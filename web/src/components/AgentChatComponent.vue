@@ -138,10 +138,10 @@
                 <span>正在加载消息...</span>
               </div>
 
-              <!-- 打招呼区域 - 在输入框上方 -->
-              <div v-if="!conversations.length" class="chat-greeting-input">
-                <h1>{{ randomGreeting }}</h1>
-              </div>
+              <RiceEndospermWelcome
+                v-if="!conversations.length"
+                @select="handleWelcomeQuestionSelect"
+              />
 
               <AgentInputArea
                 v-model="userInput"
@@ -617,6 +617,7 @@ import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCallingResult/toolRegistry'
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
 import { makeChildThreadId } from '@/utils/subagentThread'
+import RiceEndospermWelcome from '@/components/rice-endosperm/RiceEndospermWelcome.vue'
 
 // ==================== PROPS & EMITS ====================
 const props = defineProps({
@@ -636,20 +637,16 @@ const { agents, selectedAgentId, agentConfig, configurableItems, availableKnowle
 const { threads, currentThreadId, currentThread } = storeToRefs(chatThreadsStore)
 
 // ==================== LOCAL CHAT & UI STATE ====================
-const userInput = ref('')
+const draftQuestion = sessionStorage.getItem('rice-endosperm-draft-question') || ''
+const userInput = ref(draftQuestion)
+if (draftQuestion) {
+  sessionStorage.removeItem('rice-endosperm-draft-question')
+}
 const sendCooldownActive = ref(false)
 let sendCooldownTimer = null
-// 预设的打招呼文本
-const greetingMessages = [
-  '👋 您好，有什么可以帮您？',
-  '👋 你好！有什么想聊的吗？',
-  '👋 嘿，有什么我可以帮助你的？',
-  '👋 欢迎！今天想讨论什么话题？',
-  '👋 你好呀，随时为你服务！'
-]
-
-// 随机选择一个打招呼文本
-const randomGreeting = greetingMessages[Math.floor(Math.random() * greetingMessages.length)]
+const handleWelcomeQuestionSelect = (question) => {
+  userInput.value = question
+}
 
 // 业务状态（保留在组件本地）
 const chatState = reactive({
@@ -3170,17 +3167,6 @@ watch(currentChatId, (threadId, oldThreadId) => {
   display: flex;
   flex-direction: column;
   background: var(--gray-0);
-}
-
-.chat-greeting-input {
-  padding: 24px 0;
-  text-align: center;
-
-  h1 {
-    font-size: 1.4rem;
-    color: var(--gray-1000);
-    margin: 0;
-  }
 }
 
 .agent-segment-wrapper {
