@@ -10,25 +10,52 @@ export const useThemeStore = defineStore('theme', () => {
   const commonTheme = {
     token: {
       fontFamily:
-        "'HarmonyOS Sans SC', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;",
-      colorPrimary: '#24839b',
-      colorLink: 'var(--main-color)',
-      colorLinkHover: 'var(--main-600)',
-      colorLinkActive: 'var(--main-800)',
-      borderRadius: 8,
+        "'HarmonyOS Sans SC', 'Noto Sans SC', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      colorPrimary: '#2f6b4f',
+      colorSuccess: '#438064',
+      colorWarning: '#d6a83e',
+      colorInfo: '#3277a8',
+      colorLink: '#3277a8',
+      colorLinkHover: '#245d86',
+      colorLinkActive: '#183f5d',
+      borderRadius: 10,
+      borderRadiusLG: 16,
+      controlHeight: 36,
+      controlHeightLG: 42,
       wireframe: false
     }
   }
 
   // 浅色主题配置
   const lightTheme = {
-    ...commonTheme
+    ...commonTheme,
+    token: {
+      ...commonTheme.token,
+      colorText: '#24312b',
+      colorTextSecondary: '#68746e',
+      colorBgLayout: '#fffdf6',
+      colorBgContainer: '#ffffff'
+    }
   }
 
   // 深色主题配置
   const darkTheme = {
     ...commonTheme,
-    algorithm: theme.darkAlgorithm
+    algorithm: theme.darkAlgorithm,
+    token: {
+      ...commonTheme.token,
+      colorPrimary: '#78aa8b',
+      colorSuccess: '#78aa8b',
+      colorWarning: '#e0be67',
+      colorInfo: '#73a9cc',
+      colorLink: '#73a9cc',
+      colorLinkHover: '#91bdd8',
+      colorLinkActive: '#b3d1e3',
+      colorText: '#edf3ee',
+      colorTextSecondary: '#a9b7ad',
+      colorBgLayout: '#0f1712',
+      colorBgContainer: '#19251d'
+    }
   }
 
   // 当前主题配置

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 128" role="img" aria-labelledby="title desc">
+  <title id="title">稻芯智析</title>
+  <desc id="desc">水稻胚乳证据型科研智能体深色标志</desc>
+  <g transform="translate(8 4) scale(.94)">
+    <path d="M64 6C40 19 25 46 30 78c4 25 17 41 34 48 17-7 30-23 34-48 5-32-10-59-34-72Z" fill="#E0BE67"/>
+    <path d="M64 16C47 26 37 48 40 74c2 18 11 32 24 40 13-8 22-22 24-40 3-26-7-48-24-58Z" fill="#EDF3EE" stroke="#745316" stroke-width="2"/>
+    <path d="M48 80 61 61l15 9 10-20M61 61l-5-21M61 61l-2 31M76 70l7 21" fill="none" stroke="#73A9CC" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="48" cy="80" r="5" fill="#78AA8B"/>
+    <circle cx="61" cy="61" r="7" fill="#78AA8B"/>
+    <circle cx="76" cy="70" r="5" fill="#73A9CC"/>
+    <circle cx="86" cy="50" r="4" fill="#E0BE67"/>
+    <circle cx="56" cy="40" r="4" fill="#73A9CC"/>
+    <circle cx="59" cy="92" r="4" fill="#E0BE67"/>
+    <circle cx="83" cy="91" r="4" fill="#78AA8B"/>
+    <path d="M63 124C47 115 35 100 31 78c10 8 20 17 32 31Zm2 0c16-9 28-24 32-46-10 8-20 17-32 31Z" fill="#78AA8B"/>
+  </g>
+  <text x="142" y="61" fill="#EDF3EE" font-family="'Noto Sans SC','HarmonyOS Sans SC','Microsoft YaHei',sans-serif" font-size="38" font-weight="700">稻芯智析</text>
+  <text x="144" y="91" fill="#A9B7AD" font-family="Inter,'Segoe UI',sans-serif" font-size="16" font-weight="500" letter-spacing="1.2">RICE ENDOSPERM INTELLIGENCE</text>
+</svg>

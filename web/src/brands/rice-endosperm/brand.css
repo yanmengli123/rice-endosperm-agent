@@ -1,0 +1,135 @@
+:root.brand-rice-endosperm {
+  --main-1000: #10271d;
+  --main-900: #183d2c;
+  --main-800: #24533d;
+  --main-700: #2f6b4f;
+  --main-600: #438064;
+  --main-500: #5c9679;
+  --main-400: #7eac91;
+  --main-300: #a2c4ad;
+  --main-200: #c6dccb;
+  --main-100: #dfecdf;
+  --main-50: #eff6ef;
+  --main-40: #f3f8f1;
+  --main-30: #f7faf4;
+  --main-20: #fafbf7;
+  --main-10: #fdfcf8;
+  --main-5: #fffdf6;
+  --main-1: #fffefa;
+  --main-0: #ffffff;
+
+  --main-color: #2f6b4f;
+  --main-bright: #438064;
+  --bg-sider: #f6f1e3;
+
+  --color-primary-50: var(--main-50);
+  --color-primary-100: var(--main-200);
+  --color-primary-500: var(--main-500);
+  --color-primary-700: var(--main-700);
+  --color-primary-900: var(--main-900);
+
+  --color-info-10: #f7fbfd;
+  --color-info-50: #edf6fb;
+  --color-info-100: #cee6f2;
+  --color-info-500: #3277a8;
+  --color-info-700: #245d86;
+  --color-info-900: #183f5d;
+
+  --color-accent-10: #fffdf5;
+  --color-accent-50: #fff9e8;
+  --color-accent-100: #f7e7b6;
+  --color-accent-500: #d6a83e;
+  --color-accent-700: #a87d22;
+  --color-accent-900: #745316;
+
+  --rice-page-bg: #fffdf6;
+  --rice-surface: #ffffff;
+  --rice-sidebar: #f6f1e3;
+  --rice-text: #24312b;
+  --rice-text-secondary: #68746e;
+  --rice-border: #e7e1d3;
+  --rice-gold: #d6a83e;
+  --rice-evidence: #3277a8;
+}
+
+:root.brand-rice-endosperm.dark {
+  --main-1000: #edf3ee;
+  --main-900: #dce8df;
+  --main-800: #c5d9ca;
+  --main-700: #a7c7b1;
+  --main-600: #92bea1;
+  --main-500: #78aa8b;
+  --main-400: #5b8d70;
+  --main-300: #416f57;
+  --main-200: #315541;
+  --main-100: #253f31;
+  --main-50: #1c3025;
+  --main-40: #192a20;
+  --main-30: #16231c;
+  --main-20: #141f18;
+  --main-10: #111b15;
+  --main-5: #0f1712;
+  --main-1: #0d140f;
+  --main-0: #0b110d;
+
+  --main-color: #78aa8b;
+  --main-bright: #92bea1;
+  --bg-sider: #141f18;
+
+  --color-info-10: #101b22;
+  --color-info-50: #142633;
+  --color-info-100: #1c3b4f;
+  --color-info-500: #73a9cc;
+  --color-info-700: #91bdd8;
+  --color-info-900: #b3d1e3;
+
+  --color-accent-10: #1d190e;
+  --color-accent-50: #2c2411;
+  --color-accent-100: #4d3c18;
+  --color-accent-500: #e0be67;
+  --color-accent-700: #ead087;
+  --color-accent-900: #f2dfa8;
+
+  --rice-page-bg: #0f1712;
+  --rice-surface: #19251d;
+  --rice-sidebar: #141f18;
+  --rice-text: #edf3ee;
+  --rice-text-secondary: #a9b7ad;
+  --rice-border: #344239;
+  --rice-gold: #e0be67;
+  --rice-evidence: #73a9cc;
+
+  --color-bg-container: #19251d;
+  --color-bg-elevated: #202d24;
+  --color-text: #edf3ee;
+  --color-text-secondary: #a9b7ad;
+  --color-text-tertiary: #7f9185;
+}
+
+.brand-rice-endosperm .rice-gene-id {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  color: var(--main-800);
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.86em;
+  background: var(--main-50);
+  border: 1px solid var(--main-200);
+  border-radius: 5px;
+}
+
+.brand-rice-endosperm .rice-source-link {
+  color: var(--rice-evidence);
+  font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-rice-endosperm *,
+  .brand-rice-endosperm *::before,
+  .brand-rice-endosperm *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

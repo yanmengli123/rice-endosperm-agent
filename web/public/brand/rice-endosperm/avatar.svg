@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">穗芯智能体</title>
+  <desc id="desc">水稻胚乳与知识网络构成的科研智能体头像</desc>
+  <rect width="256" height="256" rx="64" fill="#F6F1E3"/>
+  <circle cx="128" cy="128" r="99" fill="#FFFDF6" stroke="#DFECDF" stroke-width="6"/>
+  <path d="M128 34C91 54 69 96 76 145c6 38 25 62 52 73 27-11 46-35 52-73 7-49-15-91-52-111Z" fill="#D6A83E"/>
+  <path d="M128 49c-26 16-41 49-36 90 4 27 17 46 36 56 19-10 32-29 36-56 5-41-10-74-36-90Z" fill="#FFFDF6" stroke="#F0D990" stroke-width="4"/>
+  <path d="m103 148 26-35 25 16 14-34m-39 18-8-30m8 30-4 49m29-33 9 35" fill="none" stroke="#3277A8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="103" cy="148" r="9" fill="#2F6B4F"/>
+  <circle cx="129" cy="113" r="12" fill="#2F6B4F" stroke="#FFFDF6" stroke-width="4"/>
+  <circle cx="154" cy="129" r="9" fill="#3277A8"/>
+  <circle cx="168" cy="95" r="7" fill="#D6A83E"/>
+  <circle cx="121" cy="83" r="7" fill="#3277A8"/>
+  <circle cx="125" cy="162" r="7" fill="#D6A83E"/>
+  <circle cx="163" cy="164" r="7" fill="#2F6B4F"/>
+  <path d="M126 220c-26-14-45-39-51-75 17 13 34 28 51 51Zm4 0c26-14 45-39 51-75-17 13-34 28-51 51Z" fill="#2F6B4F"/>
+</svg>

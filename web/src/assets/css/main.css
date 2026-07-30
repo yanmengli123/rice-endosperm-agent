@@ -4,10 +4,11 @@
 @import './shorts.css';
 @import './dashboard.css';
 @import './code-highlight.less';
+@import '../../brands/rice-endosperm/brand.css';
 
 :root {
   --header-height: 45px;
-  --min-width: 450px;
+  --min-width: 320px;
 }
 
 *,

@@ -1,0 +1,21 @@
+# 稻芯智析品牌配置
+
+organization:
+  name: "稻芯智析"
+  logo: "/brand/rice-endosperm/logo-mark.svg"
+  avatar: "/brand/rice-endosperm/avatar.svg"
+  login_bg: "/brand/rice-endosperm/login-bg.svg"
+
+branding:
+  name: "稻芯智析"
+  title: "从基因到证据，理解水稻胚乳发育"
+  subtitle: "聚焦胚乳发育、籽粒灌浆、淀粉与储藏蛋白积累，为科研问题提供可追溯的文献与实验依据。"
+  subtitles:
+    - "聚焦水稻胚乳发育、籽粒灌浆与品质形成"
+    - "连接基因、表达、调控通路与来源文献"
+    - "区分实验结果、关联证据与模型推断"
+
+footer:
+  copyright: "© 稻芯智析 2026 · 基于 Yuxi 构建"
+  user_agreement_url: "/protocols/user-agreement.template.html"
+  privacy_policy_url: "/protocols/privacy-policy.template.html"

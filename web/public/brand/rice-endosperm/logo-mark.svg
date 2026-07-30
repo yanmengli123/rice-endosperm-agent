@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">稻芯智析标志</title>
+  <desc id="desc">水稻籽粒剖面中的知识节点网络</desc>
+  <defs>
+    <clipPath id="grain-clip">
+      <path d="M64 16C47 26 37 48 40 74c2 18 11 32 24 40 13-8 22-22 24-40 3-26-7-48-24-58Z"/>
+    </clipPath>
+  </defs>
+  <path d="M64 6C40 19 25 46 30 78c4 25 17 41 34 48 17-7 30-23 34-48 5-32-10-59-34-72Z" fill="#D6A83E"/>
+  <path d="M64 16C47 26 37 48 40 74c2 18 11 32 24 40 13-8 22-22 24-40 3-26-7-48-24-58Z" fill="#FFFDF6" stroke="#F0D990" stroke-width="2"/>
+  <g clip-path="url(#grain-clip)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M48 80 61 61l15 9 10-20M61 61l-5-21M61 61l-2 31M76 70l7 21" fill="none" stroke="#3277A8" stroke-width="3"/>
+    <circle cx="48" cy="80" r="5" fill="#2F6B4F"/>
+    <circle cx="61" cy="61" r="7" fill="#2F6B4F" stroke="#FFFDF6" stroke-width="2"/>
+    <circle cx="76" cy="70" r="5" fill="#3277A8"/>
+    <circle cx="86" cy="50" r="4" fill="#D6A83E"/>
+    <circle cx="56" cy="40" r="4" fill="#3277A8"/>
+    <circle cx="59" cy="92" r="4" fill="#D6A83E"/>
+    <circle cx="83" cy="91" r="4" fill="#2F6B4F"/>
+  </g>
+  <path d="M63 124C47 115 35 100 31 78c10 8 20 17 32 31Z" fill="#2F6B4F"/>
+  <path d="M65 124c16-9 28-24 32-46-10 8-20 17-32 31Z" fill="#438064"/>
+  <path d="M64 7c2-3 5-5 9-7-2 4-4 7-7 10Z" fill="#2F6B4F"/>
+</svg>

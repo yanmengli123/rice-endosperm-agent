@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" role="img" aria-labelledby="title desc">
+  <title id="title">水稻胚乳科研背景</title>
+  <desc id="desc">水稻籽粒剖面、知识节点与稻穗线稿构成的克制科研插图</desc>
+  <defs>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0v48" fill="none" stroke="#2F6B4F" stroke-opacity=".055"/>
+    </pattern>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFFDF6"/>
+      <stop offset="1" stop-color="#F6F1E3"/>
+    </linearGradient>
+    <linearGradient id="husk" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#E8C96E"/>
+      <stop offset="1" stop-color="#C9942E"/>
+    </linearGradient>
+    <filter id="soft-shadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#1F513B" flood-opacity=".12"/>
+    </filter>
+    <clipPath id="endosperm">
+      <path d="M563 175c-110 67-165 215-130 365 24 105 75 173 130 203 56-30 107-98 131-203 35-150-21-298-131-365Z"/>
+    </clipPath>
+  </defs>
+  <rect width="1200" height="800" fill="url(#bg)"/>
+  <rect width="1200" height="800" fill="url(#grid)"/>
+  <g opacity=".13" fill="none" stroke="#3277A8" stroke-width="3">
+    <path d="M30 147h120l57 57h97"/>
+    <circle cx="30" cy="147" r="7" fill="#3277A8"/>
+    <circle cx="150" cy="147" r="11"/>
+    <circle cx="207" cy="204" r="8" fill="#3277A8"/>
+    <circle cx="304" cy="204" r="6"/>
+    <path d="M907 121h93l52 54h118M1000 121l38-54"/>
+    <circle cx="907" cy="121" r="7" fill="#3277A8"/>
+    <circle cx="1000" cy="121" r="11"/>
+    <circle cx="1052" cy="175" r="8" fill="#3277A8"/>
+    <path d="M866 652h98l44-46h122"/>
+    <circle cx="866" cy="652" r="7" fill="#3277A8"/>
+    <circle cx="964" cy="652" r="11"/>
+    <circle cx="1008" cy="606" r="8" fill="#3277A8"/>
+  </g>
+  <g opacity=".2" fill="none" stroke="#2F6B4F" stroke-width="4" stroke-linecap="round">
+    <path d="M174 738c31-113 39-223 22-329"/>
+    <path d="M195 510c-54-18-84-55-96-103 54 16 86 48 96 103Zm5 46c55-14 90-46 108-91-55 11-92 40-108 91Zm-15-119c49-20 76-56 82-101-49 17-79 50-82 101Zm7 177c-50-12-85-39-106-81 51 9 88 33 106 81Z"/>
+    <path d="M1016 720c-21-83-27-162-14-238"/>
+    <path d="M1001 546c-42-13-68-39-80-76 43 10 70 33 80 76Zm4 41c43-12 72-37 87-72-43 9-73 32-87 72Z"/>
+  </g>
+  <g filter="url(#soft-shadow)">
+    <path d="M563 120c-151 84-232 277-181 466 34 128 103 208 181 244 79-36 148-116 182-244 51-189-31-382-182-466Z" fill="url(#husk)"/>
+    <path d="M563 175c-110 67-165 215-130 365 24 105 75 173 130 203 56-30 107-98 131-203 35-150-21-298-131-365Z" fill="#FFFDF6" stroke="#F0D990" stroke-width="8"/>
+    <g clip-path="url(#endosperm)" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m470 513 80-113 97 54 42-126M550 400l-24-104m24 104-13 189m110-135 31 117" fill="none" stroke="#3277A8" stroke-width="12" opacity=".85"/>
+      <circle cx="470" cy="513" r="20" fill="#2F6B4F"/>
+      <circle cx="550" cy="400" r="28" fill="#2F6B4F" stroke="#FFFDF6" stroke-width="9"/>
+      <circle cx="647" cy="454" r="21" fill="#3277A8"/>
+      <circle cx="689" cy="328" r="17" fill="#D6A83E"/>
+      <circle cx="526" cy="296" r="16" fill="#3277A8"/>
+      <circle cx="537" cy="589" r="17" fill="#D6A83E"/>
+      <circle cx="678" cy="571" r="18" fill="#2F6B4F"/>
+    </g>
+    <path d="M558 748c-93-52-157-135-177-260 58 42 118 96 177 178Zm11 0c94-52 158-135 177-260-58 42-118 96-177 178Z" fill="#2F6B4F"/>
+  </g>
+  <g opacity=".28" font-family="Inter,'Segoe UI',sans-serif" fill="#3277A8">
+    <text x="74" y="87" font-size="16" letter-spacing="2">GENE · EXPRESSION · EVIDENCE</text>
+    <text x="876" y="748" font-size="15" letter-spacing="2">ENDOSPERM DEVELOPMENT</text>
+  </g>
+</svg>
