@@ -32,7 +32,7 @@
       <div class="login-card">
         <!-- 左侧图片 -->
         <div class="card-side is-image">
-          <img :src="loginBgImage" alt="登录背景" class="login-bg-image" />
+          <img :src="loginBgImage" alt="水稻胚乳科研智能体徽章" class="login-bg-image" />
         </div>
 
         <!-- 右侧表单 -->

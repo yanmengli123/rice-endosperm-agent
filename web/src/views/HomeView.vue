@@ -62,12 +62,9 @@
           <div class="hero-visual" aria-label="水稻胚乳知识网络示意图">
             <div class="visual-frame">
               <img
-                src="/brand/rice-endosperm/brand-seal.svg"
-                alt="稻芯智析：水稻籽粒剖面与知识节点"
+                src="/brand/rice-endosperm/indexlogo.png"
+                alt="水稻胚乳科研智能体徽章"
               />
-              <span class="visual-tag visual-tag--gene">Gene ID</span>
-              <span class="visual-tag visual-tag--paper">文献来源</span>
-              <span class="visual-tag visual-tag--trait">品质性状</span>
             </div>
           </div>
         </section>
@@ -445,47 +442,21 @@ onMounted(loadData)
   position: relative;
   width: min(430px, 100%);
   aspect-ratio: 1;
-  padding: 30px;
+  padding: 10px;
   background:
     linear-gradient(var(--rice-surface), var(--rice-surface)) padding-box,
     linear-gradient(145deg, var(--main-100), var(--rice-border)) border-box;
   border: 1px solid transparent;
   border-radius: 32px;
+  overflow: hidden;
 
   img {
     display: block;
     width: 100%;
     height: 100%;
+    object-fit: cover;
+    border-radius: 24px;
   }
-}
-
-.visual-tag {
-  position: absolute;
-  padding: 6px 10px;
-  color: var(--rice-text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  background: var(--rice-surface);
-  border: 1px solid var(--rice-border);
-  border-radius: 999px;
-}
-
-.visual-tag--gene {
-  top: 17%;
-  left: -16px;
-  color: var(--main-700);
-}
-
-.visual-tag--paper {
-  top: 31%;
-  right: -18px;
-  color: var(--rice-evidence);
-}
-
-.visual-tag--trait {
-  right: 7%;
-  bottom: 10%;
-  color: var(--color-accent-700);
 }
 
 .capability-section,
@@ -718,14 +689,6 @@ onMounted(loadData)
 
   .hero-visual {
     padding: 0 20px;
-  }
-
-  .visual-tag--gene {
-    left: -8px;
-  }
-
-  .visual-tag--paper {
-    right: -8px;
   }
 
   .question-heading {
