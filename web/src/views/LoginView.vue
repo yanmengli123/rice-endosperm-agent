@@ -20,9 +20,8 @@
         <div class="brand-container" @click="goHome" style="cursor: pointer">
           <img v-if="brandLogo" :src="brandLogo" alt="logo" class="brand-logo" />
           <h1 class="brand-text">
-            <span v-if="brandOrgName" class="brand-org">{{ brandOrgName }}</span>
-            <span v-if="brandOrgName && brandName !== brandOrgName" class="brand-separator"></span>
-            <span class="brand-main">{{ brandName }}</span>
+            <span class="brand-main">{{ brandOrgName || brandName }}</span>
+            <small>水稻胚乳证据型科研智能体</small>
           </h1>
         </div>
       </div>
@@ -42,7 +41,15 @@
             <header class="form-header">
               <!-- 如果是在初始化，显示特定标题 -->
               <h2 v-if="isFirstRun" class="init-title">系统初始化，请创建超级管理员</h2>
-              <p v-else class="welcome-text">欢迎登录</p>
+              <template v-else>
+                <p class="welcome-text">欢迎进入科研工作台</p>
+                <h2>从基因到证据，理解水稻胚乳发育</h2>
+                <div class="research-login-tags" aria-label="当前可用能力">
+                  <span>知识库问答</span>
+                  <span>来源引用</span>
+                  <span>文件分析</span>
+                </div>
+              </template>
             </header>
 
             <div class="login-content" :class="{ 'is-initializing': isFirstRun }">
@@ -266,14 +273,10 @@
 
     <!-- 页面底部：版权信息等 -->
     <footer class="page-footer">
-      <div class="footer-links">
-        <a href="https://github.com/xerrors" target="_blank">联系我们</a>
-        <span class="divider">|</span>
-        <a href="https://github.com/xerrors/Yuxi" target="_blank">使用帮助</a>
-      </div>
-      <div class="copyright">
-        &copy; {{ new Date().getFullYear() }} {{ brandName }}. All Rights Reserved.
-      </div>
+      <p class="research-disclaimer">
+        本系统用于科研信息辅助，重要结论请结合原始文献与实验数据核验。
+      </p>
+      <div class="copyright">{{ footerCopyright }}</div>
     </footer>
   </div>
 </template>
@@ -331,6 +334,9 @@ const privacyPolicyUrl = computed(() => {
 const showAgreementConsent = computed(() => {
   return Boolean(userAgreementUrl.value && privacyPolicyUrl.value)
 })
+const footerCopyright = computed(
+  () => infoStore.footer?.copyright || `© ${new Date().getFullYear()} ${brandName.value}`
+)
 
 // 状态
 const isFirstRun = ref(false)
@@ -707,29 +713,22 @@ onUnmounted(() => {
 
 .brand-text {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  line-height: 1;
   display: flex;
-  align-items: center;
-  gap: 12px;
-
-  .brand-org {
-    color: var(--gray-700);
-    font-weight: 600;
-  }
-
-  .brand-separator {
-    width: 4px;
-    height: 4px;
-    background-color: var(--gray-400);
-    border-radius: 50%;
-    font-weight: 600;
-  }
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  line-height: 1.2;
 
   .brand-main {
     color: var(--main-color);
+    font-size: 19px;
     font-weight: 600;
+  }
+
+  small {
+    color: var(--gray-500);
+    font-size: 11px;
+    font-weight: 400;
   }
 }
 
@@ -812,20 +811,47 @@ onUnmounted(() => {
 
 .form-header {
   text-align: left;
+
   .welcome-text {
-    font-size: 14px;
+    margin: 0 0 8px;
+    color: var(--main-700);
+    font-size: 12px;
     font-weight: 600;
-    color: var(--gray-500);
-    margin-bottom: 4px;
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 0.08em;
   }
+
+  h2 {
+    margin: 0;
+    color: var(--gray-900);
+    font-size: 20px;
+    font-weight: 650;
+    line-height: 1.5;
+  }
+
   .init-title {
     font-size: 18px;
     font-weight: 600;
     color: var(--main-color);
     margin: 0;
     line-height: 1.4;
+  }
+}
+
+.research-login-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+
+  span {
+    padding: 4px 8px;
+    color: var(--main-700);
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--main-50);
+    border: 1px solid var(--main-100);
+    border-radius: 999px;
   }
 }
 
@@ -955,25 +981,10 @@ onUnmounted(() => {
   text-align: center;
 }
 
-.footer-links {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 8px;
-
-  a {
-    color: var(--gray-500);
-    font-size: 13px;
-    &:hover {
-      color: var(--main-color);
-    }
-  }
-
-  .divider {
-    color: var(--gray-300);
-    font-size: 12px;
-  }
+.research-disclaimer {
+  margin: 0 0 6px;
+  color: var(--gray-500);
+  font-size: 12px;
 }
 
 .copyright {

@@ -1,7 +1,6 @@
 <script setup>
 import { ref, onMounted, computed, provide, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
-import { GithubOutlined } from '@ant-design/icons-vue'
 import {
   BarChart3,
   ClipboardList,
@@ -42,10 +41,6 @@ const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
 const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
   storeToRefs(chatThreadsStore)
 
-// Add state for GitHub stars
-const githubStars = ref(0)
-const isLoadingStars = ref(false)
-
 // Add state for debug modal
 const showDebugModal = ref(false)
 
@@ -83,22 +78,11 @@ const getRemoteDatabase = async () => {
   }
 }
 
-// Fetch GitHub stars count
-const fetchGithubStars = async () => {
-  try {
-    isLoadingStars.value = true
-    // 公共API，可以直接使用fetch
-    const response = await fetch('https://api.github.com/repos/xerrors/Yuxi')
-    const data = await response.json()
-    githubStars.value = data.stargazers_count
-  } catch (error) {
-    console.error('获取GitHub stars失败:', error)
-  } finally {
-    isLoadingStars.value = false
-  }
-}
-
 onMounted(async () => {
+  if (window.matchMedia('(max-width: 640px)').matches) {
+    setSidebarCollapsed(true)
+  }
+
   // 加载信息配置与知识库数据无依赖，可并行
   await Promise.all([infoStore.loadInfoConfig(), getRemoteDatabase()])
   await initAgentNavigation()
@@ -106,7 +90,6 @@ onMounted(async () => {
   // 仅管理员加载任务中心数据
   if (userStore.isAdmin) {
     taskerStore.loadTasks()
-    fetchGithubStars() // Fetch GitHub stars on mount
   }
 })
 
@@ -118,8 +101,11 @@ const activeConversationThreadId = computed(() => {
   return route.path.startsWith('/agent') ? currentThreadId.value : null
 })
 const organizationName = computed(() => {
-  return infoStore.organization.name || infoStore.branding.name || 'Yuxi'
+  return infoStore.organization.name || infoStore.branding.name || '稻芯智析'
 })
+const organizationAvatar = computed(
+  () => infoStore.organization.avatar || '/brand/rice-endosperm/avatar.svg'
+)
 
 // 下面是导航菜单部分，添加智能体项
 const mainList = computed(() => {
@@ -278,7 +264,7 @@ provide('settingsModal', {
     <div class="header">
       <div class="sidebar-brand" @click.stop>
         <router-link v-if="!sidebarCollapsed" to="/" class="brand-link">
-          <img :src="infoStore.organization.avatar" class="brand-avatar" />
+          <img :src="organizationAvatar" alt="" class="brand-avatar" />
           <span class="brand-name">{{ organizationName }}</span>
         </router-link>
         <button
@@ -288,7 +274,7 @@ provide('settingsModal', {
           aria-label="展开侧边栏"
           @click="setSidebarCollapsed(false)"
         >
-          <img :src="infoStore.organization.avatar" class="brand-avatar brand-avatar-image" />
+          <img :src="organizationAvatar" alt="" class="brand-avatar brand-avatar-image" />
           <PanelLeftOpen class="brand-expand-icon" size="20" />
         </button>
         <button
@@ -373,18 +359,6 @@ provide('settingsModal', {
         />
       </div>
       <div class="foo">
-        <div class="github nav-item" @click.stop>
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
-            <template #title>欢迎 Star</template>
-            <a href="https://github.com/xerrors/Yuxi" target="_blank" class="github-link">
-              <GithubOutlined class="icon" />
-              <span class="nav-text">GitHub</span>
-              <span v-if="githubStars > 0" class="github-stars">
-                <span class="star-count">{{ (githubStars / 1000).toFixed(1) }}k</span>
-              </span>
-            </a>
-          </a-tooltip>
-        </div>
         <!-- 用户信息组件 -->
         <div class="nav-item user-info" @click.stop>
           <UserInfoComponent :show-role="!sidebarCollapsed">
@@ -529,7 +503,6 @@ div.header,
 
   .sidebar-brand,
   :deep(.conversation-nav-section:not(.sidebar-conversations)),
-  .github,
   .user-info {
     flex-shrink: 0;
   }
@@ -689,51 +662,6 @@ div.header,
       color: var(--main-color);
     }
 
-    &.github {
-      margin-bottom: 8px;
-      &:hover {
-        border-color: transparent;
-      }
-
-      .github-link {
-        display: flex;
-        align-items: center;
-        width: 100%;
-        min-width: 0;
-        color: inherit;
-        text-decoration: none;
-      }
-
-      .icon {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        font-size: @sidebar-icon-size;
-        line-height: 1;
-      }
-
-      .github-stars {
-        display: flex;
-        align-items: center;
-        max-width: 48px;
-        margin-left: auto;
-        overflow: hidden;
-        font-size: 12px;
-        color: var(--gray-600);
-        background-color: var(--gray-100);
-        padding: 2px 8px;
-        border-radius: 6px;
-        white-space: nowrap;
-        transition:
-          opacity 0.12s ease,
-          max-width 0.18s ease;
-
-        .star-count {
-          font-weight: 600;
-        }
-      }
-    }
-
     &.api-docs {
       padding: 10px 12px;
     }
@@ -875,18 +803,11 @@ div.header,
       width: 100%;
       padding: 0 @sidebar-collapsed-icon-padding-x;
 
-      .nav-text,
-      .github-stars {
+      .nav-text {
         max-width: 0;
         margin-left: 0;
         opacity: 0;
         pointer-events: none;
-      }
-
-      &.github {
-        .github-link {
-          justify-content: flex-start;
-        }
       }
 
       &.user-info {

@@ -1,6 +1,11 @@
 <template>
   <a-tooltip :title="themeStore.isDark ? '切换到浅色模式' : '切换到深色模式'">
-    <a-button type="text" @click="themeStore.toggleTheme" class="theme-toggle-btn">
+    <a-button
+      type="text"
+      class="theme-toggle-btn"
+      :aria-label="themeStore.isDark ? '切换到浅色模式' : '切换到深色模式'"
+      @click="themeStore.toggleTheme"
+    >
       <template #icon>
         <component :is="themeStore.isDark ? SunIcon : MoonIcon" :size="18" />
       </template>
@@ -20,10 +25,5 @@ const themeStore = useThemeStore()
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.3s ease;
-}
-
-.theme-toggle-btn:hover {
-  transform: rotate(20deg);
 }
 </style>
