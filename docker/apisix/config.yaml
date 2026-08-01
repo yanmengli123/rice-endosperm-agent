@@ -1,0 +1,21 @@
+apisix:
+  node_listen:
+    - port: 9080
+  enable_ipv6: false
+  router:
+    http: radixtree_uri_with_parameter
+
+plugins:
+  - request-id
+  - proxy-rewrite
+  - request-validation
+  - limit-count
+  - limit-conn
+  - proxy-buffering
+
+stream_plugins: []
+
+deployment:
+  role: data_plane
+  role_data_plane:
+    config_provider: yaml

@@ -41,6 +41,25 @@ def test_agent_call_run_requires_authentication(monkeypatch: pytest.MonkeyPatch)
     assert response.status_code == 401
 
 
+def test_credential_status_requires_authentication(monkeypatch: pytest.MonkeyPatch):
+    client = _build_app(monkeypatch, authenticated=False)
+
+    response = client.get("/api/agent-invocation/credential-status")
+
+    assert response.status_code == 401
+
+
+def test_credential_status_is_non_billable_and_does_not_expose_identity(monkeypatch: pytest.MonkeyPatch):
+    client = _build_app(monkeypatch)
+
+    response = client.get("/api/agent-invocation/credential-status")
+
+    assert response.status_code == 200
+    assert response.json() == {"authenticated": True, "auth_scheme": "yuxi_api_key"}
+    assert "user" not in response.text.lower()
+    assert "key" in response.json()["auth_scheme"]
+
+
 def test_agent_eval_run_returns_service_payload(monkeypatch: pytest.MonkeyPatch):
     calls: dict[str, object] = {}
 

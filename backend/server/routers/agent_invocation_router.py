@@ -52,6 +52,14 @@ class AgentEvalRunCreate(BaseModel):
     include_trajectory_summary: bool = Field(False, description="是否返回轻量工具调用轨迹摘要")
 
 
+@agent_invocation_router.get("/credential-status")
+async def get_agent_invocation_credential_status(
+    _current_user: User = Depends(get_required_user),
+):
+    """只验证调用凭证，不创建 Agent run，也不返回用户或密钥信息。"""
+    return {"authenticated": True, "auth_scheme": "yuxi_api_key"}
+
+
 @agent_invocation_router.post("/agent-call/runs")
 async def create_agent_call_run(
     payload: AgentCallRunCreate,

@@ -6,6 +6,11 @@
 
 ## v0.7.1 (2026-07-17)
 
+### 新增
+
+- 新增 APISIX Standalone 外部调用网关：通过独立 Compose 覆盖层仅开放 Agent 创建、结果查询和 SSE 路由，保留 Yuxi API Key 作为唯一认证来源，并补充 PowerShell 异步调用脚本与生产安全边界文档。
+- 为桌面客户端补充非计费凭证探测与任务取消能力：新增 `GET /api/agent-invocation/credential-status`，并在 APISIX 白名单开放该端点及 `POST /api/agent/runs/{run_id}/cancel`；探测接口只返回认证状态，不创建模型任务、不暴露用户或密钥信息。
+
 ### 安全
 
 - 生产 Compose 不再回退到公开的 Neo4j、MinIO 和 PostgreSQL 默认凭证，并要求显式配置 JWT 随机密钥与实例标识；相关配置缺失时会在解析阶段拒绝启动并提示具体变量名。管理员初始化、创建用户、创建部门管理员及修改用户密码在前后端统一要求密码不少于 8 位。

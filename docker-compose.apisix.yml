@@ -1,0 +1,25 @@
+services:
+  apisix:
+    image: apache/apisix:3.17.0-debian
+    container_name: yuxi-apisix
+    restart: unless-stopped
+    ports:
+      - "${APISIX_HTTP_BIND:-127.0.0.1}:${APISIX_HTTP_PORT:-9088}:9080"
+    volumes:
+      - ./docker/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ./docker/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+    environment:
+      YUXI_PUBLIC_AGENT_SLUG: ${YUXI_PUBLIC_AGENT_SLUG:-default-chatbot}
+    networks:
+      - app-network
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "apisix", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
