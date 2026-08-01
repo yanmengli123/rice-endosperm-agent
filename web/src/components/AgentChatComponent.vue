@@ -635,6 +635,7 @@ const configStore = useConfigStore()
 const { agents, selectedAgentId, agentConfig, configurableItems, availableKnowledgeBases } =
   storeToRefs(agentStore)
 const { threads, currentThreadId, currentThread } = storeToRefs(chatThreadsStore)
+const { selectedModelSpec } = storeToRefs(chatUIStore)
 
 // ==================== LOCAL CHAT & UI STATE ====================
 const draftQuestion = sessionStorage.getItem('rice-endosperm-draft-question') || ''
@@ -956,10 +957,8 @@ const currentAgent = computed(() => {
 })
 const currentChatId = computed(() => currentThreadId.value)
 
-// ==================== 对话级模型覆盖 ====================
-// 按线程记忆用户选择的模型；未选择时回退到智能体配置的模型。
-const DRAFT_MODEL_KEY = '__draft__'
-const selectedModelByThread = reactive({})
+// ==================== 应用级模型偏好 ====================
+// 用户手动选择的模型由 Pinia 持久化；切换页面、智能体或线程都不会覆盖它。
 const agentDefaultModel = computed(
   () =>
     agentConfig.value?.model ||
@@ -967,17 +966,9 @@ const agentDefaultModel = computed(
     configStore.config?.default_model ||
     ''
 )
-const currentModelSpec = computed(
-  () => selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] || agentDefaultModel.value
-)
+const currentModelSpec = computed(() => selectedModelSpec.value || agentDefaultModel.value)
 const handleModelSelect = (spec) => {
-  if (typeof spec === 'string') {
-    if (spec) {
-      selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] = spec
-    } else {
-      delete selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY]
-    }
-  }
+  chatUIStore.setSelectedModelSpec(spec)
 }
 
 const currentThreadAgentName = computed(() => {
@@ -2132,24 +2123,9 @@ const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
     const response = await agentApi.getAgentHistory(threadId)
     const history = response.history || []
     threadMessages.value[threadId] = history
-    restoreThreadModelSelection(threadId, history)
   } catch (error) {
     handleChatError(error, 'load')
     throw error
-  }
-}
-
-// 跨会话还原：用最近一条用户消息记录的 model_spec 还原模型选择
-const restoreThreadModelSelection = (threadId, history) => {
-  if (selectedModelByThread[threadId]) return
-  for (let i = history.length - 1; i >= 0; i -= 1) {
-    const msg = history[i]
-    if (msg?.type !== 'human') continue
-    const modelSpec = msg?.extra_metadata?.model_spec
-    if (modelSpec) {
-      selectedModelByThread[threadId] = modelSpec
-      return
-    }
   }
 }
 
@@ -2458,17 +2434,9 @@ const handleSendMessage = async ({ image } = {}) => {
       message.error('创建对话失败，请重试')
       return
     }
-    // 新建线程：把草稿态的模型选择迁移到真实线程，避免选择丢失
-    const draftModelSpec = selectedModelByThread[DRAFT_MODEL_KEY]
-    if (draftModelSpec) {
-      if (!selectedModelByThread[threadId]) {
-        selectedModelByThread[threadId] = draftModelSpec
-      }
-      delete selectedModelByThread[DRAFT_MODEL_KEY]
-    }
   }
-  // 仅当用户显式选择过模型才下发覆盖；否则传 null，由后端使用智能体配置的模型
-  const modelSpec = selectedModelByThread[threadId] || null
+  // 仅在用户手动选择过模型时覆盖后端配置；否则由后端使用智能体默认模型。
+  const modelSpec = selectedModelSpec.value || null
 
   userInput.value = ''
 
