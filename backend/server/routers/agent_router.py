@@ -143,7 +143,7 @@ async def create_agent(
     if not agent_manager.get_agent(payload.backend_id):
         raise HTTPException(status_code=404, detail=f"智能体后端 {payload.backend_id} 不存在")
     if payload.set_default:
-        raise HTTPException(status_code=422, detail="默认智能体已固定为内置智能助手")
+        raise HTTPException(status_code=422, detail="默认智能体已固定为内置稻芯智析智能体")
 
     repo = AgentRepository(db)
     try:

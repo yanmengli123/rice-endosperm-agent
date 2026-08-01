@@ -50,4 +50,4 @@ def test_remote_command_prints_version_and_remote_context_first(tmp_path, monkey
 
     assert result.exit_code == 0
     lines = [line.strip() for line in result.output.splitlines() if line.strip()]
-    assert lines[:3] == [f"Yuxi CLI {__version__}", "Remote: local https://example.com", "pong"]
+    assert lines[:3] == [f"稻芯智析 CLI {__version__}", "Remote: local https://example.com", "pong"]

@@ -28,10 +28,12 @@ def is_server_version_supported(version: str, minimum: str = MIN_SERVER_VERSION)
 def ensure_server_compatible(discovery: dict, required_capability: str) -> None:
     version = str(discovery.get("version") or "")
     if not is_server_version_supported(version):
-        raise ServerCompatibilityError(f"当前 Yuxi 服务版本 {version or 'unknown'} 低于 CLI 要求 {MIN_SERVER_VERSION}")
+        raise ServerCompatibilityError(
+            f"当前稻芯智析服务版本 {version or 'unknown'} 低于 CLI 要求 {MIN_SERVER_VERSION}"
+        )
 
     if not _capability_enabled(discovery, required_capability):
-        raise ServerCompatibilityError(f"当前 Yuxi 服务未声明支持 {required_capability}")
+        raise ServerCompatibilityError(f"当前稻芯智析服务未声明支持 {required_capability}")
 
 
 def _capability_enabled(discovery: dict, capability: str) -> bool:

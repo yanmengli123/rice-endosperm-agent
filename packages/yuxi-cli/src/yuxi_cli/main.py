@@ -25,9 +25,9 @@ from yuxi_cli.config import ConfigError, ConfigStore
 from yuxi_cli.kb_upload import DEFAULT_CONCURRENCY, MAX_CONCURRENCY, KbUploadError, KbUploadOptions, run_kb_upload
 
 console = Console()
-app = typer.Typer(help="Yuxi command line client.", invoke_without_command=True)
-remote_app = typer.Typer(help="Manage Yuxi remotes.")
-agent_app = typer.Typer(help="Run and manage Yuxi agents.")
+app = typer.Typer(help="稻芯智析命令行客户端。", invoke_without_command=True)
+remote_app = typer.Typer(help="管理稻芯智析远程实例。")
+agent_app = typer.Typer(help="运行和管理稻芯智析智能体。")
 kb_app = typer.Typer(help="Upload and manage knowledge base files.")
 app.add_typer(remote_app, name="remote")
 app.add_typer(agent_app, name="agent")
@@ -40,7 +40,7 @@ def _store() -> ConfigStore:
 
 def _print_remote_context(store: ConfigStore, remote_name: str | None) -> None:
     remote = store.load().get_remote(remote_name)
-    console.print(f"Yuxi CLI {__version__}")
+    console.print(f"稻芯智析 CLI {__version__}")
     console.print(f"Remote: {remote.name} {remote.url}")
 
 
@@ -195,11 +195,11 @@ def upload_knowledge_base_files(
 @agent_app.command("eval")
 def eval_agent(
     dataset_name: str = typer.Option(..., "--dataset-name", help="Langfuse dataset name."),
-    agent_slug: str = typer.Option(..., "--agent-slug", help="Yuxi agent slug."),
+    agent_slug: str = typer.Option(..., "--agent-slug", help="稻芯智析智能体 slug。"),
     experiment_name: str | None = typer.Option(None, "--experiment-name", help="Langfuse experiment name."),
     remote: str | None = typer.Option(None, "--remote", help="Remote name."),
     max_concurrency: int = typer.Option(1, "--max-concurrency", help="Langfuse experiment max concurrency."),
-    timeout_seconds: float = typer.Option(900, "--timeout-seconds", help="Per item Yuxi API timeout."),
+    timeout_seconds: float = typer.Option(900, "--timeout-seconds", help="单项稻芯智析 API 超时时间。"),
 ):
     options = AgentEvalOptions(
         dataset_name=dataset_name,

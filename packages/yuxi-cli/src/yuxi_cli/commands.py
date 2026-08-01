@@ -194,7 +194,7 @@ def _ensure_server_compatible(client: YuxiClient, required_capability: str) -> N
     try:
         discovery = client.discovery()
     except ClientError as exc:
-        raise CommandError(f"无法读取服务端 discovery，请确认远程是 Yuxi 0.7.1 或更高版本: {exc}") from exc
+        raise CommandError(f"无法读取服务端 discovery，请确认远程是稻芯智析 0.7.1 或更高版本: {exc}") from exc
     try:
         ensure_server_compatible(discovery, required_capability)
     except ServerCompatibilityError as exc:

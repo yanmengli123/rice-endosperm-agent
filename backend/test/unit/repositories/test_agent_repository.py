@@ -8,6 +8,8 @@ import pytest
 from yuxi.repositories.agent_repository import (
     AgentRepository,
     DEFAULT_AGENT_DESCRIPTION,
+    DEFAULT_AGENT_ICON,
+    DEFAULT_AGENT_NAME,
     DEFAULT_SHARE_CONFIG,
     GENERAL_PURPOSE_AGENT_DESCRIPTION,
     GENERAL_PURPOSE_AGENT_NAME,
@@ -41,7 +43,9 @@ async def test_ensure_default_agent_creates_description(monkeypatch):
 
     agent = await repo.ensure_default_agent()
 
+    assert agent.name == DEFAULT_AGENT_NAME
     assert agent.description == DEFAULT_AGENT_DESCRIPTION
+    assert agent.icon == DEFAULT_AGENT_ICON
     assert agent.config_json == {"context": {}}
     assert db.added is agent
     db.commit.assert_awaited_once()
@@ -53,6 +57,8 @@ async def test_ensure_default_agent_backfills_missing_description(monkeypatch):
     db = FakeDb()
     repo = AgentRepository(db)
     agent = SimpleNamespace(
+        name="智能助手",
+        icon=None,
         share_config=DEFAULT_SHARE_CONFIG.copy(),
         is_default=True,
         description=None,
@@ -68,7 +74,9 @@ async def test_ensure_default_agent_backfills_missing_description(monkeypatch):
     result = await repo.ensure_default_agent(created_by="admin")
 
     assert result is agent
+    assert agent.name == DEFAULT_AGENT_NAME
     assert agent.description == DEFAULT_AGENT_DESCRIPTION
+    assert agent.icon == DEFAULT_AGENT_ICON
     assert agent.updated_by == "admin"
     db.commit.assert_awaited_once()
     db.refresh.assert_awaited_once_with(agent)

@@ -7,15 +7,17 @@ from typing import Any, Literal
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, AGENT_ICON, BRAND_NAME
 from yuxi.storage.postgres.models_business import Agent, User
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.share_config import SHARE_ACCESS_LEVELS, normalize_share_config
 
 DEFAULT_AGENT_SLUG = "default-chatbot"
-DEFAULT_AGENT_NAME = "智能助手"
+DEFAULT_AGENT_NAME = BRAND_NAME
 DEFAULT_AGENT_BACKEND_ID = "ChatbotAgent"
 SUB_AGENT_BACKEND_ID = "SubAgentBackend"
-DEFAULT_AGENT_DESCRIPTION = "基础的对话机器人，可以回答问题，可在配置中启用需要的工具。"
+DEFAULT_AGENT_DESCRIPTION = AGENT_DESCRIPTION
+DEFAULT_AGENT_ICON = AGENT_ICON
 DEFAULT_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "user_uids": []}
 
 GENERAL_PURPOSE_AGENT_SLUG = "general-purpose"
@@ -179,10 +181,16 @@ class AgentRepository:
         agent = await self.get_by_slug(DEFAULT_AGENT_SLUG)
         if agent:
             needs_update = False
+            if getattr(agent, "name", None) != DEFAULT_AGENT_NAME:
+                agent.name = DEFAULT_AGENT_NAME
+                needs_update = True
+            if getattr(agent, "icon", None) != DEFAULT_AGENT_ICON:
+                agent.icon = DEFAULT_AGENT_ICON
+                needs_update = True
             if agent.share_config != DEFAULT_SHARE_CONFIG:
                 agent.share_config = DEFAULT_SHARE_CONFIG.copy()
                 needs_update = True
-            if not agent.description:
+            if agent.description != DEFAULT_AGENT_DESCRIPTION:
                 agent.description = DEFAULT_AGENT_DESCRIPTION
                 needs_update = True
             if getattr(agent, "is_subagent", False):
@@ -202,7 +210,7 @@ class AgentRepository:
             backend_id=DEFAULT_AGENT_BACKEND_ID,
             name=DEFAULT_AGENT_NAME,
             description=DEFAULT_AGENT_DESCRIPTION,
-            icon=None,
+            icon=DEFAULT_AGENT_ICON,
             pics=[],
             config_json={"context": {}},
             share_config=DEFAULT_SHARE_CONFIG.copy(),
@@ -379,7 +387,7 @@ class AgentRepository:
         if agent.is_subagent:
             raise ValueError("子智能体不能设为默认智能体")
         if not is_builtin_agent(agent):
-            raise ValueError("默认智能体已固定为内置智能助手")
+            raise ValueError("默认智能体已固定为内置稻芯智析智能体")
         share_config = agent.share_config or DEFAULT_SHARE_CONFIG.copy()
         if share_config.get("access_level") != "global":
             raise ValueError("内置智能体必须全局共享")

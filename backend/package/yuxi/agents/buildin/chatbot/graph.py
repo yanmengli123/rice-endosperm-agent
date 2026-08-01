@@ -4,6 +4,7 @@ from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
 
 from yuxi.agents import BaseAgent, load_chat_model, resolve_chat_model_spec
 from yuxi.agents.backends import create_agent_filesystem_middleware
+from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, BRAND_NAME
 from yuxi.agents.context import (
     DEFAULT_SUMMARY_KEEP_MESSAGES,
     DEFAULT_SUMMARY_L2_TRIGGER_RATIO,
@@ -77,8 +78,8 @@ async def _build_middlewares(context):
 
 
 class ChatbotAgent(BaseAgent):
-    name = "智能助手"
-    description = "基础的对话机器人，可以回答问题，可在配置中启用需要的工具。"
+    name = BRAND_NAME
+    description = AGENT_DESCRIPTION
     capabilities = ["file_upload", "files"]  # 支持文件上传功能
     context_schema = ChatBotContext
 

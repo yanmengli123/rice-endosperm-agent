@@ -35,7 +35,7 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
     BuiltinSkillSpec(
         slug="knowledge-base",
         source_dir=_SKILLS_ROOT / "knowledge-base",
-        description="使用 Yuxi 知识库进行检索、打开文档、文档内定位和查看思维导图。",
+        description="使用稻芯智析知识库进行检索、打开文档、文档内定位和查看思维导图。",
         version="2026.06.24",
         tool_dependencies=(
             "list_kbs",

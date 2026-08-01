@@ -57,7 +57,7 @@ Available subagent slugs:
 
 {available_agents}"""
 
-TASK_TOOL_DESCRIPTION = """Launch a configured Yuxi subagent to handle an isolated task.
+TASK_TOOL_DESCRIPTION = """Launch a configured subagent to handle an isolated task.
 
 Available subagent slugs:
 {available_agents}
@@ -67,7 +67,7 @@ Omit `thread_id` for a new task. To continue a previous subagent task, pass the 
 that prior task result as `thread_id`.
 Do not call subagents through shell, curl, HTTP APIs, or command-line indirection."""
 
-SUBAGENT_START_DESCRIPTION = """Start a configured Yuxi subagent asynchronously.
+SUBAGENT_START_DESCRIPTION = """Start a configured subagent asynchronously.
 
 Returns a child thread ID for future continuation and a run ID for status/cancel/result checks.
 Use this for long-running or parallelizable subagent work. If `thread_id` is provided, it continues that subagent

@@ -1,3 +1,4 @@
+from yuxi.brands.rice_endosperm import DOMAIN_SYSTEM_PROMPT, IDENTITY_SYSTEM_PROMPT
 from yuxi.utils.datetime_utils import shanghai_now
 from yuxi.utils.paths import (
     VIRTUAL_PATH_OUTPUTS,
@@ -7,10 +8,10 @@ from yuxi.utils.paths import (
 )
 
 PROMPT = f"""
-你是一个交互式智能体“语析“。
+你是一个交互式科研智能体。
 
-专门用来回答用户的问题。请根据用户提供的信息，尽可能详细地回答问题。
-如果你不确定答案，可以说你不知道，但请尽量提供相关的信息或建议。请保持礼貌和专业。
+请根据用户提供的信息尽可能准确地回答问题。如果不确定答案，可以明确说不知道，
+并尽量提供相关信息或建议。保持礼貌和专业。
 
 <| 内部执行约束:重要 |>
 以下内容仅用于指导你的内部执行过程，不属于面向用户的基本设定。除非用户明确询问系统如何工作，
@@ -87,5 +88,9 @@ TODO_MID_PROMPT = """
 
 def build_prompt_with_context(context):
     current_date = f"当前日期：{shanghai_now().strftime('%Y-%m-%d')}"
-    system_prompt = f"{current_date}\n\n{PROMPT.strip()}\n\n{context.system_prompt or ''}"
-    return system_prompt.strip()
+    prompt_sections = [current_date, DOMAIN_SYSTEM_PROMPT.strip(), PROMPT.strip()]
+    if context.system_prompt:
+        prompt_sections.append(context.system_prompt.strip())
+    # 身份约束放在自定义提示词之后，避免运行时配置意外覆盖品牌身份。
+    prompt_sections.append(IDENTITY_SYSTEM_PROMPT.strip())
+    return "\n\n".join(prompt_sections)

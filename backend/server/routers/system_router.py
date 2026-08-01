@@ -5,6 +5,7 @@ import aiofiles
 import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException
 from yuxi import config, get_version
+from yuxi.brands.rice_endosperm import BRAND_NAME
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
 
@@ -27,7 +28,7 @@ async def health_check():
 async def discovery():
     """系统能力发现接口（公开接口）"""
     return {
-        "name": "Yuxi",
+        "name": BRAND_NAME,
         "version": get_version(),
         "api_prefix": "/api",
         "capabilities": {

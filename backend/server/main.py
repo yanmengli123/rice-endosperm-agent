@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, BRAND_NAME
 
 from server.routers import router
 from server.utils.lifespan import lifespan
@@ -72,7 +73,11 @@ def _build_cors_options(origins: list[str] | None = None) -> dict[str, object]:
     }
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title=f"{BRAND_NAME} API",
+    description=f"{AGENT_DESCRIPTION.removesuffix('。')}服务接口",
+    lifespan=lifespan,
+)
 # 所有业务接口统一挂载到 /api，具体分组在 server.routers 中集中注册。
 app.include_router(router, prefix="/api")
 
