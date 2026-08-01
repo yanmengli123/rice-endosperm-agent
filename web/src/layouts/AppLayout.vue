@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed, provide, watch } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
   BarChart3,
@@ -25,7 +25,6 @@ import { storeToRefs } from 'pinia'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
 import DebugComponent from '@/components/DebugComponent.vue'
 import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
-import SettingsModal from '@/components/SettingsModal.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
 
@@ -44,18 +43,8 @@ const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
 // Add state for debug modal
 const showDebugModal = ref(false)
 
-// Add state for settings modal
-const showSettingsModal = ref(false)
-const settingsInitialTab = ref('')
-
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
 const conversationSearchOpen = ref(false)
-
-// Provide settings modal methods to child components
-const openSettingsModal = (tab) => {
-  settingsInitialTab.value = tab || (userStore.isAdmin ? 'base' : 'account')
-  showSettingsModal.value = true
-}
 
 // Handle debug modal close
 const handleDebugModalClose = () => {
@@ -253,10 +242,6 @@ watch(
   { immediate: true }
 )
 
-// Provide settings modal methods to child components
-provide('settingsModal', {
-  openSettingsModal
-})
 </script>
 
 <template>
@@ -415,11 +400,6 @@ provide('settingsModal', {
       <DebugComponent />
     </a-modal>
     <TaskCenterDrawer v-if="userStore.isAdmin" />
-    <SettingsModal
-      v-model:visible="showSettingsModal"
-      :initial-tab="settingsInitialTab"
-      @close="() => (showSettingsModal = false)"
-    />
   </div>
 </template>
 
