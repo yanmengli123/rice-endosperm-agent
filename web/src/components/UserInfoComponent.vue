@@ -35,7 +35,7 @@
           <a-menu-divider />
           <a-menu-item key="docs" @click="openDocs">
             <template #icon><BookOpen :size="16" /></template>
-            <span class="menu-text">文档中心</span>
+            <span class="menu-text">平台使用文档</span>
           </a-menu-item>
           <a-menu-item key="theme" @click="toggleTheme">
             <template #icon>

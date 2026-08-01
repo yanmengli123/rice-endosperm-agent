@@ -3,12 +3,12 @@
     <img
       class="rice-welcome__avatar"
       src="/brand/rice-endosperm/avatar.svg"
-      alt="穗芯智能体"
+      alt="稻芯智析智能体"
     />
 
     <div class="rice-welcome__heading">
       <p>Rice Endosperm Intelligence</p>
-      <h1 id="rice-welcome-title">你好，我是穗芯</h1>
+      <h1 id="rice-welcome-title">你好，我是稻芯智析</h1>
       <span>面向水稻胚乳发育与品质研究的科研智能体</span>
     </div>
 

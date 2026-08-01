@@ -2649,7 +2649,7 @@ const buildExportPayload = () => {
 
   const payload = {
     chatTitle: currentThread.value?.title || '新对话',
-    agentName: currentAgentName.value || currentAgent.value?.name || '智能助手',
+    agentName: currentAgentName.value || currentAgent.value?.name || '稻芯智析',
     agentDescription: agentDescription || currentAgent.value?.description || '',
     messages: conversations.value ? JSON.parse(JSON.stringify(conversations.value)) : [],
     onGoingMessages: onGoingConvMessages.value
