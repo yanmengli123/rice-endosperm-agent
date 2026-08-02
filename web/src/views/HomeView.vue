@@ -24,6 +24,12 @@
           </span>
         </button>
 
+        <nav class="header-nav" aria-label="首页内容导航">
+          <a href="#capabilities">研究能力</a>
+          <a href="#rice-databases">数据库导航</a>
+          <a href="#questions">问题示例</a>
+        </nav>
+
         <div class="header-actions">
           <ThemeToggle />
           <UserInfoComponent v-if="userStore.isLoggedIn" />
@@ -69,7 +75,7 @@
           </div>
         </section>
 
-        <section class="capability-section" aria-labelledby="capability-title">
+        <section id="capabilities" class="capability-section" aria-labelledby="capability-title">
           <div class="section-heading">
             <p>当前可用能力</p>
             <h2 id="capability-title">为水稻胚乳问题建立清晰的研究入口</h2>
@@ -86,7 +92,9 @@
           </div>
         </section>
 
-        <section class="question-section" aria-labelledby="question-title">
+        <RiceDatabaseDirectory />
+
+        <section id="questions" class="question-section" aria-labelledby="question-title">
           <div class="question-heading">
             <div>
               <p>研究问题示例</p>
@@ -127,6 +135,7 @@ import { useInfoStore } from '@/stores/info'
 import { healthApi } from '@/apis/system_api'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
+import RiceDatabaseDirectory from '@/components/rice-endosperm/RiceDatabaseDirectory.vue'
 import {
   ArrowRight,
   BookOpenCheck,
@@ -353,6 +362,33 @@ onMounted(loadData)
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.header-nav {
+  display: flex;
+  align-items: center;
+  gap: clamp(14px, 2.2vw, 28px);
+  margin: 0 24px;
+
+  a {
+    padding: 8px 0;
+    color: var(--rice-text-secondary);
+    font-size: 12px;
+    font-weight: 550;
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+
+    &:hover {
+      color: var(--main-700);
+      border-bottom-color: var(--main-300);
+    }
+
+    &:focus-visible {
+      outline: 3px solid color-mix(in srgb, var(--main-color) 24%, transparent);
+      outline-offset: 3px;
+      border-radius: 3px;
+    }
+  }
 }
 
 .hero-section {
@@ -629,6 +665,10 @@ onMounted(loadData)
 }
 
 @media (max-width: 900px) {
+  .header-nav {
+    display: none;
+  }
+
   .hero-section {
     grid-template-columns: 1fr;
     min-height: auto;
