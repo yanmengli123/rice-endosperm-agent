@@ -44,7 +44,9 @@ routes:
         redis_database: 3
         rejected_code: 429
         show_limit_quota_header: true
-        allow_degradation: false
+        # 认证仍由 Yuxi 强制执行；Redis 短暂不可用时只跳过限流，
+        # 避免限流基础设施把有效凭证错误地变成 HTTP 500。
+        allow_degradation: true
 
   - id: yuxi-public-agent-create
     name: yuxi-public-agent-create
@@ -128,7 +130,7 @@ routes:
         redis_database: 3
         rejected_code: 429
         show_limit_quota_header: true
-        allow_degradation: false
+        allow_degradation: true
 
   - id: yuxi-public-agent-result
     name: yuxi-public-agent-result
@@ -183,7 +185,7 @@ routes:
         redis_database: 3
         rejected_code: 429
         show_limit_quota_header: true
-        allow_degradation: false
+        allow_degradation: true
 
   - id: yuxi-public-agent-events
     name: yuxi-public-agent-events
@@ -221,6 +223,7 @@ routes:
         redis_port: 6379
         redis_database: 3
         rejected_code: 429
+        allow_degradation: true
 
   - id: yuxi-public-agent-cancel
     name: yuxi-public-agent-cancel
@@ -256,6 +259,6 @@ routes:
         redis_database: 3
         rejected_code: 429
         show_limit_quota_header: true
-        allow_degradation: false
+        allow_degradation: true
 
 #END

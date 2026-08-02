@@ -22,15 +22,14 @@ GET  /api/agent/runs/:run_id/events
 POST /api/agent/runs/:run_id/cancel
 ```
 
-启动：
+个性化发行版已把 APISIX 纳入默认 Compose 栈。启动全部服务：
 
 ```powershell
-docker compose `
-  -f docker-compose.yml `
-  -f docker-compose.override.yml `
-  -f docker-compose.apisix.yml `
-  up -d apisix
+docker compose up -d
 ```
+
+只补启动或恢复网关时可运行 `docker compose up -d apisix`。旧部署继续叠加
+`docker-compose.apisix.yml` 也兼容，但新安装不再需要额外指定该文件。
 
 当前实例的公开 Agent slug 是 `default-chatbot`。创建独立的外部 Agent 后，可以在启动前设置：
 
@@ -43,6 +42,12 @@ $env:YUXI_PUBLIC_AGENT_SLUG = "rice-endosperm-public-v1"
 ```powershell
 docker exec yuxi-apisix apisix reload
 ```
+
+APISIX 的限流状态使用 Redis 统一存储。Redis 短暂不可用时，限流插件会进入
+`allow_degradation` 模式并记录告警，但请求仍必须通过 Yuxi API Key 认证；这可避免
+限流依赖故障把所有有效凭证错误地返回为 HTTP 500。任务创建和 worker 队列仍依赖
+Redis，因此应监控 `redis` 与 `worker` 的 Compose 健康状态。标准启动命令会等待
+Redis 健康后启动 worker，worker 进程失联退出后由 Docker 的重启策略恢复。
 
 ## 安全加载 API Key
 
