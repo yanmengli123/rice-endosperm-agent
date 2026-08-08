@@ -49,7 +49,6 @@ class ModelProviderPayload(BaseModel):
     models_endpoint: str | None = Field(None, description="聊天/通用模型列表端点")
     embedding_models_endpoint: str | None = Field(None, description="Embedding 模型列表端点")
     rerank_models_endpoint: str | None = Field(None, description="Rerank 模型列表端点")
-    api_key_env: str | None = Field(None, description="API Key 环境变量名")
     api_key: str | None = Field(None, description="直接配置的 API Key")
     capabilities: list[str] | None = Field(None, description="支持能力")
     enabled_models: list[dict[str, Any]] | None = Field(None, description="已启用模型配置")
@@ -125,7 +124,6 @@ async def update_provider(
         unset_fields = payload.model_fields_set
         data = payload.model_dump(exclude_none=True)
         for nullable_field in (
-            "api_key_env",
             "api_key",
             "default_protocol",
             "embedding_base_url",

@@ -73,6 +73,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize model cache during startup: {e}")
 
+    # 初始化 OCR 云服务配置与跨进程凭证缓存
+    try:
+        from yuxi.knowledge.parser.credential_cache import ocr_credential_cache
+        from yuxi.services.ocr_provider_service import (
+            ensure_builtin_ocr_provider_in_db,
+            get_all_ocr_providers,
+        )
+
+        async with pg_manager.get_async_session_context() as session:
+            await ensure_builtin_ocr_provider_in_db(session)
+        async with pg_manager.get_async_session_context() as session:
+            ocr_credential_cache.rebuild(await get_all_ocr_providers(session))
+    except Exception as e:
+        logger.error(f"Failed to initialize OCR provider credentials during startup: {e}")
+
     # 初始化知识库管理器
     if os.environ.get("LITE_MODE", "").lower() in ("true", "1"):
         logger.info("LITE_MODE enabled, skipping knowledge base initialization")

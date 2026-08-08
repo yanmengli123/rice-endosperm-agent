@@ -20,6 +20,10 @@ def test_model_provider_payload_accepts_embedding_and_rerank_urls():
     assert data["rerank_base_url"] == "https://api.example.com/v1/rerank"
 
 
+def test_model_provider_payload_has_no_environment_key_entry():
+    assert "api_key_env" not in ModelProviderPayload.model_fields
+
+
 @pytest.mark.asyncio
 async def test_update_provider_commits_before_refreshing_cache(monkeypatch):
     calls = []

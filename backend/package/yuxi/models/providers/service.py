@@ -111,6 +111,8 @@ _FIELD_NORMALIZERS = {
 
 def _normalize_payload(data: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
     payload = dict(data)
+    # api_key_env 只用于旧版本数据迁移，不能再由管理接口写入运行时配置。
+    payload.pop("api_key_env", None)
     if not partial or "provider_id" in payload:
         provider_id = str(payload.get("provider_id") or "").strip()
         _validate_provider_id(provider_id)
@@ -164,12 +166,8 @@ def _normalize_payload(data: dict[str, Any], *, partial: bool = False) -> dict[s
 
 
 def resolve_api_key(provider: ModelProvider) -> str | None:
-    """解析 provider 的 API Key，优先直接配置，其次从环境变量读取。"""
-    if provider.api_key:
-        return provider.api_key
-    if provider.api_key_env:
-        return os.getenv(provider.api_key_env)
-    return None
+    """读取模型供应商页面持久化的 API Key。"""
+    return provider.api_key or None
 
 
 def check_credential_status(provider: ModelProvider) -> str:
@@ -178,8 +176,6 @@ def check_credential_status(provider: ModelProvider) -> str:
         return "ok"
     if provider.api_key:
         return "ok"
-    if provider.api_key_env:
-        return "ok" if os.getenv(provider.api_key_env) else "warning"
     return "warning"
 
 
@@ -236,10 +232,21 @@ async def get_model_provider_by_id(db: AsyncSession, provider_id: str) -> ModelP
 async def ensure_builtin_model_providers_in_db(db: AsyncSession) -> None:
     """确保独立模型配置模块的内置 provider 模板存在。
 
-    这里只补不存在的内置 provider，不覆盖管理员已编辑的配置。
+    旧版本保存的 api_key_env 会在升级时导入一次并清空引用；页面已经保存的
+    api_key 始终优先且不会被环境变量覆盖。新安装创建内置供应商时也只把环境
+    变量作为一次性引导值写入数据库，后续运行时只读取数据库。
     """
     existing = await list_model_providers(db)
     existing_ids = {p.provider_id: p for p in existing}
+
+    for provider in existing:
+        if not provider.api_key_env:
+            continue
+        if not provider.api_key:
+            provider.api_key = os.getenv(provider.api_key_env) or None
+        provider.api_key_env = None
+        provider.updated_by = "system"
+        await db.flush()
 
     for provider_def in BUILTIN_PROVIDERS:
         provider_id = provider_def["provider_id"]
@@ -253,6 +260,10 @@ async def ensure_builtin_model_providers_in_db(db: AsyncSession) -> None:
             continue
 
         payload = {key: value for key, value in provider_def.items() if value is not None}
+        bootstrap_env = payload.pop("bootstrap_api_key_env", None)
+        bootstrap_key = os.getenv(bootstrap_env) if bootstrap_env else None
+        if bootstrap_key:
+            payload["api_key"] = bootstrap_key
         payload["enabled_models"] = provider_def.get("enabled_models", [])
         payload["headers_json"] = payload.get("headers_json") or {}
         payload["extra_json"] = payload.get("extra_json") or {}

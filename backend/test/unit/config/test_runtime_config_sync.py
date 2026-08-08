@@ -100,6 +100,13 @@ def test_fresh_import_ignores_invalid_ocr_engine_and_loads_later_config(tmp_path
     assert loaded["default_model"] == "test-provider:after-invalid-ocr"
 
 
+def test_default_retrieval_models_use_free_siliconflow_variants(tmp_path):
+    cfg = Config(save_dir=str(tmp_path))
+
+    assert cfg.embed_model == "siliconflow-cn:BAAI/bge-m3"
+    assert cfg.reranker == "siliconflow-cn:BAAI/bge-reranker-v2-m3"
+
+
 def test_save_writes_runtime_snapshot_after_base_toml(tmp_path, monkeypatch: pytest.MonkeyPatch):
     redis = _FakeRedis()
     _patch_runtime_redis(monkeypatch, redis)

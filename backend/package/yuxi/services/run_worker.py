@@ -555,6 +555,13 @@ async def _worker_startup(ctx):
     await ensure_builtin_mcp_servers_in_db()
     async with pg_manager.get_async_session_context() as session:
         await init_builtin_skills(session)
+    from yuxi.knowledge.parser.credential_cache import ocr_credential_cache
+    from yuxi.services.ocr_provider_service import ensure_builtin_ocr_provider_in_db, get_all_ocr_providers
+
+    async with pg_manager.get_async_session_context() as session:
+        await ensure_builtin_ocr_provider_in_db(session)
+    async with pg_manager.get_async_session_context() as session:
+        ocr_credential_cache.rebuild(await get_all_ocr_providers(session))
     sys_config.start_runtime_sync()
 
 

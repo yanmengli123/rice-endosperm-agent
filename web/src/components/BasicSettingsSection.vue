@@ -70,6 +70,70 @@
               </div>
             </div>
           </div>
+          <div class="mineru-config-card">
+            <div class="mineru-card-header">
+              <div>
+                <div class="mineru-card-title">
+                  <ShieldCheck :size="18" />
+                  MinerU 官方 API（免费额度）
+                  <a-tag :color="mineruConfig.token_configured ? 'green' : 'orange'">
+                    {{ mineruConfig.token_configured ? 'Token 已配置' : 'Token 未配置' }}
+                  </a-tag>
+                  <a-tag v-if="mineruConfig.is_default" color="blue">当前默认</a-tag>
+                </div>
+                <p class="mineru-card-description">
+                  全局配置一次，知识库上传和附件解析都会使用同一 Token。Token 仅保存在服务端，页面不会回显。
+                </p>
+              </div>
+              <a
+                href="https://mineru.net/apiManage/token"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="official-link"
+              >
+                官网创建 Token
+                <ExternalLink :size="14" />
+              </a>
+            </div>
+
+            <div class="mineru-form-grid">
+              <div class="mineru-field mineru-token-field">
+                <label>API Token</label>
+                <a-input-password
+                  v-model:value="mineruForm.api_token"
+                  :placeholder="
+                    mineruConfig.token_configured
+                      ? '已安全配置；留空保持不变'
+                      : '粘贴 MinerU 官网创建的 Token'
+                  "
+                  autocomplete="new-password"
+                />
+              </div>
+              <div class="mineru-field">
+                <label>解析模型</label>
+                <a-select v-model:value="mineruForm.model_version" class="full-width">
+                  <a-select-option value="vlm">VLM（推荐）</a-select-option>
+                  <a-select-option value="pipeline">Pipeline</a-select-option>
+                </a-select>
+              </div>
+            </div>
+
+            <div class="mineru-card-footer">
+              <div class="connection-status" :class="mineruConnection.status">
+                {{ mineruConnection.message || '保存前可先测试 Token；测试不会创建解析任务。' }}
+              </div>
+              <div class="mineru-actions">
+                <a-button :loading="mineruTesting" @click="testMineruConnection">测试连接</a-button>
+                <a-button
+                  type="primary"
+                  :loading="mineruSaving"
+                  @click="saveMineruAsDefault"
+                >
+                  保存并设为默认
+                </a-button>
+              </div>
+            </div>
+          </div>
         </template>
       </div>
 
@@ -180,10 +244,12 @@
 </template>
 
 <script setup>
-import { computed, h } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
+import { message } from 'ant-design-vue'
 import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
-import { Globe } from 'lucide-vue-next'
+import { ExternalLink, Globe, ShieldCheck } from 'lucide-vue-next'
+import { ocrApi } from '@/apis/system_api'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import EmbeddingModelSelector from '@/components/EmbeddingModelSelector.vue'
 import RerankModelSelector from '@/components/RerankModelSelector.vue'
@@ -191,16 +257,74 @@ import RerankModelSelector from '@/components/RerankModelSelector.vue'
 const configStore = useConfigStore()
 const userStore = useUserStore()
 const items = computed(() => configStore.config?._config_items || {})
+const mineruConfig = ref({ token_configured: false, is_default: false })
+const mineruForm = reactive({ api_token: '', model_version: 'vlm' })
+const mineruConnection = reactive({ status: '', message: '' })
+const mineruTesting = ref(false)
+const mineruSaving = ref(false)
 const ocrEngineOptions = [
   { value: 'disable', label: '不启用' },
   { value: 'rapid_ocr', label: 'RapidOCR (ONNX)' },
-  { value: 'mineru_ocr', label: 'MinerU OCR' },
-  { value: 'mineru_official', label: 'MinerU Official API' },
+  { value: 'mineru_ocr', label: 'MinerU 本地服务' },
+  { value: 'mineru_official', label: 'MinerU 官方 API（免费额度）' },
   { value: 'pp_structure_v3_ocr', label: 'PP-Structure-V3' },
   { value: 'deepseek_ocr', label: 'DeepSeek OCR' },
   { value: 'paddleocr_vl_1_6', label: 'PaddleOCR-VL-1.6' },
   { value: 'paddleocr_pp_ocrv6', label: 'PP-OCRv6' }
 ]
+
+const loadMineruConfig = async () => {
+  if (!userStore.isSuperAdmin) return
+  try {
+    const response = await ocrApi.getMineruOfficialConfig()
+    mineruConfig.value = response.data
+    mineruForm.model_version = response.data?.settings?.model_version || 'vlm'
+  } catch (error) {
+    mineruConnection.status = 'error'
+    mineruConnection.message = error.message || '读取 MinerU 配置失败'
+  }
+}
+
+const testMineruConnection = async () => {
+  mineruTesting.value = true
+  try {
+    const response = await ocrApi.testMineruOfficialConfig(mineruForm.api_token)
+    mineruConnection.status = response.data?.status || 'healthy'
+    mineruConnection.message = response.data?.message || 'MinerU 官方 API 连接正常'
+    message.success('MinerU Token 测试通过')
+  } catch (error) {
+    mineruConnection.status = 'unhealthy'
+    mineruConnection.message = error.message || 'MinerU Token 测试失败'
+    message.error(mineruConnection.message)
+  } finally {
+    mineruTesting.value = false
+  }
+}
+
+const saveMineruAsDefault = async () => {
+  mineruSaving.value = true
+  try {
+    const response = await ocrApi.saveMineruOfficialConfig({
+      api_token: mineruForm.api_token || null,
+      model_version: mineruForm.model_version,
+      set_as_default: true
+    })
+    mineruForm.api_token = ''
+    mineruConfig.value = response.data
+    mineruConnection.status = response.connection?.status || 'healthy'
+    mineruConnection.message = response.connection?.message || 'MinerU 官方 API 连接正常'
+    await configStore.refreshConfig()
+    message.success('MinerU 已保存并设为默认 OCR 解析引擎')
+  } catch (error) {
+    mineruConnection.status = 'unhealthy'
+    mineruConnection.message = error.message || '保存 MinerU 配置失败'
+    message.error(mineruConnection.message)
+  } finally {
+    mineruSaving.value = false
+  }
+}
+
+onMounted(loadMineruConfig)
 
 const handleChange = (key, e) => {
   configStore.setConfigValue(key, e)
@@ -284,6 +408,85 @@ const openLink = (url) => {
     }
   }
 
+  .mineru-config-card {
+    padding: 16px;
+    border: 1px solid var(--gray-200);
+    border-radius: 8px;
+    background: var(--gray-0);
+  }
+
+  .mineru-card-header,
+  .mineru-card-footer,
+  .mineru-card-title,
+  .mineru-actions,
+  .official-link {
+    display: flex;
+    align-items: center;
+  }
+
+  .mineru-card-header,
+  .mineru-card-footer {
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .mineru-card-title {
+    gap: 8px;
+    color: var(--gray-900);
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .mineru-card-description {
+    margin: 6px 0 0;
+    color: var(--gray-600);
+    font-size: 13px;
+  }
+
+  .official-link {
+    flex-shrink: 0;
+    gap: 5px;
+    color: var(--color-primary-700);
+    font-size: 13px;
+  }
+
+  .mineru-form-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr);
+    gap: 16px;
+    margin: 16px 0;
+  }
+
+  .mineru-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+
+    label {
+      color: var(--gray-700);
+      font-size: 13px;
+      font-weight: 500;
+    }
+  }
+
+  .mineru-actions {
+    gap: 8px;
+  }
+
+  .connection-status {
+    color: var(--gray-600);
+    font-size: 13px;
+
+    &.healthy {
+      color: var(--color-success-700);
+    }
+
+    &.unhealthy,
+    &.error {
+      color: var(--color-error-700);
+    }
+  }
+
   .card {
     display: flex;
     align-items: center;
@@ -359,6 +562,16 @@ const openLink = (url) => {
   @media (max-width: 768px) {
     .agent-select {
       width: 100%;
+    }
+
+    .mineru-card-header,
+    .mineru-card-footer {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .mineru-form-grid {
+      grid-template-columns: 1fr;
     }
   }
 }

@@ -104,6 +104,18 @@ def test_select_embedding_model_loads_model_from_cache(monkeypatch):
     assert model.dimension == 1024
 
 
+def test_embedding_constructor_treats_api_key_as_value_not_environment_name(monkeypatch):
+    monkeypatch.setenv("LEGACY_EMBEDDING_KEY", "env-key")
+
+    model = OtherEmbedding(
+        model="namespace/embedding-model",
+        base_url="https://example.com/v1/embeddings",
+        api_key="LEGACY_EMBEDDING_KEY",
+    )
+
+    assert model.api_key == "LEGACY_EMBEDDING_KEY"
+
+
 def test_select_model_wraps_langchain_model_and_expands_model_params(monkeypatch):
     fake_model = SimpleNamespace()
     captured = {}
@@ -250,6 +262,84 @@ async def test_embedding_connection_reports_dimension_mismatch(monkeypatch):
     assert await model.test_connection() == (False, "Embedding 维度不一致：配置 4，实际 3")
 
 
+@pytest.mark.asyncio
+async def test_embedding_connection_reports_provider_error_for_valid_endpoint(monkeypatch):
+    model = OtherEmbedding(
+        model="BAAI/bge-m3",
+        base_url="https://api.siliconflow.cn/v1/embeddings",
+        api_key="test-key",
+    )
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        async def post(self, url, **_kwargs):
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                402,
+                request=request,
+                headers={"x-siliconcloud-trace-id": "trace-123"},
+                json={"code": 30001, "message": "Sorry, your account balance is insufficient"},
+            )
+
+    monkeypatch.setattr("yuxi.models.embed.httpx.AsyncClient", FakeAsyncClient)
+
+    success, message = await model.test_connection()
+
+    assert success is False
+    assert "HTTP 402 Payment Required" in message
+    assert "Sorry, your account balance is insufficient" in message
+    assert "code=30001" in message
+    assert "trace_id=trace-123" in message
+    assert "end with /embeddings" not in message
+
+
+@pytest.mark.asyncio
+async def test_rerank_connection_reports_provider_error():
+    model = OpenAIReranker(
+        model_name="BAAI/bge-reranker-v2-m3",
+        base_url="https://api.siliconflow.cn/v1/rerank",
+        api_key="test-key",
+    )
+
+    class FakeResponse:
+        status = 402
+        reason = "Payment Required"
+        headers = {"x-siliconcloud-trace-id": "trace-456"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        async def text(self):
+            return '{"code":30001,"message":"Sorry, your account balance is insufficient"}'
+
+    class FakeSession:
+        closed = False
+
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+        async def close(self):
+            self.closed = True
+
+    model.session = FakeSession()
+
+    success, message = await model.test_connection()
+
+    assert success is False
+    assert "HTTP 402 Payment Required" in message
+    assert "Sorry, your account balance is insufficient" in message
+    assert "code=30001" in message
+    assert "trace_id=trace-456" in message
+
+
 def test_embedding_sync_400_logs_warning(monkeypatch):
     warnings = _capture_embed_warnings(monkeypatch)
     model = OtherEmbedding(
@@ -266,7 +356,7 @@ def test_embedding_sync_400_logs_warning(monkeypatch):
 
     monkeypatch.setattr("yuxi.models.embed.requests.post", fake_post)
 
-    with pytest.raises(ValueError, match="400 Client Error"):
+    with pytest.raises(ValueError, match="HTTP 400 Bad Request"):
         model.encode(["hello", "test"])
 
     assert len(calls) == 1
@@ -320,7 +410,7 @@ def test_embedding_sync_5xx_uses_short_retry_budget(monkeypatch):
 
     monkeypatch.setattr("yuxi.models.embed.requests.post", fake_post)
 
-    with pytest.raises(ValueError, match="503 Server Error"):
+    with pytest.raises(ValueError, match="HTTP 503 Service Unavailable"):
         model.encode(["hello"])
 
     assert len(calls) == 3

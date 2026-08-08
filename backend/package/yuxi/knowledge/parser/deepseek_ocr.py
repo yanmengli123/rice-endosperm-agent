@@ -15,6 +15,7 @@ import fitz  # PyMuPDF
 import requests
 
 from yuxi.knowledge.parser.base import BaseDocumentProcessor, DocumentParserException
+from yuxi.models.providers.cache import model_cache
 from yuxi.utils import logger
 
 
@@ -31,14 +32,20 @@ class DeepSeekOCRParser(BaseDocumentProcessor):
         ".webp": "image/webp",
     }
 
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.getenv("SILICONFLOW_API_KEY")
-        if not self.api_key:
+    def __init__(self):
+        provider_info = next(
+            (info for info in model_cache.get_all_specs("chat") if info.provider_id == "siliconflow-cn"),
+            None,
+        )
+        if provider_info is None or not provider_info.api_key:
             raise DocumentParserException(
-                "SILICONFLOW_API_KEY environment variable not set", "deepseek_ocr", "missing_api_key"
+                "请先在模型供应商中启用 SiliconFlow、配置 API Key，并至少启用一个 Chat 模型",
+                "deepseek_ocr",
+                "missing_api_key",
             )
 
-        self.api_url = "https://api.siliconflow.cn/v1/chat/completions"
+        self.api_key = provider_info.api_key
+        self.api_url = f"{provider_info.base_url.rstrip('/')}/chat/completions"
         self.model = "deepseek-ai/DeepSeek-OCR"
 
         self.headers = {

@@ -1,4 +1,13 @@
-import { apiGet, apiAdminGet, apiAdminPost, apiAdminPut, apiAdminDelete } from './base'
+import {
+  apiGet,
+  apiAdminGet,
+  apiAdminPost,
+  apiAdminPut,
+  apiAdminDelete,
+  apiSuperAdminGet,
+  apiSuperAdminPost,
+  apiSuperAdminPut
+} from './base'
 
 /**
  * 系统管理API模块
@@ -77,7 +86,18 @@ export const ocrApi = {
    * 获取OCR服务健康状态
    * @returns {Promise} - OCR健康状态
    */
-  getHealth: async () => apiAdminGet('/api/system/ocr/health')
+  getHealth: async () => apiAdminGet('/api/system/ocr/health'),
+
+  getMineruOfficialConfig: async () =>
+    apiSuperAdminGet('/api/system/ocr/providers/mineru-official'),
+
+  testMineruOfficialConfig: async (apiToken = null) =>
+    apiSuperAdminPost('/api/system/ocr/providers/mineru-official/test', {
+      api_token: apiToken || null
+    }),
+
+  saveMineruOfficialConfig: async (payload) =>
+    apiSuperAdminPut('/api/system/ocr/providers/mineru-official', payload)
 }
 
 // =============================================================================

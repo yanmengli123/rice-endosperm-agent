@@ -5,12 +5,16 @@ import pytest
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from yuxi.models.providers.builtin import BUILTIN_PROVIDERS
+from yuxi.models.providers import service as provider_service
 from yuxi.models.providers.service import (
-    check_credential_status,
     _normalize_payload,
     _normalize_remote_model,
+    check_credential_status,
+    ensure_builtin_model_providers_in_db,
     fetch_remote_models,
+    resolve_api_key,
 )
+from yuxi.storage.postgres.models_business import ModelProvider
 
 
 def test_normalize_payload_accepts_enabled_chat_model():
@@ -209,8 +213,8 @@ def testcheck_credential_status_direct_api_key_ok():
     assert check_credential_status(Provider()) == "ok"
 
 
-def testcheck_credential_status_env_key_exists_ok(monkeypatch):
-    """api_key_env 对应的环境变量存在时状态为 ok。"""
+def test_runtime_credential_does_not_fallback_to_environment(monkeypatch):
+    """运行时只读取供应商页面落库的密钥，不再从环境变量回退。"""
     monkeypatch.setenv("TEST_API_KEY", "exists")
 
     class Provider:
@@ -218,19 +222,10 @@ def testcheck_credential_status_env_key_exists_ok(monkeypatch):
         api_key = None
         api_key_env = "TEST_API_KEY"
 
-    assert check_credential_status(Provider()) == "ok"
+    provider = Provider()
 
-
-def testcheck_credential_status_env_key_missing_warning(monkeypatch):
-    """api_key_env 对应的环境变量不存在时状态为 warning。"""
-    monkeypatch.delenv("MISSING_KEY", raising=False)
-
-    class Provider:
-        is_enabled = True
-        api_key = None
-        api_key_env = "MISSING_KEY"
-
-    assert check_credential_status(Provider()) == "warning"
+    assert resolve_api_key(provider) is None
+    assert check_credential_status(provider) == "warning"
 
 
 def testcheck_credential_status_both_empty_warning():
@@ -242,6 +237,124 @@ def testcheck_credential_status_both_empty_warning():
         api_key_env = None
 
     assert check_credential_status(Provider()) == "warning"
+
+
+@pytest.mark.asyncio
+async def test_builtin_credential_migration_preserves_page_key_and_clears_env_reference(monkeypatch):
+    """升级时页面已保存的密钥优先，旧环境变量引用只清理、不覆盖。"""
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "env-key")
+    monkeypatch.setattr(
+        provider_service,
+        "BUILTIN_PROVIDERS",
+        [{"provider_id": "test-provider", "bootstrap_api_key_env": "TEST_PROVIDER_KEY"}],
+    )
+    provider = type(
+        "Provider",
+        (),
+        {
+            "provider_id": "test-provider",
+            "api_key": "page-key",
+            "api_key_env": "TEST_PROVIDER_KEY",
+            "enabled_models": [],
+            "capabilities": [],
+            "updated_by": None,
+        },
+    )()
+
+    class Db:
+        async def flush(self):
+            return None
+
+    monkeypatch.setattr(provider_service, "list_model_providers", lambda _db: _async_value([provider]))
+
+    await ensure_builtin_model_providers_in_db(Db())
+
+    assert provider.api_key == "page-key"
+    assert provider.api_key_env is None
+
+
+@pytest.mark.asyncio
+async def test_builtin_credential_migration_imports_env_once(monkeypatch):
+    """旧记录没有页面密钥时，将旧环境变量值一次性导入数据库并清除引用。"""
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "env-key")
+    monkeypatch.setattr(
+        provider_service,
+        "BUILTIN_PROVIDERS",
+        [{"provider_id": "test-provider", "bootstrap_api_key_env": "TEST_PROVIDER_KEY"}],
+    )
+    provider = type(
+        "Provider",
+        (),
+        {
+            "provider_id": "test-provider",
+            "api_key": None,
+            "api_key_env": "TEST_PROVIDER_KEY",
+            "enabled_models": [],
+            "capabilities": [],
+            "updated_by": None,
+        },
+    )()
+
+    class Db:
+        async def flush(self):
+            return None
+
+    monkeypatch.setattr(provider_service, "list_model_providers", lambda _db: _async_value([provider]))
+
+    await ensure_builtin_model_providers_in_db(Db())
+
+    assert provider.api_key == "env-key"
+    assert provider.api_key_env is None
+
+
+@pytest.mark.asyncio
+async def test_new_builtin_provider_imports_bootstrap_key_without_storing_env_reference(monkeypatch):
+    """首次安装可导入 .env，但新记录只保存实际密钥。"""
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "bootstrap-key")
+    monkeypatch.setattr(
+        provider_service,
+        "BUILTIN_PROVIDERS",
+        [
+            {
+                "provider_id": "test-provider",
+                "display_name": "Test Provider",
+                "base_url": "https://example.com/v1",
+                "bootstrap_api_key_env": "TEST_PROVIDER_KEY",
+            }
+        ],
+    )
+    captured = {}
+
+    async def fake_create(_db, payload):
+        captured.update(payload)
+
+    monkeypatch.setattr(provider_service, "list_model_providers", lambda _db: _async_value([]))
+    monkeypatch.setattr(provider_service, "create_model_provider", fake_create)
+
+    await ensure_builtin_model_providers_in_db(object())
+
+    assert captured["api_key"] == "bootstrap-key"
+    assert "api_key_env" not in captured
+
+
+def test_provider_serialization_never_exposes_secret():
+    provider = ModelProvider(
+        provider_id="test-provider",
+        display_name="Test Provider",
+        base_url="https://example.com/v1",
+        api_key="secret-value",
+        api_key_env="LEGACY_KEY",
+    )
+
+    payload = provider.to_dict()
+
+    assert "api_key" not in payload
+    assert "api_key_env" not in payload
+    assert payload["api_key_configured"] is True
+
+
+async def _async_value(value):
+    return value
 
 
 # ==================== 手动添加模型 / source 字段 ====================

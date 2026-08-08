@@ -48,8 +48,8 @@ Yuxi 将上传文件先保存为原文件，再解析为 Markdown 并按知识�
 | 方案 | 适用场景 | 硬件要求 | 特点 |
 |------|----------|----------|------|
 | RapidOCR | 基础文字识别 | CPU | 免费开源，速度快 |
-| MinerU | 复杂 PDF、表格 | GPU | 精度高，版面分析好 |
-| MinerU Official | 复杂文档 | 无 | 官方云服务，开箱即用 |
+| MinerU 本地服务 | 复杂 PDF、表格 | GPU | 自托管，版面分析能力强 |
+| MinerU 官方 API | 复杂文档 | 无 | 官方精准解析 API，支持免费额度 |
 | PP-Structure-V3 | 表格、票据 | GPU | 专业版面解析 |
 | DeepSeek OCR | 智能理解 | 无 | 云端服务，Markdown 输出 |
 | PaddleOCR-VL-1.6 | 复杂文档、表格、图片 PDF | 无 | 百度 AI Studio 云端服务，输出 Markdown |
@@ -88,13 +88,16 @@ docker compose --profile all up -d --build mineru-api
 若显存有限导致启动失败，可在 `docker-compose.yml` 的 `mineru-api` 服务下放开 `--gpu-memory-utilization` 参数（如 `0.5`，必要时进一步降低）。
 :::
 
-### MinerU Official（云服务）
+### MinerU 官方 API（云服务）
 
-从 [MinerU 官网](https://mineru.net) 获取 API 密钥，在 .env 配置环境变量
+1. 登录 [MinerU Token 管理页面](https://mineru.net/apiManage/token) 创建并复制 Token。
+2. 使用超级管理员账号进入“设置 → 基本设置 → 默认项配置”。
+3. 在“MinerU 官方 API（免费额度）”卡片粘贴 Token，选择 `VLM（推荐）` 或 `Pipeline`。
+4. 点击“保存并设为默认”。系统会先执行不创建解析任务的鉴权测试，通过后才保存，并将 `mineru_official` 设为全局默认 OCR 引擎。
 
-```env
-MINERU_API_KEY=your-api-key-here
-```
+Token 只保存在服务端，管理接口和页面不会回显明文。API 与后台任务通过同一份运行时缓存读取配置，因此无需在每个容器重复配置。官方精准解析 API 的认证、文件格式与异步解析流程以 [MinerU API 文档](https://mineru.net/apiManage/docs) 为准。
+
+升级场景如需自动导入旧配置，可在首次启动新版本前临时配置 `MINERU_API_TOKEN`（兼容旧名 `MINERU_API_KEY`）。环境变量只在数据库尚未创建 MinerU 配置记录时导入一次，后续以设置页面保存值为唯一运行来源。
 
 ### PP-Structure-V3（结构化）
 

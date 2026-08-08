@@ -64,6 +64,31 @@ def test_model_cache_prefers_model_base_url_override(monkeypatch):
     assert saved_cache["alibaba:qwen3-rerank"].base_url == "https://invalid.example/rerank"
 
 
+def test_model_cache_ignores_legacy_environment_key(monkeypatch):
+    saved_cache = {}
+    monkeypatch.setenv("LEGACY_PROVIDER_KEY", "env-key")
+
+    class Provider:
+        is_enabled = True
+        provider_id = "provider"
+        api_key = None
+        api_key_env = "LEGACY_PROVIDER_KEY"
+        provider_type = "openai"
+        base_url = "https://example.com/v1"
+        embedding_base_url = None
+        rerank_base_url = None
+        headers_json = {}
+        extra_json = {}
+        enabled_models = [{"id": "chat", "type": "chat", "display_name": "Chat"}]
+
+    cache = ModelCache()
+    monkeypatch.setattr(cache, "_save_cache", lambda data: saved_cache.update(data))
+
+    cache.rebuild([Provider()])
+
+    assert saved_cache["provider:chat"].api_key == ""
+
+
 def test_model_cache_loads_from_redis_and_uses_local_ttl(monkeypatch: pytest.MonkeyPatch):
     redis = _FakeRedis()
     _patch_redis(monkeypatch, redis)

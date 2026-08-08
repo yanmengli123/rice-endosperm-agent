@@ -667,14 +667,48 @@ class ModelProvider(Base):
             "models_endpoint": self.models_endpoint,
             "embedding_models_endpoint": self.embedding_models_endpoint,
             "rerank_models_endpoint": self.rerank_models_endpoint,
-            "api_key_env": self.api_key_env,
-            "api_key": self.api_key,
+            "api_key_configured": bool(self.api_key),
             "capabilities": self.capabilities or [],
             "enabled_models": self.enabled_models or [],
             "headers_json": self.headers_json or {},
             "extra_json": self.extra_json or {},
             "is_enabled": bool(self.is_enabled),
             "is_builtin": bool(self.is_builtin),
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
+
+
+class OCRProviderConfig(Base):
+    """OCR 云服务的全局配置。敏感凭证只在服务端使用。"""
+
+    __tablename__ = "ocr_provider_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    service_id = Column(String(100), nullable=False, unique=True, index=True, comment="OCR 服务稳定标识")
+    display_name = Column(String(100), nullable=False, comment="展示名称")
+    api_base = Column(String(500), nullable=False, comment="API 基础 URL")
+    api_token = Column(String(1000), nullable=True, comment="服务端 API Token")
+    settings_json = Column(JSON, nullable=False, default=dict, comment="非敏感运行参数")
+    is_enabled = Column(Boolean, nullable=False, default=True, index=True)
+
+    created_by = Column(String(100), nullable=True)
+    updated_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+    def to_dict(self) -> dict[str, Any]:
+        """返回管理页面所需信息，永不回显 Token。"""
+        return {
+            "id": self.id,
+            "service_id": self.service_id,
+            "display_name": self.display_name,
+            "api_base": self.api_base,
+            "token_configured": bool(self.api_token),
+            "settings": self.settings_json or {},
+            "is_enabled": bool(self.is_enabled),
             "created_by": self.created_by,
             "updated_by": self.updated_by,
             "created_at": format_utc_datetime(self.created_at),

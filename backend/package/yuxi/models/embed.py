@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 from abc import ABC, abstractmethod
 
@@ -7,6 +6,7 @@ import httpx
 import numpy as np
 import requests
 
+from yuxi.models.http_errors import format_provider_http_error
 from yuxi.models.providers.cache import model_cache
 from yuxi.utils import get_docker_safe_url, hashstr, logger
 
@@ -36,7 +36,7 @@ class BaseEmbeddingModel(ABC):
         self.model = model or name or model_id
         self.dimension = dimension
         self.base_url = get_docker_safe_url(base_url)
-        self.api_key = os.getenv(api_key, api_key)
+        self.api_key = api_key
         self.batch_size = int(batch_size or 40)
         self.embed_state = {}
 
@@ -107,7 +107,8 @@ class BaseEmbeddingModel(ABC):
             return True, "连接正常"
         except Exception as e:
             error_msg = str(e)
-            error_msg += f", maybe you can check the `{self.base_url}` end with /embeddings as examples."
+            if not self.base_url.rstrip("/").endswith("/embeddings"):
+                error_msg += f"；Embedding URL 应以 /embeddings 结尾，当前为 {self.base_url}"
             logger.error(error_msg)
             return False, error_msg
 
@@ -195,8 +196,19 @@ class OtherEmbedding(BaseEmbeddingModel):
                     time.sleep(delay)
                     continue
 
-                logger.error(f"Embedding request failed: {e}, {payload}")
-                raise ValueError(f"Embedding request failed: {e}")
+                response = getattr(e, "response", None)
+                if response is not None:
+                    error_msg = format_provider_http_error(
+                        "Embedding 请求",
+                        status_code=response.status_code,
+                        reason=response.reason,
+                        response_text=response.text,
+                        trace_id=response.headers.get("x-siliconcloud-trace-id"),
+                    )
+                else:
+                    error_msg = f"Embedding 请求失败：{e}"
+                logger.error(f"{error_msg}；model={self.model}；base_url={self.base_url}")
+                raise ValueError(error_msg) from e
 
     async def aencode(self, message: list[str] | str) -> list[list[float]]:
         payload = self.build_payload(message)
@@ -218,7 +230,15 @@ class OtherEmbedding(BaseEmbeddingModel):
                         retry_index, delay = retry
                         await asyncio.sleep(delay)
                         continue
-                    raise
+                    response = e.response
+                    error_msg = format_provider_http_error(
+                        "Embedding 请求",
+                        status_code=response.status_code,
+                        reason=response.reason_phrase,
+                        response_text=response.text,
+                        trace_id=response.headers.get("x-siliconcloud-trace-id"),
+                    )
+                    raise httpx.HTTPStatusError(error_msg, request=e.request, response=response) from e
                 except httpx.RequestError as e:
                     retry = self._prepare_retry(message, retry_index=retry_index, error=e)
                     if retry:

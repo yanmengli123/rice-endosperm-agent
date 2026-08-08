@@ -6,6 +6,7 @@ from typing import Any
 import aiohttp
 import numpy as np
 
+from yuxi.models.http_errors import format_provider_http_error
 from yuxi.models.providers.cache import model_cache
 from yuxi.utils import get_docker_safe_url, logger
 
@@ -85,7 +86,15 @@ class BaseReranker(ABC):
 
         try:
             async with self.session.post(self.url, json=payload) as response:
-                response.raise_for_status()
+                if response.status >= 400:
+                    error_msg = format_provider_http_error(
+                        "Rerank 请求",
+                        status_code=response.status,
+                        reason=response.reason,
+                        response_text=await response.text(),
+                        trace_id=response.headers.get("x-siliconcloud-trace-id"),
+                    )
+                    raise RuntimeError(error_msg)
                 result: dict[str, Any] = await response.json()
         except TimeoutError as exc:
             total_timeout = self.timeout.total if self.timeout else 0.0

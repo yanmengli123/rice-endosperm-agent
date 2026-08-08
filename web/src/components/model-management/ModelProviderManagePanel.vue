@@ -54,8 +54,8 @@ const providerForm = reactive({
   models_endpoint: '/models',
   embedding_models_endpoint: '/embeddings/models',
   rerank_models_endpoint: '',
-  api_key_env: '',
   api_key: '',
+  api_key_configured: false,
   capabilities: ['chat'],
   is_enabled: true,
   headers_text: '{}',
@@ -329,8 +329,8 @@ const openCreateProviderModal = () => {
     models_endpoint: '/models',
     embedding_models_endpoint: '/embeddings/models',
     rerank_models_endpoint: '',
-    api_key_env: '',
     api_key: '',
+    api_key_configured: false,
     capabilities: ['chat'],
     is_enabled: true,
     headers_text: '{}',
@@ -352,8 +352,8 @@ const openEditProviderModal = (provider) => {
     models_endpoint: provider.models_endpoint ?? '',
     embedding_models_endpoint: provider.embedding_models_endpoint ?? '',
     rerank_models_endpoint: provider.rerank_models_endpoint ?? '',
-    api_key_env: provider.api_key_env || '',
-    api_key: provider.api_key || '',
+    api_key: '',
+    api_key_configured: provider.api_key_configured === true,
     capabilities: provider.capabilities?.length ? provider.capabilities : ['chat'],
     is_enabled: provider.is_enabled !== false,
     headers_text: formatJsonText(provider.headers_json),
@@ -362,24 +362,26 @@ const openEditProviderModal = (provider) => {
   showProviderModal.value = true
 }
 
-const buildProviderPayload = () => ({
-  provider_id: providerForm.provider_id || undefined,
-  display_name: providerForm.display_name,
-  provider_type: providerForm.provider_type,
-  default_protocol: null,
-  base_url: providerForm.base_url,
-  embedding_base_url: providerForm.embedding_base_url || null,
-  rerank_base_url: providerForm.rerank_base_url || null,
-  models_endpoint: providerForm.models_endpoint || null,
-  embedding_models_endpoint: providerForm.embedding_models_endpoint || null,
-  rerank_models_endpoint: providerForm.rerank_models_endpoint || null,
-  api_key_env: providerForm.api_key_env || null,
-  api_key: providerForm.api_key || null,
-  capabilities: providerForm.capabilities,
-  is_enabled: providerForm.is_enabled,
-  headers_json: parseJsonObject(providerForm.headers_text, '请求头'),
-  extra_json: parseJsonObject(providerForm.extra_text, '扩展配置')
-})
+const buildProviderPayload = () => {
+  const payload = {
+    provider_id: providerForm.provider_id || undefined,
+    display_name: providerForm.display_name,
+    provider_type: providerForm.provider_type,
+    default_protocol: null,
+    base_url: providerForm.base_url,
+    embedding_base_url: providerForm.embedding_base_url || null,
+    rerank_base_url: providerForm.rerank_base_url || null,
+    models_endpoint: providerForm.models_endpoint || null,
+    embedding_models_endpoint: providerForm.embedding_models_endpoint || null,
+    rerank_models_endpoint: providerForm.rerank_models_endpoint || null,
+    capabilities: providerForm.capabilities,
+    is_enabled: providerForm.is_enabled,
+    headers_json: parseJsonObject(providerForm.headers_text, '请求头'),
+    extra_json: parseJsonObject(providerForm.extra_text, '扩展配置')
+  }
+  if (providerForm.api_key) payload.api_key = providerForm.api_key
+  return payload
+}
 
 const createProvider = async () => {
   saving.value = true
@@ -815,13 +817,17 @@ defineExpose({
         </div>
 
         <div class="form-row">
-          <label class="form-label">
-            <span>API Key Env</span>
-            <a-input v-model:value="providerForm.api_key_env" placeholder="环境变量名" />
-          </label>
-          <label class="form-label">
+          <label class="form-label full-width">
             <span>API Key</span>
-            <a-input-password v-model:value="providerForm.api_key" />
+            <a-input-password
+              v-model:value="providerForm.api_key"
+              :placeholder="
+                providerForm.api_key_configured
+                  ? '已安全配置；留空保持不变，输入新值可替换'
+                  : '请输入模型供应商 API Key'
+              "
+            />
+            <small class="form-help">运行时只使用此处保存的密钥，不读取 .env 回退值。</small>
           </label>
         </div>
 
@@ -1488,6 +1494,12 @@ defineExpose({
     font-size: 12px;
     font-weight: 500;
   }
+}
+
+.form-help {
+  color: var(--gray-500);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .full-width {

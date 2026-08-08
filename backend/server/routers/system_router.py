@@ -4,12 +4,14 @@ from pathlib import Path
 import aiofiles
 import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi import config, get_version
 from yuxi.brands.rice_endosperm import BRAND_NAME
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
 
-from server.utils.auth_middleware import get_admin_user, get_required_user
+from server.utils.auth_middleware import get_admin_user, get_db, get_required_user, get_superadmin_user
 
 system = APIRouter(prefix="/system", tags=["system"])
 
@@ -187,6 +189,83 @@ async def reload_info_config(current_user: User = Depends(get_admin_user)):
 # =============================================================================
 # === OCR服务分组 ===
 # =============================================================================
+
+
+class MinerUConfigPayload(BaseModel):
+    api_token: str | None = Field(None, description="MinerU 官网创建的 API Token；留空保持原值")
+    model_version: str = Field("vlm", description="MinerU 解析模型版本：vlm 或 pipeline")
+    set_as_default: bool = Field(False, description="保存成功后设为系统默认 OCR 引擎")
+
+
+class MinerUTestPayload(BaseModel):
+    api_token: str | None = Field(None, description="待测试 Token；留空使用已保存值")
+
+
+@system.get("/ocr/providers/mineru-official")
+async def get_mineru_official_provider(
+    current_user: User = Depends(get_superadmin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """读取 MinerU 全局配置，响应中不包含 Token 明文。"""
+    del current_user
+    from yuxi.services.ocr_provider_service import get_mineru_official_config
+
+    provider = await get_mineru_official_config(db)
+    data = provider.to_dict()
+    data["is_default"] = config.default_ocr_engine == "mineru_official"
+    return {"success": True, "data": data}
+
+
+@system.post("/ocr/providers/mineru-official/test")
+async def test_mineru_official_provider(
+    payload: MinerUTestPayload,
+    current_user: User = Depends(get_superadmin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """执行无副作用的 MinerU Token 鉴权探测。"""
+    del current_user
+    from yuxi.services.ocr_provider_service import test_saved_or_supplied_mineru_connection
+
+    try:
+        health = await test_saved_or_supplied_mineru_connection(db, payload.api_token)
+        return {"success": health.get("status") == "healthy", "data": health}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@system.put("/ocr/providers/mineru-official")
+async def update_mineru_official_provider(
+    payload: MinerUConfigPayload,
+    current_user: User = Depends(get_superadmin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """验证并保存 MinerU Token，可同时设为默认 OCR 引擎。"""
+    from yuxi.knowledge.parser.credential_cache import ocr_credential_cache
+    from yuxi.services.ocr_provider_service import get_all_ocr_providers, save_mineru_official_config
+
+    try:
+        provider, health = await save_mineru_official_config(
+            db,
+            payload.model_dump(exclude={"set_as_default"}),
+            current_user.username,
+        )
+        await db.commit()
+        ocr_credential_cache.rebuild(await get_all_ocr_providers(db))
+
+        if payload.set_as_default:
+            config.set_value("default_ocr_engine", "mineru_official")
+            config.save()
+
+        data = provider.to_dict()
+        data["is_default"] = config.default_ocr_engine == "mineru_official"
+        return {"success": True, "data": data, "connection": health}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"保存 MinerU 官方 API 配置失败: {exc}")
+        raise HTTPException(status_code=500, detail="保存 MinerU 官方 API 配置失败") from exc
 
 
 @system.get("/ocr/health")
