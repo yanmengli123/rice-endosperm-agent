@@ -279,6 +279,61 @@ async def test_parse_documents_rejects_oversized_direct_batch():
     assert str(knowledge_router.MAX_DIRECT_DOCUMENT_ACTION_FILE_IDS) in exc_info.value.detail
 
 
+async def test_graph_index_task_snapshots_selected_model_in_payload(monkeypatch):
+    captured = {}
+
+    async def fake_has_running_graph_build_task(kb_id: str) -> bool:
+        return False
+
+    async def fake_get_database_info(kb_id: str) -> dict:
+        return {"name": "测试知识库"}
+
+    class FakeGraphService:
+        async def get_status(self, kb_id: str):
+            return {
+                "locked": True,
+                "config": {
+                    "extractor_options": {"model_spec": "minimax-cn:MiniMax-M3"},
+                },
+            }
+
+        async def build_pending_chunks(self, kb_id, *, batch_size, context, model_spec):
+            captured["build"] = {
+                "kb_id": kb_id,
+                "batch_size": batch_size,
+                "model_spec": model_spec,
+            }
+            return {"success": 2, "failed": 0, "remaining": 0}
+
+    async def fake_enqueue_unique_by_payload(**kwargs):
+        captured["payload"] = kwargs["payload"]
+        await kwargs["coroutine"](FakeTaskContext())
+        return SimpleNamespace(id="task_graph"), True
+
+    monkeypatch.setattr(knowledge_router, "_has_running_graph_build_task", fake_has_running_graph_build_task)
+    monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
+    monkeypatch.setattr(knowledge_router, "MilvusGraphService", FakeGraphService)
+    monkeypatch.setattr(knowledge_router.tasker, "enqueue_unique_by_payload", fake_enqueue_unique_by_payload)
+
+    result = await knowledge_router.index_graph_build(
+        "kb_1",
+        data={"batch_size": 10},
+        current_user=SimpleNamespace(uid="uid-user"),
+    )
+
+    assert result["task_id"] == "task_graph"
+    assert captured["payload"] == {
+        "kb_id": "kb_1",
+        "batch_size": 10,
+        "model_spec": "minimax-cn:MiniMax-M3",
+    }
+    assert captured["build"] == {
+        "kb_id": "kb_1",
+        "batch_size": 10,
+        "model_spec": "minimax-cn:MiniMax-M3",
+    }
+
+
 async def test_parse_pending_documents_enqueues_status_scoped_task(monkeypatch):
     captured = {"list_calls": [], "parsed": []}
 

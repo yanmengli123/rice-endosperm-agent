@@ -49,7 +49,10 @@
                   :aria-label="graphIndexButtonTitle"
                 >
                   <Database :size="16" />
-                  <span v-if="hasPendingGraphChunks" class="index-status-label"
+                  <span v-if="isBuildActive" class="index-status-label"
+                    >索引中 · {{ pendingGraphChunks }} 待处理</span
+                  >
+                  <span v-else-if="hasPendingGraphChunks" class="index-status-label"
                     >{{ pendingGraphChunks }} 待索引</span
                   >
                   <span
@@ -188,6 +191,18 @@
                 size="small"
                 style="margin-bottom: 10px"
               />
+              <a-alert
+                v-if="isBuildFailed"
+                class="build-error-alert"
+                type="error"
+                show-icon
+                :message="graphBuildStatus?.build_task_message || '图谱索引未全部完成'"
+                :description="graphBuildStatus?.build_task_error || '请检查模型服务后重试待索引 Chunk。'"
+              />
+              <div v-if="graphBuildModelSpec" class="status-row">
+                <span class="status-label">抽取模型</span>
+                <span class="status-model" :title="graphBuildModelSpec">{{ graphBuildModelSpec }}</span>
+              </div>
               <div class="stats-grid">
                 <div class="stat-item">
                   <span class="stat-value">{{ graphBuildStatus?.total_chunks ?? '-' }}</span>
@@ -431,6 +446,10 @@ const isBuildFailed = computed(() => {
   return graphBuildStatus.value?.build_task_status === 'failed'
 })
 
+const graphBuildModelSpec = computed(() => {
+  return graphBuildStatus.value?.config?.extractor_options?.model_spec || ''
+})
+
 const pendingGraphChunks = computed(() => {
   return Number(graphBuildStatus.value?.pending_chunks ?? 0)
 })
@@ -453,9 +472,9 @@ const graphIndexDotStatus = computed(() => {
 })
 
 const graphIndexButtonTitle = computed(() => {
+  if (isBuildActive.value) return `索引管理，索引中，${pendingGraphChunks.value} 待处理`
   if (hasPendingGraphChunks.value) return `索引管理，${pendingGraphChunks.value} 待索引`
   if (isGraphIndexComplete.value) return '索引管理，已全部索引'
-  if (isBuildActive.value) return '索引管理，索引中'
   return '索引管理'
 })
 
@@ -489,8 +508,10 @@ const startBuildStatusPoll = () => {
   }, 5000)
 }
 
+const shouldPollBuildStatus = computed(() => props.active && isBuildActive.value)
+
 watch(
-  isBuildActive,
+  shouldPollBuildStatus,
   (active) => {
     if (active) {
       startBuildStatusPoll()
@@ -636,7 +657,7 @@ const startGraphBuild = async () => {
         name: `图谱构建 (${kbId.value})`,
         task_type: GRAPH_BUILD_TASK_TYPE,
         message: data.message,
-        payload: { kb_id: kbId.value }
+        payload: { kb_id: kbId.value, model_spec: graphBuildModelSpec.value }
       })
     }
     await loadGraphBuildStatus()
@@ -1013,6 +1034,19 @@ onUnmounted(() => {
       color: var(--gray-600);
       font-size: 12px;
     }
+
+    .status-model {
+      max-width: 190px;
+      overflow: hidden;
+      color: var(--gray-900);
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .build-error-alert {
+    margin-bottom: 10px;
   }
 
   .stats-grid {

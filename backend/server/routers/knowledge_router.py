@@ -526,19 +526,27 @@ async def index_graph_build(
         graph_status = await service.get_status(kb_id)
         if not graph_status.get("locked"):
             raise HTTPException(status_code=400, detail="请先确认并锁定图谱抽取配置")
+        model_spec = str(
+            ((graph_status.get("config") or {}).get("extractor_options") or {}).get("model_spec") or ""
+        ).strip()
 
         async def run_graph_index(context: TaskContext):
             await context.set_message("任务初始化")
             await context.set_progress(5.0, "准备构建图谱")
-            result = await service.build_pending_chunks(kb_id, batch_size=batch_size, context=context)
+            result = await service.build_pending_chunks(
+                kb_id,
+                batch_size=batch_size,
+                context=context,
+                model_spec=model_spec,
+            )
             await context.set_result(result)
-            await context.set_progress(100.0, f"图谱构建完成，成功 {result['success']} 个，失败 {result['failed']} 个")
+            await context.set_progress(100.0, f"图谱索引已全部完成，共完成 {result['success']} 个 Chunk")
             return result
 
         task, created = await tasker.enqueue_unique_by_payload(
             name=f"图谱构建 ({database['name']})",
             task_type=GRAPH_TASK_TYPE,
-            payload={"kb_id": kb_id, "batch_size": batch_size},
+            payload={"kb_id": kb_id, "batch_size": batch_size, "model_spec": model_spec},
             coroutine=run_graph_index,
             payload_match={"kb_id": kb_id},
             statuses=ACTIVE_GRAPH_BUILD_STATUSES,

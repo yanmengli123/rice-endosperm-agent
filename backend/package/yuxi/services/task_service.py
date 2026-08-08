@@ -213,14 +213,16 @@ class Tasker:
         payload_match: dict[str, Any],
         statuses: set[str] | None,
     ) -> Task | None:
-        for task in self._tasks.values():
-            if task.type != task_type:
-                continue
-            if statuses is not None and task.status not in statuses:
-                continue
-            if all(task.payload.get(key) == value for key, value in payload_match.items()):
-                return task
-        return None
+        matches = [
+            task
+            for task in self._tasks.values()
+            if task.type == task_type
+            and (statuses is None or task.status in statuses)
+            and all(task.payload.get(key) == value for key, value in payload_match.items())
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda task: (task.created_at or "", task.updated_at or ""))
 
     async def list_tasks(self, status: str | None = None, limit: int = 100) -> dict[str, Any]:
         async with self._lock:

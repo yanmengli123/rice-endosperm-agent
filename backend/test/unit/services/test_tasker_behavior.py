@@ -77,6 +77,42 @@ async def test_task_context_exposes_payload():
     await tasker.shutdown()
 
 
+async def test_find_task_by_payload_returns_latest_matching_task():
+    repo = FakeRepo()
+    tasker = await _make_tasker(repo)
+
+    async def completed(ctx):
+        return "old"
+
+    async def failed(ctx):
+        raise RuntimeError("latest failure")
+
+    old_task = await tasker.enqueue(
+        name="old",
+        task_type="knowledge_graph_index",
+        payload={"kb_id": "kb_test"},
+        coroutine=completed,
+    )
+    await _wait_status(tasker, old_task.id, {"success"})
+    latest_task = await tasker.enqueue(
+        name="latest",
+        task_type="knowledge_graph_index",
+        payload={"kb_id": "kb_test"},
+        coroutine=failed,
+    )
+    await _wait_status(tasker, latest_task.id, {"failed"})
+
+    found = await tasker.find_task_by_payload(
+        task_type="knowledge_graph_index",
+        payload_match={"kb_id": "kb_test"},
+    )
+
+    assert found is not None
+    assert found.id == latest_task.id
+    assert found.status == "failed"
+    await tasker.shutdown()
+
+
 async def test_progress_updates_are_throttled():
     repo = FakeRepo()
     tasker = await _make_tasker(repo)

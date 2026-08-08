@@ -16,6 +16,7 @@ from yuxi.knowledge.graphs.graph_utils import (
     normalize_entity_name,
 )
 from yuxi.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
+from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
 from yuxi.repositories.knowledge_graph_repository import KnowledgeGraphRepository
@@ -31,11 +32,20 @@ from yuxi.utils.datetime_utils import utc_isoformat
 
 GRAPH_CONFIG_KEY = "graph_build_config"
 GRAPH_TASK_TYPE = "knowledge_graph_index"
+GRAPH_INDEX_MAX_ATTEMPTS = 3
 NEO4J_QUERY_OFFLOAD_LIMIT = 8
 _neo4j_query_offload_semaphore_refs: dict[
     int,
     tuple[weakref.ReferenceType[asyncio.AbstractEventLoop], weakref.ReferenceType[asyncio.Semaphore]],
 ] = {}
+
+
+class GraphBuildIncompleteError(RuntimeError):
+    def __init__(self, result: dict[str, Any]):
+        self.result = result
+        failed_details = result.get("failed_details") or []
+        detail = failed_details[0].get("error") if failed_details else "存在未完成的 Chunk"
+        super().__init__(f"图谱索引未全部完成，仍有 {result['remaining']} 个待索引 Chunk：{detail}")
 
 
 def _get_neo4j_query_offload_semaphore() -> asyncio.Semaphore:
@@ -122,24 +132,25 @@ class MilvusGraphService:
 
         build_task_status = None
         build_task_progress = 0
+        build_task_id = None
+        build_task_message = None
+        build_task_error = None
+        build_task_result = None
         if tasker is not None:
-            active_task = await tasker.find_task_by_payload(
+            latest_task = await tasker.find_task_by_payload(
                 task_type=GRAPH_TASK_TYPE,
                 payload_match={"kb_id": kb_id},
-                statuses={"pending", "running"},
             )
-            if active_task:
-                build_task_status = active_task.status
-                build_task_progress = round(active_task.progress)
-            else:
-                failed_task = await tasker.find_task_by_payload(
-                    task_type=GRAPH_TASK_TYPE,
-                    payload_match={"kb_id": kb_id},
-                    statuses={"failed", "cancelled"},
-                )
-                if failed_task:
+            if latest_task:
+                build_task_status = latest_task.status
+                build_task_progress = round(latest_task.progress)
+                build_task_id = latest_task.id
+                build_task_message = latest_task.message
+                build_task_error = latest_task.error
+                build_task_result = latest_task.result
+                if latest_task.status == "success" and pending_chunks > 0:
                     build_task_status = "failed"
-                    build_task_progress = 0
+                    build_task_message = f"历史任务未完成：仍有 {pending_chunks} 个 Chunk 待索引"
 
         return {
             "kb_id": kb_id,
@@ -152,8 +163,12 @@ class MilvusGraphService:
             "indexed_chunks": indexed_chunks,
             "entity_count": entity_count,
             "relationship_count": relationship_count,
+            "build_task_id": build_task_id,
             "build_task_status": build_task_status,
             "build_task_progress": build_task_progress,
+            "build_task_message": build_task_message,
+            "build_task_error": build_task_error,
+            "build_task_result": build_task_result,
         }
 
     async def configure(
@@ -175,6 +190,12 @@ class MilvusGraphService:
         extractor_options = extractor_options or {}
         if normalized_extractor_type == "llm" and extractor_options.get("prompt"):
             raise ValueError("LLM 图谱抽取器不支持自定义完整 Prompt，请使用 schema 配置抽取约束")
+        if normalized_extractor_type == "llm":
+            model_spec = str(extractor_options.get("model_spec") or "").strip()
+            model_info = model_cache.get_model_info(model_spec)
+            if not model_info or model_info.model_type != "chat":
+                raise ValueError(f"不支持的聊天模型: {model_spec or '未选择'}")
+            extractor_options = {**extractor_options, "model_spec": model_spec}
         GraphExtractorFactory.create(normalized_extractor_type, extractor_options)
         config = {
             "locked": True,
@@ -190,89 +211,155 @@ class MilvusGraphService:
         await self.kb_repo.update(kb_id, {"additional_params": additional_params})
         return config
 
-    async def build_pending_chunks(self, kb_id: str, *, batch_size: int, context=None) -> dict[str, Any]:
+    async def build_pending_chunks(
+        self,
+        kb_id: str,
+        *,
+        batch_size: int,
+        context=None,
+        model_spec: str | None = None,
+    ) -> dict[str, Any]:
         kb = await self._get_milvus_kb(kb_id)
         config = self._get_locked_config(kb.additional_params or {})
         extractor_options = self._runtime_extractor_options(config)
+        if model_spec:
+            extractor_options["model_spec"] = model_spec
         extractor = GraphExtractorFactory.create(config["extractor_type"], extractor_options)
         worker_count = self._get_worker_count(config)
         total_pending = await self.chunk_repo.count_graph_pending_by_kb_id(kb_id)
         processed = 0
-        failed = 0
-        failed_chunk_ids: set[str] = set()
+        attempt_counts: dict[str, int] = {}
+        last_errors: dict[str, str] = {}
         write_lock = asyncio.Lock()
 
         while True:
             if context is not None:
                 await context.raise_if_cancelled()
-            chunks = await self.chunk_repo.list_graph_pending_by_kb_id(kb_id, batch_size)
-            unprocessed = [c for c in chunks if c.chunk_id not in failed_chunk_ids]
-            if not unprocessed:
-                break
+            attempted_in_pass = 0
+            after_id: int | None = None
 
-            queue: asyncio.Queue[Any] = asyncio.Queue()
-            for chunk in unprocessed:
-                queue.put_nowait(chunk)
+            while True:
+                chunks = await self.chunk_repo.list_graph_pending_by_kb_id(
+                    kb_id,
+                    batch_size,
+                    after_id=after_id,
+                )
+                if not chunks:
+                    break
+                after_id = chunks[-1].id
+                retryable = [
+                    chunk
+                    for chunk in chunks
+                    if attempt_counts.get(chunk.chunk_id, 0) < GRAPH_INDEX_MAX_ATTEMPTS
+                ]
+                if not retryable:
+                    continue
 
-            async def worker() -> None:
-                nonlocal processed, failed
-                while True:
-                    if context is not None:
-                        await context.raise_if_cancelled()
-                    try:
-                        chunk = queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        return
-                    try:
-                        extraction_result = await self._get_chunk_extraction_result(kb_id, chunk, extractor)
-                        async with write_lock:
-                            entities, triples = await asyncio.to_thread(
-                                self.write_chunk_graph,
-                                kb_id,
-                                chunk,
-                                extraction_result,
-                            )
-                            await self.graph_repo.upsert_chunk_graph(
-                                kb_id=kb_id,
-                                file_id=chunk.file_id,
-                                chunk_id=chunk.chunk_id,
-                                entities=entities,
-                                triples=triples,
-                            )
-                            await self.graph_vector_store.insert_missing_graph_records(
-                                kb_id=kb_id,
-                                embedding_model_spec=kb.embedding_model_spec,
-                                entities=entities,
-                                triples=triples,
-                            )
-                            await self.chunk_repo.mark_graph_indexed(
+                queue: asyncio.Queue[Any] = asyncio.Queue()
+                for chunk in retryable:
+                    queue.put_nowait(chunk)
+
+                async def worker() -> None:
+                    nonlocal attempted_in_pass, processed
+                    while True:
+                        if context is not None:
+                            await context.raise_if_cancelled()
+                        try:
+                            chunk = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return
+                        attempt_counts[chunk.chunk_id] = attempt_counts.get(chunk.chunk_id, 0) + 1
+                        attempted_in_pass += 1
+                        try:
+                            extraction_result = await self._get_chunk_extraction_result(kb_id, chunk, extractor)
+                            async with write_lock:
+                                entities, triples = await asyncio.to_thread(
+                                    self.write_chunk_graph,
+                                    kb_id,
+                                    chunk,
+                                    extraction_result,
+                                )
+                                await self.graph_repo.upsert_chunk_graph(
+                                    kb_id=kb_id,
+                                    file_id=chunk.file_id,
+                                    chunk_id=chunk.chunk_id,
+                                    entities=entities,
+                                    triples=triples,
+                                )
+                                await self.graph_vector_store.insert_missing_graph_records(
+                                    kb_id=kb_id,
+                                    embedding_model_spec=kb.embedding_model_spec,
+                                    entities=entities,
+                                    triples=triples,
+                                )
+                                await self.chunk_repo.mark_graph_indexed(
+                                    chunk.chunk_id,
+                                    ent_ids=[entity["entity_id"] for entity in entities],
+                                )
+                            processed += 1
+                            last_errors.pop(chunk.chunk_id, None)
+                        except Exception as exc:
+                            last_errors[chunk.chunk_id] = str(exc)
+                            logger.error(
+                                "Chunk 图谱构建失败 chunk_id={} attempt={}/{}: {}",
                                 chunk.chunk_id,
-                                ent_ids=[entity["entity_id"] for entity in entities],
+                                attempt_counts[chunk.chunk_id],
+                                GRAPH_INDEX_MAX_ATTEMPTS,
+                                exc,
                             )
-                        processed += 1
-                    except Exception as exc:
-                        logger.error(f"Chunk 图谱构建失败 chunk_id={chunk.chunk_id}: {exc}")
-                        failed_chunk_ids.add(chunk.chunk_id)
-                        failed += 1
-                    finally:
-                        queue.task_done()
+                        finally:
+                            queue.task_done()
 
-                    if context is not None:
-                        completed = processed + failed
-                        progress = 5.0 + min(90.0, completed / max(total_pending, 1) * 90.0)
-                        await context.set_progress(progress, f"图谱构建 {completed}/{total_pending}，失败 {failed}")
+                        if context is not None:
+                            progress = 5.0 + min(90.0, processed / max(total_pending, 1) * 90.0)
+                            await context.set_progress(
+                                progress,
+                                f"图谱索引成功 {processed}/{total_pending}，失败项将自动重试",
+                            )
 
-            workers = [asyncio.create_task(worker()) for _ in range(min(worker_count, len(unprocessed)))]
-            try:
-                await asyncio.gather(*workers)
-            except Exception:
-                for task in workers:
-                    task.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
-                raise
+                workers = [asyncio.create_task(worker()) for _ in range(min(worker_count, len(retryable)))]
+                try:
+                    await asyncio.gather(*workers)
+                except Exception:
+                    for task in workers:
+                        task.cancel()
+                    await asyncio.gather(*workers, return_exceptions=True)
+                    raise
 
-        remaining = await self.chunk_repo.count_graph_pending_by_kb_id(kb_id)
-        return {"kb_id": kb_id, "success": processed, "failed": failed, "remaining": remaining}
+            remaining = await self.chunk_repo.count_graph_pending_by_kb_id(kb_id)
+            if remaining == 0:
+                return {
+                    "kb_id": kb_id,
+                    "model_spec": extractor_options.get("model_spec"),
+                    "success": processed,
+                    "failed": 0,
+                    "remaining": 0,
+                    "failure_attempts": sum(attempt_counts.values()) - processed,
+                }
+            if attempted_in_pass == 0:
+                break
+            if context is not None:
+                await context.set_message(
+                    f"仍有 {remaining} 个待索引 Chunk，正在自动重试（最多 {GRAPH_INDEX_MAX_ATTEMPTS} 次）"
+                )
+
+        failed_details = [
+            {"chunk_id": chunk_id, "error": error[:500]}
+            for chunk_id, error in list(last_errors.items())[:20]
+        ]
+        result = {
+            "kb_id": kb_id,
+            "model_spec": extractor_options.get("model_spec"),
+            "success": processed,
+            "failed": remaining,
+            "remaining": remaining,
+            "failure_attempts": sum(attempt_counts.values()) - processed,
+            "failed_details": failed_details,
+        }
+        if context is not None:
+            await context.set_result(result)
+            await context.set_progress(99.0, f"图谱索引未完成，仍有 {remaining} 个 Chunk 待处理")
+        raise GraphBuildIncompleteError(result)
 
     @staticmethod
     def _get_worker_count(config: dict[str, Any]) -> int:

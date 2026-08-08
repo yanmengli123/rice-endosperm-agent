@@ -94,3 +94,33 @@ async def test_list_by_file_ids_splits_large_inputs(monkeypatch):
 
     assert batch_lengths == [SQL_IN_BATCH_SIZE, 5]
     assert [chunk.file_id for chunk in chunks] == sorted(file_ids)
+
+
+@pytest.mark.asyncio
+async def test_list_graph_pending_supports_stable_cursor(monkeypatch):
+    statements = []
+
+    class FakeScalarResult:
+        def all(self):
+            return []
+
+    class FakeResult:
+        def scalars(self):
+            return FakeScalarResult()
+
+    class FakeSession:
+        async def execute(self, statement):
+            statements.append(statement)
+            return FakeResult()
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield FakeSession()
+
+    monkeypatch.setattr(repo_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    await KnowledgeChunkRepository().list_graph_pending_by_kb_id("kb_test", 20, after_id=42)
+
+    sql = str(statements[0])
+    assert "knowledge_chunks.id >" in sql
+    assert "ORDER BY knowledge_chunks.id ASC" in sql

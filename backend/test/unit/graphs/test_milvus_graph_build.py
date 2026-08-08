@@ -10,7 +10,11 @@ from yuxi.knowledge.graphs.extractors import (
     LLMGraphExtractor,
     normalize_extraction_result,
 )
-from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
+from yuxi.knowledge.graphs.milvus_graph_service import (
+    GRAPH_INDEX_MAX_ATTEMPTS,
+    GraphBuildIncompleteError,
+    MilvusGraphService,
+)
 
 
 def _raw_graph_node(node_id: str, *, labels: list[str] | None = None, name: str | None = None) -> dict:
@@ -142,7 +146,11 @@ async def test_milvus_graph_service_configure_rejects_spacy():
 
 
 @pytest.mark.asyncio
-async def test_milvus_graph_service_configure_persists_updated_concurrency():
+async def test_milvus_graph_service_configure_persists_updated_concurrency(monkeypatch):
+    monkeypatch.setattr(
+        "yuxi.knowledge.graphs.milvus_graph_service.model_cache.get_model_info",
+        lambda spec: SimpleNamespace(model_type="chat"),
+    )
     kb = SimpleNamespace(
         kb_type="milvus",
         additional_params={
@@ -181,6 +189,179 @@ async def test_milvus_graph_service_configure_persists_updated_concurrency():
     assert status["config"]["extractor_options"]["concurrency_count"] == 9
     assert status["entity_count"] == 3
     assert status["relationship_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_graph_status_does_not_report_legacy_success_while_chunks_are_pending():
+    kb = SimpleNamespace(
+        kb_type="milvus",
+        additional_params={
+            "graph_build_config": {
+                "locked": True,
+                "extractor_type": "llm",
+                "extractor_options": {"model_spec": "minimax-cn:MiniMax-M3"},
+            }
+        },
+    )
+    chunk_repo = SimpleNamespace(
+        count_by_kb_id=AsyncMock(return_value=3),
+        count_graph_pending_by_kb_id=AsyncMock(return_value=1),
+        count_graph_indexed_by_kb_id=AsyncMock(return_value=2),
+    )
+    graph_repo = SimpleNamespace(count_by_kb_id=AsyncMock(return_value=(4, 3)))
+    latest_task = SimpleNamespace(
+        id="task_latest",
+        status="success",
+        progress=100,
+        message="任务已完成",
+        error=None,
+        result={"remaining": 1},
+    )
+    tasker = SimpleNamespace(find_task_by_payload=AsyncMock(return_value=latest_task))
+    service = MilvusGraphService(
+        kb_repo=SimpleNamespace(get_by_kb_id=AsyncMock(return_value=kb)),
+        chunk_repo=chunk_repo,
+        graph_repo=graph_repo,
+    )
+
+    status = await service.get_status("kb_test", tasker=tasker)
+
+    assert status["build_task_status"] == "failed"
+    assert status["build_task_id"] == "task_latest"
+    assert status["pending_chunks"] == 1
+    assert "仍有 1 个 Chunk 待索引" in status["build_task_message"]
+
+
+@pytest.mark.asyncio
+async def test_milvus_graph_service_configure_rejects_non_chat_model(monkeypatch):
+    monkeypatch.setattr(
+        "yuxi.knowledge.graphs.milvus_graph_service.model_cache.get_model_info",
+        lambda spec: SimpleNamespace(model_type="embedding"),
+    )
+    kb = SimpleNamespace(kb_type="milvus", additional_params={})
+    kb_repo = SimpleNamespace(get_by_kb_id=AsyncMock(return_value=kb), update=AsyncMock())
+    service = MilvusGraphService(kb_repo=kb_repo)
+
+    with pytest.raises(ValueError, match="不支持的聊天模型"):
+        await service.configure(
+            "kb_test",
+            extractor_type="llm",
+            extractor_options={"model_spec": "siliconflow-cn:BAAI/bge-m3"},
+            created_by="user_1",
+        )
+
+    kb_repo.update.assert_not_awaited()
+
+
+class _PendingChunkRepo:
+    def __init__(self, count: int):
+        self.pending = {
+            f"chunk_{index}": SimpleNamespace(
+                id=index,
+                chunk_id=f"chunk_{index}",
+                file_id="file_1",
+                chunk_index=index,
+                content=f"content {index}",
+                extraction_result=None,
+            )
+            for index in range(1, count + 1)
+        }
+        self.indexed: list[str] = []
+
+    async def count_graph_pending_by_kb_id(self, kb_id):
+        return len(self.pending)
+
+    async def list_graph_pending_by_kb_id(self, kb_id, limit, *, after_id=None):
+        chunks = sorted(self.pending.values(), key=lambda chunk: chunk.id)
+        if after_id is not None:
+            chunks = [chunk for chunk in chunks if chunk.id > after_id]
+        return chunks[:limit]
+
+    async def mark_graph_indexed(self, chunk_id, ent_ids=None):
+        self.pending.pop(chunk_id)
+        self.indexed.append(chunk_id)
+
+
+def _graph_build_service(chunk_repo, graph_vector_store):
+    kb = SimpleNamespace(
+        kb_type="milvus",
+        embedding_model_spec="siliconflow-cn:BAAI/bge-m3",
+        additional_params={
+            "graph_build_config": {
+                "locked": True,
+                "extractor_type": "llm",
+                "extractor_options": {
+                    "model_spec": "minimax-cn:MiniMax-M3",
+                    "concurrency_count": 2,
+                },
+            }
+        },
+    )
+    service = MilvusGraphService(
+        kb_repo=SimpleNamespace(get_by_kb_id=AsyncMock(return_value=kb)),
+        chunk_repo=chunk_repo,
+        graph_repo=SimpleNamespace(upsert_chunk_graph=AsyncMock()),
+        graph_vector_store=graph_vector_store,
+    )
+    service._get_chunk_extraction_result = AsyncMock(
+        return_value={"entities": [], "relations": [], "metadata": {}}
+    )
+    service.write_chunk_graph = MagicMock(
+        side_effect=lambda kb_id, chunk, extraction: ([{"entity_id": chunk.chunk_id}], [])
+    )
+    return service
+
+
+@pytest.mark.asyncio
+async def test_graph_build_retries_transient_failures_until_no_pending_chunks():
+    chunk_repo = _PendingChunkRepo(3)
+    attempts = 0
+
+    async def insert_graph_records(*, entities, **kwargs):
+        nonlocal attempts
+        if entities[0]["entity_id"] == "chunk_1":
+            attempts += 1
+            if attempts < GRAPH_INDEX_MAX_ATTEMPTS:
+                raise RuntimeError("temporary embedding error")
+
+    service = _graph_build_service(
+        chunk_repo,
+        SimpleNamespace(insert_missing_graph_records=insert_graph_records),
+    )
+
+    result = await service.build_pending_chunks("kb_test", batch_size=2)
+
+    assert result["remaining"] == 0
+    assert result["failed"] == 0
+    assert result["success"] == 3
+    assert result["model_spec"] == "minimax-cn:MiniMax-M3"
+    assert result["failure_attempts"] == 2
+    assert set(chunk_repo.indexed) == {"chunk_1", "chunk_2", "chunk_3"}
+
+
+@pytest.mark.asyncio
+async def test_graph_build_fails_instead_of_finishing_when_any_chunk_remains_pending():
+    chunk_repo = _PendingChunkRepo(3)
+
+    async def insert_graph_records(*, entities, **kwargs):
+        if entities[0]["entity_id"] == "chunk_1":
+            raise RuntimeError("embedding unavailable")
+
+    service = _graph_build_service(
+        chunk_repo,
+        SimpleNamespace(insert_missing_graph_records=insert_graph_records),
+    )
+
+    with pytest.raises(GraphBuildIncompleteError) as exc_info:
+        await service.build_pending_chunks("kb_test", batch_size=2)
+
+    result = exc_info.value.result
+    assert result["success"] == 2
+    assert result["failed"] == 1
+    assert result["remaining"] == 1
+    assert result["failure_attempts"] == GRAPH_INDEX_MAX_ATTEMPTS
+    assert set(chunk_repo.indexed) == {"chunk_2", "chunk_3"}
+    assert set(chunk_repo.pending) == {"chunk_1"}
 
 
 def test_milvus_graph_service_writes_chunk_entity_and_relation():
