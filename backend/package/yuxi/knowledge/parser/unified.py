@@ -20,6 +20,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from markdownify import markdownify as md_convert
 
 from yuxi.knowledge.parser.zip_utils import process_zip_file as _process_zip_file
+from yuxi.knowledge.utils.text_utils import sanitize_extracted_text
 from yuxi.storage.minio import get_minio_client
 from yuxi.utils import logger
 
@@ -440,7 +441,7 @@ async def parse_source_to_markdown(source: str, params: dict | None = None) -> M
     """统一入口: 将文件解析为 Markdown（URL 解析已废弃）。"""
     markdown, file_ext, artifacts = await _process_file_to_markdown_core(source, params=params)
     return MarkdownParseResult(
-        markdown=markdown,
+        markdown=sanitize_extracted_text(markdown),
         file_ext=file_ext,
         artifacts=artifacts,
     )

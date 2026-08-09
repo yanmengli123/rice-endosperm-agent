@@ -103,6 +103,22 @@ def test_chunk_records_include_reserved_position_fields() -> None:
     assert "start_char_pos" in chunks[1]
 
 
+def test_chunk_markdown_sanitizes_unsafe_legacy_parsed_text() -> None:
+    chunks = chunk_markdown(
+        markdown_content="A=\x00[b]\x01\n\t水稻\ud800",
+        file_id="file_unsafe_pdf",
+        filename="unsafe-text-layer.pdf",
+        processing_params={
+            "chunk_preset_id": "separator",
+            "chunk_parser_config": {"delimiter": "<never-split>"},
+        },
+    )
+
+    assert [chunk["content"] for chunk in chunks] == ["A= [b] \n\t水稻�"]
+    assert chunks[0]["start_char_pos"] == 0
+    assert chunks[0]["end_char_pos"] == len(chunks[0]["content"])
+
+
 def test_book_chunking_hierarchical_merge() -> None:
     content = """
 第一章 总则

@@ -4,6 +4,7 @@ from typing import Any
 
 from yuxi.knowledge.chunking.ragflow_like.parsers import book, general, laws, qa, semantic, separator
 from yuxi.knowledge.chunking.ragflow_like.presets import map_to_internal_parser_id, normalize_chunk_preset_id
+from yuxi.knowledge.utils.text_utils import sanitize_extracted_text
 
 
 def _build_chunk_records(
@@ -13,7 +14,7 @@ def _build_chunk_records(
     search_from = 0
 
     for idx, chunk_content in enumerate(text_chunks):
-        text = (chunk_content or "").strip()
+        text = sanitize_extracted_text(chunk_content or "").strip()
         if not text:
             continue
 
@@ -74,8 +75,9 @@ def chunk_markdown(
     preset_id = normalize_chunk_preset_id(params.get("chunk_preset_id"))
     parser_config = params.get("chunk_parser_config") if isinstance(params.get("chunk_parser_config"), dict) else {}
 
-    text_chunks = _dispatch_markdown_parser(preset_id, filename, markdown_content, parser_config)
-    return _build_chunk_records(text_chunks, file_id, filename, markdown_content)
+    sanitized_markdown = sanitize_extracted_text(markdown_content)
+    text_chunks = _dispatch_markdown_parser(preset_id, filename, sanitized_markdown, parser_config)
+    return _build_chunk_records(text_chunks, file_id, filename, sanitized_markdown)
 
 
 def chunk_file(

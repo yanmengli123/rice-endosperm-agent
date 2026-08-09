@@ -15,7 +15,7 @@ from PIL import Image
 
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
 from yuxi.knowledge.parser.base import DocumentParserException
-from yuxi.knowledge.parser.unified import Parser
+from yuxi.knowledge.parser.unified import Parser, parse_source_to_markdown
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
@@ -49,6 +49,19 @@ def test_parser_parse_pdf_file_returns_markdown_text(tmp_path: Path):
     assert "Parser" in markdown
     assert "content" in markdown
     assert len(markdown.strip()) > 0
+
+
+@pytest.mark.asyncio
+async def test_parse_source_to_markdown_sanitizes_unsafe_pdf_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_process_file_to_markdown_core(source: str, params=None):
+        return "A=\x00[b]\x01\n\t水稻\ud800", ".pdf", {}
+
+    monkeypatch.setattr(parser_unified, "_process_file_to_markdown_core", _fake_process_file_to_markdown_core)
+
+    parsed = await parse_source_to_markdown("unsafe-text-layer.pdf")
+
+    assert parsed.markdown == "A= [b] \n\t水稻�"
+    assert parsed.markdown.encode("utf-8")
 
 
 def test_parser_parse_docx_file_returns_markdown_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
