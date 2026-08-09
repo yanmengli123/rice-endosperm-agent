@@ -14,6 +14,7 @@ from docx import Document
 from PIL import Image
 
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
+from yuxi.knowledge.parser.base import DocumentParserException
 from yuxi.knowledge.parser.unified import Parser
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
@@ -301,6 +302,43 @@ def test_parse_pdf_keeps_explicit_disable_when_default_ocr_enabled(
     result = parser_unified.parse_pdf(str(file_path), params={"ocr_engine": "disable"})
 
     assert "Parser PDF content" in result
+
+
+def test_parse_pdf_falls_back_to_local_text_when_ocr_service_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_path = tmp_path / "parser_test.pdf"
+    expected_text = "Parser PDF fallback content " * 8
+    _build_pdf(file_path, expected_text)
+
+    def _failed_ocr(*args, **kwargs):
+        raise DocumentParserException("temporary CDN failure", "mineru_official", "processing_failed")
+
+    monkeypatch.setattr(DocumentProcessorFactory, "process_file", _failed_ocr)
+
+    result = parser_unified.parse_pdf(str(file_path), params={"ocr_engine": "mineru_official"})
+
+    assert "Parser PDF fallback content" in result
+
+
+def test_parse_pdf_can_disable_local_text_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_path = tmp_path / "parser_test.pdf"
+    _build_pdf(file_path, "Parser PDF fallback content " * 8)
+
+    def _failed_ocr(*args, **kwargs):
+        raise DocumentParserException("temporary CDN failure", "mineru_official", "processing_failed")
+
+    monkeypatch.setattr(DocumentProcessorFactory, "process_file", _failed_ocr)
+
+    with pytest.raises(DocumentParserException, match="temporary CDN failure"):
+        parser_unified.parse_pdf(
+            str(file_path),
+            params={"ocr_engine": "mineru_official", "ocr_fallback_to_text": False},
+        )
 
 
 @pytest.mark.asyncio

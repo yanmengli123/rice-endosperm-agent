@@ -150,7 +150,7 @@ def test_book_chunking_should_apply_overlength_protection() -> None:
 
 
 def test_split_sentences_chinese_should_keep_quote_boundary() -> None:
-    text = '他说：“你好。”然后问：“你在吗？”最后结束！'
+    text = "他说：“你好。”然后问：“你在吗？”最后结束！"
     sentences = split_sentences_chinese(text)
 
     assert sentences == ["他说：“你好。”", "然后问：“你在吗？”", "最后结束！"]
@@ -353,7 +353,10 @@ def test_resolve_processing_params_keeps_ocr_fields_and_chunk_params() -> None:
     assert "auto_index" not in resolved
 
 
-def test_resolve_processing_params_defaults_ocr_fields() -> None:
+def test_resolve_processing_params_defaults_ocr_fields(monkeypatch) -> None:
+    from yuxi import config
+
+    monkeypatch.setattr(config, "default_ocr_engine", "rapid_ocr")
     resolved = resolve_processing_params(
         kb_additional_params={},
         file_processing_params={"ocr_engine_config": "invalid", "enable_ocr": "mineru_ocr"},

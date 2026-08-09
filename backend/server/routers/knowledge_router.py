@@ -164,6 +164,10 @@ def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
     if preprocessed_map is not None and not isinstance(preprocessed_map, dict):
         raise HTTPException(status_code=400, detail="params._preprocessed_map must be an object")
 
+    source_paths = params.get("source_paths")
+    if source_paths is not None and not isinstance(source_paths, dict):
+        raise HTTPException(status_code=400, detail="params.source_paths must be an object")
+
     for item in items:
         if not isinstance(item, str) or not item.strip():
             raise HTTPException(status_code=400, detail="items must only contain non-empty strings")
@@ -176,6 +180,10 @@ def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
         if not has_content_hash and not has_preprocessed_hash:
             raise HTTPException(status_code=400, detail=f"Missing content_hash for file: {item}")
 
+        source_path = source_paths.get(item) if isinstance(source_paths, dict) else None
+        if source_path is not None and (not isinstance(source_path, str) or not source_path.strip()):
+            raise HTTPException(status_code=400, detail=f"Invalid source_path for file: {item}")
+
 
 def _params_for_uploaded_document_item(item: str, params: dict) -> dict:
     source_paths = params.get("source_paths")
@@ -184,6 +192,15 @@ def _params_for_uploaded_document_item(item: str, params: dict) -> dict:
     if isinstance(source_paths, dict) and source_paths.get(item):
         item_params["source_path"] = source_paths[item]
     return item_params
+
+
+def _normalize_browser_upload_filename(filename: str | None) -> str:
+    """只使用浏览器上传路径的末级文件名，目录层级由 source_path 单独保存。"""
+    normalized = str(filename or "").strip().replace("\\", "/")
+    basename = normalized.rsplit("/", 1)[-1].strip()
+    if not basename or basename in {".", ".."}:
+        raise HTTPException(status_code=400, detail="No selected file")
+    return basename
 
 
 async def _has_running_graph_build_task(kb_id: str) -> bool:
@@ -712,7 +729,10 @@ async def add_documents(
 
                 try:
                     file_meta = await knowledge_base.add_file_record(
-                        kb_id, item, params=params, operator_id=current_user.uid
+                        kb_id,
+                        item,
+                        params=_params_for_uploaded_document_item(item, params),
+                        operator_id=current_user.uid,
                     )
                     added_files.append(
                         {
@@ -811,13 +831,18 @@ async def add_documents(
         ]
         failed_count = len([item for item in final_items if _is_failed_item(item)])
 
+        parsed_count = len([item for item in final_items if item.get("status") in {"parsed", "indexed", "done"}])
+        indexed_count = len([item for item in final_items if item.get("status") in {"indexed", "done"}])
         summary = {
             "kb_id": kb_id,
             "item_type": "文件",
             "submitted": total,
+            "added": len(added_files),
+            "parsed": parsed_count,
+            "indexed": indexed_count,
             "failed": failed_count,
         }
-        message = f"文件处理完成，失败 {failed_count} 个" if failed_count else "文件处理完成"
+        message = f"文件处理完成：提交 {total}，解析 {parsed_count}，入库 {indexed_count}，失败 {failed_count}"
         await context.set_result(summary | {"items": final_items})
         await context.set_progress(100.0, message)
 
@@ -976,6 +1001,8 @@ async def _run_parse_file_ids(
     result_payload = {"items": processed_items, "processed": len(processed_items), "failed": failed_count}
     await context.set_result(result_payload)
     await context.set_progress(100.0, message)
+    if failed_count:
+        raise RuntimeError(message)
     return result_payload
 
 
@@ -1025,6 +1052,8 @@ async def _run_index_file_ids(
     result_payload = {"items": processed_items, "processed": len(processed_items), "failed": failed_count}
     await context.set_result(result_payload)
     await context.set_progress(100.0, message)
+    if failed_count:
+        raise RuntimeError(message)
     return result_payload
 
 
@@ -1082,6 +1111,8 @@ async def _run_parse_pending_statuses(
     }
     await context.set_result(result_payload)
     await context.set_progress(100.0, message)
+    if failed_count:
+        raise RuntimeError(message)
     return result_payload
 
 
@@ -1142,6 +1173,8 @@ async def _run_index_pending_statuses(
     }
     await context.set_result(result_payload)
     await context.set_progress(100.0, message)
+    if failed_count:
+        raise RuntimeError(message)
     return result_payload
 
 
@@ -1864,20 +1897,19 @@ async def upload_file(
     current_user: User = Depends(get_admin_user),
 ):
     """上传文件"""
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No selected file")
+    upload_filename = _normalize_browser_upload_filename(file.filename)
 
     if kb_id:
         await _ensure_database_supports_documents(kb_id, "文档上传")
 
-    logger.debug(f"Received upload file with filename: {file.filename}")
+    logger.debug(f"Received upload file with filename: {upload_filename}")
 
-    ext = os.path.splitext(file.filename)[1].lower()
+    ext = os.path.splitext(upload_filename)[1].lower()
 
-    if not is_supported_file_extension(file.filename):
+    if not is_supported_file_extension(upload_filename):
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
-    basename, ext = os.path.splitext(file.filename)
+    basename, ext = os.path.splitext(upload_filename)
     # 直接使用原始文件名（小写）
     filename = f"{basename}{ext}".lower()
 

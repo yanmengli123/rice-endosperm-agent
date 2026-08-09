@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from yuxi.knowledge.parser.mineru_official import MinerUOfficialParser
 
@@ -37,9 +38,7 @@ def test_health_probe_validates_token_without_creating_task(monkeypatch):
 def test_health_probe_rejects_invalid_token(monkeypatch):
     monkeypatch.setattr(
         "yuxi.knowledge.parser.mineru_official.requests.get",
-        lambda *args, **kwargs: _Response(
-            {"success": False, "msgCode": "A0202", "msg": "user authenticate failed"}
-        ),
+        lambda *args, **kwargs: _Response({"success": False, "msgCode": "A0202", "msg": "user authenticate failed"}),
     )
 
     result = MinerUOfficialParser(api_token="invalid-token").check_health()
@@ -65,6 +64,55 @@ def test_upload_request_uses_global_model_version(monkeypatch, tmp_path):
 
     assert parser._upload_file(str(source), {}) == "batch"
     assert upload_payload["model_version"] == "vlm"
+
+
+def test_upload_request_retries_transient_connection_error(monkeypatch, tmp_path):
+    source = tmp_path / "one-page.pdf"
+    source.write_bytes(b"pdf")
+    attempts = 0
+
+    def fake_post(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise requests.exceptions.ConnectionError("connection reset")
+        return _Response({"code": 0, "data": {"batch_id": "batch", "file_urls": ["https://upload"]}})
+
+    monkeypatch.setattr("yuxi.knowledge.parser.mineru_official.requests.post", fake_post)
+    monkeypatch.setattr(
+        "yuxi.knowledge.parser.mineru_official.requests.put", lambda *args, **kwargs: _Response({}, 200)
+    )
+    monkeypatch.setattr("yuxi.knowledge.parser.mineru_official.time.sleep", lambda *_: None)
+
+    parser = MinerUOfficialParser(api_token="valid-token", model_version="vlm")
+
+    assert parser._upload_file(str(source), {}) == "batch"
+    assert attempts == 2
+
+
+def test_file_upload_retry_rewinds_source_stream(monkeypatch, tmp_path):
+    source = tmp_path / "one-page.pdf"
+    source.write_bytes(b"pdf")
+    uploaded_payloads = []
+
+    monkeypatch.setattr(
+        "yuxi.knowledge.parser.mineru_official.requests.post",
+        lambda *args, **kwargs: _Response({"code": 0, "data": {"batch_id": "batch", "file_urls": ["https://upload"]}}),
+    )
+
+    def fake_put(*args, **kwargs):
+        uploaded_payloads.append(kwargs["data"].read())
+        if len(uploaded_payloads) == 1:
+            raise requests.exceptions.ConnectionError("connection reset")
+        return _Response({}, 200)
+
+    monkeypatch.setattr("yuxi.knowledge.parser.mineru_official.requests.put", fake_put)
+    monkeypatch.setattr("yuxi.knowledge.parser.mineru_official.time.sleep", lambda *_: None)
+
+    parser = MinerUOfficialParser(api_token="valid-token", model_version="vlm")
+
+    assert parser._upload_file(str(source), {}) == "batch"
+    assert uploaded_payloads == [b"pdf", b"pdf"]
 
 
 def test_process_file_does_not_run_redundant_health_probe(monkeypatch, tmp_path):

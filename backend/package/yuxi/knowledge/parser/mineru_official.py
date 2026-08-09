@@ -20,6 +20,8 @@ _SERVICE_ID = "mineru_official"
 _DEFAULT_API_BASE = "https://mineru.net/api/v4"
 _AUTH_PROBE_TASK_ID = "00000000-0000-4000-8000-000000000000"
 _VALID_MODEL_VERSIONS = {"pipeline", "vlm"}
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_REQUEST_MAX_ATTEMPTS = 3
 
 
 class MinerUOfficialParser(BaseDocumentProcessor):
@@ -188,6 +190,31 @@ class MinerUOfficialParser(BaseDocumentProcessor):
     def _headers(api_token: str) -> dict[str, str]:
         return {"Content-Type": "application/json", "Authorization": f"Bearer {api_token}"}
 
+    @staticmethod
+    def _request_with_retry(request_callable, *args, rewind=None, **kwargs):
+        """Retry transient MinerU/network failures with a short bounded backoff."""
+        last_error = None
+        for attempt in range(1, _REQUEST_MAX_ATTEMPTS + 1):
+            if attempt > 1 and rewind is not None:
+                rewind.seek(0)
+            try:
+                response = request_callable(*args, **kwargs)
+                if response.status_code not in _RETRYABLE_STATUS_CODES or attempt == _REQUEST_MAX_ATTEMPTS:
+                    return response
+                last_error = RuntimeError(f"HTTP {response.status_code}")
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                last_error = exc
+                if attempt == _REQUEST_MAX_ATTEMPTS:
+                    raise
+
+            delay = min(2 ** (attempt - 1), 4)
+            logger.warning(
+                f"MinerU Official 请求暂时失败，{delay} 秒后重试 ({attempt}/{_REQUEST_MAX_ATTEMPTS}): {last_error}"
+            )
+            time.sleep(delay)
+
+        raise RuntimeError(f"MinerU Official 请求失败: {last_error}")
+
     def _upload_file(self, file_path: str, params: dict[str, Any]) -> str:
         api_token, api_base, configured_model_version = self._runtime_config()
         model_version = str(params.get("model_version") or configured_model_version)
@@ -216,7 +243,8 @@ class MinerUOfficialParser(BaseDocumentProcessor):
             "model_version": model_version,
             "files": [file_item],
         }
-        response = requests.post(
+        response = self._request_with_retry(
+            requests.post,
             f"{api_base}/file-urls/batch",
             headers=self._headers(api_token),
             json=upload_data,
@@ -243,7 +271,13 @@ class MinerUOfficialParser(BaseDocumentProcessor):
             raise DocumentParserException("MinerU 未返回文件上传链接", self.get_service_name(), "no_upload_url")
 
         with open(file_path, "rb") as source:
-            upload_response = requests.put(upload_urls[0], data=source, timeout=60)
+            upload_response = self._request_with_retry(
+                requests.put,
+                upload_urls[0],
+                data=source,
+                timeout=60,
+                rewind=source,
+            )
         if upload_response.status_code != 200:
             raise DocumentParserException(
                 f"上传文件到 MinerU 失败: HTTP {upload_response.status_code}",
@@ -256,7 +290,8 @@ class MinerUOfficialParser(BaseDocumentProcessor):
         start_time = time.time()
         while time.time() - start_time < max_wait_time:
             api_token, api_base, _model_version = self._runtime_config()
-            response = requests.get(
+            response = self._request_with_retry(
+                requests.get,
                 f"{api_base}/extract-results/batch/{batch_id}",
                 headers=self._headers(api_token),
                 timeout=30,
@@ -309,7 +344,7 @@ class MinerUOfficialParser(BaseDocumentProcessor):
     def _download_zip(self, zip_url: str | None) -> str:
         if not zip_url:
             raise DocumentParserException("MinerU 未返回结果下载链接", self.get_service_name(), "no_download_url")
-        response = requests.get(zip_url, timeout=60)
+        response = self._request_with_retry(requests.get, zip_url, timeout=60)
         if response.status_code != 200:
             raise DocumentParserException(
                 f"下载 MinerU 结果失败: HTTP {response.status_code}", self.get_service_name(), "download_failed"

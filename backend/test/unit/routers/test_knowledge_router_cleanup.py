@@ -155,6 +155,46 @@ async def test_upload_file_rejects_oversized_file(monkeypatch):
     assert "100 MB" in exc_info.value.detail
 
 
+async def test_upload_file_uses_basename_for_browser_folder_upload(monkeypatch):
+    captured = {}
+
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+        return None
+
+    async def fake_file_existed_in_db(kb_id: str, content_hash: str) -> bool:
+        return False
+
+    async def fake_get_same_name_files(kb_id: str, filename: str) -> list[dict]:
+        return []
+
+    async def fake_upload_to_minio(bucket_name: str, object_name: str, data: bytes) -> str:
+        captured.update(bucket_name=bucket_name, object_name=object_name, data=data)
+        return f"minio://{bucket_name}/{object_name}"
+
+    monkeypatch.setattr(
+        knowledge_router,
+        "_ensure_database_supports_documents",
+        fake_ensure_database_supports_documents,
+    )
+    monkeypatch.setattr(knowledge_router.knowledge_base, "file_existed_in_db", fake_file_existed_in_db)
+    monkeypatch.setattr(knowledge_router.knowledge_base, "get_same_name_files", fake_get_same_name_files)
+    monkeypatch.setattr(knowledge_router, "aupload_file_to_minio", fake_upload_to_minio)
+
+    upload = UploadFile(filename="wx/subdir/40573819.pdf", file=BytesIO(b"pdf-content"))
+    result = await knowledge_router.upload_file(
+        upload,
+        kb_id="kb_1",
+        current_user=SimpleNamespace(uid="user_1"),
+    )
+
+    assert result["filename"] == "40573819.pdf"
+    assert result["original_filename"] == "40573819"
+    assert captured["object_name"].startswith("kb_1/upload/40573819_")
+    assert "/wx/" not in captured["object_name"]
+    assert "/subdir/" not in captured["object_name"]
+    assert captured["data"] == b"pdf-content"
+
+
 async def test_upload_file_invalid_kb_fails_before_read_or_minio(monkeypatch):
     calls = {"read": 0, "upload": 0}
 
@@ -277,6 +317,47 @@ async def test_parse_documents_rejects_oversized_direct_batch():
 
     assert exc_info.value.status_code == 400
     assert str(knowledge_router.MAX_DIRECT_DOCUMENT_ACTION_FILE_IDS) in exc_info.value.detail
+
+
+async def test_direct_parse_task_fails_when_any_document_fails(monkeypatch):
+    context = FakeTaskContext()
+
+    async def fake_parse_file(kb_id: str, file_id: str, operator_id: str | None = None):
+        raise RuntimeError("parser unavailable")
+
+    monkeypatch.setattr(knowledge_router.knowledge_base, "parse_file", fake_parse_file)
+
+    with pytest.raises(RuntimeError, match="解析完成，失败 1 个"):
+        await knowledge_router._run_parse_file_ids(
+            context=context,
+            kb_id="kb_1",
+            file_ids=["file_1"],
+            operator_id="uid-user",
+        )
+
+    assert context.result["failed"] == 1
+    assert context.result["items"][0]["status"] == "failed"
+
+
+async def test_direct_index_task_fails_when_any_document_fails(monkeypatch):
+    context = FakeTaskContext()
+
+    async def fake_index_file(kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None):
+        raise RuntimeError("embedding unavailable")
+
+    monkeypatch.setattr(knowledge_router.knowledge_base, "index_file", fake_index_file)
+
+    with pytest.raises(RuntimeError, match="入库完成，失败 1 个"):
+        await knowledge_router._run_index_file_ids(
+            context=context,
+            kb_id="kb_1",
+            file_ids=["file_1"],
+            operator_id="uid-user",
+            params={},
+        )
+
+    assert context.result["failed"] == 1
+    assert context.result["items"][0]["status"] == "failed"
 
 
 async def test_graph_index_task_snapshots_selected_model_in_payload(monkeypatch):
@@ -474,6 +555,7 @@ async def test_index_pending_documents_uses_pending_statuses_and_params(monkeypa
 async def test_add_documents_auto_index_returns_one_final_result_per_item(monkeypatch):
     context = FakeTaskContext()
     item = "minio://knowledgebases/kb_1/upload/demo.txt"
+    captured = {}
 
     async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
         return None
@@ -482,6 +564,7 @@ async def test_add_documents_auto_index_returns_one_final_result_per_item(monkey
         return {"name": "测试知识库"}
 
     async def fake_add_file_record(kb_id: str, item_path: str, params: dict, operator_id: str | None = None):
+        captured["add_params"] = params
         return {"file_id": "file_1", "status": "indexing"}
 
     async def fake_parse_file(kb_id: str, file_id: str, operator_id: str | None = None):
@@ -512,14 +595,28 @@ async def test_add_documents_auto_index_returns_one_final_result_per_item(monkey
     result = await knowledge_router.add_documents(
         "kb_1",
         [item],
-        params={"content_type": "file", "auto_index": True, "content_hashes": {item: "hash_1"}},
+        params={
+            "content_type": "file",
+            "auto_index": True,
+            "content_hashes": {item: "hash_1"},
+            "source_paths": {item: "wx/demo.txt"},
+        },
         current_user=SimpleNamespace(uid="uid-user"),
     )
 
     assert result["status"] == "queued"
     assert context.result["submitted"] == 1
+    assert context.result["added"] == 1
+    assert context.result["parsed"] == 1
+    assert context.result["indexed"] == 1
     assert context.result["failed"] == 0
     assert context.result["items"] == [{"file_id": "file_1", "status": "indexed"}]
+    assert captured["add_params"] == {
+        "content_type": "file",
+        "auto_index": True,
+        "content_hashes": {item: "hash_1"},
+        "source_path": "wx/demo.txt",
+    }
 
 
 async def test_add_documents_auto_index_treats_error_none_as_success(monkeypatch):

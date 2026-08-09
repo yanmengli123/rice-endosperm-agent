@@ -1,12 +1,22 @@
 <template>
-  <a-modal v-model:open="visible" title="添加文件" width="800px" @cancel="handleCancel">
+  <a-modal
+    v-model:open="visible"
+    title="添加文件"
+    width="800px"
+    :closable="!hasPendingUploads && !chunkLoading"
+    :keyboard="!hasPendingUploads && !chunkLoading"
+    :mask-closable="!hasPendingUploads && !chunkLoading"
+    @cancel="handleCancel"
+  >
     <template #footer>
       <div class="footer-container">
         <a-button type="link" class="help-link-btn" @click="openDocLink">
           <CircleHelp :size="14" /> 文档处理说明
         </a-button>
         <div class="footer-buttons">
-          <a-button key="back" @click="handleCancel">取消</a-button>
+          <a-button key="back" :disabled="hasPendingUploads || chunkLoading" @click="handleCancel">
+            取消
+          </a-button>
           <a-button
             key="submit"
             type="primary"
@@ -14,7 +24,7 @@
             :loading="chunkLoading"
             :disabled="!canSubmit"
           >
-            添加到知识库
+            {{ autoIndex ? '上传、解析并入库' : '上传并解析' }}
           </a-button>
         </div>
       </div>
@@ -27,11 +37,14 @@
           <a-segmented
             v-model:value="uploadMode"
             :options="uploadModeOptions"
+            :disabled="hasPendingUploads || chunkLoading"
             class="custom-segmented"
           />
         </div>
         <div class="auto-index-toggle">
-          <a-checkbox v-model:checked="autoIndex">上传后自动入库</a-checkbox>
+          <a-checkbox v-model:checked="autoIndex" :disabled="hasPendingUploads || chunkLoading">
+            上传后自动入库
+          </a-checkbox>
         </div>
       </div>
 
@@ -197,10 +210,20 @@
           @change="handleFileUpload"
           @drop="handleDrop"
         >
-          <p class="ant-upload-text">点击或将文件拖拽到此处</p>
+          <p class="ant-upload-text">
+            {{ isFolderUpload ? '点击选择本机文献文件夹' : '点击选择或拖拽本机文献文件' }}
+          </p>
           <p class="ant-upload-hint">支持类型: {{ uploadHint }}</p>
           <div class="zip-tip" v-if="hasZipFiles">📦 ZIP包将自动解压提取 Markdown 与图片</div>
         </a-upload-dragger>
+
+        <div class="local-path-hint">
+          <Info :size="14" />
+          <span>
+            系统上传文件内容并保留文件夹内的相对路径；出于浏览器安全限制，不读取或保存 D:\
+            等本机绝对路径。
+          </span>
+        </div>
 
         <div v-if="showAggregateProgress" class="upload-progress-card">
           <div class="progress-header">
@@ -498,6 +521,7 @@ watch(
     if (newVal) {
       ocrEngineTouched.value = false
       applyDefaultOcrEngine()
+      autoIndex.value = true
       selectedFolderId.value = props.currentFolderId
       isFolderUpload.value = props.isFolderMode
       uploadMode.value = props.mode || (props.isFolderMode ? 'folder' : 'file')
@@ -596,6 +620,23 @@ const MAX_UPLOAD_CONCURRENCY = 10
 // 文件列表
 const fileList = ref([])
 
+const normalizeUploadSourcePath = (value) => {
+  const normalized = String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+  const parts = normalized.split('/').filter((part) => part && part !== '.')
+  if (!parts.length || parts.some((part) => part === '..')) return ''
+  return parts.join('/')
+}
+
+const getUploadSourcePath = (file) => {
+  const rawFile = file?.originFileObj || file
+  return normalizeUploadSourcePath(
+    rawFile?.webkitRelativePath || file?.webkitRelativePath || file?.name
+  )
+}
+
 const uploadQueue = ref([])
 const activeUploadCount = ref(0)
 const uploadTaskStatus = ref({})
@@ -640,7 +681,7 @@ const failedDetailItems = computed(() => {
       const detail = file?.response?.detail || file?.error?.message || ''
       return {
         uid,
-        name: file.name || '未命名文件',
+        name: getUploadSourcePath(file) || file.name || '未命名文件',
         status: rawStatus,
         errorText: detail || '上传失败'
       }
@@ -663,14 +704,14 @@ const uploadModeOptions = computed(() => [
     value: 'file',
     label: h('div', { class: 'segmented-option' }, [
       h(FileUp, { size: 16, class: 'option-icon' }),
-      h('span', { class: 'option-text' }, '上传文件')
+      h('span', { class: 'option-text' }, '本机文件')
     ])
   },
   {
     value: 'folder',
     label: h('div', { class: 'segmented-option' }, [
       h(FolderUp, { size: 16, class: 'option-icon' }),
-      h('span', { class: 'option-text' }, '上传文件夹')
+      h('span', { class: 'option-text' }, '本机文件夹')
     ])
   },
   {
@@ -911,7 +952,7 @@ const processingParams = ref({
 })
 
 // 自动入库相关
-const autoIndex = ref(false)
+const autoIndex = ref(true)
 const indexParams = ref({
   chunk_preset_id: '',
   chunk_parser_config: {}
@@ -1129,12 +1170,21 @@ const validateOcrService = () => {
 }
 
 const handleCancel = () => {
+  if (hasPendingUploads.value || chunkLoading.value) {
+    message.warning('文件正在上传或提交处理中，请等待任务提交完成')
+    return
+  }
   emit('update:visible', false)
 }
 
 const beforeUpload = (file) => {
   if (!isSupportedExtension(file?.name)) {
     message.error(`不支持的文件类型：${file?.name || '未知文件'}`)
+    return Upload.LIST_IGNORE
+  }
+  const sourcePath = getUploadSourcePath(file)
+  if (!sourcePath || sourcePath.length > 512) {
+    message.error(`文件相对路径无效或超过 512 字符：${file?.name || '未知文件'}`)
     return Upload.LIST_IGNORE
   }
   return true
@@ -1282,9 +1332,9 @@ const runUploadTask = (task) => {
 
   return new Promise((resolve, reject) => {
     const formData = new FormData()
-    const filename =
-      isFolderUpload.value && file.webkitRelativePath ? file.webkitRelativePath : file.name
-    formData.append('file', file, filename)
+    const rawFile = file?.originFileObj || file
+    const filename = rawFile?.name || file?.name
+    formData.append('file', rawFile, filename)
 
     const currentKbId = kbId.value
     if (!currentKbId) {
@@ -1494,12 +1544,14 @@ const chunkData = async () => {
         Object.assign(params, buildAutoIndexParams())
       }
 
-      await store.addFiles({
+      const submitted = await store.addFiles({
         items,
         contentType: 'file',
         params,
         parentId: selectedFolderId.value
       })
+
+      if (!submitted) return
 
       emit('success')
       handleCancel()
@@ -1572,12 +1624,14 @@ const chunkData = async () => {
       params._preprocessed_map = preprocessedMap
 
       // 调用 addFiles (file mode)
-      await store.addFiles({
+      const submitted = await store.addFiles({
         items: items,
         contentType: 'file', // 重要：这里改为 file，因为我们已经转成了 minio 上的文件
         params,
         parentId: selectedFolderId.value
       })
+
+      if (!submitted) return
 
       emit('success')
       handleCancel()
@@ -1599,6 +1653,7 @@ const chunkData = async () => {
   const items = []
   const content_hashes = {}
   const file_sizes = {}
+  const source_paths = {}
   for (const file of fileList.value) {
     if (file.status !== 'done') continue
     const file_path = file.response?.file_path
@@ -1608,6 +1663,8 @@ const chunkData = async () => {
     items.push(file_path)
     if (content_hash) content_hashes[file_path] = content_hash
     if (Number.isFinite(file.response?.size)) file_sizes[file_path] = file.response.size
+    const sourcePath = getUploadSourcePath(file)
+    if (sourcePath) source_paths[file_path] = sourcePath
 
     // 检查是否需要OCR
     const ext = file_path.substring(file_path.lastIndexOf('.')).toLowerCase()
@@ -1627,18 +1684,20 @@ const chunkData = async () => {
 
   try {
     store.state.chunkLoading = true
-    const params = { ...processingParams.value, content_hashes, file_sizes }
+    const params = { ...processingParams.value, content_hashes, file_sizes, source_paths }
     if (autoIndex.value) {
       params.auto_index = true
       Object.assign(params, buildAutoIndexParams())
     }
 
-    await store.addFiles({
+    const submitted = await store.addFiles({
       items,
       contentType: 'file',
       params,
       parentId: selectedFolderId.value
     })
+
+    if (!submitted) return
 
     emit('success')
     handleCancel()
@@ -2082,6 +2141,21 @@ const chunkData = async () => {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 4px;
+}
+
+.local-path-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--gray-500);
+  font-size: 12px;
+  line-height: 1.5;
+
+  svg {
+    flex: 0 0 auto;
+    margin-top: 2px;
+  }
 }
 
 .upload-progress-card {

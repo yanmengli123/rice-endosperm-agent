@@ -43,6 +43,7 @@ SUPPORTED_FILE_EXTENSIONS: tuple[str, ...] = (
     ".tif",
     ".zip",
 )
+_MIN_PDF_TEXT_FALLBACK_CHARS = 80
 
 
 def is_supported_file_extension(file_name: str | os.PathLike[str]) -> bool:
@@ -245,6 +246,16 @@ def parse_pdf(file, params=None):
         return DocumentProcessorFactory.process_file(opt_ocr, file, processor_params)
     except DocumentProcessorException as e:
         logger.error(f"文档处理失败: {e.service_name} - {str(e)}")
+        if processor_params.get("ocr_fallback_to_text", True):
+            try:
+                fallback_text = pdfreader(file, params=processor_params)
+            except Exception as fallback_error:  # noqa: BLE001
+                logger.warning(f"PDF 本地文本提取回退失败: {fallback_error}")
+            else:
+                normalized_text = re.sub(r"\s+", "", fallback_text)
+                if len(normalized_text) >= _MIN_PDF_TEXT_FALLBACK_CHARS:
+                    logger.warning(f"OCR 引擎 {opt_ocr} 不可用，已回退到 PDF 本地文本提取 ({len(fallback_text)} 字符)")
+                    return fallback_text
         raise
     except Exception as e:  # noqa: BLE001
         logger.error(f"PDF 解析失败: {str(e)}")
