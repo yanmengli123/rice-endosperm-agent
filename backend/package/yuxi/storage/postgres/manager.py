@@ -257,18 +257,50 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "ALTER TABLE IF EXISTS knowledge_chunks ADD COLUMN IF NOT EXISTS extraction_result JSONB",
+            ("ALTER TABLE IF EXISTS knowledge_graph_entities ADD COLUMN IF NOT EXISTS canonical_identity VARCHAR(512)"),
+            (
+                "UPDATE knowledge_graph_entities SET canonical_identity = 'name:' || normalized_name "
+                "WHERE canonical_identity IS NULL"
+            ),
+            ("ALTER TABLE IF EXISTS knowledge_graph_entities ALTER COLUMN canonical_identity SET NOT NULL"),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_entities "
+                "DROP CONSTRAINT IF EXISTS uq_knowledge_graph_entities_identity"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_graph_entities_identity_v2 "
+                "ON knowledge_graph_entities(kb_id, canonical_identity, label)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_triples "
+                "ADD COLUMN IF NOT EXISTS support_count INTEGER NOT NULL DEFAULT 0"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_triples "
+                "ADD COLUMN IF NOT EXISTS literature_count INTEGER NOT NULL DEFAULT 0"
+            ),
+            "ALTER TABLE IF EXISTS knowledge_graph_triples ADD COLUMN IF NOT EXISTS best_evidence_level VARCHAR(64)",
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_triples "
+                "ADD COLUMN IF NOT EXISTS consensus_direction VARCHAR(64) NOT NULL DEFAULT 'UNKNOWN'"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS evidence_alignment_status VARCHAR(32) NOT NULL DEFAULT 'ALIGNED'"
+            ),
             """
             CREATE TABLE IF NOT EXISTS knowledge_graph_entities (
                 id SERIAL PRIMARY KEY,
                 entity_id VARCHAR(64) NOT NULL UNIQUE,
                 kb_id VARCHAR(80) NOT NULL REFERENCES knowledge_bases(kb_id) ON DELETE CASCADE,
+                canonical_identity VARCHAR(512) NOT NULL,
                 normalized_name VARCHAR(512) NOT NULL,
                 label VARCHAR(128) NOT NULL,
                 name VARCHAR(512) NOT NULL,
                 attributes JSONB,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
-                CONSTRAINT uq_knowledge_graph_entities_identity UNIQUE (kb_id, normalized_name, label)
+                CONSTRAINT uq_knowledge_graph_entities_identity_v2 UNIQUE (kb_id, canonical_identity, label)
             )
             """,
             """
@@ -291,6 +323,10 @@ class PostgresManager(metaclass=SingletonMeta):
                 target_entity_id VARCHAR(64) NOT NULL REFERENCES knowledge_graph_entities(entity_id) ON DELETE CASCADE,
                 relation_type VARCHAR(256) NOT NULL,
                 content TEXT NOT NULL,
+                support_count INTEGER NOT NULL DEFAULT 0,
+                literature_count INTEGER NOT NULL DEFAULT 0,
+                best_evidence_level VARCHAR(64),
+                consensus_direction VARCHAR(64) NOT NULL DEFAULT 'UNKNOWN',
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )

@@ -491,6 +491,7 @@ class MilvusGraphService:
                 {
                     "entity_id": entity_id,
                     "kb_id": kb_id,
+                    "canonical_identity": f"name:{normalized_name}",
                     "normalized_name": normalized_name,
                     "label": label,
                     "name": entity["text"],

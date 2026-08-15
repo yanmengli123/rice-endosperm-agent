@@ -42,6 +42,7 @@ class KnowledgeGraphRepository:
                     entity_stmt.on_conflict_do_update(
                         index_elements=["entity_id"],
                         set_={
+                            "canonical_identity": entity_stmt.excluded.canonical_identity,
                             "name": entity_stmt.excluded.name,
                             "attributes": entity_stmt.excluded.attributes,
                             "updated_at": func.now(),

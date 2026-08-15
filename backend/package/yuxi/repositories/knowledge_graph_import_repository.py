@@ -94,6 +94,8 @@ class KnowledgeGraphImportRepository:
                     stmt.on_conflict_do_update(
                         index_elements=["entity_id"],
                         set_={
+                            "canonical_identity": stmt.excluded.canonical_identity,
+                            "normalized_name": stmt.excluded.normalized_name,
                             "name": stmt.excluded.name,
                             "attributes": stmt.excluded.attributes,
                             "updated_at": func.now(),
@@ -104,7 +106,7 @@ class KnowledgeGraphImportRepository:
                     insert(KnowledgeGraphEntitySource)
                     .values(
                         [
-                            {**item, "import_id": import_id, "source_type": "csv_import"}
+                            {"import_id": import_id, "source_type": item.get("source_type", "csv_import"), **item}
                             for item in plan["entity_sources"]
                         ]
                     )
@@ -119,6 +121,10 @@ class KnowledgeGraphImportRepository:
                         set_={
                             "content": stmt.excluded.content,
                             "relation_type": stmt.excluded.relation_type,
+                            "support_count": stmt.excluded.support_count,
+                            "literature_count": stmt.excluded.literature_count,
+                            "best_evidence_level": stmt.excluded.best_evidence_level,
+                            "consensus_direction": stmt.excluded.consensus_direction,
                             "updated_at": func.now(),
                         },
                     )
@@ -127,7 +133,7 @@ class KnowledgeGraphImportRepository:
                     insert(KnowledgeGraphTripleSource)
                     .values(
                         [
-                            {**item, "import_id": import_id, "source_type": "csv_import"}
+                            {"import_id": import_id, "source_type": item.get("source_type", "csv_import"), **item}
                             for item in plan["triple_sources"]
                         ]
                     )
@@ -141,6 +147,7 @@ class KnowledgeGraphImportRepository:
                         index_elements=["evidence_id"],
                         set_={
                             "assertion_status": stmt.excluded.assertion_status,
+                            "evidence_alignment_status": stmt.excluded.evidence_alignment_status,
                             "metadata_json": stmt.excluded.metadata_json,
                             "updated_at": func.now(),
                         },
@@ -460,6 +467,7 @@ class KnowledgeGraphImportRepository:
         return {
             "entity_id": record.entity_id,
             "kb_id": record.kb_id,
+            "canonical_identity": record.canonical_identity,
             "normalized_name": record.normalized_name,
             "label": record.label,
             "name": record.name,
@@ -483,6 +491,10 @@ class KnowledgeGraphImportRepository:
             "target_entity_id": record.target_entity_id,
             "relation_type": record.relation_type,
             "content": record.content,
+            "support_count": record.support_count,
+            "literature_count": record.literature_count,
+            "best_evidence_level": record.best_evidence_level,
+            "consensus_direction": record.consensus_direction,
         }
 
     @staticmethod
@@ -497,6 +509,7 @@ class KnowledgeGraphImportRepository:
             "directness": record.directness,
             "evidence_level": record.evidence_level,
             "evidence_quote": record.evidence_quote,
+            "evidence_alignment_status": record.evidence_alignment_status,
             "metadata_json": record.metadata_json or {},
         }
 

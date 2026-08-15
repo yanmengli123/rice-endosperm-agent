@@ -1,4 +1,5 @@
 from yuxi.knowledge.graphs.managed_import_parser import parse_managed_graph_import
+from yuxi.knowledge.graphs.managed_import_service import _aggregate_evidence
 
 NODE_HEADER = "node_id,name,node_type,rap_id,msu_id,out_degree,in_degree,publication_count"
 RELATION_HEADER = (
@@ -34,14 +35,15 @@ def test_gene_rows_merge_with_status_and_relation_evidence_is_canonicalized():
     assert result["counts"]["canonical_entities"] == 2
     assert result["counts"]["canonical_triples"] == 1
     assert result["counts"]["evidence_assertions"] == 1
+    assert result["plan"]["triples"][0]["literature_count"] == 1
     gene = next(item for item in result["plan"]["entities"] if item["label"] == "Gene")
     assert gene["attributes"]["gene_status"] == "confirmed"
     assert len(result["plan"]["triple_sources"]) == 2
     assert len(result["plan"]["evidence_sources"]) == 2
 
 
-def test_case_variant_without_registry_id_requires_explicit_row_selection():
-    initial = _parse(
+def test_case_variant_without_registry_id_is_nonblocking_and_preserves_aliases():
+    result = _parse(
         [
             "gene-1,OsPPDK,RICE_GENE,,,,,",
             "gene-1,osppdk,RICE_GENE_CANDIDATE,,,,,",
@@ -49,33 +51,93 @@ def test_case_variant_without_registry_id_requires_explicit_row_selection():
         [],
     )
 
-    assert initial["status"] == "AWAITING_CONFLICT_RESOLUTION"
-    assert initial["conflicts"][0]["code"] == "CASE_VARIANT_CONFLICT"
-    conflict_id = initial["conflicts"][0]["conflict_id"]
-    resolved = _parse(
-        [
-            "gene-1,OsPPDK,RICE_GENE,,,,,",
-            "gene-1,osppdk,RICE_GENE_CANDIDATE,,,,,",
-        ],
-        [],
-        resolutions={conflict_id: {"selected_row_number": 2}},
-    )
-
-    assert resolved["valid"] is True
-    assert resolved["plan"]["entities"][0]["name"] == "OsPPDK"
+    assert result["status"] == "READY"
+    assert result["blockers"] == []
+    assert result["warnings"][0]["code"] == "CASE_UNRESOLVED"
+    entity = result["plan"]["entities"][0]
+    assert entity["name"] == "OsPPDK"
+    assert entity["attributes"]["aliases"] == ["OsPPDK", "osppdk"]
+    assert entity["attributes"]["normalization_status"] == "CASE_UNRESOLVED"
 
 
-def test_gene_and_allele_mutant_are_not_automatically_merged():
+def test_gene_and_allele_mutant_are_split_linked_and_relations_are_routed_by_semantics():
     result = _parse(
         [
             "entity-1,FLO2,RICE_GENE_CANDIDATE,,,,,",
             "entity-1,flo2,ALLELE_MUTANT,,,,,",
+            "phenotype-1,floury endosperm,PHENOTYPE,,,,,",
         ],
-        [],
+        [
+            "entity-1,phenotype-1,MUTANT_EFFECT,POSITIVE,DIRECT,E1,1,1,1,,mutant quote",
+            "entity-1,phenotype-1,PROMOTES_PHENOTYPE,POSITIVE,DIRECT,E2,1,1,2,,gene quote",
+        ],
     )
 
-    assert result["valid"] is False
-    assert result["conflicts"][0]["code"] == "SEMANTIC_TYPE_CONFLICT"
+    assert result["valid"] is True
+    assert result["conflicts"] == []
+    assert result["counts"]["semantic_splits"] == 1
+    assert result["semantic_splits"][0]["code"] == "GENE_ALLELE_IDENTITY_SPLIT"
+    effective = result["effective_resolutions"][result["semantic_splits"][0]["split_id"]]
+    assert effective["action"] == "split"
+    assert effective["relation_routes"]["2"]["start"] == "allele"
+    assert effective["relation_routes"]["3"]["start"] == "gene"
+    entities = {item["label"]: item for item in result["plan"]["entities"]}
+    triples = result["plan"]["triples"]
+    assert {"Gene", "AlleleMutant", "Phenotype"} == set(entities)
+    assert (
+        next(item for item in triples if item["relation_type"] == "MUTANT_EFFECT")["source_entity_id"]
+        == entities["AlleleMutant"]["entity_id"]
+    )
+    assert (
+        next(item for item in triples if item["relation_type"] == "PROMOTES_PHENOTYPE")["source_entity_id"]
+        == entities["Gene"]["entity_id"]
+    )
+    allele_of = next(item for item in triples if item["relation_type"] == "ALLELE_OF")
+    assert allele_of["source_entity_id"] == entities["AlleleMutant"]["entity_id"]
+    assert allele_of["target_entity_id"] == entities["Gene"]["entity_id"]
+
+
+def test_semantic_route_can_be_overridden_per_relation_endpoint():
+    initial = _parse(
+        [
+            "entity-1,FLO2,RICE_GENE_CANDIDATE,,,,,",
+            "entity-1,flo2,ALLELE_MUTANT,,,,,",
+            "process-1,starch synthesis,PROCESS,,,,,",
+        ],
+        ["entity-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,1,,quote"],
+    )
+    split_id = initial["semantic_splits"][0]["split_id"]
+    overridden = _parse(
+        [
+            "entity-1,FLO2,RICE_GENE_CANDIDATE,,,,,",
+            "entity-1,flo2,ALLELE_MUTANT,,,,,",
+            "process-1,starch synthesis,PROCESS,,,,,",
+        ],
+        ["entity-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,1,,quote"],
+        resolutions={split_id: {"relation_routes": {"2": {"start": "allele"}}}},
+    )
+    allele = next(item for item in overridden["plan"]["entities"] if item["label"] == "AlleleMutant")
+    required_for = next(item for item in overridden["plan"]["triples"] if item["relation_type"] == "REQUIRED_FOR")
+    assert required_for["source_entity_id"] == allele["entity_id"]
+
+
+def test_ambiguous_evidence_is_saved_but_excluded_from_exact_literature_count():
+    result = _parse(
+        [
+            "gene-1,OsPPDK,RICE_GENE,Os01g01010,,,,",
+            "process-1,starch synthesis,PROCESS,,,,,",
+        ],
+        ["gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,9,9,1|2,10.1/a,quote one||quote two"],
+    )
+
+    assert result["valid"] is True
+    assert result["warnings"][0]["code"] == "EVIDENCE_ALIGNMENT_AMBIGUOUS"
+    evidence = result["plan"]["evidence"][0]
+    triple = next(item for item in result["plan"]["triples"] if item["relation_type"] == "REQUIRED_FOR")
+    assert evidence["evidence_alignment_status"] == "AMBIGUOUS"
+    assert triple["support_count"] == 1
+    assert triple["literature_count"] == 0
+    assert triple["best_evidence_level"] == "E1"
 
 
 def test_cypher_is_reported_but_never_added_to_execution_plan():
@@ -99,3 +161,33 @@ def test_dangling_relationship_blocks_import():
 
     assert result["valid"] is False
     assert result["errors"][0]["code"] == "DANGLING_RELATION"
+
+
+def test_projection_aggregate_excludes_ambiguous_evidence_from_exact_literature_count():
+    aggregate = _aggregate_evidence(
+        [
+            {
+                "evidence_id": "aligned",
+                "triple_id": "triple-1",
+                "literature_id": "pmid:1",
+                "direction": "POSITIVE",
+                "evidence_level": "E2",
+                "evidence_alignment_status": "ALIGNED",
+                "metadata_json": {"pmids": ["1"], "dois": []},
+            },
+            {
+                "evidence_id": "ambiguous",
+                "triple_id": "triple-1",
+                "literature_id": "pmid:2",
+                "direction": "POSITIVE",
+                "evidence_level": "E1",
+                "evidence_alignment_status": "AMBIGUOUS",
+                "metadata_json": {"pmids": ["2", "3"], "dois": ["10.1/x"]},
+            },
+        ]
+    )["triple-1"]
+
+    assert aggregate["support_count"] == 2
+    assert aggregate["literature_count"] == 1
+    assert aggregate["best_evidence_level"] == "E1"
+    assert aggregate["ambiguous_evidence_count"] == 1

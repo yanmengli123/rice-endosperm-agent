@@ -102,19 +102,19 @@
             :description="`检测到 ${report.cypher.statement_count} 个语句片段；写操作关键词：${(report.cypher.write_keywords || []).join('、') || '无'}`"
           />
 
-          <div v-if="report?.errors?.length" class="issue-list">
-            <div class="issue-title error">阻塞错误（{{ report.errors.length }}）</div>
-            <div v-for="item in report.errors.slice(0, 8)" :key="issueKey(item)" class="issue-row">
+          <div v-if="report?.blockers?.length" class="issue-list">
+            <div class="issue-title error">阻塞错误（{{ report.blockers.length }}）</div>
+            <div v-for="item in report.blockers.slice(0, 8)" :key="issueKey(item)" class="issue-row">
               <span>{{ item.code }}</span>
               <span>{{ item.message }}</span>
               <span v-if="item.row_number">第 {{ item.row_number }} 行</span>
             </div>
           </div>
 
-          <div v-if="report?.warnings?.length" class="issue-list">
+          <div v-if="generalWarnings.length" class="issue-list">
             <div class="issue-title">预检警告（{{ report.warnings.length }}）</div>
             <div
-              v-for="item in report.warnings.slice(0, 6)"
+              v-for="item in generalWarnings.slice(0, 6)"
               :key="issueKey(item)"
               class="issue-row"
             >
@@ -122,10 +122,37 @@
               <span>{{ item.message }}</span>
               <span v-if="item.row_number">第 {{ item.row_number }} 行</span>
             </div>
-            <div v-if="report.warnings.length > 6" class="more-hint">
-              另有 {{ report.warnings.length - 6 }} 条警告已完整保存在导入记录中
+            <div v-if="generalWarnings.length > 6" class="more-hint">
+              另有 {{ generalWarnings.length - 6 }} 条警告已完整保存在导入记录中
             </div>
           </div>
+
+          <details v-if="caseReviews.length" class="review-disclosure">
+            <summary>大小写待核验（{{ caseReviews.length }}）· 非阻塞</summary>
+            <p class="conflict-help">
+              系统已按规范名称自动合并并保留全部别名。可选择展示名，也可前往 RAP-DB / Rice Genome Annotation Project 核验；不选择不会阻止导入。
+            </p>
+            <div v-for="review in caseReviews" :key="review.review_id" class="case-review-row">
+              <div>
+                <strong>{{ review.external_ids.join('、') }}</strong>
+                <span class="case-aliases">{{ review.aliases.join(' / ') }}</span>
+              </div>
+              <a-radio-group v-model:value="caseReviewSelections[review.review_id]" size="small">
+                <a-radio-button
+                  v-for="option in review.options"
+                  :key="option.row_number"
+                  :value="option.row_number"
+                  :disabled="!reviewEditable"
+                >
+                  {{ option.name }}
+                </a-radio-button>
+              </a-radio-group>
+              <div class="registry-links">
+                <a href="https://rapdb.dna.naro.go.jp/" target="_blank" rel="noopener noreferrer">RAP-DB</a>
+                <a href="https://rice.uga.edu/" target="_blank" rel="noopener noreferrer">RGAP</a>
+              </div>
+            </div>
+          </details>
 
           <div v-if="report?.conflicts?.length" class="conflict-section">
             <div class="issue-title error">
@@ -143,7 +170,13 @@
                 <span>{{ conflict.code }}</span>
                 <span>{{ conflict.external_ids.join('、') }}</span>
               </div>
-              <a-radio-group v-model:value="resolutionSelections[conflict.conflict_id]">
+              <a-alert
+                v-if="conflict.resolvable === false"
+                type="error"
+                show-icon
+                message="该错误不能通过选择记录绕过，请修正 CSV 后重新上传"
+              />
+              <a-radio-group v-else v-model:value="resolutionSelections[conflict.conflict_id]">
                 <a-radio
                   v-for="option in conflict.options"
                   :key="option.row_number"
@@ -158,15 +191,78 @@
             </div>
           </div>
 
+          <div v-if="report?.semantic_splits?.length" class="semantic-section">
+            <div class="semantic-title-row">
+              <div>
+                <div class="issue-title safe">安全拆分方案（{{ report.semantic_splits.length }}）</div>
+                <p class="conflict-help">默认保留 Gene 与 AlleleMutant 两个实体、建立 ALLELE_OF，并按证据语义逐行路由。以下方案可直接导入，也可逐关系覆盖。</p>
+              </div>
+              <a-tag color="green">科研语义安全</a-tag>
+            </div>
+            <details
+              v-for="split in report.semantic_splits"
+              :key="split.split_id"
+              class="split-card"
+            >
+              <summary>
+                {{ split.preview.gene.name }} / {{ split.preview.allele.name }}
+                <span>{{ split.relation_routes.length }} 条关系 · 自动增加 ALLELE_OF</span>
+              </summary>
+              <div class="entity-preview-grid">
+                <label class="entity-preview gene-preview">
+                  <span>Gene</span>
+                  <a-input v-model:value="semanticResolutions[split.split_id].gene_name" size="small" :disabled="!reviewEditable" />
+                  <code>{{ split.preview.gene.canonical_identity }}</code>
+                </label>
+                <div class="allele-arrow">ALLELE_OF →</div>
+                <label class="entity-preview allele-preview">
+                  <span>AlleleMutant</span>
+                  <a-input v-model:value="semanticResolutions[split.split_id].allele_name" size="small" :disabled="!reviewEditable" />
+                  <code>{{ split.preview.allele.canonical_identity }}</code>
+                </label>
+              </div>
+              <div class="route-table">
+                <div v-for="route in split.relation_routes" :key="route.row_number" class="route-row">
+                  <div>
+                    <strong>第 {{ route.row_number }} 行 · {{ route.relation_type }}</strong>
+                    <span>{{ route.start_id }} → {{ route.end_id }}</span>
+                    <small>{{ route.reason }}</small>
+                  </div>
+                  <label v-for="(_, endpoint) in route.endpoints" :key="endpoint">
+                    {{ endpoint === 'start' ? '起点' : '终点' }}
+                    <a-select
+                      v-model:value="semanticResolutions[split.split_id].relation_routes[String(route.row_number)][endpoint]"
+                      size="small"
+                      style="width: 130px"
+                      :disabled="!reviewEditable"
+                    >
+                      <a-select-option value="gene">Gene</a-select-option>
+                      <a-select-option value="allele">AlleleMutant</a-select-option>
+                    </a-select>
+                  </label>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <details v-if="report?.info?.length" class="review-disclosure info-disclosure">
+            <summary>审计信息（{{ report.info.length }}）</summary>
+            <div v-for="item in report.info" :key="issueKey(item)" class="issue-row">
+              <span>{{ item.code }}</span>
+              <span>{{ item.message }}</span>
+              <span v-if="item.count">{{ item.count }} 条</span>
+            </div>
+          </details>
+
           <div class="report-actions">
             <a-button
-              v-if="report?.conflicts?.length"
+              v-if="hasReviewablePlan"
               :loading="validating"
-              :disabled="!allConflictsResolved"
+              :disabled="!allBlockingConflictsResolved"
               @click="revalidate"
             >
               <ShieldCheck :size="16" />
-              应用选择并重新预检
+              应用审阅方案并重新预检
             </a-button>
             <a-button
               v-if="canExecute"
@@ -255,6 +351,8 @@ const cypherFile = ref(null)
 const currentImport = ref(null)
 const history = ref([])
 const resolutionSelections = reactive({})
+const caseReviewSelections = reactive({})
+const semanticResolutions = reactive({})
 const uploading = ref(false)
 const validating = ref(false)
 const executing = ref(false)
@@ -323,11 +421,27 @@ const FilePicker = defineComponent({
 const report = computed(() => currentImport.value?.validation_report || null)
 const statusMeta = computed(() => getStatusMeta(currentImport.value?.status))
 const isRunning = computed(() => ACTIVE_STATUSES.has(currentImport.value?.status))
+const reviewEditable = computed(() => !['SUCCEEDED', 'ROLLED_BACK'].includes(currentImport.value?.status))
 const canExecute = computed(
   () => report.value?.valid && ['READY', 'FAILED', 'CANCELLED'].includes(currentImport.value?.status)
 )
-const allConflictsResolved = computed(() =>
-  (report.value?.conflicts || []).every((item) => resolutionSelections[item.conflict_id])
+const caseReviews = computed(() =>
+  (report.value?.warnings || []).filter((item) => item.code === 'CASE_UNRESOLVED' && item.review_id)
+)
+const generalWarnings = computed(() =>
+  (report.value?.warnings || []).filter((item) => item.code !== 'CASE_UNRESOLVED')
+)
+const allBlockingConflictsResolved = computed(() =>
+  (report.value?.conflicts || []).every(
+    (item) => item.resolvable !== false && resolutionSelections[item.conflict_id]
+  )
+)
+const hasReviewablePlan = computed(
+  () =>
+    reviewEditable.value &&
+    (Boolean(report.value?.conflicts?.length) ||
+      Boolean(report.value?.semantic_splits?.length) ||
+      Boolean(caseReviews.value.length))
 )
 const countItems = computed(() => {
   const counts = report.value?.counts || {}
@@ -386,17 +500,20 @@ const uploadAndValidate = async () => {
 const revalidate = async () => {
   validating.value = true
   try {
+    const appliedResolutions = buildResolutions()
     const validationReport = await graphImportApi.validate(
       props.kbId,
       currentImport.value.import_id,
-      buildResolutions()
+      appliedResolutions
     )
     currentImport.value = {
       ...currentImport.value,
       status: validationReport.status,
       validation_report: validationReport,
-      error_message: validationReport.errors?.[0]?.message || null
+      resolution_config: appliedResolutions,
+      error_message: validationReport.blockers?.[0]?.message || null
     }
+    hydrateResolutions()
     message.success(validationReport.valid ? '预检通过，可以开始导入' : '已更新预检报告')
     await loadHistory()
   } catch (error) {
@@ -501,20 +618,50 @@ const confirmRollback = (record) => {
 
 const hydrateResolutions = () => {
   Object.keys(resolutionSelections).forEach((key) => delete resolutionSelections[key])
+  Object.keys(caseReviewSelections).forEach((key) => delete caseReviewSelections[key])
+  Object.keys(semanticResolutions).forEach((key) => delete semanticResolutions[key])
   const saved = currentImport.value?.resolution_config || {}
   for (const conflict of report.value?.conflicts || []) {
     const value = saved[conflict.conflict_id]
     if (value) resolutionSelections[conflict.conflict_id] = value.selected_row_number || value
   }
+  for (const review of caseReviews.value) {
+    const value = saved[review.review_id]
+    if (value) caseReviewSelections[review.review_id] = value.selected_row_number || value
+  }
+  for (const split of report.value?.semantic_splits || []) {
+    const value = saved[split.split_id] || {}
+    const relationRoutes = {}
+    for (const route of split.relation_routes || []) {
+      const savedRoute = value.relation_routes?.[String(route.row_number)] || {}
+      relationRoutes[String(route.row_number)] = Object.fromEntries(
+        Object.entries(route.endpoints).map(([endpoint, role]) => [endpoint, savedRoute[endpoint] || role])
+      )
+    }
+    semanticResolutions[split.split_id] = {
+      action: 'split',
+      gene_name: value.gene_name || split.preview.gene.name,
+      allele_name: value.allele_name || split.preview.allele.name,
+      relation_routes: relationRoutes
+    }
+  }
 }
 
-const buildResolutions = () =>
-  Object.fromEntries(
+const buildResolutions = () => ({
+  ...Object.fromEntries(
     Object.entries(resolutionSelections).map(([conflictId, selectedRowNumber]) => [
       conflictId,
       { selected_row_number: Number(selectedRowNumber) }
     ])
-  )
+  ),
+  ...Object.fromEntries(
+    Object.entries(caseReviewSelections).map(([reviewId, selectedRowNumber]) => [
+      reviewId,
+      { selected_row_number: Number(selectedRowNumber) }
+    ])
+  ),
+  ...Object.fromEntries(Object.entries(semanticResolutions))
+})
 
 const startPolling = () => {
   stopPolling()
@@ -675,7 +822,9 @@ onUnmounted(stopPolling)
 }
 
 .issue-list,
-.conflict-section {
+.conflict-section,
+.semantic-section,
+.review-disclosure {
   margin-top: 16px;
 }
 
@@ -686,6 +835,10 @@ onUnmounted(stopPolling)
 
   &.error {
     color: var(--color-error-600);
+  }
+
+  &.safe {
+    color: var(--color-success-600);
   }
 }
 
@@ -724,6 +877,144 @@ onUnmounted(stopPolling)
   font-weight: 600;
 }
 
+.review-disclosure,
+.split-card {
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  background: var(--gray-25);
+
+  summary {
+    padding: 11px 12px;
+    color: var(--gray-900);
+    font-weight: 600;
+    cursor: pointer;
+  }
+}
+
+.case-review-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--gray-100);
+
+  > div:first-child {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+}
+
+.case-aliases,
+.registry-links,
+.route-row span,
+.route-row small,
+.split-card summary span {
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+.registry-links {
+  display: flex;
+  gap: 8px;
+}
+
+.semantic-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.split-card {
+  margin-bottom: 8px;
+
+  summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+  }
+}
+
+.entity-preview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-top: 1px solid var(--gray-100);
+}
+
+.entity-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--gray-150);
+  border-radius: 6px;
+
+  > span {
+    font-weight: 600;
+  }
+
+  code {
+    overflow: hidden;
+    color: var(--gray-500);
+    font-size: 11px;
+    text-overflow: ellipsis;
+  }
+}
+
+.gene-preview {
+  border-left: 3px solid var(--main-color);
+}
+
+.allele-preview {
+  border-left: 3px solid var(--color-warning-500);
+}
+
+.allele-arrow {
+  color: var(--gray-600);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.route-table {
+  max-height: 250px;
+  overflow-y: auto;
+  border-top: 1px solid var(--gray-100);
+}
+
+.route-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--gray-100);
+
+  > div {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  > label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--gray-600);
+    font-size: 12px;
+  }
+}
+
+.info-disclosure {
+  .issue-row:last-child {
+    border-bottom: 0;
+  }
+}
+
 .report-actions {
   display: flex;
   justify-content: flex-end;
@@ -743,6 +1034,21 @@ onUnmounted(stopPolling)
 
   .issue-row {
     grid-template-columns: 1fr;
+  }
+
+  .case-review-row,
+  .entity-preview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .allele-arrow {
+    transform: rotate(90deg);
+    justify-self: center;
+  }
+
+  .route-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

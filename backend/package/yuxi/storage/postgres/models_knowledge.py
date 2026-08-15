@@ -113,13 +113,14 @@ class KnowledgeGraphEntity(Base):
     __tablename__ = "knowledge_graph_entities"
     __table_args__ = (
         UniqueConstraint("entity_id", name="uq_knowledge_graph_entities_entity_id"),
-        UniqueConstraint("kb_id", "normalized_name", "label", name="uq_knowledge_graph_entities_identity"),
+        UniqueConstraint("kb_id", "canonical_identity", "label", name="uq_knowledge_graph_entities_identity_v2"),
         Index("ix_knowledge_graph_entities_kb_id", "kb_id"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     entity_id = Column(String(64), nullable=False)
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    canonical_identity = Column(String(512), nullable=False)
     normalized_name = Column(String(512), nullable=False)
     label = Column(String(128), nullable=False)
     name = Column(String(512), nullable=False)
@@ -167,6 +168,10 @@ class KnowledgeGraphTriple(Base):
     )
     relation_type = Column(String(256), nullable=False)
     content = Column(Text, nullable=False)
+    support_count = Column(Integer, nullable=False, default=0)
+    literature_count = Column(Integer, nullable=False, default=0)
+    best_evidence_level = Column(String(64))
+    consensus_direction = Column(String(64), nullable=False, default="UNKNOWN")
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
@@ -293,6 +298,7 @@ class KnowledgeGraphRelationEvidence(Base):
     evidence_level = Column(String(64))
     evidence_methods = Column(JSON_VALUE)
     evidence_quote = Column(Text)
+    evidence_alignment_status = Column(String(32), nullable=False, default="ALIGNED")
     source_scope = Column(String(64), nullable=False, default="relation_row")
     metadata_json = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)

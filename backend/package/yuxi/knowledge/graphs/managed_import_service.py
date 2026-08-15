@@ -132,6 +132,10 @@ class ManagedGraphImportService:
 
     async def validate(self, import_id: str, resolutions: dict[str, Any]) -> dict[str, Any]:
         record = await self._require_import(import_id)
+        if record.status == "SUCCEEDED":
+            raise ValueError("已完成批次的规范实体和路由方案不可变更；如需调整，请先回滚后重新上传")
+        if record.status == "ROLLED_BACK":
+            raise ValueError("已回滚批次不能重新预检；请重新上传原始文件")
         await self.repository.update_import(import_id, {"status": "PARSING", "error_message": None})
         nodes_bytes, relationships_bytes, cypher_bytes = await self._download_files(record)
         await self.repository.update_import(import_id, {"status": "VALIDATING"})
@@ -143,6 +147,7 @@ class ManagedGraphImportService:
             resolutions=resolutions,
         )
         report = _public_report(parsed)
+        effective_resolutions = parsed.get("effective_resolutions", resolutions)
         status = parsed["status"]
         if status == "INVALID":
             status = "FAILED"
@@ -150,8 +155,10 @@ class ManagedGraphImportService:
             import_id,
             {
                 "status": status,
+                "schema_version": SCHEMA_VERSION,
+                "normalizer_version": NORMALIZER_VERSION,
                 "validation_report": report,
-                "resolution_config": resolutions,
+                "resolution_config": effective_resolutions,
                 "error_message": report["errors"][0]["message"] if report["errors"] else None,
             },
         )
@@ -175,13 +182,14 @@ class ManagedGraphImportService:
                 resolutions=resolutions,
             )
             report = _public_report(parsed)
+            effective_resolutions = parsed.get("effective_resolutions", resolutions)
             if not parsed["valid"] or parsed["plan"] is None:
                 await self.repository.update_import(
                     import_id,
                     {
                         "status": parsed["status"] if parsed["status"] != "INVALID" else "FAILED",
                         "validation_report": report,
-                        "resolution_config": resolutions,
+                        "resolution_config": effective_resolutions,
                     },
                 )
                 if parsed["conflicts"]:
@@ -190,10 +198,10 @@ class ManagedGraphImportService:
 
             await self.repository.update_import(
                 import_id,
-                {"status": "READY", "validation_report": report, "resolution_config": resolutions},
+                {"status": "READY", "validation_report": report, "resolution_config": effective_resolutions},
             )
             await _progress(context, 15, "提交 PostgreSQL 规范实体、三元组、证据、来源和 Outbox")
-            result = await self.repository.commit_plan(import_id, parsed["plan"], resolutions)
+            result = await self.repository.commit_plan(import_id, parsed["plan"], effective_resolutions)
             projection = await self._project_import(record.kb_id, import_id, context)
             result.update(projection)
             await self.repository.update_import(
@@ -346,6 +354,7 @@ class ManagedGraphImportService:
                         r.literature_count = row.literature_count,
                         r.best_evidence_level = row.best_evidence_level,
                         r.consensus_direction = row.consensus_direction,
+                        r.ambiguous_evidence_count = row.ambiguous_evidence_count,
                         r.pmids = row.pmids,
                         r.dois = row.dois,
                         r.managed_projection = true
@@ -461,6 +470,7 @@ def _aggregate_evidence(evidence: list[dict[str, Any]]) -> dict[str, dict[str, A
         grouped[item["triple_id"]].append(item)
     result = {}
     for triple_id, items in grouped.items():
+        aligned_items = [item for item in items if item.get("evidence_alignment_status", "ALIGNED") == "ALIGNED"]
         directions = {item.get("direction") or "UNKNOWN" for item in items}
         known_directions = directions - {"UNKNOWN", ""}
         consensus = (
@@ -471,27 +481,13 @@ def _aggregate_evidence(evidence: list[dict[str, Any]]) -> dict[str, dict[str, A
             else "UNKNOWN"
         )
         levels = [item.get("evidence_level") for item in items if item.get("evidence_level")]
-        literature_ids = {
-            identity
-            for item in items
-            for identity in [
-                item.get("literature_id"),
-                *[
-                    f"pmid:{pmid}"
-                    for pmid in ((item.get("metadata_json") or {}).get("pmids") or [])
-                ],
-                *[
-                    f"doi:{doi}"
-                    for doi in ((item.get("metadata_json") or {}).get("dois") or [])
-                ],
-            ]
-            if identity
-        }
+        literature_ids = {identity for item in aligned_items for identity in _exact_literature_keys(item) if identity}
         result[triple_id] = {
             "support_count": len({item["evidence_id"] for item in items}),
             "literature_count": len(literature_ids),
             "best_evidence_level": min(levels, key=_evidence_level_rank) if levels else None,
             "consensus_direction": consensus,
+            "ambiguous_evidence_count": len(items) - len(aligned_items),
             "pmids": sorted(
                 {pmid for item in items for pmid in ((item.get("metadata_json") or {}).get("pmids") or []) if pmid}
             ),
@@ -508,6 +504,7 @@ def _empty_evidence_aggregate() -> dict[str, Any]:
         "literature_count": 0,
         "best_evidence_level": None,
         "consensus_direction": "UNKNOWN",
+        "ambiguous_evidence_count": 0,
         "pmids": [],
         "dois": [],
     }
@@ -518,13 +515,24 @@ def _evidence_level_rank(value: str) -> tuple[int, str]:
     return (int(digits) if digits else 999, value)
 
 
+def _exact_literature_keys(evidence: dict[str, Any]) -> list[str]:
+    metadata = evidence.get("metadata_json") or {}
+    pmids = metadata.get("pmids") or []
+    dois = metadata.get("dois") or []
+    if pmids and dois and len(pmids) == len(dois):
+        return [f"pmid:{pmid}|doi:{doi}" for pmid, doi in zip(pmids, dois, strict=True)]
+    if pmids:
+        return [f"pmid:{pmid}" for pmid in pmids]
+    return [f"doi:{doi}" for doi in dois]
+
+
 def _batches(items: list[Any], size: int = 500):
     for start in range(0, len(items), size):
         yield items[start : start + size]
 
 
 def _public_report(parsed: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in parsed.items() if key != "plan"}
+    return {key: value for key, value in parsed.items() if key not in {"plan", "effective_resolutions"}}
 
 
 def _sha256(data: bytes) -> str:

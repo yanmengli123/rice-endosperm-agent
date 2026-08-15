@@ -33,6 +33,31 @@ class _RecordingEngine:
 
 
 @pytest.mark.asyncio
+async def test_ensure_knowledge_schema_adds_canonical_identity_and_evidence_statistics():
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_knowledge_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+
+    assert "ADD COLUMN IF NOT EXISTS canonical_identity VARCHAR(512)" in statements
+    assert "uq_knowledge_graph_entities_identity_v2" in statements
+    assert "ADD COLUMN IF NOT EXISTS support_count INTEGER NOT NULL DEFAULT 0" in statements
+    assert "ADD COLUMN IF NOT EXISTS literature_count INTEGER NOT NULL DEFAULT 0" in statements
+    assert "ADD COLUMN IF NOT EXISTS evidence_alignment_status" in statements
+    assert statements.index("SET canonical_identity") < statements.index("ALTER COLUMN canonical_identity SET NOT NULL")
+
+
+@pytest.mark.asyncio
 async def test_ensure_business_schema_backfills_subagent_thread_columns_before_dropping_legacy_columns():
     manager = PostgresManager()
     original_initialized = manager._initialized

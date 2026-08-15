@@ -585,7 +585,12 @@ const graphLoaded = ref(false)
 const isGraphSupported = computed(() => GRAPH_SUPPORTED_KB_TYPES.has(kbType.value?.toLowerCase()))
 const hasGraphNodes = computed(() => graph.graphData.nodes.length > 0)
 const showGraphConfigEmpty = computed(
-  () => isMilvus.value && !graphBuildStatus.value?.locked && !graphBuildLoading.value
+  () =>
+    isMilvus.value &&
+    !graphBuildStatus.value?.locked &&
+    !graphBuildLoading.value &&
+    graphLoaded.value &&
+    !hasGraphNodes.value
 )
 const showGraphDataEmpty = computed(
   () =>
