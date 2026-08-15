@@ -42,6 +42,14 @@
               <div class="actions-right">
                 <a-button
                   v-if="isMilvus"
+                  class="action-btn"
+                  @click="openGraphImport"
+                  title="导入节点 CSV、关系 CSV 与 Cypher 说明"
+                >
+                  <FileUp :size="16" />
+                </a-button>
+                <a-button
+                  v-if="isMilvus"
                   class="action-btn index-action-btn"
                   :class="{ 'has-index-label': hasPendingGraphChunks }"
                   @click="toggleBuildPanel"
@@ -356,6 +364,11 @@
         </div>
       </a-form>
     </a-modal>
+    <GraphImportModal
+      v-model:open="showGraphImport"
+      :kb-id="kbId"
+      @imported="handleGraphImported"
+    />
   </div>
 </template>
 
@@ -370,12 +383,14 @@ import {
   Search,
   Loader2,
   Database,
+  FileUp,
   Network,
   BrainCircuit,
   ScanText
 } from 'lucide-vue-next'
 import GraphCanvas from '@/components/GraphCanvas.vue'
 import GraphDetailPanel from '@/components/GraphDetailPanel.vue'
+import GraphImportModal from '@/components/GraphImportModal.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
 import { getKbTypeLabel } from '@/utils/kb_utils'
 import { unifiedApi } from '@/apis/graph_api'
@@ -416,6 +431,7 @@ const searchInput = ref('')
 const graphBuildStatus = ref(null)
 const graphBuildLoading = ref(false)
 const showGraphConfig = ref(false)
+const showGraphImport = ref(false)
 let buildStatusPollTimer = null
 
 const extractorTypeOptions = [
@@ -486,6 +502,16 @@ const toggleBuildPanel = () => {
 const toggleSettingsPanel = () => {
   showSettings.value = !showSettings.value
   showBuildPanel.value = false
+}
+
+const openGraphImport = () => {
+  showBuildPanel.value = false
+  showSettings.value = false
+  showGraphImport.value = true
+}
+
+const handleGraphImported = async () => {
+  await Promise.all([loadGraphBuildStatus(), loadGraph()])
 }
 
 const isEditingGraphConfig = computed(() => Boolean(graphBuildStatus.value?.locked))

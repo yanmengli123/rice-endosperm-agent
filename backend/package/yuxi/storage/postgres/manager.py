@@ -367,6 +367,30 @@ class PostgresManager(metaclass=SingletonMeta):
                 "CREATE INDEX IF NOT EXISTS ix_knowledge_graph_triple_mentions_chunk_id "
                 "ON knowledge_graph_triple_mentions(chunk_id)"
             ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_entity_sources "
+                "DROP CONSTRAINT IF EXISTS uq_graph_entity_source_identity"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_triple_sources "
+                "DROP CONSTRAINT IF EXISTS uq_graph_triple_source_identity"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_evidence_sources "
+                "DROP CONSTRAINT IF EXISTS uq_graph_evidence_source_identity"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_graph_entity_source_row "
+                "ON knowledge_graph_entity_sources(import_id, row_number)"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_graph_triple_source_row "
+                "ON knowledge_graph_triple_sources(import_id, row_number)"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_graph_evidence_source_row "
+                "ON knowledge_graph_evidence_sources(import_id, row_number)"
+            ),
         ]
 
         async with self.async_engine.begin() as conn:

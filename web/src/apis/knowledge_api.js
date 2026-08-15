@@ -313,6 +313,39 @@ export const graphBuildApi = {
 }
 
 // =============================================================================
+// === 托管知识图谱导入 ===
+// =============================================================================
+
+function graphImportUrl(kbId, importId = '', action = '') {
+  const suffix = [importId, action].filter(Boolean).join('/')
+  return `/api/knowledge/databases/${kbId}/graph-imports${suffix ? `/${suffix}` : ''}`
+}
+
+export const graphImportApi = {
+  upload: async (kbId, { name, nodesFile, relationshipsFile, cypherFile }) => {
+    const formData = new FormData()
+    formData.append('name', name || 'CSV 图谱导入')
+    formData.append('nodes_file', nodesFile)
+    formData.append('relationships_file', relationshipsFile)
+    if (cypherFile) formData.append('cypher_file', cypherFile)
+    return apiRequest(graphImportUrl(kbId), { method: 'POST', body: formData }, true, 'json')
+  },
+
+  list: async (kbId) => apiAdminGet(graphImportUrl(kbId)),
+
+  get: async (kbId, importId) => apiAdminGet(graphImportUrl(kbId, importId)),
+
+  validate: async (kbId, importId, resolutions = {}) =>
+    apiAdminPost(graphImportUrl(kbId, importId, 'validate'), { resolutions }),
+
+  execute: async (kbId, importId, resolutions = {}) =>
+    apiAdminPost(graphImportUrl(kbId, importId, 'execute'), { resolutions }),
+
+  rollback: async (kbId, importId) =>
+    apiAdminPost(graphImportUrl(kbId, importId, 'rollback'), {})
+}
+
+// =============================================================================
 // === 思维导图分组 ===
 // =============================================================================
 

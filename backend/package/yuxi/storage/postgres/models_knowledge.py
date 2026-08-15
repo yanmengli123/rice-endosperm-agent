@@ -191,6 +191,159 @@ class KnowledgeGraphTripleMention(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
+class KnowledgeGraphImport(Base):
+    """托管知识图谱导入批次。"""
+
+    __tablename__ = "knowledge_graph_imports"
+    __table_args__ = (
+        UniqueConstraint("import_id", name="uq_knowledge_graph_imports_import_id"),
+        UniqueConstraint("idempotency_key", name="uq_knowledge_graph_imports_idempotency_key"),
+        Index("ix_knowledge_graph_imports_kb_created", "kb_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    import_id = Column(String(64), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(255), nullable=False)
+    status = Column(String(64), nullable=False, default="UPLOADED", index=True)
+    schema_version = Column(String(32), nullable=False)
+    normalizer_version = Column(String(32), nullable=False)
+    nodes_object_name = Column(String(1024), nullable=False)
+    relationships_object_name = Column(String(1024), nullable=False)
+    cypher_object_name = Column(String(1024))
+    nodes_sha256 = Column(String(64), nullable=False)
+    relationships_sha256 = Column(String(64), nullable=False)
+    cypher_sha256 = Column(String(64))
+    idempotency_key = Column(String(64), nullable=False)
+    mapping_config = Column(JSON_VALUE)
+    validation_report = Column(JSON_VALUE)
+    resolution_config = Column(JSON_VALUE)
+    result = Column(JSON_VALUE)
+    error_message = Column(Text)
+    created_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+
+
+class KnowledgeGraphEntitySource(Base):
+    """规范实体与导入来源的多对多关系。"""
+
+    __tablename__ = "knowledge_graph_entity_sources"
+    __table_args__ = (
+        UniqueConstraint("import_id", "row_number", name="uq_graph_entity_source_row"),
+        Index("ix_graph_entity_sources_entity_id", "entity_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    import_id = Column(
+        String(64), ForeignKey("knowledge_graph_imports.import_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entity_id = Column(String(64), ForeignKey("knowledge_graph_entities.entity_id", ondelete="CASCADE"), nullable=False)
+    source_type = Column(String(32), nullable=False, default="csv_import")
+    external_id = Column(String(512), nullable=False)
+    row_number = Column(Integer)
+    raw_data = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class KnowledgeGraphTripleSource(Base):
+    """规范三元组与导入来源的多对多关系。"""
+
+    __tablename__ = "knowledge_graph_triple_sources"
+    __table_args__ = (
+        UniqueConstraint("import_id", "row_number", name="uq_graph_triple_source_row"),
+        Index("ix_graph_triple_sources_triple_id", "triple_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    import_id = Column(
+        String(64), ForeignKey("knowledge_graph_imports.import_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    triple_id = Column(String(64), ForeignKey("knowledge_graph_triples.triple_id", ondelete="CASCADE"), nullable=False)
+    source_type = Column(String(32), nullable=False, default="csv_import")
+    source_id = Column(String(512), nullable=False)
+    row_number = Column(Integer)
+    raw_data = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class KnowledgeGraphRelationEvidence(Base):
+    """规范三元组的一条独立证据 assertion。"""
+
+    __tablename__ = "knowledge_graph_relation_evidence"
+    __table_args__ = (
+        UniqueConstraint("evidence_id", name="uq_graph_relation_evidence_id"),
+        Index("ix_graph_relation_evidence_triple_id", "triple_id"),
+        Index("ix_graph_relation_evidence_kb_id", "kb_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    evidence_id = Column(String(64), nullable=False)
+    triple_id = Column(String(64), ForeignKey("knowledge_graph_triples.triple_id", ondelete="CASCADE"), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    literature_id = Column(String(512))
+    pmid = Column(String(64))
+    doi = Column(String(512))
+    direction = Column(String(64))
+    directness = Column(String(64))
+    assertion_status = Column(String(64), nullable=False, default="asserted")
+    evidence_level = Column(String(64))
+    evidence_methods = Column(JSON_VALUE)
+    evidence_quote = Column(Text)
+    source_scope = Column(String(64), nullable=False, default="relation_row")
+    metadata_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class KnowledgeGraphEvidenceSource(Base):
+    """证据与导入来源的多对多关系。"""
+
+    __tablename__ = "knowledge_graph_evidence_sources"
+    __table_args__ = (
+        UniqueConstraint("import_id", "row_number", name="uq_graph_evidence_source_row"),
+        Index("ix_graph_evidence_sources_evidence_id", "evidence_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    import_id = Column(
+        String(64), ForeignKey("knowledge_graph_imports.import_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    evidence_id = Column(
+        String(64), ForeignKey("knowledge_graph_relation_evidence.evidence_id", ondelete="CASCADE"), nullable=False
+    )
+    row_number = Column(Integer)
+    raw_data = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class KnowledgeGraphOutboxEvent(Base):
+    """PostgreSQL 事务内创建的图谱投影事件。"""
+
+    __tablename__ = "knowledge_graph_outbox_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_graph_outbox_event_id"),
+        UniqueConstraint("import_id", "event_type", "target", name="uq_graph_outbox_import_target"),
+        Index("ix_graph_outbox_status_created", "status", "created_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    event_id = Column(String(64), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    import_id = Column(String(64), ForeignKey("knowledge_graph_imports.import_id", ondelete="CASCADE"), nullable=False)
+    event_type = Column(String(64), nullable=False)
+    target = Column(String(32), nullable=False)
+    payload = Column(JSON_VALUE)
+    status = Column(String(32), nullable=False, default="PENDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    processed_at = Column(DateTime(timezone=True))
+
+
 class EvaluationDataset(Base):
     """评估数据集模型"""
 

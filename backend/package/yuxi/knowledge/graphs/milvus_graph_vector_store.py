@@ -97,6 +97,28 @@ class MilvusGraphVectorStore:
         if tasks:
             await asyncio.gather(*tasks)
 
+    async def existing_graph_record_ids(
+        self,
+        kb_id: str,
+        *,
+        entity_ids: list[str],
+        triple_ids: list[str],
+    ) -> tuple[set[str], set[str]]:
+        """Return the requested IDs currently materialized in Milvus."""
+        existing_entity_ids, existing_triple_ids = await asyncio.gather(
+            asyncio.to_thread(
+                self._query_existing_collection_ids,
+                graph_entity_collection_name(kb_id),
+                entity_ids,
+            ),
+            asyncio.to_thread(
+                self._query_existing_collection_ids,
+                graph_triple_collection_name(kb_id),
+                triple_ids,
+            ),
+        )
+        return existing_entity_ids, existing_triple_ids
+
     async def search_entities(
         self,
         *,
@@ -292,6 +314,11 @@ class MilvusGraphVectorStore:
             existing_ids.update(row["id"] for row in rows)
         return existing_ids
 
+    def _query_existing_collection_ids(self, collection_name: str, ids: list[str]) -> set[str]:
+        if not ids or not utility.has_collection(collection_name, using=self.connection_alias):
+            return set()
+        return self._query_existing_ids(Collection(name=collection_name, using=self.connection_alias), ids)
+
     def _insert_entities(self, collection: Collection, entities: list[dict[str, Any]], embeddings: list) -> None:
         collection.insert(
             [
@@ -300,6 +327,7 @@ class MilvusGraphVectorStore:
                 embeddings,
             ]
         )
+        collection.flush()
 
     def _insert_triples(self, collection: Collection, triples: list[dict[str, Any]], embeddings: list) -> None:
         collection.insert(
@@ -311,6 +339,7 @@ class MilvusGraphVectorStore:
                 embeddings,
             ]
         )
+        collection.flush()
 
     def _delete_ids(self, collection_name: str, ids: list[str]) -> None:
         if not utility.has_collection(collection_name, using=self.connection_alias):
@@ -320,3 +349,4 @@ class MilvusGraphVectorStore:
             batch = ids[start : start + 1000]
             quoted_ids = ", ".join(f'"{item}"' for item in batch)
             collection.delete(expr=f"id in [{quoted_ids}]")
+        collection.flush()
