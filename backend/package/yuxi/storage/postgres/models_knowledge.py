@@ -36,6 +36,7 @@ class KnowledgeBase(Base):
     llm_model_spec = Column(String(512))
     query_params = Column(JSON_VALUE)
     additional_params = Column(JSON_VALUE)
+    graph_view_settings = Column(JSON_VALUE)
     share_config = Column(JSON_VALUE)
     mindmap = Column(JSON_VALUE)
     mindmap_file_ids = Column(JSON_VALUE)

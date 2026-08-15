@@ -138,27 +138,37 @@
               <a-form layout="vertical">
                 <a-form-item label="最大节点数 (limit)">
                   <a-input-number
-                    v-model:value="subgraphParams.maxNodes"
+                    v-model:value="settingsForm.maxNodes"
                     :min="10"
                     :max="1000"
                     :step="10"
+                    :disabled="graphSettingsSaving"
                     style="width: 100%"
                   />
                 </a-form-item>
                 <a-form-item label="搜索深度 (depth)">
                   <a-input-number
-                    v-model:value="subgraphParams.maxDepth"
+                    v-model:value="settingsForm.maxDepth"
                     :min="1"
                     :max="5"
                     :step="1"
+                    :disabled="graphSettingsSaving"
                     style="width: 100%"
                   />
                 </a-form-item>
                 <a-form-item label="排除 Chunk 节点">
-                  <a-switch v-model:checked="subgraphParams.excludeChunk" />
+                  <a-switch
+                    v-model:checked="settingsForm.excludeChunk"
+                    :disabled="graphSettingsSaving"
+                  />
                 </a-form-item>
                 <a-form-item>
-                  <a-button type="primary" @click="applySettings" style="width: 100%">
+                  <a-button
+                    type="primary"
+                    :loading="graphSettingsSaving"
+                    @click="applySettings"
+                    style="width: 100%"
+                  >
                     应用
                   </a-button>
                 </a-form-item>
@@ -402,6 +412,11 @@ import { useGraph } from '@/composables/useGraph'
 const GRAPH_BUILD_TASK_TYPE = 'knowledge_graph_index'
 const MILVUS_KB_TYPE = 'milvus'
 const GRAPH_SUPPORTED_KB_TYPES = new Set([MILVUS_KB_TYPE])
+const DEFAULT_GRAPH_VIEW_SETTINGS = Object.freeze({
+  maxNodes: 100,
+  maxDepth: 2,
+  excludeChunk: true
+})
 
 const props = defineProps({
   active: {
@@ -422,17 +437,20 @@ const isMilvus = computed(() => kbType.value?.toLowerCase() === MILVUS_KB_TYPE)
 const graphRef = ref(null)
 const showSettings = ref(false)
 const showBuildPanel = ref(false)
-const subgraphParams = reactive({
-  maxNodes: 100,
-  maxDepth: 2,
-  excludeChunk: true
-})
+const subgraphParams = reactive({ ...DEFAULT_GRAPH_VIEW_SETTINGS })
+const settingsForm = reactive({ ...DEFAULT_GRAPH_VIEW_SETTINGS })
+const graphSettingsLoadedKbId = ref('')
+const graphSettingsLoading = ref(false)
+const graphSettingsSaving = ref(false)
 const searchInput = ref('')
 const graphBuildStatus = ref(null)
 const graphBuildLoading = ref(false)
 const showGraphConfig = ref(false)
 const showGraphImport = ref(false)
 let buildStatusPollTimer = null
+let graphSettingsRequestSeq = 0
+let graphSettingsLoadPromise = null
+let graphSettingsLoadKbId = ''
 
 const extractorTypeOptions = [
   {
@@ -499,9 +517,14 @@ const toggleBuildPanel = () => {
   showSettings.value = false
 }
 
-const toggleSettingsPanel = () => {
-  showSettings.value = !showSettings.value
+const toggleSettingsPanel = async () => {
+  const opening = !showSettings.value
+  showSettings.value = opening
   showBuildPanel.value = false
+  if (opening) {
+    await loadGraphSettings()
+    Object.assign(settingsForm, subgraphParams)
+  }
 }
 
 const openGraphImport = () => {
@@ -588,6 +611,63 @@ let graphLoadRequestSeq = 0
 
 const getErrorDetail = (e, fallback) => {
   return e?.response?.data?.detail || e?.response?.data?.message || e?.message || fallback
+}
+
+const normalizeGraphViewSettings = (value = {}) => ({
+  maxNodes: Math.min(1000, Math.max(10, Number(value.max_nodes) || 100)),
+  maxDepth: Math.min(5, Math.max(1, Number(value.max_depth) || 2)),
+  excludeChunk: typeof value.exclude_chunk === 'boolean' ? value.exclude_chunk : true
+})
+
+const resetGraphViewSettings = () => {
+  Object.assign(subgraphParams, DEFAULT_GRAPH_VIEW_SETTINGS)
+  Object.assign(settingsForm, DEFAULT_GRAPH_VIEW_SETTINGS)
+}
+
+const loadGraphSettings = async (force = false) => {
+  const currentDatabaseId = kbId.value
+  if (!currentDatabaseId || !isGraphSupported.value) return false
+  if (!force && graphSettingsLoadedKbId.value === currentDatabaseId) return true
+  if (!force && graphSettingsLoadPromise && graphSettingsLoadKbId === currentDatabaseId) {
+    return graphSettingsLoadPromise
+  }
+
+  const requestSeq = ++graphSettingsRequestSeq
+  graphSettingsLoading.value = true
+  graphSettingsLoadKbId = currentDatabaseId
+  const request = (async () => {
+    try {
+      const response = await unifiedApi.getViewSettings(currentDatabaseId)
+      if (requestSeq !== graphSettingsRequestSeq || currentDatabaseId !== kbId.value) return false
+      const settings = normalizeGraphViewSettings(response?.data)
+      Object.assign(subgraphParams, settings)
+      Object.assign(settingsForm, settings)
+      graphSettingsLoadedKbId.value = currentDatabaseId
+      return true
+    } catch (e) {
+      console.error('Failed to load graph view settings:', e)
+      if (requestSeq === graphSettingsRequestSeq && currentDatabaseId === kbId.value) {
+        resetGraphViewSettings()
+        graphSettingsLoadedKbId.value = currentDatabaseId
+        message.warning('读取图谱设置失败，已暂时使用默认值')
+      }
+      return false
+    } finally {
+      if (requestSeq === graphSettingsRequestSeq) {
+        graphSettingsLoading.value = false
+      }
+    }
+  })()
+
+  graphSettingsLoadPromise = request
+  try {
+    return await request
+  } finally {
+    if (graphSettingsLoadPromise === request) {
+      graphSettingsLoadPromise = null
+      graphSettingsLoadKbId = ''
+    }
+  }
 }
 
 const loadGraphBuildStatus = async () => {
@@ -722,6 +802,10 @@ const resetGraphBuild = async () => {
 const loadGraph = async () => {
   if (!kbId.value || !isGraphSupported.value) return
 
+  const requestedDatabaseId = kbId.value
+  await loadGraphSettings()
+  if (requestedDatabaseId !== kbId.value || !isGraphSupported.value) return
+
   const requestSeq = ++graphLoadRequestSeq
   const currentDatabaseId = kbId.value
   graph.fetching = true
@@ -756,9 +840,30 @@ const loadGraph = async () => {
   }
 }
 
-const applySettings = () => {
-  showSettings.value = false
-  loadGraph()
+const applySettings = async () => {
+  if (!kbId.value || graphSettingsSaving.value) return
+  const currentDatabaseId = kbId.value
+  graphSettingsSaving.value = true
+  try {
+    const response = await unifiedApi.updateViewSettings(currentDatabaseId, {
+      max_nodes: settingsForm.maxNodes,
+      max_depth: settingsForm.maxDepth,
+      exclude_chunk: settingsForm.excludeChunk
+    })
+    if (currentDatabaseId !== kbId.value) return
+    const settings = normalizeGraphViewSettings(response?.data)
+    Object.assign(subgraphParams, settings)
+    Object.assign(settingsForm, settings)
+    graphSettingsLoadedKbId.value = currentDatabaseId
+    showSettings.value = false
+    message.success(response?.message || '图谱设置已保存并全局应用')
+    await loadGraph()
+  } catch (e) {
+    console.error('Failed to save graph view settings:', e)
+    message.error(getErrorDetail(e, '保存图谱设置失败'))
+  } finally {
+    graphSettingsSaving.value = false
+  }
 }
 
 const onSearch = () => {
@@ -803,6 +908,12 @@ watch(
 watch(kbId, () => {
   graphStatusRequestSeq += 1
   graphLoadRequestSeq += 1
+  graphSettingsRequestSeq += 1
+  graphSettingsLoadedKbId.value = ''
+  graphSettingsLoadPromise = null
+  graphSettingsLoadKbId = ''
+  graphSettingsLoading.value = false
+  resetGraphViewSettings()
   graphLoaded.value = false
   graph.clearGraph()
   graphBuildStatus.value = null
@@ -816,6 +927,9 @@ watch(kbId, () => {
 
 watch(isGraphSupported, (supported) => {
   if (!supported) {
+    graphSettingsRequestSeq += 1
+    graphSettingsLoadedKbId.value = ''
+    resetGraphViewSettings()
     graphLoaded.value = false
     graph.clearGraph()
     graphBuildStatus.value = null

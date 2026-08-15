@@ -1,4 +1,4 @@
-import { apiGet } from './base'
+import { apiGet, apiPut } from './base'
 
 export const graphApi = {
   getGraphs: async () => {
@@ -27,6 +27,24 @@ export const graphApi = {
     })
 
     return await apiGet(`/api/graph/subgraph?${queryParams.toString()}`, {}, true)
+  },
+
+  getViewSettings: async (kb_id) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+
+    const queryParams = new URLSearchParams({ kb_id })
+    return await apiGet(`/api/graph/settings?${queryParams.toString()}`, {}, true)
+  },
+
+  updateViewSettings: async (kb_id, settings) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+
+    const queryParams = new URLSearchParams({ kb_id })
+    return await apiPut(`/api/graph/settings?${queryParams.toString()}`, settings, {}, true)
   },
 
   getStats: async (kb_id) => {
