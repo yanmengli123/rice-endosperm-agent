@@ -180,6 +180,13 @@ class AgentRepository:
     async def ensure_default_agent(self, *, created_by: str | None = None) -> Agent:
         agent = await self.get_by_slug(DEFAULT_AGENT_SLUG)
         if agent:
+            from yuxi.repositories.knowledge_scope_repository import KnowledgeScopeRepository
+
+            await KnowledgeScopeRepository(self.db).ensure_agent_config(
+                agent_slug=DEFAULT_AGENT_SLUG,
+                scope_mode="INHERIT_GLOBAL",
+                actor_uid=created_by,
+            )
             needs_update = False
             if getattr(agent, "name", None) != DEFAULT_AGENT_NAME:
                 agent.name = DEFAULT_AGENT_NAME
@@ -203,6 +210,8 @@ class AgentRepository:
                 agent.updated_at = utc_now_naive()
                 await self.db.commit()
                 await self.db.refresh(agent)
+            else:
+                await self.db.commit()
             return agent
 
         agent = Agent(
@@ -222,6 +231,13 @@ class AgentRepository:
             updated_at=utc_now_naive(),
         )
         self.db.add(agent)
+        from yuxi.repositories.knowledge_scope_repository import KnowledgeScopeRepository
+
+        await KnowledgeScopeRepository(self.db).ensure_agent_config(
+            agent_slug=agent.slug,
+            scope_mode="INHERIT_GLOBAL",
+            actor_uid=created_by,
+        )
         await self.db.commit()
         await self.db.refresh(agent)
         return agent
@@ -460,6 +476,13 @@ class AgentRepository:
             updated_at=utc_now_naive(),
         )
         self.db.add(agent)
+        from yuxi.repositories.knowledge_scope_repository import KnowledgeScopeRepository
+
+        await KnowledgeScopeRepository(self.db).ensure_agent_config(
+            agent_slug=agent.slug,
+            scope_mode="INHERIT_GLOBAL",
+            actor_uid=created_by,
+        )
         await self.db.commit()
         await self.db.refresh(agent)
         if is_default:

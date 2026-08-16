@@ -262,6 +262,7 @@ const saveAgent = async () => {
         payload.config_json = { context: agentStore.agentConfig }
       }
       const updated = await agentStore.updateAgentProfile(editingAgentId.value, payload)
+      await runtimeConfigFormRef.value?.saveKnowledgeScopeConfig?.()
       agentStore.originalAgentConfig = { ...agentStore.agentConfig }
       emit('saved', { mode: 'edit', agent: updated })
       message.success('智能体已保存')

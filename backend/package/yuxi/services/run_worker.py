@@ -332,6 +332,7 @@ async def process_agent_run(ctx, run_id: str):
         "has_image": bool(image_content),
         "attachment_file_ids": input_metadata.get("attachment_file_ids") or [],
         "model_spec": payload.get("model_spec"),
+        "knowledge_scope_snapshot": payload.get("knowledge_scope_snapshot"),
         "run_type": run_type,
         "created_by_run_id": run.created_by_run_id,
     }

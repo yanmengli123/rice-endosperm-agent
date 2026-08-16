@@ -1,4 +1,13 @@
-import { apiGet, apiAdminGet, apiAdminPost, apiAdminPut, apiAdminDelete, apiRequest } from './base'
+import {
+  apiGet,
+  apiPost,
+  apiPut,
+  apiAdminGet,
+  apiAdminPost,
+  apiAdminPut,
+  apiAdminDelete,
+  apiRequest
+} from './base'
 
 /**
  * 知识库管理API模块
@@ -86,6 +95,34 @@ export const databaseApi = {
   getAccessibleDatabases: async () => {
     return apiGet('/api/knowledge/databases/accessible')
   }
+}
+
+// =============================================================================
+// === 默认问答范围（Knowledge Scope） ===
+// =============================================================================
+
+export const knowledgeScopeApi = {
+  getDefaultScope: async () => apiAdminGet('/api/knowledge/scopes/default-qa'),
+
+  getDefaultScopeHistory: async (limit = 100) =>
+    apiAdminGet(`/api/knowledge/scopes/default-qa/history?limit=${limit}`),
+
+  replayDefaultScopeVersion: async (version) =>
+    apiAdminGet(`/api/knowledge/scopes/default-qa/versions/${version}`),
+
+  updateDefaultScopeMember: async (kbId, data) =>
+    apiAdminPut(`/api/knowledge/scopes/default-qa/members/${kbId}`, data),
+
+  resolve: async (agentSlug, sessionKbIds = null) =>
+    apiPost('/api/knowledge/scopes/resolve', {
+      agent_slug: agentSlug,
+      session_kb_ids: sessionKbIds
+    }),
+
+  getAgentConfig: async (agentSlug) => apiGet(`/api/knowledge/scopes/agents/${agentSlug}`),
+
+  updateAgentConfig: async (agentSlug, data) =>
+    apiPut(`/api/knowledge/scopes/agents/${agentSlug}`, data)
 }
 
 // =============================================================================
@@ -341,8 +378,7 @@ export const graphImportApi = {
   execute: async (kbId, importId, resolutions = {}) =>
     apiAdminPost(graphImportUrl(kbId, importId, 'execute'), { resolutions }),
 
-  rollback: async (kbId, importId) =>
-    apiAdminPost(graphImportUrl(kbId, importId, 'rollback'), {})
+  rollback: async (kbId, importId) => apiAdminPost(graphImportUrl(kbId, importId, 'rollback'), {})
 }
 
 // =============================================================================

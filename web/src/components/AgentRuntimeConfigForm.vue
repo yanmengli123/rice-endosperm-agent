@@ -13,6 +13,73 @@
         >
           <!-- 配置表单 -->
           <a-form :model="agentConfig" layout="vertical" class="config-form">
+            <section v-if="activeSegment === 'other'" class="knowledge-scope-config">
+              <div class="knowledge-scope-heading">
+                <div>
+                  <div class="knowledge-scope-title">知识问答范围</div>
+                  <p>最终范围 = 用户有权访问 ∩ 智能体基础范围 ∩ 会话缩小范围</p>
+                </div>
+                <a-tag color="green">权限安全交集</a-tag>
+              </div>
+
+              <a-spin :spinning="knowledgeScopeLoading">
+                <a-form-item label="范围策略">
+                  <a-select
+                    v-model:value="knowledgeScopeConfig.scope_mode"
+                    :disabled="isReadOnlyConfig"
+                    @change="markKnowledgeScopeDirty"
+                  >
+                    <a-select-option
+                      v-for="option in knowledgeScopeModeOptions"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </a-select-option>
+                  </a-select>
+                  <p class="config-description">{{ selectedScopeModeDescription }}</p>
+                </a-form-item>
+
+                <a-form-item label="检索边界">
+                  <a-radio-group
+                    v-model:value="knowledgeScopeConfig.retrieval_mode"
+                    :disabled="isReadOnlyConfig"
+                    @change="handleRetrievalModeChange"
+                  >
+                    <a-radio-button value="KB_ONLY">仅知识库</a-radio-button>
+                    <a-radio-button value="KB_PLUS_WEB">知识库 + Web</a-radio-button>
+                  </a-radio-group>
+                  <p class="config-description">
+                    “仅知识库”会在运行时代码层移除 Web 搜索工具；模型无法自行绕过。
+                  </p>
+                </a-form-item>
+
+                <a-form-item
+                  v-if="knowledgeScopeConfig.retrieval_mode === 'KB_PLUS_WEB'"
+                  label="允许 Web 检索"
+                >
+                  <a-switch
+                    v-model:checked="knowledgeScopeConfig.allow_web"
+                    :disabled="isReadOnlyConfig"
+                    @change="markKnowledgeScopeDirty"
+                  />
+                </a-form-item>
+
+                <a-alert
+                  v-if="
+                    knowledgeScopeConfig.scope_mode === 'CUSTOM' ||
+                    knowledgeScopeConfig.scope_mode === 'GLOBAL_PLUS_CUSTOM'
+                  "
+                  type="info"
+                  show-icon
+                  message="自定义部分来自本页工具配置中的知识库选择；全局部分由“智能体扩展 → 知识库”卡片控制。"
+                />
+                <div v-if="knowledgeScopeDirty" class="knowledge-scope-unsaved">
+                  知识范围有未保存更改，将随“保存智能体”一并应用。
+                </div>
+              </a-spin>
+            </section>
+
             <a-alert
               v-if="isEmptyConfig"
               type="warning"
@@ -387,11 +454,12 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import { AlertTriangle, Check, Plus, Search, RotateCw, RotateCcw, Settings } from 'lucide-vue-next'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
+import { knowledgeScopeApi } from '@/apis/knowledge_api'
 import { useAgentStore } from '@/stores/agent'
 import {
   getAgentConfigOptionDescription as getOptionDescription,
@@ -437,6 +505,95 @@ const segmentOptions = [
 const activeSegment = computed(() => (props.showSegmented ? currentSegment.value : props.segment))
 const isToolResourceKind = (kind) => isDefaultAllAgentResourceKind(kind)
 const KNOWLEDGE_BASE_SKILL_SLUG = 'knowledge-base'
+const knowledgeScopeLoading = ref(false)
+const knowledgeScopeDirty = ref(false)
+const knowledgeScopeConfig = ref({
+  scope_mode: 'LEGACY',
+  retrieval_mode: 'KB_ONLY',
+  allow_web: false
+})
+const knowledgeScopeModeOptions = [
+  {
+    value: 'INHERIT_GLOBAL',
+    label: '继承全局问答范围',
+    description: '只使用知识库卡片中已纳入全局问答的知识库；推荐用于默认问答智能体。'
+  },
+  {
+    value: 'CUSTOM',
+    label: '仅使用智能体自定义范围',
+    description: '只使用当前智能体工具配置中选择的知识库，不继承全局范围。'
+  },
+  {
+    value: 'GLOBAL_PLUS_CUSTOM',
+    label: '全局范围 + 智能体自定义',
+    description: '使用全局范围与当前智能体已选知识库的并集，随后再与用户权限取交集。'
+  },
+  {
+    value: 'DISABLED',
+    label: '禁用知识库检索',
+    description: '该智能体不读取任何知识库；适合纯工具或纯对话智能体。'
+  },
+  {
+    value: 'LEGACY',
+    label: '兼容旧配置',
+    description: '继续沿用历史 knowledges 配置语义，仅用于平滑迁移旧智能体。'
+  }
+]
+const selectedScopeModeDescription = computed(
+  () =>
+    knowledgeScopeModeOptions.find((item) => item.value === knowledgeScopeConfig.value.scope_mode)
+      ?.description || ''
+)
+
+const markKnowledgeScopeDirty = () => {
+  knowledgeScopeDirty.value = true
+}
+
+const handleRetrievalModeChange = () => {
+  if (knowledgeScopeConfig.value.retrieval_mode === 'KB_ONLY') {
+    knowledgeScopeConfig.value.allow_web = false
+  } else if (!knowledgeScopeConfig.value.allow_web) {
+    knowledgeScopeConfig.value.allow_web = true
+  }
+  markKnowledgeScopeDirty()
+}
+
+const loadKnowledgeScopeConfig = async (agentSlug) => {
+  knowledgeScopeDirty.value = false
+  if (!agentSlug) return
+  knowledgeScopeLoading.value = true
+  try {
+    const result = await knowledgeScopeApi.getAgentConfig(agentSlug)
+    knowledgeScopeConfig.value = {
+      scope_mode: result?.config?.scope_mode || 'LEGACY',
+      retrieval_mode: result?.config?.retrieval_mode || 'KB_ONLY',
+      allow_web: Boolean(result?.config?.allow_web)
+    }
+  } catch (error) {
+    console.error('加载智能体知识范围失败:', error)
+    message.error(error.message || '加载智能体知识范围失败')
+  } finally {
+    knowledgeScopeLoading.value = false
+  }
+}
+
+const saveKnowledgeScopeConfig = async () => {
+  if (!knowledgeScopeDirty.value || isReadOnlyConfig.value || !selectedAgentId.value) return
+  const retrievalMode = knowledgeScopeConfig.value.retrieval_mode || 'KB_ONLY'
+  const result = await knowledgeScopeApi.updateAgentConfig(selectedAgentId.value, {
+    scope_mode: knowledgeScopeConfig.value.scope_mode,
+    retrieval_mode: retrievalMode,
+    allow_web: retrievalMode === 'KB_PLUS_WEB' && Boolean(knowledgeScopeConfig.value.allow_web)
+  })
+  knowledgeScopeConfig.value = {
+    scope_mode: result?.config?.scope_mode || knowledgeScopeConfig.value.scope_mode,
+    retrieval_mode: result?.config?.retrieval_mode || retrievalMode,
+    allow_web: Boolean(result?.config?.allow_web)
+  }
+  knowledgeScopeDirty.value = false
+}
+
+watch(selectedAgentId, (agentSlug) => loadKnowledgeScopeConfig(agentSlug), { immediate: true })
 
 const isEmptyConfig = computed(() => {
   return !selectedAgentId.value || Object.keys(configurableItems.value).length === 0
@@ -776,7 +933,7 @@ const validateAndFilterConfig = () => {
   return validatedConfig
 }
 
-defineExpose({ validateAndFilterConfig })
+defineExpose({ validateAndFilterConfig, saveKnowledgeScopeConfig })
 </script>
 
 <style lang="less" scoped>
@@ -976,6 +1133,42 @@ defineExpose({ validateAndFilterConfig })
         }
       }
     }
+  }
+}
+
+.knowledge-scope-config {
+  padding: 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--gray-200);
+  border-radius: 12px;
+  background: var(--gray-20);
+
+  .knowledge-scope-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+
+    .knowledge-scope-title {
+      color: var(--gray-900);
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    p {
+      margin: 4px 0 0;
+      color: var(--gray-600);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+  }
+
+  .knowledge-scope-unsaved {
+    margin-top: 12px;
+    color: var(--main-700);
+    font-size: 12px;
+    font-weight: 500;
   }
 }
 

@@ -23,6 +23,11 @@
             {{ getKbTypeLabel(t) }}
           </a-select-option>
         </a-select>
+        <a-select v-model:value="scopeFilter" style="width: 140px" placeholder="默认问答范围">
+          <a-select-option value="all">全部范围状态</a-select-option>
+          <a-select-option value="included">已纳入问答</a-select-option>
+          <a-select-option value="excluded">未纳入问答</a-select-option>
+        </a-select>
       </template>
       <template #actions>
         <a-button
@@ -177,6 +182,95 @@
       </template>
     </a-modal>
 
+    <a-modal
+      :open="scopeModal.open"
+      title="默认问答范围"
+      width="680px"
+      :confirm-loading="scopeModal.saving"
+      destroyOnClose
+      @ok="saveScopeMember"
+      @cancel="closeScopeModal"
+    >
+      <div v-if="scopeModal.database" class="scope-config">
+        <div class="scope-summary">
+          <div>
+            <div class="scope-kb-name">{{ scopeModal.database.name }}</div>
+            <div class="scope-kb-id">{{ scopeModal.database.kb_id }}</div>
+          </div>
+          <a-tag :color="healthTag(scopeForm.health_status).color">
+            {{ healthTag(scopeForm.health_status).label }}
+          </a-tag>
+        </div>
+
+        <a-alert
+          type="info"
+          show-icon
+          message="纳入问答只改变检索策略，不会重新索引、删除文件或修改图谱。最终范围仍会与用户权限取交集。"
+        />
+
+        <div class="scope-section scope-enabled-row">
+          <div>
+            <div class="scope-section-title">纳入默认问答范围</div>
+            <div class="scope-section-hint">启用后，继承默认范围的智能体可检索此知识库。</div>
+          </div>
+          <a-switch v-model:checked="scopeForm.enabled" />
+        </div>
+
+        <div class="scope-section">
+          <div class="scope-section-title">检索通道</div>
+          <div class="scope-option-grid">
+            <label class="scope-option">
+              <span><FileText :size="16" /> 文档 Chunk</span>
+              <a-switch v-model:checked="scopeForm.document_enabled" size="small" />
+            </label>
+            <label class="scope-option">
+              <span><Network :size="16" /> 知识图谱</span>
+              <a-switch v-model:checked="scopeForm.graph_enabled" size="small" />
+            </label>
+            <label class="scope-option">
+              <span><TableProperties :size="16" /> 结构化证据</span>
+              <a-switch v-model:checked="scopeForm.structured_enabled" size="small" />
+            </label>
+          </div>
+        </div>
+
+        <div class="scope-section">
+          <div class="scope-section-title">科研证据策略</div>
+          <div class="evidence-options">
+            <a-checkbox v-model:checked="scopeForm.evidence_strict">STRICT 严格证据</a-checkbox>
+            <a-checkbox v-model:checked="scopeForm.evidence_supporting"
+              >SUPPORTING 支持证据</a-checkbox
+            >
+            <a-checkbox v-model:checked="scopeForm.evidence_candidate"
+              >CANDIDATE 候选证据</a-checkbox
+            >
+            <a-checkbox v-model:checked="scopeForm.evidence_rejected">REJECTED 否定证据</a-checkbox>
+          </div>
+          <a-alert
+            v-if="scopeForm.evidence_candidate || scopeForm.evidence_rejected"
+            type="warning"
+            show-icon
+            message="候选或否定证据只用于展示不确定性与冲突，不能自动升级为已证实结论。"
+          />
+        </div>
+
+        <div class="scope-section priority-row">
+          <div>
+            <div class="scope-section-title">检索优先级</div>
+            <div class="scope-section-hint">数值越小越优先；全局重排仍会综合相关度和证据等级。</div>
+          </div>
+          <a-input-number v-model:value="scopeForm.priority" :min="0" :max="1000" />
+        </div>
+
+        <div class="scope-health-grid">
+          <div v-for="item in healthMetrics" :key="item.label" class="scope-health-item">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.value }}</strong>
+          </div>
+        </div>
+      </div>
+    </a-modal>
+
     <!-- 加载状态 -->
     <div v-if="dbState.listLoading" class="loading-container">
       <a-spin size="large" />
@@ -243,6 +337,15 @@
             </a-menu-item>
           </a-menu>
         </template>
+        <template #footer>
+          <div class="scope-card-state">
+            <span class="scope-state-dot" :class="scopeStateClass(database)"></span>
+            <span>{{ scopeStateLabel(database) }}</span>
+          </div>
+          <a-button size="small" @click.stop="openScopeModal(database)">
+            <Settings2 :size="14" /> 配置问答范围
+          </a-button>
+        </template>
       </InfoCard>
     </ExtensionCardGrid>
   </div>
@@ -255,9 +358,18 @@ import { storeToRefs } from 'pinia'
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
-import { Copy, Pencil, Plus, Trash2 } from 'lucide-vue-next'
+import {
+  Copy,
+  FileText,
+  Network,
+  Pencil,
+  Plus,
+  Settings2,
+  TableProperties,
+  Trash2
+} from 'lucide-vue-next'
 import { message, Modal } from 'ant-design-vue'
-import { databaseApi, typeApi } from '@/apis/knowledge_api'
+import { databaseApi, knowledgeScopeApi, typeApi } from '@/apis/knowledge_api'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
@@ -297,6 +409,25 @@ const knowledgeViewItems = [
 const kbTypes = computed(() => Object.keys(supportedKbTypes.value))
 const searchQuery = ref('')
 const typeFilter = ref(null)
+const scopeFilter = ref('all')
+const scopeState = reactive({ scope: null, members: new Map(), loading: false })
+
+const emptyScopeForm = () => ({
+  enabled: false,
+  document_enabled: true,
+  graph_enabled: true,
+  structured_enabled: true,
+  evidence_strict: true,
+  evidence_supporting: true,
+  evidence_candidate: false,
+  evidence_rejected: false,
+  priority: 100,
+  health_status: 'VALIDATING',
+  health_details: {}
+})
+
+const scopeForm = reactive(emptyScopeForm())
+const scopeModal = reactive({ open: false, saving: false, database: null })
 
 const filteredDatabases = computed(() => {
   let list = databases.value
@@ -311,8 +442,124 @@ const filteredDatabases = computed(() => {
   if (typeFilter.value) {
     list = list.filter((db) => (db.kb_type || 'milvus') === typeFilter.value)
   }
+  if (scopeFilter.value !== 'all') {
+    list = list.filter((db) => {
+      const included = Boolean(scopeState.members.get(db.kb_id)?.enabled)
+      return scopeFilter.value === 'included' ? included : !included
+    })
+  }
   return list
 })
+
+const loadDefaultScope = async () => {
+  scopeState.loading = true
+  try {
+    const data = await knowledgeScopeApi.getDefaultScope()
+    scopeState.scope = data.scope || null
+    scopeState.members = new Map((data.members || []).map((item) => [item.kb_id, item]))
+  } catch (error) {
+    message.error(error.message || '默认问答范围加载失败')
+  } finally {
+    scopeState.loading = false
+  }
+}
+
+const healthTag = (status) => {
+  const map = {
+    HEALTHY: { label: '健康', color: 'green' },
+    DEGRADED: { label: '部分可用', color: 'orange' },
+    UNAVAILABLE: { label: '不可用', color: 'red' },
+    VALIDATING: { label: '待验证', color: 'blue' }
+  }
+  return map[status] || map.VALIDATING
+}
+
+const scopeStateLabel = (database) => {
+  const member = scopeState.members.get(database.kb_id)
+  if (!member?.enabled) return '未纳入默认问答'
+  return `已纳入 · ${healthTag(member.health_status).label}`
+}
+
+const scopeStateClass = (database) => {
+  const member = scopeState.members.get(database.kb_id)
+  if (!member?.enabled) return 'is-off'
+  if (member.health_status === 'HEALTHY') return 'is-healthy'
+  if (member.health_status === 'UNAVAILABLE') return 'is-error'
+  return 'is-warning'
+}
+
+const openScopeModal = (database) => {
+  const member = scopeState.members.get(database.kb_id) || emptyScopeForm()
+  Object.assign(scopeForm, emptyScopeForm(), member)
+  scopeModal.database = database
+  scopeModal.open = true
+}
+
+const closeScopeModal = () => {
+  scopeModal.open = false
+  scopeModal.database = null
+  Object.assign(scopeForm, emptyScopeForm())
+}
+
+const healthMetrics = computed(() => {
+  const details = scopeForm.health_details || {}
+  return [
+    { label: '文件', value: details.files ?? '—' },
+    { label: 'Chunks', value: details.chunks ?? '—' },
+    { label: '实体', value: details.entities ?? '—' },
+    { label: '关系', value: details.triples ?? '—' },
+    { label: '证据', value: details.evidence ?? '—' }
+  ]
+})
+
+const saveScopeMember = async () => {
+  if (!scopeModal.database || !scopeState.scope) return
+  if (
+    scopeForm.enabled &&
+    !scopeForm.document_enabled &&
+    !scopeForm.graph_enabled &&
+    !scopeForm.structured_enabled
+  ) {
+    message.warning('纳入问答时至少启用一个检索通道')
+    return
+  }
+  scopeModal.saving = true
+  try {
+    const payload = {
+      expected_version: scopeState.scope.version,
+      enabled: scopeForm.enabled,
+      document_enabled: scopeForm.document_enabled,
+      graph_enabled: scopeForm.graph_enabled,
+      structured_enabled: scopeForm.structured_enabled,
+      evidence_strict: scopeForm.evidence_strict,
+      evidence_supporting: scopeForm.evidence_supporting,
+      evidence_candidate: scopeForm.evidence_candidate,
+      evidence_rejected: scopeForm.evidence_rejected,
+      priority: scopeForm.priority
+    }
+    const data = await knowledgeScopeApi.updateDefaultScopeMember(
+      scopeModal.database.kb_id,
+      payload
+    )
+    scopeState.scope = data.scope
+    scopeState.members.set(scopeModal.database.kb_id, {
+      ...data.member,
+      name: scopeModal.database.name,
+      kb_type: scopeModal.database.kb_type
+    })
+    message.success(scopeForm.enabled ? '已纳入默认问答范围' : '已从默认问答范围停用')
+    closeScopeModal()
+  } catch (error) {
+    if (error.response?.status === 409) {
+      await loadDefaultScope()
+      message.warning('范围配置已被其他管理员更新，已刷新到最新版本，请重新确认')
+    } else {
+      message.error(error.message || '问答范围保存失败')
+    }
+  } finally {
+    scopeModal.saving = false
+  }
+}
 
 const state = reactive({
   openNewDatabaseModel: false
@@ -602,6 +849,7 @@ onMounted(() => {
   loadChunkPresetOptions()
   loadSupportedKbTypes()
   databaseStore.loadDatabases()
+  loadDefaultScope()
 })
 
 defineExpose({
@@ -613,6 +861,139 @@ defineExpose({
 .database-container {
   :deep(.info-card-icon) {
     background: var(--gray-0);
+  }
+}
+
+.scope-config {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.scope-summary,
+.scope-enabled-row,
+.priority-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.scope-kb-name,
+.scope-section-title {
+  color: var(--gray-900);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.scope-kb-id,
+.scope-section-hint {
+  margin-top: 3px;
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+.scope-kb-id {
+  font-family: monospace;
+}
+
+.scope-section {
+  padding: 14px;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  background: var(--gray-10);
+}
+
+.scope-option-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.scope-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--gray-150);
+  border-radius: 6px;
+  background: var(--gray-0);
+
+  > span {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--gray-700);
+    font-size: 12px;
+  }
+}
+
+.evidence-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.scope-health-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.scope-health-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px;
+  border-radius: 6px;
+  background: var(--gray-50);
+  color: var(--gray-500);
+  font-size: 11px;
+
+  strong {
+    color: var(--gray-900);
+    font-size: 16px;
+  }
+}
+
+.scope-card-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--gray-600);
+  font-size: 12px;
+}
+
+.scope-state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gray-300);
+
+  &.is-healthy {
+    background: var(--color-success-500);
+  }
+
+  &.is-warning {
+    background: var(--color-warning-500);
+  }
+
+  &.is-error {
+    background: var(--color-error-500);
+  }
+}
+
+@media (max-width: 768px) {
+  .scope-option-grid,
+  .evidence-options {
+    grid-template-columns: 1fr;
+  }
+
+  .scope-health-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

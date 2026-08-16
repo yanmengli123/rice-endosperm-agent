@@ -36,9 +36,10 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
         slug="knowledge-base",
         source_dir=_SKILLS_ROOT / "knowledge-base",
         description="使用稻芯智析知识库进行检索、打开文档、文档内定位和查看思维导图。",
-        version="2026.06.24",
+        version="2026.08.16",
         tool_dependencies=(
             "list_kbs",
+            "query_knowledge_scope",
             "query_kb",
             "find_kb_document",
             "open_kb_document",

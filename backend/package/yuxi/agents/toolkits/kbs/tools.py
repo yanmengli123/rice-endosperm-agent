@@ -157,6 +157,36 @@ OpenKBDocumentInput = OpenInputSchema
 FindKBDocumentInput = FindInputSchema
 
 
+class QueryKnowledgeScopeInput(BaseModel):
+    query_text: str = Field(description="面向当前问题提炼的检索语句；系统会同时检索范围内所有知识源")
+    top_k: int = Field(default=12, ge=1, le=50, description="全局去重和重排后最多返回的证据数量")
+
+
+@tool(category="knowledge", tags=["知识库", "Graph-RAG"], args_schema=QueryKnowledgeScopeInput)
+async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolRuntime = None) -> Any:
+    """在当前运行已冻结的知识范围中统一检索文档、图谱和结构化科研证据。
+
+    这是回答知识问题的首选入口。它不会接受 kb_id，因此模型不能绕过 ScopeResolver 扩大范围；
+    返回的 evidence_id 用于关键科研论断引用。
+    """
+    if not str(query_text or "").strip():
+        return "请提供查询内容"
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    snapshot = getattr(context, "_effective_knowledge_scope", None) if context is not None else None
+    if not isinstance(snapshot, dict):
+        return {
+            "error": "KNOWLEDGE_SCOPE_NOT_BOUND",
+            "message": "当前运行没有绑定知识范围快照，为避免越权已拒绝检索。",
+        }
+    from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway
+
+    return await query_knowledge_scope_gateway(
+        query_text=str(query_text).strip(),
+        scope_snapshot=snapshot,
+        top_k=top_k,
+    )
+
+
 async def _resolve_visible_knowledge_bases_for_query(runtime: ToolRuntime | None) -> list[dict[str, Any]]:
     if runtime is None:
         return []
@@ -462,12 +492,21 @@ async def search_file(
 def get_common_kb_tools() -> list:
     """获取通用知识库工具列表
 
-    返回 6 个通用工具：
+    返回 7 个通用工具：
     - list_kbs: 列出用户可访问的知识库
     - get_mindmap: 获取指定知识库的思维导图
     - query_kb: 在指定知识库中检索
     - find_kb_document: 在指定文件内定位关键词或正则模式
     - open_kb_document: 按 file_id 分段打开知识库文档
     - search_file: 搜索知识库中的文件
+    - query_knowledge_scope: 在冻结的问答范围内统一检索文档、图谱和结构化证据
     """
-    return [list_kbs, get_mindmap, query_kb, find_kb_document, open_kb_document, search_file]
+    return [
+        list_kbs,
+        get_mindmap,
+        query_knowledge_scope,
+        query_kb,
+        find_kb_document,
+        open_kb_document,
+        search_file,
+    ]

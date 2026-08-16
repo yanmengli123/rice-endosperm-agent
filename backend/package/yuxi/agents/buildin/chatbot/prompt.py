@@ -85,12 +85,25 @@ TODO_MID_PROMPT = """
 每个待办任务名称必须简短，控制在 20 个中文汉字以内。
 """
 
+KNOWLEDGE_SCOPE_PROMPT = """
+<| 科研知识范围与证据约束 |>
+- 当前问题只能使用运行时知识范围中返回的 Evidence；不得把未纳入、无权限或被会话缩小排除的知识源当作依据。
+- 使用 query_knowledge_scope 进行跨知识库检索，并在关键科研论断后标注工具返回的 evidence_id。
+- STRICT、SUPPORTING 是默认可用证据；CANDIDATE 只有在范围策略显式允许时才可使用，
+  并必须标为候选，不得写成已证实事实；REJECTED 不得作为支持证据。
+- “结合/互作”不等于“激活/抑制”；Gene 与 Allele/Mutant 不得混为同一实体。
+- 结构化字段与原文 quote 冲突时，必须保留冲突并降低结论强度，不得静默覆盖。
+- 没有足够范围内证据时明确回答证据不足，不得用模型记忆补全科研事实。
+"""
+
 
 def build_prompt_with_context(context):
     current_date = f"当前日期：{shanghai_now().strftime('%Y-%m-%d')}"
     prompt_sections = [current_date, DOMAIN_SYSTEM_PROMPT.strip(), PROMPT.strip()]
     if context.system_prompt:
         prompt_sections.append(context.system_prompt.strip())
+    if isinstance(getattr(context, "_effective_knowledge_scope", None), dict):
+        prompt_sections.append(KNOWLEDGE_SCOPE_PROMPT.strip())
     # 身份约束放在自定义提示词之后，避免运行时配置意外覆盖品牌身份。
     prompt_sections.append(IDENTITY_SYSTEM_PROMPT.strip())
     return "\n\n".join(prompt_sections)

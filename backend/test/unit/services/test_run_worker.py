@@ -443,6 +443,18 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         del session
         calls.append("init_builtin_skills")
 
+    async def fake_ensure_builtin_ocr_provider_in_db(session):
+        del session
+        calls.append("ensure_builtin_ocr_provider_in_db")
+
+    async def fake_get_all_ocr_providers(session):
+        del session
+        calls.append("get_all_ocr_providers")
+        return []
+
+    def fake_rebuild_ocr_cache(_providers):
+        calls.append("rebuild_ocr_cache")
+
     def fake_start_runtime_sync():
         calls.append("start_runtime_sync")
 
@@ -453,6 +465,12 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
     monkeypatch.setattr(run_worker, "ensure_builtin_mcp_servers_in_db", fake_ensure_builtin_mcp_servers_in_db)
     monkeypatch.setattr(run_worker, "init_builtin_skills", fake_init_builtin_skills)
     monkeypatch.setattr(run_worker.sys_config, "start_runtime_sync", fake_start_runtime_sync)
+    monkeypatch.setattr(
+        "yuxi.services.ocr_provider_service.ensure_builtin_ocr_provider_in_db",
+        fake_ensure_builtin_ocr_provider_in_db,
+    )
+    monkeypatch.setattr("yuxi.services.ocr_provider_service.get_all_ocr_providers", fake_get_all_ocr_providers)
+    monkeypatch.setattr("yuxi.knowledge.parser.credential_cache.ocr_credential_cache.rebuild", fake_rebuild_ocr_cache)
 
     await run_worker._worker_startup({})
 
@@ -462,5 +480,8 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "ensure_business_schema",
         "ensure_builtin_mcp_servers_in_db",
         "init_builtin_skills",
+        "ensure_builtin_ocr_provider_in_db",
+        "get_all_ocr_providers",
+        "rebuild_ocr_cache",
         "start_runtime_sync",
     ]

@@ -37,6 +37,7 @@ from yuxi.services.langfuse_service import (
     flush_langfuse,
     get_trace_info,
 )
+from yuxi.services.knowledge_scope_service import resolve_effective_knowledge_scope
 from yuxi.services.subagent_run_service import serialize_subagent_run_state
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Agent, User
@@ -224,6 +225,39 @@ def _apply_subagent_runtime_context(input_context: dict, meta: dict | None) -> N
         input_context[key] = value
     # 标记为子智能体运行，供下游逻辑判断
     input_context["is_subagent_runtime"] = True
+
+
+async def _ensure_knowledge_scope_snapshot(*, db, user: User, agent_slug: str, meta: dict) -> dict:
+    snapshot = meta.get("knowledge_scope_snapshot")
+    if not isinstance(snapshot, dict):
+        snapshot = await resolve_effective_knowledge_scope(
+            db=db,
+            user=user,
+            agent_slug=agent_slug,
+        )
+        meta["knowledge_scope_snapshot"] = snapshot
+    return snapshot
+
+
+def _apply_knowledge_scope_snapshot(input_context: dict, snapshot: dict | None) -> None:
+    """把已解析快照绑定到 runtime；这里只能消费快照，不能再扩大范围。"""
+    if not isinstance(snapshot, dict):
+        return
+    input_context["knowledges"] = list(snapshot.get("effective_kb_ids") or [])
+    if not snapshot.get("allow_web", False):
+        input_context["tools"] = [
+            name
+            for name in (input_context.get("tools") or [])
+            if str(name).lower() not in {"tavily_search", "web_search", "search_web"}
+        ]
+        input_context["subagents"] = [
+            slug for slug in (input_context.get("subagents") or []) if str(slug).lower() != "web-search"
+        ]
+
+
+def _bind_knowledge_scope_to_context(context, snapshot: dict | None) -> None:
+    if isinstance(snapshot, dict):
+        setattr(context, "_effective_knowledge_scope", snapshot)
 
 
 def _stream_message_key(metadata: dict | None, namespace: list[str], thread_id: str | None) -> tuple[str, str]:
@@ -833,6 +867,12 @@ async def stream_agent_chat(
             "has_image": bool(image_content),
         }
     )
+    knowledge_scope_snapshot = await _ensure_knowledge_scope_snapshot(
+        db=db,
+        user=current_user,
+        agent_slug=agent_item.slug,
+        meta=meta,
+    )
 
     messages = [human_message]
     input_context = await build_agent_input_context(
@@ -844,7 +884,9 @@ async def stream_agent_chat(
     )
     _apply_model_override(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
+    _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     context = _build_agent_context(agent, input_context)
+    _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
     langfuse_run = _build_langfuse_run_context(
         current_user=current_user,
         thread_id=thread_id,
@@ -1146,6 +1188,12 @@ async def stream_agent_resume(
 
     meta["agent_slug"] = agent_item.slug
     meta["backend_id"] = agent_item.backend_id
+    knowledge_scope_snapshot = await _ensure_knowledge_scope_snapshot(
+        db=db,
+        user=current_user,
+        agent_slug=agent_item.slug,
+        meta=meta,
+    )
     input_context = await build_agent_input_context(
         agent_config or {},
         thread_id=thread_id,
@@ -1154,7 +1202,9 @@ async def stream_agent_resume(
         request_id=meta.get("request_id"),
     )
     _apply_model_override(input_context, meta)
+    _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     context = _build_agent_context(agent, input_context)
+    _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
     langfuse_run = _build_langfuse_run_context(
         current_user=current_user,
         thread_id=thread_id,
@@ -1377,7 +1427,11 @@ async def get_agent_state_view(
             model_spec = latest_run.input_payload.get("model_spec")
             if isinstance(model_spec, str) and model_spec.strip():
                 input_context["model"] = model_spec.strip()
+            knowledge_scope_snapshot = latest_run.input_payload.get("knowledge_scope_snapshot")
+            _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
         context = _build_agent_context(agent, input_context)
+        if latest_run and isinstance(latest_run.input_payload, dict):
+            _bind_knowledge_scope_to_context(context, latest_run.input_payload.get("knowledge_scope_snapshot"))
         state = await _read_checkpoint_state(agent, uid=current_uid, thread_id=thread_id, context=context)
         values = getattr(state, "values", {}) if state else {}
         response = {"agent_state": extract_agent_state(values)}

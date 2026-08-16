@@ -8,12 +8,66 @@ from fastapi import HTTPException
 import yuxi.services.agent_run_service as agent_run_service
 import yuxi.services.subagent_run_service as service_module
 from yuxi.services.input_message_service import build_chat_input_message
-from yuxi.services.subagent_run_service import SubagentRunBusy, SubagentRunService
+from yuxi.services.subagent_run_service import (
+    SubagentRunBusy,
+    SubagentRunService,
+    narrow_child_scope_to_parent,
+)
 from yuxi.utils.hash_utils import subagent_child_thread_id
 
 
 def make_child_thread_id(parent_thread_id: str, agent_slug: str, tool_call_id: str) -> str:
     return subagent_child_thread_id(parent_thread_id, agent_slug, tool_call_id)
+
+
+def test_child_scope_cannot_reenable_parent_capabilities():
+    parent = {
+        "scope_version": 7,
+        "effective_kb_ids": ["kb-rice"],
+        "allow_web": False,
+        "members": [
+            {
+                "kb_id": "kb-rice",
+                "document_enabled": False,
+                "graph_enabled": True,
+                "structured_enabled": True,
+                "evidence_strict": True,
+                "evidence_supporting": True,
+                "evidence_candidate": False,
+                "evidence_rejected": False,
+            }
+        ],
+    }
+    child = {
+        "scope_version": 9,
+        "effective_kb_ids": ["kb-rice", "kb-outside"],
+        "allow_web": True,
+        "retrieval_mode": "KB_PLUS_WEB",
+        "members": [
+            {
+                "kb_id": "kb-rice",
+                "document_enabled": True,
+                "graph_enabled": True,
+                "structured_enabled": True,
+                "evidence_strict": True,
+                "evidence_supporting": True,
+                "evidence_candidate": True,
+                "evidence_rejected": True,
+            },
+            {"kb_id": "kb-outside", "graph_enabled": True},
+        ],
+    }
+
+    result = narrow_child_scope_to_parent(child, parent)
+
+    assert result["effective_kb_ids"] == ["kb-rice"]
+    assert result["members"][0]["document_enabled"] is False
+    assert result["members"][0]["graph_enabled"] is True
+    assert result["members"][0]["evidence_candidate"] is False
+    assert result["members"][0]["evidence_rejected"] is False
+    assert result["allow_web"] is False
+    assert result["retrieval_mode"] == "KB_ONLY"
+    assert result["parent_scope_version"] == 7
 
 
 class _FakeDB:
@@ -276,10 +330,23 @@ def _patch_run_record_creation(
             )
             return self.db.created_run
 
+    async def fake_resolve_effective_knowledge_scope(**kwargs):
+        assert kwargs["agent_slug"] == "worker"
+        return {
+            "scope_version": 9,
+            "effective_kb_ids": ["kb-rice"],
+            "allow_web": False,
+            "retrieval_mode": "KB_ONLY",
+        }
+
     monkeypatch.setattr(agent_run_service.agent_manager, "get_agent", lambda backend_id: _FakeBackend())
     monkeypatch.setattr(agent_run_service, "ConversationRepository", ConvRepo)
     monkeypatch.setattr(agent_run_service, "AgentRepository", AgentRepo)
     monkeypatch.setattr(agent_run_service, "AgentRunRepository", RunRepo)
+    monkeypatch.setattr(
+        "yuxi.services.knowledge_scope_service.resolve_effective_knowledge_scope",
+        fake_resolve_effective_knowledge_scope,
+    )
 
 
 def _fake_create_run_record(captured: dict[str, object], *, run_id: str = "child-run"):
@@ -582,6 +649,12 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
             "parent_thread_id": "parent-thread",
             "file_thread_id": "parent-file-thread",
             "skills_thread_id": "child-thread",
+        },
+        "knowledge_scope_snapshot": {
+            "scope_version": 9,
+            "effective_kb_ids": ["kb-rice"],
+            "allow_web": False,
+            "retrieval_mode": "KB_ONLY",
         },
     }
     assert db.committed is False

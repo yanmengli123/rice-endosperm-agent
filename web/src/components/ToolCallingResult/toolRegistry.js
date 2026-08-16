@@ -39,6 +39,7 @@ export const TOOL_ICON_MAP = {
   open_kb_document: FileText,
   present_artifacts: FolderOutput,
   query_kb: BookOpen,
+  query_knowledge_scope: Network,
   read_file: FileText,
   replace: FilePen,
   run_shell_command: SquareTerminal,

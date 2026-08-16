@@ -36,6 +36,7 @@ from yuxi.services.input_message_service import (
     AgentRunInputMessage,
     build_resume_input_message,
 )
+from yuxi.services.knowledge_scope_service import resolve_effective_knowledge_scope
 from yuxi.services.run_queue_service import (
     build_run_event_envelope,
     get_arq_pool,
@@ -397,6 +398,17 @@ async def create_agent_run_view(
     else:
         resolved_model_spec = resolve_agent_run_model_spec(model_spec, scope.agent_item, scope.agent_backend)
 
+    parent_payload = scope.parent_run.input_payload if run_type == "resume" else None
+    knowledge_scope_snapshot = (
+        parent_payload.get("knowledge_scope_snapshot") if isinstance(parent_payload, dict) else None
+    )
+    if not isinstance(knowledge_scope_snapshot, dict):
+        knowledge_scope_snapshot = await resolve_effective_knowledge_scope(
+            db=db,
+            user=scope.current_user,
+            agent_slug=agent_slug,
+        )
+
     run_input_message = _prepare_run_input_message(
         run_type=run_type,
         input_message=input_message,
@@ -412,7 +424,10 @@ async def create_agent_run_view(
         request_id=request_id,
         input_message=run_input_message,
     )
-    input_payload = {"model_spec": resolved_model_spec}
+    input_payload = {
+        "model_spec": resolved_model_spec,
+        "knowledge_scope_snapshot": knowledge_scope_snapshot,
+    }
 
     run, created = await persist_agent_run_record(
         agent_slug=agent_slug,
@@ -440,6 +455,7 @@ class AgentRunCreationScope:
     conversation: Any
     agent_item: Any
     agent_backend: Any
+    current_user: Any
     existing_run: Any | None
     parent_run: Any | None = None
 
@@ -674,6 +690,7 @@ async def prepare_agent_run_creation_scope(
         conversation=conversation,
         agent_item=agent_item,
         agent_backend=agent_backend,
+        current_user=current_user,
         existing_run=existing,
         parent_run=parent_run,
     )

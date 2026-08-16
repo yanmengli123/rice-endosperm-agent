@@ -141,4 +141,9 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
         selected_tools.append(tool)
         selected_tool_names.add(tool.name)
 
+    scope = getattr(context, "_effective_knowledge_scope", None)
+    if isinstance(scope, dict) and not scope.get("allow_web", False):
+        web_names = {"tavily_search", "web_search", "search_web"}
+        selected_tools = [tool for tool in selected_tools if str(getattr(tool, "name", "")).lower() not in web_names]
+
     return selected_tools

@@ -47,6 +47,100 @@ class KnowledgeBase(Base):
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
 
+class KnowledgeScope(Base):
+    """可版本化的问答知识范围定义。"""
+
+    __tablename__ = "knowledge_scopes"
+    __table_args__ = (
+        UniqueConstraint("scope_id", name="uq_knowledge_scopes_scope_id"),
+        UniqueConstraint("slug", name="uq_knowledge_scopes_slug"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope_id = Column(String(64), nullable=False, unique=True, index=True)
+    slug = Column(String(80), nullable=False, unique=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    retrieval_mode = Column(String(32), nullable=False, default="KB_ONLY")
+    allow_web = Column(Boolean, nullable=False, default=False)
+    version = Column(Integer, nullable=False, default=1)
+    created_by = Column(String(64))
+    updated_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class KnowledgeScopeMember(Base):
+    """一个知识库在某个知识范围中的独立检索与证据策略。"""
+
+    __tablename__ = "knowledge_scope_members"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "kb_id", name="uq_knowledge_scope_members_scope_kb"),
+        Index("ix_knowledge_scope_members_scope_enabled", "scope_id", "enabled"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope_id = Column(
+        String(64), ForeignKey("knowledge_scopes.scope_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+    document_enabled = Column(Boolean, nullable=False, default=True)
+    graph_enabled = Column(Boolean, nullable=False, default=True)
+    structured_enabled = Column(Boolean, nullable=False, default=True)
+    evidence_strict = Column(Boolean, nullable=False, default=True)
+    evidence_supporting = Column(Boolean, nullable=False, default=True)
+    evidence_candidate = Column(Boolean, nullable=False, default=False)
+    evidence_rejected = Column(Boolean, nullable=False, default=False)
+    priority = Column(Integer, nullable=False, default=100)
+    health_status = Column(String(32), nullable=False, default="VALIDATING")
+    health_details = Column(JSON_VALUE)
+    last_validated_at = Column(DateTime(timezone=True))
+    created_by = Column(String(64))
+    updated_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class AgentKnowledgeScopeConfig(Base):
+    """智能体如何组合默认范围与自己的知识库配置。"""
+
+    __tablename__ = "agent_knowledge_scope_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_slug = Column(
+        String(80), ForeignKey("agents.slug", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    scope_id = Column(String(64), ForeignKey("knowledge_scopes.scope_id", ondelete="SET NULL"), index=True)
+    scope_mode = Column(String(32), nullable=False, default="LEGACY")
+    retrieval_mode = Column(String(32))
+    allow_web = Column(Boolean)
+    created_by = Column(String(64))
+    updated_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class KnowledgeScopeAudit(Base):
+    """知识范围变更审计；保存版本前后的完整策略。"""
+
+    __tablename__ = "knowledge_scope_audits"
+    __table_args__ = (Index("ix_knowledge_scope_audits_scope_version", "scope_id", "new_version"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    audit_id = Column(String(64), nullable=False, unique=True, index=True)
+    scope_id = Column(
+        String(64), ForeignKey("knowledge_scopes.scope_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    action = Column(String(64), nullable=False)
+    old_version = Column(Integer, nullable=False)
+    new_version = Column(Integer, nullable=False)
+    before_json = Column(JSON_VALUE)
+    after_json = Column(JSON_VALUE)
+    updated_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
 class KnowledgeFile(Base):
     """知识文件模型"""
 

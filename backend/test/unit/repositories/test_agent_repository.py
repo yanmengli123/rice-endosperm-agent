@@ -18,6 +18,7 @@ from yuxi.repositories.agent_repository import (
     user_can_access_agent,
     user_can_manage_agent,
 )
+from yuxi.repositories.knowledge_scope_repository import KnowledgeScopeRepository
 from yuxi.storage.postgres.models_business import Agent, User
 
 
@@ -29,6 +30,13 @@ class FakeDb:
 
     def add(self, item):
         self.added = item
+
+
+@pytest.fixture(autouse=True)
+def mock_scope_config(monkeypatch):
+    ensure_agent_config = AsyncMock()
+    monkeypatch.setattr(KnowledgeScopeRepository, "ensure_agent_config", ensure_agent_config)
+    return ensure_agent_config
 
 
 @pytest.mark.asyncio

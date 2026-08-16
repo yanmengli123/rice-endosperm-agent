@@ -23,6 +23,7 @@ import WebSearchTool from './tools/WebSearchTool.vue'
 import ListKbsTool from './tools/ListKbsTool.vue'
 import GetMindmapTool from './tools/GetMindmapTool.vue'
 import QueryKbTool from './tools/QueryKbTool.vue'
+import QueryKnowledgeScopeTool from './tools/QueryKnowledgeScopeTool.vue'
 import FindKbDocumentTool from './tools/FindKbDocumentTool.vue'
 import OpenKbDocumentTool from './tools/OpenKbDocumentTool.vue'
 import CalculatorTool from './tools/CalculatorTool.vue'
@@ -83,6 +84,7 @@ const TOOL_RENDERERS = {
   ocr_parse_file: OcrParseFileTool,
   open_kb_document: OpenKbDocumentTool,
   query_kb: QueryKbTool,
+  query_knowledge_scope: QueryKnowledgeScopeTool,
   read_file: ReadFileTool,
   replace: EditFileTool,
   run_shell_command: ExecuteTool,

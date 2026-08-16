@@ -61,6 +61,48 @@ def subagent_run_urls(run_id: str) -> dict[str, str]:
     }
 
 
+_SCOPE_CAPABILITY_FLAGS = (
+    "document_enabled",
+    "graph_enabled",
+    "structured_enabled",
+    "evidence_strict",
+    "evidence_supporting",
+    "evidence_candidate",
+    "evidence_rejected",
+)
+
+
+def narrow_child_scope_to_parent(child_scope: dict[str, Any], parent_scope: dict[str, Any]) -> dict[str, Any]:
+    """子智能体只能缩小父运行已冻结的 KB、通道、证据等级和 Web 能力。"""
+    narrowed = dict(child_scope)
+    parent_ids = {str(value) for value in parent_scope.get("effective_kb_ids") or []}
+    child_ids = [str(value) for value in child_scope.get("effective_kb_ids") or []]
+    effective_ids = [kb_id for kb_id in child_ids if kb_id in parent_ids]
+    narrowed["effective_kb_ids"] = effective_ids
+
+    parent_members = {
+        str(item.get("kb_id")): item
+        for item in parent_scope.get("members") or []
+        if isinstance(item, dict) and item.get("kb_id")
+    }
+    child_members = []
+    for item in child_scope.get("members") or []:
+        if not isinstance(item, dict) or str(item.get("kb_id")) not in effective_ids:
+            continue
+        merged = dict(item)
+        parent_member = parent_members.get(str(item.get("kb_id")))
+        if parent_member:
+            for flag in _SCOPE_CAPABILITY_FLAGS:
+                merged[flag] = bool(item.get(flag, False)) and bool(parent_member.get(flag, False))
+        child_members.append(merged)
+    narrowed["members"] = child_members
+    narrowed["allow_web"] = bool(child_scope.get("allow_web")) and bool(parent_scope.get("allow_web"))
+    if not narrowed["allow_web"]:
+        narrowed["retrieval_mode"] = "KB_ONLY"
+    narrowed["parent_scope_version"] = parent_scope.get("scope_version")
+    return narrowed
+
+
 def serialize_subagent_run_state(run: AgentRun) -> dict:
     """序列化给父智能体状态使用的子智能体 run 摘要。
 
@@ -236,6 +278,20 @@ class SubagentRunService:
             "model_spec": resolved_model_spec,
             "runtime": {key: value for key, value in runtime_payload.items() if value is not None},
         }
+        from yuxi.services.knowledge_scope_service import resolve_effective_knowledge_scope
+
+        creator_payload = getattr(creator_run, "input_payload", None)
+        parent_scope = creator_payload.get("knowledge_scope_snapshot") if isinstance(creator_payload, dict) else None
+        parent_kb_ids = parent_scope.get("effective_kb_ids") if isinstance(parent_scope, dict) else None
+        child_scope = await resolve_effective_knowledge_scope(
+            db=self.db,
+            user=scope.current_user,
+            agent_slug=relation.subagent_slug,
+            session_kb_ids=parent_kb_ids,
+        )
+        if isinstance(parent_scope, dict):
+            child_scope = narrow_child_scope_to_parent(child_scope, parent_scope)
+        input_payload["knowledge_scope_snapshot"] = child_scope
         subagent_input_message = input_message.with_metadata(
             {
                 "request_id": request_id,

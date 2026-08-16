@@ -27,6 +27,22 @@ class _FakeSession:
         self.commit_count += 1
 
 
+@pytest.fixture(autouse=True)
+def mock_knowledge_scope_resolver(monkeypatch: pytest.MonkeyPatch):
+    async def resolve_scope(**_kwargs):
+        return {
+            "scope_id": "scope-test",
+            "scope_version": 1,
+            "scope_mode": "LEGACY",
+            "effective_kb_ids": [],
+            "members": [],
+            "retrieval_mode": "KB_PLUS_WEB",
+            "allow_web": True,
+        }
+
+    monkeypatch.setattr(svc, "resolve_effective_knowledge_scope", resolve_scope)
+
+
 class TestNormalizeInterruptOptions:
     """测试 _normalize_interrupt_options 函数"""
 

@@ -710,7 +710,10 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
     assert db.added[0].run_id == db.created_run.id
     assert db.added[0].request_id == "req-1"
     assert db.enqueued == [("process_agent_run", db.created_run.id, f"run:{db.created_run.id}")]
-    assert db.created_run_kwargs["input_payload"] == {"model_spec": "agent-default-model"}
+    assert db.created_run_kwargs["input_payload"] == {
+        "model_spec": "agent-default-model",
+        "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
+    }
     assert "model_spec" not in db.added[0].extra_metadata
     assert db.added[0].extra_metadata["raw_message"]["type"] == "human"
     assert db.added[0].extra_metadata["raw_message"]["content"] == "hello"
@@ -1341,11 +1344,20 @@ def _patch_agent_run_creation(
     async def fake_get_arq_pool():
         return Queue()
 
+    async def fake_resolve_effective_knowledge_scope(**kwargs):
+        assert kwargs["agent_slug"] == "default"
+        return {"scope_version": 7, "effective_kb_ids": ["kb-rice"]}
+
     monkeypatch.setattr(agent_run_service.agent_manager, "get_agent", lambda backend_id: _FakeBackend())
     monkeypatch.setattr(agent_run_service, "AgentRepository", AgentRepo)
     monkeypatch.setattr(agent_run_service, "ConversationRepository", ConvRepo)
     monkeypatch.setattr(agent_run_service, "AgentRunRepository", _CreateRunRepo)
     monkeypatch.setattr(agent_run_service, "get_arq_pool", fake_get_arq_pool)
+    monkeypatch.setattr(
+        agent_run_service,
+        "resolve_effective_knowledge_scope",
+        fake_resolve_effective_knowledge_scope,
+    )
     return db
 
 
@@ -1384,7 +1396,10 @@ async def test_create_chat_run_with_image_persists_multimodal_message_type(monke
         db=db,
     )
 
-    assert db.created_run_kwargs["input_payload"] == {"model_spec": "agent-default-model"}
+    assert db.created_run_kwargs["input_payload"] == {
+        "model_spec": "agent-default-model",
+        "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
+    }
     assert db.added[0].message_type == "multimodal_image"
     assert db.added[0].image_content == "base64-image"
     raw_message = db.added[0].extra_metadata["raw_message"]

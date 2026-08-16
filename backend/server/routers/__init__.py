@@ -49,9 +49,11 @@ if not _LITE_MODE:
     from server.routers.graph_router import graph
     from server.routers.knowledge_eval_router import evaluation
     from server.routers.knowledge_router import knowledge
+    from server.routers.knowledge_scope_router import knowledge_scope
 
     # 知识库与图谱能力依赖较重，LITE 模式下跳过这组接口。
     router.include_router(knowledge)  # /api/knowledge/* 知识库管理与检索
+    router.include_router(knowledge_scope)  # /api/knowledge/scopes/* 默认问答范围与运行解析
     router.include_router(graph_import)  # /api/knowledge/* 托管图谱导入
     router.include_router(evaluation)  # /api/evaluation/* 知识库评估
     router.include_router(graph)  # /api/graph/* 图谱查询与管理
