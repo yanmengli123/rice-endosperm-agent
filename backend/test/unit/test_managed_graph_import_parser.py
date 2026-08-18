@@ -26,8 +26,8 @@ def test_gene_rows_merge_with_status_and_relation_evidence_is_canonicalized():
             "phenotype-1,Opaque endosperm,PHENOTYPE,,,0,1,1",
         ],
         [
-            "gene-1,phenotype-1,REGULATES_PHENOTYPE,POSITIVE,DIRECT,E1,1,1,123,10.1/test,quoted evidence",
-            "gene-1,phenotype-1,REGULATES_PHENOTYPE,POSITIVE,DIRECT,E1,1,1,123,10.1/test,quoted evidence",
+            "gene-1,phenotype-1,REGULATES_PHENOTYPE,POSITIVE,DIRECT,E1,1,1,12345678,10.1007/test,quoted evidence",
+            "gene-1,phenotype-1,REGULATES_PHENOTYPE,POSITIVE,DIRECT,E1,1,1,12345678,10.1007/test,quoted evidence",
         ],
     )
 
@@ -68,8 +68,8 @@ def test_gene_and_allele_mutant_are_split_linked_and_relations_are_routed_by_sem
             "phenotype-1,floury endosperm,PHENOTYPE,,,,,",
         ],
         [
-            "entity-1,phenotype-1,MUTANT_EFFECT,POSITIVE,DIRECT,E1,1,1,1,,mutant quote",
-            "entity-1,phenotype-1,PROMOTES_PHENOTYPE,POSITIVE,DIRECT,E2,1,1,2,,gene quote",
+            "entity-1,phenotype-1,MUTANT_EFFECT,POSITIVE,DIRECT,E1,1,1,12345671,,mutant quote",
+            "entity-1,phenotype-1,PROMOTES_PHENOTYPE,POSITIVE,DIRECT,E2,1,1,12345672,,gene quote",
         ],
     )
 
@@ -104,7 +104,7 @@ def test_semantic_route_can_be_overridden_per_relation_endpoint():
             "entity-1,flo2,ALLELE_MUTANT,,,,,",
             "process-1,starch synthesis,PROCESS,,,,,",
         ],
-        ["entity-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,1,,quote"],
+        ["entity-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,12345671,,quote"],
     )
     split_id = initial["semantic_splits"][0]["split_id"]
     overridden = _parse(
@@ -113,7 +113,7 @@ def test_semantic_route_can_be_overridden_per_relation_endpoint():
             "entity-1,flo2,ALLELE_MUTANT,,,,,",
             "process-1,starch synthesis,PROCESS,,,,,",
         ],
-        ["entity-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,1,,quote"],
+        ["entity-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,12345671,,quote"],
         resolutions={split_id: {"relation_routes": {"2": {"start": "allele"}}}},
     )
     allele = next(item for item in overridden["plan"]["entities"] if item["label"] == "AlleleMutant")
@@ -121,23 +121,50 @@ def test_semantic_route_can_be_overridden_per_relation_endpoint():
     assert required_for["source_entity_id"] == allele["entity_id"]
 
 
-def test_ambiguous_evidence_is_saved_but_excluded_from_exact_literature_count():
+def test_ambiguous_evidence_blocks_import_instead_of_guessing_alignment():
     result = _parse(
         [
             "gene-1,OsPPDK,RICE_GENE,Os01g01010,,,,",
             "process-1,starch synthesis,PROCESS,,,,,",
         ],
-        ["gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,9,9,1|2,10.1/a,quote one||quote two"],
+        ["gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,9,9,12345671|12345672,10.1007/a,quote one||quote two"],
+    )
+
+    assert result["valid"] is False
+    assert any(item["code"] == "EVIDENCE_ALIGNMENT_AMBIGUOUS" for item in result["blockers"])
+    assert result["plan"]["evidence"] == []
+
+
+def test_aligned_multiple_literature_records_are_split_one_to_one():
+    result = _parse(
+        [
+            "gene-1,OsPPDK,RICE_GENE,Os01g01010,,,,",
+            "phenotype-1,grain yield,PHENOTYPE,,,,,",
+        ],
+        [
+            "gene-1,phenotype-1,REGULATES_PHENOTYPE,POSITIVE,DIRECT,E2,2,2,"
+            "12345671|12345672,10.1007/a|10.1007/b,quote one||quote two"
+        ],
     )
 
     assert result["valid"] is True
-    assert result["warnings"][0]["code"] == "EVIDENCE_ALIGNMENT_AMBIGUOUS"
-    evidence = result["plan"]["evidence"][0]
-    triple = next(item for item in result["plan"]["triples"] if item["relation_type"] == "REQUIRED_FOR")
-    assert evidence["evidence_alignment_status"] == "AMBIGUOUS"
-    assert triple["support_count"] == 1
-    assert triple["literature_count"] == 0
-    assert triple["best_evidence_level"] == "E1"
+    assert result["counts"]["evidence_assertions"] == 2
+    assert {item["pmid"] for item in result["plan"]["evidence"]} == {"12345671", "12345672"}
+    assert all(item["claim_eligible"] for item in result["plan"]["evidence"])
+    assert all(item["outcome_class"] == "DIRECT_YIELD" for item in result["plan"]["evidence"])
+
+
+def test_scientific_notation_identifier_blocks_import_without_rounding():
+    result = _parse(
+        [
+            "gene-1,OsPPDK,RICE_GENE,Os01g01010,,,,",
+            "phenotype-1,grain yield,PHENOTYPE,,,,,",
+        ],
+        ["gene-1,phenotype-1,REGULATES_PHENOTYPE,POSITIVE,DIRECT,E2,1,1,3.95521e+07,,quote"],
+    )
+
+    assert result["valid"] is False
+    assert any(item["code"] == "INVALID_SCIENTIFIC_NOTATION" for item in result["blockers"])
 
 
 def test_cypher_is_reported_but_never_added_to_execution_plan():

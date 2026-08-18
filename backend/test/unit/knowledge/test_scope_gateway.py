@@ -1,4 +1,4 @@
-from yuxi.knowledge.scope_gateway import _deduplicate_and_rerank, classify_evidence_status
+from yuxi.knowledge.scope_gateway import _compact_evidence, _deduplicate_and_rerank, classify_evidence_status
 
 
 def _evidence(*, kb_id: str, direction: str = "POSITIVE", status: str = "STRICT") -> dict:
@@ -21,6 +21,7 @@ def _evidence(*, kb_id: str, direction: str = "POSITIVE", status: str = "STRICT"
 
 def test_evidence_classifier_does_not_promote_candidate_or_conflict():
     assert classify_evidence_status("candidate", "high", "ALIGNED") == "CANDIDATE"
+    assert classify_evidence_status("asserted", "high", "ALIGNED", "candidate") == "CANDIDATE"
     assert classify_evidence_status("asserted", "high", "CONFLICT") == "SUPPORTING"
     assert classify_evidence_status("rejected", "high", "ALIGNED") == "REJECTED"
     assert classify_evidence_status("verified", "high", "ALIGNED") == "STRICT"
@@ -46,3 +47,47 @@ def test_conflicting_directions_are_not_silently_merged():
 
     assert evidence[0]["conflict"] is True
     assert warnings and "证据冲突" in warnings[0]
+
+
+def test_yield_reranking_preserves_requested_semantic_layers():
+    rows = []
+    for index in range(8):
+        row = _evidence(kb_id=f"direct-{index}")
+        row["subject"] = {"name": f"DirectGene{index}"}
+        row["outcome_class"] = "DIRECT_YIELD"
+        rows.append(row)
+    for category in ("CONDITION_SPECIFIC_YIELD", "YIELD_COMPONENT", "GRAIN_FILLING"):
+        row = _evidence(kb_id=category.lower())
+        row["subject"] = {"name": category}
+        row["outcome_class"] = category
+        rows.append(row)
+
+    evidence, _ = _deduplicate_and_rerank(rows, top_k=6, stratify_yield=True)
+
+    categories = {item["outcome_class"] for item in evidence}
+    assert {"DIRECT_YIELD", "CONDITION_SPECIFIC_YIELD", "YIELD_COMPONENT", "GRAIN_FILLING"} <= categories
+
+
+def test_compact_evidence_removes_internal_fields_and_duplicate_content():
+    row = _evidence(kb_id="kb-a")
+    row.update(
+        {
+            "content": "A" * 600,
+            "metadata": {"large": True},
+            "priority": 50,
+            "raw_score": 0.99,
+            "claim_eligible": True,
+            "conflict": False,
+        }
+    )
+
+    compact = _compact_evidence(row)
+
+    assert compact["claim_eligible"] is True
+    assert compact["conflict"] is False
+    assert compact["evidence_quote"].endswith("…")
+    assert len(compact["evidence_quote"]) == 300
+    assert "content" not in compact
+    assert "metadata" not in compact
+    assert "priority" not in compact
+    assert "raw_score" not in compact

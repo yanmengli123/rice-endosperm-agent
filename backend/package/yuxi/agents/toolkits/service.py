@@ -142,8 +142,19 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
         selected_tool_names.add(tool.name)
 
     scope = getattr(context, "_effective_knowledge_scope", None)
-    if isinstance(scope, dict) and not scope.get("allow_web", False):
-        web_names = {"tavily_search", "web_search", "search_web"}
-        selected_tools = [tool for tool in selected_tools if str(getattr(tool, "name", "")).lower() not in web_names]
+    if isinstance(scope, dict):
+        # The scope gateway is infrastructure, not an optional model skill.  It
+        # must remain registered even before the knowledge-base Skill is read.
+        from yuxi.agents.toolkits.registry import get_all_tool_instances
+
+        scope_tool = next((tool for tool in get_all_tool_instances() if tool.name == "query_knowledge_scope"), None)
+        if scope_tool is not None and scope_tool.name not in selected_tool_names:
+            selected_tools.append(scope_tool)
+            selected_tool_names.add(scope_tool.name)
+        if not scope.get("allow_web", False):
+            web_names = {"tavily_search", "web_search", "search_web"}
+            selected_tools = [
+                tool for tool in selected_tools if str(getattr(tool, "name", "")).lower() not in web_names
+            ]
 
     return selected_tools

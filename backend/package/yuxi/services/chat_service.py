@@ -243,6 +243,10 @@ def _apply_knowledge_scope_snapshot(input_context: dict, snapshot: dict | None) 
     """把已解析快照绑定到 runtime；这里只能消费快照，不能再扩大范围。"""
     if not isinstance(snapshot, dict):
         return
+    # BaseAgent reconstructs its context from input_context before building the
+    # graph.  Persist the frozen snapshot in that transport object so tools,
+    # prompts and middleware all observe the same scope in worker execution.
+    input_context["_effective_knowledge_scope"] = snapshot
     input_context["knowledges"] = list(snapshot.get("effective_kb_ids") or [])
     if not snapshot.get("allow_web", False):
         input_context["tools"] = [

@@ -355,6 +355,10 @@ class ManagedGraphImportService:
                         r.best_evidence_level = row.best_evidence_level,
                         r.consensus_direction = row.consensus_direction,
                         r.ambiguous_evidence_count = row.ambiguous_evidence_count,
+                        r.claim_eligible_count = row.claim_eligible_count,
+                        r.outcome_classes = row.outcome_classes,
+                        r.yield_measure_types = row.yield_measure_types,
+                        r.conditions = row.conditions,
                         r.pmids = row.pmids,
                         r.dois = row.dois,
                         r.managed_projection = true
@@ -471,6 +475,11 @@ def _aggregate_evidence(evidence: list[dict[str, Any]]) -> dict[str, dict[str, A
     result = {}
     for triple_id, items in grouped.items():
         aligned_items = [item for item in items if item.get("evidence_alignment_status", "ALIGNED") == "ALIGNED"]
+        claim_eligible_items = [
+            item
+            for item in aligned_items
+            if item.get("claim_eligible", item.get("evidence_alignment_status") == "ALIGNED")
+        ]
         directions = {item.get("direction") or "UNKNOWN" for item in items}
         known_directions = directions - {"UNKNOWN", ""}
         consensus = (
@@ -481,18 +490,36 @@ def _aggregate_evidence(evidence: list[dict[str, Any]]) -> dict[str, dict[str, A
             else "UNKNOWN"
         )
         levels = [item.get("evidence_level") for item in items if item.get("evidence_level")]
-        literature_ids = {identity for item in aligned_items for identity in _exact_literature_keys(item) if identity}
+        literature_ids = {
+            identity for item in claim_eligible_items for identity in _exact_literature_keys(item) if identity
+        }
         result[triple_id] = {
             "support_count": len({item["evidence_id"] for item in items}),
             "literature_count": len(literature_ids),
             "best_evidence_level": min(levels, key=_evidence_level_rank) if levels else None,
             "consensus_direction": consensus,
             "ambiguous_evidence_count": len(items) - len(aligned_items),
+            "claim_eligible_count": len(claim_eligible_items),
+            "outcome_classes": sorted({item.get("outcome_class") for item in items if item.get("outcome_class")}),
+            "yield_measure_types": sorted(
+                {item.get("yield_measure_type") for item in items if item.get("yield_measure_type")}
+            ),
+            "conditions": sorted({item.get("condition") for item in items if item.get("condition")}),
             "pmids": sorted(
-                {pmid for item in items for pmid in ((item.get("metadata_json") or {}).get("pmids") or []) if pmid}
+                {
+                    pmid
+                    for item in claim_eligible_items
+                    for pmid in ((item.get("metadata_json") or {}).get("pmids") or [])
+                    if pmid
+                }
             ),
             "dois": sorted(
-                {doi for item in items for doi in ((item.get("metadata_json") or {}).get("dois") or []) if doi}
+                {
+                    doi
+                    for item in claim_eligible_items
+                    for doi in ((item.get("metadata_json") or {}).get("dois") or [])
+                    if doi
+                }
             ),
         }
     return result
@@ -505,6 +532,10 @@ def _empty_evidence_aggregate() -> dict[str, Any]:
         "best_evidence_level": None,
         "consensus_direction": "UNKNOWN",
         "ambiguous_evidence_count": 0,
+        "claim_eligible_count": 0,
+        "outcome_classes": [],
+        "yield_measure_types": [],
+        "conditions": [],
         "pmids": [],
         "dois": [],
     }

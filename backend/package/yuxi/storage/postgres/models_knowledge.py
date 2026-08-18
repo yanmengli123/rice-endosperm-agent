@@ -386,6 +386,7 @@ class KnowledgeGraphRelationEvidence(Base):
     literature_id = Column(String(512))
     pmid = Column(String(64))
     doi = Column(String(512))
+    identifier_status = Column(String(64), nullable=False, default="MISSING")
     direction = Column(String(64))
     directness = Column(String(64))
     assertion_status = Column(String(64), nullable=False, default="asserted")
@@ -393,6 +394,21 @@ class KnowledgeGraphRelationEvidence(Base):
     evidence_methods = Column(JSON_VALUE)
     evidence_quote = Column(Text)
     evidence_alignment_status = Column(String(32), nullable=False, default="ALIGNED")
+    outcome_class = Column(String(64), nullable=False, default="OTHER")
+    yield_measure_type = Column(String(64))
+    experimental_subject_type = Column(String(64))
+    subject_material = Column(String(512))
+    perturbs = Column(String(512))
+    perturbation_direction = Column(String(64))
+    condition = Column(String(512))
+    cultivar = Column(String(512))
+    genetic_background = Column(String(512))
+    development_stage = Column(String(512))
+    observed_effect = Column(String(256))
+    observed_relation = Column(String(256))
+    inferred_gene_function = Column(Text)
+    sentence_id = Column(String(256))
+    claim_eligible = Column(Boolean, nullable=False, default=False)
     source_scope = Column(String(64), nullable=False, default="relation_row")
     metadata_json = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
@@ -404,7 +420,7 @@ class KnowledgeGraphEvidenceSource(Base):
 
     __tablename__ = "knowledge_graph_evidence_sources"
     __table_args__ = (
-        UniqueConstraint("import_id", "row_number", name="uq_graph_evidence_source_row"),
+        UniqueConstraint("import_id", "row_number", "evidence_id", name="uq_graph_evidence_source_row_v2"),
         Index("ix_graph_evidence_sources_evidence_id", "evidence_id"),
     )
 

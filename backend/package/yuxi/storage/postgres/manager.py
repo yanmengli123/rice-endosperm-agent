@@ -288,6 +288,165 @@ class PostgresManager(metaclass=SingletonMeta):
                 "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
                 "ADD COLUMN IF NOT EXISTS evidence_alignment_status VARCHAR(32) NOT NULL DEFAULT 'ALIGNED'"
             ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS identifier_status VARCHAR(64) NOT NULL DEFAULT 'MISSING'"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS outcome_class VARCHAR(64) NOT NULL DEFAULT 'OTHER'"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS yield_measure_type VARCHAR(64)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS experimental_subject_type VARCHAR(64)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS subject_material VARCHAR(512)"
+            ),
+            "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence ADD COLUMN IF NOT EXISTS perturbs VARCHAR(512)",
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS perturbation_direction VARCHAR(64)"
+            ),
+            "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence ADD COLUMN IF NOT EXISTS condition VARCHAR(512)",
+            "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence ADD COLUMN IF NOT EXISTS cultivar VARCHAR(512)",
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS genetic_background VARCHAR(512)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS development_stage VARCHAR(512)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS observed_effect VARCHAR(256)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS observed_relation VARCHAR(256)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS inferred_gene_function TEXT"
+            ),
+            "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence ADD COLUMN IF NOT EXISTS sentence_id VARCHAR(256)",
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_relation_evidence "
+                "ADD COLUMN IF NOT EXISTS claim_eligible BOOLEAN NOT NULL DEFAULT FALSE"
+            ),
+            (
+                "UPDATE knowledge_graph_relation_evidence SET pmid = substring(literature_id from 6) "
+                "WHERE (pmid IS NULL OR btrim(pmid) = '') AND literature_id ~ '^pmid:[0-9]{6,10}$'"
+            ),
+            (
+                "UPDATE knowledge_graph_relation_evidence SET identifier_status = CASE "
+                "WHEN pmid ~ '^[0-9]{6,10}$' OR doi ~* '^10\\.[0-9]{4,9}/\\S+$' THEN 'VALID' "
+                "WHEN pmid ~* '^[+-]?([0-9]+\\.[0-9]+|[0-9]+)e[+-]?[0-9]+$' THEN 'INVALID_SCIENTIFIC_NOTATION' "
+                "WHEN COALESCE(btrim(pmid), '') = '' AND COALESCE(btrim(doi), '') = '' THEN 'MISSING' "
+                "ELSE 'INVALID_FORMAT' END"
+            ),
+            (
+                "UPDATE knowledge_graph_relation_evidence SET pmid = NULL "
+                "WHERE pmid IS NOT NULL AND pmid !~ '^[0-9]{6,10}$'"
+            ),
+            (
+                "UPDATE knowledge_graph_relation_evidence e SET "
+                "condition = CASE "
+                "WHEN lower(COALESCE(e.evidence_quote, '')) "
+                "SIMILAR TO '%(high temperature|high-temperature|heat stress)%' "
+                "THEN 'HIGH_TEMPERATURE' "
+                "WHEN lower(COALESCE(e.evidence_quote, '')) SIMILAR TO '%(drought|water deficit)%' THEN 'DROUGHT' "
+                "WHEN lower(COALESCE(e.evidence_quote, '')) SIMILAR TO '%(salt stress|salinity)%' THEN 'SALT_STRESS' "
+                "ELSE e.condition END"
+            ),
+            (
+                "UPDATE knowledge_graph_relation_evidence e SET outcome_class = CASE "
+                "WHEN lower(t.name) SIMILAR TO '%(grain yield|yield per plant|field yield|plot yield)%' "
+                "THEN CASE WHEN e.condition IS NULL THEN 'DIRECT_YIELD' ELSE 'CONDITION_SPECIFIC_YIELD' END "
+                "WHEN lower(t.name) SIMILAR TO "
+                "'%(grain weight|kernel weight|seed weight|grain number|panicle number|"
+                "seed-setting rate|seed setting rate)%' "
+                "THEN 'YIELD_COMPONENT' "
+                "WHEN lower(t.name) SIMILAR TO '%(grain size|grain length|grain width|grain shape|seed size)%' "
+                "THEN 'GRAIN_MORPHOLOGY' "
+                "WHEN lower(t.name) SIMILAR TO '%(grain filling|grain-filling|filling rate)%' THEN 'GRAIN_FILLING' "
+                "WHEN lower(t.name) SIMILAR TO "
+                "'%(grain quality|chalkiness|amylose|starch quality|eating quality|protein content)%' THEN 'QUALITY' "
+                "ELSE 'OTHER' END "
+                "FROM knowledge_graph_triples tr JOIN knowledge_graph_entities t ON t.entity_id = tr.target_entity_id "
+                "WHERE tr.triple_id = e.triple_id"
+            ),
+            (
+                "UPDATE knowledge_graph_relation_evidence e SET "
+                "yield_measure_type = CASE "
+                "WHEN lower(t.name) SIMILAR TO '%(1000-grain weight|1000 grain weight|thousand-grain weight)%' "
+                "THEN 'THOUSAND_GRAIN_WEIGHT' "
+                "WHEN lower(t.name) SIMILAR TO '%(grain weight|kernel weight|seed weight)%' THEN 'GRAIN_WEIGHT' "
+                "WHEN lower(t.name) SIMILAR TO '%(grain number per panicle|grains per panicle)%' "
+                "THEN 'GRAIN_NUMBER_PER_PANICLE' "
+                "WHEN lower(t.name) SIMILAR TO '%(panicle number|panicles per plant)%' THEN 'PANICLE_NUMBER' "
+                "WHEN lower(t.name) SIMILAR TO '%(seed-setting rate|seed setting rate)%' THEN 'SEED_SETTING_RATE' "
+                "WHEN lower(t.name) SIMILAR TO '%(yield per plant)%' THEN 'YIELD_PER_PLANT' "
+                "WHEN lower(t.name) SIMILAR TO '%(grain yield|field yield|plot yield)%' THEN 'FIELD_YIELD' "
+                "ELSE e.yield_measure_type END "
+                "FROM knowledge_graph_triples tr JOIN knowledge_graph_entities t ON t.entity_id = tr.target_entity_id "
+                "WHERE tr.triple_id = e.triple_id"
+            ),
+            (
+                "UPDATE knowledge_graph_relation_evidence e SET "
+                "experimental_subject_type = CASE "
+                "WHEN lower(s.name) LIKE 'sttm%' THEN 'STTM_CONSTRUCT' "
+                "WHEN lower(s.name) LIKE '%rnai%' OR lower(COALESCE(e.observed_relation, tr.relation_type, '')) "
+                "LIKE '%rnai%' THEN 'RNAI_CONSTRUCT' "
+                "WHEN lower(s.name) LIKE '%crispr%' OR lower(COALESCE(e.observed_relation, tr.relation_type, '')) "
+                "LIKE '%crispr%' THEN 'CRISPR_LINE' "
+                "WHEN lower(COALESCE(e.observed_relation, tr.relation_type, '')) SIMILAR TO "
+                "'%(knockout|knock-out|loss_of_function|loss-of-function)%' THEN 'KNOCKOUT_LINE' "
+                "WHEN lower(COALESCE(e.observed_relation, tr.relation_type, '')) SIMILAR TO "
+                "'%(knockdown|knock-down)%' THEN 'KNOCKDOWN_LINE' "
+                "WHEN lower(COALESCE(e.observed_relation, tr.relation_type, '')) SIMILAR TO "
+                "'%(overexpression|over-expression)%' THEN 'OVEREXPRESSION_LINE' "
+                "WHEN lower(s.label) LIKE '%allele%' OR lower(s.label) LIKE '%mutant%' "
+                "OR lower(COALESCE(e.observed_relation, tr.relation_type, '')) SIMILAR TO '%(mutant|allele)%' "
+                "THEN 'ALLELE_MUTANT' "
+                "WHEN lower(s.label) LIKE '%rna%' OR lower(s.name) LIKE 'mir%' THEN 'MIRNA' "
+                "WHEN lower(s.label) LIKE '%gene%' THEN 'GENE' ELSE upper(s.label) END, "
+                "subject_material = CASE "
+                "WHEN lower(COALESCE(e.observed_relation, tr.relation_type, '')) SIMILAR TO "
+                "'%(knockout|knock-out|loss_of_function|loss-of-function)%' THEN s.name || ' knockout line' "
+                "WHEN lower(COALESCE(e.observed_relation, tr.relation_type, '')) SIMILAR TO "
+                "'%(knockdown|knock-down)%' THEN s.name || ' knockdown line' "
+                "WHEN lower(COALESCE(e.observed_relation, tr.relation_type, '')) SIMILAR TO "
+                "'%(overexpression|over-expression)%' THEN s.name || ' overexpression line' "
+                "WHEN lower(COALESCE(e.observed_relation, tr.relation_type, '')) LIKE '%rnai%' "
+                "THEN s.name || ' RNAi construct' "
+                "WHEN lower(COALESCE(e.observed_relation, tr.relation_type, '')) SIMILAR TO '%(mutant|allele)%' "
+                "THEN s.name || ' mutant/allele' ELSE COALESCE(e.subject_material, s.name) END, "
+                "observed_effect = COALESCE(e.observed_effect, e.direction), "
+                "observed_relation = COALESCE(e.observed_relation, tr.relation_type) "
+                "FROM knowledge_graph_triples tr JOIN knowledge_graph_entities s ON s.entity_id = tr.source_entity_id "
+                "WHERE tr.triple_id = e.triple_id"
+            ),
+            (
+                "UPDATE knowledge_graph_relation_evidence SET claim_eligible = "
+                "identifier_status = 'VALID' AND evidence_alignment_status = 'ALIGNED' "
+                "AND COALESCE(btrim(evidence_quote), '') <> '' "
+                "AND jsonb_array_length(COALESCE(metadata_json->'pmids', '[]'::jsonb)) <= 1 "
+                "AND jsonb_array_length(COALESCE(metadata_json->'dois', '[]'::jsonb)) <= 1 "
+                "AND jsonb_array_length(COALESCE(metadata_json->'quotes', '[]'::jsonb)) <= 1"
+            ),
+            (
+                "DO $$ BEGIN IF NOT EXISTS "
+                "(SELECT 1 FROM pg_constraint WHERE conname = 'ck_graph_evidence_pmid_string') "
+                "THEN ALTER TABLE knowledge_graph_relation_evidence ADD CONSTRAINT ck_graph_evidence_pmid_string "
+                "CHECK (pmid IS NULL OR pmid ~ '^[0-9]{6,10}$'); END IF; END $$"
+            ),
             """
             CREATE TABLE IF NOT EXISTS knowledge_graph_entities (
                 id SERIAL PRIMARY KEY,
@@ -417,6 +576,16 @@ class PostgresManager(metaclass=SingletonMeta):
                 "DROP CONSTRAINT IF EXISTS uq_graph_evidence_source_identity"
             ),
             (
+                "ALTER TABLE IF EXISTS knowledge_graph_evidence_sources "
+                "DROP CONSTRAINT IF EXISTS uq_graph_evidence_source_row"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_evidence_sources "
+                "DROP CONSTRAINT IF EXISTS uq_graph_evidence_source_row_v2"
+            ),
+            "DROP INDEX IF EXISTS uq_graph_evidence_source_row",
+            "DROP INDEX IF EXISTS uq_graph_evidence_source_row_v2",
+            (
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_graph_entity_source_row "
                 "ON knowledge_graph_entity_sources(import_id, row_number)"
             ),
@@ -425,8 +594,12 @@ class PostgresManager(metaclass=SingletonMeta):
                 "ON knowledge_graph_triple_sources(import_id, row_number)"
             ),
             (
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_graph_evidence_source_row "
-                "ON knowledge_graph_evidence_sources(import_id, row_number)"
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_graph_evidence_source_row_v2 "
+                "ON knowledge_graph_evidence_sources(import_id, row_number, evidence_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_graph_evidence_outcome_claim "
+                "ON knowledge_graph_relation_evidence(kb_id, outcome_class, claim_eligible)"
             ),
         ]
 

@@ -232,6 +232,21 @@ async def test_resolve_configured_runtime_tools_registers_skill_gated_tools():
     assert _KB_TOOL_NAMES <= {tool.name for tool in tools}
 
 
+@pytest.mark.asyncio
+async def test_resolve_configured_runtime_tools_always_registers_scope_gateway():
+    context = SimpleNamespace(
+        tools=None,
+        mcps=None,
+        _readable_skills=[],
+        _runtime_skill_dependency_map={},
+        _effective_knowledge_scope={"scope_id": "scope-1", "allow_web": False},
+    )
+
+    tools = await resolve_configured_runtime_tools(context)
+
+    assert "query_knowledge_scope" in {tool.name for tool in tools}
+
+
 def _make_gated_request(activated):
     base = SimpleNamespace(name="read_file")
     gated = [SimpleNamespace(name="list_kbs"), SimpleNamespace(name="query_kb")]
@@ -287,6 +302,37 @@ async def test_awrap_model_call_keeps_gated_tools_when_activated():
     await SkillsMiddleware().awrap_model_call(request, handler)
 
     assert captured["tools"] == {"read_file", "list_kbs", "query_kb"}
+
+
+@pytest.mark.asyncio
+async def test_awrap_model_call_hides_raw_query_when_scope_is_bound():
+    request = _make_gated_request(activated=["knowledge-base"])
+    request.runtime.context._effective_knowledge_scope = {"scope_id": "scope-1", "scope_version": 3}
+    captured = {}
+
+    async def handler(req):
+        captured["tools"] = {tool.name for tool in req.tools}
+        return "ok"
+
+    await SkillsMiddleware().awrap_model_call(request, handler)
+
+    assert captured["tools"] == {"read_file", "list_kbs", "query_knowledge_scope"}
+
+
+@pytest.mark.asyncio
+async def test_awrap_model_call_hides_scope_gateway_after_complete_package():
+    request = _make_gated_request(activated=["knowledge-base"])
+    request.runtime.context._effective_knowledge_scope = {"scope_id": "scope-1", "scope_version": 3}
+    request.runtime.context._knowledge_scope_query_completed = True
+    captured = {}
+
+    async def handler(req):
+        captured["tools"] = {tool.name for tool in req.tools}
+        return "ok"
+
+    await SkillsMiddleware().awrap_model_call(request, handler)
+
+    assert captured["tools"] == {"read_file", "list_kbs"}
 
 
 def test_read_file_activates_only_readable_skill() -> None:

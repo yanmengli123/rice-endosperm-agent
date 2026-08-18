@@ -11,10 +11,16 @@ from yuxi.knowledge.graphs.graph_utils import (
     compute_triple_id,
     normalize_entity_name,
 )
+from yuxi.knowledge.research_evidence import (
+    build_evidence_semantics,
+    identifier_has_scientific_notation,
+    validate_doi,
+    validate_pmid,
+)
 from yuxi.utils import hashstr
 
-SCHEMA_VERSION = "rice-endosperm-csv-v2"
-NORMALIZER_VERSION = "managed-graph-v2"
+SCHEMA_VERSION = "rice-endosperm-csv-v3"
+NORMALIZER_VERSION = "managed-graph-v3"
 
 NODE_HEADERS = {
     "node_id",
@@ -109,6 +115,7 @@ def parse_managed_graph_import(
     nodes = _read_csv(nodes_bytes, NODE_HEADERS, "nodes", blockers)
     relationships = _read_csv(relationships_bytes, RELATIONSHIP_HEADERS, "relationships", blockers)
     cypher_report = _inspect_cypher(cypher_bytes, blockers)
+    _validate_identifier_columns(nodes, relationships, blockers)
 
     if blockers:
         return _result(blockers, warnings, info, [], [], cypher_report, {}, None)
@@ -174,22 +181,24 @@ def parse_managed_graph_import(
         )
 
         alignment_status = _evidence_alignment_status(row)
-        evidence = _build_evidence(kb_id, triple_id, row, alignment_status)
-        evidence_by_id.setdefault(evidence["evidence_id"], evidence)
-        evidence_sources.append(
-            {
-                "evidence_id": evidence["evidence_id"],
-                "row_number": row_number,
-                "raw_data": _without_internal_fields(row),
-            }
-        )
         if alignment_status == "AMBIGUOUS":
-            warnings.append(
+            blockers.append(
                 {
                     "code": "EVIDENCE_ALIGNMENT_AMBIGUOUS",
-                    "severity": "WARNING",
+                    "severity": "BLOCKER",
                     "row_number": row_number,
-                    "message": "PMID、DOI 与证据引文数量不一致；已按整行证据原样保存，不计入精确文献数",
+                    "message": "PMID、DOI 与证据引文数量不一致；无法可靠对齐，已阻止导入且不会猜测配对关系",
+                }
+            )
+            continue
+
+        for evidence in _build_evidence_records(kb_id, triple_id, row, source=source, target=target):
+            evidence_by_id.setdefault(evidence["evidence_id"], evidence)
+            evidence_sources.append(
+                {
+                    "evidence_id": evidence["evidence_id"],
+                    "row_number": row_number,
+                    "raw_data": _without_internal_fields(row),
                 }
             )
 
@@ -313,6 +322,59 @@ def _read_csv(
         clean["_row_number"] = row_number
         rows.append(clean)
     return rows
+
+
+def _validate_identifier_columns(
+    nodes: list[dict[str, Any]],
+    relationships: list[dict[str, Any]],
+    blockers: list[dict[str, Any]],
+) -> None:
+    """Reject lossy identifiers before canonical identities are calculated."""
+    for row in nodes:
+        for field in ("rap_id", "msu_id"):
+            value = row.get(field)
+            if identifier_has_scientific_notation(value):
+                blockers.append(
+                    {
+                        "code": "INVALID_SCIENTIFIC_NOTATION",
+                        "severity": "BLOCKER",
+                        "file": "nodes",
+                        "row_number": row["_row_number"],
+                        "field": field,
+                        "value": value,
+                        "message": f"{field} 必须使用权威字符串，科学计数法可能已丢失有效位",
+                    }
+                )
+
+    for row in relationships:
+        for pmid in _split_pipe(row.get("pmids") or ""):
+            _value, status = validate_pmid(pmid)
+            if status != "VALID":
+                blockers.append(
+                    {
+                        "code": status,
+                        "severity": "BLOCKER",
+                        "file": "relationships",
+                        "row_number": row["_row_number"],
+                        "field": "pmids",
+                        "value": pmid,
+                        "message": "PMID 必须是 6–10 位数字字符串；系统不会从科学计数法猜测原值",
+                    }
+                )
+        for doi in _split_pipe(row.get("dois") or ""):
+            _value, status = validate_doi(doi)
+            if status != "VALID":
+                blockers.append(
+                    {
+                        "code": f"DOI_{status}",
+                        "severity": "BLOCKER",
+                        "file": "relationships",
+                        "row_number": row["_row_number"],
+                        "field": "dois",
+                        "value": doi,
+                        "message": "DOI 必须是以 10. 开头的完整字符串",
+                    }
+                )
 
 
 def _group_nodes(nodes: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
@@ -886,50 +948,76 @@ def _effective_resolutions(
     return effective
 
 
-def _build_evidence(
+def _build_evidence_records(
     kb_id: str,
     triple_id: str,
     row: dict[str, Any],
-    alignment_status: str,
-) -> dict[str, Any]:
+    *,
+    source: dict[str, Any],
+    target: dict[str, Any],
+) -> list[dict[str, Any]]:
     pmids = _split_pipe(row["pmids"])
     dois = _split_pipe(row["dois"])
     quotes = _split_quotes(row["evidence_quotes"])
-    literature_ids = sorted({*[f"pmid:{item}" for item in pmids], *[f"doi:{item}" for item in dois]})
-    literature_id = literature_ids[0] if literature_ids else None
-    identity = "|".join(
-        [
-            kb_id,
-            triple_id,
-            *literature_ids,
-            row["direction"].strip().upper(),
-            row["directness"].strip().upper(),
-            row["best_evidence_level"].strip().upper(),
-            "||".join(quotes),
-        ]
-    )
-    return {
-        "evidence_id": hashstr(identity, length=32),
-        "triple_id": triple_id,
-        "kb_id": kb_id,
-        "literature_id": literature_id,
-        "pmid": pmids[0] if len(pmids) == 1 else None,
-        "doi": dois[0] if len(dois) == 1 else None,
-        "direction": row["direction"].strip().upper() or "UNKNOWN",
-        "directness": row["directness"].strip().upper() or "UNKNOWN",
-        "evidence_level": row["best_evidence_level"].strip().upper() or None,
-        "evidence_quote": " || ".join(quotes) or None,
-        "evidence_methods": [],
-        "source_scope": "relation_row",
-        "evidence_alignment_status": alignment_status,
-        "metadata_json": {
-            "pmids": pmids,
-            "dois": dois,
-            "quotes": quotes,
-            "declared_support_count": _parse_optional_int(row["support_count"]),
-            "declared_literature_count": _parse_optional_int(row["literature_count"]),
-        },
-    }
+    width = max(len(pmids), len(dois), len(quotes), 1)
+    records = []
+    for index in range(width):
+        pmid = pmids[index] if pmids else None
+        doi = dois[index] if dois else None
+        quote = quotes[index] if quotes else None
+        literature_keys = [key for key in (f"pmid:{pmid}" if pmid else None, f"doi:{doi}" if doi else None) if key]
+        literature_id = "|".join(literature_keys) or None
+        identifier_status = "VALID" if literature_keys else "MISSING"
+        semantics = build_evidence_semantics(
+            source_name=source.get("name"),
+            source_label=source.get("label"),
+            relation_type=row["relation_type"],
+            target_name=target.get("name"),
+            quote=quote,
+            direction=row["direction"],
+        )
+        identity = "|".join(
+            [
+                kb_id,
+                triple_id,
+                literature_id or "",
+                row["direction"].strip().upper(),
+                row["directness"].strip().upper(),
+                row["best_evidence_level"].strip().upper(),
+                quote or "",
+            ]
+        )
+        records.append(
+            {
+                "evidence_id": hashstr(identity, length=32),
+                "triple_id": triple_id,
+                "kb_id": kb_id,
+                "literature_id": literature_id,
+                "pmid": pmid,
+                "doi": doi,
+                "identifier_status": identifier_status,
+                "direction": row["direction"].strip().upper() or "UNKNOWN",
+                "directness": row["directness"].strip().upper() or "UNKNOWN",
+                "assertion_status": "ASSERTED",
+                "evidence_level": row["best_evidence_level"].strip().upper() or None,
+                "evidence_quote": quote,
+                "evidence_methods": [],
+                "source_scope": "relation_row",
+                "evidence_alignment_status": "ALIGNED",
+                "sentence_id": f"relationships:{row['_row_number']}:evidence:{index + 1}",
+                "claim_eligible": bool(literature_keys and quote),
+                **semantics,
+                "metadata_json": {
+                    "pmids": [pmid] if pmid else [],
+                    "dois": [doi] if doi else [],
+                    "quotes": [quote] if quote else [],
+                    "declared_support_count": _parse_optional_int(row["support_count"]),
+                    "declared_literature_count": _parse_optional_int(row["literature_count"]),
+                    "source_row_number": row["_row_number"],
+                },
+            }
+        )
+    return records
 
 
 def _evidence_alignment_status(row: dict[str, Any]) -> str:

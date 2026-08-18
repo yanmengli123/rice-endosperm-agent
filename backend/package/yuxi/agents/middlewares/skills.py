@@ -266,7 +266,28 @@ class SkillsMiddleware(AgentMiddleware):
                 model_tools.append(t)
                 existing_tool_names.add(t.name)
 
-        if gated_tool_names or enabled_tools:
+        # A bound Knowledge Scope is the single retrieval boundary.  Keep the
+        # legacy tool registered in ToolNode for old checkpoints, but never
+        # expose it to the model where it could bypass Evidence Package rules.
+        scope_bound = isinstance(getattr(runtime_context, "_effective_knowledge_scope", None), dict)
+        if scope_bound:
+            model_tools = [tool for tool in model_tools if tool.name != "query_kb"]
+            scope_query_completed = bool(getattr(runtime_context, "_knowledge_scope_query_completed", False))
+            if scope_query_completed:
+                # The unified gateway already returned a complete Evidence
+                # Package for this turn.  Removing it now prevents capable
+                # reasoning models from recursively re-querying the same
+                # frozen scope instead of composing the answer.
+                model_tools = [tool for tool in model_tools if tool.name != "query_knowledge_scope"]
+            elif "query_knowledge_scope" not in {tool.name for tool in model_tools}:
+                scope_tool = next(
+                    (tool for tool in get_all_tool_instances() if tool.name == "query_knowledge_scope"),
+                    None,
+                )
+                if scope_tool is not None:
+                    model_tools.append(scope_tool)
+
+        if gated_tool_names or enabled_tools or scope_bound:
             request = request.override(tools=model_tools)
 
         return await handler(request)

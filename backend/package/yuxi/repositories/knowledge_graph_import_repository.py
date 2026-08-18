@@ -146,8 +146,32 @@ class KnowledgeGraphImportRepository:
                     stmt.on_conflict_do_update(
                         index_elements=["evidence_id"],
                         set_={
+                            "literature_id": stmt.excluded.literature_id,
+                            "pmid": stmt.excluded.pmid,
+                            "doi": stmt.excluded.doi,
+                            "identifier_status": stmt.excluded.identifier_status,
+                            "direction": stmt.excluded.direction,
+                            "directness": stmt.excluded.directness,
                             "assertion_status": stmt.excluded.assertion_status,
+                            "evidence_level": stmt.excluded.evidence_level,
+                            "evidence_methods": stmt.excluded.evidence_methods,
+                            "evidence_quote": stmt.excluded.evidence_quote,
                             "evidence_alignment_status": stmt.excluded.evidence_alignment_status,
+                            "outcome_class": stmt.excluded.outcome_class,
+                            "yield_measure_type": stmt.excluded.yield_measure_type,
+                            "experimental_subject_type": stmt.excluded.experimental_subject_type,
+                            "subject_material": stmt.excluded.subject_material,
+                            "perturbs": stmt.excluded.perturbs,
+                            "perturbation_direction": stmt.excluded.perturbation_direction,
+                            "condition": stmt.excluded.condition,
+                            "cultivar": stmt.excluded.cultivar,
+                            "genetic_background": stmt.excluded.genetic_background,
+                            "development_stage": stmt.excluded.development_stage,
+                            "observed_effect": stmt.excluded.observed_effect,
+                            "observed_relation": stmt.excluded.observed_relation,
+                            "inferred_gene_function": stmt.excluded.inferred_gene_function,
+                            "sentence_id": stmt.excluded.sentence_id,
+                            "claim_eligible": stmt.excluded.claim_eligible,
                             "metadata_json": stmt.excluded.metadata_json,
                             "updated_at": func.now(),
                         },
@@ -156,7 +180,7 @@ class KnowledgeGraphImportRepository:
                 await session.execute(
                     insert(KnowledgeGraphEvidenceSource)
                     .values([{**item, "import_id": import_id} for item in plan["evidence_sources"]])
-                    .on_conflict_do_nothing(index_elements=["import_id", "row_number"])
+                    .on_conflict_do_nothing(index_elements=["import_id", "row_number", "evidence_id"])
                 )
 
             for target in ("neo4j", "milvus"):
@@ -505,11 +529,28 @@ class KnowledgeGraphImportRepository:
             "literature_id": record.literature_id,
             "pmid": record.pmid,
             "doi": record.doi,
+            "identifier_status": record.identifier_status,
             "direction": record.direction,
             "directness": record.directness,
+            "assertion_status": record.assertion_status,
             "evidence_level": record.evidence_level,
             "evidence_quote": record.evidence_quote,
             "evidence_alignment_status": record.evidence_alignment_status,
+            "outcome_class": record.outcome_class,
+            "yield_measure_type": record.yield_measure_type,
+            "experimental_subject_type": record.experimental_subject_type,
+            "subject_material": record.subject_material,
+            "perturbs": record.perturbs,
+            "perturbation_direction": record.perturbation_direction,
+            "condition": record.condition,
+            "cultivar": record.cultivar,
+            "genetic_background": record.genetic_background,
+            "development_stage": record.development_stage,
+            "observed_effect": record.observed_effect,
+            "observed_relation": record.observed_relation,
+            "inferred_gene_function": record.inferred_gene_function,
+            "sentence_id": record.sentence_id,
+            "claim_eligible": record.claim_eligible,
             "metadata_json": record.metadata_json or {},
         }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from yuxi.agents.context import BaseContext
 from yuxi.services import chat_service as svc
 
 
@@ -29,6 +30,10 @@ def test_scope_snapshot_replaces_knowledge_ids_and_blocks_web_capabilities():
     )
 
     assert input_context["knowledges"] == ["kb-rice"]
+    assert input_context["_effective_knowledge_scope"] == {
+        "effective_kb_ids": ["kb-rice"],
+        "allow_web": False,
+    }
     assert input_context["tools"] == ["calculator"]
     assert input_context["subagents"] == ["researcher"]
 
@@ -46,5 +51,20 @@ def test_scope_snapshot_keeps_web_capabilities_only_when_explicitly_allowed():
     )
 
     assert input_context["knowledges"] == ["kb-rice"]
+    assert input_context["_effective_knowledge_scope"] == {
+        "effective_kb_ids": ["kb-rice"],
+        "allow_web": True,
+    }
     assert input_context["tools"] == ["tavily_search"]
     assert input_context["subagents"] == ["web-search"]
+
+
+def test_scope_snapshot_survives_base_agent_context_reconstruction():
+    snapshot = {"scope_id": "scope-rice", "scope_version": 4, "effective_kb_ids": ["kb-rice"]}
+    input_context = {}
+    svc._apply_knowledge_scope_snapshot(input_context, snapshot)
+
+    context = BaseContext()
+    context.update_from_dict(input_context)
+
+    assert context._effective_knowledge_scope == snapshot
