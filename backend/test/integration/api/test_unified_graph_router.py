@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -50,6 +51,37 @@ async def test_get_graphs_list_only_returns_milvus(test_client, admin_headers, k
     assert payload["data"]
     assert all(graph["type"] == "milvus" for graph in payload["data"])
     assert any(graph["id"] == knowledge_database["kb_id"] for graph in payload["data"])
+
+
+async def test_delete_database_removes_neo4j_projection(test_client, admin_headers, knowledge_database):
+    from yuxi.storage.neo4j import get_shared_neo4j_connection, neo4j_read, neo4j_write, safe_neo4j_label
+
+    kb_id = knowledge_database["kb_id"]
+    label = safe_neo4j_label(kb_id)
+    driver = get_shared_neo4j_connection().driver
+
+    def create_projection(tx):
+        tx.run(
+            f"""
+            CREATE (source:MilvusKB:Entity:`{label}` {{kb_id: $kb_id, name: 'source'}})
+            CREATE (target:MilvusKB:Entity:`{label}` {{kb_id: $kb_id, name: 'target'}})
+            CREATE (source)-[:RELATION {{kb_id: $kb_id}}]->(target)
+            """,
+            kb_id=kb_id,
+        )
+
+    await asyncio.to_thread(neo4j_write, driver, create_projection)
+
+    response = await test_client.delete(f"/api/knowledge/databases/{kb_id}", headers=admin_headers)
+
+    assert response.status_code == 200, response.text
+    rows = await asyncio.to_thread(
+        neo4j_read,
+        driver,
+        f"OPTIONAL MATCH (n:MilvusKB:`{label}`) OPTIONAL MATCH (n)-[r]-() "
+        "RETURN count(DISTINCT n) AS nodes, count(DISTINCT r) AS relationships",
+    )
+    assert rows == [{"nodes": 0, "relationships": 0}]
 
 
 @pytest.mark.parametrize("path", ["/api/graph/subgraph", "/api/graph/stats", "/api/graph/labels"])

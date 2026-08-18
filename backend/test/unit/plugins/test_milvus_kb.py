@@ -175,16 +175,16 @@ async def test_delete_database_offloads_milvus_cleanup(monkeypatch):
         lambda kb_id, using: record_cleanup("drop_collection"),
     )
 
-    class FakeGraphVectorStore:
+    class FakeMilvusGraphService:
         def __init__(self):
-            record_cleanup("graph_init")
+            record_cleanup("graph_service_init")
 
-        def drop_graph_collections(self, kb_id):
-            record_cleanup("drop_graph_collections")
+        def delete_graph(self, kb_id):
+            record_cleanup("delete_graph")
 
     monkeypatch.setattr(
-        "yuxi.knowledge.graphs.milvus_graph_vector_store.MilvusGraphVectorStore",
-        FakeGraphVectorStore,
+        "yuxi.knowledge.graphs.milvus_graph_service.MilvusGraphService",
+        FakeMilvusGraphService,
     )
 
     async def delete_base(self, kb_id):
@@ -196,7 +196,7 @@ async def test_delete_database_offloads_milvus_cleanup(monkeypatch):
     result = await kb.delete_database("db")
 
     assert result == {"message": "删除成功"}
-    assert calls == ["has_collection", "drop_collection", "graph_init", "drop_graph_collections", "delete_base"]
+    assert calls == ["has_collection", "drop_collection", "graph_service_init", "delete_graph", "delete_base"]
     assert cleanup_threads
     assert all(thread_id != event_loop_thread for thread_id in cleanup_threads)
 

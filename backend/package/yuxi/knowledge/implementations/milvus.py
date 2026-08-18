@@ -1319,9 +1319,9 @@ class MilvusKB(KnowledgeBase):
             except Exception as e:
                 logger.error(f"Failed to drop Milvus collection {kb_id}: {e}")
 
-            from yuxi.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
+            from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
 
-            MilvusGraphVectorStore().drop_graph_collections(kb_id)
+            MilvusGraphService().delete_graph(kb_id)
 
         await asyncio.to_thread(delete_milvus_collections)
 

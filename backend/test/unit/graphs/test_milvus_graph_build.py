@@ -438,6 +438,25 @@ def test_milvus_graph_service_delete_file_graph_uses_scoped_streaming_queries():
     assert "DETACH DELETE c" in queries[2]
 
 
+def test_milvus_graph_service_delete_graph_removes_neo4j_projection_and_vector_collections():
+    tx = MagicMock()
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.execute_write.side_effect = lambda func: func(tx)
+    driver = MagicMock()
+    driver.session.return_value = session
+    graph_vector_store = MagicMock()
+    service = MilvusGraphService(
+        neo4j_connection=SimpleNamespace(driver=driver),
+        graph_vector_store=graph_vector_store,
+    )
+
+    service.delete_graph("kb_test")
+
+    tx.run.assert_called_once_with("MATCH (n:MilvusKB:`kb_test`) DETACH DELETE n")
+    graph_vector_store.drop_graph_collections.assert_called_once_with("kb_test")
+
+
 def test_milvus_graph_service_process_query_result_keeps_complete_edges():
     service = MilvusGraphService()
     result = service._process_query_result(
