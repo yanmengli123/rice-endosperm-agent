@@ -85,34 +85,11 @@ TODO_MID_PROMPT = """
 每个待办任务名称必须简短，控制在 20 个中文汉字以内。
 """
 
-KNOWLEDGE_SCOPE_PROMPT = """
-<| 科研知识范围与证据约束 |>
-- 当前问题只能使用运行时知识范围中返回的 Evidence；不得把未纳入、无权限或被会话缩小排除的知识源当作依据。
-- 科研问题必须优先使用 query_knowledge_scope；不得用 query_kb 的原始混合 chunk 绕过统一证据分层。
-- 每轮只调用一次 query_knowledge_scope。该调用已并行覆盖范围内所有知识源并返回完整 Evidence Package；
-  收到结果后直接基于各分层作答，不要再拆词、改写问题或重复检索。
-- 只允许 claim_eligible=true 的结构化 evidence 支撑确定性论断。Document、Graph-only 和含混聚合记录只能作为上下文。
-- 每个关键科研论断必须在同一行或同一句标注 evidence_id；若写 PMID/DOI，只能逐字复制该 evidence record 中的值。
-- 回答 grain-yield 基因问题时严格按 Evidence Package 分层：直接产量、条件特异产量、产量构成、灌浆/粒型、其他支持。
-  grain weight、grain size、grain filling 不得表述为 direct grain yield，也不得把其数值改写成总产量增幅。
-- STRICT、SUPPORTING 是默认可用证据；CANDIDATE 仅在用户明确询问候选且范围策略允许时可使用，
-  并必须标为候选，不得写成已证实事实；REJECTED 不得作为支持证据。
-- “结合/互作”不等于“激活/抑制”；Gene、Allele/Mutant、Construct 和 Treatment 不得混为同一实体。
-- Construct/Mutant 的观察效应不得直接改写成正常基因功能；若作推断，必须明确写“提示/可能”并保留实验材料。
-- evidence.condition 非空时，结论中必须明确保留条件；不得把高温等条件特异效应泛化为普遍规律。
-- 结构化字段与原文 quote 冲突时，必须保留冲突并降低结论强度，不得静默覆盖。
-- 知识库状态和本回答使用的来源只能引用工具返回的 knowledge_source_status 与 sources_used；不得自行判断“空库”。
-- 没有足够范围内证据时明确回答证据不足，不得用模型记忆补全科研事实。
-"""
-
-
 def build_prompt_with_context(context):
     current_date = f"当前日期：{shanghai_now().strftime('%Y-%m-%d')}"
     prompt_sections = [current_date, DOMAIN_SYSTEM_PROMPT.strip(), PROMPT.strip()]
     if context.system_prompt:
         prompt_sections.append(context.system_prompt.strip())
-    if isinstance(getattr(context, "_effective_knowledge_scope", None), dict):
-        prompt_sections.append(KNOWLEDGE_SCOPE_PROMPT.strip())
     # 身份约束放在自定义提示词之后，避免运行时配置意外覆盖品牌身份。
     prompt_sections.append(IDENTITY_SYSTEM_PROMPT.strip())
     return "\n\n".join(prompt_sections)

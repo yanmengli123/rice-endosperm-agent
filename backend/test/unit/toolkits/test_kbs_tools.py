@@ -24,10 +24,6 @@ def _query_kb_callable():
     return _tool_callable(tools.query_kb)
 
 
-def _query_knowledge_scope_callable():
-    return _tool_callable(tools.query_knowledge_scope)
-
-
 def _find_kb_document_callable():
     return _tool_callable(tools.find_kb_document)
 
@@ -45,10 +41,6 @@ async def _run_tool(callback, **kwargs):
 
 async def _run_query_kb(**kwargs):
     return await _run_tool(_query_kb_callable(), **kwargs)
-
-
-async def _run_query_knowledge_scope(**kwargs):
-    return await _run_tool(_query_knowledge_scope_callable(), **kwargs)
 
 
 async def _run_find_kb_document(**kwargs):
@@ -133,55 +125,6 @@ async def test_query_kb_returns_search_schema_without_sandbox_paths(monkeypatch)
     assert result["results"][0]["metadata"]["source"] == "auth-guide.pdf"
     assert "filepath" not in result["results"][0]["metadata"]
     assert "parsed_path" not in result["results"][0]["metadata"]
-
-
-@pytest.mark.asyncio
-async def test_query_kb_cannot_bypass_bound_knowledge_scope(monkeypatch) -> None:
-    monkeypatch.setattr(
-        tools,
-        "_get_knowledge_base",
-        lambda: pytest.fail("scoped query must be rejected before accessing a raw retriever"),
-    )
-    runtime = SimpleNamespace(
-        context=SimpleNamespace(_effective_knowledge_scope={"scope_id": "scope-1", "scope_version": 7})
-    )
-
-    result = await _run_query_kb(kb_id="db-1", query_text="grain yield genes", runtime=runtime)
-
-    assert result == {
-        "error": "SCOPE_RETRIEVAL_REQUIRED",
-        "message": "当前会话已绑定统一知识范围，请使用 query_knowledge_scope；原始单库检索已关闭。",
-        "scope_id": "scope-1",
-        "scope_version": 7,
-    }
-
-
-@pytest.mark.asyncio
-async def test_query_knowledge_scope_marks_complete_package_for_current_run(monkeypatch) -> None:
-    expected = {"evidence": [{"evidence_id": "EV-1", "claim_eligible": True}]}
-
-    async def _fake_gateway(*, query_text, scope_snapshot, top_k):
-        assert query_text == "grain yield genes"
-        assert scope_snapshot["scope_id"] == "scope-1"
-        assert top_k == 12
-        return expected
-
-    import yuxi.knowledge.scope_gateway as scope_gateway
-
-    monkeypatch.setattr(scope_gateway, "query_knowledge_scope_gateway", _fake_gateway)
-    context = SimpleNamespace(
-        _effective_knowledge_scope={"scope_id": "scope-1", "scope_version": 7},
-        _knowledge_scope_query_completed=False,
-    )
-
-    result = await _run_query_knowledge_scope(
-        query_text="grain yield genes",
-        top_k=12,
-        runtime=SimpleNamespace(context=context),
-    )
-
-    assert result == expected
-    assert context._knowledge_scope_query_completed is True
 
 
 @pytest.mark.asyncio

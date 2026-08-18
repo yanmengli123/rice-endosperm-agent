@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 
 from yuxi.agents.toolkits.registry import tool
 from yuxi.knowledge.base import KnowledgeBase
-from yuxi.knowledge.research_evidence import sanitize_scientific_identifier_notation
 from yuxi.knowledge.schemas import (
     FindInputSchema,
     FindOutputSchema,
@@ -160,15 +159,15 @@ FindKBDocumentInput = FindInputSchema
 
 class QueryKnowledgeScopeInput(BaseModel):
     query_text: str = Field(description="面向当前问题提炼的检索语句；系统会同时检索范围内所有知识源")
-    top_k: int = Field(default=12, ge=1, le=12, description="语义分层、全局去重和重排后最多返回 12 条证据")
+    top_k: int = Field(default=12, ge=1, le=50, description="全局去重和重排后最多返回的证据数量")
 
 
 @tool(category="knowledge", tags=["知识库", "Graph-RAG"], args_schema=QueryKnowledgeScopeInput)
 async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolRuntime = None) -> Any:
     """在当前运行已冻结的知识范围中统一检索文档、图谱和结构化科研证据。
 
-    这是回答知识问题的首选入口，每轮调用一次即可返回完整 Evidence Package。它不会接受
-    kb_id，因此模型不能绕过 ScopeResolver 扩大范围；返回的 evidence_id 用于关键科研论断引用。
+    这是回答知识问题的首选入口。它不会接受 kb_id，因此模型不能绕过 ScopeResolver 扩大范围；
+    返回的 evidence_id 可用于关键科研论断引用。
     """
     if not str(query_text or "").strip():
         return "请提供查询内容"
@@ -181,19 +180,11 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
         }
     from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway
 
-    result = await query_knowledge_scope_gateway(
+    return await query_knowledge_scope_gateway(
         query_text=str(query_text).strip(),
         scope_snapshot=snapshot,
         top_k=top_k,
     )
-    # SkillsMiddleware reads this run-local flag before the next model call
-    # and removes the gateway from the visible tool set.  A single gateway
-    # call already fans out to every scoped knowledge source and returns all
-    # scientific outcome layers, so follow-up calls only add latency and can
-    # cause tool loops with reasoning-heavy models.
-    if context is not None:
-        setattr(context, "_knowledge_scope_query_completed", True)
-    return result
 
 
 async def _resolve_visible_knowledge_bases_for_query(runtime: ToolRuntime | None) -> list[dict[str, Any]]:
@@ -239,38 +230,21 @@ def _find_query_target(
 
 async def _build_query_output(target_kb_id: str, result: Any) -> Any:
     if isinstance(result, dict) and result.get("kb_id") == target_kb_id and isinstance(result.get("results"), list):
-        output = SearchOutputSchema(**result).model_dump()
-    else:
-        output = KnowledgeBase.build_search_output(target_kb_id, result)
-    if not isinstance(output, dict):
-        return sanitize_scientific_identifier_notation(output) if isinstance(output, str) else output
-    for row in output.get("results") or []:
-        if isinstance(row, dict) and "content" in row:
-            row["content"] = sanitize_scientific_identifier_notation(row.get("content"))
-    return output
+        return SearchOutputSchema(**result).model_dump()
+    return KnowledgeBase.build_search_output(target_kb_id, result)
 
 
 @tool(category="knowledge", tags=["知识库"], args_schema=QueryKBInput)
 async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, runtime: ToolRuntime = None) -> Any:
     """在指定知识库中检索内容
 
-    仅供未绑定统一知识范围的兼容链路使用。当前运行已绑定知识范围时必须改用
-    query_knowledge_scope，避免绕过范围策略与科研 Evidence Contract。
+    当用户需要查询具体内容时使用此工具。kb_id 是知识库资源 ID，也就是 kb_id；返回结果中的
+    file_id 可继续用于 find_kb_document 或 open_kb_document。
     """
     if not kb_id:
         return "请提供 kb_id"
     if not query_text:
         return "请提供查询内容"
-
-    context = getattr(runtime, "context", None) if runtime is not None else None
-    snapshot = getattr(context, "_effective_knowledge_scope", None) if context is not None else None
-    if isinstance(snapshot, dict):
-        return {
-            "error": "SCOPE_RETRIEVAL_REQUIRED",
-            "message": "当前会话已绑定统一知识范围，请使用 query_knowledge_scope；原始单库检索已关闭。",
-            "scope_id": snapshot.get("scope_id"),
-            "scope_version": snapshot.get("scope_version"),
-        }
 
     knowledge_base = _get_knowledge_base()
     retrievers = knowledge_base.get_retrievers()

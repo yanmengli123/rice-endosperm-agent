@@ -170,12 +170,6 @@ class BaseContext:
         repr=False,
     )
 
-    _knowledge_scope_query_completed: bool = field(
-        default=False,
-        metadata={"name": "本轮统一知识范围检索已完成", "configurable": False, "hide": True},
-        repr=False,
-    )
-
     system_prompt: str = field(
         default="You are a helpful assistant.",
         metadata={"name": "系统提示词", "description": "用来描述智能体的角色和行为", "kind": "prompt"},

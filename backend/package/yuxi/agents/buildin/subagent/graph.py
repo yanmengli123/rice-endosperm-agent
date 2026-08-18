@@ -19,7 +19,6 @@ from yuxi.agents.context import (
     prepare_agent_runtime_context,
 )
 from yuxi.agents.middlewares import (
-    EvidenceValidationMiddleware,
     ImageInputCompatibilityMiddleware,
     TokenUsageMiddleware,
     create_summary_middleware,
@@ -86,7 +85,6 @@ async def _build_middlewares(context):
         ModelRetryMiddleware(),
         ImageInputCompatibilityMiddleware(),
         TokenUsageMiddleware(),
-        EvidenceValidationMiddleware(),
     ]
 
 
