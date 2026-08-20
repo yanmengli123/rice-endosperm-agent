@@ -78,7 +78,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, watch, nextTick, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { RefreshCw, Map as MapIcon, Sparkles, Maximize2, Plus } from 'lucide-vue-next'
 import { mindmapApi } from '@/apis/knowledge_api'
@@ -104,6 +104,14 @@ const mindmapDiff = ref(null)
 const isIncremental = ref(false)
 let markmapInstance = null
 let textMeasureContext = null
+let resizeObserver = null
+let renderFrameId = null
+let stableFitTimer = null
+let safariFallbackTimer = null
+let renderRevision = 0
+let activeRenderCount = 0
+let loadRequestRevision = 0
+let disposed = false
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
 const MARKMAP_MAX_WIDTH = 200
@@ -135,29 +143,22 @@ const useSvgTextFallback = (() => {
 const loadMindmap = async () => {
   if (!props.kbId) return
 
+  const kbId = props.kbId
+  const requestRevision = ++loadRequestRevision
+
   try {
     loading.value = true
-    const response = await mindmapApi.getByDatabase(props.kbId)
+    const response = await mindmapApi.getByDatabase(kbId)
+
+    if (disposed || requestRevision !== loadRequestRevision || kbId !== props.kbId) return
 
     const mindmap = response.mindmap || null
     mindmapData.value = mindmap
 
-    if (markmapInstance) {
-      markmapInstance.destroy()
-      markmapInstance = null
-    }
-
-    if (mindmap) {
-      await nextTick()
-
-      // 延迟渲染，确保DOM完全更新
-      setTimeout(() => {
-        renderMindmap(mindmap)
-      }, 100)
-    }
-
     await checkMindmapDiff()
   } catch (error) {
+    if (disposed || requestRevision !== loadRequestRevision || kbId !== props.kbId) return
+
     // 如果是404错误，说明还没有生成，静默处理
     if (
       error?.message?.includes('404') ||
@@ -171,7 +172,9 @@ const loadMindmap = async () => {
       message.error('加载思维导图失败: ' + errorMsg)
     }
   } finally {
-    loading.value = false
+    if (!disposed && requestRevision === loadRequestRevision && kbId === props.kbId) {
+      loading.value = false
+    }
   }
 }
 
@@ -191,15 +194,7 @@ const generateMindmap = async () => {
     )
 
     mindmapData.value = response.mindmap
-
-    // 等待DOM更新
-    await nextTick()
-
-    // 再延迟一点，确保SVG元素完全渲染
-    setTimeout(() => {
-      renderMindmap(response.mindmap)
-      message.success('思维导图生成成功！')
-    }, 100)
+    message.success('思维导图生成成功！')
 
     await checkMindmapDiff()
   } catch (error) {
@@ -249,17 +244,11 @@ const incrementalUpdate = async () => {
     const response = await mindmapApi.generateMindmap(props.kbId, [], '', true)
 
     mindmapData.value = response.mindmap
-
-    await nextTick()
-
-    setTimeout(() => {
-      renderMindmap(response.mindmap)
-      if (response.no_ai_needed) {
-        message.success('思维导图已更新（自动清理已删除文件）')
-      } else {
-        message.success('增量更新完成！')
-      }
-    }, 100)
+    if (response.no_ai_needed) {
+      message.success('思维导图已更新（自动清理已删除文件）')
+    } else {
+      message.success('增量更新完成！')
+    }
 
     await checkMindmapDiff()
   } catch (error) {
@@ -289,8 +278,7 @@ const jsonToMarkdown = (node, level = 0) => {
   return markdown
 }
 
-const ensureSvgViewportSize = () => {
-  const svg = mindmapSvg.value
+const ensureSvgViewportSize = (svg = mindmapSvg.value) => {
   const container = svg?.parentElement
   if (!svg || !container) return false
 
@@ -390,10 +378,9 @@ const hideOriginalMarkmapText = (contentGroup) => {
   })
 }
 
-const syncSafariTextFallback = () => {
-  const svg = mindmapSvg.value
-  const contentGroup = markmapInstance?.g?.node?.()
-  const data = markmapInstance?.state?.data
+const syncSafariTextFallback = (instance = markmapInstance, svg = mindmapSvg.value) => {
+  const contentGroup = instance?.g?.node?.()
+  const data = instance?.state?.data
 
   if (!useSvgTextFallback || !svg || !contentGroup || !data) {
     svg?.classList.remove('mindmap-safari-fallback')
@@ -435,46 +422,93 @@ const syncSafariTextFallback = () => {
   hideOriginalMarkmapText(contentGroup)
 }
 
-const patchSafariTextFallback = () => {
-  if (!useSvgTextFallback || !markmapInstance) return
+const patchSafariTextFallback = (instance, svg) => {
+  if (!useSvgTextFallback || !instance) return
 
-  const originalRenderData = markmapInstance.renderData.bind(markmapInstance)
-  markmapInstance.renderData = async (...args) => {
+  const originalRenderData = instance.renderData.bind(instance)
+  instance.renderData = async (...args) => {
     const result = await originalRenderData(...args)
-    syncSafariTextFallback()
-    setTimeout(() => {
-      hideOriginalMarkmapText(markmapInstance?.g?.node?.())
+    if (markmapInstance !== instance || mindmapSvg.value !== svg) return result
+
+    syncSafariTextFallback(instance, svg)
+    clearTimeout(safariFallbackTimer)
+    safariFallbackTimer = setTimeout(() => {
+      if (markmapInstance === instance && mindmapSvg.value === svg) {
+        hideOriginalMarkmapText(instance.g?.node?.())
+      }
     }, 350)
     return result
   }
 }
 
+const destroyMarkmap = () => {
+  if (!markmapInstance) return
+
+  markmapInstance.destroy()
+  markmapInstance = null
+}
+
+const cancelScheduledRender = () => {
+  renderRevision += 1
+
+  if (renderFrameId !== null) {
+    cancelAnimationFrame(renderFrameId)
+    renderFrameId = null
+  }
+
+  clearTimeout(stableFitTimer)
+  stableFitTimer = null
+  clearTimeout(safariFallbackTimer)
+  safariFallbackTimer = null
+}
+
+const isCurrentRender = (revision, svg, instance) =>
+  !disposed &&
+  revision === renderRevision &&
+  svg === mindmapSvg.value &&
+  instance === markmapInstance
+
+const scheduleMindmapRender = async () => {
+  const data = mindmapData.value
+  if (disposed || !data || loading.value || generating.value) return
+
+  const revision = ++renderRevision
+
+  if (renderFrameId !== null) {
+    cancelAnimationFrame(renderFrameId)
+    renderFrameId = null
+  }
+
+  await nextTick()
+  if (
+    disposed ||
+    revision !== renderRevision ||
+    !mindmapSvg.value ||
+    loading.value ||
+    generating.value
+  ) {
+    return
+  }
+
+  renderFrameId = requestAnimationFrame(() => {
+    renderFrameId = null
+    void renderMindmap(data, revision)
+  })
+}
+
 /**
  * 渲染思维导图
  */
-const renderMindmap = async (data, retryCount = 0) => {
-  if (!data) return
+const renderMindmap = async (data, revision) => {
+  const svg = mindmapSvg.value
+  if (disposed || revision !== renderRevision || !data || !svg || !ensureSvgViewportSize(svg))
+    return
 
-  if (!mindmapSvg.value || !ensureSvgViewportSize()) {
-    // 如果SVG或尺寸还没准备好，最多重试3次
-    if (retryCount < 3) {
-      setTimeout(() => {
-        renderMindmap(data, retryCount + 1)
-      }, 100)
-      return
-    } else {
-      console.error('无法获取SVG容器，渲染失败')
-      message.error('渲染失败：无法找到SVG容器')
-      return
-    }
-  }
-
+  let instance = null
   try {
-    // 清空之前的实例
-    if (markmapInstance) {
-      markmapInstance.destroy()
-    }
-    mindmapSvg.value.classList.remove('mindmap-safari-fallback')
+    activeRenderCount += 1
+    destroyMarkmap()
+    svg.classList.remove('mindmap-safari-fallback')
 
     // 将JSON转换为Markdown
     const markdown = jsonToMarkdown(data)
@@ -484,7 +518,7 @@ const renderMindmap = async (data, retryCount = 0) => {
     const { root } = transformer.transform(markdown)
 
     // 创建Markmap实例
-    markmapInstance = Markmap.create(mindmapSvg.value, {
+    instance = Markmap.create(svg, {
       duration: 300,
       maxWidth: MARKMAP_MAX_WIDTH,
       nodeMinHeight: 24,
@@ -492,21 +526,37 @@ const renderMindmap = async (data, retryCount = 0) => {
       spacingVertical: 5,
       spacingHorizontal: 60
     })
-    patchSafariTextFallback()
+    markmapInstance = instance
+    patchSafariTextFallback(instance, svg)
 
-    await markmapInstance.setData(root)
-    await markmapInstance.fit()
+    await instance.setData(root)
+    if (!isCurrentRender(revision, svg, instance)) {
+      instance.destroy()
+      return
+    }
+
+    await instance.fit()
+    if (!isCurrentRender(revision, svg, instance)) {
+      instance.destroy()
+      return
+    }
 
     // 延迟再次适应，确保布局完全稳定
-    setTimeout(() => {
-      if (markmapInstance) {
-        syncSafariTextFallback()
-        markmapInstance.fit()
+    clearTimeout(stableFitTimer)
+    stableFitTimer = setTimeout(() => {
+      if (isCurrentRender(revision, svg, instance)) {
+        syncSafariTextFallback(instance, svg)
+        void instance.fit()
       }
     }, 300)
   } catch (error) {
-    console.error('渲染思维导图失败:', error)
-    message.error('渲染失败: ' + error.message)
+    if (isCurrentRender(revision, svg, instance)) {
+      console.error('渲染思维导图失败:', error)
+      message.error('渲染失败: ' + error.message)
+      destroyMarkmap()
+    }
+  } finally {
+    activeRenderCount -= 1
   }
 }
 
@@ -514,10 +564,10 @@ const renderMindmap = async (data, retryCount = 0) => {
  * 适应视图
  */
 const fitView = () => {
-  if (markmapInstance) {
-    ensureSvgViewportSize()
-    syncSafariTextFallback()
-    markmapInstance.fit()
+  const svg = mindmapSvg.value
+  if (markmapInstance && ensureSvgViewportSize(svg)) {
+    syncSafariTextFallback(markmapInstance, svg)
+    void markmapInstance.fit()
   }
 }
 
@@ -539,41 +589,81 @@ watch(
   (newId) => {
     if (newId) {
       loadMindmap()
+    } else {
+      loadRequestRevision += 1
+      loading.value = false
+      mindmapData.value = null
     }
   },
   { immediate: true }
 )
 
-// 监听容器大小变化，自动适应
-let resizeObserver = null
+watch(
+  mindmapSvg,
+  (svg) => {
+    resizeObserver?.disconnect()
+    resizeObserver = null
 
-onMounted(() => {
-  // 设置ResizeObserver监听容器大小变化
-  nextTick(() => {
-    if (mindmapSvg.value) {
-      const container = mindmapSvg.value.parentElement
-      if (container) {
-        resizeObserver = new ResizeObserver(() => {
-          if (markmapInstance) {
-            ensureSvgViewportSize()
-            syncSafariTextFallback()
-            markmapInstance.fit()
-          }
-        })
-        resizeObserver.observe(container)
-      }
+    if (!svg) {
+      cancelScheduledRender()
+      destroyMarkmap()
+      return
     }
-  })
-})
+
+    const container = svg.parentElement
+    if (container) {
+      resizeObserver = new ResizeObserver(() => {
+        if (
+          disposed ||
+          svg !== mindmapSvg.value ||
+          !mindmapData.value ||
+          loading.value ||
+          generating.value
+        ) {
+          return
+        }
+
+        if (!ensureSvgViewportSize(svg)) return
+
+        if (markmapInstance && activeRenderCount === 0) {
+          syncSafariTextFallback(markmapInstance, svg)
+          void markmapInstance.fit()
+        } else if (!markmapInstance) {
+          void scheduleMindmapRender()
+        }
+      })
+      resizeObserver.observe(container)
+    }
+
+    void scheduleMindmapRender()
+  },
+  { flush: 'post' }
+)
+
+watch(
+  [mindmapData, loading, generating],
+  ([data, isLoading, isGenerating]) => {
+    if (!data || isLoading || isGenerating) {
+      cancelScheduledRender()
+      if (!mindmapSvg.value) {
+        destroyMarkmap()
+      }
+      return
+    }
+
+    void scheduleMindmapRender()
+  },
+  { flush: 'post' }
+)
 
 // 清理
 onUnmounted(() => {
-  if (markmapInstance) {
-    markmapInstance.destroy()
-  }
-  if (resizeObserver) {
-    resizeObserver.disconnect()
-  }
+  disposed = true
+  loadRequestRevision += 1
+  cancelScheduledRender()
+  destroyMarkmap()
+  resizeObserver?.disconnect()
+  resizeObserver = null
 })
 </script>
 

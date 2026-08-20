@@ -121,18 +121,53 @@ def test_semantic_route_can_be_overridden_per_relation_endpoint():
     assert required_for["source_entity_id"] == allele["entity_id"]
 
 
-def test_ambiguous_evidence_blocks_import_instead_of_guessing_alignment():
+def test_multiple_quotes_for_one_literature_are_merged_without_losing_claim_eligibility():
     result = _parse(
         [
             "gene-1,OsPPDK,RICE_GENE,Os01g01010,,,,",
             "process-1,starch synthesis,PROCESS,,,,,",
         ],
-        ["gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,9,9,12345671|12345672,10.1007/a,quote one||quote two"],
+        [
+            "gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,12345671,10.1007/a,"
+            "quote one||quote two||quote three"
+        ],
     )
 
-    assert result["valid"] is False
-    assert any(item["code"] == "EVIDENCE_ALIGNMENT_AMBIGUOUS" for item in result["blockers"])
-    assert result["plan"]["evidence"] == []
+    assert result["valid"] is True
+    assert result["blockers"] == []
+    assert result["counts"]["evidence_assertions"] == 1
+    evidence = result["plan"]["evidence"][0]
+    assert evidence["evidence_quote"] == "quote one\n\nquote two\n\nquote three"
+    assert evidence["evidence_alignment_status"] == "ALIGNED"
+    assert evidence["claim_eligible"] is True
+
+
+def test_ambiguous_multi_literature_evidence_is_preserved_as_nonclaimable_row_bundle():
+    result = _parse(
+        [
+            "gene-1,OsPPDK,RICE_GENE,Os01g01010,,,,",
+            "process-1,starch synthesis,PROCESS,,,,,",
+        ],
+        [
+            "gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,2,2,12345671,"
+            "10.1007/a|10.1007/b,quote one||quote two"
+        ],
+    )
+
+    assert result["valid"] is True
+    assert result["blockers"] == []
+    warning = next(item for item in result["warnings"] if item["code"] == "EVIDENCE_ALIGNMENT_ROW_LEVEL")
+    assert warning["row_number"] == 2
+    assert result["counts"]["evidence_assertions"] == 1
+    evidence = result["plan"]["evidence"][0]
+    assert evidence["literature_id"] is None
+    assert evidence["pmid"] is None
+    assert evidence["doi"] is None
+    assert evidence["evidence_alignment_status"] == "ROW_LEVEL"
+    assert evidence["claim_eligible"] is False
+    assert evidence["metadata_json"]["pmids"] == ["12345671"]
+    assert evidence["metadata_json"]["dois"] == ["10.1007/a", "10.1007/b"]
+    assert evidence["metadata_json"]["quotes"] == ["quote one", "quote two"]
 
 
 def test_aligned_multiple_literature_records_are_split_one_to_one():

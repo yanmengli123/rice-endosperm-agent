@@ -20,7 +20,7 @@ from yuxi.knowledge.research_evidence import (
 from yuxi.utils import hashstr
 
 SCHEMA_VERSION = "rice-endosperm-csv-v3"
-NORMALIZER_VERSION = "managed-graph-v3"
+NORMALIZER_VERSION = "managed-graph-v4"
 
 NODE_HEADERS = {
     "node_id",
@@ -181,18 +181,27 @@ def parse_managed_graph_import(
         )
 
         alignment_status = _evidence_alignment_status(row)
-        if alignment_status == "AMBIGUOUS":
-            blockers.append(
+        if alignment_status == "ROW_LEVEL":
+            warnings.append(
                 {
-                    "code": "EVIDENCE_ALIGNMENT_AMBIGUOUS",
-                    "severity": "BLOCKER",
+                    "code": "EVIDENCE_ALIGNMENT_ROW_LEVEL",
+                    "severity": "WARNING",
                     "row_number": row_number,
-                    "message": "PMID、DOI 与证据引文数量不一致；无法可靠对齐，已阻止导入且不会猜测配对关系",
+                    "message": (
+                        "多篇文献的 PMID、DOI 与证据引文无法逐篇可靠配对；"
+                        "已保留为不可用于精确引文的行级证据包，不会猜测配对关系且不阻塞图谱导入"
+                    ),
                 }
             )
-            continue
 
-        for evidence in _build_evidence_records(kb_id, triple_id, row, source=source, target=target):
+        for evidence in _build_evidence_records(
+            kb_id,
+            triple_id,
+            row,
+            source=source,
+            target=target,
+            alignment_status=alignment_status,
+        ):
             evidence_by_id.setdefault(evidence["evidence_id"], evidence)
             evidence_sources.append(
                 {
@@ -955,19 +964,70 @@ def _build_evidence_records(
     *,
     source: dict[str, Any],
     target: dict[str, Any],
+    alignment_status: str | None = None,
 ) -> list[dict[str, Any]]:
     pmids = _split_pipe(row["pmids"])
     dois = _split_pipe(row["dois"])
     quotes = _split_quotes(row["evidence_quotes"])
-    width = max(len(pmids), len(dois), len(quotes), 1)
+    declared_literature_count = _parse_optional_int(row["literature_count"])
+    alignment_status = alignment_status or _evidence_alignment_status(row)
+    literature_width = max(len(pmids), len(dois), declared_literature_count or 0, 1)
+
+    if alignment_status == "ROW_LEVEL":
+        evidence_items = [
+            {
+                "pmid": None,
+                "doi": None,
+                "quote": "\n\n".join(quotes) or None,
+                "pmids": pmids,
+                "dois": dois,
+                "quotes": quotes,
+                "alignment_status": "ROW_LEVEL",
+                "sentence_suffix": "bundle",
+            }
+        ]
+    elif literature_width == 1:
+        evidence_items = [
+            {
+                "pmid": pmids[0] if pmids else None,
+                "doi": dois[0] if dois else None,
+                "quote": "\n\n".join(quotes) or None,
+                "pmids": pmids,
+                "dois": dois,
+                "quotes": quotes,
+                "alignment_status": "ALIGNED",
+                "sentence_suffix": "1",
+            }
+        ]
+    else:
+        evidence_items = [
+            {
+                "pmid": pmids[index] if index < len(pmids) else None,
+                "doi": dois[index] if index < len(dois) else None,
+                "quote": quotes[index] if index < len(quotes) else None,
+                "pmids": [pmids[index]] if index < len(pmids) else [],
+                "dois": [dois[index]] if index < len(dois) else [],
+                "quotes": [quotes[index]] if index < len(quotes) else [],
+                "alignment_status": "ALIGNED",
+                "sentence_suffix": str(index + 1),
+            }
+            for index in range(literature_width)
+        ]
+
     records = []
-    for index in range(width):
-        pmid = pmids[index] if pmids else None
-        doi = dois[index] if dois else None
-        quote = quotes[index] if quotes else None
+    for item in evidence_items:
+        pmid = item["pmid"]
+        doi = item["doi"]
+        quote = item["quote"]
         literature_keys = [key for key in (f"pmid:{pmid}" if pmid else None, f"doi:{doi}" if doi else None) if key]
         literature_id = "|".join(literature_keys) or None
-        identifier_status = "VALID" if literature_keys else "MISSING"
+        identifier_status = (
+            "VALID"
+            if literature_keys
+            else "UNALIGNED"
+            if item["pmids"] or item["dois"]
+            else "MISSING"
+        )
         semantics = build_evidence_semantics(
             source_name=source.get("name"),
             source_label=source.get("label"),
@@ -984,6 +1044,7 @@ def _build_evidence_records(
                 row["direction"].strip().upper(),
                 row["directness"].strip().upper(),
                 row["best_evidence_level"].strip().upper(),
+                item["alignment_status"],
                 quote or "",
             ]
         )
@@ -1003,16 +1064,16 @@ def _build_evidence_records(
                 "evidence_quote": quote,
                 "evidence_methods": [],
                 "source_scope": "relation_row",
-                "evidence_alignment_status": "ALIGNED",
-                "sentence_id": f"relationships:{row['_row_number']}:evidence:{index + 1}",
-                "claim_eligible": bool(literature_keys and quote),
+                "evidence_alignment_status": item["alignment_status"],
+                "sentence_id": f"relationships:{row['_row_number']}:evidence:{item['sentence_suffix']}",
+                "claim_eligible": bool(item["alignment_status"] == "ALIGNED" and literature_keys and quote),
                 **semantics,
                 "metadata_json": {
-                    "pmids": [pmid] if pmid else [],
-                    "dois": [doi] if doi else [],
-                    "quotes": [quote] if quote else [],
+                    "pmids": item["pmids"],
+                    "dois": item["dois"],
+                    "quotes": item["quotes"],
                     "declared_support_count": _parse_optional_int(row["support_count"]),
-                    "declared_literature_count": _parse_optional_int(row["literature_count"]),
+                    "declared_literature_count": declared_literature_count,
                     "source_row_number": row["_row_number"],
                 },
             }
@@ -1021,12 +1082,24 @@ def _build_evidence_records(
 
 
 def _evidence_alignment_status(row: dict[str, Any]) -> str:
-    counts = [
-        len(items)
-        for items in (_split_pipe(row["pmids"]), _split_pipe(row["dois"]), _split_quotes(row["evidence_quotes"]))
-        if items
-    ]
-    return "AMBIGUOUS" if len(set(counts)) > 1 else "ALIGNED"
+    pmids = _split_pipe(row["pmids"])
+    dois = _split_pipe(row["dois"])
+    quotes = _split_quotes(row["evidence_quotes"])
+    declared_literature_count = _parse_optional_int(row["literature_count"])
+    source_width = max(len(pmids), len(dois), declared_literature_count or 0)
+
+    # evidence_quotes is a row-level quote bundle. Multiple quote fragments can
+    # therefore belong to the same literature record and are merged safely.
+    if source_width <= 1:
+        return "ALIGNED"
+
+    if declared_literature_count and declared_literature_count != source_width:
+        return "ROW_LEVEL"
+    if any(count not in {0, source_width} for count in (len(pmids), len(dois))):
+        return "ROW_LEVEL"
+    if quotes and len(quotes) != source_width:
+        return "ROW_LEVEL"
+    return "ALIGNED"
 
 
 def _inspect_cypher(data: bytes | None, errors: list[dict[str, Any]]) -> dict[str, Any]:
