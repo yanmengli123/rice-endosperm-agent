@@ -35,7 +35,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { RefreshCw } from 'lucide-vue-next'
+import { RefreshCw } from '@lucide/vue'
 import { agentEnvApi } from '@/apis/agent_env_api'
 import McpEnvEditor from '@/components/McpEnvEditor.vue'
 

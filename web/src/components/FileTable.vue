@@ -379,7 +379,7 @@ import {
   Database,
   Filter,
   MoreHorizontal
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 const store = useDatabaseStore()
 

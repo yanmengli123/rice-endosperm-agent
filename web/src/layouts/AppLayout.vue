@@ -11,7 +11,7 @@ import {
   PanelLeftOpen,
   MessageCirclePlus,
   Search
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 import { useConfigStore } from '@/stores/config'
 import { useAgentStore } from '@/stores/agent'

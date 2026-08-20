@@ -276,7 +276,7 @@ import {
   FilePen,
   Save,
   X
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import hljs from 'highlight.js/lib/common'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'

@@ -38,7 +38,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
-import { Eye, EyeOff } from 'lucide-vue-next'
+import { Eye, EyeOff } from '@lucide/vue'
 
 const props = defineProps({
   modelValue: {

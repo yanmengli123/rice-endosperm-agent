@@ -40,7 +40,7 @@
 
 <script setup>
 import { computed, ref, watch, inject } from 'vue'
-import { ChevronDown, ChevronRight, Atom } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, Atom } from '@lucide/vue'
 import { ToolCallRenderer } from '@/components/ToolCallingResult'
 import {
   getToolCallId,

@@ -109,7 +109,7 @@
 
 <script setup>
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { MessageCircle, MessageCirclePlus, X } from 'lucide-vue-next'
+import { MessageCircle, MessageCirclePlus, X } from '@lucide/vue'
 import { threadApi } from '@/apis'
 import dayjs, { parseToShanghai } from '@/utils/time'
 

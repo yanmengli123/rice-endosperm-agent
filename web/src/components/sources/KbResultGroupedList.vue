@@ -79,7 +79,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { FileText, ChevronRight, ChevronDown, Eye } from 'lucide-vue-next'
+import { FileText, ChevronRight, ChevronDown, Eye } from '@lucide/vue'
 import KbChunkDetailModal from './KbChunkDetailModal.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
 

@@ -198,7 +198,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { ChevronLeft, ChevronRight, CircleHelp, LibraryBig } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, CircleHelp, LibraryBig } from '@lucide/vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'
 import WorkspaceFileList from '@/components/workspace/WorkspaceFileList.vue'

@@ -144,7 +144,7 @@ import {
   Quote,
   ShieldCheck,
   Sprout
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 const DRAFT_QUESTION_KEY = 'rice-endosperm-draft-question'
 

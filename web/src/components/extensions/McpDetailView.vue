@@ -418,7 +418,7 @@ import {
   Wrench,
   Save,
   X
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { mcpApi } from '@/apis/mcp_api'
 import { formatFullDateTime } from '@/utils/time'
 import McpEnvEditor from '@/components/McpEnvEditor.vue'

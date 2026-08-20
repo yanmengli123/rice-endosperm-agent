@@ -7,12 +7,44 @@ from pymilvus import CollectionSchema, DataType, FieldSchema, Function, Function
 
 from yuxi.knowledge.base import FileStatus, KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.nlp import count_tokens
+from yuxi.knowledge.implementations import milvus as milvus_module
 from yuxi.knowledge.implementations.milvus import (
     CONTENT_ANALYZER_PARAMS,
     CONTENT_SPARSE_FIELD,
     VECTOR_METRIC_TYPE,
     MilvusKB,
 )
+
+
+def test_init_connection_selects_database_on_named_alias(monkeypatch):
+    calls = []
+    monkeypatch.setattr(milvus_module.connections, "connect", lambda **kwargs: calls.append(("connect", kwargs)))
+    monkeypatch.setattr(
+        milvus_module.db,
+        "list_database",
+        lambda **kwargs: calls.append(("list", kwargs)) or [],
+    )
+    monkeypatch.setattr(
+        milvus_module.db,
+        "create_database",
+        lambda database, **kwargs: calls.append(("create", database, kwargs)),
+    )
+    monkeypatch.setattr(
+        milvus_module.db,
+        "using_database",
+        lambda database, **kwargs: calls.append(("using", database, kwargs)),
+    )
+    kb = MilvusKB.__new__(MilvusKB)
+    kb.connection_alias = "kb-alias"
+    kb.milvus_uri = "http://milvus:19530"
+    kb.milvus_token = ""
+    kb.milvus_db = "yuxi"
+
+    kb._init_connection()
+
+    assert ("list", {"using": "kb-alias"}) in calls
+    assert ("create", "yuxi", {"using": "kb-alias"}) in calls
+    assert ("using", "yuxi", {"using": "kb-alias"}) in calls
 
 
 class FakeHit:

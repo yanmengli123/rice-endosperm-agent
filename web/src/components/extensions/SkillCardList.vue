@@ -606,7 +606,7 @@ import {
   Plus,
   Minus,
   LoaderCircle
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
@@ -2088,7 +2088,7 @@ defineExpose({
   }
 }
 
-:deep(.recommendation-card) {
+.recommendation-card {
   cursor: default;
   &:hover {
     border-color: var(--gray-150);

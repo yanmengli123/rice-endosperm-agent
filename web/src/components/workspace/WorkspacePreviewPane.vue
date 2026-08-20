@@ -29,7 +29,7 @@
 </template>
 
 <script setup>
-import { FileSearch } from 'lucide-vue-next'
+import { FileSearch } from '@lucide/vue'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'
 
 defineProps({

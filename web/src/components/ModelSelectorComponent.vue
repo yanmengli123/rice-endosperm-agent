@@ -96,7 +96,7 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { modelProviderApi } from '@/apis/system_api'
-import { RefreshCw, X } from 'lucide-vue-next'
+import { RefreshCw, X } from '@lucide/vue'
 import { useModelStatus } from '@/composables/useModelStatus'
 
 const props = defineProps({

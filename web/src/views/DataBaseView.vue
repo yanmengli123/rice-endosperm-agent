@@ -367,7 +367,7 @@ import {
   Settings2,
   TableProperties,
   Trash2
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { message, Modal } from 'ant-design-vue'
 import { databaseApi, knowledgeScopeApi, typeApi } from '@/apis/knowledge_api'
 import PageHeader from '@/components/shared/PageHeader.vue'

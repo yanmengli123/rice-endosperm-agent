@@ -576,7 +576,7 @@ import {
   onDeactivated
 } from 'vue'
 import { message } from 'ant-design-vue'
-import { ChevronDown, FolderKanban, LayoutList, RefreshCw } from 'lucide-vue-next'
+import { ChevronDown, FolderKanban, LayoutList, RefreshCw } from '@lucide/vue'
 import { formatFileSize } from '@/utils/file_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'

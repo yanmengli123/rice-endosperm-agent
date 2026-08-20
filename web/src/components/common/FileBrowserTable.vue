@@ -98,7 +98,7 @@
 
 <script setup>
 import { computed } from 'vue'
-import { RotateCw } from 'lucide-vue-next'
+import { RotateCw } from '@lucide/vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 
 const props = defineProps({

@@ -4,8 +4,6 @@ load_dotenv(".env", override=True)
 
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 
-from yuxi.config import config as config  # noqa: E402
-
 try:
     from importlib.metadata import version
 
@@ -14,6 +12,15 @@ except Exception:
     __version__ = "unknown"
 
 executor = ThreadPoolExecutor()  # noqa: E402
+
+
+def __getattr__(name: str):
+    if name == "config":
+        from yuxi.config import config as loaded_config
+
+        globals()[name] = loaded_config
+        return loaded_config
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def get_version():

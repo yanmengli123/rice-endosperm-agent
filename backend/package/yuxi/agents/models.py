@@ -63,12 +63,69 @@ def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel
         api_key=SecretStr(api_key),
         base_url=base_url,
         stream_usage=True,
+        disable_thinking_for_legacy_tool_history=(
+            info.provider_id.lower() == "deepseek" or "api.deepseek.com" in base_url.lower()
+        ),
         **kwargs,
     )
 
 
 class _ToolCallChunkFixChatOpenAI(ChatOpenAI):
-    """归一化流式 tool_call 续片中的空串 name/id，规避 v3 流式累积缺陷。"""
+    """兼容 OpenAI 风格供应商的流式工具调用和思考内容。"""
+
+    disable_thinking_for_legacy_tool_history: bool = False
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        messages = self._convert_input(input_).to_messages()
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        payload_messages = payload.get("messages")
+        if not isinstance(payload_messages, list) or len(payload_messages) != len(messages):
+            return payload
+
+        has_legacy_tool_history = False
+        for message, payload_message in zip(messages, payload_messages, strict=True):
+            if not isinstance(payload_message, dict) or payload_message.get("role") != "assistant":
+                continue
+            reasoning_content = getattr(message, "additional_kwargs", {}).get("reasoning_content")
+            if not isinstance(reasoning_content, str):
+                has_legacy_tool_history = has_legacy_tool_history or bool(payload_message.get("tool_calls"))
+                continue
+            payload_message["reasoning_content"] = reasoning_content
+            if payload_message.get("tool_calls") and payload_message.get("content") is None:
+                payload_message["content"] = ""
+
+        if self.disable_thinking_for_legacy_tool_history and has_legacy_tool_history:
+            extra_body = dict(payload.get("extra_body") or {})
+            extra_body["thinking"] = {"type": "disabled"}
+            payload["extra_body"] = extra_body
+        return payload
+
+    def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class, base_generation_info):
+        generation_chunk = super()._convert_chunk_to_generation_chunk(
+            chunk,
+            default_chunk_class,
+            base_generation_info,
+        )
+        if generation_chunk is None:
+            return None
+
+        choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
+        if choices and isinstance(choices[0].get("delta"), dict):
+            reasoning_content = choices[0]["delta"].get("reasoning_content")
+            if isinstance(reasoning_content, str):
+                generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning_content
+        return generation_chunk
+
+    def _create_chat_result(self, response, generation_info=None):
+        result = super()._create_chat_result(response, generation_info)
+        response_dict = response if isinstance(response, dict) else response.model_dump()
+        choices = response_dict.get("choices") or []
+        for generation, choice in zip(result.generations, choices, strict=False):
+            message = choice.get("message") if isinstance(choice, dict) else None
+            reasoning_content = message.get("reasoning_content") if isinstance(message, dict) else None
+            if isinstance(reasoning_content, str):
+                generation.message.additional_kwargs["reasoning_content"] = reasoning_content
+        return result
 
     async def _astream(self, *args, **kwargs):
         async for chunk in super()._astream(*args, **kwargs):

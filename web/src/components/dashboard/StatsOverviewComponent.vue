@@ -79,7 +79,7 @@ import {
   Heart,
   TrendingUp,
   TrendingDown
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 // Props
 const props = defineProps({

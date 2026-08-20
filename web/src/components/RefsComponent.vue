@@ -102,7 +102,7 @@ import {
   RotateCcw,
   BookOpen,
   ChevronDown
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { agentApi } from '@/apis'
 import KnowledgeSourceSection from '@/components/KnowledgeSourceSection.vue'
 import WebSearchSourceSection from '@/components/WebSearchSourceSection.vue'

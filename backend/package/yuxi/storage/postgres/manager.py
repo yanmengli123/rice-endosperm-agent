@@ -1031,7 +1031,9 @@ class PostgresManager(metaclass=SingletonMeta):
             await session.commit()
         except Exception as e:
             await session.rollback()
-            logger.error(f"PostgreSQL async operation failed: {e}")
+            status_code = getattr(e, "status_code", None)
+            if not isinstance(status_code, int) or status_code >= 500:
+                logger.error(f"PostgreSQL async operation failed: {e}")
             raise
         finally:
             await session.close()

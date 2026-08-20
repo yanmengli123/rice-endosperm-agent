@@ -155,7 +155,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { ChevronDown, ChevronUp, X } from 'lucide-vue-next'
+import { ChevronDown, ChevronUp, X } from '@lucide/vue'
 import { threadApi } from '@/apis'
 import { ocrApi } from '@/apis/system_api'
 import { useConfigStore } from '@/stores/config'

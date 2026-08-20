@@ -332,7 +332,7 @@
 <script setup>
 import { computed, defineComponent, h, onUnmounted, reactive, ref, watch } from 'vue'
 import { Modal, message } from 'ant-design-vue'
-import { FileSpreadsheet, Play, RefreshCw, ShieldCheck, Upload } from 'lucide-vue-next'
+import { FileSpreadsheet, Play, RefreshCw, ShieldCheck, Upload } from '@lucide/vue'
 import { graphImportApi } from '@/apis/knowledge_api'
 import { useTaskerStore } from '@/stores/tasker'
 

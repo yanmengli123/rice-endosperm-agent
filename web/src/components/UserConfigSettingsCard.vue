@@ -31,7 +31,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { RefreshCw } from 'lucide-vue-next'
+import { RefreshCw } from '@lucide/vue'
 import { userConfigApi } from '@/apis/user_config_api'
 
 const loading = ref(false)

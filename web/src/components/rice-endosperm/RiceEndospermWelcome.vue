@@ -37,7 +37,7 @@
 </template>
 
 <script setup>
-import { BookOpenCheck, FileSearch, Quote } from 'lucide-vue-next'
+import { BookOpenCheck, FileSearch, Quote } from '@lucide/vue'
 
 const emit = defineEmits(['select'])
 

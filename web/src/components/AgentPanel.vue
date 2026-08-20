@@ -137,7 +137,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Download, Folders, PanelRightClose, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { Download, Folders, PanelRightClose, RefreshCw, Trash2, X } from '@lucide/vue'
 import { Modal, message } from 'ant-design-vue'
 import FileTreeComponent from '@/components/FileTreeComponent.vue'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'

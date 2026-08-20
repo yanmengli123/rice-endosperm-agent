@@ -21,7 +21,7 @@
 </template>
 
 <script setup>
-import { FileText, Image } from 'lucide-vue-next'
+import { FileText, Image } from '@lucide/vue'
 import { message } from 'ant-design-vue'
 import { uploadMultimodalImage } from '@/utils/multimodal_image_upload'
 

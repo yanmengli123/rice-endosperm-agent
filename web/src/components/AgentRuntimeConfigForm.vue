@@ -473,7 +473,7 @@
 import { ref, computed, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
-import { AlertTriangle, Check, Plus, Search, RotateCw, RotateCcw, Settings } from 'lucide-vue-next'
+import { AlertTriangle, Check, Plus, Search, RotateCw, RotateCcw, Settings } from '@lucide/vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import { knowledgeScopeApi } from '@/apis/knowledge_api'
 import { useAgentStore } from '@/stores/agent'

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from yuxi.storage.postgres import manager as manager_module
 from yuxi.storage.postgres.manager import PostgresManager
 
 
@@ -30,6 +31,43 @@ class _RecordingEngine:
 
     def begin(self):
         return _RecordingBegin(self.connection)
+
+
+class _RecordingSession:
+    def __init__(self):
+        self.rolled_back = False
+        self.closed = False
+
+    async def commit(self):
+        pass
+
+    async def rollback(self):
+        self.rolled_back = True
+
+    async def close(self):
+        self.closed = True
+
+
+class _ClientResponseError(Exception):
+    status_code = 401
+
+
+@pytest.mark.asyncio
+async def test_async_session_does_not_log_expected_client_response_as_database_error(monkeypatch):
+    manager = PostgresManager()
+    session = _RecordingSession()
+    logged_errors = []
+    monkeypatch.setattr(manager, "initialize", lambda: None)
+    manager.AsyncSession = lambda: session
+    monkeypatch.setattr(manager_module.logger, "error", logged_errors.append)
+
+    with pytest.raises(_ClientResponseError):
+        async with manager.get_async_session_context():
+            raise _ClientResponseError("authentication required")
+
+    assert session.rolled_back is True
+    assert session.closed is True
+    assert logged_errors == []
 
 
 @pytest.mark.asyncio

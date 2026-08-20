@@ -136,7 +136,7 @@
 
 <script setup>
 import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
-import { Globe, Building2, Users, UserPlus } from 'lucide-vue-next'
+import { Globe, Building2, Users, UserPlus } from '@lucide/vue'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis/department_api'
 import { authApi } from '@/apis/auth_api'

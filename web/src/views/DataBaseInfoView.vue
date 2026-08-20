@@ -387,7 +387,7 @@ import {
   Save,
   Search,
   Trash2
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import FileTable from '@/components/FileTable.vue'

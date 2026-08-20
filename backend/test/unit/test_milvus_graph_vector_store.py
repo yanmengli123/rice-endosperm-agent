@@ -18,6 +18,42 @@ class FakeCollection:
         self.flush_count += 1
 
 
+def test_init_connection_selects_graph_database_on_named_alias(monkeypatch):
+    calls = []
+    monkeypatch.setattr(vector_store_module.connections, "has_connection", lambda alias: False)
+    monkeypatch.setattr(
+        vector_store_module.connections,
+        "connect",
+        lambda **kwargs: calls.append(("connect", kwargs)),
+    )
+    monkeypatch.setattr(
+        vector_store_module.db,
+        "list_database",
+        lambda **kwargs: calls.append(("list", kwargs)) or [],
+    )
+    monkeypatch.setattr(
+        vector_store_module.db,
+        "create_database",
+        lambda database, **kwargs: calls.append(("create", database, kwargs)),
+    )
+    monkeypatch.setattr(
+        vector_store_module.db,
+        "using_database",
+        lambda database, **kwargs: calls.append(("using", database, kwargs)),
+    )
+    store = object.__new__(MilvusGraphVectorStore)
+    store.connection_alias = "graph-alias"
+    store.milvus_uri = "http://milvus:19530"
+    store.milvus_token = ""
+    store.milvus_db = "yuxi"
+
+    store._init_connection()
+
+    assert ("list", {"using": "graph-alias"}) in calls
+    assert ("create", "yuxi", {"using": "graph-alias"}) in calls
+    assert ("using", "yuxi", {"using": "graph-alias"}) in calls
+
+
 def test_delete_ids_flushes_before_follow_up_visibility_check(monkeypatch):
     collection = FakeCollection()
     monkeypatch.setattr(vector_store_module.utility, "has_collection", lambda *args, **kwargs: True)

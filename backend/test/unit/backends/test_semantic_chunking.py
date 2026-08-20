@@ -1,5 +1,6 @@
+# ruff: noqa: E501
+
 import pytest
-import numpy as np
 
 # 现在可以安全地导入了，因为顶层不再有重型依赖
 from yuxi.knowledge.chunking.ragflow_like.parsers import semantic
@@ -307,11 +308,11 @@ def test_semantic_chunking_basic(embed_fn, sample_markdown):
     for idx, chunk in enumerate(chunks, 1):
         print(f"\n[Chunk {idx}]\n{chunk}")
     print("\n--- 语义切分结果结束 ---")
-   
+
 def test_heading_inference():
     """测试标题层级推断工具类"""
     from yuxi.knowledge.chunking.ragflow_like.utils.md_parser_utils import infer_heading_level
-    
+
     assert infer_heading_level("1. 简介") == 1
     assert infer_heading_level("1.1 详细设计") == 2
     assert infer_heading_level("1.2.3 核心逻辑") == 3

@@ -290,7 +290,7 @@ import {
   render
 } from 'vue'
 import { SendOutlined, ArrowUpOutlined, PauseOutlined } from '@ant-design/icons-vue'
-import { Paperclip } from 'lucide-vue-next'
+import { Paperclip } from '@lucide/vue'
 import { searchMentionFiles } from '@/apis/mention_api'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import {

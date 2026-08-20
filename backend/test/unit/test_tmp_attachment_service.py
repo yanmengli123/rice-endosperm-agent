@@ -9,7 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("SAVE_DIR", os.path.join(os.environ.get("CLAUDE_JOB_DIR", tempfile.gettempdir()), "yuxi-test-saves"))
+os.environ.setdefault(
+    "SAVE_DIR",
+    os.path.join(os.environ.get("CLAUDE_JOB_DIR", tempfile.gettempdir()), "yuxi-test-saves"),
+)
 
 from yuxi.services import conversation_service as service
 
@@ -347,5 +350,6 @@ async def test_confirm_tmp_thread_attachments_keeps_duplicate_names_separate(mon
 
     first, second = response["attachments"]
     assert first["original_path"] != second["original_path"]
-    assert (tmp_path / "threads" / "thread-1" / "user-data" / "uploads" / Path(first["original_path"]).name).read_bytes() == b"first"
-    assert (tmp_path / "threads" / "thread-1" / "user-data" / "uploads" / Path(second["original_path"]).name).read_bytes() == b"second"
+    upload_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+    assert (upload_dir / Path(first["original_path"]).name).read_bytes() == b"first"
+    assert (upload_dir / Path(second["original_path"]).name).read_bytes() == b"second"

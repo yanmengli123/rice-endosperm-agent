@@ -397,7 +397,7 @@ import {
   Network,
   BrainCircuit,
   ScanText
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import GraphCanvas from '@/components/GraphCanvas.vue'
 import GraphDetailPanel from '@/components/GraphDetailPanel.vue'
 import GraphImportModal from '@/components/GraphImportModal.vue'

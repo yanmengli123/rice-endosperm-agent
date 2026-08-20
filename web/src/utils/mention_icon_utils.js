@@ -1,4 +1,4 @@
-import { BookMarked, BookOpen, Bot, Plug } from 'lucide-vue-next'
+import { BookMarked, BookOpen, Bot, Plug } from '@lucide/vue'
 
 export const MENTION_ICON_SIZE = 15
 export const MENTION_ICON_STROKE_WIDTH = 2.2

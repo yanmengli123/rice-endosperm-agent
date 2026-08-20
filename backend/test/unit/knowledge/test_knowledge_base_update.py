@@ -131,7 +131,9 @@ class FakeFileRepository:
             "token_count": sum(int(record.token_count or 0) for record in files),
             "pending_parse_count": sum(1 for record in files if record.status == "uploaded"),
             "pending_index_count": sum(1 for record in files if record.status in {"parsed", "error_indexing"}),
-            "processing_count": sum(1 for record in files if record.status in {"processing", "waiting", "parsing", "indexing"}),
+            "processing_count": sum(
+                1 for record in files if record.status in {"processing", "waiting", "parsing", "indexing"}
+            ),
         }
 
 

@@ -179,7 +179,7 @@
 import { reactive, onMounted, watch } from 'vue'
 import { notification, message, Modal } from 'ant-design-vue'
 import { departmentApi, apiSuperAdminGet } from '@/apis'
-import { Plus, RefreshCw, SquarePen, Trash2 } from 'lucide-vue-next'
+import { Plus, RefreshCw, SquarePen, Trash2 } from '@lucide/vue'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 
 // 表格列定义

@@ -92,7 +92,7 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { Settings2, ChevronDown, Check } from 'lucide-vue-next'
+import { Settings2, ChevronDown, Check } from '@lucide/vue'
 import { useRoute, useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
 import AgentChatComponent from '@/components/AgentChatComponent.vue'

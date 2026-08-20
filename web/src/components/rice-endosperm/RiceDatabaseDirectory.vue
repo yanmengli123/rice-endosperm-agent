@@ -137,7 +137,7 @@ import {
   Search,
   SearchX,
   ShieldCheck
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import {
   RICE_DATABASE_LAST_VERIFIED,
   riceDatabaseCategories,
