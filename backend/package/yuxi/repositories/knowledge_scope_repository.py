@@ -227,7 +227,9 @@ class KnowledgeScopeRepository:
         *,
         agent_slug: str,
         scope_mode: str,
+        knowledge_strategy: str,
         retrieval_mode: str | None,
+        retrieval_policy: dict[str, Any] | None,
         allow_web: bool | None,
         actor_uid: str,
     ) -> AgentKnowledgeScopeConfig:
@@ -237,7 +239,9 @@ class KnowledgeScopeRepository:
             actor_uid=actor_uid,
         )
         config.scope_mode = scope_mode
+        config.knowledge_strategy = knowledge_strategy
         config.retrieval_mode = retrieval_mode
+        config.retrieval_policy = retrieval_policy or {}
         config.allow_web = allow_web
         config.updated_by = actor_uid
         config.updated_at = utc_now_naive()

@@ -386,13 +386,13 @@ async def _query_managed_graph_source(
 
 
 def _canonical_key(row: dict[str, Any]) -> str:
-    doi = str(row.get("doi") or "").strip().casefold()
-    pmid = str(row.get("pmid") or "").strip().casefold()
     subject = str((row.get("subject") or {}).get("name") or "").strip().casefold()
     predicate = str(row.get("predicate") or "").strip().casefold()
     obj = str((row.get("object") or {}).get("name") or "").strip().casefold()
     if subject or predicate or obj:
-        return f"claim:{subject}|{predicate}|{obj}|{doi or pmid}"
+        return f"claim:{subject}|{predicate}|{obj}"
+    doi = str(row.get("doi") or "").strip().casefold()
+    pmid = str(row.get("pmid") or "").strip().casefold()
     content = re.sub(r"\s+", " ", str(row.get("content") or "").strip().casefold())
     return f"text:{doi or pmid}|{hashlib.sha256(content.encode('utf-8')).hexdigest()[:24]}"
 
@@ -413,6 +413,14 @@ def _deduplicate_and_rerank(
         merged = dict(best)
         merged["found_in_kbs"] = sorted({kb for row in group for kb in row.get("found_in_kbs") or []})
         merged["provenance"] = [item for row in group for item in row.get("provenance") or []]
+        merged["evidence_records"] = [
+            {
+                field: row.get(field)
+                for field in ("evidence_id", "pmid", "doi", "kb_id", "evidence_level", "condition")
+                if row.get(field) not in (None, "", [], {})
+            }
+            for row in group
+        ]
         directions = {str(row.get("direction") or "UNKNOWN").upper() for row in group} - {"", "UNKNOWN", "NONE"}
         alignments = {str(row.get("alignment_status") or "ALIGNED").upper() for row in group}
         conflict = len(directions) > 1 or any(value in {"CONFLICT", "CONFLICTED", "AMBIGUOUS"} for value in alignments)
@@ -522,6 +530,7 @@ def _compact_evidence(row: dict[str, Any]) -> dict[str, Any]:
         "inferred_gene_function": row.get("inferred_gene_function"),
         "evidence_quote": clipped(row.get("evidence_quote") or row.get("content"), limit=300),
         "conflict": bool(row.get("conflict")),
+        "evidence_records": row.get("evidence_records") or [],
     }
     return {key: value for key, value in compact.items() if value not in (None, "", [], {}) or isinstance(value, bool)}
 

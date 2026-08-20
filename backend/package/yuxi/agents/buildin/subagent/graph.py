@@ -20,6 +20,7 @@ from yuxi.agents.context import (
 )
 from yuxi.agents.middlewares import (
     ImageInputCompatibilityMiddleware,
+    KnowledgeContextMiddleware,
     TokenUsageMiddleware,
     create_summary_middleware,
     save_attachments_to_fs,
@@ -78,6 +79,7 @@ async def _build_middlewares(context):
         ),
         save_attachments_to_fs,
         SkillsMiddleware(),
+        KnowledgeContextMiddleware(),
         summary_middleware,
         TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
         PatchToolCallsMiddleware(),

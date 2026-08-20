@@ -5,11 +5,31 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from langchain.messages import AIMessage, HumanMessage
+from langchain.messages import AIMessage, HumanMessage, ToolMessage
 
 from yuxi.agents import context as agent_context
 from yuxi.agents.backends.sandbox import paths as workspace_paths
 from yuxi.services import chat_service as svc
+
+
+def test_knowledge_contract_messages_bind_backend_retrieval_to_tool_history():
+    assistant, tool_message = svc._knowledge_contract_messages(
+        {"retrieval_id": "kr_1", "status": "COMPLETED", "claims": []},
+        query="grain size genes",
+        message_id="msg_1",
+    )
+
+    assert assistant.tool_calls == [
+        {
+            "id": "kr_1",
+            "name": "query_knowledge_scope",
+            "args": {"query_text": "grain size genes", "orchestrated_by": "backend"},
+            "type": "tool_call",
+        }
+    ]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.tool_call_id == "kr_1"
+    assert '"status":"COMPLETED"' in tool_message.content
 
 
 def _empty_agent_context(_thread_id: str, _uid: str) -> str:

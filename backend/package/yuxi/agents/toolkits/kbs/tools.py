@@ -173,6 +173,12 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
         return "请提供查询内容"
     context = getattr(runtime, "context", None) if runtime is not None else None
     snapshot = getattr(context, "_effective_knowledge_scope", None) if context is not None else None
+    contract = getattr(context, "_knowledge_contract", None) if context is not None else None
+    if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
+        return {
+            "error": "KNOWLEDGE_FIRST_CONTRACT_ALREADY_BOUND",
+            "message": "本 Run 已完成统一首检索，拒绝重复执行。",
+        }
     if not isinstance(snapshot, dict):
         return {
             "error": "KNOWLEDGE_SCOPE_NOT_BOUND",
@@ -185,6 +191,56 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
         scope_snapshot=snapshot,
         top_k=top_k,
     )
+
+
+class DeepenEvidenceInput(BaseModel):
+    query_text: str = Field(description="围绕现有 Claim 深挖机制、条件或文档原文的检索语句")
+    claim_ids: list[str] = Field(min_length=1, description="需要补充上下文的现有 claim_id；不得伪造")
+    top_k: int = Field(default=8, ge=1, le=12, description="补充证据的最大数量")
+
+
+@tool(category="knowledge", tags=["知识库", "Graph-RAG"], args_schema=DeepenEvidenceInput)
+async def deepen_evidence(
+    query_text: str,
+    claim_ids: list[str] | None = None,
+    top_k: int = 8,
+    runtime: ToolRuntime = None,
+) -> Any:
+    """在本 Run 冻结 Scope 内对后端首检索结果做受限深挖，不允许扩张知识范围或联网。"""
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    snapshot = getattr(context, "_effective_knowledge_scope", None) if context is not None else None
+    contract = getattr(context, "_knowledge_contract", None) if context is not None else None
+    if not isinstance(snapshot, dict) or not isinstance(contract, dict):
+        return {"error": "KNOWLEDGE_CONTRACT_NOT_BOUND", "message": "本 Run 没有可深化的知识证据契约。"}
+    allowed_claim_ids = {str(item.get("claim_id")) for item in contract.get("claims") or [] if item.get("claim_id")}
+    raw_claim_ids = [str(value) for value in claim_ids or []]
+    requested_claim_ids = [value for value in raw_claim_ids if value in allowed_claim_ids]
+    if not raw_claim_ids:
+        return {"error": "CLAIM_IDS_REQUIRED", "message": "深化检索必须绑定首检索中的 Claim。"}
+    if len(requested_claim_ids) != len(raw_claim_ids):
+        return {"error": "CLAIM_NOT_IN_CONTRACT", "message": "请求的 Claim 不属于本 Run 首次检索结果。"}
+    claim_by_id = {str(item.get("claim_id")): item for item in contract.get("claims") or []}
+    anchors = []
+    for claim_id_value in requested_claim_ids:
+        claim = claim_by_id[claim_id_value]
+        anchors.extend(
+            [
+                str((claim.get("subject") or {}).get("name") or ""),
+                str((claim.get("object") or {}).get("name") or ""),
+            ]
+        )
+    anchored_query = " ".join([str(query_text).strip(), *list(dict.fromkeys(value for value in anchors if value))])
+    from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway
+
+    result = await query_knowledge_scope_gateway(
+        query_text=anchored_query,
+        scope_snapshot={**snapshot, "allow_web": False, "retrieval_mode": "KB_ONLY"},
+        top_k=top_k,
+    )
+    result["retrieval_kind"] = "SECONDARY_EVIDENCE_DEEPENING"
+    result["parent_retrieval_id"] = contract.get("retrieval_id")
+    result["requested_claim_ids"] = requested_claim_ids
+    return result
 
 
 async def _resolve_visible_knowledge_bases_for_query(runtime: ToolRuntime | None) -> list[dict[str, Any]]:
@@ -246,6 +302,13 @@ async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, ru
     if not query_text:
         return "请提供查询内容"
 
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    contract = getattr(context, "_knowledge_contract", None) if context is not None else None
+    if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
+        return {
+            "error": "KNOWLEDGE_FIRST_CONTRACT_ALREADY_BOUND",
+            "message": "本 Run 已完成统一首检索；请使用 deepen_evidence 并绑定现有 Claim ID。",
+        }
     knowledge_base = _get_knowledge_base()
     retrievers = knowledge_base.get_retrievers()
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
@@ -492,7 +555,7 @@ async def search_file(
 def get_common_kb_tools() -> list:
     """获取通用知识库工具列表
 
-    返回 7 个通用工具：
+    返回 8 个通用工具：
     - list_kbs: 列出用户可访问的知识库
     - get_mindmap: 获取指定知识库的思维导图
     - query_kb: 在指定知识库中检索
@@ -500,11 +563,13 @@ def get_common_kb_tools() -> list:
     - open_kb_document: 按 file_id 分段打开知识库文档
     - search_file: 搜索知识库中的文件
     - query_knowledge_scope: 在冻结的问答范围内统一检索文档、图谱和结构化证据
+    - deepen_evidence: 围绕首检索 Contract 在同一冻结范围内补充机制和原文上下文
     """
     return [
         list_kbs,
         get_mindmap,
         query_knowledge_scope,
+        deepen_evidence,
         query_kb,
         find_kb_document,
         open_kb_document,

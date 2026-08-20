@@ -117,6 +117,10 @@ export const agentApi = {
    */
   getAgentRun: (runId) => apiGet(`/api/agent/runs/${runId}`),
 
+  /** 获取 Run 的轻量知识检索审计记录。 */
+  getAgentRunKnowledgeRetrievals: (runId) =>
+    apiGet(`/api/agent/runs/${runId}/knowledge-retrievals`),
+
   /**
    * 取消 Run
    * @param {string} runId - run ID

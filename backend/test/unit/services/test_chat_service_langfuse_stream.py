@@ -48,6 +48,17 @@ def mock_knowledge_scope_resolver(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(svc, "resolve_effective_knowledge_scope", resolve_scope)
 
+    async def prepare_contract(_db, *, retrieval_id, **_kwargs):
+        return {
+            "retrieval_id": retrieval_id,
+            "status": "SKIPPED",
+            "claims": [],
+            "evidence": [],
+            "structured_result": [],
+        }
+
+    monkeypatch.setattr(svc, "prepare_knowledge_context", prepare_contract)
+
 
 class _FakeConvRepo:
     def __init__(self, _db):

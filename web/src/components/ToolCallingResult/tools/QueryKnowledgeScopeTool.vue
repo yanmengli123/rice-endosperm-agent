@@ -24,12 +24,30 @@
             <span v-if="!(scope(resultContent).kb_ids || []).length" class="empty">范围为空</span>
           </div>
 
-          <div v-if="(result(resultContent).knowledge_source_status || []).length" class="source-status-list">
-            <div v-for="item in result(resultContent).knowledge_source_status" :key="item.kb_id">
+          <div
+            v-if="(result(resultContent).knowledge_source_status || []).length"
+            class="source-status-list"
+          >
+            <div
+              v-for="item in result(resultContent).knowledge_source_status"
+              :key="`${item.kb_id}-${item.source || 'legacy'}`"
+            >
               <strong>{{ item.kb_name }}</strong>
-              <span>{{ item.document_status }}</span>
-              <span>{{ item.graph_status }}</span>
-              <span>{{ item.structured_status }}</span>
+              <span v-if="item.source">{{ item.source }}</span>
+              <span>{{ item.capability_status || item.document_status }}</span>
+              <span>{{ item.query_status || item.graph_status }}</span>
+              <span v-if="item.hit_count !== null && item.hit_count !== undefined">
+                {{ item.hit_count }} hits
+              </span>
+              <span
+                v-if="
+                  item.eligible_evidence_count !== null &&
+                  item.eligible_evidence_count !== undefined
+                "
+              >
+                {{ item.eligible_evidence_count }} 条合格证据
+              </span>
+              <span v-else-if="item.structured_status">{{ item.structured_status }}</span>
             </div>
           </div>
 
@@ -42,22 +60,115 @@
 
           <div class="scope-stats">
             <div>
-              <strong>{{ summary(resultContent).raw_hits || 0 }}</strong>
-              <span>原始命中</span>
+              <strong>{{
+                completeness(resultContent).exact_relation_count ??
+                summary(resultContent).raw_hits ??
+                0
+              }}</strong>
+              <span>精确关系</span>
             </div>
             <div>
-              <strong>{{ summary(resultContent).deduplicated_hits || 0 }}</strong>
-              <span>去重证据</span>
+              <strong>{{
+                completeness(resultContent).eligible_claim_count ??
+                summary(resultContent).claim_count ??
+                0
+              }}</strong>
+              <span>合格 Claim</span>
             </div>
             <div>
-              <strong>{{ statusCount(resultContent, 'STRICT') }}</strong>
-              <span>STRICT</span>
+              <strong>{{
+                completeness(resultContent).eligible_evidence_count ??
+                summary(resultContent).evidence_count ??
+                0
+              }}</strong>
+              <span>合格 Evidence</span>
             </div>
             <div>
-              <strong>{{ statusCount(resultContent, 'CANDIDATE') }}</strong>
-              <span>CANDIDATE</span>
+              <strong
+                :class="`completeness-${String(completeness(resultContent).status || '').toLowerCase()}`"
+              >
+                {{ completeness(resultContent).status || 'N/A' }}
+              </strong>
+              <span>完整性</span>
             </div>
           </div>
+
+          <div v-if="hasValidation(resultContent)" class="contract-validation">
+            <span>
+              Claim Validator
+              <strong
+                :class="`validator-${String(validation(resultContent).claims?.status || '').toLowerCase()}`"
+              >
+                {{ validation(resultContent).claims?.status || 'N/A' }}
+              </strong>
+            </span>
+            <span>
+              Citation Validator
+              <strong
+                :class="`validator-${String(validation(resultContent).citations?.status || '').toLowerCase()}`"
+              >
+                {{ validation(resultContent).citations?.status || 'N/A' }}
+              </strong>
+            </span>
+            <span v-if="completeness(resultContent).uncited_exact_relation_count">
+              {{
+                completeness(resultContent).uncited_exact_relation_count
+              }}
+              条关系仅完成扫描，未形成可引用 Claim
+            </span>
+          </div>
+
+          <details v-if="structuredRows(resultContent).length" class="structured-results" open>
+            <summary>规范科研结果（{{ structuredRows(resultContent).length }}）</summary>
+            <div class="structured-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>实体</th>
+                    <th>关系语义</th>
+                    <th>对象</th>
+                    <th>证据</th>
+                    <th>PMID / DOI</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in displayedStructuredRows(resultContent)" :key="row.claim_id">
+                    <td>
+                      <strong>{{ row.subject }}</strong>
+                    </td>
+                    <td>
+                      <span class="relation-group">{{
+                        relationGroupLabel(row.relation_group)
+                      }}</span
+                      ><small>{{ row.relation }}</small>
+                    </td>
+                    <td>{{ row.object }}</td>
+                    <td>
+                      <code v-for="id in row.evidence_ids || []" :key="id">{{ id }}</code>
+                    </td>
+                    <td>
+                      <span v-for="pmid in row.pmids || []" :key="`pmid-${pmid}`"
+                        >PMID {{ pmid }}</span
+                      >
+                      <span v-for="doi in row.dois || []" :key="`doi-${doi}`">DOI {{ doi }}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <button
+              v-if="structuredRows(resultContent).length > displayLimit"
+              type="button"
+              class="expand-results"
+              @click="showAllStructured = !showAllStructured"
+            >
+              {{
+                showAllStructured
+                  ? '收起到前 20 条'
+                  : `展开全部 ${structuredRows(resultContent).length} 条`
+              }}
+            </button>
+          </details>
 
           <div v-if="(result(resultContent).warnings || []).length" class="scope-warnings">
             <div v-for="warning in result(resultContent).warnings" :key="warning">
@@ -66,9 +177,15 @@
           </div>
 
           <details v-if="(result(resultContent).evidence || []).length" class="evidence-details">
-            <summary>查看科研证据卡片（{{ (result(resultContent).evidence || []).length }}）</summary>
+            <summary>
+              查看科研证据卡片（{{ (result(resultContent).evidence || []).length }}）
+            </summary>
             <div class="evidence-list">
-              <article v-for="item in result(resultContent).evidence" :key="item.evidence_id" class="evidence-card">
+              <article
+                v-for="item in result(resultContent).evidence"
+                :key="item.evidence_id"
+                class="evidence-card"
+              >
                 <header>
                   <strong>{{ item.subject?.name || '未命名实体' }}</strong>
                   <span>{{ outcomeLabel(item.outcome_class) }}</span>
@@ -77,21 +194,31 @@
                   </span>
                 </header>
                 <div class="evidence-grid">
-                  <span><small>观察效应</small>{{ item.observed_effect || item.direction || '未记录' }}</span>
+                  <span
+                    ><small>观察效应</small
+                    >{{ item.observed_effect || item.direction || '未记录' }}</span
+                  >
                   <span><small>实验材料</small>{{ materialLabel(item) }}</span>
                   <span><small>实验条件</small>{{ conditionLabel(item.condition) }}</span>
                   <span><small>证据等级</small>{{ item.evidence_level || '未分级' }}</span>
                   <span><small>PMID</small>{{ item.pmid || '无精确 PMID' }}</span>
-                  <span><small>Evidence ID</small><code>{{ item.evidence_id }}</code></span>
+                  <span
+                    ><small>Evidence ID</small><code>{{ item.evidence_id }}</code></span
+                  >
                 </div>
                 <details class="evidence-audit">
                   <summary>审计详情</summary>
                   <dl>
-                    <dt>关系</dt><dd>{{ item.observed_relation || item.predicate || '未记录' }}</dd>
-                    <dt>DOI</dt><dd>{{ item.doi || '未记录' }}</dd>
-                    <dt>知识库</dt><dd>{{ item.kb_name || item.kb_id }}</dd>
-                    <dt>可支撑结论</dt><dd>{{ item.claim_eligible ? '是' : '否（仅作上下文）' }}</dd>
-                    <dt>原始证据</dt><dd>{{ item.evidence_quote || item.content || '未记录' }}</dd>
+                    <dt>关系</dt>
+                    <dd>{{ item.observed_relation || item.predicate || '未记录' }}</dd>
+                    <dt>DOI</dt>
+                    <dd>{{ item.doi || '未记录' }}</dd>
+                    <dt>知识库</dt>
+                    <dd>{{ item.kb_name || item.kb_id }}</dd>
+                    <dt>可支撑结论</dt>
+                    <dd>{{ item.claim_eligible ? '是' : '否（仅作上下文）' }}</dd>
+                    <dt>原始证据</dt>
+                    <dd>{{ item.evidence_quote || item.content || '未记录' }}</dd>
                   </dl>
                 </details>
               </article>
@@ -105,7 +232,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import BaseToolCall from '../BaseToolCall.vue'
 
 const props = defineProps({ toolCall: { type: Object, required: true } })
@@ -139,8 +266,25 @@ const result = (content) => {
 }
 const scope = (content) => result(content)?.knowledge_scope_snapshot || {}
 const summary = (content) => result(content)?.retrieval_summary || {}
-const statusCount = (content, status) =>
-  (result(content)?.evidence || []).filter((item) => item.evidence_status === status).length
+const completeness = (content) => result(content)?.completeness || {}
+const validation = (content) => result(content)?.validation || {}
+const hasValidation = (content) =>
+  ['claims', 'citations'].some((key) => {
+    const status = validation(content)?.[key]?.status
+    return Boolean(status && status !== 'NOT_APPLICABLE')
+  })
+const structuredRows = (content) => result(content)?.structured_result || []
+const displayLimit = 20
+const showAllStructured = ref(false)
+const displayedStructuredRows = (content) =>
+  showAllStructured.value ? structuredRows(content) : structuredRows(content).slice(0, displayLimit)
+
+const relationGroupLabels = {
+  FUNCTIONAL_REGULATION: '功能调控',
+  PERTURBATION_EVIDENCE: '扰动证据',
+  ASSOCIATION_OR_CONTEXT: '关联/背景'
+}
+const relationGroupLabel = (value) => relationGroupLabels[value] || value || '未分组'
 
 const outcomeLabels = {
   DIRECT_YIELD: '直接产量',
@@ -149,13 +293,13 @@ const outcomeLabels = {
   GRAIN_FILLING: '灌浆',
   GRAIN_MORPHOLOGY: '粒型',
   QUALITY: '品质',
-  OTHER: '其他证据',
+  OTHER: '其他证据'
 }
 const conditionLabels = {
   HIGH_TEMPERATURE: '高温',
   DROUGHT: '干旱',
   SALT_STRESS: '盐胁迫',
-  LOW_NITROGEN: '低氮',
+  LOW_NITROGEN: '低氮'
 }
 const outcomeLabel = (value) => outcomeLabels[value] || value || '其他证据'
 const conditionLabel = (value) => conditionLabels[value] || value || '未记录/常规条件'
@@ -280,6 +424,109 @@ const materialLabel = (item) =>
   background: var(--color-warning-50);
   color: var(--color-warning-800);
   font-size: 11px;
+}
+
+.contract-validation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+  color: var(--gray-600);
+  font-size: 11px;
+
+  span {
+    padding: 4px 7px;
+    border-radius: 5px;
+    background: var(--gray-25);
+  }
+
+  strong {
+    margin-left: 4px;
+  }
+
+  .validator-pass {
+    color: var(--color-success-700);
+  }
+
+  .validator-fail {
+    color: var(--color-error-700);
+  }
+}
+
+.structured-results {
+  margin-top: 10px;
+
+  summary {
+    cursor: pointer;
+    color: var(--gray-800);
+    font-size: 12px;
+    font-weight: 600;
+  }
+}
+
+.structured-table-wrap {
+  max-height: 420px;
+  margin-top: 8px;
+  overflow: auto;
+  border: 1px solid var(--gray-100);
+  border-radius: 6px;
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+
+  th,
+  td {
+    padding: 7px;
+    border-bottom: 1px solid var(--gray-100);
+    text-align: left;
+    vertical-align: top;
+  }
+
+  th {
+    position: sticky;
+    top: 0;
+    background: var(--gray-25);
+    color: var(--gray-600);
+  }
+
+  td span,
+  td code,
+  td small {
+    display: block;
+    margin-top: 2px;
+  }
+
+  td code {
+    overflow-wrap: anywhere;
+    color: var(--gray-600);
+  }
+}
+
+.relation-group {
+  color: var(--color-primary-700);
+  font-weight: 600;
+}
+
+.expand-results {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary-600);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.completeness-pass {
+  color: var(--color-success-700) !important;
+}
+
+.completeness-fail,
+.completeness-unverified {
+  color: var(--color-warning-700) !important;
 }
 
 .evidence-details {

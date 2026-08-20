@@ -85,6 +85,7 @@ const TOOL_RENDERERS = {
   open_kb_document: OpenKbDocumentTool,
   query_kb: QueryKbTool,
   query_knowledge_scope: QueryKnowledgeScopeTool,
+  deepen_evidence: QueryKnowledgeScopeTool,
   read_file: ReadFileTool,
   replace: EditFileTool,
   run_shell_command: ExecuteTool,

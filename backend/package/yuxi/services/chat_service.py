@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from langchain.messages import AIMessage, AIMessageChunk
+from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.types import Command
 from yuxi import config as conf
 from yuxi.agents.buildin import agent_manager
@@ -29,6 +29,7 @@ from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.subagent_thread_repository import SubagentThreadRepository
+from yuxi.knowledge.orchestration import prepare_knowledge_context
 from yuxi.services.conversation_service import serialize_attachment
 from yuxi.services.input_message_service import AgentRunInputMessage
 from yuxi.services.langfuse_service import (
@@ -262,6 +263,32 @@ def _apply_knowledge_scope_snapshot(input_context: dict, snapshot: dict | None) 
 def _bind_knowledge_scope_to_context(context, snapshot: dict | None) -> None:
     if isinstance(snapshot, dict):
         setattr(context, "_effective_knowledge_scope", snapshot)
+
+
+def _knowledge_contract_messages(
+    contract: dict[str, Any], *, query: str, message_id: str
+) -> tuple[AIMessage, ToolMessage]:
+    retrieval_id = str(contract["retrieval_id"])
+    assistant_message = AIMessage(
+        id=message_id,
+        content="",
+        tool_calls=[
+            {
+                "id": retrieval_id,
+                "name": "query_knowledge_scope",
+                "args": {"query_text": query, "orchestrated_by": "backend"},
+            }
+        ],
+        additional_kwargs={"knowledge_first": True},
+    )
+    tool_message = ToolMessage(
+        id=f"msg_{uuid.uuid4().hex}",
+        content=json.dumps(contract, ensure_ascii=False, separators=(",", ":")),
+        tool_call_id=retrieval_id,
+        name="query_knowledge_scope",
+        additional_kwargs={"knowledge_first": True},
+    )
+    return assistant_message, tool_message
 
 
 def _stream_message_key(metadata: dict | None, namespace: list[str], thread_id: str | None) -> tuple[str, str]:
@@ -952,6 +979,52 @@ async def stream_agent_chat(
                 )
             except Exception as e:
                 logger.error(f"Error saving user message: {e}")
+
+        retrieval_id = f"kr_{uuid.uuid4().hex}"
+        knowledge_contract = await prepare_knowledge_context(
+            db,
+            question=query,
+            scope_snapshot=knowledge_scope_snapshot,
+            run_id=meta.get("run_id"),
+            request_id=meta.get("request_id"),
+            retrieval_id=retrieval_id,
+        )
+        input_context["_knowledge_contract"] = knowledge_contract
+        setattr(context, "_knowledge_contract", knowledge_contract)
+        if knowledge_contract.get("status") != "SKIPPED":
+            synthetic_message_id = f"msg_{uuid.uuid4().hex}"
+            assistant_retrieval_message, tool_retrieval_message = _knowledge_contract_messages(
+                knowledge_contract,
+                query=query,
+                message_id=synthetic_message_id,
+            )
+            messages.extend([assistant_retrieval_message, tool_retrieval_message])
+            yield make_chunk(
+                status="loading",
+                stream_event={
+                    "type": "tool_call",
+                    "message_id": synthetic_message_id,
+                    "tool_call_id": retrieval_id,
+                    "name": "query_knowledge_scope",
+                    "args": {"query_text": query, "orchestrated_by": "backend"},
+                    "index": 0,
+                },
+                meta=meta,
+            )
+            yield make_chunk(
+                status="stream_event",
+                event={
+                    "method": "tools",
+                    "namespace": [],
+                    "data": {
+                        "event": "tool-finished",
+                        "tool_call_id": retrieval_id,
+                        "tool_name": "query_knowledge_scope",
+                        "output": tool_retrieval_message.model_dump(mode="json"),
+                    },
+                },
+                meta=meta,
+            )
 
         # 智能体流式执行期间不访问业务数据库，先结束预处理事务并归还连接池。
         await db.commit()

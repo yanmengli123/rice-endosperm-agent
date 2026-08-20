@@ -123,6 +123,16 @@ class PostgresManager(metaclass=SingletonMeta):
         """确保知识库 schema 包含所有必要字段"""
         self._check_initialized()
         stmts = [
+            (
+                "ALTER TABLE IF EXISTS agent_knowledge_scope_configs "
+                "ADD COLUMN IF NOT EXISTS knowledge_strategy VARCHAR(32) NOT NULL DEFAULT 'MODEL_DECIDES'"
+            ),
+            ("ALTER TABLE IF EXISTS agent_knowledge_scope_configs ADD COLUMN IF NOT EXISTS retrieval_policy JSONB"),
+            (
+                "UPDATE agent_knowledge_scope_configs SET knowledge_strategy = 'KNOWLEDGE_FIRST' "
+                "WHERE agent_slug = 'default-chatbot' AND retrieval_policy IS NULL"
+            ),
+            "UPDATE agent_knowledge_scope_configs SET retrieval_policy = '{}'::jsonb WHERE retrieval_policy IS NULL",
             "ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS embedding_model_spec VARCHAR(512)",
             "ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS llm_model_spec VARCHAR(512)",
             "ALTER TABLE IF EXISTS knowledge_bases DROP COLUMN IF EXISTS embed_info",
@@ -535,6 +545,15 @@ class PostgresManager(metaclass=SingletonMeta):
             ),
             "CREATE INDEX IF NOT EXISTS ix_knowledge_graph_entities_kb_id ON knowledge_graph_entities(kb_id)",
             (
+                "CREATE INDEX IF NOT EXISTS ix_graph_entity_exact_lookup "
+                "ON knowledge_graph_entities(kb_id, label, normalized_name)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_graph_entity_alias_lookup "
+                "ON knowledge_graph_entity_aliases(kb_id, normalized_alias)"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_graph_entity_alias_entity_id ON knowledge_graph_entity_aliases(entity_id)",
+            (
                 "CREATE INDEX IF NOT EXISTS ix_knowledge_graph_entity_mentions_kb_id "
                 "ON knowledge_graph_entity_mentions(kb_id)"
             ),
@@ -551,6 +570,31 @@ class PostgresManager(metaclass=SingletonMeta):
                 "ON knowledge_graph_triples(triple_id)"
             ),
             "CREATE INDEX IF NOT EXISTS ix_knowledge_graph_triples_kb_id ON knowledge_graph_triples(kb_id)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_graph_triples_target_relation "
+                "ON knowledge_graph_triples(kb_id, target_entity_id, relation_type)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_graph_triples_source_relation "
+                "ON knowledge_graph_triples(kb_id, source_entity_id, relation_type)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_graph_evidence_claim_lookup "
+                "ON knowledge_graph_relation_evidence(kb_id, triple_id, claim_eligible)"
+            ),
+            (
+                "INSERT INTO knowledge_graph_entity_aliases "
+                "(kb_id, entity_id, alias, normalized_alias, alias_type, source, is_official, created_at) "
+                "SELECT e.kb_id, e.entity_id, alias.value, "
+                "lower(regexp_replace(btrim(alias.value), '\\s+', ' ', 'g')), "
+                "'IMPORTED', 'entity.attributes.aliases', FALSE, NOW() "
+                "FROM knowledge_graph_entities e "
+                "CROSS JOIN LATERAL jsonb_array_elements_text("
+                "CASE WHEN jsonb_typeof(e.attributes->'aliases') = 'array' "
+                "THEN e.attributes->'aliases' ELSE '[]'::jsonb END) AS alias(value) "
+                "WHERE btrim(alias.value) <> '' "
+                "ON CONFLICT (kb_id, normalized_alias, entity_id) DO NOTHING"
+            ),
             (
                 "CREATE INDEX IF NOT EXISTS ix_knowledge_graph_triple_mentions_kb_id "
                 "ON knowledge_graph_triple_mentions(kb_id)"

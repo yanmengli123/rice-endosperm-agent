@@ -16,6 +16,11 @@ from yuxi.repositories.agent_repository import (
     user_can_access_agent,
     user_can_manage_agent,
 )
+from yuxi.repositories.agent_run_repository import AgentRunRepository
+from yuxi.repositories.knowledge_retrieval_repository import (
+    KnowledgeRetrievalRepository,
+    serialize_retrieval_run,
+)
 from yuxi.services.agent_run_service import (
     cancel_agent_run_view,
     create_agent_run_view,
@@ -286,6 +291,19 @@ async def get_agent_run_result_route(
     run_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
 ):
     return await get_agent_run_result(run_id=run_id, current_uid=str(current_user.uid), db=db)
+
+
+@agent_router.get("/runs/{run_id}/knowledge-retrievals")
+async def get_agent_run_knowledge_retrievals(
+    run_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_user.uid))
+    if not run:
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+    records = await KnowledgeRetrievalRepository(db).list_for_run(run_id)
+    return {"retrievals": [serialize_retrieval_run(record) for record in records]}
 
 
 @agent_router.post("/runs/{run_id}/cancel")

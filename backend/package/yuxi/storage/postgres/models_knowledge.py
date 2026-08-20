@@ -113,7 +113,9 @@ class AgentKnowledgeScopeConfig(Base):
     )
     scope_id = Column(String(64), ForeignKey("knowledge_scopes.scope_id", ondelete="SET NULL"), index=True)
     scope_mode = Column(String(32), nullable=False, default="LEGACY")
+    knowledge_strategy = Column(String(32), nullable=False, default="MODEL_DECIDES")
     retrieval_mode = Column(String(32))
+    retrieval_policy = Column(JSON_VALUE)
     allow_web = Column(Boolean)
     created_by = Column(String(64))
     updated_by = Column(String(64))
@@ -221,6 +223,27 @@ class KnowledgeGraphEntity(Base):
     attributes = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class KnowledgeGraphEntityAlias(Base):
+    """规范实体的可检索别名；避免运行时扫描 attributes JSON。"""
+
+    __tablename__ = "knowledge_graph_entity_aliases"
+    __table_args__ = (
+        UniqueConstraint("kb_id", "normalized_alias", "entity_id", name="uq_graph_entity_alias_identity"),
+        Index("ix_graph_entity_alias_lookup", "kb_id", "normalized_alias"),
+        Index("ix_graph_entity_alias_entity_id", "entity_id"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    entity_id = Column(String(64), ForeignKey("knowledge_graph_entities.entity_id", ondelete="CASCADE"), nullable=False)
+    alias = Column(String(512), nullable=False)
+    normalized_alias = Column(String(512), nullable=False)
+    alias_type = Column(String(64), nullable=False, default="IMPORTED")
+    source = Column(String(128))
+    is_official = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
 class KnowledgeGraphEntityMention(Base):
@@ -459,6 +482,49 @@ class KnowledgeGraphOutboxEvent(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
     processed_at = Column(DateTime(timezone=True))
+
+
+class KnowledgeRetrievalRun(Base):
+    """一次 AgentRun 知识检索的轻量审计记录。"""
+
+    __tablename__ = "knowledge_retrieval_runs"
+    __table_args__ = (
+        UniqueConstraint("retrieval_id", name="uq_knowledge_retrieval_runs_id"),
+        Index("ix_knowledge_retrieval_runs_run", "run_id", "started_at"),
+        Index("ix_knowledge_retrieval_runs_status", "status", "started_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    retrieval_id = Column(String(64), nullable=False)
+    run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True)
+    request_id = Column(String(64))
+    scope_id = Column(String(64))
+    scope_version = Column(Integer)
+    knowledge_strategy = Column(String(32), nullable=False)
+    planner_version = Column(String(32), nullable=False)
+    entity_resolver_version = Column(String(32), nullable=False)
+    retrieval_orchestrator_version = Column(String(32), nullable=False)
+    claim_validator_version = Column(String(32), nullable=False)
+    contract_schema_version = Column(String(32), nullable=False)
+    intent = Column(String(64), nullable=False)
+    query_mode = Column(String(32), nullable=False)
+    resolved_entity_ids = Column(JSON_VALUE)
+    source_status_json = Column(JSON_VALUE)
+    expected_relation_count = Column(Integer)
+    returned_relation_count = Column(Integer)
+    expected_claim_count = Column(Integer)
+    returned_claim_count = Column(Integer)
+    expected_evidence_count = Column(Integer)
+    returned_evidence_count = Column(Integer)
+    claim_ids_json = Column(JSON_VALUE)
+    evidence_ids_json = Column(JSON_VALUE)
+    chunk_ids_json = Column(JSON_VALUE)
+    contract_hash = Column(String(64))
+    status = Column(String(32), nullable=False, default="RUNNING")
+    warnings_json = Column(JSON_VALUE)
+    error_code = Column(String(128))
+    started_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    finished_at = Column(DateTime(timezone=True))
 
 
 class EvaluationDataset(Base):

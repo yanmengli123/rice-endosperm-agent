@@ -54,6 +54,10 @@ async def test_ensure_knowledge_schema_adds_canonical_identity_and_evidence_stat
     assert "ADD COLUMN IF NOT EXISTS support_count INTEGER NOT NULL DEFAULT 0" in statements
     assert "ADD COLUMN IF NOT EXISTS literature_count INTEGER NOT NULL DEFAULT 0" in statements
     assert "ADD COLUMN IF NOT EXISTS evidence_alignment_status" in statements
+    assert "ADD COLUMN IF NOT EXISTS knowledge_strategy" in statements
+    assert "ix_graph_entity_alias_lookup" in statements
+    assert "ix_graph_triples_target_relation" in statements
+    assert "ix_graph_evidence_claim_lookup" in statements
     assert statements.index("SET canonical_identity") < statements.index("ALTER COLUMN canonical_identity SET NOT NULL")
 
 

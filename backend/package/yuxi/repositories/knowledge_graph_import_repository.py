@@ -6,10 +6,12 @@ from typing import Any
 from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
+from yuxi.knowledge.graphs.graph_utils import normalize_entity_name
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
     KnowledgeGraphEntity,
+    KnowledgeGraphEntityAlias,
     KnowledgeGraphEntityMention,
     KnowledgeGraphEntitySource,
     KnowledgeGraphEvidenceSource,
@@ -112,6 +114,35 @@ class KnowledgeGraphImportRepository:
                     )
                     .on_conflict_do_nothing(index_elements=["import_id", "row_number"])
                 )
+                alias_rows = []
+                for entity in plan["entities"]:
+                    attributes = entity.get("attributes") if isinstance(entity.get("attributes"), dict) else {}
+                    aliases = []
+                    for key in ("aliases", "synonyms", "rap_ids", "msu_ids"):
+                        values = attributes.get(key)
+                        if isinstance(values, list):
+                            aliases.extend(value for value in values if isinstance(value, str))
+                    for alias in dict.fromkeys(aliases):
+                        normalized_alias = normalize_entity_name(alias)
+                        if not normalized_alias:
+                            continue
+                        alias_rows.append(
+                            {
+                                "kb_id": entity["kb_id"],
+                                "entity_id": entity["entity_id"],
+                                "alias": alias.strip(),
+                                "normalized_alias": normalized_alias,
+                                "alias_type": "IMPORTED",
+                                "source": f"graph_import:{import_id}",
+                                "is_official": False,
+                            }
+                        )
+                if alias_rows:
+                    await session.execute(
+                        insert(KnowledgeGraphEntityAlias)
+                        .values(alias_rows)
+                        .on_conflict_do_nothing(index_elements=["kb_id", "normalized_alias", "entity_id"])
+                    )
 
             if plan["triples"]:
                 stmt = insert(KnowledgeGraphTriple).values(plan["triples"])

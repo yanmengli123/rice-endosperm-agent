@@ -40,6 +40,22 @@
                   <p class="config-description">{{ selectedScopeModeDescription }}</p>
                 </a-form-item>
 
+                <a-form-item label="知识检索策略">
+                  <a-radio-group
+                    v-model:value="knowledgeScopeConfig.knowledge_strategy"
+                    :disabled="isReadOnlyConfig || knowledgeScopeConfig.scope_mode === 'DISABLED'"
+                    @change="markKnowledgeScopeDirty"
+                  >
+                    <a-radio-button value="KNOWLEDGE_FIRST">知识优先</a-radio-button>
+                    <a-radio-button value="MODEL_DECIDES">模型按需</a-radio-button>
+                    <a-radio-button value="DISABLED">禁用</a-radio-button>
+                  </a-radio-group>
+                  <p class="config-description">
+                    “知识优先”会在模型生成前由后端统一检索一次；模型不能跳过、重复执行或扩大本 Run
+                    的知识范围。
+                  </p>
+                </a-form-item>
+
                 <a-form-item label="检索边界">
                   <a-radio-group
                     v-model:value="knowledgeScopeConfig.retrieval_mode"
@@ -509,6 +525,7 @@ const knowledgeScopeLoading = ref(false)
 const knowledgeScopeDirty = ref(false)
 const knowledgeScopeConfig = ref({
   scope_mode: 'LEGACY',
+  knowledge_strategy: 'MODEL_DECIDES',
   retrieval_mode: 'KB_ONLY',
   allow_web: false
 })
@@ -566,6 +583,7 @@ const loadKnowledgeScopeConfig = async (agentSlug) => {
     const result = await knowledgeScopeApi.getAgentConfig(agentSlug)
     knowledgeScopeConfig.value = {
       scope_mode: result?.config?.scope_mode || 'LEGACY',
+      knowledge_strategy: result?.config?.knowledge_strategy || 'MODEL_DECIDES',
       retrieval_mode: result?.config?.retrieval_mode || 'KB_ONLY',
       allow_web: Boolean(result?.config?.allow_web)
     }
@@ -582,11 +600,17 @@ const saveKnowledgeScopeConfig = async () => {
   const retrievalMode = knowledgeScopeConfig.value.retrieval_mode || 'KB_ONLY'
   const result = await knowledgeScopeApi.updateAgentConfig(selectedAgentId.value, {
     scope_mode: knowledgeScopeConfig.value.scope_mode,
+    knowledge_strategy:
+      knowledgeScopeConfig.value.scope_mode === 'DISABLED'
+        ? 'DISABLED'
+        : knowledgeScopeConfig.value.knowledge_strategy,
     retrieval_mode: retrievalMode,
     allow_web: retrievalMode === 'KB_PLUS_WEB' && Boolean(knowledgeScopeConfig.value.allow_web)
   })
   knowledgeScopeConfig.value = {
     scope_mode: result?.config?.scope_mode || knowledgeScopeConfig.value.scope_mode,
+    knowledge_strategy:
+      result?.config?.knowledge_strategy || knowledgeScopeConfig.value.knowledge_strategy,
     retrieval_mode: result?.config?.retrieval_mode || retrievalMode,
     allow_web: Boolean(result?.config?.allow_web)
   }

@@ -16,6 +16,7 @@ from yuxi.agents.context import (
 )
 from yuxi.agents.middlewares import (
     ImageInputCompatibilityMiddleware,
+    KnowledgeContextMiddleware,
     TokenUsageMiddleware,
     create_summary_middleware,
     save_attachments_to_fs,
@@ -60,6 +61,7 @@ async def _build_middlewares(context):
         ),
         save_attachments_to_fs,
         SkillsMiddleware(),
+        KnowledgeContextMiddleware(),
     ]
     subagent_middleware = await create_subagent_task_middleware(context)
     if subagent_middleware:

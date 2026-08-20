@@ -26,7 +26,16 @@ from yuxi.utils.datetime_utils import utc_now_naive
 
 SCOPE_MODES = {"LEGACY", "INHERIT_GLOBAL", "CUSTOM", "GLOBAL_PLUS_CUSTOM", "DISABLED"}
 RETRIEVAL_MODES = {"KB_ONLY", "KB_PLUS_WEB"}
+KNOWLEDGE_STRATEGIES = {"KNOWLEDGE_FIRST", "MODEL_DECIDES", "DISABLED"}
 HEALTH_STATUSES = {"HEALTHY", "DEGRADED", "UNAVAILABLE", "VALIDATING"}
+
+DEFAULT_RETRIEVAL_POLICY = {
+    "exact_first": True,
+    "enumeration_exhaustive": True,
+    "narrative_evidence_limit": 10,
+    "display_limit": 20,
+    "allow_secondary_retrieval": True,
+}
 
 DEFAULT_MEMBER_POLICY = {
     "enabled": True,
@@ -94,7 +103,10 @@ def _serialize_agent_scope_config(config, *, fallback_mode: str) -> dict[str, An
         "agent_slug": getattr(config, "agent_slug", None),
         "scope_id": getattr(config, "scope_id", None) or DEFAULT_QA_SCOPE_ID,
         "scope_mode": getattr(config, "scope_mode", None) or fallback_mode,
+        "knowledge_strategy": getattr(config, "knowledge_strategy", None)
+        or ("KNOWLEDGE_FIRST" if fallback_mode == "INHERIT_GLOBAL" else "MODEL_DECIDES"),
         "retrieval_mode": getattr(config, "retrieval_mode", None),
+        "retrieval_policy": getattr(config, "retrieval_policy", None) or dict(DEFAULT_RETRIEVAL_POLICY),
         "allow_web": getattr(config, "allow_web", None),
         "created_at": config.created_at.isoformat() if config and config.created_at else None,
         "updated_at": config.updated_at.isoformat() if config and config.updated_at else None,
@@ -176,6 +188,17 @@ async def resolve_effective_knowledge_scope(
     if mode not in SCOPE_MODES:
         mode = fallback_mode
 
+    fallback_strategy = "KNOWLEDGE_FIRST" if agent_slug == "default-chatbot" else "MODEL_DECIDES"
+    knowledge_strategy = str(getattr(config, "knowledge_strategy", None) or fallback_strategy).upper()
+    if knowledge_strategy not in KNOWLEDGE_STRATEGIES:
+        knowledge_strategy = fallback_strategy
+    if mode == "DISABLED":
+        knowledge_strategy = "DISABLED"
+    retrieval_policy = dict(DEFAULT_RETRIEVAL_POLICY)
+    configured_policy = getattr(config, "retrieval_policy", None)
+    if isinstance(configured_policy, dict):
+        retrieval_policy.update(configured_policy)
+
     if mode == "INHERIT_GLOBAL":
         base_ids = global_ids
     elif mode == "CUSTOM":
@@ -229,8 +252,12 @@ async def resolve_effective_knowledge_scope(
         "scope_slug": scope.slug,
         "scope_version": int(scope.version or 1),
         "scope_mode": mode,
+        "source": "AGENT_RUN_SNAPSHOT",
+        "authoritative_for_this_run": True,
         "agent_slug": agent_slug,
+        "knowledge_strategy": knowledge_strategy,
         "retrieval_mode": retrieval_mode,
+        "retrieval_policy": retrieval_policy,
         "allow_web": allow_web,
         "effective_kb_ids": [item["kb_id"] for item in effective_members],
         "members": effective_members,

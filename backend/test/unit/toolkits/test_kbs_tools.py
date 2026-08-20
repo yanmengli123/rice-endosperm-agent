@@ -28,6 +28,10 @@ def _find_kb_document_callable():
     return _tool_callable(tools.find_kb_document)
 
 
+def _deepen_evidence_callable():
+    return _tool_callable(tools.deepen_evidence)
+
+
 def _open_kb_document_callable():
     return _tool_callable(tools.open_kb_document)
 
@@ -41,6 +45,10 @@ async def _run_tool(callback, **kwargs):
 
 async def _run_query_kb(**kwargs):
     return await _run_tool(_query_kb_callable(), **kwargs)
+
+
+async def _run_deepen_evidence(**kwargs):
+    return await _run_tool(_deepen_evidence_callable(), **kwargs)
 
 
 async def _run_find_kb_document(**kwargs):
@@ -93,6 +101,65 @@ def _patch_retrievers(monkeypatch, *, kb_type: str = "milvus", retriever=None):
 async def _fake_visible_kbs(runtime):
     del runtime
     return [{"kb_id": "db-1", "name": "FAQ"}]
+
+
+@pytest.mark.asyncio
+async def test_query_kb_is_rejected_after_knowledge_first_contract_is_bound(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tools,
+        "_get_knowledge_base",
+        lambda: (_ for _ in ()).throw(AssertionError("direct retriever must not be initialized")),
+    )
+    runtime = SimpleNamespace(context=SimpleNamespace(_knowledge_contract={"status": "COMPLETED"}))
+
+    result = await _run_query_kb(kb_id="db-1", query_text="auth", runtime=runtime)
+
+    assert result["error"] == "KNOWLEDGE_FIRST_CONTRACT_ALREADY_BOUND"
+
+
+@pytest.mark.asyncio
+async def test_deepen_evidence_is_claim_bound_and_cannot_expand_scope(monkeypatch) -> None:
+    calls = {}
+
+    async def fake_gateway(**kwargs):
+        calls.update(kwargs)
+        return {"evidence": []}
+
+    monkeypatch.setattr("yuxi.knowledge.scope_gateway.query_knowledge_scope_gateway", fake_gateway)
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            _effective_knowledge_scope={
+                "effective_kb_ids": ["kb-a"],
+                "members": [{"kb_id": "kb-a"}],
+                "allow_web": True,
+                "retrieval_mode": "KB_PLUS_WEB",
+            },
+            _knowledge_contract={
+                "retrieval_id": "kr_1",
+                "status": "COMPLETED",
+                "claims": [
+                    {
+                        "claim_id": "claim_1",
+                        "subject": {"name": "GS3"},
+                        "object": {"name": "grain size"},
+                    }
+                ],
+            },
+        )
+    )
+
+    result = await _run_deepen_evidence(
+        query_text="mechanism",
+        claim_ids=["claim_1"],
+        runtime=runtime,
+    )
+
+    assert calls["query_text"] == "mechanism GS3 grain size"
+    assert calls["scope_snapshot"]["effective_kb_ids"] == ["kb-a"]
+    assert calls["scope_snapshot"]["allow_web"] is False
+    assert calls["scope_snapshot"]["retrieval_mode"] == "KB_ONLY"
+    assert result["parent_retrieval_id"] == "kr_1"
+    assert result["requested_claim_ids"] == ["claim_1"]
 
 
 @pytest.mark.asyncio

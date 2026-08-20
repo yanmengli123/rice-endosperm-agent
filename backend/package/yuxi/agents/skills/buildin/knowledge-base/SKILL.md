@@ -12,6 +12,7 @@ description: "使用稻芯智析知识库进行检索、打开文档、文档内
 
 - `list_kbs`：列出当前会话可访问且已启用的知识库。
 - `query_knowledge_scope`：首选检索入口；一次查询运行快照范围内的文档、图谱和结构化证据，返回可引用的 `evidence_id`。
+- `deepen_evidence`：仅在后端首次检索已完成但机制/原文上下文不足时使用；只能围绕现有 Claim 在同一冻结范围内深挖，不能扩张知识库或联网。
 - `query_kb`：按 `kb_id` 在指定知识库中检索内容，返回 `file_id` 和相关片段。
 - `open_kb_document`：按 `kb_id` 和 `file_id` 打开文档原文窗口，适合查看更完整上下文。
 - `find_kb_document`：在已知文档内用关键词或正则定位段落。
@@ -21,11 +22,13 @@ description: "使用稻芯智析知识库进行检索、打开文档、文档内
 ## 操作流程
 
 1. 对明确要求使用知识库的问答优先调用 `query_knowledge_scope`；普通寒暄、身份询问和非知识问题不要调用知识库工具。
+   当运行时已提供后端知识 Contract 时，不要再次调用 `query_knowledge_scope` 或 `query_kb`；需要补充机制/原文时只使用 `deepen_evidence`，并绑定已有 `claim_id`。
 2. 需要确认当前会话有哪些知识库可用时调用 `list_kbs`。
 3. 用户明确指定单个知识库，或需要继续深挖某一来源时，可以使用 `query_kb`。
 4. 如果检索片段带有 `file_id` 且需要核对上下文，可调用 `open_kb_document` 查看原文。
 5. 如果用户要求定位术语、指标、章节或原文证据，使用 `find_kb_document` 在候选文档内查找。
 6. 当用户关心知识库结构、文件分类或知识框架时，使用 `get_mindmap`。
+7. 首次 Contract 只有结构化关系、用户又追问机制或原文时，才调用 `deepen_evidence`。
 
 ## 关键约束
 

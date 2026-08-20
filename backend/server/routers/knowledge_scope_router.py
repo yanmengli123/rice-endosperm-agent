@@ -12,6 +12,7 @@ from yuxi.repositories.knowledge_scope_repository import (
     ScopeVersionConflictError,
 )
 from yuxi.services.knowledge_scope_service import (
+    KNOWLEDGE_STRATEGIES,
     RETRIEVAL_MODES,
     SCOPE_MODES,
     _serialize_agent_scope_config,
@@ -46,7 +47,9 @@ class ScopeResolveRequest(BaseModel):
 
 class AgentScopeUpdate(BaseModel):
     scope_mode: str
+    knowledge_strategy: str | None = None
     retrieval_mode: str | None = None
+    retrieval_policy: dict | None = None
     allow_web: bool | None = None
 
 
@@ -158,16 +161,31 @@ async def put_agent_scope_config(
         raise HTTPException(status_code=422, detail=f"scope_mode 必须是 {sorted(SCOPE_MODES)} 之一")
     if retrieval_mode is not None and retrieval_mode not in RETRIEVAL_MODES:
         raise HTTPException(status_code=422, detail=f"retrieval_mode 必须是 {sorted(RETRIEVAL_MODES)} 之一")
-
     agent = await AgentRepository(db).get_by_slug(agent_slug)
     if not agent:
         raise HTTPException(status_code=404, detail="智能体不存在")
     if not user_can_manage_agent(current_user, agent):
         raise HTTPException(status_code=403, detail="不能编辑该智能体的知识范围")
+    existing = await KnowledgeScopeRepository(db).get_agent_config(agent_slug)
+    fallback_strategy = "KNOWLEDGE_FIRST" if agent_slug == "default-chatbot" else "MODEL_DECIDES"
+    knowledge_strategy = str(
+        payload.knowledge_strategy or getattr(existing, "knowledge_strategy", None) or fallback_strategy
+    ).upper()
+    if mode == "DISABLED":
+        knowledge_strategy = "DISABLED"
+    if knowledge_strategy not in KNOWLEDGE_STRATEGIES:
+        raise HTTPException(status_code=422, detail=f"knowledge_strategy 必须是 {sorted(KNOWLEDGE_STRATEGIES)} 之一")
+    retrieval_policy = (
+        payload.retrieval_policy
+        if payload.retrieval_policy is not None
+        else getattr(existing, "retrieval_policy", None)
+    )
     config = await KnowledgeScopeRepository(db).update_agent_config(
         agent_slug=agent_slug,
         scope_mode=mode,
+        knowledge_strategy=knowledge_strategy,
         retrieval_mode=retrieval_mode,
+        retrieval_policy=retrieval_policy,
         allow_web=payload.allow_web,
         actor_uid=str(current_user.uid),
     )

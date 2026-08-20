@@ -266,7 +266,11 @@ class SkillsMiddleware(AgentMiddleware):
                 model_tools.append(t)
                 existing_tool_names.add(t.name)
 
-        if gated_tool_names or enabled_tools:
+        knowledge_contract = getattr(runtime_context, "_knowledge_contract", None)
+        if isinstance(knowledge_contract, dict) and knowledge_contract.get("status") != "SKIPPED":
+            model_tools = [tool for tool in model_tools if tool.name not in {"query_knowledge_scope", "query_kb"}]
+
+        if gated_tool_names or enabled_tools or isinstance(knowledge_contract, dict):
             request = request.override(tools=model_tools)
 
         return await handler(request)

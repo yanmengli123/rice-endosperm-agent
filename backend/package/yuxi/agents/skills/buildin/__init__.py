@@ -40,6 +40,7 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
         tool_dependencies=(
             "list_kbs",
             "query_knowledge_scope",
+            "deepen_evidence",
             "query_kb",
             "find_kb_document",
             "open_kb_document",

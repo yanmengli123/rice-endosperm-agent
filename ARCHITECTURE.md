@@ -30,7 +30,7 @@ Yuxi 是一个面向 RAG、知识图谱和多智能体工作流的知识库平�
 - `services` 是用例层，负责串联 repositories、agents、knowledge、storage 和外部系统。聊天、运行队列、文件视图、Skills、MCP、SubAgents、评估等跨模块流程都从这里找入口。
 - `repositories` 是数据库访问边界，封装业务对象和知识库元数据的 SQLAlchemy 查询。不要让路由绕过 repository 直接操作模型，除非已有局部模式要求这样做。
 - `storage` 放持久化基础设施。`storage/postgres` 管理业务表、知识库表和 LangGraph checkpoint 所需连接池；`storage/minio` 管理对象存储。
-- `knowledge` 是知识库和图谱领域。`KnowledgeBaseManager` 根据知识库类型分发到具体实现；`implementations` 放 Milvus、Dify 等知识库实现；`graphs` 放 Milvus 知识库图谱适配与构建服务；`chunking` 放文档分块策略。
+- `knowledge` 是知识库和图谱领域。`KnowledgeBaseManager` 根据知识库类型分发到具体实现；`implementations` 放 Milvus、Dify 等知识库实现；`graphs` 放 Milvus 知识库图谱适配与构建服务；`chunking` 放文档分块策略。科研问答统一经过 `knowledge/orchestration`，由 `planning`、`retrieval`、`contracts`、`validation` 和 `rendering` 生成可审计的 Claim/Evidence Contract；`scope_gateway.py` 只保留通用访问与兼容能力。
 - `knowledge/parser` 是文档解析边界，统一封装 MinerU、PaddleX、RapidOCR、DeepSeek OCR 等解析实现。
 - `models` 封装 chat、embedding、rerank 模型适配；`config` 维护应用配置和内置模型信息；`utils` 放跨领域但足够通用的工具。
 
@@ -55,8 +55,8 @@ Yuxi 是一个面向 RAG、知识图谱和多智能体工作流的知识库平�
 1. `AgentView` 及相关组件收集输入、附件和智能体配置。
 2. `web/src/apis` 调用 `/api/chat` 相关接口。
 3. `server/routers/chat_router.py` 进入后端，委托 `yuxi.services.chat_service` 或 `agent_run_service`。
-4. 服务层读取 conversation、agent config、tools、skills、knowledge 等配置，必要时创建后台 run。
-5. `worker-dev` 执行 LangGraph 智能体；中间件按上下文挂载知识库工具、Skills、MCP、附件与沙盒能力。
+4. 服务层读取 conversation、agent config、tools、skills、knowledge 等配置，必要时创建后台 run；AgentRun 创建时冻结本次知识范围、知识策略和检索策略。
+5. 普通科研问答先由 Knowledge-first 编排器生成 Claim/Evidence Contract，再交给 `worker-dev` 执行 LangGraph 智能体；中间件注入本 Run 权威知识范围和已验证 Contract，并按上下文挂载 Skills、MCP、附件与沙盒能力。
 6. 运行事件写入 Redis，最终状态和业务记录写入 Postgres；文件和产物落到 `saves`、MinIO 或沙盒用户数据目录。
 7. 前端通过 SSE/轮询消费运行事件，渲染消息、工具调用、引用来源、产物卡片和文件预览。
 
@@ -66,6 +66,7 @@ Yuxi 是一个面向 RAG、知识图谱和多智能体工作流的知识库平�
 - HTTP 路由层应保持薄；领域流程放在 `yuxi.services`，持久化查询放在 `yuxi.repositories`。
 - 前端 API 调用应集中在 `web/src/apis`，组件不要散落拼接后端 URL。
 - 智能体能力通过 context、middleware、toolkits、backends 组合；知识库通过工具访问，不要把知识库、MCP、Skills 或沙盒逻辑硬编码进单个页面或路由。
+- 科研枚举以 PostgreSQL canonical graph 为事实权威源；Neo4j 是多跳投影，Milvus 是文档/机制上下文。LLM 不得决定检索完整性、来源状态或生成引用标识符。
 - LITE 模式必须允许跳过知识库、图谱、评估等重依赖能力；新增相关接口或初始化逻辑时要尊重这个边界。
 - 沙盒虚拟路径以 `SANDBOX_VIRTUAL_PATH_PREFIX` 为边界，用户可见路径与宿主机真实路径不要混用。
 - 面向用户或外部系统的输入在边界校验；内部服务之间优先信任已有类型、仓储和框架约束，避免为了假设场景堆叠防御代码。
