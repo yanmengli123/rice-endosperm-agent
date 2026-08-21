@@ -140,6 +140,36 @@ async def test_process_agent_run_restores_invocation_meta(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_process_agent_run_commits_output_before_marking_completed(monkeypatch: pytest.MonkeyPatch):
+    run_obj = _build_run()
+    _patch_common(monkeypatch, run_obj)
+    stream_session_exited = False
+
+    @asynccontextmanager
+    async def fake_session_ctx():
+        nonlocal stream_session_exited
+        try:
+            yield object()
+        finally:
+            stream_session_exited = True
+
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
+        del run_id, error_type, error_message
+        assert status == "completed"
+        assert stream_session_exited is True
+
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
+    monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
+    monkeypatch.setattr(
+        run_worker,
+        "stream_agent_chat",
+        lambda **kwargs: _BytesAsyncIter([b'{"status":"finished","thread_id":"thread-1"}\n']),
+    )
+
+    await run_worker.process_agent_run({"job_try": 1}, "run-1")
+
+
+@pytest.mark.asyncio
 async def test_process_agent_run_non_retryable_error_marks_failed(monkeypatch: pytest.MonkeyPatch):
     run_obj = _build_run()
     _patch_common(monkeypatch, run_obj)

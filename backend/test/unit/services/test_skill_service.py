@@ -910,6 +910,48 @@ async def test_init_builtin_skills_create_missing(tmp_path: Path, monkeypatch: p
     assert (tmp_path / "skills" / "reporter" / "prompts" / "system.md").read_text(encoding="utf-8") == "prompt"
 
 
+def test_replace_skill_target_skips_unchanged_directory(tmp_path: Path):
+    source_dir = tmp_path / "source" / "reporter"
+    target_dir = tmp_path / "skills" / "reporter"
+    source_dir.mkdir(parents=True)
+    target_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text("same", encoding="utf-8")
+    (target_dir / "SKILL.md").write_text("same", encoding="utf-8")
+
+    assert svc._replace_skill_target(target_dir, source_dir) is False
+    assert (target_dir / "SKILL.md").read_text(encoding="utf-8") == "same"
+    assert list(target_dir.parent.glob(".reporter.*")) == []
+
+
+def test_dirs_equal_detects_changed_file_content(tmp_path: Path):
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "SKILL.md").write_text("old", encoding="utf-8")
+    (right / "SKILL.md").write_text("new", encoding="utf-8")
+
+    assert svc._dirs_equal(left, right) is False
+
+
+@pytest.mark.asyncio
+async def test_builtin_skill_lock_uses_postgres_transaction_advisory_lock():
+    captured: dict[str, object] = {}
+
+    class FakeDB:
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def execute(self, statement, parameters):
+            captured["statement"] = str(statement)
+            captured["parameters"] = parameters
+
+    await svc._acquire_builtin_skills_lock(FakeDB())
+
+    assert "pg_advisory_xact_lock" in captured["statement"]
+    assert captured["parameters"] == {"lock_id": svc._BUILTIN_SKILLS_ADVISORY_LOCK_ID}
+
+
 @pytest.mark.asyncio
 async def test_init_builtin_skills_updates_existing_record_and_preserves_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

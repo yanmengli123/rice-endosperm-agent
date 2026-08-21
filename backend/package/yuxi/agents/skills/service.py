@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi import config as sys_config
@@ -66,6 +66,7 @@ BUILTIN_SKILL_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "u
 SKILL_DRAFT_TTL_SECONDS = 60 * 60
 _THREAD_SKILLS_LOCK = threading.Lock()
 _THREAD_SKILLS_LOCKS: dict[str, threading.Lock] = {}
+_BUILTIN_SKILLS_ADVISORY_LOCK_ID = int.from_bytes(b"YuxiSkil", "big")
 
 
 def _get_thread_skills_lock(thread_id: str) -> threading.Lock:
@@ -318,12 +319,10 @@ def _build_builtin_skill_dir_path(slug: str) -> str:
 
 
 def _dirs_equal(dir1: Path, dir2: Path) -> bool:
-    """检查两个目录内容是否相同（通过文件列表比较）"""
+    """检查两个目录的相对路径与文件内容是否完全相同。"""
     if not dir1.exists() or not dir2.exists():
         return False
-    list1 = sorted([f.relative_to(dir1) for f in dir1.rglob("*") if f.is_file()])
-    list2 = sorted([f.relative_to(dir2) for f in dir2.rglob("*") if f.is_file()])
-    return list1 == list2
+    return _compute_dir_hash(dir1) == _compute_dir_hash(dir2)
 
 
 def _compute_dir_hash(source_dir: Path) -> str:
@@ -340,7 +339,10 @@ def _compute_dir_hash(source_dir: Path) -> str:
     return hasher.hexdigest()
 
 
-def _replace_skill_target(target_dir: Path, source_dir: Path) -> None:
+def _replace_skill_target(target_dir: Path, source_dir: Path) -> bool:
+    if target_dir.is_dir() and _compute_dir_hash(target_dir) == _compute_dir_hash(source_dir):
+        return False
+
     temp_target = target_dir.with_name(f".{target_dir.name}.tmp-{uuid.uuid4().hex[:8]}")
     trash_dir: Path | None = None
     if temp_target.exists():
@@ -360,6 +362,23 @@ def _replace_skill_target(target_dir: Path, source_dir: Path) -> None:
 
     if trash_dir and trash_dir.exists():
         shutil.rmtree(trash_dir, ignore_errors=True)
+    return True
+
+
+async def _acquire_builtin_skills_lock(db: AsyncSession | None) -> None:
+    """Serialize built-in skill materialization across API and worker processes."""
+    if db is None:
+        return
+    get_bind = getattr(db, "get_bind", None)
+    if not callable(get_bind):
+        return
+    bind = get_bind()
+    if getattr(getattr(bind, "dialect", None), "name", None) != "postgresql":
+        return
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": _BUILTIN_SKILLS_ADVISORY_LOCK_ID},
+    )
 
 
 async def list_accessible_skills(
@@ -1282,6 +1301,7 @@ def list_builtin_skill_specs() -> list[dict[str, Any]]:
 
 
 async def init_builtin_skills(db: AsyncSession, *, created_by: str = "system") -> list[Skill]:
+    await _acquire_builtin_skills_lock(db)
     repo = SkillRepository(db)
     synced_items: list[Skill] = []
 
