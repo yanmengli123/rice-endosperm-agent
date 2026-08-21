@@ -91,3 +91,44 @@ def test_llm_context_omits_publication_and_evidence_identifiers():
     assert "evidence-1" not in context
     assert "12345678" not in context
     assert "10.1000/rice" not in context
+
+
+def test_llm_context_distinguishes_claims_from_unique_genes():
+    context = build_answer_context(
+        {
+            "claims": [
+                {
+                    "claim_id": "claim-1",
+                    "subject": {"id": "gene-1", "name": "OsNF-YB1"},
+                    "predicate": "REQUIRED_FOR",
+                    "object": {"name": "endosperm development"},
+                    "relation_group": "FUNCTIONAL_REGULATION",
+                    "evidence": [],
+                },
+                {
+                    "claim_id": "claim-2",
+                    "subject": {"id": "gene-1", "name": "OsNF-YB1"},
+                    "predicate": "RNAI_EFFECT",
+                    "object": {"name": "endosperm development"},
+                    "relation_group": "PERTURBATION_EVIDENCE",
+                    "evidence": [],
+                },
+                {
+                    "claim_id": "claim-3",
+                    "subject": {"id": "gene-2", "name": "FLO7"},
+                    "predicate": "REQUIRED_FOR",
+                    "object": {"name": "endosperm development"},
+                    "relation_group": "FUNCTIONAL_REGULATION",
+                    "evidence": [],
+                },
+            ]
+        }
+    )
+
+    assert '"claim_count":3' in context
+    assert '"unique_subject_count":2' in context
+    assert '"FUNCTIONAL_REGULATION":{"claim_count":2,"unique_subject_count":2}' in context
+    assert '"PERTURBATION_EVIDENCE":{"claim_count":1,"unique_subject_count":1}' in context
+    assert "回答基因数量只能使用 unique_subject_count" in context
+    assert "不得暴露 result_counts、unique_subject_count 等内部字段名" in context
+    assert "不得称为知识库收录总数" in context

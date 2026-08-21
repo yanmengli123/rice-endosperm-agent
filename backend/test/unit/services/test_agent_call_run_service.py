@@ -232,6 +232,12 @@ async def test_create_agent_call_run_waits_and_wraps_final_result(monkeypatch: p
             "agent_run_id": run_id,
             "request_id": "req-1",
             "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+            "run_context": {
+                "protocol_version": "1.1",
+                "model_spec": "provider:model",
+                "knowledge_scope": {"kb_count": 3},
+                "knowledge_retrievals": [],
+            },
         }
 
     monkeypatch.setattr(svc, "create_agent_invocation_run_view", fake_create_agent_invocation_run_view)
@@ -255,6 +261,8 @@ async def test_create_agent_call_run_waits_and_wraps_final_result(monkeypatch: p
     assert result["choices"][0]["messages"] == [{"role": "assistant", "content": "你好"}]
     assert result["choices"][0]["finish_reason"] == "stop"
     assert result["usage"] == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+    assert result["run_context"]["protocol_version"] == "1.1"
+    assert result["run_context"]["model_spec"] == "provider:model"
     assert calls["await_kwargs"] == {"run_id": "run-1", "current_uid": "user-1"}
 
 

@@ -15,6 +15,15 @@ def test_grain_size_gene_question_is_exact_exhaustive_enumeration():
     assert plan["answer_mode"] == "HYBRID"
 
 
+def test_endosperm_key_regulator_question_is_exact_exhaustive_enumeration():
+    plan = _plan("水稻胚乳发育的关键调控基因有哪些？")
+
+    assert plan["intent"] == "PHENOTYPE_REGULATOR_ENUMERATION"
+    assert plan["query_mode"] == "EXHAUSTIVE"
+    assert plan["target_mention"] == "水稻胚乳发育"
+    assert plan["retrieval_required"] is True
+
+
 def test_planner_is_stable_across_repeated_runs():
     plans = [_plan("列出所有调控 grain size 的基因") for _ in range(20)]
 

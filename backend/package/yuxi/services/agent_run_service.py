@@ -32,6 +32,10 @@ from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.repositories.knowledge_retrieval_repository import (
+    KnowledgeRetrievalRepository,
+    serialize_retrieval_run,
+)
 from yuxi.services.input_message_service import (
     AgentRunInputMessage,
     build_resume_input_message,
@@ -58,6 +62,89 @@ SSE_POLL_INTERVAL_SECONDS = float(os.getenv("RUN_SSE_POLL_INTERVAL_SECONDS", "1.
 RUN_PROGRESS_RECENT_EVENT_SCAN_LIMIT = 100
 RUN_PROGRESS_MESSAGE_LIMIT = 3
 RUN_PROGRESS_CONTENT_MAX_CHARS = 800
+AGENT_RUN_PROTOCOL_VERSION = "1.1"
+
+
+def _public_knowledge_scope(snapshot: object) -> dict[str, Any]:
+    """Return the immutable, non-secret knowledge scope used by one run."""
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    members = []
+    for raw_member in snapshot.get("members") or []:
+        if not isinstance(raw_member, dict):
+            continue
+        members.append(
+            {
+                "kb_id": raw_member.get("kb_id"),
+                "kb_name": raw_member.get("kb_name"),
+                "kb_type": raw_member.get("kb_type"),
+                "priority": raw_member.get("priority"),
+                "document_enabled": bool(raw_member.get("document_enabled", False)),
+                "graph_enabled": bool(raw_member.get("graph_enabled", False)),
+                "structured_enabled": bool(raw_member.get("structured_enabled", False)),
+                "included_via": raw_member.get("included_via"),
+            }
+        )
+    return {
+        "scope_id": snapshot.get("scope_id"),
+        "scope_version": snapshot.get("scope_version"),
+        "scope_mode": snapshot.get("scope_mode"),
+        "knowledge_strategy": snapshot.get("knowledge_strategy"),
+        "retrieval_mode": snapshot.get("retrieval_mode"),
+        "allow_web": bool(snapshot.get("allow_web", False)),
+        "kb_count": len(members),
+        "members": members,
+    }
+
+
+def _public_retrieval_summary(record: object) -> dict[str, Any]:
+    serialized = serialize_retrieval_run(record)
+    return {
+        key: serialized.get(key)
+        for key in (
+            "retrieval_id",
+            "status",
+            "intent",
+            "query_mode",
+            "planner_version",
+            "entity_resolver_version",
+            "retrieval_orchestrator_version",
+            "claim_validator_version",
+            "contract_schema_version",
+            "source_status",
+            "returned_relation_count",
+            "returned_claim_count",
+            "returned_evidence_count",
+            "warnings",
+            "error_code",
+            "finished_at",
+        )
+    }
+
+
+def _build_server_run_context(run: object, retrieval_records: list[object] | None = None) -> dict[str, Any]:
+    input_payload = getattr(run, "input_payload", None)
+    if not isinstance(input_payload, dict):
+        input_payload = {}
+    return {
+        "protocol_version": AGENT_RUN_PROTOCOL_VERSION,
+        "model_spec": input_payload.get("model_spec"),
+        "knowledge_scope": _public_knowledge_scope(input_payload.get("knowledge_scope_snapshot")),
+        "knowledge_retrievals": [_public_retrieval_summary(record) for record in (retrieval_records or [])],
+    }
+
+
+async def _load_server_run_context(run: object, db: AsyncSession) -> dict[str, Any]:
+    if not isinstance(getattr(run, "input_payload", None), dict):
+        return _build_server_run_context(run)
+    records: list[object] = []
+    try:
+        records = await KnowledgeRetrievalRepository(db).list_for_run(str(getattr(run, "id", "")))
+        return _build_server_run_context(run, records)
+    except Exception as error:
+        # Run completion must remain available even if optional audit metadata cannot be loaded.
+        logger.warning(f"Failed to load knowledge retrieval context for run {getattr(run, 'id', '')}: {error}")
+        return _build_server_run_context(run)
 
 
 def _resolve_agent_run_request_id(
@@ -111,6 +198,7 @@ def _build_run_response(run) -> dict:
         "status": run.status,
         "request_id": run.request_id,
         "stream_url": f"/api/agent/runs/{run.id}/events",
+        "run_context": _build_server_run_context(run),
     }
 
 
@@ -758,6 +846,7 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
         "request_id": run.request_id,
         "final_message_id": output_message.id if output_message else None,
         "langfuse_trace_id": output_metadata.get("langfuse_trace_id"),
+        "run_context": await _load_server_run_context(run, db),
     }
     if run.error_type or run.error_message:
         payload["error"] = {"type": run.error_type, "message": run.error_message}

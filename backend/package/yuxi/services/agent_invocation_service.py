@@ -94,6 +94,7 @@ async def create_agent_call_run_view(
                 "status": run_response["status"],
                 "request_id": run_response["request_id"],
                 "output": "",
+                "run_context": run_response.get("run_context"),
             }
         )
 
@@ -489,6 +490,8 @@ def _build_agent_call_response(result: dict[str, Any]) -> dict[str, Any]:
     }
     if result.get("error"):
         payload["error"] = result["error"]
+    if isinstance(result.get("run_context"), dict):
+        payload["run_context"] = result["run_context"]
     return payload
 
 

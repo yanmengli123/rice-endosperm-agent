@@ -5,7 +5,7 @@ from typing import Any
 
 from yuxi.knowledge.planning.task_classifier import TASK_CLASSIFIER_VERSION, classify_task
 
-PLANNER_VERSION = "1.0"
+PLANNER_VERSION = "1.1"
 
 _SOCIAL_PATTERNS = (
     r"^(?:hi|hello|hey|你好|您好|嗨|早上好|下午好|晚上好)[!！。.，,\s]*$",
@@ -29,6 +29,7 @@ def _clean_target(value: str | None) -> str | None:
 
 def _enumeration_target(question: str) -> str | None:
     patterns = (
+        r"(.+?)的(?:关键|核心|主要)?(?:调控|相关)(?:基因|genes?)(?:有|包括)?(?:哪些|有什么)",
         r"对\s*(.+?)\s*(?:进行)?(?:调控|影响|控制)(?:的)?(?:基因|gene)",
         r"(?:调控|影响|控制|参与)\s*(.+?)\s*(?:的)?(?:基因|gene)",
         r"(?:哪些|所有|全部|列出).{0,20}(?:基因|genes?).{0,30}(?:调控|影响|控制)\s*(.+?)(?:[?？。]|$)",

@@ -8,7 +8,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.knowledge.graphs.graph_utils import normalize_entity_name
 from yuxi.storage.postgres.models_knowledge import KnowledgeGraphEntity, KnowledgeGraphEntityAlias
 
-ENTITY_RESOLVER_VERSION = "1.0"
+ENTITY_RESOLVER_VERSION = "1.1"
+
+_DOMAIN_MENTION_ALIASES = {
+    "水稻胚乳发育": "endosperm development",
+    "胚乳发育": "endosperm development",
+}
+
+
+def _normalized_exact_candidates(mention: str) -> list[str]:
+    normalized = normalize_entity_name(mention)
+    mapped = _DOMAIN_MENTION_ALIASES.get(normalized)
+    return [normalized, mapped] if mapped and mapped != normalized else [normalized]
 
 
 def _serialize(entity: KnowledgeGraphEntity, *, mention: str, tier: str) -> dict[str, Any]:
@@ -41,12 +52,13 @@ async def resolve_entities(
             "resolver_version": ENTITY_RESOLVER_VERSION,
         }
 
+    exact_candidates = _normalized_exact_candidates(mention)
     exact = list(
         (
             await db.execute(
                 select(KnowledgeGraphEntity).where(
                     KnowledgeGraphEntity.kb_id.in_(kb_ids),
-                    KnowledgeGraphEntity.normalized_name == normalized,
+                    KnowledgeGraphEntity.normalized_name.in_(exact_candidates),
                 )
             )
         )
@@ -66,7 +78,7 @@ async def resolve_entities(
                     )
                     .where(
                         KnowledgeGraphEntityAlias.kb_id.in_(kb_ids),
-                        KnowledgeGraphEntityAlias.normalized_alias == normalized,
+                        KnowledgeGraphEntityAlias.normalized_alias.in_(exact_candidates),
                     )
                 )
             )

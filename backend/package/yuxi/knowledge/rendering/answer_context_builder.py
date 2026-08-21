@@ -10,6 +10,18 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
     """Compress the complete backend Contract into the context permitted for LLM narration."""
     scope = contract.get("knowledge_scope_snapshot") or {}
     claims = contract.get("claims") or []
+    unique_subjects: set[str] = set()
+    relation_group_counts: dict[str, dict[str, Any]] = {}
+    for claim in claims:
+        subject = claim.get("subject") or {}
+        subject_key = str(subject.get("canonical_identity") or subject.get("id") or subject.get("name") or "")
+        if subject_key:
+            unique_subjects.add(subject_key)
+        group = str(claim.get("relation_group") or "UNCLASSIFIED")
+        group_counts = relation_group_counts.setdefault(group, {"claim_count": 0, "subjects": set()})
+        group_counts["claim_count"] += 1
+        if subject_key:
+            group_counts["subjects"].add(subject_key)
     claim_summaries = [
         {
             "claim_id": claim.get("claim_id"),
@@ -72,6 +84,17 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "answer_mode": (contract.get("retrieval_plan") or {}).get("answer_mode"),
         "scope_id": scope.get("scope_id"),
         "scope_version": scope.get("scope_version"),
+        "result_counts": {
+            "claim_count": len(claims),
+            "unique_subject_count": len(unique_subjects),
+            "relation_groups": {
+                group: {
+                    "claim_count": counts["claim_count"],
+                    "unique_subject_count": len(counts["subjects"]),
+                }
+                for group, counts in relation_group_counts.items()
+            },
+        },
         "completeness": contract.get("completeness") or {},
         "claims": claim_summaries,
         "selected_evidence": narrative_evidence,
@@ -90,6 +113,10 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "不要自行生成、补全或改写这些标识符。FUNCTIONAL_REGULATION 可表述为功能调控；"
         "PERTURBATION_EVIDENCE 只能表述为遗传/实验扰动证据；ASSOCIATION_OR_CONTEXT 不得升级为因果。"
         "Neo4j graph_expansion 只用于机制和路径上下文，不能替代 PostgreSQL canonical Claim。"
+        "统计时必须区分 result_counts.claim_count 与 unique_subject_count：回答基因数量只能使用 "
+        "unique_subject_count；关系分组数量只能使用各组的 unique_subject_count，并明确同一基因可跨组重复。"
+        "正文只用自然语言表达统计，不得暴露 result_counts、unique_subject_count 等内部字段名，也不得把 Claim 称为预测。"
         "completeness.status=PASS 只表示完整返回了当前证据策略允许的 Claim；"
-        "可表述为‘全部可引用结果’。只有 all_exact_relations_citable=true 时才可进一步称为‘全部调控基因’。"
+        "可表述为‘全部可引用结果’。只有 all_exact_relations_citable=true 时才可进一步称为‘全部调控基因’；"
+        "否则数量必须表述为‘当前证据策略下返回的可引用基因’，不得称为知识库收录总数。"
     )

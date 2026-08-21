@@ -1127,6 +1127,89 @@ async def test_get_agent_run_result_uses_output_message_id(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_get_agent_run_result_exposes_authoritative_model_scope_and_retrieval_context(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    run = SimpleNamespace(
+        id="run-1",
+        status="completed",
+        agent_slug="default-chatbot",
+        conversation_thread_id="thread-1",
+        conversation_id=None,
+        request_id="req-1",
+        output_message_id=None,
+        error_type=None,
+        error_message=None,
+        input_payload={
+            "model_spec": "minimax-cn:MiniMax-M3",
+            "knowledge_scope_snapshot": {
+                "scope_id": "scope-global",
+                "scope_version": 11,
+                "scope_mode": "INHERIT_GLOBAL",
+                "knowledge_strategy": "KNOWLEDGE_FIRST",
+                "retrieval_mode": "KB_ONLY",
+                "allow_web": False,
+                "members": [
+                    {
+                        "kb_id": "kb-graph",
+                        "kb_name": "水稻胚乳发育neo4j",
+                        "kb_type": "local",
+                        "priority": 10,
+                        "document_enabled": False,
+                        "graph_enabled": True,
+                        "structured_enabled": True,
+                        "included_via": "GLOBAL",
+                    }
+                ],
+            },
+        },
+    )
+
+    class RunRepo:
+        def __init__(self, db):
+            self.db = db
+
+        async def get_run_for_user(self, run_id: str, uid: str):
+            del run_id, uid
+            return run
+
+    class RetrievalRepo:
+        def __init__(self, db):
+            self.db = db
+
+        async def list_for_run(self, run_id: str):
+            assert run_id == "run-1"
+            return [{"retrieval_id": "retrieval-1"}]
+
+    monkeypatch.setattr(agent_run_service, "AgentRunRepository", RunRepo)
+    monkeypatch.setattr(agent_run_service, "KnowledgeRetrievalRepository", RetrievalRepo)
+    monkeypatch.setattr(
+        agent_run_service,
+        "serialize_retrieval_run",
+        lambda _record: {
+            "retrieval_id": "retrieval-1",
+            "status": "completed",
+            "intent": "PHENOTYPE_REGULATOR_ENUMERATION",
+            "query_mode": "EXHAUSTIVE",
+            "returned_relation_count": 11,
+            "returned_claim_count": 11,
+            "returned_evidence_count": 11,
+            "source_status": [{"source": "canonical_graph", "status": "completed"}],
+        },
+    )
+
+    payload = await agent_run_service.get_agent_run_result(run_id="run-1", current_uid="user-1", db=object())
+
+    context = payload["run_context"]
+    assert context["protocol_version"] == "1.1"
+    assert context["model_spec"] == "minimax-cn:MiniMax-M3"
+    assert context["knowledge_scope"]["kb_count"] == 1
+    assert context["knowledge_scope"]["members"][0]["kb_name"] == "水稻胚乳发育neo4j"
+    assert context["knowledge_retrievals"][0]["returned_claim_count"] == 11
+    assert context["knowledge_retrievals"][0]["returned_evidence_count"] == 11
+
+
+@pytest.mark.asyncio
 async def test_get_agent_run_result_missing_run_returns_failed(monkeypatch: pytest.MonkeyPatch):
     class RunRepo:
         def __init__(self, db):
