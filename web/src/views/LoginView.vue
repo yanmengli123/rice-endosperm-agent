@@ -307,7 +307,7 @@ const agentStore = useAgentStore()
 
 // 品牌展示数据
 const loginBgImage = computed(() => {
-  return infoStore.organization?.login_bg || '/login-bg.jpg'
+  return infoStore.organization?.login_bg || '/brand/rice-endosperm/indexlogo.png'
 })
 const brandLogo = computed(() => {
   return infoStore.organization?.logo || ''
