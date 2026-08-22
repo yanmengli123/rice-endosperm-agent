@@ -88,6 +88,23 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 本项目完全通过 Docker Compose 进行管理。所有开发和调试都应在运行的容器环境中进行。使用 `docker compose up -d` 命令进行构建和启动。
 
+### 常用命令
+
+```bash
+make up                # 按 docker-compose.yml 构建并启动全部服务（需 .env，从 .env.template 复制）
+make up-lite           # 轻量模式：LITE_MODE=true，仅启动 postgres/redis/minio/api/web
+make down              # 停止服务
+make reset             # 清空 docker/volumes 重建，并写入种子用户
+make logs              # 查看 api-dev 最近日志
+make format            # ruff format + ruff check --fix + 前端 prettier/eslint
+
+# 测试统一在 api-dev 容器内执行，分层规范见 docs/develop-guides/testing-guidelines.md
+bash backend/test/run_tests.sh unit                  # 单元测试（不依赖运行中的服务）
+bash backend/test/run_tests.sh integration           # 集成测试（需服务已启动）
+bash backend/test/run_tests.sh e2e                   # 端到端测试（需服务已启动）
+docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.py::<测试名>   # 运行单个测试
+```
+
 **核心原则**:
 
 1. 由于 Compose 服务 `api` / `web`（容器名 `api-dev` / `web-dev`）均配置了热重载 (hot-reloading)，本地修改代码后无需重启容器，服务会自动更新。应该先检查项目是否已经在后台启动（`docker ps`），查看日志（`docker logs api-dev --tail 100`）具体的可以阅读 [docker-compose.yml](docker-compose.yml).
