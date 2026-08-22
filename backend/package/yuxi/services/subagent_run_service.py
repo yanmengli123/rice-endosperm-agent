@@ -26,6 +26,7 @@ from yuxi.services.input_message_service import AgentRunInputMessage
 from yuxi.storage.postgres.models_business import Agent, AgentRun, SubagentThread
 from yuxi.utils.datetime_utils import utc_isoformat
 from yuxi.utils.hash_utils import hash_id, subagent_child_thread_id
+from yuxi.utils.logging_config import logger
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,13 @@ class SubagentRunService:
         # 创建成功后入队 worker 执行；幂等命中已有 run 时不重复入队。
         if created:
             await self.db.commit()
-            await agent_run_service.enqueue_agent_run(run.id)
+            try:
+                await agent_run_service.enqueue_agent_run(run.id)
+            except Exception:
+                # 入队失败立刻置为失败，避免幂等命中让重试永远不再入队、线程被锁死。
+                logger.exception(f"Failed to enqueue subagent run {run.id}")
+                await agent_run_service.mark_run_enqueue_failed(run.id)
+                raise
 
         return SubagentStartResult(
             run=run,

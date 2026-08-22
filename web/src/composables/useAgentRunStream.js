@@ -189,6 +189,7 @@ export function useAgentRunStream({
       touchedThreadIds.forEach((id) => clearPendingInterruptForRun(id, runId))
     }
     ts.lastRetryableJobTry = null
+    ts.runReconnectAttempts = 0
     ts.replyLoadingVisible = false
     ts.pendingRequestId = null
     fetchThreadMessages({ agentId: unref(currentAgentId), threadId, delay }).finally(() => {
@@ -226,15 +227,37 @@ export function useAgentRunStream({
     return true
   }
 
+  // SSE 重连退避参数：固定 500ms 无限重连会在后端不可用时形成请求与
+  // toast 风暴；改为指数退避并设置最大尝试次数。
+  const RUN_RECONNECT_BASE_DELAY_MS = 500
+  const RUN_RECONNECT_MAX_DELAY_MS = 15000
+  const RUN_RECONNECT_MAX_ATTEMPTS = 6
+
   const scheduleRunReconnect = (threadId, runId, delay = 500) => {
     const ts = getThreadState(threadId)
-    if (!ts || ts.activeRunId !== runId) return
-    setTimeout(() => {
-      const latest = getThreadState(threadId)
-      if (latest?.activeRunId === runId && !latest.runStreamAbortController) {
-        void startRunStream(threadId, runId, latest.runLastSeq)
-      }
-    }, delay)
+    if (!ts || ts.activeRunId !== runId) return false
+    const attempts = (ts.runReconnectAttempts || 0) + 1
+    ts.runReconnectAttempts = attempts
+    if (attempts > RUN_RECONNECT_MAX_ATTEMPTS) {
+      // 放弃重连：清掉活跃 run 状态，交由调用方按失败收尾并提示用户。
+      ts.activeRunId = null
+      ts.isStreaming = false
+      ts.replyLoadingVisible = false
+      ts.pendingRequestId = null
+      clearActiveRunSnapshot(threadId)
+      return false
+    }
+    const backoff = Math.min(RUN_RECONNECT_BASE_DELAY_MS * 2 ** (attempts - 1), RUN_RECONNECT_MAX_DELAY_MS)
+    setTimeout(
+      () => {
+        const latest = getThreadState(threadId)
+        if (latest?.activeRunId === runId && !latest.runStreamAbortController) {
+          void startRunStream(threadId, runId, latest.runLastSeq)
+        }
+      },
+      Math.max(delay, backoff)
+    )
+    return true
   }
 
   const startRunStream = async (threadId, runId, afterSeq = '0-0') => {
@@ -263,6 +286,9 @@ export function useAgentRunStream({
 
       await processRunSseResponse(response, (event, data, eventId) => {
         if (!data || ts.activeRunId !== runId) return
+
+        // 收到有效事件说明连接可用，重置重连退避计数。
+        ts.runReconnectAttempts = 0
 
         if (eventId) {
           const incomingSeq = normalizeRunSeq(eventId)
@@ -374,8 +400,15 @@ export function useAgentRunStream({
       if (error?.name !== 'AbortError') {
         streamSmoother?.flushThread(threadId)
         console.error('Run SSE stream error:', error)
-        handleChatError(error, 'stream')
-        scheduleRunReconnect(threadId, runId)
+        const attempts = getThreadState(threadId)?.runReconnectAttempts || 0
+        if (attempts === 0) {
+          // 一轮重连里只在首次失败提示，避免 toast 刷屏。
+          handleChatError(error, 'stream')
+        }
+        if (!scheduleRunReconnect(threadId, runId)) {
+          handleChatError(error, 'stream')
+          finalizeRunStream(threadId, runId, new Set([threadId]), { status: 'failed' })
+        }
       } else if (ts.activeRunId !== runId) {
         ts.replyLoadingVisible = false
         ts.pendingRequestId = null
@@ -419,6 +452,13 @@ export function useAgentRunStream({
           ts.pendingRequestId = null
           clearPendingInterruptForRun(threadId, run.id)
           clearActiveRunSnapshot(threadId)
+          try {
+            // 与 finalizeRunStream 行为对齐：resume 发现已是终态时也要刷新
+            // 消息历史，否则界面会停留在不完整的流式回复上。
+            await fetchThreadMessages({ agentId: unref(currentAgentId), threadId })
+          } catch (e) {
+            console.warn('Failed to refresh messages for terminal run on resume:', threadId, e)
+          }
           notifyTerminalDetected(threadId, run.id, new Set([threadId]))
         }
       } catch (e) {

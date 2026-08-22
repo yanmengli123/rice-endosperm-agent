@@ -26,6 +26,31 @@ from yuxi.storage.postgres.models_business import User
 
 knowledge_scope = APIRouter(prefix="/knowledge/scopes", tags=["knowledge-scope"])
 
+# retrieval_policy 白名单：与消费端（knowledge_context / retrieval_orchestrator）
+# 和 DEFAULT_RETRIEVAL_POLICY 对齐。入库前校验，避免脏配置在每次运行时
+# int() 强转失败导致该智能体所有 run 失败。
+RETRIEVAL_POLICY_BOOLEAN_KEYS = {"exact_first", "enumeration_exhaustive", "allow_secondary_retrieval"}
+RETRIEVAL_POLICY_INT_KEYS = {"narrative_evidence_limit", "display_limit", "bounded_top_k"}
+RETRIEVAL_POLICY_KEYS = RETRIEVAL_POLICY_BOOLEAN_KEYS | RETRIEVAL_POLICY_INT_KEYS
+
+
+def _validate_retrieval_policy(policy: dict) -> None:
+    unknown_keys = sorted(set(policy) - RETRIEVAL_POLICY_KEYS)
+    if unknown_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=f"retrieval_policy 含未知字段: {unknown_keys}，允许的字段: {sorted(RETRIEVAL_POLICY_KEYS)}",
+        )
+    for key, value in policy.items():
+        if value is None:
+            continue
+        if key in RETRIEVAL_POLICY_BOOLEAN_KEYS:
+            if not isinstance(value, bool):
+                raise HTTPException(status_code=422, detail=f"retrieval_policy.{key} 必须是布尔值")
+        else:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise HTTPException(status_code=422, detail=f"retrieval_policy.{key} 必须是正整数")
+
 
 class ScopeMemberUpdate(BaseModel):
     expected_version: int = Field(..., ge=1)
@@ -180,6 +205,8 @@ async def put_agent_scope_config(
         if payload.retrieval_policy is not None
         else getattr(existing, "retrieval_policy", None)
     )
+    if retrieval_policy is not None:
+        _validate_retrieval_policy(retrieval_policy)
     config = await KnowledgeScopeRepository(db).update_agent_config(
         agent_slug=agent_slug,
         scope_mode=mode,

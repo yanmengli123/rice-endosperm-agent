@@ -1301,12 +1301,15 @@ def list_builtin_skill_specs() -> list[dict[str, Any]]:
 
 
 async def init_builtin_skills(db: AsyncSession, *, created_by: str = "system") -> list[Skill]:
-    await _acquire_builtin_skills_lock(db)
     repo = SkillRepository(db)
     synced_items: list[Skill] = []
 
     for spec in list_builtin_skill_specs():
         slug = spec["slug"]
+        # 每个 skill 单独取 xact 锁：repo 方法的内部 commit 会释放事务级 advisory
+        # 锁，循环外一次性加锁只能保护第一个 skill；按 skill 加锁配合顺序遍历
+        # 仍然能完整串行化 API 与 worker 两个进程的目录物化。
+        await _acquire_builtin_skills_lock(db)
         existing = await repo.get_by_slug(slug)
         if existing and not is_builtin_skill(existing):
             raise ValueError(f"内置 skill '{slug}' 与已存在的非内置 skill 冲突")

@@ -95,7 +95,9 @@ async def resolve_entities(
                     select(KnowledgeGraphEntity)
                     .where(
                         KnowledgeGraphEntity.kb_id.in_(kb_ids),
-                        KnowledgeGraphEntity.normalized_name.ilike(f"%{normalized}%"),
+                        # autoescape 把用户原词里的 %/_ 当字面量，避免通配符放大
+                        # 命中面把可回答的枚举问句误判成 AMBIGUOUS。
+                        KnowledgeGraphEntity.normalized_name.ilike(f"%{normalized}%", autoescape=True),
                     )
                     .limit(20)
                 )

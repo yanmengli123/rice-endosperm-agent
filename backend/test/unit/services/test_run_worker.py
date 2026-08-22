@@ -200,44 +200,40 @@ async def test_process_agent_run_non_retryable_error_marks_failed(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_process_agent_run_retryable_error_retries_then_completes(monkeypatch: pytest.MonkeyPatch):
+async def test_process_agent_run_retryable_error_fails_without_auto_retry(monkeypatch: pytest.MonkeyPatch):
+    """可重试错误不再自动重跑：重跑会从 checkpoint 重复注入本轮输入，污染上下文。"""
     run_obj = _build_run()
     _patch_common(monkeypatch, run_obj)
 
     terminal_statuses: list[str] = []
+    terminal_error_types: list[str | None] = []
     events: list[dict] = []
-    attempts = {"count": 0}
 
     async def fake_append_event(run_id: str, event_type: str, payload: dict, **kwargs):
         del run_id, kwargs
         events.append({"event_type": event_type, "payload": payload})
 
     async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
-        del run_id, error_type, error_message
+        del run_id, error_message
         terminal_statuses.append(status)
+        terminal_error_types.append(error_type)
 
     def fake_consume(stream, run_ctx):
         del stream, run_ctx
-        attempts["count"] += 1
-        if attempts["count"] == 1:
-            return _RaisingAsyncIter(run_worker.RetryableRunError("temporary failure"))
-        return _BytesAsyncIter([b'{"status":"finished","request_id":"req-1"}\n'])
+        return _RaisingAsyncIter(ConnectionError("temporary failure"))
 
     monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
     monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
     monkeypatch.setattr(run_worker, "_consume_stream_with_cancel", fake_consume)
 
-    with pytest.raises(run_worker.RetryableRunError):
-        await run_worker.process_agent_run({"job_try": 1}, "run-1")
+    await run_worker.process_agent_run({"job_try": 1}, "run-1")
 
-    assert terminal_statuses == []
+    assert terminal_statuses == ["failed"]
+    assert terminal_error_types == ["retryable_worker_error"]
     assert any(
         item["event_type"] == "error" and item["payload"]["chunk"].get("error_type") == "retryable_worker_error"
         for item in events
     )
-
-    await run_worker.process_agent_run({"job_try": 2}, "run-1")
-    assert terminal_statuses == ["completed"]
 
 
 @pytest.mark.asyncio
@@ -462,6 +458,9 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
     async def fake_ensure_business_schema():
         calls.append("ensure_business_schema")
 
+    async def fake_reconcile_stale_agent_runs():
+        calls.append("reconcile_stale_agent_runs")
+
     async def fake_ensure_builtin_mcp_servers_in_db():
         calls.append("ensure_builtin_mcp_servers_in_db")
 
@@ -491,6 +490,7 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
     monkeypatch.setattr(run_worker.pg_manager, "initialize", fake_initialize)
     monkeypatch.setattr(run_worker.pg_manager, "create_business_tables", fake_create_business_tables)
     monkeypatch.setattr(run_worker.pg_manager, "ensure_business_schema", fake_ensure_business_schema)
+    monkeypatch.setattr(run_worker, "reconcile_stale_agent_runs", fake_reconcile_stale_agent_runs)
     monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
     monkeypatch.setattr(run_worker, "ensure_builtin_mcp_servers_in_db", fake_ensure_builtin_mcp_servers_in_db)
     monkeypatch.setattr(run_worker, "init_builtin_skills", fake_init_builtin_skills)
@@ -508,6 +508,7 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "initialize",
         "create_business_tables",
         "ensure_business_schema",
+        "reconcile_stale_agent_runs",
         "ensure_builtin_mcp_servers_in_db",
         "init_builtin_skills",
         "ensure_builtin_ocr_provider_in_db",

@@ -335,7 +335,7 @@ const routeChunkThreadId = (data, payload, chunk) => {
   )
 }
 
-const startRunStreamReplay = async (runId) => {
+const startRunStreamReplay = async (runId, attempt = 0) => {
   stopRunStream()
   resetStreamState()
   if (!runId || !props.childThreadId || isTerminalRunStatus(effectiveRunStatus.value)) return
@@ -388,20 +388,34 @@ const startRunStreamReplay = async (runId) => {
   } catch (e) {
     if (e?.name !== 'AbortError') {
       console.error('Failed to stream subagent run messages:', e)
+      // 断连不能静默冻结：核对一次 run 状态，仍在运行且未重试过则重放一次，
+      // 否则由 finally 收尾清理 streaming 状态。
+      let runStillActive = false
+      try {
+        const runRes = await agentApi.getAgentRun(runId)
+        runStillActive = Boolean(runRes?.run && !isTerminalRunStatus(runRes.run.status))
+      } catch (statusError) {
+        console.warn('Failed to check subagent run status after stream error:', statusError)
+      }
+      if (runStillActive && attempt < 1) {
+        startRunStreamReplay(runId, attempt + 1)
+        return
+      }
     }
   } finally {
     if (!controller.signal.aborted && props.childThreadId) {
       streamSmoother.flushThread(props.childThreadId)
       scheduleScrollToBottom()
     }
+    // 仅在本次流未被新一轮回放接管时才清理状态，避免覆盖重放已设置的标志。
     if (streamAbortController === controller) {
       streamAbortController = null
-    }
-    streamReplayActive.value = false
-    const threadState = getStreamThreadState(props.childThreadId)
-    if (threadState) {
-      threadState.isStreaming = false
-      threadState.replyLoadingVisible = false
+      streamReplayActive.value = false
+      const threadState = getStreamThreadState(props.childThreadId)
+      if (threadState) {
+        threadState.isStreaming = false
+        threadState.replyLoadingVisible = false
+      }
     }
   }
 }

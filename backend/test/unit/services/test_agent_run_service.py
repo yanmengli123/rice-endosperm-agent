@@ -1580,3 +1580,74 @@ def test_compact_stream_chunk_retains_compression_field():
 
     assert compact["status"] == "context_compression"
     assert compact["compression"] == {"type": "yuxi.context_compression", "status": "started"}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_agent_runs_marks_terminal_and_notifies(monkeypatch):
+    runs = [
+        SimpleNamespace(id="run-pending", status="pending", conversation_thread_id="thread-1"),
+        SimpleNamespace(id="run-running", status="running", conversation_thread_id="thread-2"),
+        SimpleNamespace(id="run-cancel", status="cancel_requested", conversation_thread_id="thread-3"),
+    ]
+
+    class FakeRepo:
+        async def list_stale_non_terminal_runs(self, **kwargs):
+            del kwargs
+            return list(runs)
+
+        async def set_terminal_status(self, run_id, *, status, error_type=None, error_message=None):
+            del error_type, error_message
+            for run in runs:
+                if run.id == run_id:
+                    run.status = status
+                    return run
+
+    captured_events: list[tuple[str, str, str]] = []
+
+    @asynccontextmanager
+    async def fake_session_ctx():
+        yield object()
+
+    async def fake_append_event(run_id, event_type, payload, *, thread_id=None):
+        del thread_id
+        captured_events.append((run_id, event_type, payload["status"]))
+
+    monkeypatch.setattr(agent_run_service.pg_manager, "get_async_session_context", fake_session_ctx)
+    monkeypatch.setattr(agent_run_service, "AgentRunRepository", lambda db: FakeRepo())
+    monkeypatch.setattr(agent_run_service, "append_run_stream_event", fake_append_event)
+
+    count = await agent_run_service.reconcile_stale_agent_runs()
+
+    assert count == 3
+    statuses = {run.id: run.status for run in runs}
+    assert statuses == {
+        "run-pending": "failed",
+        "run-running": "failed",
+        "run-cancel": "cancelled",
+    }
+    assert {event[0] for event in captured_events} == {"run-pending", "run-running", "run-cancel"}
+    assert all(event[1] == "end" for event in captured_events)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_agent_runs_noop_without_stale_runs(monkeypatch):
+    class FakeRepo:
+        async def list_stale_non_terminal_runs(self, **kwargs):
+            del kwargs
+            return []
+
+        async def set_terminal_status(self, run_id, **kwargs):
+            raise AssertionError("no stale runs should not mark anything")
+
+    @asynccontextmanager
+    async def fake_session_ctx():
+        yield object()
+
+    async def fake_append_event(*args, **kwargs):
+        raise AssertionError("no stale runs should not append events")
+
+    monkeypatch.setattr(agent_run_service.pg_manager, "get_async_session_context", fake_session_ctx)
+    monkeypatch.setattr(agent_run_service, "AgentRunRepository", lambda db: FakeRepo())
+    monkeypatch.setattr(agent_run_service, "append_run_stream_event", fake_append_event)
+
+    assert await agent_run_service.reconcile_stale_agent_runs() == 0

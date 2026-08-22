@@ -7,12 +7,14 @@ import json
 import time
 from dataclasses import dataclass, field
 
+from arq import cron
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.agents.skills.service import init_builtin_skills
 from yuxi.config import config as sys_config
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
+from yuxi.services.agent_run_service import reconcile_stale_agent_runs
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.run_queue_service import (
@@ -31,14 +33,6 @@ LOADING_FLUSH_INTERVAL_MS = 100
 LOADING_FLUSH_MAX_CHARS = 512
 RUN_CANCEL_POLL_SECONDS = 0.2
 SUPPORTED_RUN_TYPES = {"chat", "resume", "subagent"}
-
-
-class RetryableRunError(Exception):
-    """Error type that should trigger ARQ retry."""
-
-
-class NonRetryableRunError(Exception):
-    """Error type that should not trigger ARQ retry."""
 
 
 @dataclass
@@ -69,11 +63,18 @@ class RunContext:
         return False
 
     async def _watch_cancel_signal(self) -> None:
+        # Redis 发布/订阅可能因瞬时故障丢信号；除 Redis key/pubsub 外，每 5 秒
+        # 以 DB 的 cancel_requested 状态兜底核对一次，保证取消最终一定生效。
+        db_check_interval_seconds = 5.0
+        last_db_check = time.monotonic()
         while not self.cancel_event.is_set():
             cancelled = await wait_for_cancel_signal(
                 self.run_id,
                 poll_timeout_seconds=RUN_CANCEL_POLL_SECONDS,
             )
+            if not cancelled and time.monotonic() - last_db_check >= db_check_interval_seconds:
+                cancelled = await _is_cancel_requested(self.run_id)
+                last_db_check = time.monotonic()
             if cancelled:
                 self.cancel_event.set()
                 return
@@ -170,14 +171,8 @@ def _job_try(ctx) -> int:
     return 1
 
 
-def _is_last_try(ctx) -> bool:
-    return _job_try(ctx) >= max(1, int(getattr(WorkerSettings, "max_tries", 1)))
-
-
 def _is_retryable_exception(exc: Exception) -> bool:
-    if isinstance(exc, NonRetryableRunError):
-        return False
-    return isinstance(exc, (RetryableRunError, OperationalError, ConnectionError, TimeoutError, asyncio.TimeoutError))
+    return isinstance(exc, (OperationalError, ConnectionError, TimeoutError, asyncio.TimeoutError))
 
 
 def _iter_json_chunks(chunk_bytes: bytes) -> list[dict]:
@@ -399,9 +394,18 @@ async def process_agent_run(ctx, run_id: str):
             else:
                 raise RuntimeError(f"unsupported run_type after validation: {run_type}")
 
+            draining_for_terminal = False
             async for chunk_bytes in _consume_stream_with_cancel(stream, run_ctx):
+                if draining_for_terminal:
+                    # 已捕获终态 chunk：继续排空生成器直到自然结束，而不是提前 break。
+                    # stream 的会话消息落库发生在生成器收尾（save_messages_from_langgraph_state），
+                    # 提前放弃生成器会让 ask_user/human_approval 中断前的消息永久不落库。
+                    continue
                 stop_stream = False
                 for chunk in _iter_json_chunks(chunk_bytes):
+                    if stop_stream:
+                        # 终态已捕获：跳过同批次剩余 chunk，但继续排空后续流。
+                        continue
                     target_thread_id = _chunk_thread_id(chunk, thread_id)
                     if chunk.get("status") == "loading":
                         await writer.append(chunk, thread_id=target_thread_id)
@@ -454,10 +458,13 @@ async def process_agent_run(ctx, run_id: str):
                         )
                         stop_stream = True
 
-                    if await run_ctx.is_cancelled():
+                    # 终态 chunk 已捕获后不再响应取消信号：此刻输出已完整产生，
+                    # 晚到的取消不应把 completed 翻转成 cancelled（桌面端/前端会出现
+                    # "完整回答 + 已取消"的自相矛盾终态）。
+                    if terminal_outcome is None and await run_ctx.is_cancelled():
                         raise asyncio.CancelledError(f"run {run_id} cancelled")
                 if stop_stream:
-                    break
+                    draining_for_terminal = True
 
         # The stream writes the final assistant message with the session above.  Only
         # expose a terminal run after that transaction has committed, otherwise a
@@ -513,25 +520,23 @@ async def process_agent_run(ctx, run_id: str):
                 {"chunk": retryable_error_chunk, "retryable": True},
                 thread_id=thread_id,
             )
-            if _is_last_try(ctx):
-                await mark_run_terminal(
-                    run_id,
-                    "failed",
-                    error_type="retryable_worker_error",
-                    error_message=str(e),
-                )
-                await _append_end_event(
-                    run_id,
-                    "failed",
-                    thread_id=thread_id,
-                    payload={"chunk": retryable_error_chunk},
-                )
-                logger.error(f"Run failed after retries exhausted {run_id}: {e}")
-                return
-
-            if isinstance(e, RetryableRunError):
-                raise
-            raise RetryableRunError(str(e)) from e
+            # 不做自动重跑：重跑会从 checkpoint 重复注入本轮 human 输入与合成检索
+            # 消息（上下文污染 + 业务消息表出现重复轮次）。可重试错误同样以明确
+            # 错误终止，由用户重新发送产生新的干净 run。
+            await mark_run_terminal(
+                run_id,
+                "failed",
+                error_type="retryable_worker_error",
+                error_message=str(e),
+            )
+            await _append_end_event(
+                run_id,
+                "failed",
+                thread_id=thread_id,
+                payload={"chunk": retryable_error_chunk},
+            )
+            logger.error(f"Run failed with retryable error, no auto-retry {run_id}: {e}")
+            return
 
         logger.error(f"Run failed {run_id}: {e}")
         error_chunk = {
@@ -569,6 +574,9 @@ async def _worker_startup(ctx):
     pg_manager.initialize()
     await pg_manager.create_business_tables()
     await pg_manager.ensure_business_schema()
+    # 启动即清扫一次历史孤儿 run（进程崩溃/Redis 瞬断遗留的 pending/running），
+    # 释放被唯一活跃索引锁住的线程。
+    await reconcile_stale_agent_runs()
     await ensure_builtin_mcp_servers_in_db()
     async with pg_manager.get_async_session_context() as session:
         await init_builtin_skills(session)
@@ -588,10 +596,18 @@ async def _worker_shutdown(ctx):
 
 class WorkerSettings:
     functions = [process_agent_run]
-    max_tries = 2
-    retry_jobs = True
+    # 每 5 分钟清扫一次孤儿 run；worker 启动时也会立即执行一次。
+    cron_jobs = [cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5)))]
+    # 不做 ARQ 自动重试：重跑会从 checkpoint 重复注入本轮输入（见 process_agent_run
+    # 的 except 分支说明）。max_tries 保留 1 仅作为兜底声明。
+    max_tries = 1
+    retry_jobs = False
     job_timeout = 3600
     keep_result = 60
+    # 显式抬高并发槽位：subagent 的 task 工具在 job 内同步等待子 run 终结，
+    # 父子共享同一槽位池，默认 10 个槽位在多用户并行 subagent 时会父子互等。
+    # 这是结构性缓解（彻底解法需要独立队列）；数值需大于预期的并行等待数。
+    max_jobs = 32
     on_startup = _worker_startup
     on_shutdown = _worker_shutdown
     try:

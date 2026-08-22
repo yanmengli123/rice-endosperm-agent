@@ -605,6 +605,12 @@ async def save_messages_from_langgraph_state(
                 msg_type = "tool"
 
         msg_id = getattr(msg, "id", None) or msg_dict.get("id")
+        if not msg_id and msg_type == "ai":
+            # 部分 provider 聚合路径会产生没有 id 的 AIMessage；不派生稳定 id 的
+            # 话每次状态回存都会重复入库。按线程 + 内容生成确定性 id，下一轮
+            # 回存时命中 existing_ids 被跳过。
+            msg_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{thread_id}|ai|{msg_dict.get('content')}"))
+            msg_dict = {**msg_dict, "id": msg_id}
         if msg_type == "human" or msg_id in existing_ids:
             continue
 
@@ -1304,6 +1310,8 @@ async def stream_agent_resume(
     )
 
     protocol_message_ids: dict[tuple[str, str], str] = {}
+    accumulated_content: list[str] = []
+    conv_repo = ConversationRepository(db)
 
     try:
         async for mode, payload in stream_source:
@@ -1355,6 +1363,26 @@ async def stream_agent_resume(
 
             for stream_event in stream_events:
                 content = _stream_event_response(stream_event)
+                if chunk_thread_id == thread_id and content:
+                    # 与 chat 流一致的双道内容护栏（滚动检查），防止借 resume
+                    # 路径绕过敏感内容检查。
+                    accumulated_content.append(content)
+                    if conf.enable_content_guard and await content_guard.check_with_keywords(
+                        "".join(accumulated_content[-10:])
+                    ):
+                        await save_partial_message(
+                            conv_repo,
+                            thread_id,
+                            AIMessage(content="".join(accumulated_content)),
+                            "content_guard_blocked",
+                            trace_info=trace_info,
+                            run_id=meta.get("run_id"),
+                            request_id=meta.get("request_id"),
+                        )
+                        meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+                        yield make_resume_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
+                        return
+
                 yield make_resume_chunk(
                     content=content,
                     stream_event=stream_event,
@@ -1362,6 +1390,21 @@ async def stream_agent_resume(
                     status="loading",
                     thread_id=chunk_thread_id,
                 )
+
+        full_resume_content = "".join(accumulated_content)
+        if conf.enable_content_guard and full_resume_content and await content_guard.check(full_resume_content):
+            await save_partial_message(
+                conv_repo,
+                thread_id,
+                AIMessage(content=full_resume_content),
+                "content_guard_blocked",
+                trace_info=trace_info,
+                run_id=meta.get("run_id"),
+                request_id=meta.get("request_id"),
+            )
+            meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+            yield make_resume_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
+            return
 
         langgraph_config = {"configurable": {"thread_id": thread_id, "uid": uid}}
         interrupted = False
@@ -1385,7 +1428,6 @@ async def stream_agent_resume(
             yield make_resume_chunk(status="agent_state", agent_state=agent_state, meta=meta)
 
         # 先存储数据库，再返回 finished，避免前端查询时数据未落库
-        conv_repo = ConversationRepository(db)
         try:
             await save_messages_from_langgraph_state(
                 agent_instance=agent,

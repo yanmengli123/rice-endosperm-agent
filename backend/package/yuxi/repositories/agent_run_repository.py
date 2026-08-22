@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import and_, select
+from datetime import timedelta
+
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES, AgentRun, SubagentThread
@@ -228,3 +230,42 @@ class AgentRunRepository:
     async def _lock_run(self, run_id: str) -> AgentRun | None:
         result = await self.db.execute(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
         return result.scalar_one_or_none()
+
+    async def list_stale_non_terminal_runs(
+        self,
+        *,
+        now,
+        pending_cutoff_seconds: int,
+        running_cutoff_seconds: int,
+        cancel_cutoff_seconds: int,
+    ) -> list[AgentRun]:
+        """列出卡在非终态的孤儿 run，供对账任务回收。
+
+        覆盖三类窗口：commit 后入队前进程崩溃遗留的 pending、worker 崩溃后
+        无人收尾的 running、取消信号丢失后停滞的 cancel_requested。
+        """
+        return list(
+            (
+                await self.db.execute(
+                    select(AgentRun).where(
+                        AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
+                        or_(
+                            and_(
+                                AgentRun.status == "pending",
+                                AgentRun.created_at < now - timedelta(seconds=pending_cutoff_seconds),
+                            ),
+                            and_(
+                                AgentRun.status == "running",
+                                AgentRun.updated_at < now - timedelta(seconds=running_cutoff_seconds),
+                            ),
+                            and_(
+                                AgentRun.status == "cancel_requested",
+                                AgentRun.updated_at < now - timedelta(seconds=cancel_cutoff_seconds),
+                            ),
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )

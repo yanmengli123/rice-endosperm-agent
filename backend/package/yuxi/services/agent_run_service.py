@@ -42,6 +42,7 @@ from yuxi.services.input_message_service import (
 )
 from yuxi.services.knowledge_scope_service import resolve_effective_knowledge_scope
 from yuxi.services.run_queue_service import (
+    append_run_stream_event,
     build_run_event_envelope,
     get_arq_pool,
     get_last_run_stream_seq,
@@ -531,7 +532,14 @@ async def create_agent_run_view(
     )
     if created:
         await db.commit()
-        await enqueue_agent_run(run.id)
+        try:
+            await enqueue_agent_run(run.id)
+        except Exception:
+            # 入队失败必须立刻把 run 置为失败：幂等命中会让同 request_id 的重试
+            # 永远不再入队，线程随即被唯一活跃索引锁死（只能靠对账任务回收）。
+            logger.exception(f"Failed to enqueue agent run {run.id}")
+            await mark_run_enqueue_failed(run.id)
+            raise
 
     return _build_run_response(run)
 
@@ -788,6 +796,88 @@ async def enqueue_agent_run(run_id: str) -> None:
     """把已持久化的 run 投递到后台 worker 队列。"""
     queue = await get_arq_pool()
     await queue.enqueue_job("process_agent_run", run_id, _job_id=f"run:{run_id}")
+
+
+# 孤儿 run 对账阈值：pending 超过入队正常耗时、cancel_requested 超过取消生效
+# 正常耗时即判定失联；running 需超过 job_timeout（3600s）留出余量。
+STALE_PENDING_CUTOFF_SECONDS = 600
+STALE_RUNNING_CUTOFF_SECONDS = 5400
+STALE_CANCEL_CUTOFF_SECONDS = 600
+
+
+async def mark_run_enqueue_failed(run_id: str) -> None:
+    async with pg_manager.get_async_session_context() as db:
+        await AgentRunRepository(db).set_terminal_status(
+            run_id,
+            status="failed",
+            error_type="enqueue_failed",
+            error_message="任务入队失败，请重新发送",
+        )
+
+
+async def reconcile_stale_agent_runs(ctx: Any = None) -> int:
+    """把卡在非终态的孤儿 run 收敛为终态，释放被唯一活跃索引锁住的线程。
+
+    由 worker 启动与定时任务调用，覆盖三类窗口：commit 后入队前进程崩溃
+    （永久 pending）、worker 崩溃/OOM（无人收尾的 running）、取消信号丢失
+    （停滞的 cancel_requested）。
+    """
+    del ctx
+    now = utc_now_naive()
+    reconciled: list[tuple[str, str | None, str, dict]] = []
+    async with pg_manager.get_async_session_context() as db:
+        repo = AgentRunRepository(db)
+        stale_runs = await repo.list_stale_non_terminal_runs(
+            now=now,
+            pending_cutoff_seconds=STALE_PENDING_CUTOFF_SECONDS,
+            running_cutoff_seconds=STALE_RUNNING_CUTOFF_SECONDS,
+            cancel_cutoff_seconds=STALE_CANCEL_CUTOFF_SECONDS,
+        )
+        for run in stale_runs:
+            if run.status == "cancel_requested":
+                status = "cancelled"
+                chunk = {"status": "interrupted", "message": "取消请求已生效"}
+            elif run.status == "pending":
+                status = "failed"
+                chunk = {
+                    "status": "error",
+                    "error_type": "stale_run_reconciled",
+                    "error_message": "任务长时间未入队执行，已被系统回收，请重新发送",
+                    "retryable": False,
+                }
+            else:
+                status = "failed"
+                chunk = {
+                    "status": "error",
+                    "error_type": "stale_run_reconciled",
+                    "error_message": "执行中断（worker 失联超时），请重新发送",
+                    "retryable": False,
+                }
+            updated = await repo.set_terminal_status(
+                run.id,
+                status=status,
+                error_type="stale_run_reconciled",
+                error_message=chunk.get("error_message") or chunk.get("message"),
+            )
+            # set_terminal_status 对已终态 run 是 no-op；只有真正写入才补发 end 事件
+            if updated is not None and updated.status == status:
+                reconciled.append((run.id, run.conversation_thread_id, status, chunk))
+        # 会话上下文退出时统一 commit
+
+    for run_id, thread_id, status, chunk in reconciled:
+        logger.warning(f"Reconciled stale agent run {run_id} -> {status}")
+        try:
+            await append_run_stream_event(
+                run_id,
+                "end",
+                {"status": status, "chunk": chunk},
+                thread_id=thread_id,
+            )
+        except Exception:
+            logger.exception(f"Failed to append reconcile end event for run {run_id}")
+    if reconciled:
+        logger.warning(f"Reconciled {len(reconciled)} stale agent runs")
+    return len(reconciled)
 
 
 async def get_agent_run_view(*, run_id: str, current_uid: str, db: AsyncSession) -> dict:
