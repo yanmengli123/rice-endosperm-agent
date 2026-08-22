@@ -125,6 +125,7 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 - Icon 应该优先从 lucide-vue-next （推荐，但是需要注意尺寸）
 - 样式使用 less，非特殊情况必须使用 [base.css](web/src/assets/css/base.css) 中的颜色变量
 - UI 设计规范详见 [design](docs/develop-guides/design.md)
+- 站点品牌文案（导航栏名称、logo、登录背景、页脚版权）由后端 `/api/system/info` 下发，不要在前端硬编码：加载优先级为 `YUXI_BRAND_FILE_PATH` → `info.local.yaml`（本地覆盖，已 gitignore）→ `info.template.yaml`，配置文件在 `backend/package/yuxi/config/static/`；品牌图片放 `web/public/brand/rice-endosperm/`
 
 
 ### 后端开发规范
