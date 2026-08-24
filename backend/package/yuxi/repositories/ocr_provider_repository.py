@@ -23,9 +23,8 @@ async def create_ocr_provider(db: AsyncSession, data: dict) -> OCRProviderConfig
     await db.refresh(provider)
     return provider
 
-async def update_ocr_provider(
-    db: AsyncSession, provider: OCRProviderConfig, data: dict
-) -> OCRProviderConfig:
+
+async def update_ocr_provider(db: AsyncSession, provider: OCRProviderConfig, data: dict) -> OCRProviderConfig:
     for key, value in data.items():
         setattr(provider, key, value)
     await db.flush()

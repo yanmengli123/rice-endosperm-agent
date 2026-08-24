@@ -1,8 +1,8 @@
 from .attachment import inject_attachment_context, save_attachments_to_fs
 from .context import context_aware_prompt, context_based_model
 from .dynamic_tool import DynamicToolMiddleware
-from .model_input import ImageInputCompatibilityMiddleware
 from .knowledge_context import KnowledgeContextMiddleware
+from .model_input import ImageInputCompatibilityMiddleware
 from .summary import create_summary_middleware
 from .token_usage import TokenUsageMiddleware
 

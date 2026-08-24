@@ -4,7 +4,6 @@ from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
 
 from yuxi.agents import BaseAgent, load_chat_model, resolve_chat_model_spec
 from yuxi.agents.backends import create_agent_filesystem_middleware
-from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, BRAND_NAME
 from yuxi.agents.context import (
     DEFAULT_SUMMARY_KEEP_MESSAGES,
     DEFAULT_SUMMARY_L2_TRIGGER_RATIO,
@@ -24,6 +23,7 @@ from yuxi.agents.middlewares import (
 from yuxi.agents.middlewares.skills import SkillsMiddleware
 from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
+from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, BRAND_NAME
 
 from .context import ChatBotContext
 from .prompt import TODO_MID_PROMPT, build_prompt_with_context

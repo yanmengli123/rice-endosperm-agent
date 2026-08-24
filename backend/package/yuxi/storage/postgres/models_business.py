@@ -4,8 +4,8 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger,
     JSON,
+    BigInteger,
     Boolean,
     Column,
     DateTime,

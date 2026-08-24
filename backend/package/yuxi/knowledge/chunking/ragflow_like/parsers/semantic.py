@@ -157,9 +157,7 @@ def _doi_from_filename(filename: str) -> str | None:
     return None
 
 
-def _extract_literature_header(
-    markdown_content: str, source_filename: str | None = None
-) -> dict[str, str]:
+def _extract_literature_header(markdown_content: str, source_filename: str | None = None) -> dict[str, str]:
     """从整篇 Markdown 提取文献标题与确定性标识符（DOI/PMID），用于注入每个 chunk。"""
     title = ""
     for line in markdown_content.splitlines():
@@ -221,10 +219,18 @@ def _enrich_literature_chunks(chunks: list[str], markdown_content: str, parser_c
             if stripped.startswith("#"):
                 section_path = stripped.lstrip("#").strip().split("|")[0].strip()
                 # 过滤分块器内部特殊块标记，避免泄漏进元数据前缀
-                if section_path in {
-                    "Table", "Table KV", "Math Block",
-                    "bullet_list_open", "ordered_list_open", "html_block",
-                } or not section_path:
+                if (
+                    section_path
+                    in {
+                        "Table",
+                        "Table KV",
+                        "Math Block",
+                        "bullet_list_open",
+                        "ordered_list_open",
+                        "html_block",
+                    }
+                    or not section_path
+                ):
                     section_path = ""
                 body_start = index + 1
                 break

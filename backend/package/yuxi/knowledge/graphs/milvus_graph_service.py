@@ -248,9 +248,7 @@ class MilvusGraphService:
                     break
                 after_id = chunks[-1].id
                 retryable = [
-                    chunk
-                    for chunk in chunks
-                    if attempt_counts.get(chunk.chunk_id, 0) < GRAPH_INDEX_MAX_ATTEMPTS
+                    chunk for chunk in chunks if attempt_counts.get(chunk.chunk_id, 0) < GRAPH_INDEX_MAX_ATTEMPTS
                 ]
                 if not retryable:
                     continue
@@ -344,8 +342,7 @@ class MilvusGraphService:
                 )
 
         failed_details = [
-            {"chunk_id": chunk_id, "error": error[:500]}
-            for chunk_id, error in list(last_errors.items())[:20]
+            {"chunk_id": chunk_id, "error": error[:500]} for chunk_id, error in list(last_errors.items())[:20]
         ]
         result = {
             "kb_id": kb_id,

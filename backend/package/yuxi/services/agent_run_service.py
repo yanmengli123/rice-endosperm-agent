@@ -465,9 +465,7 @@ async def _enforce_user_quota(*, db: AsyncSession, uid: str) -> None:
     """运行创建前的配额预检；未配置配额的用户不受限。"""
     if not uid:
         return
-    quota = (
-        await db.execute(select(UserQuota).filter(UserQuota.uid == uid).with_for_update())
-    ).scalar_one_or_none()
+    quota = (await db.execute(select(UserQuota).filter(UserQuota.uid == uid).with_for_update())).scalar_one_or_none()
     if quota is None:
         return
     now = utc_now_naive()

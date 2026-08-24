@@ -152,10 +152,7 @@ class TokenUsageMiddleware(AgentMiddleware[TokenUsageState]):
 
         previous_usage = request.state.get("token_usage")
         previous_run_usage = previous_usage.get("run_model_usage", {}) if isinstance(previous_usage, Mapping) else {}
-        run_model_usage = {
-            key: int(previous_run_usage.get(key, 0)) + int(value)
-            for key, value in model_usage.items()
-        }
+        run_model_usage = {key: int(previous_run_usage.get(key, 0)) + int(value) for key, value in model_usage.items()}
         for key, value in previous_run_usage.items():
             if key not in run_model_usage and isinstance(value, int):
                 run_model_usage[key] = value

@@ -25,20 +25,20 @@ from yuxi import config as conf
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
 from yuxi.agents.state import AgentStatePayload
+from yuxi.knowledge.orchestration import prepare_knowledge_context
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.subagent_thread_repository import SubagentThreadRepository
-from yuxi.knowledge.orchestration import prepare_knowledge_context
 from yuxi.services.conversation_service import serialize_attachment
 from yuxi.services.input_message_service import AgentRunInputMessage
+from yuxi.services.knowledge_scope_service import resolve_effective_knowledge_scope
 from yuxi.services.langfuse_service import (
     LangfuseRunContext,
     build_run_context,
     flush_langfuse,
     get_trace_info,
 )
-from yuxi.services.knowledge_scope_service import resolve_effective_knowledge_scope
 from yuxi.services.subagent_run_service import serialize_subagent_run_state
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Agent, User
@@ -582,7 +582,9 @@ def _extract_total_tokens(state) -> int | None:
             return int(total_tokens)
         input_tokens = model_usage.get("input_tokens", model_usage.get("prompt_tokens", 0))
         output_tokens = model_usage.get("output_tokens", model_usage.get("completion_tokens", 0))
-        if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (input_tokens, output_tokens)):
+        if all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) for value in (input_tokens, output_tokens)
+        ):
             return int(input_tokens) + int(output_tokens)
     return None
 

@@ -85,6 +85,7 @@ TODO_MID_PROMPT = """
 每个待办任务名称必须简短，控制在 20 个中文汉字以内。
 """
 
+
 def build_prompt_with_context(context):
     current_date = f"当前日期：{shanghai_now().strftime('%Y-%m-%d')}"
     prompt_sections = [current_date, DOMAIN_SYSTEM_PROMPT.strip(), PROMPT.strip()]

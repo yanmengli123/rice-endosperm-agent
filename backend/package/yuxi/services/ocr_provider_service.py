@@ -7,7 +7,6 @@ import os
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.repositories.ocr_provider_repository import (
     create_ocr_provider,
     get_ocr_provider,
@@ -74,9 +73,7 @@ async def test_mineru_official_connection(api_token: str, api_base: str) -> dict
     return await asyncio.to_thread(parser.check_health)
 
 
-async def test_saved_or_supplied_mineru_connection(
-    db: AsyncSession, api_token: str | None = None
-) -> dict[str, Any]:
+async def test_saved_or_supplied_mineru_connection(db: AsyncSession, api_token: str | None = None) -> dict[str, Any]:
     provider = await get_mineru_official_config(db)
     candidate_token = (api_token or "").strip() or provider.api_token or ""
     if not candidate_token:

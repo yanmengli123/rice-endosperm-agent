@@ -230,9 +230,7 @@ class AgentRunRepository:
         return run
 
     async def set_total_tokens(self, run_id: str, total_tokens: int) -> None:
-        await self.db.execute(
-            update(AgentRun).where(AgentRun.id == run_id).values(total_tokens=int(total_tokens))
-        )
+        await self.db.execute(update(AgentRun).where(AgentRun.id == run_id).values(total_tokens=int(total_tokens)))
 
     async def _lock_run(self, run_id: str) -> AgentRun | None:
         result = await self.db.execute(select(AgentRun).where(AgentRun.id == run_id).with_for_update())

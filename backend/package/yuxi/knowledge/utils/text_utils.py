@@ -50,22 +50,16 @@ def validate_markdown_quality(markdown: str | None) -> str:
     text = str(markdown or "")
     if not text.strip():
         # 扫描件整页 OCR 失败时典型产物就是纯空白；空结果一律不得入库。
-        raise ParseQualityError(
-            "解析结果为空白，疑似空白页、扫描件 OCR 失败或损坏文件，已拒绝入库。"
-        )
+        raise ParseQualityError("解析结果为空白，疑似空白页、扫描件 OCR 失败或损坏文件，已拒绝入库。")
 
     replacement_count = text.count(_REPLACEMENT_CHARACTER)
     total_count = len(text)
     # 比率阈值只在足量样本上启用：短文本里单个坏字符即可造成高占比，属于误报
-    if (
-        total_count >= _QUALITY_MIN_SAMPLE_CHARS
-        and replacement_count / total_count > _QUALITY_MAX_REPLACEMENT_RATIO
-    ):
+    if total_count >= _QUALITY_MIN_SAMPLE_CHARS and replacement_count / total_count > _QUALITY_MAX_REPLACEMENT_RATIO:
         percent = round(replacement_count / total_count * 100, 1)
         threshold = round(_QUALITY_MAX_REPLACEMENT_RATIO * 100, 1)
         raise ParseQualityError(
-            f"解析结果乱码字符占比 {percent}% 超过 {threshold}%，"
-            "疑似编码异常或字体损坏的文档，已拒绝入库。"
+            f"解析结果乱码字符占比 {percent}% 超过 {threshold}%，疑似编码异常或字体损坏的文档，已拒绝入库。"
         )
 
     return text
