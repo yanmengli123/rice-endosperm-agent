@@ -11,6 +11,7 @@ from yuxi.services.agent_invocation_service import (
     get_agent_call_run_result_view,
 )
 from yuxi.storage.postgres.models_business import User
+from yuxi.utils.auth_utils import AuthUtils
 
 from server.utils.auth_middleware import get_db, get_required_user
 
@@ -54,10 +55,14 @@ class AgentEvalRunCreate(BaseModel):
 
 @agent_invocation_router.get("/credential-status")
 async def get_agent_invocation_credential_status(
-    _current_user: User = Depends(get_required_user),
+    current_user: User = Depends(get_required_user),
 ):
-    """只验证调用凭证，不创建 Agent run，也不返回用户或密钥信息。"""
-    return {"authenticated": True, "auth_scheme": "yuxi_api_key"}
+    """验证调用凭证并返回不可逆账号作用域，不创建 Agent run。"""
+    return {
+        "authenticated": True,
+        "auth_scheme": "yuxi_api_key",
+        "account_scope_id": AuthUtils.account_scope_id(current_user.uid),
+    }
 
 
 @agent_invocation_router.post("/agent-call/runs")

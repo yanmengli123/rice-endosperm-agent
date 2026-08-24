@@ -1,6 +1,8 @@
 """用户级配置与凭据路由"""
 
+import asyncio
 import re
+from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -11,8 +13,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_current_user, get_db, get_required_user
 from yuxi.config import UserConfig, UserConfigSchema
+from yuxi.models.providers.cache import model_cache
+from yuxi.services.operation_log_service import log_operation
+from yuxi.services.run_queue_service import publish_cancel_signal
 from yuxi.storage.minio import upload_image_to_minio
-from yuxi.storage.postgres.models_business import APIKey, AgentEnv, User
+from yuxi.storage.postgres.models_business import (
+    AGENT_RUN_TERMINAL_STATUSES,
+    APIKey,
+    AgentEnv,
+    AgentRun,
+    OperationLog,
+    User,
+    UserModelPreference,
+    UserQuota,
+)
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import coerce_any_to_utc_datetime, format_utc_datetime, utc_now_naive
 
@@ -188,6 +202,11 @@ async def create_api_key(
             raise HTTPException(status_code=404, detail="关联的用户不存在")
         target_user = user
 
+    if target_user.is_disabled:
+        raise HTTPException(status_code=400, detail="不能为已停用用户创建 API Key")
+    if target_user.department_id is None:
+        raise HTTPException(status_code=400, detail="用户尚未绑定部门")
+
     if data.department_id is not None and data.department_id != target_user.department_id:
         raise HTTPException(status_code=403, detail="API Key 部门必须与关联用户部门一致")
 
@@ -203,7 +222,7 @@ async def create_api_key(
         key_prefix=key_prefix,
         name=data.name,
         user_id=target_user.id,
-        department_id=data.department_id,
+        department_id=target_user.department_id,
         expires_at=expires_at,
         created_by=str(current_user.id),
     )
@@ -325,3 +344,225 @@ async def update_agent_env(
     await db.commit()
     # 直接返回刚写入的 env/now，避免身份映射中的旧实例属性导致返回陈旧值
     return AgentEnvResponse(env=env, updated_at=format_utc_datetime(now))
+
+# =============================================================================
+# === 企业级用户管理（管理员） ===
+# =============================================================================
+
+
+async def _load_target_user(db: AsyncSession, uid: str) -> User:
+    result = await db.execute(select(User).filter(User.uid == uid, User.is_deleted == 0))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    return user
+
+
+def _admin_guard(current_user: User, target: User) -> None:
+    """停用/启用/配额目标的权限与保护规则。"""
+    if current_user.role not in {"admin", "superadmin"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    if target.id == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能对自己执行该操作")
+    if target.role == "superadmin" and current_user.role != "superadmin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅超级管理员可操作超级管理员")
+    if current_user.role == "admin":
+        if target.department_id != current_user.department_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只能管理本部门用户")
+        if target.role != "user":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="部门管理员只能管理普通用户")
+
+
+@user_router.post("/manage/{uid}/disable")
+async def disable_user(uid: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+    """停用用户：立即拒绝登录/API Key，并取消尚未结束的运行。"""
+    target = await _load_target_user(db, uid)
+    _admin_guard(current_user, target)
+    target.is_disabled = True
+    target.auth_version += 1
+    active_runs = (
+        await db.execute(
+            select(AgentRun).filter(
+                AgentRun.uid == target.uid,
+                AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
+            )
+        )
+    ).scalars().all()
+    for run in active_runs:
+        run.status = "cancel_requested"
+        run.updated_at = utc_now_naive()
+    active_run_ids = [run.id for run in active_runs]
+    db.add(
+        OperationLog(
+            user_id=current_user.id,
+            operation="停用用户",
+            details=f"uid={uid}, 取消活动运行 {len(active_run_ids)} 个",
+        )
+    )
+    await db.commit()
+    if active_run_ids:
+        await asyncio.gather(*(publish_cancel_signal(run_id) for run_id in active_run_ids))
+    return {"uid": uid, "is_disabled": True, "cancelled_runs": len(active_run_ids)}
+
+
+@user_router.post("/manage/{uid}/enable")
+async def enable_user(uid: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+    """启用用户：恢复账号访问；API Key 自身的启停状态保持不变。"""
+    target = await _load_target_user(db, uid)
+    _admin_guard(current_user, target)
+    target.is_disabled = False
+    target.auth_version += 1
+    db.add(OperationLog(user_id=current_user.id, operation="启用用户", details=f"uid={uid}"))
+    await db.commit()
+    return {"uid": uid, "is_disabled": False}
+
+
+# =============================================================================
+# === 用户级默认模型偏好 ===
+# =============================================================================
+
+
+class ModelPreferenceUpdate(BaseModel):
+    chat_model_spec: str | None = Field(None, max_length=200, description="为空表示清除偏好，回落智能体/系统默认")
+
+
+@user_router.get("/model-preference")
+async def get_model_preference(current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(UserModelPreference).filter(UserModelPreference.uid == current_user.uid))
+    pref = result.scalar_one_or_none()
+    return {"chat_model_spec": pref.chat_model_spec if pref else None}
+
+
+@user_router.put("/model-preference")
+async def put_model_preference(
+    data: ModelPreferenceUpdate,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """保存用户级默认聊天模型；解析优先级：请求级 > 用户级 > 智能体级 > 系统级。"""
+    spec = (data.chat_model_spec or "").strip() or None
+    if spec:
+        info = model_cache.get_model_info(spec)
+        if not info or info.model_type != "chat":
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"未找到可用聊天模型: {spec}")
+
+    result = await db.execute(select(UserModelPreference).filter(UserModelPreference.uid == current_user.uid))
+    pref = result.scalar_one_or_none()
+    if pref is None:
+        if spec is None:
+            return {"chat_model_spec": None}
+        pref = UserModelPreference(uid=current_user.uid, chat_model_spec=spec, updated_by=current_user.uid)
+        db.add(pref)
+    else:
+        pref.chat_model_spec = spec
+        pref.updated_by = current_user.uid
+    db.add(
+        OperationLog(
+            user_id=current_user.id,
+            operation="更新默认聊天模型",
+            details=f"chat_model_spec={spec or '系统默认'}",
+        )
+    )
+    await db.commit()
+    return {"chat_model_spec": spec}
+
+
+# =============================================================================
+# === 用量与配额 ===
+# =============================================================================
+
+
+@user_router.get("/usage")
+async def get_my_usage(
+    days: int = Query(14, ge=1, le=90),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """按天返回当前用户的 run 数与 token 用量（来自 agent_runs 终态计量）。"""
+    since = utc_now_naive() - timedelta(days=days)
+    month_start = utc_now_naive().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    rows = (
+        await db.execute(
+            select(
+                func.date(AgentRun.created_at).label("day"),
+                func.count(AgentRun.id).label("run_count"),
+                func.coalesce(func.sum(AgentRun.total_tokens), 0).label("tokens"),
+            )
+            .filter(AgentRun.uid == current_user.uid, AgentRun.created_at >= since)
+            .group_by(func.date(AgentRun.created_at))
+            .order_by(func.date(AgentRun.created_at).desc())
+        )
+    ).all()
+    monthly_tokens = (
+        await db.execute(
+            select(func.coalesce(func.sum(AgentRun.total_tokens), 0)).filter(
+                AgentRun.uid == current_user.uid, AgentRun.created_at >= month_start
+            )
+        )
+    ).scalar()
+    return {
+        "daily": [{"date": str(row.day), "run_count": row.run_count, "tokens": int(row.tokens or 0)} for row in rows],
+        "monthly_tokens": int(monthly_tokens or 0),
+    }
+
+
+@user_router.get("/quota")
+async def get_my_quota(current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(UserQuota).filter(UserQuota.uid == current_user.uid))
+    quota = result.scalar_one_or_none()
+    return {
+        "daily_run_limit": quota.daily_run_limit if quota else None,
+        "monthly_token_limit": quota.monthly_token_limit if quota else None,
+    }
+
+
+class QuotaUpdate(BaseModel):
+    daily_run_limit: int | None = Field(None, ge=1)
+    monthly_token_limit: int | None = Field(None, ge=1)
+
+
+@user_router.get("/manage/{uid}/quota")
+async def get_user_quota(
+    uid: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+):
+    target = await _load_target_user(db, uid)
+    _admin_guard(current_user, target)
+    result = await db.execute(select(UserQuota).filter(UserQuota.uid == uid))
+    quota = result.scalar_one_or_none()
+    return {
+        "uid": uid,
+        "daily_run_limit": quota.daily_run_limit if quota else None,
+        "monthly_token_limit": quota.monthly_token_limit if quota else None,
+    }
+
+
+@user_router.put("/manage/{uid}/quota")
+async def put_user_quota(
+    uid: str,
+    data: QuotaUpdate,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """管理员设置用户配额；字段为 null 表示不限制。"""
+    target = await _load_target_user(db, uid)
+    _admin_guard(current_user, target)
+    result = await db.execute(select(UserQuota).filter(UserQuota.uid == uid))
+    quota = result.scalar_one_or_none()
+    if quota is None:
+        quota = UserQuota(uid=uid, updated_by=current_user.uid)
+        db.add(quota)
+    quota.daily_run_limit = data.daily_run_limit
+    quota.monthly_token_limit = data.monthly_token_limit
+    quota.updated_by = current_user.uid
+    db.add(
+        OperationLog(
+            user_id=current_user.id,
+            operation="更新用户配额",
+            details=(
+                f"uid={uid}, daily_run_limit={data.daily_run_limit}, "
+                f"monthly_token_limit={data.monthly_token_limit}"
+            ),
+        )
+    )
+    await db.commit()
+    return {"uid": uid, "daily_run_limit": quota.daily_run_limit, "monthly_token_limit": quota.monthly_token_limit}

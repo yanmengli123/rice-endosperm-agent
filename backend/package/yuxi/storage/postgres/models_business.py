@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     JSON,
     Boolean,
     Column,
@@ -69,6 +70,11 @@ class User(Base):
     last_failed_login = Column(DateTime, nullable=True)  # 最后一次登录失败时间
     login_locked_until = Column(DateTime, nullable=True)  # 锁定到什么时候
 
+    # 停用相关字段：停用后禁止登录与 API Key 认证。Key 自身启停状态独立保留，
+    # 避免重新启用账号时误恢复此前因泄露等原因被人工撤销的 Key。
+    is_disabled = Column(Boolean, nullable=False, default=False, index=True)
+    auth_version = Column(Integer, nullable=False, default=0)
+
     # 软删除相关字段
     is_deleted = Column(Integer, nullable=False, default=0, index=True)  # 是否已删除：0=否，1=是
     deleted_at = Column(DateTime, nullable=True)  # 删除时间
@@ -84,6 +90,10 @@ class User(Base):
 
     agent_env = relationship("AgentEnv", back_populates="user", cascade="all, delete-orphan", uselist=False)
     user_config = relationship("UserConfig", back_populates="user", cascade="all, delete-orphan", uselist=False)
+    model_preference = relationship(
+        "UserModelPreference", back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+    quota = relationship("UserQuota", back_populates="user", cascade="all, delete-orphan", uselist=False)
 
     def to_dict(self, include_password: bool = False) -> dict[str, Any]:
         result = {
@@ -100,6 +110,7 @@ class User(Base):
             "last_failed_login": format_utc_datetime(self.last_failed_login),
             "login_locked_until": format_utc_datetime(self.login_locked_until),
             "is_deleted": self.is_deleted,
+            "is_disabled": self.is_disabled,
             "deleted_at": format_utc_datetime(self.deleted_at),
         }
         if include_password:
@@ -131,6 +142,49 @@ class User(Base):
         self.login_failed_count = 0
         self.last_failed_login = None
         self.login_locked_until = None
+
+
+class UserModelPreference(Base):
+    """用户级默认模型偏好：请求未指定模型时的用户维度覆盖层。"""
+
+    __tablename__ = "user_model_preferences"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    uid = Column(
+        String,
+        ForeignKey("users.uid", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    chat_model_spec = Column(String(200), nullable=True)
+    updated_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+    user = relationship("User", back_populates="model_preference", uselist=False)
+
+
+class UserQuota(Base):
+    """用户配额：None 表示不限制；由管理员设置，运行创建时预检。"""
+
+    __tablename__ = "user_quotas"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    uid = Column(
+        String,
+        ForeignKey("users.uid", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    daily_run_limit = Column(Integer, nullable=True)
+    monthly_token_limit = Column(BigInteger, nullable=True)
+    updated_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+    user = relationship("User", back_populates="quota", uselist=False)
 
 
 class AgentEnv(Base):
@@ -851,6 +905,7 @@ class AgentRun(Base):
     conversation_thread_id = Column(String(64), index=True, nullable=False, comment="Conversation thread ID snapshot")
     agent_slug = Column(String(64), index=True, nullable=False, comment="Agent slug")
     uid = Column(String(64), index=True, nullable=False, comment="UID")
+    total_tokens = Column(BigInteger, nullable=True)  # 终态计量：本次 run 消耗的 token 总量
     status = Column(
         String(32),
         index=True,
@@ -858,7 +913,7 @@ class AgentRun(Base):
         default="pending",
         comment="Run status: pending/running/completed/failed/cancel_requested/cancelled/interrupted",
     )
-    request_id = Column(String(64), unique=True, index=True, nullable=False, comment="Idempotency request ID")
+    request_id = Column(String(64), index=True, nullable=False, comment="User-scoped idempotency request ID")
     conversation_id = Column(
         Integer, ForeignKey("conversations.id"), nullable=True, index=True, comment="Conversation ID"
     )
@@ -911,6 +966,13 @@ class AgentRun(Base):
             "updated_at": format_utc_datetime(self.updated_at),
         }
 
+
+Index(
+    "uq_agent_runs_uid_request_id",
+    AgentRun.uid,
+    AgentRun.request_id,
+    unique=True,
+)
 
 Index(
     "uq_agent_runs_one_active_per_thread",

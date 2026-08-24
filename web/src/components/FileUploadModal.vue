@@ -471,6 +471,10 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  formatTemplate: {
+    type: String,
+    default: ''
+  },
   folderTree: {
     type: Array,
     default: () => []
@@ -1063,6 +1067,10 @@ const ocrEngineOptions = [
 ]
 
 const resolveDefaultOcrEngine = () => {
+  // PDF 文献证据库模板：默认使用 MinerU 官方引擎（文献解析质量优先）
+  if (props.formatTemplate === 'pdf_literature') {
+    return 'mineru_official'
+  }
   const configuredEngine = String(
     configStore.config?.default_ocr_engine || DEFAULT_OCR_ENGINE
   ).trim()

@@ -2,7 +2,7 @@
  * 认证相关 API
  */
 
-import { apiAdminGet, apiGet, apiPost } from './base'
+import { apiAdminGet, apiAdminPost, apiAdminPut, apiGet, apiPost } from './base'
 
 async function parseErrorDetail(response, fallbackMessage) {
   const contentType = response.headers.get('content-type') || ''
@@ -24,6 +24,26 @@ async function getOIDCConfig() {
   const response = await fetch('/api/auth/oidc/config')
   if (!response.ok) {
     throw new Error('获取 OIDC 配置失败')
+  }
+  return response.json()
+}
+
+async function getRegisterConfig() {
+  const response = await fetch('/api/auth/register-config')
+  if (!response.ok) {
+    throw new Error('获取注册配置失败')
+  }
+  return response.json()
+}
+
+async function register(payload) {
+  const response = await fetch('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+  if (!response.ok) {
+    throw new Error(await parseErrorDetail(response, '注册失败'))
   }
   return response.json()
 }
@@ -90,11 +110,38 @@ async function approveCLIAuthSession(userCode) {
   return apiPost(`/api/auth/cli/sessions/${encoded}/approve`, {})
 }
 
+async function listManagedUsers(skip = 0, limit = 100) {
+  return apiAdminGet(`/api/auth/users?skip=${skip}&limit=${limit}`)
+}
+
+async function createManagedUser(payload) {
+  return apiAdminPost('/api/auth/users', payload)
+}
+
+async function setManagedUserEnabled(uid, enabled) {
+  return apiAdminPost(`/api/user/manage/${encodeURIComponent(uid)}/${enabled ? 'enable' : 'disable'}`)
+}
+
+async function getManagedUserQuota(uid) {
+  return apiAdminGet(`/api/user/manage/${encodeURIComponent(uid)}/quota`)
+}
+
+async function setManagedUserQuota(uid, payload) {
+  return apiAdminPut(`/api/user/manage/${encodeURIComponent(uid)}/quota`, payload)
+}
+
 export const authApi = {
+  getRegisterConfig,
+  register,
   getOIDCConfig,
   getOIDCLoginUrl,
   getUserAccessOptions,
   exchangeOIDCCode,
   getCLIAuthSession,
-  approveCLIAuthSession
+  approveCLIAuthSession,
+  listManagedUsers,
+  createManagedUser,
+  setManagedUserEnabled,
+  getManagedUserQuota,
+  setManagedUserQuota
 }

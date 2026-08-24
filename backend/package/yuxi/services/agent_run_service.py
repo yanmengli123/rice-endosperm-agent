@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
@@ -52,7 +52,7 @@ from yuxi.services.run_queue_service import (
     publish_cancel_signal,
 )
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Message, User
+from yuxi.storage.postgres.models_business import AgentRun, Message, User, UserModelPreference, UserQuota
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.hash_utils import hash_id
 from yuxi.utils.logging_config import logger
@@ -174,7 +174,12 @@ class AgentRunWaitTimeout(Exception):
         super().__init__(f"agent run {run_id} is still {status} after waiting")
 
 
-def resolve_agent_run_model_spec(model_spec: str | None, agent_item, agent_backend) -> str:
+def resolve_agent_run_model_spec(
+    model_spec: str | None,
+    agent_item,
+    agent_backend,
+    user_model_spec: str | None = None,
+) -> str:
     """解析本次 run 实际使用的模型：显式覆盖优先，否则配置模型，最后系统默认模型。"""
     normalized = model_spec.strip() if isinstance(model_spec, str) else None
     if normalized:
@@ -182,6 +187,13 @@ def resolve_agent_run_model_spec(model_spec: str | None, agent_item, agent_backe
         if not info or info.model_type != "chat":
             raise HTTPException(status_code=422, detail=f"未找到可用聊天模型: '{normalized}'")
         return normalized
+
+    if user_model_spec:
+        user_info = model_cache.get_model_info(user_model_spec)
+        if user_info and user_info.model_type == "chat":
+            return user_model_spec
+        # 用户偏好指向的模型可能已被管理员下线；此时回落智能体/系统默认并留痕
+        logger.warning(f"用户级模型偏好已失效，回退默认解析: {user_model_spec}")
 
     context = agent_backend.context_schema()
     config_json = getattr(agent_item, "config_json", None) or {}
@@ -443,6 +455,55 @@ async def get_agent_run_progress(run_id: str, *, message_limit: int = RUN_PROGRE
     return {"last_seq": last_seq, "messages": list(reversed(messages))}
 
 
+async def _get_user_model_pref(*, db: AsyncSession, uid: str) -> str | None:
+    result = await db.execute(select(UserModelPreference).filter(UserModelPreference.uid == uid))
+    pref = result.scalar_one_or_none()
+    return pref.chat_model_spec if pref else None
+
+
+async def _enforce_user_quota(*, db: AsyncSession, uid: str) -> None:
+    """运行创建前的配额预检；未配置配额的用户不受限。"""
+    if not uid:
+        return
+    quota = (
+        await db.execute(select(UserQuota).filter(UserQuota.uid == uid).with_for_update())
+    ).scalar_one_or_none()
+    if quota is None:
+        return
+    now = utc_now_naive()
+    if quota.daily_run_limit is not None:
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        used_runs = (
+            await db.execute(
+                select(func.count(AgentRun.id)).filter(
+                    AgentRun.uid == uid,
+                    AgentRun.created_at >= day_start,
+                    AgentRun.status.notin_(["failed", "cancelled"]),
+                )
+            )
+        ).scalar() or 0
+        if int(used_runs) >= int(quota.daily_run_limit):
+            raise HTTPException(
+                status_code=429,
+                detail=f"今日运行次数已达配额（{quota.daily_run_limit} 次），请联系管理员调整",
+            )
+    if quota.monthly_token_limit is not None:
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        used_tokens = (
+            await db.execute(
+                select(func.coalesce(func.sum(AgentRun.total_tokens), 0)).filter(
+                    AgentRun.uid == uid,
+                    AgentRun.created_at >= month_start,
+                )
+            )
+        ).scalar() or 0
+        if int(used_tokens) >= int(quota.monthly_token_limit):
+            raise HTTPException(
+                status_code=429,
+                detail=f"本月 token 用量已达配额（{quota.monthly_token_limit}），请联系管理员调整",
+            )
+
+
 async def create_agent_run_view(
     *,
     input_message: AgentRunInputMessage | None,
@@ -482,10 +543,20 @@ async def create_agent_run_view(
     if scope.existing_run:
         return _build_run_response(scope.existing_run)
 
+    # 幂等命中不重复消耗配额。锁定用户配额行直到本次 run 创建事务提交，
+    # 避免同一用户的并发请求同时通过“先计数、后创建”的检查窗口。
+    await _enforce_user_quota(db=db, uid=current_uid)
+
     if run_type == "resume":
         resolved_model_spec = scope.parent_run.input_payload["model_spec"]
     else:
-        resolved_model_spec = resolve_agent_run_model_spec(model_spec, scope.agent_item, scope.agent_backend)
+        user_model_spec = await _get_user_model_pref(db=db, uid=current_uid)
+        resolved_model_spec = resolve_agent_run_model_spec(
+            model_spec,
+            scope.agent_item,
+            scope.agent_backend,
+            user_model_spec=user_model_spec,
+        )
 
     parent_payload = scope.parent_run.input_payload if run_type == "resume" else None
     knowledge_scope_snapshot = (
@@ -677,7 +748,7 @@ async def persist_agent_run_record(
             await db.flush()
     except IntegrityError:
         run_repo = AgentRunRepository(db)
-        existing = await run_repo.get_run_by_request_id(request_id)
+        existing = await run_repo.get_run_by_request_id(request_id, str(current_uid))
         if existing and _same_run_request_scope(
             existing,
             uid=str(current_uid),
@@ -744,9 +815,7 @@ async def prepare_agent_run_creation_scope(
         raise HTTPException(status_code=404, detail=f"智能体后端 {agent_item.backend_id} 不存在")
 
     run_repo = AgentRunRepository(db)
-    existing = await run_repo.get_run_by_request_id(request_id)
-    if existing and existing.uid != str(current_uid):
-        raise HTTPException(status_code=409, detail="request_id 冲突")
+    existing = await run_repo.get_run_by_request_id(request_id, str(current_uid))
     if existing and not _same_run_request_scope(
         existing,
         uid=str(current_uid),

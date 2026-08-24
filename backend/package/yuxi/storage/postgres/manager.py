@@ -990,6 +990,47 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE INDEX IF NOT EXISTS ix_conversations_is_pinned ON conversations(is_pinned)",
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_model_providers_provider_id ON model_providers(provider_id)",
             "CREATE INDEX IF NOT EXISTS ix_model_providers_is_enabled ON model_providers(is_enabled)",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS is_disabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 0",
+            """
+            UPDATE api_keys AS key
+            SET department_id = users.department_id
+            FROM users
+            WHERE key.user_id = users.id
+              AND key.department_id IS NULL
+              AND users.department_id IS NOT NULL
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_model_preferences (
+                id SERIAL PRIMARY KEY,
+                uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                chat_model_spec VARCHAR(200),
+                updated_by VARCHAR(64),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT uq_user_model_preferences_uid UNIQUE (uid)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_quotas (
+                id SERIAL PRIMARY KEY,
+                uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                daily_run_limit INTEGER,
+                monthly_token_limit BIGINT,
+                updated_by VARCHAR(64),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT uq_user_quotas_uid UNIQUE (uid)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_agent_runs_uid_created ON agent_runs(uid, created_at)",
+            "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS total_tokens BIGINT",
+            # request_id 的幂等作用域属于用户。旧版全局唯一会让两个用户使用同一
+            # 客户端幂等 ID 时互相冲突；先移除历史唯一约束/索引，再建立复合唯一索引。
+            "ALTER TABLE IF EXISTS agent_runs DROP CONSTRAINT IF EXISTS agent_runs_request_id_key",
+            "DROP INDEX IF EXISTS ix_agent_runs_request_id",
+            "CREATE INDEX IF NOT EXISTS ix_agent_runs_request_id ON agent_runs(request_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_uid_request_id ON agent_runs(uid, request_id)",
         ]
         async with self.async_engine.begin() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警

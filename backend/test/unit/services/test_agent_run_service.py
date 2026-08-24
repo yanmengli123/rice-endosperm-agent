@@ -232,6 +232,14 @@ class _UserResult:
         return SimpleNamespace(uid="user-1", role="user")
 
 
+class _NoneResult:
+    def scalar_one_or_none(self):
+        return None
+
+    def scalar(self):
+        return None
+
+
 class _CreateRunDb:
     def __init__(
         self,
@@ -262,7 +270,10 @@ class _CreateRunDb:
         self._message_id = message_id
 
     async def execute(self, stmt):
-        del stmt
+        description = str(stmt)
+        # 配额与用户级模型偏好查询在单测中视为无数据
+        if 'user_quotas' in description or 'user_model_preferences' in description:
+            return _NoneResult()
         return _UserResult()
 
     def add(self, item):
@@ -307,7 +318,8 @@ class _CreateRunRepo:
     def __init__(self, db_session):
         self.db = db_session
 
-    async def get_run_by_request_id(self, request_id: str):
+    async def get_run_by_request_id(self, request_id: str, uid: str):
+        del uid
         self.db.request_id_lookups.append(request_id)
         if "rollback_savepoint" in self.db.order and self.db.existing_run_after_rollback:
             return self.db.existing_run_after_rollback

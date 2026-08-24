@@ -15,6 +15,26 @@ SCIENTIFIC_NOTATION_PATTERN = re.compile(r"^[+-]?(?:\d+\.\d+|\d+)[eE][+-]?\d+$")
 SCIENTIFIC_IDENTIFIER_IN_TEXT = re.compile(r"(?<![\w.])\d\.\d{4,}[eE]\+?0?[6-9](?!\w)")
 DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 
+# 水稻基因标识符：RAP（Os07g08420）与 MSU（LOC_Os07g40960）。
+# \b 在 LOC_ 前缀处不成立（下划线与 O 均为词字符），因此 RAP 模式不会误切 MSU ID。
+RAP_IDENTIFIER_IN_TEXT = re.compile(r"\bOs\d{1,2}g\d{5}\b", re.IGNORECASE)
+MSU_IDENTIFIER_IN_TEXT = re.compile(r"\bLOC_Os\d{1,2}g\d{5}\b", re.IGNORECASE)
+
+
+def extract_gene_identifiers(text: Any) -> list[str]:
+    """从问题文本提取 RAP/MSU 标识符，返回 canonical_identity 精确键（小写，MSU 优先）。"""
+    value = str(text or "")
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for pattern, prefix in ((MSU_IDENTIFIER_IN_TEXT, "msu:"), (RAP_IDENTIFIER_IN_TEXT, "rap:")):
+        for match in pattern.finditer(value):
+            token = f"{prefix}{match.group(0).casefold()}"
+            if token not in seen:
+                seen.add(token)
+                identifiers.append(token)
+    return identifiers
+
+
 OUTCOME_CLASSES = (
     "DIRECT_YIELD",
     "YIELD_COMPONENT",

@@ -56,6 +56,15 @@ NODE_TYPE_MAPPING = {
     "QTL_LOCUS": ("QTL", None),
     "CIS_ELEMENT": ("CisElement", None),
     "RNA": ("RNA", None),
+    # 扩展实体类型：支撑"材料/条件/时期/通路/蛋白/文献"等上下文维度的图谱表达
+    "PROTEIN": ("Protein", None),
+    "PATHWAY": ("Pathway", None),
+    "TISSUE": ("Tissue", None),
+    "DEVELOPMENT_STAGE": ("DevelopmentStage", None),
+    "CONDITION": ("Condition", None),
+    "CULTIVAR": ("Cultivar", None),
+    "EXPERIMENT": ("Experiment", None),
+    "PUBLICATION": ("Publication", None),
 }
 
 GENE_RELATION_TYPES = {
@@ -1021,13 +1030,7 @@ def _build_evidence_records(
         quote = item["quote"]
         literature_keys = [key for key in (f"pmid:{pmid}" if pmid else None, f"doi:{doi}" if doi else None) if key]
         literature_id = "|".join(literature_keys) or None
-        identifier_status = (
-            "VALID"
-            if literature_keys
-            else "UNALIGNED"
-            if item["pmids"] or item["dois"]
-            else "MISSING"
-        )
+        identifier_status = "VALID" if literature_keys else "UNALIGNED" if item["pmids"] or item["dois"] else "MISSING"
         semantics = build_evidence_semantics(
             source_name=source.get("name"),
             source_label=source.get("label"),

@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import os
 import secrets
 from datetime import timedelta
@@ -54,6 +55,16 @@ class AuthUtils:
         key_hash = hashlib.sha256(full_key.encode()).hexdigest()
         key_prefix = full_key[:12]
         return full_key, key_hash, key_prefix
+
+    @staticmethod
+    def account_scope_id(uid: str) -> str:
+        """返回稳定、不可反推 UID 的桌面端账号隔离标识。"""
+        digest = hmac.new(
+            _get_jwt_secret_key().encode(),
+            f"desktop-account-scope:{uid}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"yxacct_{digest[:32]}"
 
     @staticmethod
     def hash_password(password: str) -> str:

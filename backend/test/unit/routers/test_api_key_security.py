@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from contextlib import asynccontextmanager
 
 import pytest
@@ -7,15 +8,16 @@ import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from server.routers.auth_router import delete_user
-from server.routers.user_router import APIKeyCreate, create_api_key
-from server.utils.auth_middleware import _verify_api_key
+from server.routers.auth_router import delete_user, login_for_access_token
+from server.routers.user_router import APIKeyCreate, _admin_guard, create_api_key, disable_user, enable_user
+from server.utils.auth_middleware import _verify_api_key, get_current_user
 from yuxi.repositories import user_repository as user_repository_module
 from yuxi.repositories.user_repository import UserRepository
-from yuxi.storage.postgres.models_business import APIKey, Base, Department, User
+from yuxi.storage.postgres.models_business import APIKey, AgentRun, Base, Department, User
 from yuxi.utils.auth_utils import AuthUtils
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+user_router_module = importlib.import_module("server.routers.user_router")
 
 
 class _ScalarResult:
@@ -154,6 +156,130 @@ async def test_create_api_key_allows_current_user_department(session):
     assert response.api_key.user_id == session["regular_user"].id
     assert response.api_key.department_id == session["dept_a"].id
     assert response.secret.startswith(response.api_key.key_prefix)
+
+
+async def test_api_key_rejects_stale_cross_department_binding(session):
+    db = session["db"]
+    secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="stale department binding",
+        user_id=session["regular_user"].id,
+        department_id=session["dept_b"].id,
+        created_by=str(session["regular_user"].id),
+    )
+    db.add(api_key)
+    await db.commit()
+
+    user, verified_key = await _verify_api_key(secret, db)
+
+    assert user is None
+    assert verified_key is None
+
+
+async def test_auth_version_invalidates_existing_jwt(session):
+    db = session["db"]
+    user = session["regular_user"]
+    token = AuthUtils.create_access_token({"sub": str(user.id), "auth_version": user.auth_version})
+    user.auth_version += 1
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(authorization=f"Bearer {token}", db=db)
+
+    assert exc.value.status_code == 401
+
+
+async def test_malformed_signed_jwt_subject_is_rejected_as_unauthorized(session):
+    token = AuthUtils.create_access_token({"sub": "not-an-integer", "auth_version": 0})
+
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(authorization=f"Bearer {token}", db=session["db"])
+
+    assert exc.value.status_code == 401
+
+
+async def test_login_does_not_disclose_whether_identifier_exists(session):
+    db = session["db"]
+    user = session["regular_user"]
+    user.password_hash = AuthUtils.hash_password("correct-password")
+    await db.commit()
+
+    class Form:
+        password = "wrong-password"
+
+    existing_form = Form()
+    existing_form.username = user.uid
+    missing_form = Form()
+    missing_form.username = "missing-user"
+
+    with pytest.raises(HTTPException) as existing_exc:
+        await login_for_access_token(existing_form, db)
+    with pytest.raises(HTTPException) as missing_exc:
+        await login_for_access_token(missing_form, db)
+
+    assert existing_exc.value.status_code == missing_exc.value.status_code == 401
+    assert existing_exc.value.detail == missing_exc.value.detail == "登录标识或密码错误"
+
+
+async def test_department_admin_cannot_manage_user_from_another_department(session):
+    with pytest.raises(HTTPException) as exc:
+        _admin_guard(session["dept_b_admin"], session["regular_user"])
+
+    assert exc.value.status_code == 403
+
+
+async def test_enabling_user_does_not_restore_individually_revoked_key(session):
+    db = session["db"]
+    user = session["regular_user"]
+    user.is_disabled = True
+    _secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="revoked key",
+        user_id=user.id,
+        department_id=user.department_id,
+        created_by=str(user.id),
+        is_enabled=False,
+    )
+    db.add(api_key)
+    await db.commit()
+
+    await enable_user(user.uid, current_user=session["superadmin"], db=db)
+    await db.refresh(api_key)
+
+    assert user.is_disabled is False
+    assert api_key.is_enabled is False
+
+
+async def test_disabling_user_publishes_cancel_for_active_runs(session, monkeypatch):
+    db = session["db"]
+    user = session["regular_user"]
+    run = AgentRun(
+        id="run-disable-test",
+        conversation_thread_id="thread-disable-test",
+        agent_slug="default-chatbot",
+        uid=user.uid,
+        status="running",
+        request_id="request-disable-test-0001",
+        input_payload={},
+    )
+    db.add(run)
+    await db.commit()
+    published = []
+
+    async def fake_publish(run_id):
+        published.append(run_id)
+
+    monkeypatch.setattr(user_router_module, "publish_cancel_signal", fake_publish)
+    result = await disable_user(user.uid, current_user=session["superadmin"], db=db)
+    await db.refresh(run)
+
+    assert result["cancelled_runs"] == 1
+    assert run.status == "cancel_requested"
+    assert published == [run.id]
 
 
 async def test_delete_user_disables_owned_api_keys(session):

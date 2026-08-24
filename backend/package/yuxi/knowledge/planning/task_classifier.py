@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 
-TASK_CLASSIFIER_VERSION = "1.0"
+from yuxi.knowledge.research_evidence import extract_gene_identifiers
+
+TASK_CLASSIFIER_VERSION = "1.1"
 
 
 def classify_task(question: str) -> str:
@@ -15,5 +17,8 @@ def classify_task(question: str) -> str:
     if re.search(r"(?:是否|关系|关联|does .+ (?:regulate|affect)|relationship)", text, flags=re.IGNORECASE):
         return "RELATION_LOOKUP"
     if re.search(r"(?:RAP ID|MSU ID|基因编号|identifier|是什么基因)", text, flags=re.IGNORECASE):
+        return "ENTITY_LOOKUP"
+    # 问题中携带 RAP/MSU 标识符且未命中更高优先级意图时，走确定性标识符查询
+    if extract_gene_identifiers(text):
         return "ENTITY_LOOKUP"
     return "GENERAL_KNOWLEDGE_QUERY"

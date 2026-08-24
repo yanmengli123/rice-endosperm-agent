@@ -41,7 +41,13 @@ async def _verify_api_key(key: str, db: AsyncSession) -> tuple[User | None, APIK
 
     result = await db.execute(select(User).filter(User.id == api_key.user_id))
     user = result.scalar_one_or_none()
-    if user and not user.is_deleted:
+    if (
+        user
+        and not user.is_deleted
+        and not user.is_disabled
+        and user.department_id is not None
+        and api_key.department_id == user.department_id
+    ):
         return user, api_key
 
     return None, None
@@ -90,10 +96,27 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    result = await db.execute(select(User).filter(User.id == int(user_id), User.is_deleted == 0))
+    try:
+        parsed_user_id = int(user_id)
+    except (TypeError, ValueError):
+        raise credentials_exception from None
+
+    result = await db.execute(select(User).filter(User.id == parsed_user_id, User.is_deleted == 0))
     user = result.scalar_one_or_none()
     if user is None:
         raise credentials_exception
+    if user.is_disabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="账号已被停用，请联系管理员",
+        )
+    token_auth_version = payload.get("auth_version", 0)
+    if token_auth_version != user.auth_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="登录会话已失效，请重新登录",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     if user.is_login_locked():
         raise HTTPException(
             status_code=status.HTTP_423_LOCKED,
@@ -104,14 +127,19 @@ async def get_current_user(
     return user
 
 
-# 获取已登录用户（抛出401如果未登录）
-async def get_required_user(user: User | None = Depends(get_current_user)):
+# 获取已认证用户。身份接口允许尚待管理员分配部门的注册用户访问。
+async def get_authenticated_user(user: User | None = Depends(get_current_user)):
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="请登录后再访问",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    return user
+
+
+# 获取可访问业务资源的用户；未绑定部门时明确拒绝。
+async def get_required_user(user: User = Depends(get_authenticated_user)):
     if not user.department_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

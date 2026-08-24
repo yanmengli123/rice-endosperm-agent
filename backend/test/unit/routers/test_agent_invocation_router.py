@@ -55,7 +55,9 @@ def test_credential_status_is_non_billable_and_does_not_expose_identity(monkeypa
     response = client.get("/api/agent-invocation/credential-status")
 
     assert response.status_code == 200
-    assert response.json() == {"authenticated": True, "auth_scheme": "yuxi_api_key"}
+    assert response.json()["authenticated"] is True
+    assert response.json()["auth_scheme"] == "yuxi_api_key"
+    assert response.json()["account_scope_id"].startswith("yxacct_")
     assert "user" not in response.text.lower()
     assert "key" in response.json()["auth_scheme"]
 

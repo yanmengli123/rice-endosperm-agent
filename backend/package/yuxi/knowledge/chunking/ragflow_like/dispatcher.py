@@ -51,6 +51,8 @@ def _dispatch_markdown_parser(
     preset_id: str, filename: str, markdown_content: str, parser_config: dict[str, Any]
 ) -> list[str]:
     parser_id = map_to_internal_parser_id(preset_id)
+    # 注入源文件名供分块器做文献标题/标识符兜底（不覆盖调用方显式设置）
+    parser_config = {"source_filename": filename, **parser_config}
 
     if parser_id == "naive":
         return general.chunk_markdown(markdown_content, parser_config)

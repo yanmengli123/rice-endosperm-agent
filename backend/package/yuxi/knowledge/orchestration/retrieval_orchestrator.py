@@ -16,7 +16,11 @@ from yuxi.knowledge.contracts.schemas import (
 from yuxi.knowledge.planning.entity_resolver import ENTITY_RESOLVER_VERSION, resolve_entities
 from yuxi.knowledge.planning.query_planner import PLANNER_VERSION, plan_knowledge_query
 from yuxi.knowledge.rendering.structured_renderer import render_structured_rows
-from yuxi.knowledge.retrieval.canonical_graph_retriever import retrieve_exact_regulator_enumeration
+from yuxi.knowledge.retrieval.canonical_graph_retriever import (
+    extract_gene_identifiers,
+    retrieve_entities_by_identifiers,
+    retrieve_exact_regulator_enumeration,
+)
 from yuxi.knowledge.retrieval.neo4j_path_retriever import retrieve_neo4j_paths
 from yuxi.knowledge.validation.citation_validator import validate_structured_citations
 from yuxi.knowledge.validation.claim_validator import validate_deterministic_claims
@@ -253,6 +257,36 @@ async def prepare_knowledge_context(
                     f"另有 {uncited_count} 条精确图谱关系缺少当前策略允许的合格 Evidence；"
                     "它们已计入关系扫描，但未升级为可引用 Claim。"
                 )
+        elif plan.get("intent") == "ENTITY_LOOKUP":
+            identifiers = extract_gene_identifiers(question)
+            if not identifiers:
+                raise LookupError("GENE_IDENTIFIER_NOT_FOUND")
+            async with db.begin_nested():
+                lookup = await retrieve_entities_by_identifiers(
+                    db,
+                    identifiers=identifiers,
+                    members=members,
+                )
+            if not lookup["matched_entities"]:
+                raise LookupError("EXACT_ENTITY_NOT_FOUND")
+            contract["resolved_entities"] = lookup["matched_entities"]
+            contract.update(
+                {
+                    "status": "COMPLETED",
+                    "claims": lookup["claims"],
+                    "evidence": lookup["evidence"],
+                    "knowledge_source_status": lookup["source_status"],
+                    "completeness": lookup["completeness"],
+                    "retriever_version": lookup["retriever_version"],
+                }
+            )
+            completeness_status, completeness_warnings = validate_completeness(contract["completeness"])
+            contract["completeness"]["status"] = completeness_status
+            contract["warnings"].extend(completeness_warnings)
+            if not lookup["claims"]:
+                contract["warnings"].append(
+                    f"标识符 {', '.join(identifiers)} 已精确匹配到规范实体，但当前策略下没有可引用的一跳关系证据。"
+                )
         else:
             from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway
 
@@ -283,7 +317,7 @@ async def prepare_knowledge_context(
                 }
                 contract["knowledge_source_status"].extend(graph_expansion["source_status"])
         contract["structured_result"] = render_structured_rows(contract["claims"])
-        if plan.get("intent") == "PHENOTYPE_REGULATOR_ENUMERATION":
+        if plan.get("intent") in {"PHENOTYPE_REGULATOR_ENUMERATION", "ENTITY_LOOKUP"}:
             claim_validation, claim_warnings = validate_deterministic_claims(contract["claims"])
             citation_validation, citation_warnings = validate_structured_citations(
                 contract["structured_result"],

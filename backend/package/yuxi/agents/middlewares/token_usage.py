@@ -42,6 +42,7 @@ class TokenUsagePayload(TypedDict, total=False):
     summary_message_tokens: int
     summary_trigger_tokens: int | None
     model_usage: dict[str, int]
+    run_model_usage: dict[str, int]
     counter: str
     estimate: bool
     measured_at: str
@@ -140,6 +141,24 @@ class TokenUsageMiddleware(AgentMiddleware[TokenUsageState]):
             message for message in llm_messages if not _is_tool_message(message) and not _is_summary_message(message)
         ]
         summary_trigger_tokens = _summary_trigger_tokens(getattr(request.runtime, "context", None))
+        model_usage = _model_usage_from_response(response)
+        if not model_usage:
+            output_tokens = self._count_tokens(response_messages)
+            model_usage = {
+                "input_tokens": llm_input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": llm_input_tokens + output_tokens,
+            }
+
+        previous_usage = request.state.get("token_usage")
+        previous_run_usage = previous_usage.get("run_model_usage", {}) if isinstance(previous_usage, Mapping) else {}
+        run_model_usage = {
+            key: int(previous_run_usage.get(key, 0)) + int(value)
+            for key, value in model_usage.items()
+        }
+        for key, value in previous_run_usage.items():
+            if key not in run_model_usage and isinstance(value, int):
+                run_model_usage[key] = value
 
         return {
             "state_message_count": len(next_state_messages),
@@ -162,7 +181,8 @@ class TokenUsageMiddleware(AgentMiddleware[TokenUsageState]):
             "summary_active": summary_message is not None,
             "summary_message_tokens": self._count_tokens([summary_message]) if summary_message else 0,
             "summary_trigger_tokens": summary_trigger_tokens,
-            "model_usage": _model_usage_from_response(response),
+            "model_usage": model_usage,
+            "run_model_usage": run_model_usage,
             "counter": "langchain.count_tokens_approximately",
             "estimate": True,
             "measured_at": datetime.now(UTC).isoformat(),

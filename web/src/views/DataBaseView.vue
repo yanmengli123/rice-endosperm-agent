@@ -52,6 +52,41 @@
       destroyOnClose
     >
       <div class="new-database-form">
+        <!-- 按文件格式快速创建（可选模板） -->
+        <div class="form-section">
+          <h3 class="section-title">
+            按文件格式快速创建<span class="template-optional-mark">（选填，自动配置分块与解析）</span>
+          </h3>
+          <div class="format-template-cards">
+            <div
+              v-for="template in formatTemplates"
+              :key="template.key"
+              class="format-template-card"
+              :class="{ active: state.formatTemplate === template.key }"
+              @click="applyFormatTemplate(template.key)"
+            >
+              <div class="card-header">
+                <span class="type-title">{{ template.label }}</span>
+              </div>
+              <div class="card-description">{{ template.description }}</div>
+              <div
+                v-if="state.formatTemplate === template.key && template.key === 'csv_dataset'"
+                class="template-sub-option"
+                @click.stop
+              >
+                <a-radio-group
+                  :value="state.formatCsvMode"
+                  size="small"
+                  @change="handleFormatCsvModeChange"
+                >
+                  <a-radio-button value="record">记录型（一行一块）</a-radio-button>
+                  <a-radio-button value="qa">问答型（Q/A 两列）</a-radio-button>
+                </a-radio-group>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 知识库类型选择 -->
         <div class="form-section">
           <h3 class="section-title">知识库类型<span class="required-mark">*</span></h3>
@@ -562,8 +597,70 @@ const saveScopeMember = async () => {
 }
 
 const state = reactive({
-  openNewDatabaseModel: false
+  openNewDatabaseModel: false,
+  formatTemplate: '',
+  formatCsvMode: 'record'
 })
+
+// 按文件格式快速创建模板：只做表单预填与创建后引导，kb_type 恒为 milvus
+const FORMAT_TEMPLATES = [
+  {
+    key: 'pdf_literature',
+    label: '📄 PDF 文献证据库',
+    description: 'MinerU 解析 + 语义分块；每个 chunk 自动附加文献标题、DOI/PMID、章节路径与证据级别（Results=direct，Discussion=inferred）。上传 PDF 时建议使用 MinerU 官方引擎。',
+    nameSuffix: '文献证据库',
+    apply: {
+      chunk_preset_id: 'semantic',
+      chunk_parser_config: { chunk_token_num: 512, literature_enrichment: true },
+      format_template: 'pdf_literature'
+    }
+  },
+  {
+    key: 'csv_dataset',
+    label: '📊 CSV 结构化数据集',
+    description: '一行一条记录独立成块，保留行级来源；问答型 CSV（question,answer 两列）自动抽取问答对。',
+    nameSuffix: '结构化数据集',
+    apply: {
+      chunk_preset_id: 'separator',
+      chunk_parser_config: { chunk_token_num: 384, delimiter: '\n\n', overlapped_percent: 0 },
+      format_template: 'csv_dataset'
+    }
+  },
+  {
+    key: 'graph_csv',
+    label: '🕸 科研知识图谱',
+    description: '节点 CSV + 关系 CSV + 审计 cypher；PostgreSQL 规范源、Neo4j/Milvus 双投影，创建后前往图谱页执行导入。',
+    nameSuffix: '科研知识图谱',
+    apply: { format_template: 'graph_csv' }
+  }
+]
+
+const getFormatTemplate = (key) => FORMAT_TEMPLATES.find((item) => item.key === key) || null
+
+const applyFormatTemplate = (key) => {
+  if (state.formatTemplate === key) {
+    state.formatTemplate = ''
+    state.formatCsvMode = 'record'
+    return
+  }
+  const template = getFormatTemplate(key)
+  if (!template) return
+  state.formatTemplate = key
+  state.formatCsvMode = 'record'
+  newDatabase.kb_type = 'milvus'
+  newDatabase.chunk_preset_id = template.apply.chunk_preset_id || DEFAULT_CHUNK_PRESET_ID
+  if (!newDatabase.name.trim()) {
+    newDatabase.name = template.nameSuffix
+  }
+  if (!newDatabase.description.trim()) {
+    newDatabase.description = `${template.label.replace(/^\S+\s/, '')}：${template.description}`
+  }
+}
+
+const handleFormatCsvModeChange = () => {
+  if (state.formatTemplate !== 'csv_dataset') return
+  newDatabase.chunk_preset_id = state.formatCsvMode === 'qa' ? 'qa' : 'separator'
+}
 
 const createDefaultShareConfig = () => ({
   access_level: 'global',
@@ -573,6 +670,8 @@ const createDefaultShareConfig = () => ({
 
 const shareConfig = ref(createDefaultShareConfig())
 const shareConfigFormRef = ref(null)
+
+const formatTemplates = FORMAT_TEMPLATES
 
 const createEmptyDatabaseForm = () => ({
   name: '',
@@ -635,6 +734,8 @@ const resetNewDatabase = () => {
   Object.assign(newDatabase, createEmptyDatabaseForm())
   newDatabase.kb_type = kbTypes.value[0] || ''
   resetCreateParamValues()
+  state.formatTemplate = ''
+  state.formatCsvMode = 'record'
   shareConfig.value = createDefaultShareConfig()
 }
 
@@ -712,6 +813,24 @@ const buildRequestData = () => {
     }
   }
 
+  // 按格式模板合并分块参数与模板标记
+  const template = getFormatTemplate(state.formatTemplate)
+  if (template && newDatabase.kb_type === 'milvus') {
+    requestData.additional_params.format_template = template.apply.format_template
+    if (template.key === 'csv_dataset') {
+      requestData.additional_params.chunk_preset_id =
+        state.formatCsvMode === 'qa' ? 'qa' : 'separator'
+      requestData.additional_params.chunk_parser_config = {
+        ...(template.apply.chunk_parser_config || {}),
+        ...(state.formatCsvMode === 'qa'
+          ? { chunk_token_num: 512, delimiter: '\n', overlapped_percent: 0 }
+          : {})
+      }
+    } else if (template.apply.chunk_parser_config) {
+      requestData.additional_params.chunk_parser_config = { ...template.apply.chunk_parser_config }
+    }
+  }
+
   for (const field of createParamOptions.value) {
     const value = newDatabase.additional_params[field.key]
     requestData.additional_params[field.key] = typeof value === 'string' ? value.trim() : value
@@ -746,9 +865,19 @@ const handleCreateDatabase = async () => {
 
   const requestData = buildRequestData()
   try {
-    await databaseStore.createDatabase(requestData)
+    const templateKey = state.formatTemplate
+    const data = await databaseStore.createDatabase(requestData)
     resetNewDatabase()
     state.openNewDatabaseModel = false
+    // 图谱模板创建成功后直接引导到图谱页执行 CSV 导入
+    if (templateKey === 'graph_csv') {
+      const createdKbId =
+        data?.kb_id || data?.database?.kb_id || databaseStore.databases?.[0]?.kb_id || ''
+      if (createdKbId) {
+        router.push(`/extensions/knowledgebase/${createdKbId}?tab=graph`)
+        message.info('知识库已创建，请在图谱页导入节点 CSV 与关系 CSV')
+      }
+    }
   } catch {
     // 错误已在 store 中处理
   }
@@ -1096,6 +1225,56 @@ defineExpose({
     @media (max-width: 768px) {
       grid-template-columns: 1fr;
       gap: 10px;
+    }
+
+    .format-template-cards {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+
+      .format-template-card {
+        border: 1px solid var(--gray-150);
+        border-radius: 12px;
+        padding: 12px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        background: var(--gray-0);
+
+        &:hover {
+          border-color: var(--main-color);
+        }
+
+        &.active {
+          border-color: var(--main-color);
+          background: color-mix(in srgb, var(--main-color) 6%, transparent);
+        }
+
+        .card-header {
+          margin-bottom: 6px;
+
+          .type-title {
+            font-weight: 600;
+            font-size: 13px;
+          }
+        }
+
+        .card-description {
+          font-size: 12px;
+          color: var(--gray-500);
+          line-height: 1.5;
+        }
+
+        .template-sub-option {
+          margin-top: 8px;
+        }
+      }
+    }
+
+    .template-optional-mark {
+      font-size: 12px;
+      font-weight: 400;
+      color: var(--gray-400);
+      margin-left: 6px;
     }
 
     .kb-type-card {

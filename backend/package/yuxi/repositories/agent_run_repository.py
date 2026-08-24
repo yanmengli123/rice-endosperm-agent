@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES, AgentRun, SubagentThread
@@ -21,8 +21,10 @@ class AgentRunRepository:
         result = await self.db.execute(select(AgentRun).where(AgentRun.id == run_id))
         return result.scalar_one_or_none()
 
-    async def get_run_by_request_id(self, request_id: str) -> AgentRun | None:
-        result = await self.db.execute(select(AgentRun).where(AgentRun.request_id == request_id))
+    async def get_run_by_request_id(self, request_id: str, uid: str) -> AgentRun | None:
+        result = await self.db.execute(
+            select(AgentRun).where(AgentRun.request_id == request_id, AgentRun.uid == str(uid))
+        )
         return result.scalar_one_or_none()
 
     async def get_run_for_user(self, run_id: str, uid: str) -> AgentRun | None:
@@ -226,6 +228,11 @@ class AgentRunRepository:
         run.updated_at = run.finished_at
         await self.db.flush()
         return run
+
+    async def set_total_tokens(self, run_id: str, total_tokens: int) -> None:
+        await self.db.execute(
+            update(AgentRun).where(AgentRun.id == run_id).values(total_tokens=int(total_tokens))
+        )
 
     async def _lock_run(self, run_id: str) -> AgentRun | None:
         result = await self.db.execute(select(AgentRun).where(AgentRun.id == run_id).with_for_update())

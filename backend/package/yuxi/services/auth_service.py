@@ -137,6 +137,10 @@ async def exchange_cli_auth_token(db: AsyncSession, device_code: str) -> dict:
     if row is None:
         raise CLIAuthError("invalid_user", "授权用户不存在", status_code=409)
     user, department_name = row
+    if user.is_disabled:
+        raise CLIAuthError("invalid_user", "授权用户已被停用", status_code=403)
+    if user.department_id is None:
+        raise CLIAuthError("department_required", "授权用户尚未绑定部门", status_code=400)
 
     full_key, key_hash, key_prefix = AuthUtils.generate_api_key()
     api_key = APIKey(
@@ -144,6 +148,7 @@ async def exchange_cli_auth_token(db: AsyncSession, device_code: str) -> dict:
         key_prefix=key_prefix,
         name=session.key_name,
         user_id=user.id,
+        department_id=user.department_id,
         created_by=str(user.id),
     )
     db.add(api_key)
@@ -162,4 +167,5 @@ async def exchange_cli_auth_token(db: AsyncSession, device_code: str) -> dict:
         "api_key": api_key.to_dict(),
         "secret": full_key,
         "user": user_data,
+        "account_scope_id": AuthUtils.account_scope_id(user.uid),
     }

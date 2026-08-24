@@ -303,7 +303,8 @@ def _patch_run_record_creation(
         def __init__(self, db_session):
             self.db = db_session
 
-        async def get_run_by_request_id(self, request_id: str):
+        async def get_run_by_request_id(self, request_id: str, uid: str):
+            del uid
             self.db.request_id_lookups.append(request_id)
             return self.db.existing_run
 

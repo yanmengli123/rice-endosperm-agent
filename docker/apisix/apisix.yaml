@@ -82,8 +82,7 @@ routes:
           properties:
             agent_slug:
               type: string
-              enum:
-                - "${{YUXI_PUBLIC_AGENT_SLUG:=default-chatbot}}"
+              pattern: "^[a-z0-9][a-z0-9_-]{0,63}$"
             messages:
               type: array
               minItems: 1
@@ -107,6 +106,10 @@ routes:
               type: string
               minLength: 1
               maxLength: 128
+            model_spec:
+              type: string
+              minLength: 1
+              maxLength: 200
             request_id:
               type: string
               minLength: 16
@@ -169,13 +172,193 @@ routes:
               pattern: "^[A-Za-z0-9_-]+$"
             agent_slug:
               type: string
-              enum:
-                - "${{YUXI_PUBLIC_AGENT_SLUG:=default-chatbot}}"
+              pattern: "^[a-z0-9][a-z0-9_-]{0,63}$"
           additionalProperties: false
         rejected_code: 400
         rejected_msg: invalid request
       limit-count:
         count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-public-cli-session-create
+    name: yuxi-public-cli-session-create
+    uri: /api/auth/cli/sessions
+    methods:
+      - POST
+    priority: 90
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 10
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-public-cli-session-token
+    name: yuxi-public-cli-session-token
+    uri: /api/auth/cli/sessions/token
+    methods:
+      - POST
+    priority: 90
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-model-list
+    name: yuxi-model-list
+    uri: /api/system/model-providers/models/v2
+    methods:
+      - GET
+    priority: 90
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-user-model-preference
+    name: yuxi-user-model-preference
+    uri: /api/user/model-preference
+    methods:
+      - GET
+      - PUT
+    priority: 90
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-user-api-key-delete
+    name: yuxi-user-api-key-delete
+    uri: /api/user/apikey/:api_key_id
+    methods:
+      - DELETE
+    priority: 95
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 10
         time_window: 60
         key_type: var
         key: remote_addr

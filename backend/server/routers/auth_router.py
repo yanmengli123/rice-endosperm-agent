@@ -1,4 +1,7 @@
+import os
 import re
+import secrets
+from urllib.parse import quote, urlparse
 from yuxi.utils import logger
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status, UploadFile, File
@@ -7,13 +10,15 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import APIKey, User, Department
+from yuxi.storage.postgres.models_business import APIKey, Department, OperationLog, User
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.repositories.department_repository import DepartmentRepository
 from server.utils.auth_middleware import (
     get_admin_user,
+    get_authenticated_user,
     get_superadmin_user,
     get_db,
     get_required_user,
@@ -44,6 +49,13 @@ from yuxi.services.oidc_service import (
 
 # 创建路由器
 auth = APIRouter(prefix="/auth", tags=["authentication"])
+
+# 不存在账号时执行等成本的 Argon2 校验，避免通过响应时间枚举登录标识。
+# 该哈希只对应固定占位文本，不是任何真实用户凭证。
+DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$SDj0/iiy9nalX9mDvqU25A$"
+    "KKlDtRXMd/aecDyi04DAM/YiMJWhksK9xoi7A8EKchk"
+)
 
 
 # 请求和响应模型
@@ -93,6 +105,7 @@ class UserResponse(BaseModel):
     department_name: str | None = None  # 部门名称
     created_at: str
     last_login: str | None = None
+    is_disabled: bool = False
 
 
 class UserAccessOption(BaseModel):
@@ -154,6 +167,7 @@ class CLIAuthSessionCreateResponse(BaseModel):
     device_code: str
     user_code: str
     verification_uri: str
+    verification_uri_complete: str
     expires_in: int
     interval: int
 
@@ -177,6 +191,7 @@ class CLIAuthTokenResponse(BaseModel):
     api_key: dict
     secret: str
     user: dict
+    account_scope_id: str
 
 
 # =============================================================================
@@ -211,33 +226,24 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         result = await db.execute(select(User).filter(User.phone_number == login_identifier))
         user = result.scalar_one_or_none()
 
-    # 如果用户不存在，为防止用户名枚举攻击，返回通用错误信息
+    # 如果用户不存在，执行一次真实 Argon2 校验以降低时序枚举风险。
     if not user:
+        AuthUtils.verify_password(DUMMY_PASSWORD_HASH, form_data.password)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="登录标识或密码错误",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 检查用户是否已被删除
-    if user.is_deleted:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="该账户已注销",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # 检查用户是否处于登录锁定状态
-    if user.is_login_locked():
-        remaining_time = user.get_remaining_lock_time()
-        raise HTTPException(
-            status_code=status.HTTP_423_LOCKED,
-            detail=f"登录被锁定，请等待 {remaining_time} 秒后再试",
-            headers={"WWW-Authenticate": "Bearer", "X-Lock-Remaining": str(remaining_time)},
-        )
-
     # 验证密码
     if not AuthUtils.verify_password(user.password_hash, form_data.password):
+        # 已删除/停用账号不累计失败次数，也不向未持有正确密码的人泄露账号状态。
+        if user.is_deleted or getattr(user, "is_disabled", False):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="登录标识或密码错误",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         # 密码错误，增加失败次数
         user.increment_failed_login()
         await db.commit()
@@ -256,9 +262,31 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         else:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="用户名或密码错误",
+                detail="登录标识或密码错误",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+    # 只有持有正确密码后才披露账号注销/停用状态。
+    if user.is_deleted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="该账户已注销",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if getattr(user, "is_disabled", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="账号已被停用，请联系管理员",
+        )
+
+    # 锁定期内即使密码正确也不能登录。
+    if user.is_login_locked():
+        remaining_time = user.get_remaining_lock_time()
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"登录被锁定，请等待 {remaining_time} 秒后再试",
+            headers={"WWW-Authenticate": "Bearer", "X-Lock-Remaining": str(remaining_time)},
+        )
 
     # 登录成功，重置失败计数器
     user.reset_failed_login()
@@ -266,7 +294,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     await db.commit()
 
     # 生成访问令牌
-    token_data = {"sub": str(user.id)}
+    token_data = {"sub": str(user.id), "auth_version": user.auth_version}
     access_token = AuthUtils.create_access_token(token_data)
 
     # 记录登录操作
@@ -293,17 +321,127 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 
 
 # =============================================================================
+# === 自助注册分组 ===
+# =============================================================================
+
+
+class SelfRegisterRequest(BaseModel):
+    uid: str = Field(..., description="登录标识，3-20 位字母/数字/下划线")
+    username: str = Field(..., description="显示名称")
+    password: str = Field(..., min_length=8, max_length=128, description="密码，8-128 位")
+    invite_code: str | None = Field(None, description="邀请码（启用邀请码时必填）")
+
+
+def _register_enabled() -> bool:
+    return os.getenv("REGISTER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@auth.get("/register-config")
+async def get_register_config():
+    """返回非敏感注册开关，供登录页决定是否展示自助注册入口。"""
+    return {
+        "enabled": _register_enabled(),
+        "invite_required": bool(os.getenv("REGISTER_INVITE_CODE", "").strip()),
+    }
+
+
+@auth.post("/register")
+async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(get_db)):
+    """自助注册普通用户；由 REGISTER_ENABLED 显式开启，可选邀请码与默认部门。"""
+    if not _register_enabled():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="系统未开放自助注册")
+
+    invite_code = os.getenv("REGISTER_INVITE_CODE", "").strip()
+    provided_invite = (data.invite_code or "").strip()
+    if invite_code and not secrets.compare_digest(provided_invite, invite_code):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="邀请码不正确")
+
+    if not re.match(r"^[a-zA-Z0-9_]+$", data.uid) or not (3 <= len(data.uid) <= 20):
+        detail_msg = "用户ID只能包含字母、数字和下划线，长度3-20"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail_msg,
+        )
+
+    username_ok, username_error = validate_username(data.username)
+    if not username_ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=username_error)
+
+    existing = (
+        await db.execute(select(User).filter((User.uid == data.uid) | (User.username == data.username)))
+    ).scalar_one_or_none()
+    if existing:
+        conflict = "登录标识" if existing.uid == data.uid else "显示名称"
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"该{conflict}已被使用")
+
+    department_id = None
+    default_department_id = os.getenv("REGISTER_DEPARTMENT_ID", "").strip()
+    if default_department_id.isdigit():
+        department = (
+            await db.execute(select(Department).filter(Department.id == int(default_department_id)))
+        ).scalar_one_or_none()
+        if department is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="注册部门配置无效")
+        department_id = department.id
+
+    new_user = User(
+        username=data.username.strip(),
+        uid=data.uid,
+        password_hash=AuthUtils.hash_password(data.password),
+        role="user",
+        department_id=department_id,
+        last_login=utc_now_naive(),
+    )
+    db.add(new_user)
+    try:
+        await db.flush()
+        db.add(OperationLog(user_id=new_user.id, operation="自助注册", details=f"uid={new_user.uid}"))
+        await db.commit()
+        await db.refresh(new_user)
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="登录标识或显示名称已被使用") from exc
+
+    access_token = AuthUtils.create_access_token(
+        {"sub": str(new_user.id), "auth_version": new_user.auth_version}
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": new_user.id,
+        "username": new_user.username,
+        "uid": new_user.uid,
+        "role": new_user.role,
+        "department_id": new_user.department_id,
+    }
+
+
+# =============================================================================
 # === CLI 浏览器登录授权分组 ===
 # =============================================================================
 
 
 @auth.post("/cli/sessions", response_model=CLIAuthSessionCreateResponse)
 async def create_cli_session(data: CLIAuthSessionCreate, db: AsyncSession = Depends(get_db)):
+    public_web_url = os.getenv("YUXI_PUBLIC_WEB_URL", "http://localhost:5175").strip().rstrip("/")
+    parsed_web_url = urlparse(public_web_url)
+    is_loopback = parsed_web_url.hostname in {"localhost", "127.0.0.1", "::1"}
+    if (
+        not parsed_web_url.hostname
+        or parsed_web_url.username
+        or parsed_web_url.password
+        or parsed_web_url.query
+        or parsed_web_url.fragment
+        or (parsed_web_url.scheme != "https" and not (parsed_web_url.scheme == "http" and is_loopback))
+    ):
+        raise HTTPException(status_code=500, detail="YUXI_PUBLIC_WEB_URL 配置无效")
     session, device_code = await create_cli_auth_session(db, key_name=data.key_name)
+    verification_uri = f"{public_web_url}/auth/cli/authorize"
     return CLIAuthSessionCreateResponse(
         device_code=device_code,
         user_code=session.user_code,
-        verification_uri="/auth/cli/authorize",
+        verification_uri=verification_uri,
+        verification_uri_complete=f"{verification_uri}?user_code={quote(session.user_code)}",
         expires_in=CLI_AUTH_SESSION_TTL_SECONDS,
         interval=CLI_AUTH_POLL_INTERVAL_SECONDS,
     )
@@ -408,7 +546,7 @@ async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depen
     )
 
     # 生成访问令牌
-    token_data = {"sub": str(new_admin.id)}
+    token_data = {"sub": str(new_admin.id), "auth_version": new_admin.auth_version}
     access_token = AuthUtils.create_access_token(token_data)
 
     # 记录操作
@@ -433,7 +571,7 @@ async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depen
 
 
 @auth.get("/me", response_model=UserResponse)
-async def read_users_me(current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def read_users_me(current_user: User = Depends(get_authenticated_user), db: AsyncSession = Depends(get_db)):
     """获取当前登录用户的个人信息"""
     user_dict = current_user.to_dict()
 
@@ -733,6 +871,7 @@ async def update_user(
 
     # 更新信息
     update_details = []
+    invalidate_sessions = False
 
     if user_data.username is not None:
         # 检查用户名是否已被其他用户使用
@@ -748,6 +887,7 @@ async def update_user(
 
     if user_data.password is not None:
         user.password_hash = AuthUtils.hash_password(user_data.password)
+        invalidate_sessions = True
         update_details.append("密码已更新")
 
     if user_data.role is not None:
@@ -762,9 +902,20 @@ async def update_user(
                     detail="不能将管理员降级为普通用户，因为该用户是当前部门的唯一管理员",
                 )
         user.role = user_data.role
+        invalidate_sessions = True
         update_details.append(f"角色: {user_data.role}")
 
     if user_data.phone_number is not None:
+        if user_data.phone_number and not is_valid_phone_number(user_data.phone_number):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="手机号格式不正确")
+        if user_data.phone_number:
+            existing_phone = (
+                await db.execute(
+                    select(User).filter(User.phone_number == user_data.phone_number, User.id != user_id)
+                )
+            ).scalar_one_or_none()
+            if existing_phone:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="手机号已被使用")
         user.phone_number = user_data.phone_number
         update_details.append(f"手机号: {user_data.phone_number or '已清空'}")
 
@@ -780,6 +931,12 @@ async def update_user(
                 detail="只有超级管理员才能修改用户部门",
             )
 
+        department = (
+            await db.execute(select(Department).filter(Department.id == user_data.department_id))
+        ).scalar_one_or_none()
+        if department is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="目标部门不存在")
+
         # 检查该用户是否是当前部门的唯一管理员
         if user.role == "admin" and user.department_id is not None:
             admin_count = await UserRepository().get_admin_count_in_department(
@@ -792,7 +949,11 @@ async def update_user(
                 )
 
         user.department_id = user_data.department_id
+        invalidate_sessions = True
         update_details.append(f"部门ID: {user_data.department_id}")
+
+    if invalidate_sessions:
+        user.auth_version += 1
 
     await db.commit()
 
@@ -974,7 +1135,7 @@ async def impersonate_user(
         )
 
     # 生成访问令牌
-    token_data = {"sub": str(target_user.id)}
+    token_data = {"sub": str(target_user.id), "auth_version": target_user.auth_version}
     access_token = AuthUtils.create_access_token(token_data)
 
     # 获取部门名称

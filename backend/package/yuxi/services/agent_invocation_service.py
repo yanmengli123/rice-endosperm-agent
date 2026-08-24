@@ -191,10 +191,8 @@ async def create_agent_invocation_run_view(
     if not agent_item:
         raise HTTPException(status_code=404, detail="智能体不存在")
 
-    existing_run = await AgentRunRepository(db).get_run_by_request_id(request_id)
+    existing_run = await AgentRunRepository(db).get_run_by_request_id(request_id, str(current_user.uid))
     if existing_run:
-        if existing_run.uid != str(current_user.uid):
-            raise HTTPException(status_code=409, detail="request_id 冲突")
         if existing_run.agent_slug != agent_item.slug or existing_run.run_type != "chat":
             raise HTTPException(status_code=409, detail="request_id 冲突")
         if requested_thread_id and existing_run.conversation_thread_id != requested_thread_id:
@@ -205,6 +203,9 @@ async def create_agent_invocation_run_view(
 
     conv_repo = ConversationRepository(db)
     conversation = await conv_repo.get_conversation_by_thread_id(resolved_thread_id)
+    if conversation and str(conversation.uid) != str(current_user.uid):
+        # 外部调用者不能接管他人线程：thread_id 冲突一律按不存在处理
+        raise HTTPException(status_code=404, detail="对话线程不存在")
     if not conversation:
         await conv_repo.add_conversation(
             uid=str(current_user.uid),

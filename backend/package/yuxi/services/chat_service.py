@@ -569,6 +569,33 @@ async def save_partial_message(
         return None
 
 
+def _extract_total_tokens(state) -> int | None:
+    """从 LangGraph 终态提取本次 run 的 token 总量（TokenUsageMiddleware 写入）。"""
+    values = getattr(state, "values", None) or {}
+    usage = values.get("token_usage")
+    model_usage = usage.get("run_model_usage") if isinstance(usage, dict) else None
+    if not isinstance(model_usage, dict) or not model_usage:
+        model_usage = usage.get("model_usage") if isinstance(usage, dict) else None
+    if isinstance(model_usage, dict) and model_usage:
+        total_tokens = model_usage.get("total_tokens")
+        if isinstance(total_tokens, (int, float)) and not isinstance(total_tokens, bool):
+            return int(total_tokens)
+        input_tokens = model_usage.get("input_tokens", model_usage.get("prompt_tokens", 0))
+        output_tokens = model_usage.get("output_tokens", model_usage.get("completion_tokens", 0))
+        if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (input_tokens, output_tokens)):
+            return int(input_tokens) + int(output_tokens)
+    return None
+
+
+async def _persist_run_total_tokens(db, run_id: str | None, total_tokens: int | None) -> None:
+    if not run_id or not total_tokens:
+        return
+    try:
+        await AgentRunRepository(db).set_total_tokens(run_id, total_tokens)
+    except Exception:
+        logger.warning(f"记录 run token 用量失败: run_id={run_id}")
+
+
 async def save_messages_from_langgraph_state(
     agent_instance,
     thread_id: str,
@@ -1147,6 +1174,8 @@ async def stream_agent_chat(
             agent_state = extract_agent_state(getattr(state, "values", {})) if state else {}
         except Exception:
             agent_state = {}
+            state = None
+        run_total_tokens = _extract_total_tokens(state)
 
         final_signature = _agent_state_signature(agent_state)
         if final_signature and final_signature != last_agent_state_signature:
@@ -1168,6 +1197,8 @@ async def stream_agent_chat(
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")
             yield make_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
+
+        await _persist_run_total_tokens(db, meta.get("run_id"), run_total_tokens)
 
         if interrupted:
             return
@@ -1422,6 +1453,8 @@ async def stream_agent_resume(
             agent_state = extract_agent_state(getattr(state, "values", {})) if state else {}
         except Exception:
             agent_state = {}
+            state = None
+        run_total_tokens = _extract_total_tokens(state)
 
         final_signature = _agent_state_signature(agent_state)
         if final_signature and final_signature != last_agent_state_signature:
@@ -1442,6 +1475,8 @@ async def stream_agent_resume(
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")
             yield make_resume_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
+
+        await _persist_run_total_tokens(db, meta.get("run_id"), run_total_tokens)
 
         if interrupted:
             return

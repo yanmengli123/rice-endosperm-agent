@@ -12,8 +12,8 @@ class _NoExistingRunRepo:
     def __init__(self, db):
         self.db = db
 
-    async def get_run_by_request_id(self, request_id: str):
-        del request_id
+    async def get_run_by_request_id(self, request_id: str, uid: str):
+        del request_id, uid
         return None
 
 

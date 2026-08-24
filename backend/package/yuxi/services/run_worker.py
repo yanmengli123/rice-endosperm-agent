@@ -153,7 +153,14 @@ async def mark_run_terminal(run_id: str, status: str, error_type: str | None = N
 
 async def _load_user(uid: str):
     async with pg_manager.get_async_session_context() as db:
-        result = await db.execute(select(User).where(User.uid == uid, User.is_deleted == 0))
+        result = await db.execute(
+            select(User).where(
+                User.uid == uid,
+                User.is_deleted == 0,
+                User.is_disabled.is_(False),
+                User.department_id.is_not(None),
+            )
+        )
         return result.scalar_one_or_none()
 
 
@@ -266,6 +273,15 @@ async def process_agent_run(ctx, run_id: str):
     if run.status in TERMINAL_RUN_STATUSES:
         logger.info(f"Run already terminal, skip: {run_id}, status={run.status}")
         return
+    if run.status == "cancel_requested":
+        await mark_run_terminal(run_id, "cancelled", "cancelled", "账号停用或用户请求取消")
+        await _append_end_event(
+            run_id,
+            "cancelled",
+            thread_id=run.conversation_thread_id,
+            payload={"reason": "cancelled_before_start"},
+        )
+        return
 
     if not isinstance(run.input_payload, dict):
         await mark_run_terminal(run_id, "failed", "invalid_input_payload", "run input_payload 必须是对象")
@@ -298,7 +314,7 @@ async def process_agent_run(ctx, run_id: str):
 
     user = await _load_user(uid)
     if not user:
-        await mark_run_terminal(run_id, "failed", "user_not_found", f"user {uid} not found")
+        await mark_run_terminal(run_id, "failed", "user_unavailable", f"user {uid} is unavailable")
         return
 
     resume_input = None

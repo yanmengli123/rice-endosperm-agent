@@ -53,7 +53,10 @@ async def test_auth_router_cli_auth_create_approve_and_exchange(app_client):
     create_response = await app_client.post("/api/auth/cli/sessions", json={})
     assert create_response.status_code == 200, create_response.text
     session = create_response.json()
-    assert session["verification_uri"] == "/auth/cli/authorize"
+    assert session["verification_uri"] == "http://localhost:5175/auth/cli/authorize"
+    assert session["verification_uri_complete"].endswith(
+        f"/auth/cli/authorize?user_code={session['user_code']}"
+    )
 
     pending_response = await app_client.post(
         "/api/auth/cli/sessions/token", json={"device_code": session["device_code"]}
@@ -74,3 +77,4 @@ async def test_auth_router_cli_auth_create_approve_and_exchange(app_client):
     token_data = token_response.json()
     assert token_data["secret"].startswith("yxkey_")
     assert token_data["user"]["uid"] == "admin"
+    assert token_data["api_key"]["department_id"] == token_data["user"]["department_id"]

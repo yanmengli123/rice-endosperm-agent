@@ -67,6 +67,7 @@ async def test_token_usage_middleware_records_request_and_state_tokens() -> None
     assert token_usage["summary_trigger_tokens"] == 2048
     assert "summary_keep_tokens" not in token_usage
     assert token_usage["model_usage"] == {"input_tokens": 12, "output_tokens": 5, "total_tokens": 17}
+    assert token_usage["run_model_usage"] == {"input_tokens": 12, "output_tokens": 5, "total_tokens": 17}
     assert token_usage["estimate"] is True
 
 

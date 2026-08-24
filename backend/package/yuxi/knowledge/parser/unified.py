@@ -20,7 +20,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from markdownify import markdownify as md_convert
 
 from yuxi.knowledge.parser.zip_utils import process_zip_file as _process_zip_file
-from yuxi.knowledge.utils.text_utils import sanitize_extracted_text
+from yuxi.knowledge.utils.text_utils import sanitize_extracted_text, validate_markdown_quality
 from yuxi.storage.minio import get_minio_client
 from yuxi.utils import logger
 
@@ -440,8 +440,11 @@ async def _process_file_to_markdown_core(
 async def parse_source_to_markdown(source: str, params: dict | None = None) -> MarkdownParseResult:
     """统一入口: 将文件解析为 Markdown（URL 解析已废弃）。"""
     markdown, file_ext, artifacts = await _process_file_to_markdown_core(source, params=params)
+    sanitized = sanitize_extracted_text(markdown)
+    # 解析出口质量门禁：空白/高比例乱码直接拒绝，避免脏数据进入分块与向量库。
+    validate_markdown_quality(sanitized)
     return MarkdownParseResult(
-        markdown=sanitize_extracted_text(markdown),
+        markdown=sanitized,
         file_ext=file_ext,
         artifacts=artifacts,
     )

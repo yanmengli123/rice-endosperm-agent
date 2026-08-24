@@ -10,7 +10,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   MessageCirclePlus,
-  Search
+  Search,
+  Users,
 } from '@lucide/vue'
 
 import { useConfigStore } from '@/stores/config'
@@ -115,6 +116,15 @@ const mainList = computed(() => {
     icon: FolderKanban,
     activeIcon: FolderKanban
   })
+
+  if (userStore.isAdmin) {
+    items.push({
+      name: '用户管理',
+      path: '/user-manage',
+      icon: Users,
+      activeIcon: Users
+    })
+  }
 
   items.push({
     name: '智能体扩展',

@@ -105,6 +105,11 @@ bash backend/test/run_tests.sh e2e                   # 端到端测试（需服�
 docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.py::<测试名>   # 运行单个测试
 ```
 
+容器内测试实操提示：
+
+- `uv run` 偶发清华镜像 403 时加 `--no-sync` 跳过环境同步（如 `uv run --no-sync --group test pytest ...`）。
+- 全量 `pytest test/unit/` 单次执行容易超时（每个目录约 10s 的 exec+收集开销叠加，并非挂起）；按目录分块跑（services、routers、knowledge…各一次）既快又能定位问题。
+
 **核心原则**:
 
 1. 由于 Compose 服务 `api` / `web`（容器名 `api-dev` / `web-dev`）均配置了热重载 (hot-reloading)，本地修改代码后无需重启容器，服务会自动更新。应该先检查项目是否已经在后台启动（`docker ps`），查看日志（`docker logs api-dev --tail 100`）具体的可以阅读 [docker-compose.yml](docker-compose.yml).
@@ -119,14 +124,21 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 - 需求/修改 明确之后，如果改动较大，则需要在 docs/vibe 目录下创建一个包含日期的文档，记录需求的细节和验收标准
 - 该需求文档中，还应该包括本次任务的目标以及 checklist（简要）
 
+### 外部网关与多租户契约
+
+- APISIX（`docker/apisix/apisix.yaml`，standalone，本地 :9088；Yuxi API 直连 :5050、Web 开发服务器 :5175）是桌面端/外部调用的唯一入口，仅白名单放行少量路由；`request-validation` 插件会强制校验请求体（如 agent-call/runs/result 必须同时携带 `run_id` + `agent_slug`，缺一即 400），改契约时两端同步。
+- 网关限流按 `remote_addr`（IP）而非 API Key；身份认证完全下沉到 Yuxi（`yxkey_` 前缀 Bearer → api_keys 表 → 所属用户）。
+- 桌面端用户开户走 CLI 设备码流程：`POST /auth/cli/sessions`（免登录创建）→ 用户在 Web `/auth/cli/authorize?user_code=` 批准 → `POST /auth/cli/sessions/token` 用 device_code 换取**自动创建的 API Key**。
+- 企业运营契约：未绑定部门的用户创建 run 返回 400；配额超限返回 429（管理员经 `/api/user/manage/{uid}/quota` 设置）；停用用户名下 API Key 连带禁用并立即拒绝认证；用量查询 `GET /api/user/usage?days=N`。
+- 模型供应商（model_providers，含 chat/embedding/rerank/OCR 凭证）是**全局单份**配置，仅管理员可写；模型解析优先级为 请求级 > **用户级**（`GET/PUT /api/user/model-preference`）> 智能体级 > 系统级。
+- 站点品牌文案（导航栏名称、logo、登录背景、页脚版权）由后端 `/api/system/info` 下发，不要在前端硬编码：加载优先级为 `YUXI_BRAND_FILE_PATH` → `info.local.yaml`（本地覆盖，已 gitignore）→ `info.template.yaml`，配置文件在 `backend/package/yuxi/config/static/`；品牌图片放 `web/public/brand/rice-endosperm/`
+
 ### 前端开发规范
 - 使用 pnpm 管理
 - API 接口规范：所有的 API 接口都应该定义在 web/src/apis 下面
 - Icon 应该优先从 lucide-vue-next （推荐，但是需要注意尺寸）
 - 样式使用 less，非特殊情况必须使用 [base.css](web/src/assets/css/base.css) 中的颜色变量
 - UI 设计规范详见 [design](docs/develop-guides/design.md)
-- 站点品牌文案（导航栏名称、logo、登录背景、页脚版权）由后端 `/api/system/info` 下发，不要在前端硬编码：加载优先级为 `YUXI_BRAND_FILE_PATH` → `info.local.yaml`（本地覆盖，已 gitignore）→ `info.template.yaml`，配置文件在 `backend/package/yuxi/config/static/`；品牌图片放 `web/public/brand/rice-endosperm/`
-
 
 ### 后端开发规范
 
@@ -143,6 +155,15 @@ make format        # 格式化代码
 - 不允许把代码写得稀碎：不要为简单线性逻辑拆出一堆细碎 helper；优先写成职责清晰、结构完整、可一眼读懂的实现。
 - 拆函数必须服务于明确的复用、隔离副作用或降低认知负担；如果拆分后调用链更绕、上下文更分散，就应合并回更直接的实现。
 - 遵循向下规则（The Stepdown Rule）：公开的、高层次的方法放在文件顶部，细节逐层下沉。读者从上往下阅读时，每一层只调用紧接着的下一层实现，像读报纸标题一样逐级展开细节，无需跳跃。
+
+### 知识库与检索要点
+
+- 按文件格式建库走前端模板层（[DataBaseView.vue](web/src/views/DataBaseView.vue) 的 `FORMAT_TEMPLATES`，仅预填表单）：三个模板都是 `kb_type=milvus`，分块/解析配置写在 `additional_params.chunk_parser_config` 并自动继承到每个文件；图谱不是独立 kb_type，能力挂在 milvus 库上
+- 解析出口有质量门禁（[text_utils.py](backend/package/yuxi/knowledge/utils/text_utils.py) `validate_markdown_quality`）：空白结果与大样本高乱码占比直接拒绝入库
+- semantic 分块支持 `literature_enrichment`：chunk 前缀【文献】【标识符】DOI/PMID（含文件名反推 DOI）【章节】【证据级别】；`max_embed_chunk_tokens`（默认 2000）是嵌入安全网——大表格等免拆块超限会被强制二次切分，否则超出 bge-m3 8192 tokens 上游会 400
+- 意图分类含 ENTITY_LOOKUP 确定性分支：问题携带 RAP/MSU 标识符时按 `canonical_identity` 精确匹配实体并枚举一跳关系（[canonical_graph_retriever.py](backend/package/yuxi/knowledge/retrieval/canonical_graph_retriever.py)），证据资格规则与枚举分支一致
+- 托管图谱导入的节点类型白名单在 [managed_import_parser.py](backend/package/yuxi/knowledge/graphs/managed_import_parser.py) 的 `NODE_TYPE_MAPPING`，新增实体类型先扩这里
+- APISIX 网关（docker/apisix/apisix.yaml）对 run result 路由强制 `run_id`+`agent_slug` 双必填字段，外部调用测试时缺一即 400
 
 **其他**：
 

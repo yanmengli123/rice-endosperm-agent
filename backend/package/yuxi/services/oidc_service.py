@@ -839,7 +839,7 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
     if user.is_deleted:
         return _redirect_to_login_with_error("该账户已注销")
 
-    token_data = {"sub": str(user.id)}
+    token_data = {"sub": str(user.id), "auth_version": user.auth_version}
     jwt_token = AuthUtils.create_access_token(token_data)
 
     await log_operation(db, user.id, "OIDC 登录", request=request)

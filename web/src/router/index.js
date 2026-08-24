@@ -85,6 +85,19 @@ const router = createRouter({
       ]
     },
     {
+      path: '/user-manage',
+      name: 'UserManage',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'UserManageComp',
+          component: () => import('../views/UserManageView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+        }
+      ]
+    },
+    {
       path: '/model-manage',
       name: 'model-manage',
       component: AppLayout,
@@ -96,6 +109,18 @@ const router = createRouter({
           meta: { keepAlive: false, requiresAuth: true }
         }
       ]
+    },
+    {
+      path: '/register',
+      name: 'register',
+      component: () => import('../views/RegisterView.vue'),
+      meta: { keepAlive: false }
+    },
+    {
+      path: '/pending-assignment',
+      name: 'pending-assignment',
+      component: () => import('../views/PendingAssignmentView.vue'),
+      meta: { keepAlive: false, requiresAuth: true }
     },
     {
       path: '/extensions',
@@ -176,6 +201,13 @@ router.beforeEach(async (to) => {
   const isLoggedIn = userStore.isLoggedIn
   const isAdmin = userStore.isAdmin
   const isSuperAdmin = userStore.isSuperAdmin
+
+  if (isLoggedIn && !userStore.departmentId && to.path !== '/pending-assignment') {
+    return '/pending-assignment'
+  }
+  if (isLoggedIn && userStore.departmentId && to.path === '/pending-assignment') {
+    return '/agent'
+  }
 
   // 如果路由需要认证但用户未登录
   if (requiresAuth && !isLoggedIn) {

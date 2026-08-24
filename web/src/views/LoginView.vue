@@ -233,6 +233,10 @@
                   </a-form-item>
                 </a-form>
 
+                <div v-if="registrationEnabled" class="register-entry">
+                  <router-link to="/register">没有账号？注册新账号 →</router-link>
+                </div>
+
                 <!-- OIDC 登录选项  -->
                 <div v-if="oidcChecking || oidcEnabled" class="third-party-login">
                   <div class="divider">
@@ -346,6 +350,7 @@ const agreementAccepted = ref(false)
 const serverStatus = ref('loading')
 const serverError = ref('')
 const healthChecking = ref(false)
+const registrationEnabled = ref(false)
 
 // OIDC 相关状态
 const oidcEnabled = ref(false)
@@ -462,6 +467,11 @@ const handleLogin = async () => {
     })
 
     message.success('登录成功')
+
+    if (!userStore.departmentId) {
+      router.push('/pending-assignment')
+      return
+    }
 
     // 获取重定向路径
     const redirectPath = sessionStorage.getItem('redirect') || '/'
@@ -650,6 +660,13 @@ onMounted(async () => {
 
   // 检查是否是首次运行
   await checkFirstRunStatus()
+
+  try {
+    const registerConfig = await authApi.getRegisterConfig()
+    registrationEnabled.value = Boolean(registerConfig.enabled)
+  } catch {
+    registrationEnabled.value = false
+  }
 
   // 如果处于首次运行状态，不需要 OIDC 自动登录
   if (isFirstRun.value) {

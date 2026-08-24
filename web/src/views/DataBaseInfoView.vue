@@ -9,6 +9,7 @@
 
     <FileUploadModal
       v-model:visible="addFilesModalVisible"
+      :format-template="database?.additional_params?.format_template || ''"
       :folder-tree="folderTree"
       :current-folder-id="currentFolderId"
       :is-folder-mode="isFolderUploadMode"
@@ -463,7 +464,14 @@ const tabs = computed(() => {
 })
 
 const visibleTabs = computed(() => tabs.value)
-const activeTab = ref('filetable')
+// 支持 ?tab=graph 直达（图谱模板创建成功后的引导跳转）
+const activeTab = ref(route.query.tab === 'graph' ? 'graph' : 'filetable')
+watch(
+  () => route.query.tab,
+  (tab) => {
+    if (tab === 'graph') activeTab.value = 'graph'
+  }
+)
 
 watch(
   () => [kbId.value, isMilvus.value],
