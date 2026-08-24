@@ -15,6 +15,7 @@ from server.routers.model_provider_router import model_providers
 from server.routers.skill_router import skills, user_skills
 from server.routers.system_router import system
 from server.routers.system_task_router import tasks
+from server.routers.tenant_router import tenants
 from server.routers.tool_router import tools
 from server.routers.user_router import user_router
 from server.routers.workspace_router import workspace
@@ -34,6 +35,7 @@ router.include_router(chat)  # /api/chat/* 对话线程、消息历史与附件
 router.include_router(dashboard)  # /api/dashboard/* 仪表盘聚合数据
 router.include_router(department)  # /api/departments/* 部门与权限相关数据
 router.include_router(tasks)  # /api/tasks/* 后台任务查询与管理
+router.include_router(tenants)  # /api/tenant/* 租户成员信息
 router.include_router(mcp)  # /api/system/mcp-servers/* MCP 服务管理
 router.include_router(model_providers)  # /api/system/model-providers/* 独立模型配置
 router.include_router(skills)  # /api/system/skills/* Skills 管理

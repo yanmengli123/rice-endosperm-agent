@@ -399,6 +399,9 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
     db.add(new_user)
     try:
         await db.flush()
+        from yuxi.services.principal import resolve_tenant_id
+
+        await resolve_tenant_id(db, new_user.uid)
         db.add(OperationLog(user_id=new_user.id, operation="自助注册", details=f"uid={new_user.uid}"))
         await db.commit()
         await db.refresh(new_user)
@@ -745,6 +748,11 @@ async def create_user(
             "department_id": department_id,
         }
     )
+
+    # P1：新用户归入其活跃租户（缺失时自愈默认租户成员关系）
+    from yuxi.services.principal import resolve_tenant_id
+
+    await resolve_tenant_id(db, new_user.uid)
 
     # 记录操作
     await log_operation(

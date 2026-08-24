@@ -676,8 +676,83 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(text("ALTER TABLE users ALTER COLUMN account_scope_id SET NOT NULL"))
         await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_account_scope ON users(account_scope_id)"))
 
+    async def _migration_0002_tenant_foundation(self, conn) -> None:
+        """P1 租户基础：租户表、默认租户种子、成员回填、业务表归属收紧。"""
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS tenants ("
+                "id BIGSERIAL PRIMARY KEY, name VARCHAR(128) NOT NULL UNIQUE, "
+                "status VARCHAR(32) NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO tenants (id, name, status) VALUES (1, '默认企业', 'active') "
+                "ON CONFLICT (id) DO NOTHING"
+            )
+        )
+        await conn.execute(text("SELECT setval(pg_get_serial_sequence('tenants','id'), "
+                                "GREATEST((SELECT MAX(id) FROM tenants), 1))"))
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS tenant_memberships ("
+                "id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE, "
+                "role VARCHAR(32) NOT NULL DEFAULT 'member', status VARCHAR(32) NOT NULL DEFAULT 'active', "
+                "created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_memberships_tenant_uid "
+                 "ON tenant_memberships(tenant_id, uid)")
+        )
+        # 存量用户全部归入默认租户，角色由 users.role 映射
+        await conn.execute(
+            text(
+                "INSERT INTO tenant_memberships (tenant_id, uid, role, status) "
+                "SELECT 1, u.uid, "
+                "CASE u.role WHEN 'superadmin' THEN 'platform_admin' WHEN 'admin' THEN 'tenant_admin' ELSE 'member' END, "
+                "'active' FROM users u WHERE u.is_deleted = 0 "
+                "ON CONFLICT (tenant_id, uid) DO NOTHING"
+            )
+        )
+
+        scoped_tables = [
+            "conversations", "agent_runs", "agents", "skills", "knowledge_bases",
+        ]
+        # tasks 允许系统级任务无主体：仅补列与回填，不做 NOT NULL 约束
+        await conn.execute(text("ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
+        await conn.execute(text("ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS created_by VARCHAR(64)"))
+        await conn.execute(text("UPDATE tasks SET tenant_id = 1 WHERE tenant_id IS NULL"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_tenant ON tasks(tenant_id)"))
+        for table in scoped_tables:
+            await conn.execute(
+                text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS tenant_id BIGINT")
+            )
+            await conn.execute(
+                text(f"UPDATE {table} SET tenant_id = 1 WHERE tenant_id IS NULL")
+            )
+            await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN tenant_id SET NOT NULL"))
+            await conn.execute(
+                text(f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant ON {table}(tenant_id)")
+            )
+            constraint_sql = (
+                f"ALTER TABLE {table} ADD CONSTRAINT fk_{table}_tenant "
+                f"FOREIGN KEY (tenant_id) REFERENCES tenants(id)"
+            )
+            constraint_name = f"fk_{table}_tenant"
+            exists = (
+                await conn.execute(
+                    text("SELECT 1 FROM pg_constraint WHERE conname = :name"),
+                    {"name": constraint_name},
+                )
+            ).scalar()
+            if not exists:
+                await conn.execute(text(constraint_sql))
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
+        ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
     ]
 
     async def _apply_versioned_migrations(self):

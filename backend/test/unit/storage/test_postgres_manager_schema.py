@@ -18,6 +18,9 @@ class _EmptySelectResult:
     def scalar_one_or_none(self):
         return None
 
+    def scalar(self):
+        return None
+
 
 class _RecordingConnection:
     def __init__(self):

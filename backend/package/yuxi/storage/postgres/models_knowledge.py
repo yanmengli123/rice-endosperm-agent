@@ -25,6 +25,9 @@ class KnowledgeBase(Base):
     """知识库模型"""
 
     __tablename__ = "knowledge_bases"
+
+    # P1 租户归属：由 PrincipalContext 注入，禁止来自请求体
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)
     __table_args__ = (UniqueConstraint("kb_id", name="uq_knowledge_bases_kb_id"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)

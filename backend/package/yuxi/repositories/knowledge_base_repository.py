@@ -20,7 +20,11 @@ class KnowledgeBaseRepository:
             return result.scalar_one_or_none()
 
     async def create(self, data: dict[str, Any]) -> KnowledgeBase:
-        kb = KnowledgeBase(**data)
+        from yuxi.services.principal import resolve_tenant_id
+
+        async with pg_manager.get_async_session_context() as session:
+            tenant_id = await resolve_tenant_id(session, str(data.get("created_by") or ""))
+        kb = KnowledgeBase(**data, tenant_id=tenant_id)
         async with pg_manager.get_async_session_context() as session:
             session.add(kb)
         return kb

@@ -58,7 +58,10 @@ class SkillRepository:
         created_by: str | None,
     ) -> Skill:
         now = utc_now_naive()
+        from yuxi.services.principal import resolve_tenant_id
+
         item = Skill(
+            tenant_id=await resolve_tenant_id(self.db, created_by),
             slug=slug,
             name=name,
             description=description,

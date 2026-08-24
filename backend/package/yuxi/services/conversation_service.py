@@ -103,7 +103,8 @@ async def _convert_upload_to_markdown(upload: UploadFile) -> ConversionResult:
 
 
 async def require_user_conversation(conv_repo: ConversationRepository, thread_id: str, uid: str):
-    conversation = await conv_repo.get_conversation_by_thread_id(thread_id)
+    # P1：uid 过滤下推到 SQL，跨用户 thread_id 探测直接 404
+    conversation = await conv_repo.get_conversation_by_thread_id(thread_id, uid=str(uid))
     if not conversation or conversation.uid != str(uid) or conversation.status == "deleted":
         raise HTTPException(status_code=404, detail="对话线程不存在")
     return conversation
@@ -540,7 +541,7 @@ async def delete_thread_view(
 ) -> dict:
     conv_repo = ConversationRepository(db)
     await require_user_conversation(conv_repo, thread_id, str(current_uid))
-    deleted = await conv_repo.delete_conversation(thread_id, soft_delete=True)
+    deleted = await conv_repo.delete_conversation(thread_id, soft_delete=True, uid=str(current_uid))
     if not deleted:
         raise HTTPException(status_code=404, detail="对话线程不存在")
     return {"message": "删除成功"}
@@ -556,7 +557,9 @@ async def update_thread_view(
 ) -> dict:
     conv_repo = ConversationRepository(db)
     await require_user_conversation(conv_repo, thread_id, str(current_uid))
-    updated_conv = await conv_repo.update_conversation(thread_id, title=title, is_pinned=is_pinned)
+    updated_conv = await conv_repo.update_conversation(
+        thread_id, title=title, is_pinned=is_pinned, uid=str(current_uid)
+    )
     if not updated_conv:
         raise HTTPException(status_code=500, detail="更新失败")
     return {
@@ -909,7 +912,7 @@ async def get_thread_history_view(
 ) -> dict:
     """获取对话历史消息，包含用户反馈状态"""
     conv_repo = ConversationRepository(db)
-    conversation = await conv_repo.get_conversation_by_thread_id(thread_id)
+    conversation = await conv_repo.get_conversation_by_thread_id(thread_id, uid=str(current_uid))
     if not conversation or conversation.uid != str(current_uid) or conversation.status == "deleted":
         raise HTTPException(status_code=404, detail="对话线程不存在")
 

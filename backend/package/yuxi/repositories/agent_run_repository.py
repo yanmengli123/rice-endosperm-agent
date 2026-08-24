@@ -157,11 +157,14 @@ class AgentRunRepository:
         input_message_id: int | None = None,
     ) -> AgentRun:
         """登记一条 run 记录；输入正文和图片应通过 input_message_id 指向 Message。"""
+        from yuxi.services.principal import resolve_tenant_id
+
         run = AgentRun(
             id=run_id,
             conversation_thread_id=conversation_thread_id,
             agent_slug=agent_slug,
             uid=str(uid),
+            tenant_id=await resolve_tenant_id(self.db, str(uid)),
             request_id=request_id,
             conversation_id=conversation_id,
             created_by_run_id=created_by_run_id,

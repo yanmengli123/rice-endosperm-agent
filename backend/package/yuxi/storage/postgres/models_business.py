@@ -25,6 +25,7 @@ Base = declarative_base()
 MAX_LOGIN_FAILED_ATTEMPTS = 5
 LOGIN_LOCK_DURATION_SECONDS = 300
 AGENT_RUN_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "interrupted")
+DEFAULT_TENANT_ID = 1  # 种子默认租户；首装由迁移写入
 
 
 class Department(Base):
@@ -47,6 +48,43 @@ class Department(Base):
             "description": self.description,
             "created_at": format_utc_datetime(self.created_at),
         }
+
+
+class Tenant(Base):
+    """企业租户：多企业边界的顶层划分。"""
+
+    __tablename__ = "tenants"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False, unique=True)
+    status = Column(String(32), nullable=False, default="active")  # active / suspended
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+
+TENANT_MEMBERSHIP_ROLES = ("platform_admin", "tenant_admin", "member")
+
+
+class TenantMembership(Base):
+    """用户在某租户内的身份、角色与状态。"""
+
+    __tablename__ = "tenant_memberships"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        BigInteger,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String(32), nullable=False, default="member")  # platform_admin / tenant_admin / member
+    status = Column(String(32), nullable=False, default="active")  # active / suspended
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+    __table_args__ = (
+        Index("uq_tenant_memberships_tenant_uid", "tenant_id", "uid", unique=True),
+    )
 
 
 class User(Base):
@@ -242,10 +280,28 @@ class UserConfig(Base):
         }
 
 
+def _tenant_column() -> Column:
+    """业务资源租户外键的统一声明。
+
+    ORM 层保持可空以兼容存量库过渡态；NOT NULL 由版本化迁移 0002 在数据库层强制，
+    生产环境缺失租户上下文的写入会直接违反约束而失败。
+    """
+    return Column(
+        BigInteger,
+        ForeignKey("tenants.id"),
+        nullable=True,
+        index=True,
+        comment="归属租户（服务端 PrincipalContext 注入）",
+    )
+
+
 class Agent(Base):
     """用户可管理、可授权、可切换的智能体。"""
 
     __tablename__ = "agents"
+
+    # P1 租户归属：由 PrincipalContext 注入，禁止来自请求体
+    tenant_id = _tenant_column()
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     slug = Column(String(80), nullable=False, unique=True, index=True)
@@ -295,6 +351,9 @@ class Skill(Base):
 
     __tablename__ = "skills"
 
+    # P1 租户归属：由 PrincipalContext 注入，禁止来自请求体
+    tenant_id = _tenant_column()
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     slug = Column(String(128), nullable=False, unique=True, index=True, comment="技能唯一标识（目录名）")
     name = Column(String(128), nullable=False, comment="技能名称（来自 SKILL.md frontmatter.name）")
@@ -341,6 +400,9 @@ class Conversation(Base):
     """Conversation table - 对话表"""
 
     __tablename__ = "conversations"
+
+    # P1 租户归属：由 PrincipalContext 注入，禁止来自请求体
+    tenant_id = _tenant_column()
 
     id = Column(Integer, primary_key=True, autoincrement=True, comment="Primary key")
     thread_id = Column(String(64), unique=True, index=True, nullable=False, comment="Thread ID (UUID)")
@@ -783,6 +845,10 @@ class OCRProviderConfig(Base):
 class TaskRecord(Base):
     __tablename__ = "tasks"
 
+    # P1 租户归属：用户发起的任务由 PrincipalContext 注入；纯系统任务可为空
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)
+    created_by = Column(String(64), nullable=True)
+
     id = Column(String(32), primary_key=True)
     name = Column(String(255), nullable=False)
     type = Column(String(64), nullable=False, index=True)
@@ -911,6 +977,9 @@ class AgentRun(Base):
     """AgentRun table - 运行任务表"""
 
     __tablename__ = "agent_runs"
+
+    # P1 租户归属：由 PrincipalContext 注入，禁止来自请求体
+    tenant_id = _tenant_column()
 
     id = Column(String(64), primary_key=True, comment="Run ID (UUID)")
     conversation_thread_id = Column(String(64), index=True, nullable=False, comment="Conversation thread ID snapshot")

@@ -8,6 +8,7 @@
 
 ### 新增
 
+- P1 租户基础：新增 `tenants` / `tenant_memberships` 表（首装种子默认企业，存量用户按角色映射回填成员关系，superadmin→platform_admin、admin→tenant_admin、user→member）；conversations / agent_runs / agents / skills / knowledge_bases 增加租户外键（数据库层 NOT NULL 由迁移 0002 强制），tasks 支持可空归属与 created_by；引入服务端权威身份上下文 PrincipalContext，资源租户一律由登录态推导并在创建点注入，请求体不可提交；会话读取/更新/删除的 uid 过滤下推 SQL 层，跨用户 thread_id 探测直接 404。新增 GET /api/tenant/members 成员只读端点与 10 例租户单元测试。
 - 稻芯智析公开首页新增权威水稻数据库导航：集中展示核心门户、基因组与注释、表达调控、变异育种、功能突变体、蛋白通路、种质资源及官方归档入口，支持按名称、机构、用途搜索与分类筛选；外部链接按官方入口、官方数据页、研究资源和官方归档分层标识，并提供核验日期、版本引用提醒与响应式深浅色界面。
 - 新增 APISIX Standalone 外部调用网关：通过独立 Compose 覆盖层仅开放 Agent 创建、结果查询和 SSE 路由，保留 Yuxi API Key 作为唯一认证来源，并补充 PowerShell 异步调用脚本与生产安全边界文档。
 - 为桌面客户端补充非计费凭证探测与任务取消能力：新增 `GET /api/agent-invocation/credential-status`，并在 APISIX 白名单开放该端点及 `POST /api/agent/runs/{run_id}/cancel`；探测接口只返回认证状态，不创建模型任务、不暴露用户或密钥信息。AgentRun 创建与结果响应新增向后兼容的 `run_context`，公开本次运行实际模型、冻结知识范围及轻量检索审计摘要，使桌面端能严格展示服务端权威状态而不自行推断。

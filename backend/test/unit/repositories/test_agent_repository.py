@@ -28,6 +28,16 @@ class FakeDb:
         self.commit = AsyncMock()
         self.refresh = AsyncMock()
 
+    async def execute(self, _stmt):
+        # P1 租户解析桩：无成员关系 → 自愈默认租户（users 角色查询返回 None）
+        class _R:
+            def scalar_one_or_none(self):
+                return None
+
+        return _R()
+    async def flush(self):
+        return None
+
     def add(self, item):
         self.added = item
 

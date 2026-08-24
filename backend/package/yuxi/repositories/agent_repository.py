@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, AGENT_ICON, BRAND_NAME
 from yuxi.storage.postgres.models_business import Agent, User
+from yuxi.services.principal import resolve_tenant_id
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.share_config import SHARE_ACCESS_LEVELS, normalize_share_config
 
@@ -236,6 +237,7 @@ class AgentRepository:
             return agent
 
         agent = Agent(
+            tenant_id=await resolve_tenant_id(self.db, created_by),
             slug=DEFAULT_AGENT_SLUG,
             backend_id=DEFAULT_AGENT_BACKEND_ID,
             name=DEFAULT_AGENT_NAME,
@@ -269,6 +271,8 @@ class AgentRepository:
             return agent
 
         agent = Agent(
+            tenant_id=await resolve_tenant_id(self.db, created_by),
+
             slug=WEB_SEARCH_AGENT_SLUG,
             backend_id=SUB_AGENT_BACKEND_ID,
             name=WEB_SEARCH_AGENT_NAME,
@@ -317,6 +321,8 @@ class AgentRepository:
             return agent
 
         agent = Agent(
+            tenant_id=await resolve_tenant_id(self.db, created_by),
+
             slug=slug,
             backend_id=backend_id,
             name=name,
@@ -481,6 +487,8 @@ class AgentRepository:
             raise ValueError("默认智能体必须全局共享")
 
         agent = Agent(
+            tenant_id=await resolve_tenant_id(self.db, created_by),
+
             slug=await self._unique_slug(slug, name),
             backend_id=backend_id,
             name=name.strip() or "未命名智能体",

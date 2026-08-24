@@ -98,9 +98,12 @@ class ConversationRepository:
 
         normalized_title = self._normalize_title(title)
 
+        from yuxi.services.principal import resolve_tenant_id
+
         conversation = Conversation(
             thread_id=thread_id,
             uid=str(uid),
+            tenant_id=await resolve_tenant_id(self.db, str(uid)),
             agent_id=agent_id,
             title=normalized_title or "New Conversation",
             status="active",
@@ -137,8 +140,12 @@ class ConversationRepository:
         await self.db.refresh(conversation)
         return conversation
 
-    async def get_conversation_by_thread_id(self, thread_id: str) -> Conversation | None:
-        result = await self.db.execute(select(Conversation).where(Conversation.thread_id == thread_id))
+    async def get_conversation_by_thread_id(self, thread_id: str, uid: str | None = None) -> Conversation | None:
+        stmt = select(Conversation).where(Conversation.thread_id == thread_id)
+        if uid:
+            # P1：SQL 层租户内归属过滤，杜绝跨用户按 thread_id 探测
+            stmt = stmt.where(Conversation.uid == str(uid))
+        result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
     async def get_conversation_by_id(self, conversation_id: int) -> Conversation | None:
@@ -430,8 +437,9 @@ class ConversationRepository:
         status: str | None = None,
         metadata: dict | None = None,
         is_pinned: bool | None = None,
+        uid: str | None = None,
     ) -> Conversation | None:
-        conversation = await self.get_conversation_by_thread_id(thread_id)
+        conversation = await self.get_conversation_by_thread_id(thread_id, uid=uid)
         if not conversation:
             return None
 
@@ -455,8 +463,8 @@ class ConversationRepository:
         logger.info(f"Updated conversation {thread_id}")
         return conversation
 
-    async def delete_conversation(self, thread_id: str, soft_delete: bool = True) -> bool:
-        conversation = await self.get_conversation_by_thread_id(thread_id)
+    async def delete_conversation(self, thread_id: str, soft_delete: bool = True, uid: str | None = None) -> bool:
+        conversation = await self.get_conversation_by_thread_id(thread_id, uid=uid)
         if not conversation:
             return False
 
