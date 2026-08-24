@@ -205,3 +205,24 @@ async def test_ensure_business_schema_removes_unbound_api_keys_before_requiring_
     assert statements.index("DELETE FROM api_keys WHERE user_id IS NULL") < statements.index(
         "ALTER TABLE IF EXISTS api_keys ALTER COLUMN user_id SET NOT NULL"
     )
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_disables_enabled_api_keys_with_stale_department_binding():
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+
+    assert "SET is_enabled = FALSE" in statements
+    assert "key.department_id IS DISTINCT FROM users.department_id" in statements

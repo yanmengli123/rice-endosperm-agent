@@ -44,6 +44,19 @@ def _generate_user_code() -> str:
     return f"{raw[:4]}-{raw[4:]}"
 
 
+def _normalize_user_code(value: str) -> str:
+    user_code = value.strip().upper()
+    raw = user_code.replace("-", "")
+    if (
+        len(user_code) != 9
+        or user_code[4] != "-"
+        or len(raw) != 8
+        or any(character not in CLI_AUTH_USER_CODE_ALPHABET for character in raw)
+    ):
+        raise CLIAuthError("invalid_request", "授权码格式无效", status_code=400)
+    return user_code
+
+
 async def _generate_unique_user_code(db: AsyncSession) -> str:
     for _ in range(10):
         user_code = _generate_user_code()
@@ -81,7 +94,7 @@ async def create_cli_auth_session(db: AsyncSession, key_name: str | None = None)
 async def get_cli_auth_session_for_user(
     db: AsyncSession, user_code: str, *, for_update: bool = False
 ) -> CLIAuthSession:
-    stmt = select(CLIAuthSession).filter(CLIAuthSession.user_code == user_code.strip().upper())
+    stmt = select(CLIAuthSession).filter(CLIAuthSession.user_code == _normalize_user_code(user_code))
     if for_update:
         stmt = stmt.with_for_update()
     result = await db.execute(stmt)

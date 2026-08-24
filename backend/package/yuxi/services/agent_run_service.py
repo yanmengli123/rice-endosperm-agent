@@ -476,6 +476,7 @@ async def _enforce_user_quota(*, db: AsyncSession, uid: str) -> None:
                 select(func.count(AgentRun.id)).filter(
                     AgentRun.uid == uid,
                     AgentRun.created_at >= day_start,
+                    AgentRun.run_type == "chat",
                     AgentRun.status.notin_(["failed", "cancelled"]),
                 )
             )
@@ -499,6 +500,25 @@ async def _enforce_user_quota(*, db: AsyncSession, uid: str) -> None:
             raise HTTPException(
                 status_code=429,
                 detail=f"本月 token 用量已达配额（{quota.monthly_token_limit}），请联系管理员调整",
+            )
+        # Token usage can only be reconciled after a model call completes.  The
+        # quota row is locked for the surrounding run-creation transaction, so
+        # admitting at most one top-level in-flight run closes the otherwise
+        # unbounded concurrent preflight window.  Subagent runs remain usable
+        # under their already-admitted parent and still contribute token usage.
+        active_top_level_runs = (
+            await db.execute(
+                select(func.count(AgentRun.id)).filter(
+                    AgentRun.uid == uid,
+                    AgentRun.run_type.in_(["chat", "resume"]),
+                    AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
+                )
+            )
+        ).scalar() or 0
+        if int(active_top_level_runs) > 0:
+            raise HTTPException(
+                status_code=429,
+                detail="当前已有运行正在计量；月度 token 配额启用时请等待该运行结束后重试",
             )
 
 

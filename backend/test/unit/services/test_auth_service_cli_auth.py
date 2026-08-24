@@ -76,5 +76,5 @@ async def test_cli_auth_session_rejects_unknown_user_code(session):
     db, _user = session
 
     with pytest.raises(CLIAuthError) as missing:
-        await get_cli_auth_session_for_user(db, "NOPE-NOPE")
+        await get_cli_auth_session_for_user(db, "ABCD-EFGH")
     assert missing.value.code == "not_found"

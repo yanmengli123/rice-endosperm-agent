@@ -14,7 +14,7 @@ from server.routers.dashboard_router import (
     get_user_activity_stats,
 )
 from server.utils.auth_middleware import get_superadmin_user
-from yuxi.storage.postgres.models_business import Base, Conversation, Department, Message, ToolCall, User
+from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation, Department, Message, ToolCall, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -104,6 +104,23 @@ async def dashboard_session():
                 tool_call_b,
             ]
         )
+        await db.flush()
+        db.add(
+            AgentRun(
+                id="dashboard-run-b",
+                conversation_thread_id=conversation_b.thread_id,
+                conversation_id=conversation_b.id,
+                agent_slug=conversation_b.agent_id,
+                uid=conversation_b.uid,
+                total_tokens=321,
+                status="completed",
+                request_id="dashboard-request-b",
+                run_type="chat",
+                input_payload={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
         await db.commit()
         for item in [
             dept_a,
@@ -151,6 +168,7 @@ async def test_conversation_detail_superadmin_can_view_other_department(dashboar
     )
 
     assert response["thread_id"] == "thread-b"
+    assert response["total_tokens"] == 321
 
 
 async def test_user_activity_stats_superadmin_include_all_departments(dashboard_session):

@@ -19,7 +19,7 @@ from server.utils.auth_middleware import get_db, get_superadmin_user
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.storage.minio.client import normalize_public_minio_url
-from yuxi.storage.postgres.models_business import User
+from yuxi.storage.postgres.models_business import AgentRun, User
 from yuxi.utils.datetime_utils import UTC, ensure_shanghai, shanghai_now, utc_now
 from yuxi.utils.logging_config import logger
 
@@ -196,6 +196,13 @@ async def get_conversation_detail(
         # Get messages and stats
         messages = await conv_manager.get_messages(conversation.id)
         stats = await conv_manager.get_stats(conversation.id)
+        total_tokens = (
+            await db.execute(
+                select(func.coalesce(func.sum(AgentRun.total_tokens), 0)).filter(
+                    AgentRun.conversation_id == conversation.id
+                )
+            )
+        ).scalar()
 
         # Format messages
         message_list = []
@@ -232,7 +239,10 @@ async def get_conversation_detail(
             "message_count": stats.message_count if stats else len(message_list),
             "created_at": conversation.created_at.isoformat(),
             "updated_at": conversation.updated_at.isoformat(),
-            "total_tokens": stats.total_tokens if stats else 0,
+            # AgentRun is the authoritative token ledger. ConversationStats is
+            # retained for legacy message/model aggregates but is not written
+            # by the AgentRun worker and must not drive billing dashboards.
+            "total_tokens": int(total_tokens or 0),
             "messages": message_list,
         }
     except HTTPException:

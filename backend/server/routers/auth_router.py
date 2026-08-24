@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import secrets
@@ -329,7 +330,7 @@ class SelfRegisterRequest(BaseModel):
     uid: str = Field(..., description="登录标识，3-20 位字母/数字/下划线")
     username: str = Field(..., description="显示名称")
     password: str = Field(..., min_length=8, max_length=128, description="密码，8-128 位")
-    invite_code: str | None = Field(None, description="邀请码（启用邀请码时必填）")
+    invite_code: str | None = Field(None, max_length=256, description="邀请码（启用邀请码时必填）")
 
 
 def _register_enabled() -> bool:
@@ -353,7 +354,10 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
 
     invite_code = os.getenv("REGISTER_INVITE_CODE", "").strip()
     provided_invite = (data.invite_code or "").strip()
-    if invite_code and not secrets.compare_digest(provided_invite, invite_code):
+    if invite_code and not secrets.compare_digest(
+        hashlib.sha256(provided_invite.encode("utf-8")).digest(),
+        hashlib.sha256(invite_code.encode("utf-8")).digest(),
+    ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="邀请码不正确")
 
     if not re.match(r"^[a-zA-Z0-9_]+$", data.uid) or not (3 <= len(data.uid) <= 20):
@@ -948,9 +952,15 @@ async def update_user(
                     detail="不能修改该用户的部门，因为该用户是当前部门的唯一管理员",
                 )
 
+        enabled_keys = (
+            await db.execute(select(APIKey).filter(APIKey.user_id == user.id, APIKey.is_enabled.is_(True)))
+        ).scalars().all()
+        for api_key in enabled_keys:
+            api_key.is_enabled = False
+
         user.department_id = user_data.department_id
         invalidate_sessions = True
-        update_details.append(f"部门ID: {user_data.department_id}")
+        update_details.append(f"部门ID: {user_data.department_id}，已停用旧部门 API Key {len(enabled_keys)} 个")
 
     if invalidate_sessions:
         user.auth_version += 1

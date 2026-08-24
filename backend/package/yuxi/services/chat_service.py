@@ -589,8 +589,33 @@ def _extract_total_tokens(state) -> int | None:
     return None
 
 
+def _token_usage_delta(total_tokens: int | None, baseline_tokens: int | None) -> int | None:
+    """Return tokens consumed after a checkpoint baseline.
+
+    ``run_model_usage`` is persisted in LangGraph state and therefore remains
+    cumulative across normal turns and resume loops.  AgentRun accounting is
+    per run, so persisting the cumulative value would bill every previous turn
+    again.  A missing baseline is kept distinguishable from a real zero to
+    avoid silently overcharging when the checkpoint cannot be read.
+    """
+    if total_tokens is None or baseline_tokens is None:
+        return None
+    return max(int(total_tokens) - int(baseline_tokens), 0)
+
+
+async def _checkpoint_total_tokens(agent, config_dict: dict, *, context) -> int | None:
+    """Read cumulative token usage before a run starts."""
+    try:
+        graph = await agent.get_graph(context=context)
+        state = await graph.aget_state(config_dict)
+        return _extract_total_tokens(state) or 0
+    except Exception:
+        logger.warning("读取运行前 token checkpoint 基线失败；本次运行将跳过计量")
+        return None
+
+
 async def _persist_run_total_tokens(db, run_id: str | None, total_tokens: int | None) -> None:
-    if not run_id or not total_tokens:
+    if not run_id or total_tokens is None:
         return
     try:
         await AgentRunRepository(db).set_total_tokens(run_id, total_tokens)
@@ -1066,6 +1091,7 @@ async def stream_agent_chat(
 
         # 先构建 langgraph_config
         langgraph_config = {"configurable": {"thread_id": thread_id, "uid": uid}}
+        token_usage_baseline = await _checkpoint_total_tokens(agent, langgraph_config, context=context)
 
         # LangGraph 会自动从 checkpointer 恢复 state（包括 uploads）
         # 无需手动加载或传递
@@ -1177,7 +1203,7 @@ async def stream_agent_chat(
         except Exception:
             agent_state = {}
             state = None
-        run_total_tokens = _extract_total_tokens(state)
+        run_total_tokens = _token_usage_delta(_extract_total_tokens(state), token_usage_baseline)
 
         final_signature = _agent_state_signature(agent_state)
         if final_signature and final_signature != last_agent_state_signature:
@@ -1334,6 +1360,9 @@ async def stream_agent_resume(
     trace_info: dict[str, Any] = {}
     last_agent_state_signature = ""
 
+    langgraph_config = {"configurable": {"thread_id": thread_id, "uid": uid}}
+    token_usage_baseline = await _checkpoint_total_tokens(agent, langgraph_config, context=context)
+
     stream_source = agent.stream_resume_with_state(
         resume_command,
         input_context=input_context,
@@ -1439,7 +1468,6 @@ async def stream_agent_resume(
             yield make_resume_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
             return
 
-        langgraph_config = {"configurable": {"thread_id": thread_id, "uid": uid}}
         interrupted = False
         async for chunk in check_and_handle_interrupts(
             agent, langgraph_config, make_resume_chunk, meta, thread_id, context
@@ -1456,7 +1484,7 @@ async def stream_agent_resume(
         except Exception:
             agent_state = {}
             state = None
-        run_total_tokens = _extract_total_tokens(state)
+        run_total_tokens = _token_usage_delta(_extract_total_tokens(state), token_usage_baseline)
 
         final_signature = _agent_state_signature(agent_state)
         if final_signature and final_signature != last_agent_state_signature:

@@ -1001,6 +1001,14 @@ class PostgresManager(metaclass=SingletonMeta):
               AND users.department_id IS NOT NULL
             """,
             """
+            UPDATE api_keys AS key
+            SET is_enabled = FALSE
+            FROM users
+            WHERE key.user_id = users.id
+              AND key.is_enabled = TRUE
+              AND key.department_id IS DISTINCT FROM users.department_id
+            """,
+            """
             CREATE TABLE IF NOT EXISTS user_model_preferences (
                 id SERIAL PRIMARY KEY,
                 uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE,

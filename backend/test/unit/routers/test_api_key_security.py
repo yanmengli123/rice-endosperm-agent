@@ -5,10 +5,10 @@ from contextlib import asynccontextmanager
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from server.routers.auth_router import delete_user, login_for_access_token
+from server.routers.auth_router import UserUpdate, delete_user, login_for_access_token, update_user
 from server.routers.user_router import APIKeyCreate, _admin_guard, create_api_key, disable_user, enable_user
 from server.utils.auth_middleware import _verify_api_key, get_current_user
 from yuxi.repositories import user_repository as user_repository_module
@@ -176,6 +176,36 @@ async def test_api_key_rejects_stale_cross_department_binding(session):
 
     assert user is None
     assert verified_key is None
+
+
+async def test_department_change_explicitly_disables_existing_api_keys(session):
+    db = session["db"]
+    user = session["regular_user"]
+    _secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="old department key",
+        user_id=user.id,
+        department_id=user.department_id,
+        created_by=str(user.id),
+        is_enabled=True,
+    )
+    db.add(api_key)
+    await db.commit()
+
+    await update_user(
+        user.id,
+        UserUpdate(department_id=session["dept_b"].id),
+        Request({"type": "http", "method": "PUT", "path": "/", "headers": []}),
+        current_user=session["superadmin"],
+        db=db,
+    )
+    await db.refresh(api_key)
+    await db.refresh(user)
+
+    assert user.department_id == session["dept_b"].id
+    assert api_key.is_enabled is False
 
 
 async def test_auth_version_invalidates_existing_jwt(session):
