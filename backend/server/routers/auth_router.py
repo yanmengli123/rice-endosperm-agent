@@ -35,6 +35,9 @@ from yuxi.services.auth_service import (
     create_cli_auth_session,
     exchange_cli_auth_token,
     get_cli_auth_session_for_user,
+    list_device_sessions,
+    revoke_device_session,
+    rotate_device_session_refresh,
 )
 from yuxi.storage.minio import upload_image_to_minio
 from yuxi.storage.minio.client import normalize_public_minio_url
@@ -1185,6 +1188,40 @@ async def impersonate_user(
 # =============================================================================
 # === OIDC 认证分组 ===
 # =============================================================================
+
+
+@auth.post("/cli/token/refresh")
+async def refresh_cli_token(payload: dict, db: AsyncSession = Depends(get_db)):
+    """P2：旋转设备会话刷新令牌；重放检测触发会话族撤销。"""
+    refresh_token = str(payload.get("refresh_token") or "")
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="缺少 refresh_token")
+    try:
+        return await rotate_device_session_refresh(db, refresh_token)
+    except CLIAuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@auth.get("/sessions")
+async def list_my_sessions(
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出当前用户的活跃设备会话。"""
+    return {"sessions": await list_device_sessions(db, current_user.uid)}
+
+
+@auth.delete("/sessions/{family_id}")
+async def revoke_my_session(
+    family_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """下线指定设备会话。"""
+    ok = await revoke_device_session(db, current_user.uid, family_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"success": True}
 
 
 @auth.get("/oidc/config", response_model=OIDCConfigResponse)

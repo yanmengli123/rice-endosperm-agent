@@ -17,8 +17,12 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.orm import declarative_base, relationship, validates
+
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
+
+# SQLite 测试库不支持 BIGINT 自增主键，统一用带方言变体的整型主键
+BigIntPk = BigInteger().with_variant(Integer(), "sqlite")
 
 Base = declarative_base()
 
@@ -85,6 +89,37 @@ class TenantMembership(Base):
     __table_args__ = (
         Index("uq_tenant_memberships_tenant_uid", "tenant_id", "uid", unique=True),
     )
+
+
+class DeviceSession(Base):
+    """桌面端/CLI 设备会话族：一个授权产生一个会话，内含旋转中的刷新令牌。"""
+
+    __tablename__ = "device_sessions"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    family_id = Column(String(36), nullable=False, unique=True, index=True)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="active", index=True)  # active / revoked
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    last_refreshed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class DeviceSessionToken(Base):
+    """刷新令牌哈希记录；used_at 非空即视为已消费，再次出示触发重放撤销。"""
+
+    __tablename__ = "device_session_tokens"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    session_id = Column(
+        BigInteger,
+        ForeignKey("device_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
 class User(Base):

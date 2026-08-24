@@ -750,9 +750,37 @@ class PostgresManager(metaclass=SingletonMeta):
             if not exists:
                 await conn.execute(text(constraint_sql))
 
+    async def _migration_0003_device_sessions(self, conn) -> None:
+        """P2 认证：设备会话族与旋转刷新令牌。"""
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS device_sessions ("
+                "id BIGSERIAL PRIMARY KEY, family_id VARCHAR(36) NOT NULL UNIQUE, "
+                "uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE, "
+                "status VARCHAR(32) NOT NULL DEFAULT 'active', "
+                "created_at TIMESTAMPTZ DEFAULT NOW(), last_refreshed_at TIMESTAMPTZ)"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_device_sessions_uid ON device_sessions(uid)")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS device_session_tokens ("
+                "id BIGSERIAL PRIMARY KEY, session_id BIGINT NOT NULL "
+                "REFERENCES device_sessions(id) ON DELETE CASCADE, "
+                "token_hash VARCHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL, "
+                "used_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_device_session_tokens_session ON device_session_tokens(session_id)")
+        )
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
+        ("0003_device_sessions", "_migration_0003_device_sessions"),
     ]
 
     async def _apply_versioned_migrations(self):

@@ -5,7 +5,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import APIKey, User
+from yuxi.storage.postgres.models_business import APIKey, DeviceSession, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 from yuxi.utils.auth_utils import AuthUtils
@@ -110,6 +110,19 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账号已被停用，请联系管理员",
         )
+    # P2：携带 sid 的短时访问令牌，要求会话族仍处于 active（设备可被单独下线）
+    session_family = payload.get("sid")
+    if session_family:
+        device_session = (
+            await db.execute(select(DeviceSession).filter(DeviceSession.family_id == session_family))
+        ).scalar_one_or_none()
+        if device_session is None or device_session.status != "active":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="登录会话已撤销",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     token_auth_version = payload.get("auth_version", 0)
     if token_auth_version != user.auth_version:
         raise HTTPException(
