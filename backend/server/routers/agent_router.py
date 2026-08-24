@@ -15,6 +15,7 @@ from yuxi.repositories.agent_repository import (
     is_builtin_agent,
     user_can_access_agent,
     user_can_manage_agent,
+    resolve_creator_department,
 )
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.knowledge_retrieval_repository import (
@@ -151,6 +152,18 @@ async def create_agent(
         raise HTTPException(status_code=422, detail="默认智能体已固定为内置稻芯智析智能体")
 
     repo = AgentRepository(db)
+    # 新建默认不全局可见：管理员→本部门共享；普通用户由 repo 强制私有
+    effective_share_config = payload.share_config
+    if (
+        effective_share_config is None
+        and current_user.role in {"admin", "superadmin"}
+        and current_user.department_id is not None
+    ):
+        effective_share_config = {
+            "access_level": "department",
+            "department_ids": [current_user.department_id],
+            "user_uids": [],
+        }
     try:
         item = await repo.create(
             name=payload.name,
@@ -160,7 +173,7 @@ async def create_agent(
             icon=payload.icon,
             pics=payload.pics,
             config_json=_filter_agent_config_json(payload.backend_id, payload.config_json, current_user.role),
-            share_config=payload.share_config,
+            share_config=effective_share_config,
             is_default=payload.set_default,
             is_subagent=payload.is_subagent,
             created_by=str(current_user.uid),
@@ -193,7 +206,8 @@ async def update_agent(
     item = await repo.get_visible_by_slug(slug=agent_slug, user=current_user, kind="any")
     if not item:
         raise HTTPException(status_code=404, detail="智能体不存在")
-    if not user_can_manage_agent(current_user, item):
+    creator_dept = await resolve_creator_department(db, item.created_by)
+    if not user_can_manage_agent(current_user, item, creator_department_id=creator_dept):
         raise HTTPException(status_code=403, detail="不能编辑非自己创建的智能体")
 
     try:
@@ -231,7 +245,8 @@ async def delete_agent(
     item = await repo.get_visible_by_slug(slug=agent_slug, user=current_user, kind="any")
     if not item:
         raise HTTPException(status_code=404, detail="智能体不存在")
-    if not user_can_manage_agent(current_user, item):
+    creator_dept = await resolve_creator_department(db, item.created_by)
+    if not user_can_manage_agent(current_user, item, creator_department_id=creator_dept):
         raise HTTPException(status_code=403, detail="不能删除非自己创建的智能体")
     if is_builtin_agent(item):
         raise HTTPException(status_code=409, detail="内置智能体不能删除")

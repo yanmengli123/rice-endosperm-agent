@@ -279,6 +279,12 @@ async def create_database(
         else:
             embedding_model_spec = None
 
+        # P0 默认共享级别：未显式指定时按创建者部门共享，不再默认全局
+        if share_config is None:
+            share_config = {"access_level": "department", "department_ids": [], "user_uids": []}
+            if current_user.department_id is not None:
+                share_config["department_ids"] = [current_user.department_id]
+
         database_info = await knowledge_base.create_database(
             database_name,
             description,
@@ -476,6 +482,10 @@ async def update_database_info(
 async def delete_database(kb_id: str, current_user: User = Depends(get_admin_user)):
     """删除知识库"""
     logger.debug(f"Delete database {kb_id}")
+    if not await knowledge_base.check_accessible(
+        {"role": current_user.role, "uid": current_user.uid}, kb_id
+    ):
+        raise HTTPException(status_code=404, detail="Database not found")
     try:
         await knowledge_base.delete_database(kb_id)
 
@@ -689,6 +699,10 @@ async def add_documents(
 ):
     """添加文档到知识库（上传 -> 解析 -> 可选入库）"""
     logger.debug(f"Add documents for kb_id {kb_id}: {items} {params=}")
+    if not await knowledge_base.check_accessible(
+        {"role": current_user.role, "uid": current_user.uid}, kb_id
+    ):
+        raise HTTPException(status_code=404, detail="Database not found")
     await _ensure_database_supports_documents(kb_id, "文档添加/解析/入库")
 
     params = _ensure_document_params(params)

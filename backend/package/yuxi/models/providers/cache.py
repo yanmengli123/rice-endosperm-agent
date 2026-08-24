@@ -16,7 +16,9 @@ from typing import Any
 from yuxi.storage.redis import sync_redis_client
 from yuxi.utils.logging_config import logger
 
-REDIS_CACHE_KEY = "yuxi:model_cache"
+REDIS_CACHE_KEY = "yuxi:model_cache:v2"
+# v1 缓存曾包含明文凭据，重建时顺手清除，避免残留
+_LEGACY_REDIS_CACHE_KEY = "yuxi:model_cache"
 _CACHE_TTL_SECONDS = 5
 
 
@@ -63,15 +65,22 @@ class ModelInfo:
 
     @classmethod
     def from_dict(cls, data: dict) -> ModelInfo:
+        from yuxi.utils.secret_crypto import decrypt_secret
+
+        spec = f"{data['provider_id']}:{data['model_id']}"
         return cls(
             provider_id=data["provider_id"],
             model_id=data["model_id"],
             model_type=data["model_type"],
             display_name=data["display_name"],
-            api_key=data["api_key"],
+            api_key=decrypt_secret(data.get("api_key") or None, f"model-cache:{spec}") or "",
             base_url=data["base_url"],
             provider_type=data["provider_type"],
-            headers=data.get("headers", {}),
+            headers={
+                key: decrypt_secret(value, f"model-cache-hdr:{spec}:{key}") or ""
+                for key, value in (data.get("headers") or {}).items()
+                if value
+            },
             extra=data.get("extra", {}),
             dimension=data.get("dimension"),
             batch_size=data.get("batch_size", 40),
@@ -132,7 +141,13 @@ class ModelCache:
         return grouped
 
     def rebuild(self, providers: list[Any]) -> None:
-        from yuxi.models.providers.service import resolve_api_key
+        from yuxi.models.providers.service import resolve_api_key, resolve_provider_headers
+
+        try:
+            with sync_redis_client() as redis_client:
+                redis_client.delete(_LEGACY_REDIS_CACHE_KEY)
+        except Exception:
+            pass
 
         new_cache: dict[str, ModelInfo] = {}
 
@@ -154,7 +169,7 @@ class ModelCache:
                     api_key=api_key or "",
                     base_url=base_url,
                     provider_type=provider.provider_type,
-                    headers=dict(provider.headers_json or {}),
+                    headers=resolve_provider_headers(provider),
                     extra=dict(provider.extra_json or {}),
                     dimension=model.get("dimension"),
                     batch_size=model.get("batch_size", 40),
@@ -166,8 +181,20 @@ class ModelCache:
         logger.info(f"Model cache rebuilt: {len(new_cache)} models → Redis")
 
     def _save_cache(self, cache: dict[str, ModelInfo]) -> None:
+        from yuxi.utils.secret_crypto import encrypt_secret
+
         try:
-            data = {spec: info.to_dict() for spec, info in cache.items()}
+            # Redis 只落密文（AAD 绑定 spec），明文仅存在于进程内存的 ModelInfo 中
+            data = {}
+            for spec, info in cache.items():
+                payload = info.to_dict()
+                payload["api_key"] = encrypt_secret(info.api_key, f"model-cache:{spec}") or ""
+                payload["headers"] = {
+                    key: encrypt_secret(value, f"model-cache-hdr:{spec}:{key}") or ""
+                    for key, value in info.headers.items()
+                    if value
+                }
+                data[spec] = payload
             with sync_redis_client() as redis_client:
                 redis_client.set(REDIS_CACHE_KEY, json.dumps(data, ensure_ascii=False))
         except Exception as e:

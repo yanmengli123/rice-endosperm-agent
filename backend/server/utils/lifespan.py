@@ -62,6 +62,35 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to ensure builtin model providers during startup: {e}")
 
+    # 存量明文凭据惰性加密升级（P0）：模型供应商 API Key / Header 值
+    try:
+        from sqlalchemy import select as _select
+
+        from yuxi.utils.secret_crypto import encrypt_secret, is_encrypted
+
+        async with pg_manager.get_async_session_context() as session:
+            from yuxi.storage.postgres.models_business import ModelProvider
+
+            for provider in (await session.execute(_select(ModelProvider))).scalars():
+                changed = False
+                if provider.api_key and not is_encrypted(provider.api_key):
+                    provider.api_key = encrypt_secret(provider.api_key, f"model-provider-db:{provider.provider_id}")
+                    changed = True
+                headers = dict(provider.headers_json or {})
+                sealed_headers = {
+                    key: encrypt_secret(str(value), f"model-provider-hdr:{provider.provider_id}:{key}") or value
+                    for key, value in headers.items()
+                    if value and not is_encrypted(str(value))
+                }
+                if sealed_headers != headers:
+                    provider.headers_json = {**headers, **sealed_headers}
+                    changed = True
+                if changed:
+                    logger.info(f"已加密升级供应商明文凭据: {provider.provider_id}")
+            await session.commit()
+    except Exception as e:
+        logger.error(f"Failed to encrypt legacy provider credentials during startup: {e}")
+
     # 初始化模型缓存（v2 模型选择使用）
     try:
         from yuxi.models.providers.cache import model_cache
@@ -83,6 +112,29 @@ async def lifespan(app: FastAPI):
 
         async with pg_manager.get_async_session_context() as session:
             await ensure_builtin_ocr_provider_in_db(session)
+        # 存量明文 OCR Token 惰性加密升级
+        try:
+            from sqlalchemy import select as _select
+
+            from yuxi.services.ocr_provider_service import _seal_db_token
+
+            async with pg_manager.get_async_session_context() as session:
+                from yuxi.storage.postgres.models_business import OCRProviderConfig
+
+                rows = (
+                    await session.execute(
+                        _select(OCRProviderConfig).where(
+                            OCRProviderConfig.api_token.isnot(None),
+                            ~OCRProviderConfig.api_token.like("enc.v1:%"),
+                        )
+                    )
+                ).scalars()
+                for row in rows:
+                    row.api_token = _seal_db_token(row.api_token)
+                    logger.info(f"已加密升级 OCR 明文 Token: {row.service_id}")
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to encrypt legacy OCR tokens during startup: {e}")
         async with pg_manager.get_async_session_context() as session:
             ocr_credential_cache.rebuild(await get_all_ocr_providers(session))
     except Exception as e:

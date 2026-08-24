@@ -32,6 +32,20 @@ def normalize_mineru_config_payload(data: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _seal_db_token(token: str | None) -> str | None:
+    """OCR Token 落库前加密（AAD 绑定服务标识）。"""
+    from yuxi.utils.secret_crypto import encrypt_secret
+
+    return encrypt_secret(token or "", "ocr-provider-db:mineru-official") or None
+
+
+def _open_db_token(token: str | None) -> str:
+    """读取库内 Token：密文解密，存量明文透传（惰性升级由保存路径完成）。"""
+    from yuxi.utils.secret_crypto import decrypt_secret
+
+    return decrypt_secret(token or None, "ocr-provider-db:mineru-official") or ""
+
+
 async def ensure_builtin_ocr_provider_in_db(db: AsyncSession) -> OCRProviderConfig:
     """创建 MinerU 内置配置；环境变量只在首次创建时导入一次。"""
     provider = await get_ocr_provider(db, MINERU_SERVICE_ID)
@@ -45,7 +59,7 @@ async def ensure_builtin_ocr_provider_in_db(db: AsyncSession) -> OCRProviderConf
             "service_id": MINERU_SERVICE_ID,
             "display_name": "MinerU 官方 API",
             "api_base": MINERU_API_BASE,
-            "api_token": bootstrap_token,
+            "api_token": _seal_db_token(bootstrap_token),
             "settings_json": {"model_version": "vlm"},
             "is_enabled": True,
             "created_by": "system",
@@ -75,7 +89,7 @@ async def test_mineru_official_connection(api_token: str, api_base: str) -> dict
 
 async def test_saved_or_supplied_mineru_connection(db: AsyncSession, api_token: str | None = None) -> dict[str, Any]:
     provider = await get_mineru_official_config(db)
-    candidate_token = (api_token or "").strip() or provider.api_token or ""
+    candidate_token = (api_token or "").strip() or _open_db_token(provider.api_token)
     if not candidate_token:
         raise ValueError("请先填写 MinerU API Token")
     return await test_mineru_official_connection(candidate_token, provider.api_base)
@@ -88,7 +102,7 @@ async def save_mineru_official_config(
 ) -> tuple[OCRProviderConfig, dict[str, Any]]:
     provider = await get_mineru_official_config(db)
     normalized = normalize_mineru_config_payload(data)
-    candidate_token = normalized.get("api_token") or provider.api_token or ""
+    candidate_token = normalized.get("api_token") or _open_db_token(provider.api_token)
     if not candidate_token:
         raise ValueError("请先填写 MinerU API Token")
 
@@ -102,7 +116,7 @@ async def save_mineru_official_config(
         "updated_by": username,
     }
     if "api_token" in normalized:
-        update_data["api_token"] = normalized["api_token"]
+        update_data["api_token"] = _seal_db_token(normalized["api_token"])
 
     saved = await update_ocr_provider(db, provider, update_data)
     return saved, health

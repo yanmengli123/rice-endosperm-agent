@@ -50,7 +50,10 @@ def test_ocr_credential_cache_round_trip_keeps_runtime_secret(monkeypatch):
     assert runtime is not None
     assert runtime.api_token == "secret-token"
     assert runtime.settings["model_version"] == "vlm"
-    assert json.loads(redis.data[REDIS_CACHE_KEY])["mineru_official"]["api_token"] == "secret-token"
+    sealed_payload = json.loads(redis.data[REDIS_CACHE_KEY])["mineru_official"]["api_token"]
+    # P0：Redis 载荷只允许密文，运行时读取才解密
+    assert sealed_payload != "secret-token"
+    assert sealed_payload.startswith("enc.v1:")
 
 
 def test_ocr_credential_cache_does_not_fallback_to_environment(monkeypatch):

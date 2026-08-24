@@ -6,12 +6,29 @@ from yuxi.storage.postgres import manager as manager_module
 from yuxi.storage.postgres.manager import PostgresManager
 
 
+class _EmptySelectResult:
+    """SELECT 桩：版本化迁移读取已应用版本 / 回填扫描时返回空集。"""
+
+    def all(self):
+        return []
+
+    def scalars(self):
+        return self
+
+    def scalar_one_or_none(self):
+        return None
+
+
 class _RecordingConnection:
     def __init__(self):
         self.statements: list[str] = []
 
-    async def execute(self, statement):
-        self.statements.append(str(statement))
+    async def execute(self, statement, *args):
+        text = str(statement)
+        self.statements.append(text)
+        if text.lstrip().upper().startswith("SELECT"):
+            return _EmptySelectResult()
+        return None
 
 
 class _RecordingBegin:

@@ -160,10 +160,19 @@ def user_can_access_skill(user: User, skill: Skill, *, require_enabled: bool = T
     return False
 
 
-def user_can_manage_skill(user: User, skill: Skill) -> bool:
+def user_can_manage_skill(
+    user: User, skill: Skill, *, creator_department_id: int | None = None
+) -> bool:
+    """管理权限：superadmin 全通；内置技能仅平台；创建者本人；部门管理员限本部门创建。"""
     if is_builtin_skill(skill):
-        return user.role in ADMIN_ROLES
-    return user.role in ADMIN_ROLES or skill.created_by == str(user.uid or "")
+        return user.role == "superadmin"
+    if user.role == "superadmin" or skill.created_by == str(user.uid or ""):
+        return True
+    if user.role != "admin" or user.department_id is None:
+        return False
+    if skill.created_by == "system":
+        return False
+    return creator_department_id is not None and int(creator_department_id) == int(user.department_id)
 
 
 def can_skill_depend_on(parent: Skill, dependency: Skill) -> bool:
@@ -1053,7 +1062,25 @@ async def get_management_readable_skill_or_raise(db: AsyncSession, user: User, s
 
 async def get_manageable_skill_or_raise(db: AsyncSession, user: User, slug: str) -> Skill:
     item = await get_skill_or_raise(db, slug)
-    if not user_can_manage_skill(user, item):
+    creator_dept: int | None = None
+    needs_lookup = (
+        user.role == "admin"
+        and user.department_id is not None
+        and item.created_by != str(user.uid or "")
+        and item.created_by != "system"
+    )
+    if needs_lookup:
+        if db is None:
+            # 无法核验创建者部门时按拒绝处理，不放宽
+            raise ValueError(f"技能 '{slug}' 不存在或无权管理")
+        from sqlalchemy import select as _select
+
+        creator_dept_result = await db.execute(
+            _select(User.department_id).where(User.uid == item.created_by, User.is_deleted == 0)
+        )
+        raw_dept = creator_dept_result.scalar_one_or_none()
+        creator_dept = int(raw_dept) if raw_dept is not None else None
+    if not user_can_manage_skill(user, item, creator_department_id=creator_dept):
         raise ValueError(f"技能 '{slug}' 不存在或无权管理")
     return item
 

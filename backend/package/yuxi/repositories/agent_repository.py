@@ -164,8 +164,29 @@ def user_can_access_agent(user: User, agent: Agent) -> bool:
     return False
 
 
-def user_can_manage_agent(user: User, agent: Agent) -> bool:
-    return user.role in ADMIN_ROLES or agent.created_by == str(user.uid)
+def user_can_manage_agent(
+    user: User, agent: Agent, *, creator_department_id: int | None = None
+) -> bool:
+    """管理权限：superadmin 全通；创建者本人；部门管理员仅限本部门用户创建的资源。
+
+    「全局可见」不等于「全局可管理」——跨部门的 admin 一律拒绝。
+    """
+    if user.role == "superadmin" or agent.created_by == str(user.uid):
+        return True
+    if user.role not in ADMIN_ROLES or user.department_id is None:
+        return False
+    if agent.created_by == "system":
+        return False
+    return creator_department_id is not None and int(creator_department_id) == int(user.department_id)
+
+
+async def resolve_creator_department(db: AsyncSession, created_by: str | None) -> int | None:
+    """查询资源创建者当前所属部门，供跨部门管理判定。"""
+    if not created_by:
+        return None
+    result = await db.execute(select(User.department_id).where(User.uid == created_by, User.is_deleted == 0))
+    department_id = result.scalar_one_or_none()
+    return int(department_id) if department_id is not None else None
 
 
 def _slugify(value: str | None) -> str:

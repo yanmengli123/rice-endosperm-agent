@@ -14,6 +14,7 @@
 - 企业级多用户治理增强：未绑定部门的用户调用 Agent 创建接口直接拒绝（400）；新增用户级模型偏好（`GET/PUT /api/user/model-preference`，解析优先级为请求级 > 用户级 > 智能体级 > 系统级）、每日/每月配额与账号停用/启用。账号状态与 API Key 自身撤销状态相互独立，停用会取消活动运行并使 JWT 版本失效；新增 `GET /api/user/usage` 按日 run 数与月度 tokens 用量汇总；管理操作写入审计日志。Web 新增受注册开关控制的注册页、待分配部门页和用户管理页；稻芯智析桌面端通过设备码登录并使用服务端用户模型偏好。
 
 ### 安全
+- P0 凭据与权限安全收口：`model_providers.api_key`、Header 值与 `ocr_provider_configs.api_token` 全面升级为 AES-256-GCM 信封加密（AAD 绑定资源标识，主密钥 `YUXI_SECRET_MASTER_KEY`，启动时自动加密存量明文）；Redis 模型/OCR 缓存迁移 v2 键且只存密文（旧明文键重建时清除），AOF 磁盘残留不再可用。模型供应商写操作与系统任务管理端点收紧为 superadmin；知识库删除/添加文档增加资源可访问性校验（跨部门 admin 返回 404）；Agent 与 Skill 管理守卫部门化——「全局可见」不再等于「全局可管理」，跨部门 admin 一律拒绝。新建知识库/智能体默认本部门共享而非全局。`users.account_scope_id` 固化入库（唯一非空、终身不变、注册自动派生），JWT 密钥轮换不再影响桌面端本地数据归属；设备码签发的 API Key 增加 90 天过期。引入版本化 schema 迁移执行器（schema_migrations 表），复杂变更与数据回填同事务执行一次。详见 docs/vibe/2026-08-24-p0-security-hardening.md。
 
 - 生产 Compose 不再回退到公开的 Neo4j、MinIO 和 PostgreSQL 默认凭证，并要求显式配置 JWT 随机密钥与实例标识；相关配置缺失时会在解析阶段拒绝启动并提示具体变量名。管理员初始化、创建用户、创建部门管理员及修改用户密码在前后端统一要求密码不少于 8 位。
 - 修复沙箱执行边界：每个动态 Docker 沙箱使用只与 provisioner 相连的独立网络，沙箱之间不能互访，也不再加入业务 `app-network` 或发布随机宿主机端口；provisioner 重启后会重新接入已有沙箱网络，清理时只删除自身创建且标签匹配的网络。API/worker 使用至少 32 字符的 `SANDBOX_PROVISIONER_TOKEN` 调用 provisioner，并通过认证代理访问沙箱文件与命令接口，代理在应用生命周期内复用 HTTP 连接池。生产 Compose 同时移除 PostgreSQL 和解析服务的宿主机端口，阻断沙箱对其他租户、业务数据库、对象存储和无鉴权 provisioner 的横向访问。

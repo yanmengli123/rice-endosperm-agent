@@ -166,8 +166,25 @@ def _normalize_payload(data: dict[str, Any], *, partial: bool = False) -> dict[s
 
 
 def resolve_api_key(provider: ModelProvider) -> str | None:
-    """读取模型供应商页面持久化的 API Key。"""
-    return provider.api_key or None
+    """读取模型供应商页面持久化的 API Key（静态存储为密文，此处解密）。"""
+    from yuxi.utils.secret_crypto import decrypt_secret
+
+    raw = provider.api_key or None
+    if raw is None:
+        return None
+    return decrypt_secret(raw, f"model-provider-db:{provider.provider_id}") or None
+
+
+def resolve_provider_headers(provider: ModelProvider) -> dict[str, str]:
+    """读取供应商自定义 Headers（header 值静态存储为密文，此处解密）。"""
+    from yuxi.utils.secret_crypto import decrypt_secret
+
+    resolved: dict[str, str] = {}
+    for key, value in dict(provider.headers_json or {}).items():
+        if not value:
+            continue
+        resolved[key] = decrypt_secret(str(value), f"model-provider-hdr:{provider.provider_id}:{key}") or ""
+    return resolved
 
 
 def check_credential_status(provider: ModelProvider) -> str:
@@ -347,7 +364,7 @@ async def fetch_remote_models(provider: ModelProvider) -> list[dict[str, Any]]:
     Chat 模型默认走 /models；embedding 只有 provider 声明能力时才走
     /embeddings/models；rerank 供应商没有稳定通用端点，配置了 endpoint 才拉取。
     """
-    headers = dict(provider.headers_json or {})
+    headers = resolve_provider_headers(provider)
     api_key = resolve_api_key(provider)
     if api_key:
         headers.setdefault("Authorization", f"Bearer {api_key}")

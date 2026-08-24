@@ -80,7 +80,7 @@ async def test_list_visible_skills_for_management_includes_owned_disabled_and_en
         ),
         (
             Skill(slug="admin-disabled", name="admin-disabled", description="", created_by="other", enabled=False),
-            _user("root", role="admin"),
+            _user("root", role="superadmin"),
         ),
         (
             Skill(
@@ -842,7 +842,7 @@ async def test_update_skill_dependencies(monkeypatch: pytest.MonkeyPatch):
         tool_dependencies=["calculator", "calculator"],
         mcp_dependencies=["mcp-a", "mcp-a"],
         skill_dependencies=["beta", "beta"],
-        operator=_user("root"),
+        operator=_user("root", role="superadmin"),
     )
     assert captured["tool_dependencies"] == ["calculator"]
     assert captured["mcp_dependencies"] == ["mcp-a"]

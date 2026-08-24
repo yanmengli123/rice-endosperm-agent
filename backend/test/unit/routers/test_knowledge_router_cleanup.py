@@ -557,6 +557,9 @@ async def test_add_documents_auto_index_returns_one_final_result_per_item(monkey
     item = "minio://knowledgebases/kb_1/upload/demo.txt"
     captured = {}
 
+    async def fake_check_accessible(user, kb_id):
+        return True
+
     async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
         return None
 
@@ -585,6 +588,7 @@ async def test_add_documents_auto_index_returns_one_final_result_per_item(monkey
         "_ensure_database_supports_documents",
         fake_ensure_database_supports_documents,
     )
+    monkeypatch.setattr(knowledge_router.knowledge_base, "check_accessible", fake_check_accessible)
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
     monkeypatch.setattr(knowledge_router.knowledge_base, "add_file_record", fake_add_file_record)
     monkeypatch.setattr(knowledge_router.knowledge_base, "parse_file", fake_parse_file)
@@ -601,7 +605,7 @@ async def test_add_documents_auto_index_returns_one_final_result_per_item(monkey
             "content_hashes": {item: "hash_1"},
             "source_paths": {item: "wx/demo.txt"},
         },
-        current_user=SimpleNamespace(uid="uid-user"),
+        current_user=SimpleNamespace(uid="uid-user", role="admin", department_id=1),
     )
 
     assert result["status"] == "queued"
@@ -623,6 +627,9 @@ async def test_add_documents_auto_index_treats_error_none_as_success(monkeypatch
     """成功入库的文件元数据会携带 error=None，不应被统计为失败 (#793)。"""
     context = FakeTaskContext()
     item = "minio://knowledgebases/kb_1/upload/demo.txt"
+
+    async def fake_check_accessible(user, kb_id):
+        return True
 
     async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
         return None
@@ -651,6 +658,7 @@ async def test_add_documents_auto_index_treats_error_none_as_success(monkeypatch
         "_ensure_database_supports_documents",
         fake_ensure_database_supports_documents,
     )
+    monkeypatch.setattr(knowledge_router.knowledge_base, "check_accessible", fake_check_accessible)
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
     monkeypatch.setattr(knowledge_router.knowledge_base, "add_file_record", fake_add_file_record)
     monkeypatch.setattr(knowledge_router.knowledge_base, "parse_file", fake_parse_file)
@@ -662,7 +670,7 @@ async def test_add_documents_auto_index_treats_error_none_as_success(monkeypatch
         "kb_1",
         [item],
         params={"content_type": "file", "auto_index": True, "content_hashes": {item: "hash_1"}},
-        current_user=SimpleNamespace(uid="uid-user"),
+        current_user=SimpleNamespace(uid="uid-user", role="admin", department_id=1),
     )
 
     assert result["status"] == "queued"

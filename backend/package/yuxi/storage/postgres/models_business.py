@@ -16,7 +16,7 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base, relationship, validates
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
 
@@ -57,6 +57,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String, nullable=False, unique=True, index=True)  # 显示名称
     uid = Column(String, nullable=False, unique=True, index=True)  # 登录标识
+    # 桌面端本地数据隔离标识：注册时生成、终身不可变，不随 JWT 密钥轮换/改名/调部门变化
+    account_scope_id = Column(String(64), nullable=False, unique=True, index=True)
     phone_number = Column(String, nullable=True, unique=True, index=True)  # 手机号
     avatar = Column(String, nullable=True)  # 头像URL
     password_hash = Column(String, nullable=False)
@@ -78,6 +80,15 @@ class User(Base):
     # 软删除相关字段
     is_deleted = Column(Integer, nullable=False, default=0, index=True)  # 是否已删除：0=否，1=是
     deleted_at = Column(DateTime, nullable=True)  # 删除时间
+
+    @validates("uid")
+    def _derive_account_scope(self, _key, value):
+        """uid 赋值时同步派生不可变的账号隔离标识（覆盖全部创建路径）。"""
+        if value and not self.account_scope_id:
+            from yuxi.utils.auth_utils import AuthUtils
+
+            self.account_scope_id = AuthUtils.account_scope_id(value)
+        return value
 
     # 关联操作日志
     operation_logs = relationship("OperationLog", back_populates="user", cascade="all, delete-orphan")
@@ -692,7 +703,7 @@ class ModelProvider(Base):
     embedding_models_endpoint = Column(String(200), nullable=True, comment="Embedding 模型列表端点")
     rerank_models_endpoint = Column(String(200), nullable=True, comment="Rerank 模型列表端点")
     api_key_env = Column(String(128), nullable=True, comment="API Key 环境变量名")
-    api_key = Column(String(500), nullable=True, comment="直接配置的 API Key")
+    api_key = Column(String(1000), nullable=True, comment="直接配置的 API Key（AES-256-GCM 密文）")
 
     capabilities = Column(JSON, nullable=False, default=list, comment="支持能力：chat/embedding/rerank")
     enabled_models = Column(JSON, nullable=False, default=list, comment="已启用模型配置对象")
@@ -743,7 +754,7 @@ class OCRProviderConfig(Base):
     service_id = Column(String(100), nullable=False, unique=True, index=True, comment="OCR 服务稳定标识")
     display_name = Column(String(100), nullable=False, comment="展示名称")
     api_base = Column(String(500), nullable=False, comment="API 基础 URL")
-    api_token = Column(String(1000), nullable=True, comment="服务端 API Token")
+    api_token = Column(String(2000), nullable=True, comment="服务端 API Token（AES-256-GCM 密文）")
     settings_json = Column(JSON, nullable=False, default=dict, comment="非敏感运行参数")
     is_enabled = Column(Boolean, nullable=False, default=True, index=True)
 

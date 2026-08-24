@@ -96,5 +96,8 @@ async def test_bootstrap_imports_current_token_environment_once(monkeypatch):
 
     await ocr_provider_service.ensure_builtin_ocr_provider_in_db(object())
 
-    assert created[0]["api_token"] == "bootstrap-token"
+    from yuxi.services.ocr_provider_service import _open_db_token
+
+    assert created[0]["api_token"] != "bootstrap-token"
+    assert _open_db_token(created[0]["api_token"]) == "bootstrap-token"
     assert created[0]["settings_json"] == {"model_version": "vlm"}

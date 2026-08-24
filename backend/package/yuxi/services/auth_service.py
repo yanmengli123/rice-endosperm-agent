@@ -14,6 +14,8 @@ from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
 
 CLI_AUTH_SESSION_TTL_SECONDS = 10 * 60
+# 设备码签发 API Key 的过渡有效期（天）；OAuth 刷新令牌上线后将逐步替代
+DEVICE_API_KEY_TTL_DAYS = 90
 CLI_AUTH_POLL_INTERVAL_SECONDS = 2
 CLI_AUTH_DEFAULT_KEY_NAME = f"{BRAND_NAME} CLI"
 CLI_AUTH_USER_CODE_ALPHABET = "".join(ch for ch in string.ascii_uppercase + string.digits if ch not in "0O1I")
@@ -163,6 +165,8 @@ async def exchange_cli_auth_token(db: AsyncSession, device_code: str) -> dict:
         user_id=user.id,
         department_id=user.department_id,
         created_by=str(user.id),
+        # 设备流签发的 Key 非永久凭证：90 天滚动过期（OAuth 刷新令牌上线前的过渡措施）
+        expires_at=utc_now_naive() + timedelta(days=DEVICE_API_KEY_TTL_DAYS),
     )
     db.add(api_key)
     await db.flush()
@@ -176,9 +180,12 @@ async def exchange_cli_auth_token(db: AsyncSession, device_code: str) -> dict:
     user_data = user.to_dict()
     user_data["department_name"] = department_name
 
+    # 隔离标识以数据库为权威（迁移已回填，终身不变）；兜底兼容极端未回填场景
+    account_scope_id = user.account_scope_id or AuthUtils.account_scope_id(user.uid)
+
     return {
         "api_key": api_key.to_dict(),
         "secret": full_key,
         "user": user_data,
-        "account_scope_id": AuthUtils.account_scope_id(user.uid),
+        "account_scope_id": account_scope_id,
     }

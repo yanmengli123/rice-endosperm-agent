@@ -651,9 +651,58 @@ class PostgresManager(metaclass=SingletonMeta):
             for stmt in stmts:
                 await conn.execute(text(stmt))
 
+    # ------------------------------------------------------------------
+    # 版本化迁移：复杂/有数据回填的 schema 变更走这里，保证只执行一次且
+    # 与记录同事务；简单幂等 DDL 仍保留在 ensure_business_schema 列表中。
+    # ------------------------------------------------------------------
+
+    async def _migration_0001_p0_security(self, conn) -> None:
+        """P0 安全收口：凭据列加宽（密文化）、users.account_scope_id 固化。"""
+        await conn.execute(text("ALTER TABLE IF EXISTS model_providers ALTER COLUMN api_key TYPE VARCHAR(1000)"))
+        await conn.execute(text("ALTER TABLE IF EXISTS ocr_provider_configs ALTER COLUMN api_token TYPE VARCHAR(2000)"))
+        await conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS account_scope_id VARCHAR(64)"))
+
+        from yuxi.utils.auth_utils import AuthUtils
+
+        rows = (await conn.execute(text("SELECT uid FROM users WHERE account_scope_id IS NULL"))).all()
+        for (uid,) in rows:
+            await conn.execute(
+                text("UPDATE users SET account_scope_id = :scope WHERE uid = :uid"),
+                {"scope": AuthUtils.account_scope_id(uid), "uid": uid},
+            )
+        if rows:
+            logger.info(f"Backfilled account_scope_id for {len(rows)} user(s); 桌面端历史数据归属不受影响")
+
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN account_scope_id SET NOT NULL"))
+        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_account_scope ON users(account_scope_id)"))
+
+    _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
+        ("0001_p0_security", "_migration_0001_p0_security"),
+    ]
+
+    async def _apply_versioned_migrations(self):
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                    "version VARCHAR(64) PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW())"
+                )
+            )
+            done = {
+                row[0] for row in (await conn.execute(text("SELECT version FROM schema_migrations"))).all()
+            }
+            for version, method_name in self._VERSIONED_MIGRATIONS:
+                if version in done:
+                    continue
+                logger.info(f"Applying versioned schema migration: {version}")
+                await getattr(self, method_name)(conn)
+                await conn.execute(text("INSERT INTO schema_migrations(version) VALUES (:v)"), {"v": version})
+
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""
         self._check_initialized()
+        await self._apply_versioned_migrations()
         stmts = [
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",

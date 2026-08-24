@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from yuxi.storage.postgres.models_business import User
 from yuxi.services.task_service import tasker
-from server.utils.auth_middleware import get_admin_user
+from server.utils.auth_middleware import get_superadmin_user
 
 tasks = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -11,14 +11,14 @@ tasks = APIRouter(prefix="/tasks", tags=["tasks"])
 async def list_tasks(
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=100),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_superadmin_user),
 ):
     """List tasks, optionally filtered by status."""
     return await tasker.list_tasks(status=status, limit=limit)
 
 
 @tasks.get("/{task_id}")
-async def get_task(task_id: str, current_user: User = Depends(get_admin_user)):
+async def get_task(task_id: str, current_user: User = Depends(get_superadmin_user)):
     """Retrieve a single task by id."""
     task = await tasker.get_task(task_id)
     if not task:
@@ -27,7 +27,7 @@ async def get_task(task_id: str, current_user: User = Depends(get_admin_user)):
 
 
 @tasks.post("/{task_id}/cancel")
-async def cancel_task(task_id: str, current_user: User = Depends(get_admin_user)):
+async def cancel_task(task_id: str, current_user: User = Depends(get_superadmin_user)):
     """Request cancellation of a task."""
     success = await tasker.cancel_task(task_id)
     if not success:
@@ -36,7 +36,7 @@ async def cancel_task(task_id: str, current_user: User = Depends(get_admin_user)
 
 
 @tasks.delete("/{task_id}")
-async def delete_task(task_id: str, current_user: User = Depends(get_admin_user)):
+async def delete_task(task_id: str, current_user: User = Depends(get_superadmin_user)):
     """Delete a task by id."""
     success = await tasker.delete_task(task_id)
     if not success:
