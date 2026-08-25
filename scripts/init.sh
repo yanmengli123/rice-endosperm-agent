@@ -78,17 +78,26 @@ ensure_jwt_env() {
 
     if ! grep -Eq '^YUXI_SECRET_MASTER_KEY=.+' .env; then
         echo "YUXI_SECRET_MASTER_KEY is missing in .env."
-        local legacy_key_file="saves/.yuxi-dev-secret-master-key"
-        if [ -f "$legacy_key_file" ] && [ "$(wc -c < "$legacy_key_file")" -ge 32 ]; then
-            IFS= read -r YUXI_SECRET_MASTER_KEY < "$legacy_key_file"
-            echo "Migrated the existing development master key into .env."
+        # 运行态共享密钥位于容器 /app/saves，宿主上映射到 docker/volumes/yuxi/
+        local legacy_key_file=""
+        for candidate in "docker/volumes/yuxi/.yuxi-dev-secret-master-key" "saves/.yuxi-dev-secret-master-key"; do
+            if [ -f "$candidate" ] && [ "$(wc -c < "$candidate")" -ge 32 ]; then
+                legacy_key_file="$candidate"
+                break
+            fi
+        done
+        if [ -n "$legacy_key_file" ]; then
+            # 共享密钥文件是无换行的十六进制串；read 对 EOF 无换行会以非零退出，
+            # 在 set -e 下中断脚本，因此改用 tr 读取并剥离空白。
+            YUXI_SECRET_MASTER_KEY=$(tr -d '[:space:]' < "$legacy_key_file")
+            echo "Migrated the existing development master key ($legacy_key_file) into .env."
         else
             read -s -p "Please enter your YUXI_SECRET_MASTER_KEY (press Enter to auto-generate): " YUXI_SECRET_MASTER_KEY
             echo ""
-            if [ -z "$YUXI_SECRET_MASTER_KEY" ]; then
-                YUXI_SECRET_MASTER_KEY=$(generate_hex 32)
-                echo "Generated YUXI_SECRET_MASTER_KEY and saved it to .env."
-            fi
+        fi
+        if [ -z "$YUXI_SECRET_MASTER_KEY" ]; then
+            YUXI_SECRET_MASTER_KEY=$(generate_hex 32)
+            echo "Generated YUXI_SECRET_MASTER_KEY and saved it to .env."
         fi
 
         set_env_value "YUXI_SECRET_MASTER_KEY" "$YUXI_SECRET_MASTER_KEY"

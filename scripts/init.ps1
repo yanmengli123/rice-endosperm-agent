@@ -77,16 +77,23 @@ function Ensure-JwtEnv {
 
     if (-not (Test-EnvValue "YUXI_SECRET_MASTER_KEY")) {
         Write-Host "YUXI_SECRET_MASTER_KEY is missing in .env." -ForegroundColor Yellow
-        $legacyKeyFile = "saves/.yuxi-dev-secret-master-key"
-        if ((Test-Path -LiteralPath $legacyKeyFile) -and (Get-Item -LiteralPath $legacyKeyFile).Length -ge 32) {
+        # 运行态共享密钥位于容器 /app/saves，宿主上映射到 docker/volumes/yuxi/
+        $legacyKeyFile = $null
+        foreach ($candidate in @("docker/volumes/yuxi/.yuxi-dev-secret-master-key", "saves/.yuxi-dev-secret-master-key")) {
+            if ((Test-Path -LiteralPath $candidate) -and (Get-Item -LiteralPath $candidate).Length -ge 32) {
+                $legacyKeyFile = $candidate
+                break
+            }
+        }
+        if ($null -ne $legacyKeyFile) {
             $YUXI_SECRET_MASTER_KEY = (Get-Content -LiteralPath $legacyKeyFile -Raw).Trim()
-            Write-Host "Migrated the existing development master key into .env." -ForegroundColor Green
+            Write-Host "Migrated the existing development master key ($legacyKeyFile) into .env." -ForegroundColor Green
         } else {
             $YUXI_SECRET_MASTER_KEY = Read-Host "Please enter your YUXI_SECRET_MASTER_KEY (press Enter to auto-generate)"
-            if ([string]::IsNullOrEmpty($YUXI_SECRET_MASTER_KEY)) {
-                $YUXI_SECRET_MASTER_KEY = New-RandomHex 32
-                Write-Host "Generated YUXI_SECRET_MASTER_KEY and saved it to .env." -ForegroundColor Green
-            }
+        }
+        if ([string]::IsNullOrEmpty($YUXI_SECRET_MASTER_KEY)) {
+            $YUXI_SECRET_MASTER_KEY = New-RandomHex 32
+            Write-Host "Generated YUXI_SECRET_MASTER_KEY and saved it to .env." -ForegroundColor Green
         }
 
         Set-EnvValue "YUXI_SECRET_MASTER_KEY" $YUXI_SECRET_MASTER_KEY
