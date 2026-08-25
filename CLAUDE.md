@@ -137,7 +137,7 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 
 - 站点品牌文案（导航栏名称、logo、登录背景、页脚版权）由后端 `/api/system/info` 下发，不要在前端硬编码：加载优先级为 `YUXI_BRAND_FILE_PATH` → `info.local.yaml`（本地覆盖，已 gitignore）→ `info.template.yaml`，配置文件在 `backend/package/yuxi/config/static/`；品牌图片放 `web/public/brand/rice-endosperm/`
 
-### 凭据加密与多租户不变量（P0–P4 引入，改动相关代码前必读）
+### 凭据加密与多租户不变量（P0–P5 引入，改动相关代码前必读）
 
 - **敏感凭据一律静态加密**：模型 API Key/Header、OCR Token、用户 BYOK 统一走 [secret_crypto.py](backend/package/yuxi/utils/secret_crypto.py)（AES-256-GCM，AAD 绑定资源标识），主密钥 `YUXI_SECRET_MASTER_KEY` 生产必填。Redis 模型/OCR 缓存（v2 键）只存密文；新增敏感字段必须复用该服务并接入启动惰性升级清扫，禁止明文落库或进缓存。
 - **Schema 变更双通道**：带数据回填/非幂等的复杂变更走版本化迁移执行器（[manager.py](backend/package/yuxi/storage/postgres/manager.py) `_VERSIONED_MIGRATIONS`，登记 `schema_migrations` 表、同事务执行一次）；仅简单幂等 DDL 允许放 `ensure_business_schema` 列表。新迁移纪律：加列 nullable → 回填 → 建约束/索引 → NOT NULL，且不设数据库默认值掩盖漏传。
@@ -145,6 +145,15 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 - **设备会话与令牌**：设备码 exchange 同时返回会话对——30 分钟短时访问令牌（JWT 带 `sid` 声明，中间件校验 DeviceSession 仍 active）+ 30 天旋转刷新令牌（`POST /auth/cli/token/refresh`）；已消费刷新令牌再次出示即判定重放并撤销整个会话族。旧 `secret` 字段保留仅为兼容 v0.1.8 客户端。
 - **usage_ledger 是计费对账唯一权威**（append-only，禁止 UPDATE/DELETE），随 run 结束写入并带 estimated 标记；`agent_runs.total_tokens` 仅是可变缓存列。
 - **RLS 已脚手架化**：conversations / agent_runs 启用行级安全（策略按会话 GUC `yuxi.uid` 过滤），应用连接为表所有者时零行为变化；激活需切换非所有者角色并注入 GUC，步骤见 `docs/vibe/2026-08-24-p4-storage-depth.md`。
+
+### 开户、权益与 BYOK 版本化（P5 引入，改动前必读）
+
+- **凭证三分类不可混用**：设备码 exchange 只应产生「设备会话对」（访问+刷新令牌），`purpose=desktop_legacy` 的静态 Key 仅保留给旧版桌面端兼容、随版本淘汰；`purpose=external_agent` 的 Key 专供外部系统调用，可带 `scopes` 能力范围，且不应获得改配置/BYOK/配额/管理权限。新增签发桌面端凭证一律走会话，不要新增长期 Key 路径。
+- **设备会话契约已闭合**：`CLIAuthTokenResponse.session`（DeviceSessionPair）是 exchange 响应的正式字段；桌面端 `ensure_active_bearer` 优先用会话、刷新失败**不得**回退静态 Key（编译器实现见 `rice-endosperm-desktop`）。给会话端点改名/删字段会直接破坏 v0.1.9+ 客户端，两端必须同步。
+- **开户走单事务编排**：`OnboardingService`（`backend/package/yuxi/services/onboarding_service.py`）统一承担「建户+成员+权益+激活凭证+审计」且在**请求级共享 AsyncSession、中途只 flush、最外层一次 commit**，审计失败会使开户回滚——不要拆成多个独立 commit 的 repo 调用。一次性激活凭证 `onboarding_activations` 只存哈希、单次消费、可撤销、24h 有效。
+- **权益以租户维度为权威**：模型接入策略/配额在 `tenant_user_entitlements`（`credential_policy ∈ {platform_only, byok_optional, byok_required}`、daily/monthly_platform_token/concurrent 限额、`byok_platform_token_exempt`、`policy_version`），**不在全局 users 表**；run 创建时把 `policy_version` 冻结进 input_payload 供结算复查。新用户默认 `platform_only`。配额预检（`_enforce_user_quota`）在 P5 后应改读权益表。
+- **BYOK 版本化不可变**：替换密钥 = 插入新 active 行并把旧行置 `superseded` 并指向新 ID（唯一约束为 `(uid, provider_id) WHERE status='active'` 部分索引）；AgentRun 冻结的 `credential_id` 永远指向不变历史版本。**绝不物理删除凭据**，撤销走 `revoked_at/revoked_by/reason` 逻辑态。`locked`（模型规格）与 `credential_policy`（凭据来源）是两个正交维度，`agents.credential_policy` 可 `inherit_user/platform_only/byok_required` 覆盖用户权益。
+- **usage_ledger 分域记账**：除 run/uid/tenant/tokens/estimated 外，P5 增加了 `credential_source`（platform/user_byok/legacy_unknown）、`credential_id`、`provider_id`、`policy_version`——历史行强制标 `legacy_unknown` 不猜测；新写入点在 `_persist_run_total_tokens`（chat_service），保证一个 run 只有一条 ledger 记录。Dashboard/对账按此分域。
 
 ### 前端开发规范
 - 使用 pnpm 管理
