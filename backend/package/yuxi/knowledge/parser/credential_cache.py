@@ -104,6 +104,10 @@ class OCRCredentialCache:
                         settings=_json.loads(raw_settings) if raw_settings else {},
                     )
         except Exception as exc:
+            from yuxi.utils.secret_crypto import SecretCryptoError
+
+            if isinstance(exc, SecretCryptoError):
+                raise
             logger.warning(f"Failed to load OCR credential cache from Redis: {exc}")
             return {}
 

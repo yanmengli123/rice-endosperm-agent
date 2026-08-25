@@ -5,6 +5,7 @@ import io
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -64,6 +65,7 @@ async def test_list_visible_skills_for_management_includes_owned_disabled_and_en
             return items
 
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    monkeypatch.setattr(svc, "_skill_in_user_tenant", AsyncMock(return_value=True))
 
     visible = await svc.list_visible_skills_for_management(None, _user("root", role="user"))
 
@@ -109,6 +111,7 @@ async def test_management_readable_skill_allows_manageable_disabled_and_enabled_
             return skill
 
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    monkeypatch.setattr(svc, "_skill_in_user_tenant", AsyncMock(return_value=True))
 
     result = await svc.get_management_readable_skill_or_raise(None, operator, skill.slug)
 
@@ -135,6 +138,7 @@ async def test_management_readable_skill_rejects_disabled_shared_readonly(monkey
             return skill
 
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    monkeypatch.setattr(svc, "_skill_in_user_tenant", AsyncMock(return_value=True))
 
     with pytest.raises(ValueError, match="不存在或无权访问"):
         await svc.get_management_readable_skill_or_raise(None, _user("root", role="user"), skill.slug)

@@ -29,8 +29,14 @@ class FakeDb:
         self.refresh = AsyncMock()
 
     async def execute(self, _stmt):
-        # P1 租户解析桩：无成员关系 → 自愈默认租户（users 角色查询返回 None）
+        # P1 租户解析桩：用户已有唯一活动租户。
         class _R:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return [SimpleNamespace(tenant_id=1, role="member", status="active")]
+
             def scalar_one_or_none(self):
                 return None
 

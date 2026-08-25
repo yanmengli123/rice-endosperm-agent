@@ -114,7 +114,12 @@ async def get_current_user(
     session_family = payload.get("sid")
     if session_family:
         device_session = (
-            await db.execute(select(DeviceSession).filter(DeviceSession.family_id == session_family))
+            await db.execute(
+                select(DeviceSession).filter(
+                    DeviceSession.family_id == session_family,
+                    DeviceSession.uid == user.uid,
+                )
+            )
         ).scalar_one_or_none()
         if device_session is None or device_session.status != "active":
             raise HTTPException(
@@ -152,12 +157,21 @@ async def get_authenticated_user(user: User | None = Depends(get_current_user)):
 
 
 # 获取可访问业务资源的用户；未绑定部门时明确拒绝。
-async def get_required_user(user: User = Depends(get_authenticated_user)):
+async def get_required_user(
+    user: User = Depends(get_authenticated_user),
+    db: AsyncSession = Depends(get_db),
+):
     if not user.department_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="当前用户未绑定部门",
         )
+    from yuxi.services.principal import PrincipalResolutionError, resolve_principal
+
+    try:
+        await resolve_principal(db, user)
+    except PrincipalResolutionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     return user
 
 

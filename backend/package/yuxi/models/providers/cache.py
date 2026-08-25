@@ -110,6 +110,10 @@ class ModelCache:
             items = json.loads(raw)
             cache = {spec: ModelInfo.from_dict(data) for spec, data in items.items()}
         except Exception as e:
+            from yuxi.utils.secret_crypto import SecretCryptoError
+
+            if isinstance(e, SecretCryptoError):
+                raise
             logger.warning(f"Failed to load model cache from Redis: {e}")
             return {}
 
@@ -183,22 +187,20 @@ class ModelCache:
     def _save_cache(self, cache: dict[str, ModelInfo]) -> None:
         from yuxi.utils.secret_crypto import encrypt_secret
 
-        try:
-            # Redis 只落密文（AAD 绑定 spec），明文仅存在于进程内存的 ModelInfo 中
-            data = {}
-            for spec, info in cache.items():
-                payload = info.to_dict()
-                payload["api_key"] = encrypt_secret(info.api_key, f"model-cache:{spec}") or ""
-                payload["headers"] = {
-                    key: encrypt_secret(value, f"model-cache-hdr:{spec}:{key}") or ""
-                    for key, value in info.headers.items()
-                    if value
-                }
-                data[spec] = payload
-            with sync_redis_client() as redis_client:
-                redis_client.set(REDIS_CACHE_KEY, json.dumps(data, ensure_ascii=False))
-        except Exception as e:
-            logger.error(f"Failed to save model cache to Redis: {e}")
+        # Redis 只落密文（AAD 绑定 spec），明文仅存在于进程内存的 ModelInfo 中。
+        # 写入失败必须传递给调用方，禁止管理接口在运行时缓存未更新时返回成功。
+        data = {}
+        for spec, info in cache.items():
+            payload = info.to_dict()
+            payload["api_key"] = encrypt_secret(info.api_key, f"model-cache:{spec}") or ""
+            payload["headers"] = {
+                key: encrypt_secret(value, f"model-cache-hdr:{spec}:{key}") or ""
+                for key, value in info.headers.items()
+                if value
+            }
+            data[spec] = payload
+        with sync_redis_client() as redis_client:
+            redis_client.set(REDIS_CACHE_KEY, json.dumps(data, ensure_ascii=False))
 
     @staticmethod
     def _get_base_url_for_type(provider: Any, model_type: str) -> str:

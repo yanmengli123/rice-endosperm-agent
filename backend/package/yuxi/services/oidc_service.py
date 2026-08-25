@@ -674,6 +674,9 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
                     "last_login": utc_now_naive(),
                 }
             )
+            from yuxi.services.principal import ensure_tenant_membership
+
+            await ensure_tenant_membership(db, new_user)
             logger.info(f"Created OIDC user: {new_user.username} ({uid})")
 
             # use_raw_username 模式下，创建占位用户记录绑定关系

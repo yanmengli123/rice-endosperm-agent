@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import Integer, String, cast, distinct, func, select, text
+from sqlalchemy import String, cast, distinct, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_db, get_superadmin_user
@@ -750,7 +750,7 @@ async def get_call_timeseries_stats(
 ):
     """获取调用分析时间序列统计（超级管理员权限）"""
     try:
-        from yuxi.storage.postgres.models_business import Conversation, Message, ToolCall
+        from yuxi.storage.postgres.models_business import Conversation, Message, ToolCall, UsageLedger
 
         # 计算时间范围（使用北京时间 UTC+8）
         now = utc_now()
@@ -817,55 +817,21 @@ async def get_call_timeseries_stats(
             )
             query = query_result.all()
         elif type == "tokens":
-            # Token消耗统计（区分input/output tokens）
-            # 先查询input tokens
+            # AgentRun 最终计量写入 append-only usage_ledger；消息元数据并非所有模型渠道都会回填。
             from sqlalchemy import literal
 
-            input_query_result = await db.execute(
+            ledger_group_format = _get_time_group_format(UsageLedger.created_at, time_range)
+            token_query_result = await db.execute(
                 select(
-                    group_format.label("date"),
-                    func.sum(
-                        func.coalesce(
-                            cast(cast(Message.extra_metadata["usage_metadata"]["input_tokens"], String), Integer), 0
-                        )
-                    ).label("count"),
-                    literal("input_tokens").label("category"),
+                    ledger_group_format.label("date"),
+                    func.sum(UsageLedger.total_tokens).label("count"),
+                    literal("total_tokens").label("category"),
                 )
-                .filter(
-                    Message.created_at >= query_start_time,
-                    Message.extra_metadata.isnot(None),
-                    Message.extra_metadata["usage_metadata"].isnot(None),
-                )
-                .group_by(group_format)
-                .order_by(group_format)
+                .filter(UsageLedger.created_at >= query_start_time)
+                .group_by(ledger_group_format)
+                .order_by(ledger_group_format)
             )
-            input_query = input_query_result.all()
-
-            # 查询output tokens
-            output_query_result = await db.execute(
-                select(
-                    group_format.label("date"),
-                    func.sum(
-                        func.coalesce(
-                            cast(cast(Message.extra_metadata["usage_metadata"]["output_tokens"], String), Integer), 0
-                        )
-                    ).label("count"),
-                    literal("output_tokens").label("category"),
-                )
-                .filter(
-                    Message.created_at >= query_start_time,
-                    Message.extra_metadata.isnot(None),
-                    Message.extra_metadata["usage_metadata"].isnot(None),
-                )
-                .group_by(group_format)
-                .order_by(group_format)
-            )
-            output_query = output_query_result.all()
-
-            # 合并两个查询结果
-            input_results = input_query
-            output_results = output_query
-            results = input_results + output_results
+            results = token_query_result.all()
         elif type == "tools":
             # 工具调用统计（按工具名称分组）
             # 为工具调用创建独立的时间格式化器（使用 PostgreSQL 兼容的 to_char + INTERVAL）
@@ -902,7 +868,7 @@ async def get_call_timeseries_stats(
             elif type == "agents":
                 categories.add("unknown_agent")
             elif type == "tokens":
-                categories.update(["input_tokens", "output_tokens"])
+                categories.add("total_tokens")
             elif type == "tools":
                 categories.add("unknown_tool")
 

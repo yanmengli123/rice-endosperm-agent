@@ -191,6 +191,16 @@ class KnowledgeFileRepository:
             result = await session.execute(select(func.count()).select_from(KnowledgeFile))
             return int(result.scalar() or 0)
 
+    async def count_by_kb_ids(self, kb_ids: list[str]) -> int:
+        normalized = [str(kb_id) for kb_id in kb_ids if kb_id]
+        if not normalized:
+            return 0
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(func.count(KnowledgeFile.id)).where(KnowledgeFile.kb_id.in_(normalized))
+            )
+            return int(result.scalar() or 0)
+
     async def list_file_ids_by_exact_statuses(
         self,
         *,

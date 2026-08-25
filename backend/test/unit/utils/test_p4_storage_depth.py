@@ -7,15 +7,27 @@ import pytest
 from yuxi.storage.postgres.models_business import UsageLedger
 
 
+class _Result:
+    def __init__(self, value=None):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
 class _CaptureDB:
-    def __init__(self):
+    def __init__(self, run=None):
         self.added = []
+        self.run = run
 
     def add(self, item):
         self.added.append(item)
 
-    async def execute(self, *_a, **_k):
-        return SimpleNamespace()
+    async def execute(self, statement, *_a, **_k):
+        text = str(statement)
+        if "agent_runs" in text:
+            return _Result(self.run)
+        return _Result(None)
 
     async def flush(self):
         return None
@@ -26,6 +38,7 @@ class TestUsageLedgerModel:
         cols = {c.name for c in UsageLedger.__table__.columns}
         assert {"run_id", "uid", "tenant_id", "model_spec", "input_tokens",
                 "output_tokens", "total_tokens", "estimated"} <= cols
+        assert UsageLedger.__table__.columns["tenant_id"].nullable is False
 
     def test_indexes_for_query_dimensions(self):
         names = " ".join(idx.name or "" for idx in UsageLedger.__table__.indexes)
@@ -37,7 +50,8 @@ class TestUsageLedgerModel:
 async def test_persist_writes_ledger_row():
     from yuxi.services.chat_service import _persist_run_total_tokens
 
-    db = _CaptureDB()
+    run = SimpleNamespace(id="run-1", uid="alice", tenant_id=7, total_tokens=None)
+    db = _CaptureDB(run=run)
     await _persist_run_total_tokens(
         db, "run-1", 123, uid="alice", model_spec="deepseek:deepseek-v4-flash", estimated=True
     )
@@ -45,28 +59,19 @@ async def test_persist_writes_ledger_row():
     assert len(ledgers) == 1
     assert ledgers[0].total_tokens == 123
     assert ledgers[0].uid == "alice"
+    assert ledgers[0].tenant_id == 7
     assert ledgers[0].estimated is True
+    assert run.total_tokens == 123
 
 
 @pytest.mark.asyncio
-async def test_persist_without_uid_skips_ledger_but_sets_total():
+async def test_persist_without_uid_uses_authoritative_run_owner():
     from yuxi.services.chat_service import _persist_run_total_tokens
 
-    db = _CaptureDB()
+    run = SimpleNamespace(id="run-2", uid="alice", tenant_id=9, total_tokens=None)
+    db = _CaptureDB(run=run)
+    await _persist_run_total_tokens(db, "run-2", 5, uid=None)
 
-    class _Repo:
-        def __init__(self, db):
-            pass
-
-        async def set_total_tokens(self, run_id, total):
-            self.called = (run_id, total)
-
-    from yuxi.repositories.agent_run_repository import AgentRunRepository
-    original = AgentRunRepository.set_total_tokens
-    AgentRunRepository.set_total_tokens = _Repo.set_total_tokens
-    try:
-        await _persist_run_total_tokens(db, "run-2", 5, uid=None)
-    finally:
-        AgentRunRepository.set_total_tokens = original
-
-    assert not [item for item in db.added if isinstance(item, UsageLedger)]
+    ledger = next(item for item in db.added if isinstance(item, UsageLedger))
+    assert ledger.uid == "alice"
+    assert ledger.tenant_id == 9

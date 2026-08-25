@@ -2,13 +2,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
 from server.utils.auth_middleware import get_admin_user
+from server.utils.knowledge_access import authorize_knowledge_path
 from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
 
-graph = APIRouter(prefix="/graph", tags=["graph"])
+graph = APIRouter(
+    prefix="/graph",
+    tags=["graph"],
+    dependencies=[Depends(authorize_knowledge_path)],
+)
 graph_kb_repository = KnowledgeBaseRepository()
 
 

@@ -43,6 +43,21 @@ class TestSecretCrypto:
         assert unseal_from_cache(sealed, "ocr-cache:mineru") == "token"
         assert unseal_from_cache("", "ocr-cache:mineru") == ""
 
+    def test_development_key_uses_configured_shared_file(self, tmp_path, monkeypatch):
+        from yuxi.utils import secret_crypto
+
+        key_file = tmp_path / "shared" / "master-key"
+        monkeypatch.delenv("YUXI_SECRET_MASTER_KEY", raising=False)
+        monkeypatch.setenv("YUXI_ENV", "development")
+        monkeypatch.setenv("YUXI_DEV_SECRET_KEY_FILE", str(key_file))
+        secret_crypto._master_key.cache_clear()
+        try:
+            sealed = secret_crypto.encrypt_secret("value", "ctx")
+            assert key_file.exists()
+            assert secret_crypto.decrypt_secret(sealed, "ctx") == "value"
+        finally:
+            secret_crypto._master_key.cache_clear()
+
 
 class TestProviderSecretPersistence:
     def _repo(self):
@@ -58,6 +73,16 @@ class TestProviderSecretPersistence:
         assert is_encrypted(sealed["headers_json"]["X-Token"])
         # 原始入参不被篡改
         assert data["api_key"] == "sk-live"
+
+    def test_masked_header_roundtrip_preserves_existing_ciphertext(self):
+        from yuxi.utils.secret_crypto import SECRET_UNCHANGED_MARKER
+
+        sealed = self._repo()(
+            "p1",
+            {"headers_json": {"X-Token": SECRET_UNCHANGED_MARKER}},
+            existing_headers={"X-Token": "enc.v1:existing"},
+        )
+        assert sealed["headers_json"] == {"X-Token": "enc.v1:existing"}
 
     def test_resolve_roundtrip(self):
         from yuxi.models.providers.service import resolve_api_key

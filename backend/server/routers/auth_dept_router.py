@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete as sqlalchemy_delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import APIKey, Department, User
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
@@ -154,6 +155,13 @@ async def create_department(
             "department_id": new_department.id,
         }
     )
+
+    # P1：新部门管理员必须持有有效成员关系，否则首个资源创建会被权威身份解析拒绝
+    from yuxi.services.principal import resolve_tenant_id
+
+    async with pg_manager.get_async_session_context() as membership_session:
+        await resolve_tenant_id(membership_session, admin_uid)
+        await membership_session.commit()
 
     # 记录操作
     await log_operation(

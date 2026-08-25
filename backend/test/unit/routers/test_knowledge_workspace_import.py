@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -8,6 +9,11 @@ from fastapi import HTTPException
 from server.routers import knowledge_router
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def allow_workspace_kb_management(monkeypatch):
+    monkeypatch.setattr(knowledge_router.knowledge_base, "check_manageable", AsyncMock(return_value=True))
 
 
 async def test_import_workspace_files_uploads_workspace_file_to_minio(tmp_path, monkeypatch):
@@ -46,7 +52,7 @@ async def test_import_workspace_files_uploads_workspace_file_to_minio(tmp_path, 
 
     result = await knowledge_router.import_workspace_files(
         knowledge_router.WorkspaceImportRequest(kb_id="db_1", paths=["/note.md"]),
-        current_user=SimpleNamespace(id="user_1"),
+        current_user=SimpleNamespace(id="user_1", uid="user_1"),
     )
 
     assert result["status"] == "success"
@@ -78,7 +84,7 @@ async def test_import_workspace_files_rejects_directory(tmp_path, monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         await knowledge_router.import_workspace_files(
             knowledge_router.WorkspaceImportRequest(kb_id="db_1", paths=["/folder"]),
-            current_user=SimpleNamespace(id="user_1"),
+            current_user=SimpleNamespace(id="user_1", uid="user_1"),
         )
 
     assert exc_info.value.status_code == 400

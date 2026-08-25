@@ -70,7 +70,9 @@ class TestUpsertAndOpen:
         assert created.masked_hint != "sk-user-secret-1"
         assert "sk-user-secret-1" not in created.api_key_ciphertext
 
-        opened = await open_user_credential_key(db, "alice", created.id)
+        opened = await open_user_credential_key(
+            db, "alice", created.id, expected_provider_id="deepseek"
+        )
         assert opened == "sk-user-secret-1"
 
     @pytest.mark.asyncio
@@ -81,13 +83,20 @@ class TestUpsertAndOpen:
         second = await upsert_user_credential(db, "alice", "deepseek", "sk-two")
         assert second.id == first.id
         assert second.status == "active"
-        assert await open_user_credential_key(db, "alice", second.id) == "sk-two"
+        assert await open_user_credential_key(
+            db, "alice", second.id, expected_provider_id="deepseek"
+        ) == "sk-two"
 
     @pytest.mark.asyncio
     async def test_owner_scoped_open(self):
         db = _FakeDB()
         created = await upsert_user_credential(db, "alice", "deepseek", "sk-alice")
-        assert await open_user_credential_key(db, "mallory", created.id) is None
+        assert await open_user_credential_key(
+            db, "mallory", created.id, expected_provider_id="deepseek"
+        ) is None
+        assert await open_user_credential_key(
+            db, "alice", created.id, expected_provider_id="siliconflow-cn"
+        ) is None
 
     @pytest.mark.asyncio
     async def test_active_lookup_filters_revoked(self):
@@ -194,6 +203,21 @@ class TestLockedModelPolicy:
 
 
 class TestCredentialOverrideSeam:
+    @pytest.mark.asyncio
+    async def test_frozen_credential_unavailable_fails_closed(self, monkeypatch):
+        from yuxi.services import chat_service, user_credential_service
+
+        async def unavailable(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(user_credential_service, "open_user_credential_key", unavailable)
+        with pytest.raises(RuntimeError, match="冻结的用户模型凭据不可用"):
+            await chat_service._activate_user_credential(
+                db=object(),
+                uid="alice",
+                meta={"user_credential": {"credential_id": 9, "provider_id": "deepseek"}},
+            )
+
     def test_apply_credential_override_swaps_matching_provider(self):
         from yuxi.agents.models import apply_credential_override, set_user_credential_override
         from yuxi.agents.models import reset_user_credential_override

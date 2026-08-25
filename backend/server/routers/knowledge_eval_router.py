@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from server.utils.auth_middleware import get_admin_user
+from server.utils.knowledge_access import authorize_knowledge_path, authorize_knowledge_resource
 from yuxi.knowledge.eval.benchmark_generation import (
     DEFAULT_BENCHMARK_GENERATION_CONCURRENCY,
     MAX_BENCHMARK_GENERATION_CONCURRENCY,
@@ -14,7 +15,22 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 
 
-evaluation = APIRouter(prefix="/evaluation", tags=["evaluation"])
+evaluation = APIRouter(
+    prefix="/evaluation",
+    tags=["evaluation"],
+    dependencies=[Depends(authorize_knowledge_path)],
+)
+
+
+async def _authorize_dataset(
+    service: EvaluationService,
+    dataset_id: str,
+    current_user: User,
+    *,
+    manage: bool,
+) -> None:
+    kb_id = await service.get_dataset_kb_id(dataset_id)
+    await authorize_knowledge_resource(current_user, kb_id, manage=manage)
 
 
 class GenerateDatasetRequest(BaseModel):
@@ -110,6 +126,7 @@ async def download_evaluation_dataset(dataset_id: str, current_user: User = Depe
     """导出评估数据集 JSONL"""
     try:
         service = EvaluationService()
+        await _authorize_dataset(service, dataset_id, current_user, manage=False)
         export_info = await service.export_dataset_jsonl(dataset_id)
         filename = export_info["filename"]
         return Response(
@@ -117,6 +134,8 @@ async def download_evaluation_dataset(dataset_id: str, current_user: User = Depe
             media_type="application/x-ndjson",
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
         )
+    except HTTPException:
+        raise
     except ValueError as e:
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=str(e))
@@ -131,8 +150,11 @@ async def delete_evaluation_dataset(dataset_id: str, current_user: User = Depend
     """删除评估数据集"""
     try:
         service = EvaluationService()
+        await _authorize_dataset(service, dataset_id, current_user, manage=True)
         await service.delete_dataset(dataset_id)
         return {"message": "success", "data": None}
+    except HTTPException:
+        raise
     except ValueError as e:
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=str(e))
@@ -172,8 +194,12 @@ async def generate_evaluation_dataset(
 @evaluation.post("/databases/{kb_id}/runs")
 async def run_evaluation(kb_id: str, request: RunEvaluationRequest, current_user: User = Depends(get_admin_user)):
     """运行RAG评估"""
+    # 数据集必须归属路径上的知识库，防止跨库 dataset_id 注入
+    service = EvaluationService()
+    await _authorize_dataset(service, request.dataset_id, current_user, manage=True)
+    if await service.get_dataset_kb_id(request.dataset_id) != kb_id:
+        raise HTTPException(status_code=404, detail="数据集不存在")
     try:
-        service = EvaluationService()
         run_id = await service.run_evaluation(
             kb_id=kb_id,
             dataset_id=request.dataset_id,

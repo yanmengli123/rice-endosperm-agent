@@ -241,7 +241,9 @@ async def issue_device_session(db: AsyncSession, user: User) -> tuple[DeviceSess
 async def rotate_device_session_refresh(db: AsyncSession, refresh_token: str) -> dict:
     """旋转刷新令牌；检测到已消费令牌再次出示时撤销整个会话族（重放攻击）。"""
     result = await db.execute(
-        select(DeviceSessionToken).filter(DeviceSessionToken.token_hash == _hash_secret(refresh_token))
+        select(DeviceSessionToken)
+        .filter(DeviceSessionToken.token_hash == _hash_secret(refresh_token))
+        .with_for_update()
     )
     token_row = result.scalar_one_or_none()
     if token_row is None:

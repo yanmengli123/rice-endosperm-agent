@@ -211,25 +211,30 @@ def _apply_model_override(input_context: dict, meta: dict | None) -> None:
         input_context["model"] = model_spec
 
 
-async def _activate_user_credential(*, db, uid: str, meta: dict | None) -> None:
+async def _activate_user_credential(*, db, uid: str, meta: dict | None):
     """P3 BYOK：按 run 冻结的凭据引用解密并激活任务级密钥覆盖。
 
     激活作用域是当前异步任务：graph 构建期间 load_chat_model 会读取该上下文，
-    任务结束自动失效；解密失败或凭据已撤销时回落平台 Key 并记录告警。
+    调用方必须在 finally 中 reset 返回的 ContextVar token。run 已冻结凭据时，
+    解密失败、凭据撤销或供应商不匹配均失败关闭，禁止意外改用平台 Key。
     """
     ref = (meta or {}).get("user_credential") or {}
     credential_id = ref.get("credential_id")
     provider_id = ref.get("provider_id")
     if not credential_id or not provider_id:
-        return
+        return None
     from yuxi.agents.models import set_user_credential_override
     from yuxi.services.user_credential_service import open_user_credential_key
 
-    api_key = await open_user_credential_key(db, str(uid), int(credential_id))
+    api_key = await open_user_credential_key(
+        db,
+        str(uid),
+        int(credential_id),
+        expected_provider_id=str(provider_id),
+    )
     if not api_key:
-        logger.warning(f"用户模型凭据不可用，回落平台 Key: credential={credential_id}")
-        return
-    set_user_credential_override(str(provider_id), api_key)
+        raise RuntimeError(f"本次运行冻结的用户模型凭据不可用: credential={credential_id}")
+    return set_user_credential_override(str(provider_id), api_key)
 
 
 def _apply_subagent_runtime_context(input_context: dict, meta: dict | None) -> None:
@@ -646,21 +651,34 @@ async def _persist_run_total_tokens(
 ) -> None:
     if not run_id or total_tokens is None:
         return
-    try:
-        await AgentRunRepository(db).set_total_tokens(run_id, total_tokens)
-    except Exception:
-        logger.warning(f"记录 run token 用量失败: run_id={run_id}")
+    from sqlalchemy import select
 
-    # P4：append-only 计费事件流；失败不阻塞主链路但必须留痕
-    if uid:
-        try:
-            from yuxi.storage.postgres.models_business import UsageLedger
+    from yuxi.storage.postgres.models_business import UsageLedger
 
-            db.add(UsageLedger(run_id=str(run_id), uid=str(uid), model_spec=model_spec,
-                               total_tokens=int(total_tokens), estimated=bool(estimated)))
-            await db.flush()
-        except Exception as exc:
-            logger.warning(f"写入 usage_ledger 失败 run_id={run_id}: {exc}")
+    repository = AgentRunRepository(db)
+    run = await repository.get_run(str(run_id))
+    if run is None:
+        raise ValueError(f"无法为不存在的 AgentRun 写入用量: {run_id}")
+    if uid is not None and str(run.uid) != str(uid):
+        raise ValueError(f"AgentRun 用量归属不匹配: run_id={run_id}")
+
+    # uid/tenant_id 只取 AgentRun 的服务端冻结值，调用方参数仅用于一致性校验。
+    run.total_tokens = int(total_tokens)
+    existing = (
+        await db.execute(select(UsageLedger.id).where(UsageLedger.run_id == str(run_id)).limit(1))
+    ).scalar_one_or_none()
+    if existing is None:
+        db.add(
+            UsageLedger(
+                run_id=str(run_id),
+                uid=str(run.uid),
+                tenant_id=run.tenant_id,
+                model_spec=model_spec,
+                total_tokens=int(total_tokens),
+                estimated=bool(estimated),
+            )
+        )
+    await db.flush()
 
 
 async def save_messages_from_langgraph_state(
@@ -1014,7 +1032,6 @@ async def stream_agent_chat(
         request_id=meta.get("request_id"),
     )
     _apply_model_override(input_context, meta)
-    await _activate_user_credential(db=db, uid=uid, meta=meta)
     _apply_subagent_runtime_context(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     context = _build_agent_context(agent, input_context)
@@ -1033,8 +1050,10 @@ async def stream_agent_chat(
     accumulated_content: list[str] = []
     trace_info: dict[str, Any] = {}
     last_agent_state_signature = ""
+    credential_context_token = None
 
     try:
+        credential_context_token = await _activate_user_credential(db=db, uid=uid, meta=meta)
         conv_repo = ConversationRepository(db)
         await _ensure_thread_bound_agent(
             conv_repo=conv_repo,
@@ -1336,6 +1355,10 @@ async def stream_agent_chat(
 
         yield make_chunk(status="error", error_type=error_type, error_message=error_msg, meta=meta)
     finally:
+        if credential_context_token is not None:
+            from yuxi.agents.models import reset_user_credential_override
+
+            reset_user_credential_override(credential_context_token)
         flush_langfuse()
 
 
@@ -1394,7 +1417,6 @@ async def stream_agent_resume(
         request_id=meta.get("request_id"),
     )
     _apply_model_override(input_context, meta)
-    await _activate_user_credential(db=db, uid=uid, meta=meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     context = _build_agent_context(agent, input_context)
     _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
@@ -1410,6 +1432,7 @@ async def stream_agent_resume(
     )
     trace_info: dict[str, Any] = {}
     last_agent_state_signature = ""
+    credential_context_token = None
 
     langgraph_config = {"configurable": {"thread_id": thread_id, "uid": uid}}
     token_usage_baseline = await _checkpoint_total_tokens(agent, langgraph_config, context=context)
@@ -1427,6 +1450,7 @@ async def stream_agent_resume(
     conv_repo = ConversationRepository(db)
 
     try:
+        credential_context_token = await _activate_user_credential(db=db, uid=uid, meta=meta)
         async for mode, payload in stream_source:
             if mode == "values":
                 agent_state = extract_agent_state(payload if isinstance(payload, dict) else {})
@@ -1607,6 +1631,10 @@ async def stream_agent_resume(
 
         yield make_resume_chunk(message=f"Error during resume: {e}", status="error")
     finally:
+        if credential_context_token is not None:
+            from yuxi.agents.models import reset_user_credential_override
+
+            reset_user_credential_override(credential_context_token)
         flush_langfuse()
 
 

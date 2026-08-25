@@ -262,7 +262,7 @@ async def set_agent_default(
 ):
     repo = AgentRepository(db)
     agent_slug = agent_id  # 兼容既有路径参数名；这里实际是 Agent.slug。
-    item = await repo.get_by_slug(agent_slug)
+    item = await repo.get_visible_by_slug(slug=agent_slug, user=current_user, kind="main")
     if not item:
         raise HTTPException(status_code=404, detail="智能体不存在")
     try:

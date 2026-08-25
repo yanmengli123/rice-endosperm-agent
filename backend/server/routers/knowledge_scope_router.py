@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
-from yuxi.repositories.agent_repository import AgentRepository, user_can_access_agent, user_can_manage_agent
+from server.utils.auth_middleware import get_admin_user, get_db, get_required_user, get_superadmin_user
+from yuxi.repositories.agent_repository import AgentRepository, user_can_manage_agent
 from yuxi.repositories.knowledge_scope_repository import (
     DEFAULT_QA_SCOPE_ID,
     KnowledgeScopeRepository,
@@ -89,7 +89,7 @@ async def get_default_qa_scope(
 @knowledge_scope.get("/default-qa/history")
 async def get_default_qa_scope_history(
     limit: int = Query(100, ge=1, le=500),
-    _current_user: User = Depends(get_admin_user),
+    _current_user: User = Depends(get_superadmin_user),
     db: AsyncSession = Depends(get_db),
 ):
     return await get_default_scope_history(db=db, limit=limit)
@@ -98,7 +98,7 @@ async def get_default_qa_scope_history(
 @knowledge_scope.get("/default-qa/versions/{version}")
 async def get_default_qa_scope_version(
     version: int,
-    _current_user: User = Depends(get_admin_user),
+    _current_user: User = Depends(get_superadmin_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -142,8 +142,12 @@ async def resolve_scope(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    agent = await AgentRepository(db).get_by_slug(payload.agent_slug)
-    if not agent or not user_can_access_agent(current_user, agent):
+    agent = await AgentRepository(db).get_visible_by_slug(
+        slug=payload.agent_slug,
+        user=current_user,
+        kind="any",
+    )
+    if not agent:
         raise HTTPException(status_code=404, detail="智能体不存在或无权访问")
     try:
         snapshot = await resolve_effective_knowledge_scope(
@@ -165,8 +169,12 @@ async def get_agent_scope_config(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    agent = await AgentRepository(db).get_by_slug(agent_slug)
-    if not agent or not user_can_access_agent(current_user, agent):
+    agent = await AgentRepository(db).get_visible_by_slug(
+        slug=agent_slug,
+        user=current_user,
+        kind="any",
+    )
+    if not agent:
         raise HTTPException(status_code=404, detail="智能体不存在或无权访问")
     config = await KnowledgeScopeRepository(db).get_agent_config(agent_slug)
     fallback = "INHERIT_GLOBAL" if agent_slug == "default-chatbot" else "LEGACY"
@@ -186,7 +194,11 @@ async def put_agent_scope_config(
         raise HTTPException(status_code=422, detail=f"scope_mode 必须是 {sorted(SCOPE_MODES)} 之一")
     if retrieval_mode is not None and retrieval_mode not in RETRIEVAL_MODES:
         raise HTTPException(status_code=422, detail=f"retrieval_mode 必须是 {sorted(RETRIEVAL_MODES)} 之一")
-    agent = await AgentRepository(db).get_by_slug(agent_slug)
+    agent = await AgentRepository(db).get_visible_by_slug(
+        slug=agent_slug,
+        user=current_user,
+        kind="any",
+    )
     if not agent:
         raise HTTPException(status_code=404, detail="智能体不存在")
     if not user_can_manage_agent(current_user, agent):

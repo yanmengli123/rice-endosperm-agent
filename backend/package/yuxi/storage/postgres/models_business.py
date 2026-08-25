@@ -154,7 +154,7 @@ class UsageLedger(Base):
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     run_id = Column(String(64), nullable=False, index=True)
     uid = Column(String, nullable=False, index=True)
-    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)
     model_spec = Column(String(200), nullable=True)
     input_tokens = Column(BigInteger, nullable=False, default=0)
     output_tokens = Column(BigInteger, nullable=False, default=0)
@@ -860,6 +860,8 @@ class ModelProvider(Base):
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, comment="更新时间")
 
     def to_dict(self) -> dict[str, Any]:
+        from yuxi.utils.secret_crypto import SECRET_UNCHANGED_MARKER
+
         return {
             "id": self.id,
             "provider_id": self.provider_id,
@@ -875,7 +877,9 @@ class ModelProvider(Base):
             "api_key_configured": bool(self.api_key),
             "capabilities": self.capabilities or [],
             "enabled_models": self.enabled_models or [],
-            "headers_json": self.headers_json or {},
+            "headers_json": {
+                key: SECRET_UNCHANGED_MARKER for key, value in (self.headers_json or {}).items() if value
+            },
             "extra_json": self.extra_json or {},
             "is_enabled": bool(self.is_enabled),
             "is_builtin": bool(self.is_builtin),
@@ -959,6 +963,8 @@ class TaskRecord(Base):
             "result": self.result,
             "error": self.error,
             "cancel_requested": bool(self.cancel_requested),
+            "created_by": self.created_by,
+            "tenant_id": self.tenant_id,
         }
 
     def to_summary_dict(self) -> dict[str, Any]:

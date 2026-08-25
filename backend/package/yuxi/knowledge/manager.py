@@ -39,49 +39,31 @@ class KnowledgeBaseManager:
     async def initialize(self):
         """异步初始化"""
         # 初始化已存在的知识库实例
-        self._initialize_existing_kbs()
+        await self._initialize_existing_kbs()
         logger.info("KnowledgeBaseManager initialized")
 
-    def _initialize_existing_kbs(self):
+    async def _initialize_existing_kbs(self):
         """初始化已存在的知识库实例"""
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
-        async def _async_init():
-            kb_repo = KnowledgeBaseRepository()
-            rows = await kb_repo.get_all()
+        kb_repo = KnowledgeBaseRepository()
+        rows = await kb_repo.get_all()
 
-            kb_types_in_use = set()
-            for row in rows:
-                kb_type = row.kb_type or "milvus"
-                if KnowledgeBaseFactory.is_type_supported(kb_type):
-                    kb_types_in_use.add(kb_type)
-                else:
-                    logger.warning(f"Skip unsupported knowledge base type during initialization: {kb_type}")
+        kb_types_in_use = set()
+        for row in rows:
+            kb_type = row.kb_type or "milvus"
+            if KnowledgeBaseFactory.is_type_supported(kb_type):
+                kb_types_in_use.add(kb_type)
+            else:
+                logger.warning(f"Skip unsupported knowledge base type during initialization: {kb_type}")
 
-            logger.info(f"[InitializeKB] 发现 {len(kb_types_in_use)} 种知识库类型: {kb_types_in_use}")
+        logger.info(f"[InitializeKB] 发现 {len(kb_types_in_use)} 种知识库类型: {kb_types_in_use}")
 
-            # 为每种使用中的知识库类型创建实例并加载元数据
-            for kb_type in kb_types_in_use:
-                if not KnowledgeBaseFactory.is_type_supported(kb_type):
-                    logger.warning(f"[InitializeKB] Skip initialization for unsupported knowledge base type: {kb_type}")
-                    continue
-                try:
-                    kb_instance = self._get_or_create_kb_instance(kb_type)
-                    # 让 KB 实例自行加载元数据
-                    await kb_instance._load_metadata()
-                    logger.info(f"[InitializeKB] {kb_type} 实例已初始化")
-                except Exception as e:
-                    logger.error(f"Failed to initialize {kb_type} knowledge base: {e}")
-                    import traceback
-
-                    logger.error(traceback.format_exc())
-
-        # 在事件循环中运行异步初始化
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_async_init())
-        except RuntimeError:
-            asyncio.run(_async_init())
+        # 初始化完成前不开放健康状态；异常向 lifespan 传播，避免“健康但不可检索”。
+        for kb_type in kb_types_in_use:
+            kb_instance = self._get_or_create_kb_instance(kb_type)
+            await kb_instance._load_metadata()
+            logger.info(f"[InitializeKB] {kb_type} 实例已初始化")
 
     def _get_or_create_kb_instance(self, kb_type: str) -> KnowledgeBase:
         """
@@ -201,6 +183,7 @@ class KnowledgeBaseManager:
             db_info["share_config"] = row.share_config or DEFAULT_SHARE_CONFIG.copy()
             db_info["additional_params"] = kb_instance.normalize_additional_params(row.additional_params)
             db_info["created_by"] = row.created_by
+            db_info["tenant_id"] = row.tenant_id
             all_databases.append(db_info)
         return {"databases": all_databases}
 
@@ -208,6 +191,17 @@ class KnowledgeBaseManager:
     def _database_info_accessible(user: dict, db_info: dict) -> bool:
         if user.get("role") == "superadmin":
             return True
+
+        # “global”是租户内全局，不是平台全局。缺少任一归属时失败关闭。
+        user_tenant_id = user.get("tenant_id")
+        database_tenant_id = db_info.get("tenant_id")
+        if user_tenant_id is None or database_tenant_id is None:
+            return False
+        try:
+            if int(user_tenant_id) != int(database_tenant_id):
+                return False
+        except (TypeError, ValueError):
+            return False
 
         user_uid = str(user.get("uid") or "")
         if user_uid and db_info.get("created_by") == user_uid:
@@ -246,6 +240,8 @@ class KnowledgeBaseManager:
         # 超级管理员有权访问所有
         if user.get("role") == "superadmin":
             return True
+        if not str(user.get("uid") or "").strip():
+            return False
 
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
@@ -254,12 +250,44 @@ class KnowledgeBaseManager:
         if kb is None:
             return False
 
+        from yuxi.services.principal import resolve_tenant_id
+        from yuxi.storage.postgres.manager import pg_manager
+
+        async with pg_manager.get_async_session_context() as session:
+            tenant_id = await resolve_tenant_id(session, str(user.get("uid") or ""))
+
         return self._database_info_accessible(
-            user,
+            {**user, "tenant_id": tenant_id},
             {
                 "created_by": kb.created_by,
                 "share_config": kb.share_config,
+                "tenant_id": kb.tenant_id,
             },
+        )
+
+    async def check_manageable(self, user: dict, kb_id: str) -> bool:
+        """租户内管理权限：平台管理员、创建者、创建者同部门的租户管理员。"""
+        if user.get("role") == "superadmin":
+            return True
+        if not await self.check_accessible(user, kb_id):
+            return False
+
+        from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+        from yuxi.repositories.user_repository import UserRepository
+
+        kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
+        if kb is None or kb.created_by == "system":
+            return False
+        uid = str(user.get("uid") or "")
+        if kb.created_by == uid:
+            return True
+        if user.get("role") != "admin" or user.get("department_id") is None:
+            return False
+        creator = await UserRepository().get_by_uid(str(kb.created_by or ""))
+        return bool(
+            creator
+            and creator.department_id is not None
+            and int(creator.department_id) == int(user["department_id"])
         )
 
     async def get_databases_by_uid(self, uid: str) -> dict:
@@ -287,6 +315,16 @@ class KnowledgeBaseManager:
                 "department_id": user.department_id,
             }
 
+        if user_info.get("role") != "superadmin":
+            from yuxi.services.principal import resolve_tenant_id
+            from yuxi.storage.postgres.manager import pg_manager
+
+            async with pg_manager.get_async_session_context() as session:
+                user_info = {
+                    **user_info,
+                    "tenant_id": await resolve_tenant_id(session, str(user_info.get("uid") or "")),
+                }
+
         user_role = user_info.get("role")
         user_dept = user_info.get("department_id")
         logger.info(f"Getting databases for user with role {user_role} and department {user_dept}")
@@ -303,7 +341,7 @@ class KnowledgeBaseManager:
 
         return {"databases": filtered_databases}
 
-    async def database_name_exists(self, database_name: str) -> bool:
+    async def database_name_exists(self, database_name: str, *, uid: str | None = None) -> bool:
         """检查知识库名称是否已存在"""
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
         from yuxi.storage.postgres.manager import pg_manager
@@ -314,7 +352,16 @@ class KnowledgeBaseManager:
 
         kb_repo = KnowledgeBaseRepository()
         rows = await kb_repo.get_all()
+        tenant_id = None
+        if uid:
+            from yuxi.services.principal import resolve_tenant_id
+
+            async with pg_manager.get_async_session_context() as session:
+                tenant_id = await resolve_tenant_id(session, uid)
         for row in rows:
+            if tenant_id is not None:
+                if row.tenant_id is None or int(row.tenant_id) != int(tenant_id):
+                    continue
             if (row.name or "").lower() == database_name.lower():
                 return True
         return False
@@ -358,7 +405,7 @@ class KnowledgeBaseManager:
             raise ValueError(f"Unsupported knowledge base type: {kb_type}. Available types: {available_types}")
 
         # 检查名称是否已存在
-        if await self.database_name_exists(database_name):
+        if await self.database_name_exists(database_name, uid=created_by):
             raise ValueError(f"知识库名称 '{database_name}' 已存在，请使用其他名称")
 
         share_config = self._normalize_share_config(
@@ -855,13 +902,18 @@ class KnowledgeBaseManager:
             }
         return info
 
-    async def get_statistics(self) -> dict:
+    async def get_statistics(self, user: User | dict | None = None) -> dict:
         """获取统计信息"""
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
         from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
 
         kb_repo = KnowledgeBaseRepository()
         rows = await kb_repo.get_all()
+
+        if user is not None:
+            allowed = await self.get_databases_by_user(user)
+            allowed_ids = {str(item.get("kb_id")) for item in allowed.get("databases", [])}
+            rows = [row for row in rows if str(row.kb_id) in allowed_ids]
 
         stats = {"total_databases": len(rows), "kb_types": {}, "total_files": 0}
 
@@ -872,7 +924,12 @@ class KnowledgeBaseManager:
                 stats["kb_types"][kb_type] = 0
             stats["kb_types"][kb_type] += 1
 
-        stats["total_files"] = await KnowledgeFileRepository().count_all()
+        if user is None:
+            stats["total_files"] = await KnowledgeFileRepository().count_all()
+        else:
+            stats["total_files"] = await KnowledgeFileRepository().count_by_kb_ids(
+                [str(row.kb_id) for row in rows]
+            )
 
         return stats
 

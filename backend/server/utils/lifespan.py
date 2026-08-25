@@ -27,13 +27,15 @@ async def lifespan(app: FastAPI):
         await pg_manager.ensure_business_schema()
         await pg_manager.ensure_knowledge_schema()
     except Exception as e:
-        logger.error(f"Failed to initialize database during startup: {e}")
+        logger.exception(f"Failed to initialize database during startup: {e}")
+        raise
 
     # 确保内置 MCP 服务器定义存在于数据库
     try:
         await ensure_builtin_mcp_servers_in_db()
     except Exception as e:
-        logger.error(f"Failed to ensure builtin MCP servers during startup: {e}")
+        logger.exception(f"Failed to ensure builtin MCP servers during startup: {e}")
+        raise
 
     try:
         from yuxi.agents.skills.service import init_builtin_skills
@@ -41,7 +43,8 @@ async def lifespan(app: FastAPI):
         async with pg_manager.get_async_session_context() as session:
             await init_builtin_skills(session)
     except Exception as e:
-        logger.error(f"Failed to initialize builtin skills during startup: {e}")
+        logger.exception(f"Failed to initialize builtin skills during startup: {e}")
+        raise
 
     try:
         from yuxi.repositories.agent_repository import AgentRepository
@@ -53,14 +56,16 @@ async def lifespan(app: FastAPI):
             await repository.ensure_web_search_subagent()
             await repository.ensure_deep_research_agents()
     except Exception as e:
-        logger.error(f"Failed to ensure default agent during startup: {e}")
+        logger.exception(f"Failed to ensure default agent during startup: {e}")
+        raise
 
     # 初始化内置模型供应商配置
     try:
         async with pg_manager.get_async_session_context() as session:
             await ensure_builtin_model_providers_in_db(session)
     except Exception as e:
-        logger.error(f"Failed to ensure builtin model providers during startup: {e}")
+        logger.exception(f"Failed to ensure builtin model providers during startup: {e}")
+        raise
 
     # 存量明文凭据惰性加密升级（P0）：模型供应商 API Key / Header 值
     try:
@@ -82,14 +87,15 @@ async def lifespan(app: FastAPI):
                     for key, value in headers.items()
                     if value and not is_encrypted(str(value))
                 }
-                if sealed_headers != headers:
+                if sealed_headers:
                     provider.headers_json = {**headers, **sealed_headers}
                     changed = True
                 if changed:
                     logger.info(f"已加密升级供应商明文凭据: {provider.provider_id}")
             await session.commit()
     except Exception as e:
-        logger.error(f"Failed to encrypt legacy provider credentials during startup: {e}")
+        logger.exception(f"Failed to encrypt legacy provider credentials during startup: {e}")
+        raise
 
     # 初始化模型缓存（v2 模型选择使用）
     try:
@@ -100,7 +106,8 @@ async def lifespan(app: FastAPI):
             providers = await get_all_model_providers(session)
             model_cache.rebuild(providers)
     except Exception as e:
-        logger.error(f"Failed to initialize model cache during startup: {e}")
+        logger.exception(f"Failed to initialize model cache during startup: {e}")
+        raise
 
     # 初始化 OCR 云服务配置与跨进程凭证缓存
     try:
@@ -134,11 +141,13 @@ async def lifespan(app: FastAPI):
                     logger.info(f"已加密升级 OCR 明文 Token: {row.service_id}")
                 await session.commit()
         except Exception as e:
-            logger.error(f"Failed to encrypt legacy OCR tokens during startup: {e}")
+            logger.exception(f"Failed to encrypt legacy OCR tokens during startup: {e}")
+            raise
         async with pg_manager.get_async_session_context() as session:
             ocr_credential_cache.rebuild(await get_all_ocr_providers(session))
     except Exception as e:
-        logger.error(f"Failed to initialize OCR provider credentials during startup: {e}")
+        logger.exception(f"Failed to initialize OCR provider credentials during startup: {e}")
+        raise
 
     # 初始化知识库管理器
     if os.environ.get("LITE_MODE", "").lower() in ("true", "1"):
@@ -147,14 +156,16 @@ async def lifespan(app: FastAPI):
         try:
             await knowledge_base.initialize()
         except Exception as e:
-            logger.error(f"Failed to initialize knowledge base manager: {e}")
+            logger.exception(f"Failed to initialize knowledge base manager: {e}")
+            raise
 
     # 预热 Redis（run 队列）
     try:
         redis = await get_redis_client()
         await redis.ping()
     except Exception as e:
-        logger.warning(f"Run queue redis unavailable on startup: {e}")
+        logger.exception(f"Run queue redis unavailable on startup: {e}")
+        raise
 
     # 启动运行时配置同步线程（周期性从 Redis 拉取管理员保存的配置快照）
     config.start_runtime_sync()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,6 +13,17 @@ from yuxi.services.input_message_service import (
     build_chat_input_message_from_openai_content,
     restore_chat_input_message,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_user_byok_credential(monkeypatch):
+    from yuxi.services import user_credential_service
+
+    monkeypatch.setattr(
+        user_credential_service,
+        "get_active_user_credential",
+        AsyncMock(return_value=None),
+    )
 
 
 def _chat_input(content: str, image_content: str | None = None):

@@ -4,7 +4,7 @@ import re
 import uuid
 from typing import Any, Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, AGENT_ICON, BRAND_NAME
@@ -102,6 +102,15 @@ FACT_VERIFIER_SYSTEM_PROMPT = """你是「事实核查员」子智能体，专�
 - 明确标注无法查证或来源相互冲突的论断。
 - 不要编造来源或链接。"""
 
+PLATFORM_BUILTIN_AGENT_SLUGS = (
+    DEFAULT_AGENT_SLUG,
+    GENERAL_PURPOSE_AGENT_SLUG,
+    WEB_SEARCH_AGENT_SLUG,
+    DEEP_RESEARCH_AGENT_SLUG,
+    RESEARCH_EXPLORER_AGENT_SLUG,
+    FACT_VERIFIER_AGENT_SLUG,
+)
+
 ACCESS_LEVELS = SHARE_ACCESS_LEVELS
 ADMIN_ROLES = {"admin", "superadmin"}
 
@@ -198,6 +207,16 @@ def _slugify(value: str | None) -> str:
 class AgentRepository:
     def __init__(self, db_session: AsyncSession):
         self.db = db_session
+
+    async def _tenant_visible_clause(self, user: User):
+        """平台内置 Agent 跨租户可见；其他 Agent 的 global 只表示租户内全局。"""
+        if user.role == "superadmin":
+            return None
+        tenant_id = await resolve_tenant_id(self.db, str(user.uid))
+        return or_(
+            Agent.tenant_id == tenant_id,
+            Agent.slug.in_(PLATFORM_BUILTIN_AGENT_SLUGS),
+        )
 
     async def ensure_default_agent(self, *, created_by: str | None = None) -> Agent:
         agent = await self.get_by_slug(DEFAULT_AGENT_SLUG)
@@ -380,6 +399,9 @@ class AgentRepository:
     async def list_visible(self, *, user: User, include_subagent_definitions: bool = False) -> list[Agent]:
         """列出用户可见的主智能体，只有显式请求时才包含子智能体定义。"""
         stmt = select(Agent)
+        tenant_clause = await self._tenant_visible_clause(user)
+        if tenant_clause is not None:
+            stmt = stmt.where(tenant_clause)
         if not include_subagent_definitions:
             stmt = stmt.where(Agent.is_subagent.is_(False))
         result = await self.db.execute(stmt.order_by(Agent.is_default.desc(), Agent.id.asc()))
@@ -389,9 +411,11 @@ class AgentRepository:
         return [agent for agent in agents if user_can_access_agent(user, agent)]
 
     async def list_visible_subagents(self, *, user: User) -> list[Agent]:
-        result = await self.db.execute(
-            select(Agent).where(Agent.is_subagent.is_(True)).order_by(Agent.name.asc(), Agent.id.asc())
-        )
+        stmt = select(Agent).where(Agent.is_subagent.is_(True))
+        tenant_clause = await self._tenant_visible_clause(user)
+        if tenant_clause is not None:
+            stmt = stmt.where(tenant_clause)
+        result = await self.db.execute(stmt.order_by(Agent.name.asc(), Agent.id.asc()))
         agents = list(result.scalars().all())
         if user.role == "superadmin":
             return agents
@@ -409,7 +433,11 @@ class AgentRepository:
         self, *, slug: str, user: User, kind: Literal["main", "subagent", "any"] = "main"
     ) -> Agent | None:
         """按 slug 读取用户可见智能体，并按入口语义过滤主/子智能体。"""
-        agent = await self.get_by_slug(slug)
+        stmt = select(Agent).where(Agent.slug == slug)
+        tenant_clause = await self._tenant_visible_clause(user)
+        if tenant_clause is not None:
+            stmt = stmt.where(tenant_clause)
+        agent = (await self.db.execute(stmt)).scalar_one_or_none()
         if not agent:
             return None
         if not user_can_access_agent(user, agent):

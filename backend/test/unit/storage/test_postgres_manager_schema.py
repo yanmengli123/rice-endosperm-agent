@@ -246,3 +246,22 @@ async def test_ensure_business_schema_disables_enabled_api_keys_with_stale_depar
 
     assert "SET is_enabled = FALSE" in statements
     assert "key.department_id IS DISTINCT FROM users.department_id" in statements
+
+
+@pytest.mark.asyncio
+async def test_versioned_migrations_take_advisory_lock_before_reading_versions():
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager._apply_versioned_migrations()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+    assert "pg_advisory_xact_lock" in statements
+    assert statements.index("pg_advisory_xact_lock") < statements.index("SELECT version FROM schema_migrations")

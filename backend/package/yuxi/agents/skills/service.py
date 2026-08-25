@@ -105,6 +105,17 @@ def is_builtin_skill(item: Skill | dict) -> bool:
     return source_type == "builtin"
 
 
+async def _skill_in_user_tenant(db: AsyncSession, user: User, skill: Skill) -> bool:
+    """内置 Skill 是平台资源；上传/远程 Skill 的共享范围只在所属租户内生效。"""
+    if user.role == "superadmin" or is_builtin_skill(skill):
+        return True
+    if skill.tenant_id is None:
+        return False
+    from yuxi.services.principal import resolve_tenant_id
+
+    return int(skill.tenant_id) == await resolve_tenant_id(db, str(user.uid))
+
+
 def get_allowed_skill_access_levels(user: User) -> list[str]:
     if user.role in ADMIN_ROLES:
         return ["global", "department", "user"]
@@ -398,12 +409,17 @@ async def list_accessible_skills(
 ) -> list[Skill]:
     repo = SkillRepository(db)
     items = await repo.list_enabled() if require_enabled else await repo.list_all()
+    items = [item for item in items if await _skill_in_user_tenant(db, user, item)]
     return [item for item in items if user_can_access_skill(user, item, require_enabled=require_enabled)]
 
 
 async def list_manageable_skills(db: AsyncSession, user: User) -> list[Skill]:
     repo = SkillRepository(db)
-    return [item for item in await repo.list_all() if user_can_manage_skill(user, item)]
+    return [
+        item
+        for item in await repo.list_all()
+        if await _skill_in_user_tenant(db, user, item) and user_can_manage_skill(user, item)
+    ]
 
 
 async def list_visible_skills_for_management(db: AsyncSession, user: User) -> list[Skill]:
@@ -411,6 +427,8 @@ async def list_visible_skills_for_management(db: AsyncSession, user: User) -> li
     visible: list[Skill] = []
     seen: set[str] = set()
     for item in await repo.list_all():
+        if not await _skill_in_user_tenant(db, user, item):
+            continue
         if item.slug in seen:
             continue
         if user_can_manage_skill(user, item) or (item.enabled and user_can_access_skill(user, item)):
@@ -1048,20 +1066,24 @@ async def get_skill_or_raise(db: AsyncSession, slug: str) -> Skill:
 
 async def get_accessible_skill_or_raise(db: AsyncSession, user: User, slug: str) -> Skill:
     item = await get_skill_or_raise(db, slug)
-    if not user_can_access_skill(user, item):
+    if not await _skill_in_user_tenant(db, user, item) or not user_can_access_skill(user, item):
         raise ValueError(f"技能 '{slug}' 不存在或无权访问")
     return item
 
 
 async def get_management_readable_skill_or_raise(db: AsyncSession, user: User, slug: str) -> Skill:
     item = await get_skill_or_raise(db, slug)
-    if not user_can_manage_skill(user, item) and not user_can_access_skill(user, item):
+    if not await _skill_in_user_tenant(db, user, item) or (
+        not user_can_manage_skill(user, item) and not user_can_access_skill(user, item)
+    ):
         raise ValueError(f"技能 '{slug}' 不存在或无权访问")
     return item
 
 
 async def get_manageable_skill_or_raise(db: AsyncSession, user: User, slug: str) -> Skill:
     item = await get_skill_or_raise(db, slug)
+    if not await _skill_in_user_tenant(db, user, item):
+        raise ValueError(f"技能 '{slug}' 不存在或无权管理")
     creator_dept: int | None = None
     needs_lookup = (
         user.role == "admin"

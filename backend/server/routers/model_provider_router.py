@@ -29,13 +29,10 @@ async def _refresh_model_cache() -> None:
     """刷新模型缓存（CRUD 操作后调用）。"""
     from yuxi.models.providers.cache import model_cache
 
-    try:
-        async with pg_manager.get_async_session_context() as session:
-            providers = await get_all_model_providers(session)
-            model_cache.rebuild(providers)
-            logger.info(f"Model cache refreshed: {len(model_cache.get_all_specs())} models loaded")
-    except Exception as e:
-        logger.error(f"Failed to refresh model cache: {e}")
+    async with pg_manager.get_async_session_context() as session:
+        providers = await get_all_model_providers(session)
+        model_cache.rebuild(providers)
+        logger.info(f"Model cache refreshed: {len(model_cache.get_all_specs())} models loaded")
 
 
 class ModelProviderPayload(BaseModel):

@@ -88,6 +88,7 @@ async def test_document_file_exists_route_accepts_filename_with_slashes(monkeypa
     app = FastAPI()
     app.include_router(knowledge_router.knowledge, prefix="/api")
     app.dependency_overrides[knowledge_router.get_admin_user] = fake_admin_user
+    app.dependency_overrides[knowledge_router.authorize_knowledge_path] = lambda: None
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(
@@ -281,7 +282,7 @@ async def test_index_documents_uses_uid_for_operator(monkeypatch):
         captured["operator_id"] = operator_id
         return {"file_id": file_id, "status": "indexed"}
 
-    async def fake_enqueue(name: str, task_type: str, payload: dict, coroutine):
+    async def fake_enqueue(name: str, task_type: str, payload: dict, coroutine, **_kwargs):
         await coroutine(FakeTaskContext())
         return SimpleNamespace(id="task_1")
 
@@ -579,7 +580,7 @@ async def test_add_documents_auto_index_returns_one_final_result_per_item(monkey
     async def fake_index_file(kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None):
         return {"file_id": file_id, "status": "indexed"}
 
-    async def fake_enqueue(name: str, task_type: str, payload: dict, coroutine):
+    async def fake_enqueue(name: str, task_type: str, payload: dict, coroutine, **_kwargs):
         await coroutine(context)
         return SimpleNamespace(id="task_1")
 
@@ -649,7 +650,7 @@ async def test_add_documents_auto_index_treats_error_none_as_success(monkeypatch
     async def fake_index_file(kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None):
         return {"file_id": file_id, "status": "indexed", "error": None}
 
-    async def fake_enqueue(name: str, task_type: str, payload: dict, coroutine):
+    async def fake_enqueue(name: str, task_type: str, payload: dict, coroutine, **_kwargs):
         await coroutine(context)
         return SimpleNamespace(id="task_1")
 

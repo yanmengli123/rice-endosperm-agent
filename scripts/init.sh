@@ -75,6 +75,24 @@ ensure_jwt_env() {
 
         set_env_value "YUXI_INSTANCE_ID" "$YUXI_INSTANCE_ID"
     fi
+
+    if ! grep -Eq '^YUXI_SECRET_MASTER_KEY=.+' .env; then
+        echo "YUXI_SECRET_MASTER_KEY is missing in .env."
+        local legacy_key_file="saves/.yuxi-dev-secret-master-key"
+        if [ -f "$legacy_key_file" ] && [ "$(wc -c < "$legacy_key_file")" -ge 32 ]; then
+            IFS= read -r YUXI_SECRET_MASTER_KEY < "$legacy_key_file"
+            echo "Migrated the existing development master key into .env."
+        else
+            read -s -p "Please enter your YUXI_SECRET_MASTER_KEY (press Enter to auto-generate): " YUXI_SECRET_MASTER_KEY
+            echo ""
+            if [ -z "$YUXI_SECRET_MASTER_KEY" ]; then
+                YUXI_SECRET_MASTER_KEY=$(generate_hex 32)
+                echo "Generated YUXI_SECRET_MASTER_KEY and saved it to .env."
+            fi
+        fi
+
+        set_env_value "YUXI_SECRET_MASTER_KEY" "$YUXI_SECRET_MASTER_KEY"
+    fi
 }
 
 ensure_sandbox_env() {
@@ -151,6 +169,13 @@ else
         echo "Generated YUXI_INSTANCE_ID and saved it to .env."
     fi
 
+    read -s -p "Please enter your YUXI_SECRET_MASTER_KEY (press Enter to auto-generate): " YUXI_SECRET_MASTER_KEY
+    echo ""
+    if [ -z "$YUXI_SECRET_MASTER_KEY" ]; then
+        YUXI_SECRET_MASTER_KEY=$(generate_hex 32)
+        echo "Generated YUXI_SECRET_MASTER_KEY and saved it to .env."
+    fi
+
     read -s -p "Please enter your SANDBOX_PROVISIONER_TOKEN (press Enter to auto-generate): " SANDBOX_PROVISIONER_TOKEN
     echo ""
     if [ -z "$SANDBOX_PROVISIONER_TOKEN" ]; then
@@ -175,6 +200,7 @@ EOF
 # JWT security settings
 JWT_SECRET_KEY=${JWT_SECRET_KEY}
 YUXI_INSTANCE_ID=${YUXI_INSTANCE_ID}
+YUXI_SECRET_MASTER_KEY=${YUXI_SECRET_MASTER_KEY}
 SANDBOX_PROVISIONER_TOKEN=${SANDBOX_PROVISIONER_TOKEN}
 EOF
 

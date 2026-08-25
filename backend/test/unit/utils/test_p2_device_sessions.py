@@ -26,6 +26,7 @@ class _FakeDB:
         self.user_row = user_row
         self.added = []
         self.committed = 0
+        self.statements = []
 
     def add(self, item):
         self.added.append(item)
@@ -43,6 +44,7 @@ class _FakeDB:
 
     async def execute(self, stmt):
         text = str(stmt)
+        self.statements.append(text)
         if "device_session_tokens" in text:
             if "used_at IS NULL" in text or "token_hash" in text:
                 return _Result(self.token_row)
@@ -83,7 +85,11 @@ async def test_rotate_issues_new_refresh_and_marks_old_used():
         id=1, family_id=str(uuid4()), uid="alice", status="active", last_refreshed_at=None
     )
     token_row = SimpleNamespace(
-        id=9, session_id=1, token_hash=auth_service._hash_secret("rt-old"), expires_at=now.replace(year=2030), used_at=None
+        id=9,
+        session_id=1,
+        token_hash=auth_service._hash_secret("rt-old"),
+        expires_at=now.replace(year=2030),
+        used_at=None,
     )
     db = _scripted_session_db(session_row, token_row, _user("alice"))
 
@@ -93,6 +99,7 @@ async def test_rotate_issues_new_refresh_and_marks_old_used():
     assert token_row.used_at is not None
     assert session_row.last_refreshed_at is not None
     assert any(isinstance(item, auth_service.DeviceSessionToken) for item in db.added)
+    assert "FOR UPDATE" in db.statements[0]
 
 
 @pytest.mark.asyncio
@@ -100,7 +107,11 @@ async def test_replayed_token_revokes_whole_family():
     now = auth_service.utc_now_naive()
     session_row = SimpleNamespace(id=1, family_id=str(uuid4()), uid="alice", status="active")
     token_row = SimpleNamespace(
-        id=9, session_id=1, token_hash=auth_service._hash_secret("rt-used"), expires_at=now.replace(year=2030), used_at=now
+        id=9,
+        session_id=1,
+        token_hash=auth_service._hash_secret("rt-used"),
+        expires_at=now.replace(year=2030),
+        used_at=now,
     )
     db = _scripted_session_db(session_row, token_row, None)
 
@@ -125,7 +136,11 @@ async def test_revoked_session_rejects_rotation():
     now = auth_service.utc_now_naive()
     session_row = SimpleNamespace(id=1, family_id=str(uuid4()), uid="alice", status="revoked")
     token_row = SimpleNamespace(
-        id=9, session_id=1, token_hash=auth_service._hash_secret("rt-x"), expires_at=now.replace(year=2030), used_at=None
+        id=9,
+        session_id=1,
+        token_hash=auth_service._hash_secret("rt-x"),
+        expires_at=now.replace(year=2030),
+        used_at=None,
     )
     db = _scripted_session_db(session_row, token_row, None)
     with pytest.raises(auth_service.CLIAuthError) as exc_info:

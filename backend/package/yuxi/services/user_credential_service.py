@@ -107,13 +107,20 @@ async def get_active_user_credential(
     return result.scalar_one_or_none()
 
 
-async def open_user_credential_key(db: AsyncSession, uid: str, credential_id: int) -> str | None:
-    """Worker 执行期按凭据 id 解密；凭据已撤销/删除时返回 None（调用方回落平台 Key）。"""
+async def open_user_credential_key(
+    db: AsyncSession,
+    uid: str,
+    credential_id: int,
+    *,
+    expected_provider_id: str,
+) -> str | None:
+    """按冻结引用解密；同时校验所有者、状态和供应商，防止引用被挪用。"""
     result = await db.execute(select(UserModelCredential).where(UserModelCredential.id == credential_id))
     credential = result.scalar_one_or_none()
     if (
         credential is None
         or credential.uid != uid
+        or credential.provider_id != expected_provider_id
         or credential.status != UserModelCredential.CREDENTIAL_STATUS_ACTIVE
     ):
         return None

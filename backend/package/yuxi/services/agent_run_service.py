@@ -589,17 +589,13 @@ async def create_agent_run_view(
 
     # P3 BYOK：用户在该供应商下配置了自有凭据时，冻结凭据 id 供 Worker 执行时解密注入
     user_credential_ref = None
-    try:
-        from yuxi.services.user_credential_service import get_active_user_credential
+    from yuxi.services.user_credential_service import get_active_user_credential
 
-        provider_id = resolved_model_spec.split(":", 1)[0] if resolved_model_spec else None
-        if provider_id:
-            credential = await get_active_user_credential(db=db, uid=current_uid, provider_id=provider_id)
-            if credential is not None:
-                user_credential_ref = {"credential_id": credential.id, "provider_id": provider_id}
-    except Exception as exc:
-        logger.warning(f"解析用户模型凭据失败，回落平台凭据: {exc}")
-        user_credential_ref = None
+    provider_id = resolved_model_spec.split(":", 1)[0] if resolved_model_spec else None
+    if provider_id:
+        credential = await get_active_user_credential(db=db, uid=current_uid, provider_id=provider_id)
+        if credential is not None:
+            user_credential_ref = {"credential_id": credential.id, "provider_id": provider_id}
 
     parent_payload = scope.parent_run.input_payload if run_type == "resume" else None
     knowledge_scope_snapshot = (

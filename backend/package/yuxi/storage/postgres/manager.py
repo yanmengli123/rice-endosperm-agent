@@ -843,6 +843,36 @@ class PostgresManager(metaclass=SingletonMeta):
                     )
                 )
 
+    async def _migration_0007_usage_ledger_integrity(self, conn) -> None:
+        """补齐账本租户归属，并保证每个 run 只产生一条最终计量事件。"""
+        await conn.execute(
+            text(
+                "UPDATE usage_ledger AS ledger SET tenant_id = runs.tenant_id "
+                "FROM agent_runs AS runs "
+                "WHERE ledger.run_id = runs.id AND ledger.tenant_id IS NULL"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM usage_ledger older USING usage_ledger newer "
+                "WHERE older.run_id = newer.run_id AND older.id < newer.id"
+            )
+        )
+        await conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_ledger_run_id ON usage_ledger(run_id)")
+        )
+
+    async def _migration_0008_usage_ledger_tenant_required(self, conn) -> None:
+        """计费账本必须有权威租户归属，拒绝继续容忍不可对账事件。"""
+        orphan_count = (
+            await conn.execute(text("SELECT count(*) FROM usage_ledger WHERE tenant_id IS NULL"))
+        ).scalar()
+        if int(orphan_count or 0) > 0:
+            raise RuntimeError(
+                f"usage_ledger 仍有 {orphan_count} 条无法确定租户归属的记录；请先完成审计修复"
+            )
+        await conn.execute(text("ALTER TABLE usage_ledger ALTER COLUMN tenant_id SET NOT NULL"))
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
@@ -850,11 +880,16 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0004_model_credentials", "_migration_0004_model_credentials"),
         ("0005_usage_ledger", "_migration_0005_usage_ledger"),
         ("0006_rls_scaffold", "_migration_0006_rls_scaffold"),
+        ("0007_usage_ledger_integrity", "_migration_0007_usage_ledger_integrity"),
+        ("0008_usage_ledger_tenant_required", "_migration_0008_usage_ledger_tenant_required"),
     ]
 
     async def _apply_versioned_migrations(self):
         self._check_initialized()
         async with self.async_engine.begin() as conn:
+            # API 与 Worker 都会在启动时执行迁移。事务级 advisory lock 保证同一数据库
+            # 只有一个进程读取/应用版本，避免双方都观察到“未执行”后重复 DDL/INSERT。
+            await conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('yuxi-schema-migrations'))"))
             await conn.execute(
                 text(
                     "CREATE TABLE IF NOT EXISTS schema_migrations ("

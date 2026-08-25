@@ -74,6 +74,23 @@ function Ensure-JwtEnv {
 
         Set-EnvValue "YUXI_INSTANCE_ID" $YUXI_INSTANCE_ID
     }
+
+    if (-not (Test-EnvValue "YUXI_SECRET_MASTER_KEY")) {
+        Write-Host "YUXI_SECRET_MASTER_KEY is missing in .env." -ForegroundColor Yellow
+        $legacyKeyFile = "saves/.yuxi-dev-secret-master-key"
+        if ((Test-Path -LiteralPath $legacyKeyFile) -and (Get-Item -LiteralPath $legacyKeyFile).Length -ge 32) {
+            $YUXI_SECRET_MASTER_KEY = (Get-Content -LiteralPath $legacyKeyFile -Raw).Trim()
+            Write-Host "Migrated the existing development master key into .env." -ForegroundColor Green
+        } else {
+            $YUXI_SECRET_MASTER_KEY = Read-Host "Please enter your YUXI_SECRET_MASTER_KEY (press Enter to auto-generate)"
+            if ([string]::IsNullOrEmpty($YUXI_SECRET_MASTER_KEY)) {
+                $YUXI_SECRET_MASTER_KEY = New-RandomHex 32
+                Write-Host "Generated YUXI_SECRET_MASTER_KEY and saved it to .env." -ForegroundColor Green
+            }
+        }
+
+        Set-EnvValue "YUXI_SECRET_MASTER_KEY" $YUXI_SECRET_MASTER_KEY
+    }
 }
 
 function Ensure-SandboxEnv {
@@ -148,6 +165,12 @@ if (Test-Path ".env") {
         Write-Host "Generated YUXI_INSTANCE_ID and saved it to .env." -ForegroundColor Green
     }
 
+    $YUXI_SECRET_MASTER_KEY = Read-Host "Please enter your YUXI_SECRET_MASTER_KEY (press Enter to auto-generate)"
+    if ([string]::IsNullOrEmpty($YUXI_SECRET_MASTER_KEY)) {
+        $YUXI_SECRET_MASTER_KEY = New-RandomHex 32
+        Write-Host "Generated YUXI_SECRET_MASTER_KEY and saved it to .env." -ForegroundColor Green
+    }
+
     $SANDBOX_PROVISIONER_TOKEN = Read-Host "Please enter your SANDBOX_PROVISIONER_TOKEN (press Enter to auto-generate)"
     if ([string]::IsNullOrEmpty($SANDBOX_PROVISIONER_TOKEN)) {
         $SANDBOX_PROVISIONER_TOKEN = New-RandomHex 32
@@ -171,6 +194,7 @@ SILICONFLOW_API_KEY=$apiKey
 # JWT security settings
 JWT_SECRET_KEY=$JWT_SECRET_KEY
 YUXI_INSTANCE_ID=$YUXI_INSTANCE_ID
+YUXI_SECRET_MASTER_KEY=$YUXI_SECRET_MASTER_KEY
 SANDBOX_PROVISIONER_TOKEN=$SANDBOX_PROVISIONER_TOKEN
 "@
 
@@ -182,6 +206,7 @@ SANDBOX_PROVISIONER_TOKEN=$SANDBOX_PROVISIONER_TOKEN
     Remove-Variable -Name "TAVILY_API_KEY" -ErrorAction SilentlyContinue
     Remove-Variable -Name "JWT_SECRET_KEY" -ErrorAction SilentlyContinue
     Remove-Variable -Name "YUXI_INSTANCE_ID" -ErrorAction SilentlyContinue
+    Remove-Variable -Name "YUXI_SECRET_MASTER_KEY" -ErrorAction SilentlyContinue
     Remove-Variable -Name "SANDBOX_PROVISIONER_TOKEN" -ErrorAction SilentlyContinue
 }
 

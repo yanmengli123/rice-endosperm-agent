@@ -39,8 +39,13 @@ from yuxi.utils import logger
 from yuxi.utils.upload_utils import MAX_UPLOAD_SIZE_BYTES, read_upload_with_limit, write_upload_to_path
 
 from server.utils.auth_middleware import get_admin_user, get_required_user
+from server.utils.knowledge_access import authorize_knowledge_path
 
-knowledge = APIRouter(prefix="/knowledge", tags=["knowledge"])
+knowledge = APIRouter(
+    prefix="/knowledge",
+    tags=["knowledge"],
+    dependencies=[Depends(authorize_knowledge_path)],
+)
 
 ACTIVE_GRAPH_BUILD_STATUSES = {"pending", "running"}
 ACTIVE_DOCUMENT_ACTION_TASK_STATUSES = {"pending", "running"}
@@ -248,7 +253,7 @@ async def create_database(
     )
     try:
         # 先检查名称是否已存在
-        if await knowledge_base.database_name_exists(database_name):
+        if await knowledge_base.database_name_exists(database_name, uid=current_user.uid):
             raise HTTPException(
                 status_code=409,
                 detail=f"知识库名称 '{database_name}' 已存在，请使用其他名称",
@@ -577,6 +582,7 @@ async def index_graph_build(
             coroutine=run_graph_index,
             payload_match={"kb_id": kb_id},
             statuses=ACTIVE_GRAPH_BUILD_STATUSES,
+            created_by=str(current_user.uid),
         )
         if not created:
             raise HTTPException(status_code=409, detail="该知识库已有正在运行的图谱构建任务")
@@ -877,6 +883,7 @@ async def add_documents(
                 "content_type": content_type,
             },
             coroutine=run_ingest,
+            created_by=str(current_user.uid),
         )
         return {
             "message": "任务已提交，请在任务中心查看进度",
@@ -1218,6 +1225,7 @@ async def parse_documents(kb_id: str, file_ids: list[str] = Body(...), current_u
             task_type="knowledge_parse",
             payload={"kb_id": kb_id, "file_ids": file_ids},
             coroutine=run_parse,
+            created_by=str(current_user.uid),
         )
         return {"message": "解析任务已提交", "status": "queued", "task_id": task.id}
     except Exception as e:
@@ -1262,6 +1270,7 @@ async def parse_pending_documents(kb_id: str, current_user: User = Depends(get_a
             payload_match={"kb_id": kb_id, "scope": "pending", "action": "parse"},
             statuses=ACTIVE_DOCUMENT_ACTION_TASK_STATUSES,
             coroutine=run_parse,
+            created_by=str(current_user.uid),
         )
         return {
             "message": "解析任务已提交" if created else "已有待解析任务正在执行",
@@ -1308,6 +1317,7 @@ async def index_documents(
             task_type="knowledge_index",
             payload={"kb_id": kb_id, "file_ids": file_ids, "params": params},
             coroutine=run_index,
+            created_by=str(current_user.uid),
         )
         return {"message": "入库任务已提交", "status": "queued", "task_id": task.id}
     except Exception as e:
@@ -1362,6 +1372,7 @@ async def index_pending_documents(
             payload_match={"kb_id": kb_id, "scope": "pending", "action": "index"},
             statuses=ACTIVE_DOCUMENT_ACTION_TASK_STATUSES,
             coroutine=run_index,
+            created_by=str(current_user.uid),
         )
         return {
             "message": "入库任务已提交" if created else "已有待入库任务正在执行",
@@ -1844,6 +1855,17 @@ async def import_workspace_files(
     current_user: User = Depends(get_admin_user),
 ):
     """将当前用户工作区文件导入 MinIO，返回与普通文件上传一致的预处理结果。"""
+    user_info = (
+        current_user.to_dict()
+        if hasattr(current_user, "to_dict")
+        else {
+            "uid": getattr(current_user, "uid", None),
+            "role": getattr(current_user, "role", None),
+            "department_id": getattr(current_user, "department_id", None),
+        }
+    )
+    if not await knowledge_base.check_manageable(user_info, payload.kb_id):
+        raise HTTPException(status_code=404, detail="知识库不存在或无权访问")
     kb_id = payload.kb_id.strip()
     paths = [path for path in payload.paths if str(path or "").strip()]
     if not kb_id:
@@ -2046,7 +2068,7 @@ async def get_knowledge_chunk_presets(current_user: User = Depends(get_admin_use
 async def get_knowledge_base_statistics(current_user: User = Depends(get_admin_user)):
     """获取知识库统计信息"""
     try:
-        stats = await knowledge_base.get_statistics()
+        stats = await knowledge_base.get_statistics(current_user)
         return {"stats": stats, "message": "success"}
     except Exception as e:
         logger.error(f"获取知识库统计失败 {e}, {traceback.format_exc()}")

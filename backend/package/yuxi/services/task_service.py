@@ -50,6 +50,8 @@ class Task:
     result: Any | None = None
     error: str | None = None
     cancel_requested: bool = False
+    created_by: str | None = None
+    tenant_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -77,6 +79,8 @@ class Task:
             result=data.get("result"),
             error=data.get("error"),
             cancel_requested=data.get("cancel_requested", False),
+            created_by=data.get("created_by"),
+            tenant_id=data.get("tenant_id"),
         )
 
 
@@ -161,10 +165,11 @@ class Tasker:
         payload: dict[str, Any] | None = None,
         coroutine: TaskCoroutine,
         timeout_seconds: float | None = None,
+        created_by: str | None = None,
     ) -> Task:
         effective_timeout = self._resolve_timeout_seconds(timeout_seconds)
         task_id = uuid.uuid4().hex
-        task = Task(id=task_id, name=name, type=task_type, payload=payload or {})
+        task = Task(id=task_id, name=name, type=task_type, payload=payload or {}, created_by=created_by)
         async with self._lock:
             self._tasks[task_id] = task
             await self._persist_task(task)
@@ -192,6 +197,7 @@ class Tasker:
         payload_match: dict[str, Any],
         statuses: set[str] | None = None,
         timeout_seconds: float | None = None,
+        created_by: str | None = None,
     ) -> tuple[Task, bool]:
         effective_timeout = self._resolve_timeout_seconds(timeout_seconds)
         task_payload = payload or {}
@@ -200,7 +206,7 @@ class Tasker:
             if existing:
                 return existing, False
             task_id = uuid.uuid4().hex
-            task = Task(id=task_id, name=name, type=task_type, payload=task_payload)
+            task = Task(id=task_id, name=name, type=task_type, payload=task_payload, created_by=created_by)
             self._tasks[task_id] = task
             await self._persist_task(task)
             await self._queue.put((task_id, coroutine, effective_timeout))
@@ -499,8 +505,12 @@ class Tasker:
             "updated_at": _iso_to_utc_naive(task.updated_at),
             "started_at": _iso_to_utc_naive(task.started_at),
             "completed_at": _iso_to_utc_naive(task.completed_at),
+            "created_by": task.created_by,
+            "tenant_id": task.tenant_id,
         }
-        await self._repo.upsert(task.id, data)
+        record = await self._repo.upsert(task.id, data)
+        if record is not None:
+            task.tenant_id = record.tenant_id
 
 
 tasker = Tasker()

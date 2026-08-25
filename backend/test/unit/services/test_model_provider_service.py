@@ -303,7 +303,10 @@ async def test_builtin_credential_migration_imports_env_once(monkeypatch):
 
     await ensure_builtin_model_providers_in_db(Db())
 
-    assert provider.api_key == "env-key"
+    from yuxi.utils.secret_crypto import decrypt_secret, is_encrypted
+
+    assert is_encrypted(provider.api_key)
+    assert decrypt_secret(provider.api_key, "model-provider-db:test-provider") == "env-key"
     assert provider.api_key_env is None
 
 
@@ -344,6 +347,7 @@ def test_provider_serialization_never_exposes_secret():
         base_url="https://example.com/v1",
         api_key="secret-value",
         api_key_env="LEGACY_KEY",
+        headers_json={"Authorization": "enc.v1:ciphertext"},
     )
 
     payload = provider.to_dict()
@@ -351,6 +355,8 @@ def test_provider_serialization_never_exposes_secret():
     assert "api_key" not in payload
     assert "api_key_env" not in payload
     assert payload["api_key_configured"] is True
+    assert payload["headers_json"] == {"Authorization": "__YUXI_SECRET_UNCHANGED__"}
+    assert "ciphertext" not in str(payload)
 
 
 async def _async_value(value):

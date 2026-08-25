@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 
 from server.utils.auth_middleware import get_admin_user
+from server.utils.knowledge_access import authorize_knowledge_path
 from yuxi.knowledge.graphs.managed_import_service import (
     GRAPH_IMPORT_ROLLBACK_TASK_TYPE,
     GRAPH_IMPORT_TASK_TYPE,
@@ -13,7 +14,11 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.upload_utils import read_upload_with_limit
 
-graph_import = APIRouter(prefix="/knowledge", tags=["knowledge-graph-import"])
+graph_import = APIRouter(
+    prefix="/knowledge",
+    tags=["knowledge-graph-import"],
+    dependencies=[Depends(authorize_knowledge_path)],
+)
 
 MAX_GRAPH_CSV_SIZE_BYTES = 100 * 1024 * 1024
 MAX_CYPHER_SIZE_BYTES = 5 * 1024 * 1024
@@ -119,6 +124,7 @@ async def execute_graph_import(
         payload_match={"import_id": import_id},
         statuses=ACTIVE_TASK_STATUSES,
         coroutine=run_import,
+        created_by=str(current_user.uid),
     )
     if not created:
         raise HTTPException(status_code=409, detail="该导入批次已有正在运行的任务")
@@ -144,6 +150,7 @@ async def rollback_graph_import(
         payload_match={"import_id": import_id},
         statuses=ACTIVE_TASK_STATUSES,
         coroutine=run_rollback,
+        created_by=str(current_user.uid),
     )
     if not created:
         raise HTTPException(status_code=409, detail="该导入批次已有正在运行的任务")

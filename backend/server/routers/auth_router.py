@@ -402,9 +402,9 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
     db.add(new_user)
     try:
         await db.flush()
-        from yuxi.services.principal import resolve_tenant_id
+        from yuxi.services.principal import ensure_tenant_membership
 
-        await resolve_tenant_id(db, new_user.uid)
+        await ensure_tenant_membership(db, new_user)
         db.add(OperationLog(user_id=new_user.id, operation="自助注册", details=f"uid={new_user.uid}"))
         await db.commit()
         await db.refresh(new_user)
@@ -554,6 +554,10 @@ async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depen
             "last_login": utc_now_naive(),
         }
     )
+
+    from yuxi.services.principal import ensure_tenant_membership
+
+    await ensure_tenant_membership(db, new_admin)
 
     # 生成访问令牌
     token_data = {"sub": str(new_admin.id), "auth_version": new_admin.auth_version}
@@ -752,10 +756,11 @@ async def create_user(
         }
     )
 
-    # P1：新用户归入其活跃租户（缺失时自愈默认租户成员关系）
-    from yuxi.services.principal import resolve_tenant_id
+    # P1：开户流程显式把新用户加入创建者的活动租户。
+    from yuxi.services.principal import ensure_tenant_membership, resolve_principal
 
-    await resolve_tenant_id(db, new_user.uid)
+    principal = await resolve_principal(db, current_user)
+    await ensure_tenant_membership(db, new_user, tenant_id=principal.tenant_id)
 
     # 记录操作
     await log_operation(

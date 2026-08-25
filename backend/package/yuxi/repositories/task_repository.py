@@ -33,7 +33,7 @@ class TaskRepository:
             result = await session.execute(select(TaskRecord).where(TaskRecord.id == task_id))
             record = result.scalar_one_or_none()
             if record is None:
-                if "tenant_id" not in data and data.get("created_by"):
+                if not data.get("tenant_id") and data.get("created_by"):
                     from yuxi.services.principal import resolve_tenant_id
 
                     data["tenant_id"] = await resolve_tenant_id(session, str(data["created_by"]))

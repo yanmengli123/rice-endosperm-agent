@@ -246,6 +246,13 @@ class EvaluationService:
             logger.error(f"获取评估数据集详情失败: {e}")
             raise
 
+    async def get_dataset_kb_id(self, dataset_id: str) -> str:
+        """Resolve dataset ownership before dataset-id-only API operations."""
+        row = await self.eval_repo.get_dataset(dataset_id)
+        if row is None:
+            raise ValueError("Dataset not found")
+        return str(row.kb_id)
+
     async def export_dataset_jsonl(self, dataset_id: str) -> dict[str, str]:
         row = await self.eval_repo.get_dataset(dataset_id)
         if row is None:
@@ -336,6 +343,7 @@ class EvaluationService:
                 "graph_expand_top_k": graph_expand_top_k,
             },
             coroutine=self._generate_dataset_task,
+            created_by=created_by,
         )
         build_metadata["task_id"] = task.id
         await self.eval_repo.update_dataset(dataset_id, {"build_metadata": build_metadata})
@@ -513,6 +521,7 @@ class EvaluationService:
                     "created_by": created_by,
                 },
                 coroutine=self._run_evaluation_task,
+                created_by=created_by,
             )
             return run_id
         except Exception as e:
