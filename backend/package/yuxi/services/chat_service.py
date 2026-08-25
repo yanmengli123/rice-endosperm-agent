@@ -648,6 +648,8 @@ async def _persist_run_total_tokens(
     uid: str | None = None,
     model_spec: str | None = None,
     estimated: bool | None = None,
+    credential_ref: dict | None = None,
+    policy_version: int | None = None,
 ) -> None:
     if not run_id or total_tokens is None:
         return
@@ -668,6 +670,7 @@ async def _persist_run_total_tokens(
         await db.execute(select(UsageLedger.id).where(UsageLedger.run_id == str(run_id)).limit(1))
     ).scalar_one_or_none()
     if existing is None:
+        credential_ref = credential_ref or {}
         db.add(
             UsageLedger(
                 run_id=str(run_id),
@@ -676,6 +679,10 @@ async def _persist_run_total_tokens(
                 model_spec=model_spec,
                 total_tokens=int(total_tokens),
                 estimated=bool(estimated),
+                credential_source="user_byok" if credential_ref else "platform",
+                credential_id=credential_ref.get("credential_id"),
+                provider_id=credential_ref.get("provider_id"),
+                policy_version=policy_version,
             )
         )
     await db.flush()
@@ -1295,6 +1302,8 @@ async def stream_agent_chat(
             uid=meta.get("uid"),
             model_spec=meta.get("model_spec"),
             estimated=bool(usage_payload.get("estimate")) if isinstance(usage_payload, dict) else None,
+            credential_ref=meta.get("user_credential"),
+            policy_version=meta.get("policy_version"),
         )
 
         if interrupted:
@@ -1590,6 +1599,8 @@ async def stream_agent_resume(
             uid=meta.get("uid"),
             model_spec=meta.get("model_spec"),
             estimated=bool(usage_payload.get("estimate")) if isinstance(usage_payload, dict) else None,
+            credential_ref=meta.get("user_credential"),
+            policy_version=meta.get("policy_version"),
         )
 
         if interrupted:

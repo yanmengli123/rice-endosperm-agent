@@ -22,9 +22,9 @@ from yuxi.storage.postgres.models_business import (
     AgentEnv,
     AgentRun,
     OperationLog,
+    TenantUserEntitlement,
     User,
     UserModelPreference,
-    UserQuota,
 )
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import coerce_any_to_utc_datetime, format_utc_datetime, utc_now_naive
@@ -570,17 +570,32 @@ async def get_my_usage(
 
 @user_router.get("/quota")
 async def get_my_quota(current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(UserQuota).filter(UserQuota.uid == current_user.uid))
-    quota = result.scalar_one_or_none()
+    """P5：读自身权益（策略+配额）；兼容旧字段名 monthly_token_limit。"""
+    from yuxi.services.principal import resolve_entitlement, resolve_tenant_id
+    from yuxi.services.user_credential_service import list_user_credentials as _list_credentials
+
+    tenant_id = await resolve_tenant_id(db, current_user.uid)
+    entitlement = await resolve_entitlement(db, current_user.uid, tenant_id)
+    credentials = await _list_credentials(db, current_user.uid)
+    has_byok = any(c["status"] == "active" for c in credentials)
     return {
-        "daily_run_limit": quota.daily_run_limit if quota else None,
-        "monthly_token_limit": quota.monthly_token_limit if quota else None,
+        "tenant_id": tenant_id,
+        "daily_run_limit": entitlement.daily_run_limit,
+        "monthly_token_limit": entitlement.monthly_platform_token_limit,
+        "model_access_policy": entitlement.credential_policy,
+        "byok_platform_token_exempt": entitlement.byok_platform_token_exempt,
+        "policy_version": entitlement.policy_version,
+        "has_active_byok": bool(has_byok),
     }
 
 
 class QuotaUpdate(BaseModel):
     daily_run_limit: int | None = Field(None, ge=1)
     monthly_token_limit: int | None = Field(None, ge=1)
+    model_access_policy: str | None = Field(None, description="platform_only / byok_optional / byok_required")
+    byok_platform_token_exempt: bool | None = Field(
+        None, description="自有密钥流量是否豁免平台月度 token 限额"
+    )
 
 
 @user_router.get("/manage/{uid}/quota")
@@ -589,12 +604,17 @@ async def get_user_quota(
 ):
     target = await _load_target_user(db, uid)
     _admin_guard(current_user, target)
-    result = await db.execute(select(UserQuota).filter(UserQuota.uid == uid))
-    quota = result.scalar_one_or_none()
+    from yuxi.services.principal import resolve_entitlement, resolve_tenant_id
+
+    tenant_id = await resolve_tenant_id(db, uid)
+    entitlement = await resolve_entitlement(db, uid, tenant_id)
     return {
         "uid": uid,
-        "daily_run_limit": quota.daily_run_limit if quota else None,
-        "monthly_token_limit": quota.monthly_token_limit if quota else None,
+        "daily_run_limit": entitlement.daily_run_limit,
+        "monthly_token_limit": entitlement.monthly_platform_token_limit,
+        "model_access_policy": entitlement.credential_policy,
+        "byok_platform_token_exempt": entitlement.byok_platform_token_exempt,
+        "policy_version": entitlement.policy_version,
     }
 
 
@@ -605,26 +625,48 @@ async def put_user_quota(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """管理员设置用户配额；字段为 null 表示不限制。"""
+    """管理员设置用户权益（P5：策略+配额统一写入 tenant_user_entitlements）。"""
     target = await _load_target_user(db, uid)
     _admin_guard(current_user, target)
-    result = await db.execute(select(UserQuota).filter(UserQuota.uid == uid))
-    quota = result.scalar_one_or_none()
-    if quota is None:
-        quota = UserQuota(uid=uid, updated_by=current_user.uid)
-        db.add(quota)
-    quota.daily_run_limit = data.daily_run_limit
-    quota.monthly_token_limit = data.monthly_token_limit
-    quota.updated_by = current_user.uid
+    from yuxi.services.principal import resolve_entitlement, resolve_tenant_id
+
+    if data.model_access_policy is not None and data.model_access_policy not in (
+        TenantUserEntitlement.CREDENTIAL_POLICIES
+    ):
+        raise HTTPException(status_code=422, detail="无效的模型接入策略")
+
+    tenant_id = await resolve_tenant_id(db, uid)
+    entitlement = await resolve_entitlement(db, uid, tenant_id)
+    entitlement.daily_run_limit = (
+        data.daily_run_limit if data.daily_run_limit is not None else entitlement.daily_run_limit
+    )
+    if data.monthly_token_limit is not None:
+        entitlement.monthly_platform_token_limit = data.monthly_token_limit
+    if data.model_access_policy is not None:
+        entitlement.credential_policy = data.model_access_policy
+    if data.byok_platform_token_exempt is not None:
+        entitlement.byok_platform_token_exempt = data.byok_platform_token_exempt
+    entitlement.policy_version += 1
+    entitlement.updated_by = current_user.uid
     db.add(
         OperationLog(
             user_id=current_user.id,
             operation="更新用户配额",
             details=(
-                f"uid={uid}, daily_run_limit={data.daily_run_limit}, "
-                f"monthly_token_limit={data.monthly_token_limit}"
+                f"uid={uid}, daily_run_limit={entitlement.daily_run_limit}, "
+                f"monthly_platform_token_limit={entitlement.monthly_platform_token_limit}, "
+                f"model_access_policy={entitlement.credential_policy}, "
+                f"byok_exempt={entitlement.byok_platform_token_exempt}, "
+                f"policy_version={entitlement.policy_version}"
             ),
         )
     )
     await db.commit()
-    return {"uid": uid, "daily_run_limit": quota.daily_run_limit, "monthly_token_limit": quota.monthly_token_limit}
+    return {
+        "uid": uid,
+        "daily_run_limit": entitlement.daily_run_limit,
+        "monthly_token_limit": entitlement.monthly_platform_token_limit,
+        "model_access_policy": entitlement.credential_policy,
+        "byok_platform_token_exempt": entitlement.byok_platform_token_exempt,
+        "policy_version": entitlement.policy_version,
+    }

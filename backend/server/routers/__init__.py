@@ -11,6 +11,7 @@ from server.routers.dashboard_router import dashboard
 from server.routers.filesystem_router import filesystem_router
 from server.routers.mcp_router import mcp
 from server.routers.mention_router import mention_router
+from server.routers.onboarding_router import onboarding
 from server.routers.model_provider_router import model_providers
 from server.routers.skill_router import skills, user_skills
 from server.routers.system_router import system
@@ -36,6 +37,7 @@ router.include_router(dashboard)  # /api/dashboard/* 仪表盘聚合数据
 router.include_router(department)  # /api/departments/* 部门与权限相关数据
 router.include_router(tasks)  # /api/tasks/* 后台任务查询与管理
 router.include_router(tenants)  # /api/tenant/* 租户成员信息
+router.include_router(onboarding)  # 开户编排与激活兑换
 router.include_router(mcp)  # /api/system/mcp-servers/* MCP 服务管理
 router.include_router(model_providers)  # /api/system/model-providers/* 独立模型配置
 router.include_router(skills)  # /api/system/skills/* Skills 管理

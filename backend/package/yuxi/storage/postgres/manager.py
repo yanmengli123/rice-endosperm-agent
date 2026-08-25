@@ -873,6 +873,146 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         await conn.execute(text("ALTER TABLE usage_ledger ALTER COLUMN tenant_id SET NOT NULL"))
 
+    async def _migration_0009_entitlements_activation(self, conn) -> None:
+        """P5 开户与权益：租户用户权益表、一次性激活凭证表、智能体凭据策略、Key 用途。"""
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS tenant_user_entitlements ("
+                "id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE, "
+                "credential_policy VARCHAR(16) NOT NULL DEFAULT 'platform_only', "
+                "daily_run_limit INTEGER, monthly_platform_token_limit BIGINT, concurrent_run_limit INTEGER, "
+                "byok_platform_token_exempt BOOLEAN NOT NULL DEFAULT FALSE, "
+                "policy_version INTEGER NOT NULL DEFAULT 1, updated_by VARCHAR(64), "
+                "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_user_entitlements_tenant_uid "
+                "ON tenant_user_entitlements(tenant_id, uid)"
+            )
+        )
+        # 存量配额行迁移到权益表；无配额行用户补默认权益（角色映射在应用层无差异，统一 platform_only 策略）
+        await conn.execute(
+            text(
+                "INSERT INTO tenant_user_entitlements (tenant_id, uid, credential_policy, "
+                "daily_run_limit, monthly_platform_token_limit, byok_platform_token_exempt, "
+                "policy_version, updated_by) "
+                "SELECT COALESCE(m.tenant_id, 1), q.uid, 'platform_only', "
+                "q.daily_run_limit, q.monthly_token_limit, FALSE, 1, 'migration-0009' "
+                "FROM user_quotas q LEFT JOIN tenant_memberships m ON m.uid = q.uid AND m.status = 'active' "
+                "ON CONFLICT (tenant_id, uid) DO NOTHING"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO tenant_user_entitlements (tenant_id, uid, credential_policy, "
+                "byok_platform_token_exempt, policy_version, updated_by) "
+                "SELECT COALESCE(m.tenant_id, 1), u.uid, 'platform_only', FALSE, 1, 'migration-0009' "
+                "FROM users u LEFT JOIN tenant_memberships m ON m.uid = u.uid AND m.status = 'active' "
+                "WHERE u.is_deleted = 0 "
+                "ON CONFLICT (tenant_id, uid) DO NOTHING"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS onboarding_activations ("
+                "id BIGSERIAL PRIMARY KEY, code_hash VARCHAR(64) NOT NULL UNIQUE, "
+                "uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE, "
+                "tenant_id BIGINT NOT NULL REFERENCES tenants(id), issued_by VARCHAR(64) NOT NULL, "
+                "device_name VARCHAR(128) NOT NULL DEFAULT '', status VARCHAR(32) NOT NULL DEFAULT 'active', "
+                "expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ, "
+                "created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_onboarding_activations_uid ON onboarding_activations(uid)")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS agents ADD COLUMN IF NOT EXISTS credential_policy "
+                 "VARCHAR(16) NOT NULL DEFAULT 'inherit_user'")
+        )
+        await conn.execute(text("ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS purpose "
+                                "VARCHAR(32) NOT NULL DEFAULT 'external_agent'"))
+        await conn.execute(text("ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS scopes JSONB"))
+
+    async def _migration_0010_tenant_scope_backfill(self, conn) -> None:
+        """P5 租户归属补齐与 usage_ledger 分域字段（回填→约束纪律）。"""
+        # BYOK 凭据版本化：唯一约束改为 active 部分索引，历史行保留
+        await conn.execute(text("DROP INDEX IF EXISTS uq_user_model_credentials_uid_provider"))
+        await conn.execute(text("ALTER TABLE IF EXISTS model_user_credentials "
+                                "ADD COLUMN IF NOT EXISTS superseded_by_id BIGINT"))
+        await conn.execute(text("ALTER TABLE IF EXISTS model_user_credentials "
+                                "ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1"))
+        await conn.execute(text("ALTER TABLE IF EXISTS model_user_credentials ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
+        await conn.execute(
+            text(
+                "UPDATE model_user_credentials c SET tenant_id = COALESCE("
+                "(SELECT m.tenant_id FROM tenant_memberships m WHERE m.uid = c.uid "
+                "AND m.status = 'active' ORDER BY m.tenant_id LIMIT 1), 1) WHERE c.tenant_id IS NULL"
+            )
+        )
+        await conn.execute(text("ALTER TABLE model_user_credentials ALTER COLUMN tenant_id SET NOT NULL"))
+        constraint_exists = (
+            await conn.execute(
+                text("SELECT 1 FROM pg_constraint WHERE conname = 'fk_muc_tenant'")
+            )
+        ).scalar()
+        if not constraint_exists:
+            await conn.execute(
+                text("ALTER TABLE model_user_credentials ADD CONSTRAINT fk_muc_tenant "
+                     "FOREIGN KEY (tenant_id) REFERENCES tenants(id)")
+            )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_model_credentials_active "
+                "ON model_user_credentials(uid, provider_id) WHERE status = 'active'"
+            )
+        )
+        # 设备会话归属
+        await conn.execute(text("ALTER TABLE IF EXISTS device_sessions ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
+        await conn.execute(
+            text(
+                "UPDATE device_sessions d SET tenant_id = COALESCE("
+                "(SELECT m.tenant_id FROM tenant_memberships m WHERE m.uid = d.uid "
+                "AND m.status = 'active' ORDER BY m.tenant_id LIMIT 1), 1) WHERE d.tenant_id IS NULL"
+            )
+        )
+        await conn.execute(text("ALTER TABLE device_sessions ALTER COLUMN tenant_id SET NOT NULL"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_sessions_tenant ON device_sessions(tenant_id)"))
+        # 部门归属 + 联合唯一（替换全局唯一）
+        await conn.execute(text("ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
+        await conn.execute(text("UPDATE departments SET tenant_id = 1 WHERE tenant_id IS NULL"))
+        await conn.execute(text("ALTER TABLE departments ALTER COLUMN tenant_id SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE IF EXISTS departments DROP CONSTRAINT IF EXISTS departments_name_key"))
+        await conn.execute(text("DROP INDEX IF EXISTS ix_departments_name"))
+        await conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_tenant_name ON departments(tenant_id, name)")
+        )
+        # 操作日志归属（允许 NULL 的系统级日志，仅回填+索引不设 NOT NULL）
+        await conn.execute(text("ALTER TABLE IF EXISTS operation_logs ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
+        await conn.execute(
+            text(
+                "UPDATE operation_logs o SET tenant_id = COALESCE("
+                "(SELECT m.tenant_id FROM tenant_memberships m JOIN users u ON u.uid = m.uid "
+                "WHERE u.id = o.user_id AND m.status = 'active' LIMIT 1), 1) WHERE o.tenant_id IS NULL"
+            )
+        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_operation_logs_tenant ON operation_logs(tenant_id)"))
+        # usage_ledger 资金来源分域：历史行标记 legacy_unknown（不猜测），新增行由写入点负责
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS credential_source "
+                 "VARCHAR(24) NOT NULL DEFAULT 'legacy_unknown'")
+        )
+        await conn.execute(text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS credential_id BIGINT"))
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS provider_id VARCHAR(100)")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS policy_version INTEGER")
+        )
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
@@ -882,6 +1022,8 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0006_rls_scaffold", "_migration_0006_rls_scaffold"),
         ("0007_usage_ledger_integrity", "_migration_0007_usage_ledger_integrity"),
         ("0008_usage_ledger_tenant_required", "_migration_0008_usage_ledger_tenant_required"),
+        ("0009_entitlements_activation", "_migration_0009_entitlements_activation"),
+        ("0010_tenant_scope_backfill", "_migration_0010_tenant_scope_backfill"),
     ]
 
     async def _apply_versioned_migrations(self):

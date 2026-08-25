@@ -345,6 +345,7 @@ async def process_agent_run(ctx, run_id: str):
         "model_spec": payload.get("model_spec"),
         "knowledge_scope_snapshot": payload.get("knowledge_scope_snapshot"),
         "user_credential": payload.get("user_credential"),
+        "policy_version": payload.get("policy_version"),
         "run_type": run_type,
         "created_by_run_id": run.created_by_run_id,
     }

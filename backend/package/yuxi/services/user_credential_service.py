@@ -31,34 +31,59 @@ async def upsert_user_credential(
     provider_id: str,
     api_key: str,
     label: str | None = None,
+    *,
+    tenant_id: int | None = None,
 ) -> UserModelCredential:
-    """创建或替换用户在某供应商下的凭据；密文落库，接口永不回显明文。"""
+    """签发新版本的 BYOK 凭据（P5 版本化不可变）。
+
+    替换密钥 = 旧行置 superseded 并指向新行；历史 run 冻结的 credential_id
+    永远指向不可变的历史版本。明文只在本函数内存中出现，落库即密文。
+    """
     result = await db.execute(
         select(UserModelCredential).where(
             UserModelCredential.uid == uid,
             UserModelCredential.provider_id == provider_id,
+            UserModelCredential.status == UserModelCredential.CREDENTIAL_STATUS_ACTIVE,
+        )
+    )
+    previous = result.scalar_one_or_none()
+    sealed = encrypt_secret(api_key, _aad(uid, provider_id))
+    credential = UserModelCredential(
+        uid=uid,
+        provider_id=provider_id,
+        label=(label or (previous.label if previous else None) or "我的凭据")[:128],
+        api_key_ciphertext=sealed,
+        masked_hint=_mask(api_key),
+        status=UserModelCredential.CREDENTIAL_STATUS_ACTIVE,
+        version=(previous.version + 1) if previous else 1,
+        tenant_id=tenant_id or (previous.tenant_id if previous else None),
+    )
+    db.add(credential)
+    await db.flush()
+    if previous is not None:
+        previous.status = UserModelCredential.CREDENTIAL_STATUS_SUPERSEDED
+        previous.superseded_by_id = credential.id
+        await db.flush()
+    return credential
+
+
+async def revoke_user_credential(db: AsyncSession, uid: str, credential_id: int) -> bool:
+    """逻辑撤销：保留行供历史 run 审计与用量对账。"""
+    result = await db.execute(
+        select(UserModelCredential).where(
+            UserModelCredential.id == credential_id,
+            UserModelCredential.uid == uid,
         )
     )
     credential = result.scalar_one_or_none()
-    sealed = encrypt_secret(api_key, _aad(uid, provider_id))
     if credential is None:
-        credential = UserModelCredential(
-            uid=uid,
-            provider_id=provider_id,
-            label=(label or "我的凭据")[:128],
-            api_key_ciphertext=sealed,
-            masked_hint=_mask(api_key),
-            status=UserModelCredential.CREDENTIAL_STATUS_ACTIVE,
-        )
-        db.add(credential)
-    else:
-        credential.label = (label or credential.label or "我的凭据")[:128]
-        credential.api_key_ciphertext = sealed
-        credential.masked_hint = _mask(api_key)
-        credential.status = UserModelCredential.CREDENTIAL_STATUS_ACTIVE
-        credential.revoked_at = None
+        return False
+    from yuxi.utils.datetime_utils import utc_now_naive
+
+    credential.status = UserModelCredential.CREDENTIAL_STATUS_REVOKED
+    credential.revoked_at = utc_now_naive()
     await db.flush()
-    return credential
+    return True
 
 
 async def list_user_credentials(db: AsyncSession, uid: str) -> list[dict]:
@@ -80,18 +105,8 @@ async def list_user_credentials(db: AsyncSession, uid: str) -> list[dict]:
 
 
 async def delete_user_credential(db: AsyncSession, uid: str, credential_id: int) -> bool:
-    result = await db.execute(
-        select(UserModelCredential).where(
-            UserModelCredential.id == credential_id,
-            UserModelCredential.uid == uid,
-        )
-    )
-    credential = result.scalar_one_or_none()
-    if credential is None:
-        return False
-    await db.delete(credential)
-    await db.flush()
-    return True
+    """用户侧"删除"= 逻辑撤销（append 审计语义：历史 run 的凭据引用仍可追溯）。"""
+    return await revoke_user_credential(db, uid, credential_id)
 
 
 async def get_active_user_credential(

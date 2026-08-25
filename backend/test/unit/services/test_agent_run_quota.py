@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.services.agent_run_service import _enforce_user_quota
-from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation, Department, User, UserQuota
+from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation, Department, Tenant, TenantMembership, TenantUserEntitlement, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -36,8 +36,10 @@ async def quota_session():
             title="Quota test",
             status="active",
         )
-        quota = UserQuota(uid=user.uid)
-        db.add_all([department, user, conversation, quota])
+        tenant = Tenant(id=1, name="测试租户", status="active")
+        membership = TenantMembership(tenant_id=1, uid=user.uid, role="member", status="active")
+        quota = TenantUserEntitlement(tenant_id=1, uid=user.uid)
+        db.add_all([department, tenant, user, conversation, membership, quota])
         await db.commit()
         await db.refresh(conversation)
         yield db, user, quota, conversation
@@ -79,7 +81,7 @@ async def test_daily_quota_counts_only_user_initiated_chat_runs(quota_session):
 
 async def test_monthly_token_quota_rejects_second_concurrent_top_level_run(quota_session):
     db, user, quota, conversation = quota_session
-    quota.monthly_token_limit = 1_000
+    quota.monthly_platform_token_limit = 1_000
     db.add(_run(user=user, conversation=conversation, run_type="chat", status="running"))
     await db.commit()
 
@@ -92,7 +94,7 @@ async def test_monthly_token_quota_rejects_second_concurrent_top_level_run(quota
 
 async def test_monthly_token_quota_rejects_exhausted_usage(quota_session):
     db, user, quota, conversation = quota_session
-    quota.monthly_token_limit = 1_000
+    quota.monthly_platform_token_limit = 1_000
     db.add(
         _run(
             user=user,

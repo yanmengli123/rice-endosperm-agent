@@ -244,6 +244,17 @@ class _UserResult:
         return SimpleNamespace(uid="user-1", role="user")
 
 
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
 class _NoneResult:
     def scalar_one_or_none(self):
         return None
@@ -285,6 +296,11 @@ class _CreateRunDb:
         description = str(stmt)
         # 配额与用户级模型偏好查询在单测中视为无数据
         if 'user_quotas' in description or 'user_model_preferences' in description:
+            return _NoneResult()
+        # P5：权益预检会解析成员关系（返回一行默认租户）、读权益与 BYOK（视为无数据）
+        if 'tenant_memberships' in description:
+            return _RowsResult([SimpleNamespace(tenant_id=1)])
+        if 'tenant_user_entitlements' in description or 'model_user_credentials' in description:
             return _NoneResult()
         return _UserResult()
 
@@ -737,6 +753,8 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
     assert db.created_run_kwargs["input_payload"] == {
         "model_spec": "agent-default-model",
         "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
+        "policy_version": 1,
+        "credential_policy": "platform_only",
     }
     assert "model_spec" not in db.added[0].extra_metadata
     assert db.added[0].extra_metadata["raw_message"]["type"] == "human"
@@ -1506,6 +1524,8 @@ async def test_create_chat_run_with_image_persists_multimodal_message_type(monke
     assert db.created_run_kwargs["input_payload"] == {
         "model_spec": "agent-default-model",
         "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
+        "policy_version": 1,
+        "credential_policy": "platform_only",
     }
     assert db.added[0].message_type == "multimodal_image"
     assert db.added[0].image_content == "base64-image"

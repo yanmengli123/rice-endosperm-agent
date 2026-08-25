@@ -191,11 +191,22 @@ class CLIAuthApproveResponse(BaseModel):
     approved_at: str | None = None
 
 
+class DeviceSessionPair(BaseModel):
+    """P2 会话对：短时访问令牌（携带 sid 声明）+ 可旋转刷新令牌。"""
+
+    session_id: str
+    access_token: str
+    refresh_token: str
+    access_expires_in: int
+
+
 class CLIAuthTokenResponse(BaseModel):
     api_key: dict
     secret: str
     user: dict
     account_scope_id: str
+    # P2：会话对。缺失该字段的历史客户端回退静态 Key；v0.1.9+ 客户端优先使用会话。
+    session: DeviceSessionPair | None = None
 
 
 # =============================================================================

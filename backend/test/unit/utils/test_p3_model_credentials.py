@@ -76,16 +76,23 @@ class TestUpsertAndOpen:
         assert opened == "sk-user-secret-1"
 
     @pytest.mark.asyncio
-    async def test_upsert_replaces_ciphertext_and_reactivates(self):
+    async def test_upsert_creates_new_version_and_supersedes_old(self):
         db = _FakeDB()
         first = await upsert_user_credential(db, "alice", "deepseek", "sk-one")
-        first.status = "revoked"
         second = await upsert_user_credential(db, "alice", "deepseek", "sk-two")
-        assert second.id == first.id
-        assert second.status == "active"
+
+        # P5 版本化：替换=新行新 id，旧行置 superseded 并指向新行；新版本生效
+        assert second.id != first.id
+        assert second.version == first.version + 1
+        assert first.status == "superseded"
+        assert first.superseded_by_id == second.id
         assert await open_user_credential_key(
             db, "alice", second.id, expected_provider_id="deepseek"
         ) == "sk-two"
+        # 冻结在旧版本的引用按 fail-closed 处理（不再可用）
+        assert await open_user_credential_key(
+            db, "alice", first.id, expected_provider_id="deepseek"
+        ) is None
 
     @pytest.mark.asyncio
     async def test_owner_scoped_open(self):

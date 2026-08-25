@@ -32,6 +32,36 @@ def map_membership_role(users_role: str | None) -> str:
     return "member"
 
 
+async def resolve_entitlement(db: AsyncSession, uid: str, tenant_id: int):
+    """解析用户在租户内的权益（策略与配额唯一权威）；缺失时自愈默认行（platform_only）。"""
+    from yuxi.storage.postgres.models_business import TenantUserEntitlement
+
+    result = await db.execute(
+        select(TenantUserEntitlement).where(
+            TenantUserEntitlement.tenant_id == tenant_id,
+            TenantUserEntitlement.uid == uid,
+        )
+    )
+    entitlement = result.scalar_one_or_none()
+    if entitlement is not None:
+        return entitlement
+    db.add(
+        TenantUserEntitlement(
+            tenant_id=tenant_id,
+            uid=uid,
+            credential_policy=TenantUserEntitlement.CREDENTIAL_POLICY_PLATFORM_ONLY,
+        )
+    )
+    await db.flush()
+    result = await db.execute(
+        select(TenantUserEntitlement).where(
+            TenantUserEntitlement.tenant_id == tenant_id,
+            TenantUserEntitlement.uid == uid,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 @dataclass(frozen=True)
 class PrincipalContext:
     """一次请求的服务端权威身份：租户、用户与角色。"""

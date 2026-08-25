@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.orm import declarative_base, relationship, validates
 
@@ -59,7 +60,7 @@ class Tenant(Base):
 
     __tablename__ = "tenants"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     name = Column(String(128), nullable=False, unique=True)
     status = Column(String(32), nullable=False, default="active")  # active / suspended
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
@@ -74,7 +75,7 @@ class TenantMembership(Base):
 
     __tablename__ = "tenant_memberships"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(
         BigInteger,
         ForeignKey("tenants.id", ondelete="CASCADE"),
@@ -91,12 +92,72 @@ class TenantMembership(Base):
     )
 
 
+class TenantUserEntitlement(Base):
+    """用户在某个租户内的模型接入策略与资源权益（运营约束的唯一权威）。"""
+
+    __tablename__ = "tenant_user_entitlements"
+
+    CREDENTIAL_POLICY_PLATFORM_ONLY = "platform_only"
+    CREDENTIAL_POLICY_BYOK_OPTIONAL = "byok_optional"
+    CREDENTIAL_POLICY_BYOK_REQUIRED = "byok_required"
+    CREDENTIAL_POLICIES = (
+        CREDENTIAL_POLICY_PLATFORM_ONLY,
+        CREDENTIAL_POLICY_BYOK_OPTIONAL,
+        CREDENTIAL_POLICY_BYOK_REQUIRED,
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False)
+    credential_policy = Column(String(16), nullable=False, default=CREDENTIAL_POLICY_PLATFORM_ONLY)
+    daily_run_limit = Column(Integer, nullable=True)
+    monthly_platform_token_limit = Column(BigInteger, nullable=True)  # 仅统计平台凭据消耗；BYOK 不占
+    concurrent_run_limit = Column(Integer, nullable=True)  # P5b 预留：并发上限，暂不强制
+    byok_platform_token_exempt = Column(Boolean, nullable=False, default=False)
+    policy_version = Column(Integer, nullable=False, default=1)  # 每次变更 +1，run 冻结用
+    updated_by = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+    __table_args__ = (
+        Index("uq_tenant_user_entitlements_tenant_uid", "tenant_id", "uid", unique=True),
+    )
+
+
+class OnboardingActivation(Base):
+    """一次性开户激活凭证：管理员签发，用户在桌面端换取设备会话（替代长期 Key 开箱卡）。"""
+
+    __tablename__ = "onboarding_activations"
+
+    STATUS_ACTIVE = "active"
+    STATUS_CONSUMED = "consumed"
+    STATUS_REVOKED = "revoked"
+    STATUS_EXPIRED = "expired"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    code_hash = Column(String(64), nullable=False, unique=True, index=True)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    issued_by = Column(String(64), nullable=False)
+    device_name = Column(String(128), nullable=False, default="")
+    status = Column(String(32), nullable=False, default=STATUS_ACTIVE, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
 class UserModelCredential(Base):
-    """用户自带模型凭据（BYOK）：密文存储，运行时按凭据引用解密。"""
+    """用户自带模型凭据（BYOK）：密文存储，运行时按凭据引用解密。
+
+    P5 版本化不可变：替换密钥 = 插入新的 active 行并把旧行置 superseded；
+    AgentRun 冻结的 credential_id 因此永远指向不可变的历史版本。
+    """
 
     __tablename__ = "model_user_credentials"
 
     CREDENTIAL_STATUS_ACTIVE = "active"
+    CREDENTIAL_STATUS_SUPERSEDED = "superseded"  # 被新版本替换；行保留供历史 run 审计
     CREDENTIAL_STATUS_REVOKED = "revoked"
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
@@ -106,12 +167,23 @@ class UserModelCredential(Base):
     api_key_ciphertext = Column(String(1000), nullable=False)
     masked_hint = Column(String(64), nullable=True)
     status = Column(String(32), nullable=False, default="active")
+    superseded_by_id = Column(BigIntPk, nullable=True)  # 替换链指针，版本化不可变的关键
+    version = Column(Integer, nullable=False, default=1)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)  # 迁移 0010 回填后收紧
     last_tested_at = Column(DateTime(timezone=True), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
     __table_args__ = (
-        Index("uq_user_model_credentials_uid_provider", "uid", "provider_id", unique=True),
+        # P5 版本化：同一用户同一供应商只允许一把 active 密钥；历史版本行保留
+        Index(
+            "uq_user_model_credentials_active",
+            "uid",
+            "provider_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
     )
 
 
@@ -160,6 +232,11 @@ class UsageLedger(Base):
     output_tokens = Column(BigInteger, nullable=False, default=0)
     total_tokens = Column(BigInteger, nullable=False, default=0)
     estimated = Column(Boolean, nullable=False, default=False)  # 上游未回传 usage 时为估算值
+    # P5 资金来源分域：platform / user_byok / tenant_byok / legacy_unknown（历史行）
+    credential_source = Column(String(24), nullable=False, server_default="legacy_unknown")
+    credential_id = Column(BigIntPk, nullable=True)
+    provider_id = Column(String(100), nullable=True)
+    policy_version = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
 
 
@@ -975,7 +1052,11 @@ class TaskRecord(Base):
 
 
 class APIKey(Base):
-    """API Key 模型"""
+    """API Key 模型
+
+    P5：purpose 区分凭证用途——desktop_legacy 为历史桌面端过渡 Key（将随版本淘汰），
+    external_agent 为外部系统调用 Key（可携带 scopes 限制能力）。
+    """
 
     __tablename__ = "api_keys"
 
@@ -990,6 +1071,11 @@ class APIKey(Base):
     expires_at = Column(DateTime, nullable=True)
     is_enabled = Column(Boolean, nullable=False, default=True)
     last_used_at = Column(DateTime, nullable=True)
+    # P5：desktop_legacy=历史桌面端过渡 Key（逐步淘汰）；external_agent=外部系统调用 Key
+    purpose = Column(String(32), nullable=False, default="external_agent")
+    scopes = Column(JSON, nullable=True)  # 能力范围清单；空表示仅对话调用
+
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)  # 迁移 0010 回填
 
     created_by = Column(String(64), nullable=False)
     created_at = Column(DateTime, default=utc_now_naive)
