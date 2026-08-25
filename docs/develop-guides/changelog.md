@@ -19,6 +19,7 @@
 
 - 对 P0-P4 多租户链路做对抗性加固：修复跨容器主密钥不一致、迁移并发、租户/成员资格停用绕过、刷新令牌竞态、BYOK 静默回退、租户内资源共享边界、图谱与 RAG 评估端点越权，以及用量归属缺失。
 - P0 凭据与权限安全收口：`model_providers.api_key`、Header 值与 `ocr_provider_configs.api_token` 全面升级为 AES-256-GCM 信封加密（AAD 绑定资源标识，主密钥 `YUXI_SECRET_MASTER_KEY`，启动时自动加密存量明文）；Redis 模型/OCR 缓存迁移 v2 键且只存密文（旧明文键重建时清除），AOF 磁盘残留不再可用。模型供应商写操作与系统任务管理端点收紧为 superadmin；知识库删除/添加文档增加资源可访问性校验（跨部门 admin 返回 404）；Agent 与 Skill 管理守卫部门化——「全局可见」不再等于「全局可管理」，跨部门 admin 一律拒绝。新建知识库/智能体默认本部门共享而非全局。`users.account_scope_id` 固化入库（唯一非空、终身不变、注册自动派生），JWT 密钥轮换不再影响桌面端本地数据归属；设备码签发的 API Key 增加 90 天过期。引入版本化 schema 迁移执行器（schema_migrations 表），复杂变更与数据回填同事务执行一次。详见 docs/vibe/2026-08-24-p0-security-hardening.md。
+- 多租户加固第二轮：开发主密钥改为跨进程稳定的共享密钥文件并提供初始化迁移脚本；租户身份解析严格化——缺失、多重或已停用成员关系直接拒绝（不再自愈入默认租户），部门管理员创建链路补建成员关系；刷新令牌旋转加行锁并校验 SID 与用户绑定；run 计量去重（迁移 0007）与 usage_ledger.tenant_id NOT NULL（迁移 0008）；Dashboard Token 统计改读 usage_ledger 权威数据源；knowledge_access 守卫补读 JSON body 的 kb_id（封堵 fetch-url 跨租户探测），评估运行校验数据集归属防跨库注入，图谱/评估无权访问统一 404 防资源枚举；后台任务补记 created_by 与 tenant_id。
 
 - 生产 Compose 不再回退到公开的 Neo4j、MinIO 和 PostgreSQL 默认凭证，并要求显式配置 JWT 随机密钥与实例标识；相关配置缺失时会在解析阶段拒绝启动并提示具体变量名。管理员初始化、创建用户、创建部门管理员及修改用户密码在前后端统一要求密码不少于 8 位。
 - 修复沙箱执行边界：每个动态 Docker 沙箱使用只与 provisioner 相连的独立网络，沙箱之间不能互访，也不再加入业务 `app-network` 或发布随机宿主机端口；provisioner 重启后会重新接入已有沙箱网络，清理时只删除自身创建且标签匹配的网络。API/worker 使用至少 32 字符的 `SANDBOX_PROVISIONER_TOKEN` 调用 provisioner，并通过认证代理访问沙箱文件与命令接口，代理在应用生命周期内复用 HTTP 连接池。生产 Compose 同时移除 PostgreSQL 和解析服务的宿主机端口，阻断沙箱对其他租户、业务数据库、对象存储和无鉴权 provisioner 的横向访问。
