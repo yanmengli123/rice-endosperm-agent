@@ -87,9 +87,7 @@ def _master_key() -> bytes:
     # 与 auth_utils 的生产判定保持同一环境变量口径
     is_production = os.environ.get("YUXI_ENV", "development").strip().lower() in {"prod", "production"}
     if is_production:
-        raise SecretCryptoError(
-            f"生产环境必须显式配置 {_MASTER_KEY_ENV}（openssl rand -hex 32）以启用凭据静态加密"
-        )
+        raise SecretCryptoError(f"生产环境必须显式配置 {_MASTER_KEY_ENV}（openssl rand -hex 32）以启用凭据静态加密")
 
     # 开发环境：使用 API/Worker 共同挂载的 saves 卷，保证跨进程和重启稳定。
     dev_key_file = _dev_key_file()

@@ -171,9 +171,7 @@ def user_can_access_skill(user: User, skill: Skill, *, require_enabled: bool = T
     return False
 
 
-def user_can_manage_skill(
-    user: User, skill: Skill, *, creator_department_id: int | None = None
-) -> bool:
+def user_can_manage_skill(user: User, skill: Skill, *, creator_department_id: int | None = None) -> bool:
     """管理权限：superadmin 全通；内置技能仅平台；创建者本人；部门管理员限本部门创建。"""
     if is_builtin_skill(skill):
         return user.role == "superadmin"

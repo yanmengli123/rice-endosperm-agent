@@ -123,9 +123,12 @@ class OCRCredentialCache:
             data = credential.to_dict()
             # Redis 只落密文：Token 与 settings 均可能含敏感值
             data["api_token"] = encrypt_secret(credential.api_token, f"ocr-cache:{service_id}") or ""
-            data["settings"] = encrypt_secret(
-                json.dumps(credential.settings or {}, ensure_ascii=False), f"ocr-cache-settings:{service_id}"
-            ) or ""
+            data["settings"] = (
+                encrypt_secret(
+                    json.dumps(credential.settings or {}, ensure_ascii=False), f"ocr-cache-settings:{service_id}"
+                )
+                or ""
+            )
             payload[service_id] = data
         with sync_redis_client() as redis_client:
             redis_client.set(REDIS_CACHE_KEY, json.dumps(payload, ensure_ascii=False))

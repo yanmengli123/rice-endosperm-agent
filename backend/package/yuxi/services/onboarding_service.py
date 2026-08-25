@@ -15,14 +15,13 @@ from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.postgres.models_business import (
     OnboardingActivation,
     OperationLog,
     TenantUserEntitlement,
     User,
 )
-from yuxi.services.principal import resolve_tenant_id
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -133,9 +132,7 @@ async def create_onboarding_invitation(
     }
 
 
-async def consume_onboarding_activation(
-    db: AsyncSession, activation_code: str
-) -> dict:
+async def consume_onboarding_activation(db: AsyncSession, activation_code: str) -> dict:
     """消费激活码：校验有效性后签发设备会话对（不发任何静态 Key）。"""
     code_hash = _hash_code(activation_code.strip())
     result = await db.execute(
@@ -155,9 +152,7 @@ async def consume_onboarding_activation(
         await db.commit()
         raise OnboardingError("expired", "激活码已过期", 410)
 
-    user_result = await db.execute(
-        select(User).filter(User.uid == activation.uid, User.is_deleted == 0)
-    )
+    user_result = await db.execute(select(User).filter(User.uid == activation.uid, User.is_deleted == 0))
     user = user_result.scalar_one_or_none()
     if user is None or user.is_disabled:
         raise OnboardingError("invalid_user", "账号不可用", 403)
@@ -186,9 +181,7 @@ async def consume_onboarding_activation(
     }
 
 
-async def revoke_onboarding_activation(
-    db: AsyncSession, *, operator: User, activation_id: int
-) -> bool:
+async def revoke_onboarding_activation(db: AsyncSession, *, operator: User, activation_id: int) -> bool:
     result = await db.execute(select(OnboardingActivation).filter(OnboardingActivation.id == activation_id))
     activation = result.scalar_one_or_none()
     if activation is None:

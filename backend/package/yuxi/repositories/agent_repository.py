@@ -8,8 +8,8 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, AGENT_ICON, BRAND_NAME
-from yuxi.storage.postgres.models_business import Agent, User
 from yuxi.services.principal import resolve_tenant_id
+from yuxi.storage.postgres.models_business import Agent, User
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.share_config import SHARE_ACCESS_LEVELS, normalize_share_config
 
@@ -174,9 +174,7 @@ def user_can_access_agent(user: User, agent: Agent) -> bool:
     return False
 
 
-def user_can_manage_agent(
-    user: User, agent: Agent, *, creator_department_id: int | None = None
-) -> bool:
+def user_can_manage_agent(user: User, agent: Agent, *, creator_department_id: int | None = None) -> bool:
     """管理权限：superadmin 全通；创建者本人；部门管理员仅限本部门用户创建的资源。
 
     「全局可见」不等于「全局可管理」——跨部门的 admin 一律拒绝。
@@ -291,7 +289,6 @@ class AgentRepository:
 
         agent = Agent(
             tenant_id=await resolve_tenant_id(self.db, created_by),
-
             slug=WEB_SEARCH_AGENT_SLUG,
             backend_id=SUB_AGENT_BACKEND_ID,
             name=WEB_SEARCH_AGENT_NAME,
@@ -341,7 +338,6 @@ class AgentRepository:
 
         agent = Agent(
             tenant_id=await resolve_tenant_id(self.db, created_by),
-
             slug=slug,
             backend_id=backend_id,
             name=name,
@@ -516,7 +512,6 @@ class AgentRepository:
 
         agent = Agent(
             tenant_id=await resolve_tenant_id(self.db, created_by),
-
             slug=await self._unique_slug(slug, name),
             backend_id=backend_id,
             name=name.strip() or "未命名智能体",

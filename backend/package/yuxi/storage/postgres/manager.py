@@ -686,13 +686,11 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         )
         await conn.execute(
-            text(
-                "INSERT INTO tenants (id, name, status) VALUES (1, '默认企业', 'active') "
-                "ON CONFLICT (id) DO NOTHING"
-            )
+            text("INSERT INTO tenants (id, name, status) VALUES (1, '默认企业', 'active') ON CONFLICT (id) DO NOTHING")
         )
-        await conn.execute(text("SELECT setval(pg_get_serial_sequence('tenants','id'), "
-                                "GREATEST((SELECT MAX(id) FROM tenants), 1))"))
+        await conn.execute(
+            text("SELECT setval(pg_get_serial_sequence('tenants','id'), GREATEST((SELECT MAX(id) FROM tenants), 1))")
+        )
         await conn.execute(
             text(
                 "CREATE TABLE IF NOT EXISTS tenant_memberships ("
@@ -703,8 +701,10 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         )
         await conn.execute(
-            text("CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_memberships_tenant_uid "
-                 "ON tenant_memberships(tenant_id, uid)")
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_memberships_tenant_uid "
+                "ON tenant_memberships(tenant_id, uid)"
+            )
         )
         # 存量用户全部归入默认租户，角色由 users.role 映射
         await conn.execute(
@@ -719,7 +719,11 @@ class PostgresManager(metaclass=SingletonMeta):
         )
 
         scoped_tables = [
-            "conversations", "agent_runs", "agents", "skills", "knowledge_bases",
+            "conversations",
+            "agent_runs",
+            "agents",
+            "skills",
+            "knowledge_bases",
         ]
         # tasks 允许系统级任务无主体：仅补列与回填，不做 NOT NULL 约束
         await conn.execute(text("ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
@@ -727,19 +731,12 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(text("UPDATE tasks SET tenant_id = 1 WHERE tenant_id IS NULL"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_tenant ON tasks(tenant_id)"))
         for table in scoped_tables:
-            await conn.execute(
-                text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS tenant_id BIGINT")
-            )
-            await conn.execute(
-                text(f"UPDATE {table} SET tenant_id = 1 WHERE tenant_id IS NULL")
-            )
+            await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
+            await conn.execute(text(f"UPDATE {table} SET tenant_id = 1 WHERE tenant_id IS NULL"))
             await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN tenant_id SET NOT NULL"))
-            await conn.execute(
-                text(f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant ON {table}(tenant_id)")
-            )
+            await conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant ON {table}(tenant_id)"))
             constraint_sql = (
-                f"ALTER TABLE {table} ADD CONSTRAINT fk_{table}_tenant "
-                f"FOREIGN KEY (tenant_id) REFERENCES tenants(id)"
+                f"ALTER TABLE {table} ADD CONSTRAINT fk_{table}_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id)"
             )
             constraint_name = f"fk_{table}_tenant"
             exists = (
@@ -762,9 +759,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 "created_at TIMESTAMPTZ DEFAULT NOW(), last_refreshed_at TIMESTAMPTZ)"
             )
         )
-        await conn.execute(
-            text("CREATE INDEX IF NOT EXISTS ix_device_sessions_uid ON device_sessions(uid)")
-        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_sessions_uid ON device_sessions(uid)"))
         await conn.execute(
             text(
                 "CREATE TABLE IF NOT EXISTS device_session_tokens ("
@@ -816,9 +811,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         )
         for column in ("run_id", "uid", "tenant_id", "created_at"):
-            await conn.execute(
-                text(f"CREATE INDEX IF NOT EXISTS ix_usage_ledger_{column} ON usage_ledger({column})")
-            )
+            await conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_usage_ledger_{column} ON usage_ledger({column})"))
 
     async def _migration_0006_rls_scaffold(self, conn) -> None:
         """P4：行级安全策略脚手架。
@@ -858,19 +851,13 @@ class PostgresManager(metaclass=SingletonMeta):
                 "WHERE older.run_id = newer.run_id AND older.id < newer.id"
             )
         )
-        await conn.execute(
-            text("CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_ledger_run_id ON usage_ledger(run_id)")
-        )
+        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_ledger_run_id ON usage_ledger(run_id)"))
 
     async def _migration_0008_usage_ledger_tenant_required(self, conn) -> None:
         """计费账本必须有权威租户归属，拒绝继续容忍不可对账事件。"""
-        orphan_count = (
-            await conn.execute(text("SELECT count(*) FROM usage_ledger WHERE tenant_id IS NULL"))
-        ).scalar()
+        orphan_count = (await conn.execute(text("SELECT count(*) FROM usage_ledger WHERE tenant_id IS NULL"))).scalar()
         if int(orphan_count or 0) > 0:
-            raise RuntimeError(
-                f"usage_ledger 仍有 {orphan_count} 条无法确定租户归属的记录；请先完成审计修复"
-            )
+            raise RuntimeError(f"usage_ledger 仍有 {orphan_count} 条无法确定租户归属的记录；请先完成审计修复")
         await conn.execute(text("ALTER TABLE usage_ledger ALTER COLUMN tenant_id SET NOT NULL"))
 
     async def _migration_0009_entitlements_activation(self, conn) -> None:
@@ -930,22 +917,35 @@ class PostgresManager(metaclass=SingletonMeta):
             text("CREATE INDEX IF NOT EXISTS ix_onboarding_activations_uid ON onboarding_activations(uid)")
         )
         await conn.execute(
-            text("ALTER TABLE IF EXISTS agents ADD COLUMN IF NOT EXISTS credential_policy "
-                 "VARCHAR(16) NOT NULL DEFAULT 'inherit_user'")
+            text(
+                "ALTER TABLE IF EXISTS agents ADD COLUMN IF NOT EXISTS credential_policy "
+                "VARCHAR(16) NOT NULL DEFAULT 'inherit_user'"
+            )
         )
-        await conn.execute(text("ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS purpose "
-                                "VARCHAR(32) NOT NULL DEFAULT 'external_agent'"))
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS purpose "
+                "VARCHAR(32) NOT NULL DEFAULT 'external_agent'"
+            )
+        )
         await conn.execute(text("ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS scopes JSONB"))
 
     async def _migration_0010_tenant_scope_backfill(self, conn) -> None:
         """P5 租户归属补齐与 usage_ledger 分域字段（回填→约束纪律）。"""
         # BYOK 凭据版本化：唯一约束改为 active 部分索引，历史行保留
         await conn.execute(text("DROP INDEX IF EXISTS uq_user_model_credentials_uid_provider"))
-        await conn.execute(text("ALTER TABLE IF EXISTS model_user_credentials "
-                                "ADD COLUMN IF NOT EXISTS superseded_by_id BIGINT"))
-        await conn.execute(text("ALTER TABLE IF EXISTS model_user_credentials "
-                                "ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1"))
-        await conn.execute(text("ALTER TABLE IF EXISTS model_user_credentials ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS model_user_credentials ADD COLUMN IF NOT EXISTS superseded_by_id BIGINT")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS model_user_credentials "
+                "ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1"
+            )
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS model_user_credentials ADD COLUMN IF NOT EXISTS tenant_id BIGINT")
+        )
         await conn.execute(
             text(
                 "UPDATE model_user_credentials c SET tenant_id = COALESCE("
@@ -955,14 +955,14 @@ class PostgresManager(metaclass=SingletonMeta):
         )
         await conn.execute(text("ALTER TABLE model_user_credentials ALTER COLUMN tenant_id SET NOT NULL"))
         constraint_exists = (
-            await conn.execute(
-                text("SELECT 1 FROM pg_constraint WHERE conname = 'fk_muc_tenant'")
-            )
+            await conn.execute(text("SELECT 1 FROM pg_constraint WHERE conname = 'fk_muc_tenant'"))
         ).scalar()
         if not constraint_exists:
             await conn.execute(
-                text("ALTER TABLE model_user_credentials ADD CONSTRAINT fk_muc_tenant "
-                     "FOREIGN KEY (tenant_id) REFERENCES tenants(id)")
+                text(
+                    "ALTER TABLE model_user_credentials ADD CONSTRAINT fk_muc_tenant "
+                    "FOREIGN KEY (tenant_id) REFERENCES tenants(id)"
+                )
             )
         await conn.execute(
             text(
@@ -1002,16 +1002,14 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_operation_logs_tenant ON operation_logs(tenant_id)"))
         # usage_ledger 资金来源分域：历史行标记 legacy_unknown（不猜测），新增行由写入点负责
         await conn.execute(
-            text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS credential_source "
-                 "VARCHAR(24) NOT NULL DEFAULT 'legacy_unknown'")
+            text(
+                "ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS credential_source "
+                "VARCHAR(24) NOT NULL DEFAULT 'legacy_unknown'"
+            )
         )
         await conn.execute(text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS credential_id BIGINT"))
-        await conn.execute(
-            text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS provider_id VARCHAR(100)")
-        )
-        await conn.execute(
-            text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS policy_version INTEGER")
-        )
+        await conn.execute(text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS provider_id VARCHAR(100)"))
+        await conn.execute(text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS policy_version INTEGER"))
 
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
@@ -1038,9 +1036,7 @@ class PostgresManager(metaclass=SingletonMeta):
                     "version VARCHAR(64) PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW())"
                 )
             )
-            done = {
-                row[0] for row in (await conn.execute(text("SELECT version FROM schema_migrations"))).all()
-            }
+            done = {row[0] for row in (await conn.execute(text("SELECT version FROM schema_migrations"))).all()}
             for version, method_name in self._VERSIONED_MIGRATIONS:
                 if version in done:
                     continue

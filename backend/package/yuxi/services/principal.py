@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.storage.postgres.models_business import (
     DEFAULT_TENANT_ID,
     Tenant,
@@ -80,9 +79,7 @@ async def ensure_tenant_membership(
     tenant_id: int = DEFAULT_TENANT_ID,
 ) -> TenantMembership:
     """仅供开户流程显式创建成员关系；业务请求不得借此自愈权限。"""
-    tenant_status = (
-        await db.execute(select(Tenant.status).where(Tenant.id == tenant_id))
-    ).scalar_one_or_none()
+    tenant_status = (await db.execute(select(Tenant.status).where(Tenant.id == tenant_id))).scalar_one_or_none()
     if tenant_status != "active":
         raise PrincipalResolutionError("目标租户不存在或已停用")
 

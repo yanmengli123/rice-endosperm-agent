@@ -5,12 +5,11 @@ import secrets
 import string
 from dataclasses import dataclass
 from datetime import timedelta
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.brands.rice_endosperm import BRAND_NAME
-from uuid import uuid4
-
 from yuxi.storage.postgres.models_business import (
     APIKey,
     CLIAuthSession,

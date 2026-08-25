@@ -654,7 +654,6 @@ async def _persist_run_total_tokens(
     if not run_id or total_tokens is None:
         return
     from sqlalchemy import select
-
     from yuxi.storage.postgres.models_business import UsageLedger
 
     repository = AgentRunRepository(db)

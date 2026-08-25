@@ -285,9 +285,7 @@ class KnowledgeBaseManager:
             return False
         creator = await UserRepository().get_by_uid(str(kb.created_by or ""))
         return bool(
-            creator
-            and creator.department_id is not None
-            and int(creator.department_id) == int(user["department_id"])
+            creator and creator.department_id is not None and int(creator.department_id) == int(user["department_id"])
         )
 
     async def get_databases_by_uid(self, uid: str) -> dict:
@@ -927,9 +925,7 @@ class KnowledgeBaseManager:
         if user is None:
             stats["total_files"] = await KnowledgeFileRepository().count_all()
         else:
-            stats["total_files"] = await KnowledgeFileRepository().count_by_kb_ids(
-                [str(row.kb_id) for row in rows]
-            )
+            stats["total_files"] = await KnowledgeFileRepository().count_by_kb_ids([str(row.kb_id) for row in rows])
 
         return stats
 

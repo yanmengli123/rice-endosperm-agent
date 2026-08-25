@@ -28,9 +28,7 @@ def _seal_provider_secrets(
                 if previous:
                     protected_headers[key] = previous
                 continue
-            protected_headers[key] = (
-                encrypt_secret(str(value), f"model-provider-hdr:{provider_id}:{key}") or value
-            )
+            protected_headers[key] = encrypt_secret(str(value), f"model-provider-hdr:{provider_id}:{key}") or value
         sealed["headers_json"] = protected_headers
     return sealed
 

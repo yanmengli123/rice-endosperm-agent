@@ -7,7 +7,6 @@ from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.storage.postgres.models_business import (
     UserModelCredential,
 )
@@ -109,9 +108,7 @@ async def delete_user_credential(db: AsyncSession, uid: str, credential_id: int)
     return await revoke_user_credential(db, uid, credential_id)
 
 
-async def get_active_user_credential(
-    db: AsyncSession, uid: str, provider_id: str
-) -> UserModelCredential | None:
+async def get_active_user_credential(db: AsyncSession, uid: str, provider_id: str) -> UserModelCredential | None:
     result = await db.execute(
         select(UserModelCredential).where(
             UserModelCredential.uid == uid,
@@ -142,9 +139,7 @@ async def open_user_credential_key(
     return decrypt_secret(credential.api_key_ciphertext, _aad(uid, credential.provider_id))
 
 
-async def resolve_user_provider_key(
-    db: AsyncSession, uid: str, provider_id: str
-) -> str | None:
+async def resolve_user_provider_key(db: AsyncSession, uid: str, provider_id: str) -> str | None:
     """返回该用户在此供应商下的活跃凭据明文；未配置则 None（回落平台凭据）。"""
     result = await db.execute(
         select(UserModelCredential).where(

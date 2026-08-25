@@ -264,9 +264,7 @@ async def ensure_builtin_model_providers_in_db(db: AsyncSession) -> None:
 
             bootstrap_key = os.getenv(provider.api_key_env) or None
             provider.api_key = (
-                encrypt_secret(bootstrap_key, f"model-provider-db:{provider.provider_id}")
-                if bootstrap_key
-                else None
+                encrypt_secret(bootstrap_key, f"model-provider-db:{provider.provider_id}") if bootstrap_key else None
             )
         provider.api_key_env = None
         provider.updated_by = "system"

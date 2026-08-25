@@ -18,7 +18,6 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import declarative_base, relationship, validates
-
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
 
@@ -66,7 +65,6 @@ class Tenant(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
-
 TENANT_MEMBERSHIP_ROLES = ("platform_admin", "tenant_admin", "member")
 
 
@@ -87,9 +85,7 @@ class TenantMembership(Base):
     status = Column(String(32), nullable=False, default="active")  # active / suspended
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
-    __table_args__ = (
-        Index("uq_tenant_memberships_tenant_uid", "tenant_id", "uid", unique=True),
-    )
+    __table_args__ = (Index("uq_tenant_memberships_tenant_uid", "tenant_id", "uid", unique=True),)
 
 
 class TenantUserEntitlement(Base):
@@ -119,9 +115,7 @@ class TenantUserEntitlement(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
-    __table_args__ = (
-        Index("uq_tenant_user_entitlements_tenant_uid", "tenant_id", "uid", unique=True),
-    )
+    __table_args__ = (Index("uq_tenant_user_entitlements_tenant_uid", "tenant_id", "uid", unique=True),)
 
 
 class OnboardingActivation(Base):
@@ -954,9 +948,7 @@ class ModelProvider(Base):
             "api_key_configured": bool(self.api_key),
             "capabilities": self.capabilities or [],
             "enabled_models": self.enabled_models or [],
-            "headers_json": {
-                key: SECRET_UNCHANGED_MARKER for key, value in (self.headers_json or {}).items() if value
-            },
+            "headers_json": {key: SECRET_UNCHANGED_MARKER for key, value in (self.headers_json or {}).items() if value},
             "extra_json": self.extra_json or {},
             "is_enabled": bool(self.is_enabled),
             "is_builtin": bool(self.is_builtin),
