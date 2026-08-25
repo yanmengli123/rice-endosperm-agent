@@ -127,6 +127,7 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 ### 外部网关与多租户契约
 
 - APISIX（`docker/apisix/apisix.yaml`，standalone，本地 :9088；Yuxi API 直连 :5050、Web 开发服务器 :5175）是桌面端/外部调用的唯一入口，仅白名单放行少量路由；`request-validation` 插件会强制校验请求体（如 agent-call/runs/result 必须同时携带 `run_id` + `agent_slug`，缺一即 400），改契约时两端同步。
+- 排障：桌面端报「error sending request」且 api 直连正常时，先 `docker port yuxi-apisix` 验证宿主端口映射是否激活——容器 healthcheck 只测内部状态，Docker Desktop 重启后映射可能静默失效，`docker compose -f docker-compose.yml -f docker-compose.apisix.yml up -d --force-recreate apisix` 重建即恢复。
 - 网关限流按 `remote_addr`（IP）而非 API Key；身份认证完全下沉到 Yuxi（`yxkey_` 前缀 Bearer → api_keys 表 → 所属用户，且 Key 部门必须与用户当前部门一致）。用户级路由经 proxy-rewrite 剥离 `X-User-ID` 等可伪造身份头后再转发。
 - 桌面端用户开户走 CLI 设备码流程：`POST /auth/cli/sessions`（免登录创建）→ 用户在 Web `/auth/cli/authorize?user_code=` 批准 → `POST /auth/cli/sessions/token` 用 device_code 换取**自动创建的 API Key**；token 响应附带服务端签发的不可逆 `account_scope_id`（HMAC-SHA256 截断，前缀 `yxacct_`），桌面端本地数据按它隔离账号，不落盘原始 uid。
 - 账号生命周期：认证层每个请求回查 `users.is_disabled` 与 `auth_version`——停用立即拒绝所有凭证（JWT 与 API Key 同样被拒）、递增版本号使存量 JWT 失效、并取消其运行中任务；启用只恢复账号，不回改 API Key 行状态。run 幂等键为 `(uid, request_id)` 唯一索引，不同用户使用相同 request_id 互不冲突。
