@@ -8,6 +8,7 @@
 
 ### 新增
 
+- P2/P3/P4 多租户深化：设备会话体系上线——设备码授权同时签发 30 分钟短时访问令牌（携带 sid 声明）与 30 天旋转刷新令牌，`POST /api/auth/cli/token/refresh` 轮换令牌，已消费令牌再次出示即判定重放并撤销整个会话族，`GET/DELETE /api/auth/sessions` 支持设备列表与单设备下线（旧 secret 字段保留兼容 v0.1.8 客户端）。用户自带模型凭据（BYOK）：`GET/PUT/DELETE /api/user/model-credentials` 管理供应商级自有密钥，AES-256-GCM 加密落库、接口仅回显掩码；Worker 执行期按 run 冻结的凭据 id 解密注入（任务级 ContextVar 隔离），撤销后进行中任务回落平台凭据；智能体新增 `model_policy`（locked=配置模型不可被请求或用户偏好绕过）；自定义 Base URL 增加 SSRF 校验。P4 存量纵深：append-only `usage_ledger` 计费事件流随 run 结束写入（含估算标记），成为计费对账权威来源；conversations 与 agent_runs 启用行级安全并创建基于 `yuxi.uid` 会话变量的归属策略（应用连接为表所有者时零行为变化，激活需切换非所有者角色，步骤见 docs/vibe/2026-08-24-p4-storage-depth.md）。迁移 0003–0006 已在真实库执行验证。
 - P1 租户基础：新增 `tenants` / `tenant_memberships` 表（首装种子默认企业，存量用户按角色映射回填成员关系，superadmin→platform_admin、admin→tenant_admin、user→member）；conversations / agent_runs / agents / skills / knowledge_bases 增加租户外键（数据库层 NOT NULL 由迁移 0002 强制），tasks 支持可空归属与 created_by；引入服务端权威身份上下文 PrincipalContext，资源租户一律由登录态推导并在创建点注入，请求体不可提交；会话读取/更新/删除的 uid 过滤下推 SQL 层，跨用户 thread_id 探测直接 404。新增 GET /api/tenant/members 成员只读端点与 10 例租户单元测试。
 - 稻芯智析公开首页新增权威水稻数据库导航：集中展示核心门户、基因组与注释、表达调控、变异育种、功能突变体、蛋白通路、种质资源及官方归档入口，支持按名称、机构、用途搜索与分类筛选；外部链接按官方入口、官方数据页、研究资源和官方归档分层标识，并提供核验日期、版本引用提醒与响应式深浅色界面。
 - 新增 APISIX Standalone 外部调用网关：通过独立 Compose 覆盖层仅开放 Agent 创建、结果查询和 SSE 路由，保留 Yuxi API Key 作为唯一认证来源，并补充 PowerShell 异步调用脚本与生产安全边界文档。

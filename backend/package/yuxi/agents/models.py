@@ -1,3 +1,5 @@
+import contextvars
+
 from langchain.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
@@ -20,6 +22,31 @@ def resolve_chat_model_spec(model_spec: str | None, *, fallback: str | None = No
     raise ValueError("model spec 不能为空")
 
 
+# P3 BYOK：Worker 执行期按 run 冻结的用户凭据覆盖平台 Key（任务级隔离）
+_user_credential_ctx: "contextvars.ContextVar[tuple[str, str] | None]" = contextvars.ContextVar(
+    "user_model_credential", default=None
+)
+
+
+def set_user_credential_override(provider_id: str, api_key: str):
+    """在当前异步任务内激活用户凭据；返回可传给 ContextVar.reset 的 token。"""
+    return _user_credential_ctx.set((provider_id, api_key))
+
+
+def reset_user_credential_override(token) -> None:
+    _user_credential_ctx.reset(token)
+
+
+def apply_credential_override(info):
+    """纯函数：若上下文中的用户凭据命中该供应商，则替换 ModelInfo 的密钥。"""
+    from dataclasses import replace
+
+    override = _user_credential_ctx.get()
+    if override and override[0] == info.provider_id and override[1]:
+        return replace(info, api_key=override[1])
+    return info
+
+
 def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel:
     fully_specified_name = resolve_chat_model_spec(fully_specified_name)
 
@@ -34,6 +61,8 @@ def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel
 
     if info.model_type != "chat":
         raise ValueError(f"Model {fully_specified_name} is not a chat model (type={info.model_type})")
+
+    info = apply_credential_override(info)
 
     api_key = info.api_key
     base_url = get_docker_safe_url(info.base_url)

@@ -211,6 +211,27 @@ def _apply_model_override(input_context: dict, meta: dict | None) -> None:
         input_context["model"] = model_spec
 
 
+async def _activate_user_credential(*, db, uid: str, meta: dict | None) -> None:
+    """P3 BYOK：按 run 冻结的凭据引用解密并激活任务级密钥覆盖。
+
+    激活作用域是当前异步任务：graph 构建期间 load_chat_model 会读取该上下文，
+    任务结束自动失效；解密失败或凭据已撤销时回落平台 Key 并记录告警。
+    """
+    ref = (meta or {}).get("user_credential") or {}
+    credential_id = ref.get("credential_id")
+    provider_id = ref.get("provider_id")
+    if not credential_id or not provider_id:
+        return
+    from yuxi.agents.models import set_user_credential_override
+    from yuxi.services.user_credential_service import open_user_credential_key
+
+    api_key = await open_user_credential_key(db, str(uid), int(credential_id))
+    if not api_key:
+        logger.warning(f"用户模型凭据不可用，回落平台 Key: credential={credential_id}")
+        return
+    set_user_credential_override(str(provider_id), api_key)
+
+
 def _apply_subagent_runtime_context(input_context: dict, meta: dict | None) -> None:
     """把子智能体 run 的父线程和文件线程信息注入运行 context。"""
     meta = meta or {}
@@ -614,13 +635,32 @@ async def _checkpoint_total_tokens(agent, config_dict: dict, *, context) -> int 
         return None
 
 
-async def _persist_run_total_tokens(db, run_id: str | None, total_tokens: int | None) -> None:
+async def _persist_run_total_tokens(
+    db,
+    run_id: str | None,
+    total_tokens: int | None,
+    *,
+    uid: str | None = None,
+    model_spec: str | None = None,
+    estimated: bool | None = None,
+) -> None:
     if not run_id or total_tokens is None:
         return
     try:
         await AgentRunRepository(db).set_total_tokens(run_id, total_tokens)
     except Exception:
         logger.warning(f"记录 run token 用量失败: run_id={run_id}")
+
+    # P4：append-only 计费事件流；失败不阻塞主链路但必须留痕
+    if uid:
+        try:
+            from yuxi.storage.postgres.models_business import UsageLedger
+
+            db.add(UsageLedger(run_id=str(run_id), uid=str(uid), model_spec=model_spec,
+                               total_tokens=int(total_tokens), estimated=bool(estimated)))
+            await db.flush()
+        except Exception as exc:
+            logger.warning(f"写入 usage_ledger 失败 run_id={run_id}: {exc}")
 
 
 async def save_messages_from_langgraph_state(
@@ -974,6 +1014,7 @@ async def stream_agent_chat(
         request_id=meta.get("request_id"),
     )
     _apply_model_override(input_context, meta)
+    await _activate_user_credential(db=db, uid=uid, meta=meta)
     _apply_subagent_runtime_context(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     context = _build_agent_context(agent, input_context)
@@ -1226,7 +1267,16 @@ async def stream_agent_chat(
             logger.exception(f"Error saving messages from LangGraph state: {e}")
             yield make_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
 
-        await _persist_run_total_tokens(db, meta.get("run_id"), run_total_tokens)
+        usage_state = getattr(state, "values", None) or {}
+        usage_payload = usage_state.get("token_usage") if isinstance(usage_state, dict) else None
+        await _persist_run_total_tokens(
+            db,
+            meta.get("run_id"),
+            run_total_tokens,
+            uid=meta.get("uid"),
+            model_spec=meta.get("model_spec"),
+            estimated=bool(usage_payload.get("estimate")) if isinstance(usage_payload, dict) else None,
+        )
 
         if interrupted:
             return
@@ -1344,6 +1394,7 @@ async def stream_agent_resume(
         request_id=meta.get("request_id"),
     )
     _apply_model_override(input_context, meta)
+    await _activate_user_credential(db=db, uid=uid, meta=meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     context = _build_agent_context(agent, input_context)
     _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
@@ -1506,7 +1557,16 @@ async def stream_agent_resume(
             logger.exception(f"Error saving messages from LangGraph state: {e}")
             yield make_resume_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
 
-        await _persist_run_total_tokens(db, meta.get("run_id"), run_total_tokens)
+        usage_state = getattr(state, "values", None) or {}
+        usage_payload = usage_state.get("token_usage") if isinstance(usage_state, dict) else None
+        await _persist_run_total_tokens(
+            db,
+            meta.get("run_id"),
+            run_total_tokens,
+            uid=meta.get("uid"),
+            model_spec=meta.get("model_spec"),
+            estimated=bool(usage_payload.get("estimate")) if isinstance(usage_payload, dict) else None,
+        )
 
         if interrupted:
             return

@@ -91,6 +91,30 @@ class TenantMembership(Base):
     )
 
 
+class UserModelCredential(Base):
+    """用户自带模型凭据（BYOK）：密文存储，运行时按凭据引用解密。"""
+
+    __tablename__ = "model_user_credentials"
+
+    CREDENTIAL_STATUS_ACTIVE = "active"
+    CREDENTIAL_STATUS_REVOKED = "revoked"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    provider_id = Column(String(100), nullable=False, index=True)
+    label = Column(String(128), nullable=False, default="我的凭据")
+    api_key_ciphertext = Column(String(1000), nullable=False)
+    masked_hint = Column(String(64), nullable=True)
+    status = Column(String(32), nullable=False, default="active")
+    last_tested_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+    __table_args__ = (
+        Index("uq_user_model_credentials_uid_provider", "uid", "provider_id", unique=True),
+    )
+
+
 class DeviceSession(Base):
     """桌面端/CLI 设备会话族：一个授权产生一个会话，内含旋转中的刷新令牌。"""
 
@@ -120,6 +144,23 @@ class DeviceSessionToken(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class UsageLedger(Base):
+    """append-only 用量事件流：计费与对账的唯一权威来源，禁止 UPDATE/DELETE。"""
+
+    __tablename__ = "usage_ledger"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    uid = Column(String, nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)
+    model_spec = Column(String(200), nullable=True)
+    input_tokens = Column(BigInteger, nullable=False, default=0)
+    output_tokens = Column(BigInteger, nullable=False, default=0)
+    total_tokens = Column(BigInteger, nullable=False, default=0)
+    estimated = Column(Boolean, nullable=False, default=False)  # 上游未回传 usage 时为估算值
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
 
 
 class User(Base):
@@ -337,6 +378,9 @@ class Agent(Base):
 
     # P1 租户归属：由 PrincipalContext 注入，禁止来自请求体
     tenant_id = _tenant_column()
+
+    # P3 模型策略：locked=智能体指定模型优先且请求/用户不可绕过；preferred=常规解析链
+    model_policy = Column(String(16), nullable=False, default="preferred")
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     slug = Column(String(80), nullable=False, unique=True, index=True)

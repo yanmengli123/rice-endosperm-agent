@@ -180,7 +180,18 @@ def resolve_agent_run_model_spec(
     agent_backend,
     user_model_spec: str | None = None,
 ) -> str:
-    """解析本次 run 实际使用的模型：显式覆盖优先，否则配置模型，最后系统默认模型。"""
+    """解析本次 run 实际使用的模型：显式覆盖优先，否则配置模型，最后系统默认模型。
+
+    P3：智能体 model_policy=locked 时，配置模型不可被请求或用户偏好绕过。
+    """
+    if getattr(agent_item, "model_policy", "preferred") == "locked":
+        context = agent_backend.context_schema()
+        config_json = getattr(agent_item, "config_json", None) or {}
+        config_context = config_json.get("context") if isinstance(config_json, dict) else {}
+        if isinstance(config_context, dict):
+            context.update_from_dict(config_context)
+        return resolve_chat_model_spec(getattr(context, "model", None))
+
     normalized = model_spec.strip() if isinstance(model_spec, str) else None
     if normalized:
         info = model_cache.get_model_info(normalized)
@@ -576,6 +587,20 @@ async def create_agent_run_view(
             user_model_spec=user_model_spec,
         )
 
+    # P3 BYOK：用户在该供应商下配置了自有凭据时，冻结凭据 id 供 Worker 执行时解密注入
+    user_credential_ref = None
+    try:
+        from yuxi.services.user_credential_service import get_active_user_credential
+
+        provider_id = resolved_model_spec.split(":", 1)[0] if resolved_model_spec else None
+        if provider_id:
+            credential = await get_active_user_credential(db=db, uid=current_uid, provider_id=provider_id)
+            if credential is not None:
+                user_credential_ref = {"credential_id": credential.id, "provider_id": provider_id}
+    except Exception as exc:
+        logger.warning(f"解析用户模型凭据失败，回落平台凭据: {exc}")
+        user_credential_ref = None
+
     parent_payload = scope.parent_run.input_payload if run_type == "resume" else None
     knowledge_scope_snapshot = (
         parent_payload.get("knowledge_scope_snapshot") if isinstance(parent_payload, dict) else None
@@ -606,6 +631,8 @@ async def create_agent_run_view(
         "model_spec": resolved_model_spec,
         "knowledge_scope_snapshot": knowledge_scope_snapshot,
     }
+    if user_credential_ref:
+        input_payload["user_credential"] = user_credential_ref
 
     run, created = await persist_agent_run_record(
         agent_slug=agent_slug,

@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.utils.auth_middleware import get_current_user, get_db, get_required_user
 from yuxi.config import UserConfig, UserConfigSchema
 from yuxi.models.providers.cache import model_cache
-from yuxi.services.operation_log_service import log_operation
 from yuxi.services.run_queue_service import publish_cancel_signal
 from yuxi.storage.minio import upload_image_to_minio
 from yuxi.storage.postgres.models_business import (
@@ -431,6 +430,69 @@ async def get_model_preference(current_user: User = Depends(get_required_user), 
     result = await db.execute(select(UserModelPreference).filter(UserModelPreference.uid == current_user.uid))
     pref = result.scalar_one_or_none()
     return {"chat_model_spec": pref.chat_model_spec if pref else None}
+
+
+class UserCredentialPayload(BaseModel):
+    provider_id: str = Field(..., min_length=1, max_length=100)
+    api_key: str = Field(..., min_length=4, max_length=500)
+    label: str | None = Field(None, max_length=128)
+
+
+@user_router.get("/model-credentials")
+async def list_model_credentials(
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出当前用户的模型凭据（只含掩码，永不回显明文）。"""
+    from yuxi.services.user_credential_service import list_user_credentials
+
+    return {"credentials": await list_user_credentials(db, current_user.uid)}
+
+
+@user_router.put("/model-credentials")
+async def upsert_model_credential(
+    payload: UserCredentialPayload,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """创建/替换本供应商下的自有凭据（BYOK）。"""
+    from yuxi.models.providers.cache import model_cache
+    from yuxi.services.user_credential_service import upsert_user_credential
+
+    known_providers = {info.provider_id for info in model_cache.get_all_specs()}
+    if payload.provider_id not in known_providers:
+        raise HTTPException(status_code=422, detail=f"未知模型供应商: '{payload.provider_id}'")
+
+    credential = await upsert_user_credential(
+        db,
+        uid=current_user.uid,
+        provider_id=payload.provider_id,
+        api_key=payload.api_key,
+        label=payload.label,
+    )
+    await db.commit()
+    return {
+        "credential_id": credential.id,
+        "provider_id": credential.provider_id,
+        "masked_hint": credential.masked_hint,
+        "status": credential.status,
+    }
+
+
+@user_router.delete("/model-credentials/{credential_id}")
+async def delete_model_credential(
+    credential_id: int,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """撤销并删除自有凭据；进行中的任务回落平台凭据。"""
+    from yuxi.services.user_credential_service import delete_user_credential
+
+    ok = await delete_user_credential(db, current_user.uid, credential_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="凭据不存在")
+    await db.commit()
+    return {"success": True}
 
 
 @user_router.put("/model-preference")

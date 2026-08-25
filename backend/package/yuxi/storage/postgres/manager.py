@@ -711,7 +711,8 @@ class PostgresManager(metaclass=SingletonMeta):
             text(
                 "INSERT INTO tenant_memberships (tenant_id, uid, role, status) "
                 "SELECT 1, u.uid, "
-                "CASE u.role WHEN 'superadmin' THEN 'platform_admin' WHEN 'admin' THEN 'tenant_admin' ELSE 'member' END, "
+                "CASE u.role WHEN 'superadmin' THEN 'platform_admin' "
+                "WHEN 'admin' THEN 'tenant_admin' ELSE 'member' END, "
                 "'active' FROM users u WHERE u.is_deleted = 0 "
                 "ON CONFLICT (tenant_id, uid) DO NOTHING"
             )
@@ -777,10 +778,78 @@ class PostgresManager(metaclass=SingletonMeta):
             text("CREATE INDEX IF NOT EXISTS ix_device_session_tokens_session ON device_session_tokens(session_id)")
         )
 
+    async def _migration_0004_model_credentials(self, conn) -> None:
+        """P3 模型与凭据体系：用户 BYOK 凭据表 + 智能体模型策略。"""
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS model_user_credentials ("
+                "id BIGSERIAL PRIMARY KEY, uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE, "
+                "provider_id VARCHAR(100) NOT NULL, label VARCHAR(128) NOT NULL DEFAULT '我的凭据', "
+                "api_key_ciphertext VARCHAR(1000) NOT NULL, masked_hint VARCHAR(64), "
+                "status VARCHAR(32) NOT NULL DEFAULT 'active', last_tested_at TIMESTAMPTZ, "
+                "revoked_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_model_credentials_uid_provider "
+                "ON model_user_credentials(uid, provider_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS agents ADD COLUMN IF NOT EXISTS model_policy "
+                "VARCHAR(16) NOT NULL DEFAULT 'preferred'"
+            )
+        )
+
+    async def _migration_0005_usage_ledger(self, conn) -> None:
+        """P4：append-only 用量事件流。"""
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS usage_ledger ("
+                "id BIGSERIAL PRIMARY KEY, run_id VARCHAR(64) NOT NULL, uid VARCHAR NOT NULL, "
+                "tenant_id BIGINT REFERENCES tenants(id), model_spec VARCHAR(200), "
+                "input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0, "
+                "total_tokens BIGINT NOT NULL DEFAULT 0, estimated BOOLEAN NOT NULL DEFAULT FALSE, "
+                "created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        for column in ("run_id", "uid", "tenant_id", "created_at"):
+            await conn.execute(
+                text(f"CREATE INDEX IF NOT EXISTS ix_usage_ledger_{column} ON usage_ledger({column})")
+            )
+
+    async def _migration_0006_rls_scaffold(self, conn) -> None:
+        """P4：行级安全策略脚手架。
+
+        策略基于会话 GUC yuxi.uid；应用连接使用表所有者角色时策略不绑定（owner
+        bypass），因此本迁移零行为变化。激活步骤见 docs/vibe/2026-08-24-p4-storage-depth.md。
+        """
+        # messages 无独立 uid 列（经 conversation 归属继承），由 conversations 的策略间接保护
+        for table in ("conversations", "agent_runs"):
+            await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ENABLE ROW LEVEL SECURITY"))
+            policy_exists = (
+                await conn.execute(
+                    text("SELECT 1 FROM pg_policies WHERE tablename = :t AND policyname = :p"),
+                    {"t": table, "p": f"p_{table}_own_uid"},
+                )
+            ).scalar()
+            if not policy_exists:
+                await conn.execute(
+                    text(
+                        f"CREATE POLICY p_{table}_own_uid ON {table} "
+                        "USING (uid = NULLIF(current_setting('yuxi.uid', true), ''))"
+                    )
+                )
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
         ("0003_device_sessions", "_migration_0003_device_sessions"),
+        ("0004_model_credentials", "_migration_0004_model_credentials"),
+        ("0005_usage_ledger", "_migration_0005_usage_ledger"),
+        ("0006_rls_scaffold", "_migration_0006_rls_scaffold"),
     ]
 
     async def _apply_versioned_migrations(self):
