@@ -131,8 +131,18 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 - 桌面端用户开户走 CLI 设备码流程：`POST /auth/cli/sessions`（免登录创建）→ 用户在 Web `/auth/cli/authorize?user_code=` 批准 → `POST /auth/cli/sessions/token` 用 device_code 换取**自动创建的 API Key**；token 响应附带服务端签发的不可逆 `account_scope_id`（HMAC-SHA256 截断，前缀 `yxacct_`），桌面端本地数据按它隔离账号，不落盘原始 uid。
 - 账号生命周期：认证层每个请求回查 `users.is_disabled` 与 `auth_version`——停用立即拒绝所有凭证（JWT 与 API Key 同样被拒）、递增版本号使存量 JWT 失效、并取消其运行中任务；启用只恢复账号，不回改 API Key 行状态。run 幂等键为 `(uid, request_id)` 唯一索引，不同用户使用相同 request_id 互不冲突。
 - 企业运营契约：未绑定部门的用户创建 run 返回 400；配额超限返回 429（管理员经 `/api/user/manage/{uid}/quota` 设置，UserQuota 行 `with_for_update()` 行锁串行化并发创建，无配额行即不限）；用量查询 `GET /api/user/usage?days=N`。
-- 模型供应商（model_providers，含 chat/embedding/rerank/OCR 凭证）是**全局单份**配置，仅管理员可写；模型解析优先级为 请求级 > **用户级**（`GET/PUT /api/user/model-preference`）> 智能体级 > 系统级。
+- 模型供应商（model_providers，含 chat/embedding/rerank/OCR 凭证）是**全局单份**配置，仅 superadmin 可写（读不限）；模型解析优先级为 请求级 > **用户级**（`GET/PUT /api/user/model-preference`）> 智能体级 > 系统级；用户 BYOK 凭据（`/api/user/model-credentials`）在命中供应商时于 Worker 执行期覆盖平台密钥；智能体 `model_policy=locked` 时配置模型不可被请求或用户绕过。
+
 - 站点品牌文案（导航栏名称、logo、登录背景、页脚版权）由后端 `/api/system/info` 下发，不要在前端硬编码：加载优先级为 `YUXI_BRAND_FILE_PATH` → `info.local.yaml`（本地覆盖，已 gitignore）→ `info.template.yaml`，配置文件在 `backend/package/yuxi/config/static/`；品牌图片放 `web/public/brand/rice-endosperm/`
+
+### 凭据加密与多租户不变量（P0–P4 引入，改动相关代码前必读）
+
+- **敏感凭据一律静态加密**：模型 API Key/Header、OCR Token、用户 BYOK 统一走 [secret_crypto.py](backend/package/yuxi/utils/secret_crypto.py)（AES-256-GCM，AAD 绑定资源标识），主密钥 `YUXI_SECRET_MASTER_KEY` 生产必填。Redis 模型/OCR 缓存（v2 键）只存密文；新增敏感字段必须复用该服务并接入启动惰性升级清扫，禁止明文落库或进缓存。
+- **Schema 变更双通道**：带数据回填/非幂等的复杂变更走版本化迁移执行器（[manager.py](backend/package/yuxi/storage/postgres/manager.py) `_VERSIONED_MIGRATIONS`，登记 `schema_migrations` 表、同事务执行一次）；仅简单幂等 DDL 允许放 `ensure_business_schema` 列表。新迁移纪律：加列 nullable → 回填 → 建约束/索引 → NOT NULL，且不设数据库默认值掩盖漏传。
+- **租户归属权威来源是 PrincipalContext**（[principal.py](backend/package/yuxi/services/principal.py)）：业务资源创建必须经 `resolve_tenant_id(db, uid)` 注入 `tenant_id`，请求体中的 tenant_id 一律忽略；conversations/agent_runs/agents/skills/knowledge_bases 的 `tenant_id` 在数据库层 NOT NULL（tasks 例外，允许系统任务）。测试桩注意 SQLite 下 BIGINT 自增主键需用 `BigIntPk` 方言变体。
+- **设备会话与令牌**：设备码 exchange 同时返回会话对——30 分钟短时访问令牌（JWT 带 `sid` 声明，中间件校验 DeviceSession 仍 active）+ 30 天旋转刷新令牌（`POST /auth/cli/token/refresh`）；已消费刷新令牌再次出示即判定重放并撤销整个会话族。旧 `secret` 字段保留仅为兼容 v0.1.8 客户端。
+- **usage_ledger 是计费对账唯一权威**（append-only，禁止 UPDATE/DELETE），随 run 结束写入并带 estimated 标记；`agent_runs.total_tokens` 仅是可变缓存列。
+- **RLS 已脚手架化**：conversations / agent_runs 启用行级安全（策略按会话 GUC `yuxi.uid` 过滤），应用连接为表所有者时零行为变化；激活需切换非所有者角色并注入 GUC，步骤见 `docs/vibe/2026-08-24-p4-storage-depth.md`。
 
 ### 前端开发规范
 - 使用 pnpm 管理
