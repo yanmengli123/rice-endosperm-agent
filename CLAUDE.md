@@ -140,7 +140,7 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 ### 凭据加密与多租户不变量（P0–P5 引入，改动相关代码前必读）
 
 - **敏感凭据一律静态加密**：模型 API Key/Header、OCR Token、用户 BYOK 统一走 [secret_crypto.py](backend/package/yuxi/utils/secret_crypto.py)（AES-256-GCM，AAD 绑定资源标识），主密钥 `YUXI_SECRET_MASTER_KEY` 生产必填。Redis 模型/OCR 缓存（v2 键）只存密文；新增敏感字段必须复用该服务并接入启动惰性升级清扫，禁止明文落库或进缓存。
-- **Schema 变更双通道**：带数据回填/非幂等的复杂变更走版本化迁移执行器（[manager.py](backend/package/yuxi/storage/postgres/manager.py) `_VERSIONED_MIGRATIONS`，登记 `schema_migrations` 表、同事务执行一次）；仅简单幂等 DDL 允许放 `ensure_business_schema` 列表。新迁移纪律：加列 nullable → 回填 → 建约束/索引 → NOT NULL，且不设数据库默认值掩盖漏传。
+- **Schema 变更双通道**：带数据回填/非幂等的复杂变更走版本化迁移执行器（[manager.py](backend/package/yuxi/storage/postgres/manager.py) `_VERSIONED_MIGRATIONS`，登记 `schema_migrations` 表、同事务执行一次）；仅简单幂等 DDL 允许放 `ensure_business_schema` 列表。新迁移纪律：加列 nullable → 回填 → 建约束/索引 → NOT NULL，且不设数据库默认值掩盖漏传。**ORM↔DB 列漂移自检**：给模型新增/改名任何列必须同步写迁移——曾因 `api_keys.tenant_id` 只声明未迁移导致建 Key、设备码登录、删用户三条链路同时 500；提交前用 `information_schema.columns` 对照 SQLAlchemy metadata 全量比对即可发现。
 - **租户归属权威来源是 PrincipalContext**（[principal.py](backend/package/yuxi/services/principal.py)）：业务资源创建必须经 `resolve_tenant_id(db, uid)` 注入 `tenant_id`，请求体中的 tenant_id 一律忽略；conversations/agent_runs/agents/skills/knowledge_bases 的 `tenant_id` 在数据库层 NOT NULL（tasks 例外，允许系统任务）。测试桩注意 SQLite 下 BIGINT 自增主键需用 `BigIntPk` 方言变体。
 - **设备会话与令牌**：设备码 exchange 同时返回会话对——30 分钟短时访问令牌（JWT 带 `sid` 声明，中间件校验 DeviceSession 仍 active）+ 30 天旋转刷新令牌（`POST /auth/cli/token/refresh`）；已消费刷新令牌再次出示即判定重放并撤销整个会话族。旧 `secret` 字段保留仅为兼容 v0.1.8 客户端。
 - **usage_ledger 是计费对账唯一权威**（append-only，禁止 UPDATE/DELETE），随 run 结束写入并带 estimated 标记；`agent_runs.total_tokens` 仅是可变缓存列。
@@ -154,6 +154,7 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 - **权益以租户维度为权威**：模型接入策略/配额在 `tenant_user_entitlements`（`credential_policy ∈ {platform_only, byok_optional, byok_required}`、daily/monthly_platform_token/concurrent 限额、`byok_platform_token_exempt`、`policy_version`），**不在全局 users 表**；run 创建时把 `policy_version` 冻结进 input_payload 供结算复查。新用户默认 `platform_only`。配额预检（`_enforce_user_quota`）在 P5 后应改读权益表。
 - **BYOK 版本化不可变**：替换密钥 = 插入新 active 行并把旧行置 `superseded` 并指向新 ID（唯一约束为 `(uid, provider_id) WHERE status='active'` 部分索引）；AgentRun 冻结的 `credential_id` 永远指向不变历史版本。**绝不物理删除凭据**，撤销走 `revoked_at/revoked_by/reason` 逻辑态。`locked`（模型规格）与 `credential_policy`（凭据来源）是两个正交维度，`agents.credential_policy` 可 `inherit_user/platform_only/byok_required` 覆盖用户权益。
 - **usage_ledger 分域记账**：除 run/uid/tenant/tokens/estimated 外，P5 增加了 `credential_source`（platform/user_byok/legacy_unknown）、`credential_id`、`provider_id`、`policy_version`——历史行强制标 `legacy_unknown` 不猜测；新写入点在 `_persist_run_total_tokens`（chat_service），保证一个 run 只有一条 ledger 记录。Dashboard/对账按此分域。
+- **审计日志带租户归属**：`operation_logs.tenant_id` 由写入方经 `resolve_operator_tenant_id(db, user_id)` 解析（[operation_log_service.py](backend/package/yuxi/services/operation_log_service.py)）；直接构造 `OperationLog(...)` 的路由也必须传入该字段，系统级日志允许为空。
 
 ### 前端开发规范
 - 使用 pnpm 管理
