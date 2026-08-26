@@ -26,7 +26,7 @@ from server.utils.auth_middleware import (
 )
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.services.user_identity_service import generate_unique_uid, validate_username, is_valid_phone_number
-from yuxi.services.operation_log_service import log_operation
+from yuxi.services.operation_log_service import log_operation, resolve_operator_tenant_id
 from yuxi.services.auth_service import (
     CLI_AUTH_POLL_INTERVAL_SECONDS,
     CLI_AUTH_SESSION_TTL_SECONDS,
@@ -416,7 +416,14 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
         from yuxi.services.principal import ensure_tenant_membership
 
         await ensure_tenant_membership(db, new_user)
-        db.add(OperationLog(user_id=new_user.id, operation="自助注册", details=f"uid={new_user.uid}"))
+        db.add(
+            OperationLog(
+                user_id=new_user.id,
+                tenant_id=await resolve_operator_tenant_id(db, new_user.id),
+                operation="自助注册",
+                details=f"uid={new_user.uid}",
+            )
+        )
         await db.commit()
         await db.refresh(new_user)
     except IntegrityError as exc:

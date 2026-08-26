@@ -169,12 +169,15 @@ async def exchange_cli_auth_token(db: AsyncSession, device_code: str) -> dict:
         raise CLIAuthError("department_required", "授权用户尚未绑定部门", status_code=400)
 
     full_key, key_hash, key_prefix = AuthUtils.generate_api_key()
+    from yuxi.services.principal import resolve_tenant_id
+
     api_key = APIKey(
         key_hash=key_hash,
         key_prefix=key_prefix,
         name=session.key_name,
         user_id=user.id,
         department_id=user.department_id,
+        tenant_id=await resolve_tenant_id(db, user.uid),
         created_by=str(user.id),
         # 设备流签发的 Key 非永久凭证：90 天滚动过期（OAuth 刷新令牌上线前的过渡措施）
         expires_at=utc_now_naive() + timedelta(days=DEVICE_API_KEY_TTL_DAYS),
@@ -220,8 +223,16 @@ async def exchange_cli_auth_token(db: AsyncSession, device_code: str) -> dict:
 
 async def issue_device_session(db: AsyncSession, user: User) -> tuple[DeviceSession, str]:
     """创建会话族并签发首个刷新令牌。"""
+    from yuxi.services.principal import resolve_tenant_id
+
     now = utc_now_naive()
-    session = DeviceSession(family_id=str(uuid4()), uid=user.uid, status="active", created_at=now)
+    session = DeviceSession(
+        family_id=str(uuid4()),
+        uid=user.uid,
+        tenant_id=await resolve_tenant_id(db, user.uid),
+        status="active",
+        created_at=now,
+    )
     db.add(session)
     await db.flush()
 

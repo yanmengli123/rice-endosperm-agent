@@ -19,7 +19,7 @@ async def session():
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
-        department = Department(name="Config Dept")
+        department = Department(name="Config Dept", tenant_id=1)
         user = User(
             username="Config User",
             uid="config_user",

@@ -135,11 +135,12 @@ async def create_department(
                 detail="手机号已存在",
             )
 
-    # 创建部门
+    # 创建部门（归属当前默认租户；多租户运营期由平台侧指派）
     new_department = await dept_repo.create(
         {
             "name": department_data.name,
             "description": department_data.description,
+            "tenant_id": 1,
         }
     )
 

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.utils.auth_middleware import get_current_user, get_db, get_required_user
 from yuxi.config import UserConfig, UserConfigSchema
 from yuxi.models.providers.cache import model_cache
+from yuxi.services.operation_log_service import resolve_operator_tenant_id
 from yuxi.services.run_queue_service import publish_cancel_signal
 from yuxi.storage.minio import upload_image_to_minio
 from yuxi.storage.postgres.models_business import (
@@ -216,12 +217,15 @@ async def create_api_key(
         if aware_dt:
             expires_at = aware_dt.replace(tzinfo=None)
 
+    from yuxi.services.principal import resolve_tenant_id
+
     api_key = APIKey(
         key_hash=key_hash,
         key_prefix=key_prefix,
         name=data.name,
         user_id=target_user.id,
         department_id=target_user.department_id,
+        tenant_id=await resolve_tenant_id(db, target_user.uid),
         expires_at=expires_at,
         created_by=str(current_user.id),
     )
@@ -394,6 +398,7 @@ async def disable_user(uid: str, current_user: User = Depends(get_required_user)
     db.add(
         OperationLog(
             user_id=current_user.id,
+            tenant_id=await resolve_operator_tenant_id(db, current_user.id),
             operation="停用用户",
             details=f"uid={uid}, 取消活动运行 {len(active_run_ids)} 个",
         )
@@ -411,7 +416,14 @@ async def enable_user(uid: str, current_user: User = Depends(get_required_user),
     _admin_guard(current_user, target)
     target.is_disabled = False
     target.auth_version += 1
-    db.add(OperationLog(user_id=current_user.id, operation="启用用户", details=f"uid={uid}"))
+    db.add(
+        OperationLog(
+            user_id=current_user.id,
+            tenant_id=await resolve_operator_tenant_id(db, current_user.id),
+            operation="启用用户",
+            details=f"uid={uid}",
+        )
+    )
     await db.commit()
     return {"uid": uid, "is_disabled": False}
 
@@ -463,12 +475,15 @@ async def upsert_model_credential(
     if payload.provider_id not in known_providers:
         raise HTTPException(status_code=422, detail=f"未知模型供应商: '{payload.provider_id}'")
 
+    from yuxi.services.principal import resolve_tenant_id
+
     credential = await upsert_user_credential(
         db,
         uid=current_user.uid,
         provider_id=payload.provider_id,
         api_key=payload.api_key,
         label=payload.label,
+        tenant_id=await resolve_tenant_id(db, current_user.uid),
     )
     await db.commit()
     return {
@@ -521,6 +536,7 @@ async def put_model_preference(
     db.add(
         OperationLog(
             user_id=current_user.id,
+            tenant_id=await resolve_operator_tenant_id(db, current_user.id),
             operation="更新默认聊天模型",
             details=f"chat_model_spec={spec or '系统默认'}",
         )
@@ -651,6 +667,7 @@ async def put_user_quota(
     db.add(
         OperationLog(
             user_id=current_user.id,
+            tenant_id=await resolve_operator_tenant_id(db, current_user.id),
             operation="更新用户配额",
             details=(
                 f"uid={uid}, daily_run_limit={entitlement.daily_run_limit}, "

@@ -23,7 +23,7 @@ async def session():
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
-        dept = Department(name="默认部门")
+        dept = Department(name="默认部门", tenant_id=1)
         user = User(
             username="Admin",
             uid="admin",
@@ -31,7 +31,11 @@ async def session():
             role="superadmin",
             department=dept,
         )
-        db.add_all([dept, user])
+        from yuxi.storage.postgres.models_business import Tenant, TenantMembership
+
+        tenant = Tenant(id=1, name="默认企业", status="active")
+        membership = TenantMembership(tenant_id=1, uid=user.uid, role="platform_admin", status="active")
+        db.add_all([tenant, membership, dept, user])
         await db.commit()
         await db.refresh(user)
         yield db, user

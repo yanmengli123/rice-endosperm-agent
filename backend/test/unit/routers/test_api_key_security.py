@@ -13,7 +13,7 @@ from server.routers.user_router import APIKeyCreate, _admin_guard, create_api_ke
 from server.utils.auth_middleware import _verify_api_key, get_current_user
 from yuxi.repositories import user_repository as user_repository_module
 from yuxi.repositories.user_repository import UserRepository
-from yuxi.storage.postgres.models_business import APIKey, AgentRun, Base, Department, User
+from yuxi.storage.postgres.models_business import APIKey, AgentRun, Base, Department, Tenant, TenantMembership, User
 from yuxi.utils.auth_utils import AuthUtils
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -45,8 +45,8 @@ async def session():
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
-        dept_a = Department(name="Dept A")
-        dept_b = Department(name="Dept B")
+        dept_a = Department(name="Dept A", tenant_id=1)
+        dept_b = Department(name="Dept B", tenant_id=1)
         superadmin = User(
             username="Super Admin",
             uid="superadmin",
@@ -77,6 +77,18 @@ async def session():
             is_deleted=1,
         )
         db.add_all([dept_a, dept_b, superadmin, dept_b_admin, regular_user, deleted_user])
+        # P5 严格租户解析：种子默认租户与各用户成员关系
+        tenant_row = Tenant(id=1, name="默认企业", status="active")
+        memberships = [
+            TenantMembership(
+                tenant_id=1,
+                uid=u.uid,
+                role="platform_admin" if u.role == "superadmin" else "tenant_admin" if u.role == "admin" else "member",
+                status="active",
+            )
+            for u in (superadmin, dept_b_admin, regular_user)
+        ]
+        db.add_all([tenant_row, *memberships])
         await db.commit()
         for item in [dept_a, dept_b, superadmin, dept_b_admin, regular_user, deleted_user]:
             await db.refresh(item)

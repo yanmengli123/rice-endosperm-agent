@@ -45,6 +45,11 @@ class _FakeDB:
     async def execute(self, stmt):
         text = str(stmt)
         self.statements.append(text)
+        if "tenant_memberships" in text and "JOIN" in text.upper():
+            # P5 严格租户解析桩：返回唯一活跃成员行
+            row = SimpleNamespace(tenant_id=1)
+            holder = type("R", (), {"scalars": staticmethod(lambda: SimpleNamespace(all=lambda: [row]))})
+            return holder()
         if "device_session_tokens" in text:
             if "used_at IS NULL" in text or "token_hash" in text:
                 return _Result(self.token_row)

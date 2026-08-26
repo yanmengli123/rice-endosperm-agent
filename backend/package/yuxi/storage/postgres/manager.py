@@ -1022,7 +1022,37 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0008_usage_ledger_tenant_required", "_migration_0008_usage_ledger_tenant_required"),
         ("0009_entitlements_activation", "_migration_0009_entitlements_activation"),
         ("0010_tenant_scope_backfill", "_migration_0010_tenant_scope_backfill"),
+        ("0011_apikeys_tenant_scope", "_migration_0011_apikeys_tenant_scope"),
     ]
+
+    async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
+        """P5 补遗：api_keys.tenant_id 在 ORM 中声明但 0010 漏建，导致所有
+        api_keys 的 SELECT/INSERT 全部失败（建 Key、设备码签发、删用户级联）。
+        回填来源：所属用户的活跃租户成员关系（与 0010 其他表一致）。"""
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS tenant_id BIGINT")
+        )
+        await conn.execute(
+            text(
+                "UPDATE api_keys k SET tenant_id = COALESCE("
+                "(SELECT m.tenant_id FROM tenant_memberships m WHERE m.uid = "
+                "(SELECT u.uid FROM users u WHERE u.id = k.user_id) "
+                "AND m.status = 'active' ORDER BY m.tenant_id LIMIT 1), 1) "
+                "WHERE k.tenant_id IS NULL"
+            )
+        )
+        await conn.execute(text("ALTER TABLE api_keys ALTER COLUMN tenant_id SET NOT NULL"))
+        constraint_exists = (
+            await conn.execute(text("SELECT 1 FROM pg_constraint WHERE conname = 'fk_api_keys_tenant'"))
+        ).scalar()
+        if not constraint_exists:
+            await conn.execute(
+                text("ALTER TABLE api_keys ADD CONSTRAINT fk_api_keys_tenant "
+                     "FOREIGN KEY (tenant_id) REFERENCES tenants(id)")
+            )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_api_keys_tenant ON api_keys(tenant_id)")
+        )
 
     async def _apply_versioned_migrations(self):
         self._check_initialized()

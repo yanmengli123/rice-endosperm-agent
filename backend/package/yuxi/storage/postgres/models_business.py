@@ -38,7 +38,8 @@ class Department(Base):
     __tablename__ = "departments"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(50), nullable=False, unique=True, index=True)
+    name = Column(String(50), nullable=False)  # 租户内唯一（迁移 0011 前身 0010 的联合唯一索引强制）
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)  # 迁移 0010 回填
     description = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
 
@@ -189,6 +190,7 @@ class DeviceSession(Base):
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     family_id = Column(String(36), nullable=False, unique=True, index=True)
     uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)  # 迁移 0010 回填
     status = Column(String(32), nullable=False, default="active", index=True)  # active / revoked
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     last_refreshed_at = Column(DateTime(timezone=True), nullable=True)
@@ -740,12 +742,13 @@ class ConversationStats(Base):
 
 
 class OperationLog(Base):
-    """操作日志模型"""
+    """操作审计日志；tenant_id 由写入方按操作者成员关系解析（系统级日志可为空）。"""
 
     __tablename__ = "operation_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)  # 迁移 0010 回填
     operation = Column(String, nullable=False)
     details = Column(Text, nullable=True)
     ip_address = Column(String, nullable=True)

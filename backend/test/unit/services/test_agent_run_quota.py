@@ -21,7 +21,7 @@ async def quota_session():
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
-        department = Department(name="Quota Department")
+        department = Department(name="Quota Department", tenant_id=1)
         user = User(
             username="Quota User",
             uid="quota-user",

@@ -27,8 +27,8 @@ async def dashboard_session():
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
-        dept_a = Department(name="Dept A")
-        dept_b = Department(name="Dept B")
+        dept_a = Department(name="Dept A", tenant_id=1)
+        dept_b = Department(name="Dept B", tenant_id=1)
         superadmin = User(
             username="Super Admin",
             uid="superadmin",

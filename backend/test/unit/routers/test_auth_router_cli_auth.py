@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.routers.auth_router import auth
 from server.utils.auth_middleware import get_db, get_required_user
-from yuxi.storage.postgres.models_business import Base, Department, User
+from yuxi.storage.postgres.models_business import Tenant, TenantMembership, Base, Department, User
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -20,7 +20,7 @@ async def app_client():
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
-        dept = Department(name="默认部门")
+        dept = Department(name="默认部门", tenant_id=1)
         user = User(
             username="Admin",
             uid="admin",
@@ -28,7 +28,9 @@ async def app_client():
             role="superadmin",
             department=dept,
         )
-        db.add_all([dept, user])
+        tenant = Tenant(id=1, name="默认企业", status="active")
+        membership = TenantMembership(tenant_id=1, uid=user.uid, role="platform_admin", status="active")
+        db.add_all([tenant, membership, dept, user])
         await db.commit()
         await db.refresh(user)
 
