@@ -9,6 +9,23 @@ const loading = ref(false)
 const users = ref([])
 const quotaModal = reactive({ open: false, uid: '', dailyRunLimit: null, monthlyTokenLimit: null })
 const createModal = reactive({ open: false, username: '', password: '', role: 'user' })
+// P5：用户详情抽屉（账户 / 密钥 / 问答 / 监控 四合一）
+const detailDrawer = reactive({
+  open: false,
+  tab: 'account',
+  uid: '',
+  username: '',
+  info: null,
+  keys: [],
+  keysLoading: false,
+  conversations: [],
+  conversationsLoading: false,
+  activeThread: '',
+  messages: [],
+  messagesLoading: false,
+  stats: null,
+  statsLoading: false
+})
 const onboardingCard = reactive({
   open: false,
   username: '',
@@ -175,6 +192,96 @@ async function selectConversation(conv) {
   }
 }
 
+async function openDetailDrawer(user) {
+  detailDrawer.open = true
+  detailDrawer.tab = 'account'
+  detailDrawer.uid = user.uid
+  detailDrawer.username = user.username
+  detailDrawer.info = { ...user }
+  detailDrawer.keys = []
+  detailDrawer.conversations = []
+  detailDrawer.messages = []
+  detailDrawer.stats = null
+
+  detailDrawer.keysLoading = true
+  try {
+    detailDrawer.keys = await authApi.listManagedApiKeys(user.uid)
+  } catch (error) {
+    message.error(error.message || '加载密钥失败')
+  } finally {
+    detailDrawer.keysLoading = false
+  }
+  await loadConversationsInto(detailDrawer, user.uid)
+
+  detailDrawer.statsLoading = true
+  try {
+    detailDrawer.stats = await authApi.getManagedUserStats(user.uid)
+  } catch (error) {
+    message.error(error.message || '加载监控数据失败')
+  } finally {
+    detailDrawer.statsLoading = false
+  }
+}
+
+async function selectConversationInDetail(conv) {
+  detailDrawer.activeThread = conv.thread_id
+  const data = await authApi.listManagedUserMessages(detailDrawer.uid, conv.thread_id)
+  detailDrawer.messages = data.messages || []
+}
+
+async function resetManagedKey(key) {
+  try {
+    const res = await authApi.resetManagedApiKey(detailDrawer.uid, key.id)
+    onboardingCard.open = true
+    onboardingCard.username = detailDrawer.username
+    onboardingCard.uid = detailDrawer.uid
+    onboardingCard.password = ''
+    onboardingCard.apiKeySecret = res.secret
+    onboardingCard.apiKeyExpiresAt = ''
+    await reloadDetailKeys()
+    message.success('密钥已重置，新明文仅此一次展示')
+  } catch (error) {
+    message.error(error.message || '重置失败')
+  }
+}
+
+async function deleteManagedKey(key) {
+  try {
+    await authApi.deleteManagedApiKey(detailDrawer.uid, key.id)
+    message.success('密钥已删除')
+    await reloadDetailKeys()
+  } catch (error) {
+    message.error(error.message || '删除失败')
+  }
+}
+
+async function reloadDetailKeys() {
+  detailDrawer.keysLoading = true
+  try {
+    detailDrawer.keys = await authApi.listManagedApiKeys(detailDrawer.uid)
+  } finally {
+    detailDrawer.keysLoading = false
+  }
+}
+
+async function resetMemberPassword() {
+  try {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
+    let generated = ''
+    for (let i = 0; i < 12; i += 1) generated += alphabet[Math.floor(Math.random() * alphabet.length)]
+    await authApi.resetManagedUserPassword(detailDrawer.uid, generated)
+    onboardingCard.open = true
+    onboardingCard.username = detailDrawer.username
+    onboardingCard.uid = detailDrawer.uid
+    onboardingCard.password = generated
+    onboardingCard.apiKeySecret = ''
+    onboardingCard.apiKeyExpiresAt = ''
+    message.success('初始密码已重置，请通过安全渠道交付')
+  } catch (error) {
+    message.error(error.message || '重置密码失败')
+  }
+}
+
 onMounted(() => {
   if (isAdmin.value) loadUsers()
 })
@@ -329,6 +436,104 @@ onMounted(() => {
     </a-drawer>
   </div>
 </template>
+    <a-drawer
+      v-model:open="detailDrawer.open"
+      :title="`用户详情 · ${detailDrawer.username}`"
+      width="860"
+      destroy-on-close
+    >
+      <a-tabs v-model:activeKey="detailDrawer.tab">
+        <a-tab-pane key="account" tab="账户信息">
+          <a-descriptions v-if="detailDrawer.info" :column="1" bordered size="small">
+            <a-descriptions-item label="登录 ID">{{ detailDrawer.info.uid }}</a-descriptions-item>
+            <a-descriptions-item label="显示名">{{ detailDrawer.info.username }}</a-descriptions-item>
+            <a-descriptions-item label="角色">
+              <a-tag :color="detailDrawer.info.role === 'superadmin' ? 'red' : detailDrawer.info.role === 'admin' ? 'orange' : 'green'">{{ detailDrawer.info.role }}</a-tag>
+            </a-descriptions-item>
+            <a-descriptions-item label="部门">{{ detailDrawer.info.department_name || '—' }}</a-descriptions-item>
+            <a-descriptions-item label="状态">
+              <a-tag :color="detailDrawer.info.is_disabled ? 'red' : 'green'">{{ detailDrawer.info.is_disabled ? '已停用' : '正常' }}</a-tag>
+            </a-descriptions-item>
+            <a-descriptions-item label="创建时间">{{ (detailDrawer.info.created_at || '').slice(0, 19).replace('T', ' ') }}</a-descriptions-item>
+            <a-descriptions-item label="最近登录">{{ detailDrawer.info.last_login || "从未" }}</a-descriptions-item>
+          </a-descriptions>
+          <a-space style="margin-top: 16px">
+            <a-button @click="resetMemberPassword">重置初始密码（生成随机密码）</a-button>
+          </a-space>
+        </a-tab-pane>
+        <a-tab-pane key="keys" tab="API Keys">
+          <a-spin :spinning="detailDrawer.keysLoading">
+            <a-empty v-if="!detailDrawer.keys.length && !detailDrawer.keysLoading" description="暂无密钥" />
+            <a-table v-if="detailDrawer.keys.length" :data-source="detailDrawer.keys" row-key="id" :pagination="false" size="small">
+              <a-table-column title="前缀" data-index="key_prefix" />
+              <a-table-column title="名称" data-index="name" />
+              <a-table-column title="用途" data-index="purpose" />
+              <a-table-column title="状态" key="status">
+                <template #default="{ record }">
+                  <a-tag :color="record.status === 'enabled' ? 'green' : 'red'">{{ record.status === 'enabled' ? '启用' : '禁用' }}</a-tag>
+                </template>
+              </a-table-column>
+              <a-table-column title="过期时间" key="expires_at">
+                <template #default="{ record }">{{ record.expires_at ? record.expires_at.slice(0, 10) : "永久" }}</template>
+              </a-table-column>
+              <a-table-column title="操作" key="ops" width="200">
+                <template #default="{ record }">
+                  <a-space>
+                    <a-popconfirm title="重置后将签发新密钥，旧密钥立即失效？" @confirm="resetManagedKey(record)">
+                      <a-button size="small">重置</a-button>
+                    </a-popconfirm>
+                    <a-popconfirm title="确定物理删除该密钥？设备码会话关联将被断开。" @confirm="deleteManagedKey(record)">
+                      <a-button size="small" danger>删除</a-button>
+                    </a-popconfirm>
+                  </a-space>
+                </template>
+              </a-table-column>
+            </a-table>
+          </a-spin>
+        </a-tab-pane>
+        <a-tab-pane key="qa" tab="问答记录（表格）">
+          <a-select
+            v-model:value="detailDrawer.activeThread"
+            placeholder="选择会话"
+            style="width: 100%; margin-bottom: 12px"
+            @change="selectConversationInDetail({ thread_id: $event })"
+          >
+            <a-select-option v-for="conv in detailDrawer.conversations" :key="conv.thread_id" :value="conv.thread_id">
+              {{ conv.title || conv.thread_id }}
+            </a-select-option>
+          </a-select>
+          <a-table :data-source="detailDrawer.messages" row-key="created_at" :pagination="{ pageSize: 20 }" size="small">
+            <a-table-column title="时间" data-index="created_at" :width="180">
+              <template #default="{ record }">{{ (record.created_at || '').slice(0, 19).replace('T', ' ') }}</template>
+            </a-table-column>
+            <a-table-column title="角色" data-index="role" :width="90">
+              <template #default="{ record }">
+                <a-tag :color="record.role === 'user' ? 'blue' : 'green'">{{ record.role === 'user' ? '提问' : '回答' }}</a-tag>
+              </template>
+            </a-table-column>
+            <a-table-column title="内容" data-index="content" />
+          </a-table>
+        </a-tab-pane>
+        <a-tab-pane key="monitor" tab="监控面板">
+          <a-spin :spinning="detailDrawer.statsLoading">
+            <template v-if="detailDrawer.stats">
+              <a-row :gutter="12" class="monitor-cards">
+                <a-col :span="6"><a-card size="small"><a-statistic title="总运行次数" :value="detailDrawer.stats.total_runs" /></a-card></a-col>
+                <a-col :span="6"><a-card size="small"><a-statistic title="总 Token 用量" :value="detailDrawer.stats.total_tokens" /></a-card></a-col>
+                <a-col :span="6"><a-card size="small"><a-statistic title="BYOK 自费 Token" :value="detailDrawer.stats.byok_tokens" /></a-card></a-col>
+                <a-col :span="6"><a-card size="small"><a-statistic title="接入策略" :value="detailDrawer.stats.entitlement.credential_policy" /></a-card></a-col>
+              </a-row>
+              <h4 style="margin: 12px 0 8px; font-weight: 600">按日趋势</h4>
+              <a-table :data-source="detailDrawer.stats.daily" row-key="date" :pagination="false" size="small">
+                <a-table-column title="日期" data-index="date" />
+                <a-table-column title="运行次数" data-index="runs" />
+                <a-table-column title="Token 用量" data-index="tokens" />
+              </a-table>
+            </template>
+          </a-spin>
+        </a-tab-pane>
+      </a-tabs>
+    </a-drawer>
 
 <style scoped>
 .user-manage-view {
@@ -445,4 +650,13 @@ onMounted(() => {
 .qa-content {
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* P5 用户详情：监控卡片 */
+.monitor-cards {
+  margin-bottom: 12px;
+}
+
+.monitor-subtitle {
+  margin: 12px 0 8px;
+  font-weight: 600;
 }

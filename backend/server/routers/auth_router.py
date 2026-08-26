@@ -770,16 +770,17 @@ async def create_user(
                 detail="普通管理员不能指定部门",
             )
 
-    new_user = await user_repo.create(
-        {
-            "username": user_data.username,
-            "uid": uid,
-            "phone_number": user_data.phone_number,
-            "password_hash": hashed_password,
-            "role": user_data.role,
-            "department_id": department_id,
-        }
+    # P5：改用请求级会话直接构造用户——user_repo.create 使用独立会话并立即提交，
+    # 返回的游离实例会让后续"成员关系/密钥签发/审计"跨会话访问而 500。
+    new_user = User(
+        username=user_data.username,
+        uid=uid,
+        phone_number=user_data.phone_number,
+        password_hash=hashed_password,
+        role=user_data.role,
+        department_id=department_id,
     )
+    db.add(new_user)
 
     # P1：开户流程显式把新用户加入创建者的活动租户。
     from yuxi.services.principal import ensure_tenant_membership, resolve_principal

@@ -142,6 +142,32 @@ async function listManagedUserMessages(uid, threadId) {
   )
 }
 
+
+async function listManagedApiKeys(uid) {
+  const data = await apiAdminGet(`/api/user/manage/${encodeURIComponent(uid)}/api-keys`)
+  return data.keys
+}
+
+async function resetManagedApiKey(uid, keyId) {
+  return apiAdminPost(
+    `/api/user/manage/${encodeURIComponent(uid)}/api-keys/${keyId}/reset`
+  )
+}
+
+async function deleteManagedApiKey(uid, keyId) {
+  return apiAdminDelete(`/api/user/manage/${encodeURIComponent(uid)}/api-keys/${keyId}`)
+}
+
+async function getManagedUserStats(uid, days = 14) {
+  return apiAdminGet(`/api/user/manage/${encodeURIComponent(uid)}/stats?days=${days}`)
+}
+
+async function resetManagedUserPassword(uid, newPassword) {
+  return apiAdminPut(`/api/auth/users/${encodeURIComponent(uid)}/password`, {
+    password: newPassword
+  })
+}
+
 export const authApi = {
   getRegisterConfig,
   register,
@@ -157,5 +183,10 @@ export const authApi = {
   getManagedUserQuota,
   setManagedUserQuota,
   listManagedUserConversations,
-  listManagedUserMessages
+  listManagedUserMessages,
+  listManagedApiKeys,
+  resetManagedApiKey,
+  deleteManagedApiKey,
+  getManagedUserStats,
+  resetManagedUserPassword
 }

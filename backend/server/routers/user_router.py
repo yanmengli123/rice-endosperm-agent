@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import secrets
 from datetime import timedelta
 from typing import Any
 
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.utils.auth_middleware import get_admin_user, get_current_user, get_db, get_required_user
 from yuxi.config import UserConfig, UserConfigSchema
 from yuxi.models.providers.cache import model_cache
-from yuxi.services.operation_log_service import resolve_operator_tenant_id
+from yuxi.services.operation_log_service import log_operation, resolve_operator_tenant_id
 from yuxi.services.run_queue_service import publish_cancel_signal
 from yuxi.storage.minio import upload_image_to_minio
 from yuxi.storage.postgres.models_business import (
@@ -22,8 +23,10 @@ from yuxi.storage.postgres.models_business import (
     APIKey,
     AgentEnv,
     AgentRun,
+    CLIAuthSession,
     OperationLog,
     TenantUserEntitlement,
+    UsageLedger,
     User,
     UserModelPreference,
 )
@@ -278,11 +281,33 @@ async def delete_api_key(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """真·删除：先断开设备码会话对密钥行的引用，再物理删除。
+
+    usage_ledger 不引用 api_keys，历史用量对账不受影响；
+    删除动作与操作者一并写入审计日志。"""
     api_key = await get_accessible_api_key(db, api_key_id, current_user)
 
+    await db.execute(
+        CLIAuthSession.__table__.update()
+        .where(CLIAuthSession.api_key_id == api_key.id)
+        .values(api_key_id=None)
+    )
+    key_prefix = api_key.key_prefix
+    owner_uid_result = await db.execute(
+        select(User.uid).where(User.id == api_key.user_id)
+    )
+    owner_uid = owner_uid_result.scalar_one_or_none()
     await db.delete(api_key)
     await db.commit()
-    return {"success": True}
+
+    await log_operation(
+        db,
+        current_user.id,
+        "删除 API Key",
+        f"目标用户 uid={owner_uid}, prefix={key_prefix}",
+        None if current_user.id == api_key.user_id else None,
+    )
+    return {"success": True, "message": "密钥已删除"}
 
 
 @user_router.post("/apikey/{api_key_id}/regenerate", response_model=APIKeyCreateResponse)
@@ -448,6 +473,197 @@ class UserCredentialPayload(BaseModel):
     provider_id: str = Field(..., min_length=1, max_length=100)
     api_key: str = Field(..., min_length=4, max_length=500)
     label: str | None = Field(None, max_length=128)
+
+
+async def _load_manage_target(db: AsyncSession, uid: str, current_user: User) -> User:
+    """加载管理目标用户并套用部门边界（superadmin 全局、admin 本部门普通成员）。"""
+    result = await db.execute(select(User).where(User.uid == uid, User.is_deleted == 0))
+    target_user = result.scalar_one_or_none()
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    _admin_guard(current_user, target_user)
+    return target_user
+
+
+@user_router.get("/manage/{uid}/api-keys", response_model=dict)
+async def list_managed_api_keys(
+    uid: str,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出目标用户的全部 API Keys（含已撤销，供管理与对账）。"""
+    target_user = await _load_manage_target(db, uid, current_user)
+    rows = await db.execute(
+        select(APIKey)
+        .where(APIKey.user_id == target_user.id)
+        .order_by(APIKey.created_at.desc())
+    )
+    return {
+        "keys": [
+            {
+                "id": key.id,
+                "key_prefix": key.key_prefix,
+                "name": key.name,
+                "purpose": key.purpose,
+                "status": "enabled" if key.is_enabled else "disabled",
+                "expires_at": key.expires_at.isoformat() if key.expires_at else None,
+                "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
+            }
+            for key in rows.scalars().all()
+        ]
+    }
+
+
+@user_router.post("/manage/{uid}/api-keys/{key_id}/reset", response_model=dict)
+async def reset_managed_api_key(
+    uid: str,
+    key_id: int,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """重置目标用户的指定 Key：轮换哈希并返回新明文（仅此一次）。"""
+    target_user = await _load_manage_target(db, uid, current_user)
+    row_result = await db.execute(
+        select(APIKey).where(APIKey.id == key_id, APIKey.user_id == target_user.id)
+    )
+    api_key = row_result.scalar_one_or_none()
+    if api_key is None:
+        raise HTTPException(status_code=404, detail="密钥不存在")
+
+    full_key, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key.key_hash = key_hash
+    api_key.key_prefix = key_prefix
+    api_key.is_enabled = True
+    await db.commit()
+
+    await log_operation(
+        db, current_user.id, "重置用户 API Key",
+        f"目标 uid={uid}, prefix={key_prefix}", None,
+    )
+    return {"secret": full_key, "key_prefix": key_prefix}
+
+
+@user_router.delete("/manage/{uid}/api-keys/{key_id}", response_model=dict)
+async def delete_managed_api_key(
+    uid: str,
+    key_id: int,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """真·删除目标用户的指定 Key：先断开设备码会话引用再物理删除。"""
+    target_user = await _load_manage_target(db, uid, current_user)
+    row_result = await db.execute(
+        select(APIKey).where(APIKey.id == key_id, APIKey.user_id == target_user.id)
+    )
+    api_key = row_result.scalar_one_or_none()
+    if api_key is None:
+        raise HTTPException(status_code=404, detail="密钥不存在")
+
+    await db.execute(
+        CLIAuthSession.__table__.update()
+        .where(CLIAuthSession.api_key_id == api_key.id)
+        .values(api_key_id=None)
+    )
+    key_prefix = api_key.key_prefix
+    await db.delete(api_key)
+    await db.commit()
+
+    await log_operation(
+        db, current_user.id, "删除用户 API Key",
+        f"目标 uid={uid}, prefix={key_prefix}", None,
+    )
+    return {"success": True, "message": "密钥已删除"}
+
+
+@user_router.post("/manage/{uid}/password-reset", response_model=dict)
+async def reset_managed_password(
+    uid: str,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """生成随机初始密码并重置；明文仅本次响应返回。"""
+    import string as _string
+
+    target_user = await _load_manage_target(db, uid, current_user)
+    alphabet = _string.ascii_letters + _string.digits
+    new_password = "".join(secrets.choice(alphabet) for _ in range(16))
+    target_user.password_hash = AuthUtils.hash_password(new_password)
+    target_user.auth_version += 1
+    target_user.login_failed_count = 0
+    target_user.login_locked_until = None
+    await db.commit()
+
+    await log_operation(db, current_user.id, "重置用户密码", f"目标 uid={uid}", None)
+    return {"success": True, "username": target_user.username, "new_password": new_password}
+
+
+@user_router.get("/manage/{uid}/stats")
+async def get_managed_user_stats(
+    uid: str,
+    days: int = Query(14, ge=1, le=90),
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """单用户监控面板数据：按日 run/token 趋势 + 权益配额 + 分域用量。"""
+    target_user = await _load_manage_target(db, uid, current_user)
+
+    day_start = utc_now_naive().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+    daily_rows = (
+        await db.execute(
+            select(
+                func.date(AgentRun.created_at).label("day"),
+                func.count(AgentRun.id).label("runs"),
+                func.coalesce(func.sum(AgentRun.total_tokens), 0).label("tokens"),
+            )
+            .where(AgentRun.uid == target_user.uid, AgentRun.created_at >= day_start)
+            .group_by(func.date(AgentRun.created_at))
+            .order_by(func.date(AgentRun.created_at))
+        )
+    ).all()
+    daily = [
+        {"date": row.day.isoformat(), "runs": int(row.runs), "tokens": int(row.tokens)}
+        for row in daily_rows
+    ]
+
+    total_runs_row = (
+        await db.execute(select(func.count(AgentRun.id)).where(AgentRun.uid == target_user.uid))
+    ).scalar()
+    total_tokens_row = (
+        await db.execute(
+            select(func.coalesce(func.sum(AgentRun.total_tokens), 0)).where(
+                AgentRun.uid == target_user.uid
+            )
+        )
+    ).scalar()
+    byok_tokens_row = (
+        await db.execute(
+            select(func.coalesce(func.sum(UsageLedger.total_tokens), 0)).where(
+                UsageLedger.uid == target_user.uid,
+                UsageLedger.credential_source == "user_byok",
+            )
+        )
+    ).scalar()
+
+    entitlement = (
+        await db.execute(
+            select(TenantUserEntitlement).where(TenantUserEntitlement.uid == target_user.uid)
+        )
+    ).scalar_one_or_none()
+
+    return {
+        "uid": target_user.uid,
+        "username": target_user.username,
+        "total_runs": int(total_runs_row or 0),
+        "total_tokens": int(total_tokens_row or 0),
+        "byok_tokens": int(byok_tokens_row or 0),
+        "daily": daily,
+        "entitlement": {
+            "credential_policy": entitlement.credential_policy if entitlement else "platform_only",
+            "daily_run_limit": entitlement.daily_run_limit if entitlement else None,
+            "monthly_platform_token_limit": entitlement.monthly_platform_token_limit if entitlement else None,
+            "policy_version": entitlement.policy_version if entitlement else None,
+        },
+    }
 
 
 @user_router.get("/manage/{uid}/conversations")
