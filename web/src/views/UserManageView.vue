@@ -337,6 +337,13 @@ onMounted(() => {
               :disabled="record.uid === userStore.uid || (!isSuperAdmin && record.role !== 'user')"
               @click="openQuota(record)"
             >配额</a-button>
+            <a-button
+              size="small"
+              type="primary"
+              ghost
+              :disabled="record.uid === userStore.uid || (!isSuperAdmin && record.role !== 'user')"
+              @click="openDetailDrawer(record)"
+            >详情</a-button>
             <a-button size="small" @click="openQaDrawer(record)">问答</a-button>
           </a-space>
         </template>
