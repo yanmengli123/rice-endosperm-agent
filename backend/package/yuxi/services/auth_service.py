@@ -19,7 +19,7 @@ from yuxi.storage.postgres.models_business import (
     User,
 )
 from yuxi.utils.auth_utils import AuthUtils
-from yuxi.utils.datetime_utils import utc_now_naive
+from yuxi.utils.datetime_utils import utc_now, utc_now_naive
 
 CLI_AUTH_SESSION_TTL_SECONDS = 10 * 60
 # 设备码签发 API Key 的过渡有效期（天）；OAuth 刷新令牌上线后将逐步替代
@@ -225,7 +225,7 @@ async def issue_device_session(db: AsyncSession, user: User) -> tuple[DeviceSess
     """创建会话族并签发首个刷新令牌。"""
     from yuxi.services.principal import resolve_tenant_id
 
-    now = utc_now_naive()
+    now = utc_now()
     session = DeviceSession(
         family_id=str(uuid4()),
         uid=user.uid,
@@ -266,7 +266,8 @@ async def rotate_device_session_refresh(db: AsyncSession, refresh_token: str) ->
     if session is None or session.status != "active":
         raise CLIAuthError("session_revoked", "会话已撤销", status_code=401)
 
-    now = utc_now_naive()
+    # device_sessions / device_session_tokens 为 TIMESTAMPTZ，比较必须用 aware
+    now = utc_now()
     if token_row.used_at is not None:
         # 重放：撤销整个会话族
         session.status = "revoked"

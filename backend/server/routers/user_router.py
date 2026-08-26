@@ -591,6 +591,14 @@ async def reset_managed_password(
     target_user.auth_version += 1
     target_user.login_failed_count = 0
     target_user.login_locked_until = None
+    # 密码重置必须同步撤销其全部设备会话（旋转刷新令牌随 auth_version 失效前先断族）
+    from yuxi.storage.postgres.models_business import DeviceSession
+
+    await db.execute(
+        DeviceSession.__table__.update()
+        .where(DeviceSession.uid == target_user.uid)
+        .values(status="revoked")
+    )
     await db.commit()
 
     await log_operation(db, current_user.id, "重置用户密码", f"目标 uid={uid}", None)

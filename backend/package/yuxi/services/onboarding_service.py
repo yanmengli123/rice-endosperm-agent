@@ -15,15 +15,15 @@ from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.postgres.models_business import (
+    DEFAULT_TENANT_ID,
     OnboardingActivation,
     OperationLog,
     TenantUserEntitlement,
     User,
 )
 from yuxi.utils.auth_utils import AuthUtils
-from yuxi.utils.datetime_utils import utc_now_naive
+from yuxi.utils.datetime_utils import utc_now
 
 ACTIVATION_TTL_HOURS = 24
 
@@ -58,11 +58,14 @@ async def create_onboarding_invitation(
     byok_platform_token_exempt: bool = False,
     device_name: str = "桌面端",
 ) -> dict:
-    """单事务完成：建户 → 成员 → 权益 → 激活凭证 → 审计。"""
+    """单事务完成：建户 → 成员 → 权益 → 激活凭证 → 审计。
+
+    激活凭证归属默认租户：邀请由平台签发，多租户指派属后续治理功能。
+    """
     from yuxi.storage.postgres.models_business import TenantMembership
 
     uid = username.strip().lower()
-    now = utc_now_naive()
+    now = utc_now()
 
     existing = await db.execute(select(User.uid).where((User.username == username) | (User.uid == uid)))
     if existing.scalar_one_or_none() is not None:
@@ -79,7 +82,7 @@ async def create_onboarding_invitation(
     db.add(user)
     await db.flush()
 
-    tenant_id = await resolve_tenant_id(db, uid)
+    tenant_id = DEFAULT_TENANT_ID
 
     db.add(
         TenantMembership(
@@ -142,7 +145,7 @@ async def consume_onboarding_activation(db: AsyncSession, activation_code: str) 
     if activation is None:
         raise OnboardingError("invalid_code", "激活码无效", 404)
 
-    now = utc_now_naive()
+    now = utc_now()
     if activation.status == OnboardingActivation.STATUS_CONSUMED:
         raise OnboardingError("already_consumed", "激活码已被使用", 409)
     if activation.status == OnboardingActivation.STATUS_REVOKED:
@@ -201,6 +204,6 @@ async def revoke_onboarding_activation(db: AsyncSession, *, operator: User, acti
         if operator.role != "admin" or operator.department_id is None or entitlement is None:
             return False
     activation.status = OnboardingActivation.STATUS_REVOKED
-    activation.revoked_at = utc_now_naive()
+    activation.revoked_at = utc_now()
     await db.commit()
     return True

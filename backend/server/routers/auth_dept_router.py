@@ -158,10 +158,18 @@ async def create_department(
     )
 
     # P1：新部门管理员必须持有有效成员关系，否则首个资源创建会被权威身份解析拒绝
-    from yuxi.services.principal import resolve_tenant_id
 
     async with pg_manager.get_async_session_context() as membership_session:
-        await resolve_tenant_id(membership_session, admin_uid)
+        # 新建管理员必然无成员资格：直接落入默认租户（幂等），不走严格解析
+        from sqlalchemy import text as _text
+
+        membership_session.execute(
+            _text(
+                "INSERT INTO tenant_memberships (tenant_id, uid, role, status) "
+                "VALUES (1, :uid, 'member', 'active') ON CONFLICT (tenant_id, uid) DO NOTHING"
+            ),
+            {"uid": admin_uid},
+        )
         await membership_session.commit()
 
     # 记录操作
