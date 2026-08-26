@@ -130,6 +130,18 @@ async function setManagedUserQuota(uid, payload) {
   return apiAdminPut(`/api/user/manage/${encodeURIComponent(uid)}/quota`, payload)
 }
 
+async function listManagedUserConversations(uid, page = 1, pageSize = 20) {
+  return apiAdminGet(
+    `/api/user/manage/${encodeURIComponent(uid)}/conversations?page=${page}&page_size=${pageSize}`
+  )
+}
+
+async function listManagedUserMessages(uid, threadId) {
+  return apiAdminGet(
+    `/api/user/manage/${encodeURIComponent(uid)}/conversations/${encodeURIComponent(threadId)}/messages`
+  )
+}
+
 export const authApi = {
   getRegisterConfig,
   register,
@@ -143,5 +155,7 @@ export const authApi = {
   createManagedUser,
   setManagedUserEnabled,
   getManagedUserQuota,
-  setManagedUserQuota
+  setManagedUserQuota,
+  listManagedUserConversations,
+  listManagedUserMessages
 }

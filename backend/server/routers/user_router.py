@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_current_user, get_db, get_required_user
+from server.utils.auth_middleware import get_admin_user, get_current_user, get_db, get_required_user
 from yuxi.config import UserConfig, UserConfigSchema
 from yuxi.models.providers.cache import model_cache
 from yuxi.services.operation_log_service import resolve_operator_tenant_id
@@ -448,6 +448,83 @@ class UserCredentialPayload(BaseModel):
     provider_id: str = Field(..., min_length=1, max_length=100)
     api_key: str = Field(..., min_length=4, max_length=500)
     label: str | None = Field(None, max_length=128)
+
+
+@user_router.get("/manage/{uid}/conversations")
+async def list_user_conversations_for_admin(
+    uid: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """管理员查看指定用户的会话列表（仅 user/assistant 问答线程）。"""
+    target_result = await db.execute(select(User).where(User.uid == uid, User.is_deleted == 0))
+    target_user = target_result.scalar_one_or_none()
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    _admin_guard(current_user, target_user)
+
+    from yuxi.repositories.conversation_repository import ConversationRepository
+
+    repo = ConversationRepository(db)
+    offset = (page - 1) * page_size
+    conversations = await repo.list_conversations(
+        uid=target_user.uid,
+        limit=page_size,
+        offset=offset,
+        exclude_sources=("agent",),
+    )
+    return {
+        "uid": target_user.uid,
+        "username": target_user.username,
+        "conversations": [
+            {
+                "thread_id": c.thread_id,
+                "title": c.title,
+                "is_pinned": bool(c.is_pinned),
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+            }
+            for c in conversations
+        ],
+    }
+
+
+@user_router.get("/manage/{uid}/conversations/{thread_id}/messages")
+async def list_user_conversation_messages_for_admin(
+    uid: str,
+    thread_id: str,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """管理员查看指定用户某次会话的完整问答（问题与答案按时间序返回）。"""
+    target_result = await db.execute(select(User).where(User.uid == uid, User.is_deleted == 0))
+    target_user = target_result.scalar_one_or_none()
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    _admin_guard(current_user, target_user)
+
+    from yuxi.repositories.conversation_repository import ConversationRepository
+
+    repo = ConversationRepository(db)
+    conversation = await repo.get_conversation_by_thread_id(thread_id, uid=target_user.uid)
+    if conversation is None or conversation.status == "deleted":
+        raise HTTPException(status_code=404, detail="会话不存在")
+    messages = await repo.get_messages(conversation.id)
+    return {
+        "thread_id": thread_id,
+        "title": conversation.title,
+        "messages": [
+            {
+                "role": message.role,
+                "content": message.content or "",
+                "created_at": message.created_at.isoformat() if message.created_at else None,
+            }
+            for message in messages
+            if message.role in ("user", "assistant") and (message.content or "").strip()
+        ],
+    }
 
 
 @user_router.get("/model-credentials")

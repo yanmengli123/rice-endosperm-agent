@@ -2,6 +2,7 @@ import hashlib
 import os
 import re
 import secrets
+from datetime import timedelta
 from urllib.parse import quote, urlparse
 from yuxi.utils import logger
 
@@ -56,6 +57,9 @@ auth = APIRouter(prefix="/auth", tags=["authentication"])
 
 # 不存在账号时执行等成本的 Argon2 校验，避免通过响应时间枚举登录标识。
 # 该哈希只对应固定占位文本，不是任何真实用户凭证。
+# 管理员开户随机签发的桌面端密钥有效期（天）
+ADMIN_ISSUED_KEY_TTL_DAYS = 90
+
 DUMMY_PASSWORD_HASH = (
     "$argon2id$v=19$m=65536,t=3,p=4$SDj0/iiy9nalX9mDvqU25A$"
     "KKlDtRXMd/aecDyi04DAM/YiMJWhksK9xoi7A8EKchk"
@@ -101,6 +105,9 @@ class UserProfileUpdate(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
+    # P5：管理员开户时随机签发的桌面端访问密钥（明文仅此一次返回）
+    api_key_secret: str | None = None
+    api_key_expires_at: str | None = None
     uid: str
     phone_number: str | None = None
     avatar: str | None = None
@@ -780,12 +787,36 @@ async def create_user(
     principal = await resolve_principal(db, current_user)
     await ensure_tenant_membership(db, new_user, tenant_id=principal.tenant_id)
 
-    # 记录操作
-    await log_operation(
-        db, current_user.id, "创建用户", f"创建用户: {user_data.username}, 角色: {user_data.role}", request
+    # P5：为新建用户随机签发桌面端访问密钥（90 天有效）；明文仅在本次响应出现
+    full_key, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key_expires_at = utc_now_naive() + timedelta(days=ADMIN_ISSUED_KEY_TTL_DAYS)
+    db.add(
+        APIKey(
+            key_hash=key_hash,
+            key_prefix=key_prefix,
+            name=f"桌面端-{new_user.username}",
+            user_id=new_user.id,
+            department_id=new_user.department_id,
+            tenant_id=principal.tenant_id,
+            purpose="desktop_legacy",
+            expires_at=api_key_expires_at,
+            created_by=str(current_user.id),
+        )
     )
+    await log_operation(
+        db,
+        current_user.id,
+        "创建用户",
+        f"创建用户: {user_data.username}, 角色: {user_data.role}, 已签发桌面端密钥({key_prefix})",
+        request,
+    )
+    await db.commit()
+    await db.refresh(new_user)
 
-    return new_user.to_dict()
+    result = new_user.to_dict()
+    result["api_key_secret"] = full_key
+    result["api_key_expires_at"] = api_key_expires_at.isoformat()
+    return result
 
 
 # 路由：获取所有用户（管理员权限）
