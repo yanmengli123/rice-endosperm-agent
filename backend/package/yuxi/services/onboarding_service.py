@@ -23,7 +23,7 @@ from yuxi.storage.postgres.models_business import (
     User,
 )
 from yuxi.utils.auth_utils import AuthUtils
-from yuxi.utils.datetime_utils import utc_now
+from yuxi.utils.datetime_utils import utc_now, utc_now_naive
 
 ACTIVATION_TTL_HOURS = 24
 
@@ -65,7 +65,7 @@ async def create_onboarding_invitation(
     from yuxi.storage.postgres.models_business import TenantMembership
 
     uid = username.strip().lower()
-    now = utc_now()
+    now = utc_now_naive()
 
     existing = await db.execute(select(User.uid).where((User.username == username) | (User.uid == uid)))
     if existing.scalar_one_or_none() is not None:
@@ -150,7 +150,14 @@ async def consume_onboarding_activation(db: AsyncSession, activation_code: str) 
         raise OnboardingError("already_consumed", "激活码已被使用", 409)
     if activation.status == OnboardingActivation.STATUS_REVOKED:
         raise OnboardingError("revoked", "激活码已被撤销", 409)
-    if activation.status != OnboardingActivation.STATUS_ACTIVE or activation.expires_at <= now:
+    if activation.status == OnboardingActivation.STATUS_REVOKED:
+        raise OnboardingError("revoked", "激活码已被撤销", 409)
+    # expires_at 读回自 TIMESTAMPTZ 为 aware；now 统一经 coerce 转 aware 后比较
+    from yuxi.utils.datetime_utils import coerce_any_to_utc_datetime
+
+    now_aware = coerce_any_to_utc_datetime(now)
+    expires_aware = coerce_any_to_utc_datetime(activation.expires_at)
+    if activation.status != OnboardingActivation.STATUS_ACTIVE or expires_aware <= now_aware:
         activation.status = OnboardingActivation.STATUS_EXPIRED
         await db.commit()
         raise OnboardingError("expired", "激活码已过期", 410)

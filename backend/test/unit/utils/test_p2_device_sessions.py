@@ -5,6 +5,8 @@ from uuid import uuid4
 
 import pytest
 
+from datetime import UTC, datetime
+
 from yuxi.services import auth_service
 from yuxi.utils.auth_utils import AuthUtils
 
@@ -85,7 +87,8 @@ def _scripted_session_db(session_row, token_row, user_row):
 
 @pytest.mark.asyncio
 async def test_rotate_issues_new_refresh_and_marks_old_used():
-    now = auth_service.utc_now_naive()
+    now = auth_service.utc_now()
+    # 生产库 TIMESTAMPTZ 读回为 aware；测试桩同样使用 aware 以匹配真实行为
     session_row = SimpleNamespace(
         id=1, family_id=str(uuid4()), uid="alice", status="active", last_refreshed_at=None
     )
@@ -109,7 +112,8 @@ async def test_rotate_issues_new_refresh_and_marks_old_used():
 
 @pytest.mark.asyncio
 async def test_replayed_token_revokes_whole_family():
-    now = auth_service.utc_now_naive()
+    now = auth_service.utc_now()
+    # 生产库 TIMESTAMPTZ 读回为 aware；测试桩同样使用 aware 以匹配真实行为
     session_row = SimpleNamespace(id=1, family_id=str(uuid4()), uid="alice", status="active")
     token_row = SimpleNamespace(
         id=9,
@@ -138,7 +142,8 @@ async def test_unknown_refresh_token_rejected():
 
 @pytest.mark.asyncio
 async def test_revoked_session_rejects_rotation():
-    now = auth_service.utc_now_naive()
+    now = auth_service.utc_now()
+    # 生产库 TIMESTAMPTZ 读回为 aware；测试桩同样使用 aware 以匹配真实行为
     session_row = SimpleNamespace(id=1, family_id=str(uuid4()), uid="alice", status="revoked")
     token_row = SimpleNamespace(
         id=9,
