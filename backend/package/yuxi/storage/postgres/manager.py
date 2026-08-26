@@ -1079,7 +1079,9 @@ class PostgresManager(metaclass=SingletonMeta):
         self._check_initialized()
         await self._apply_versioned_migrations()
         stmts = [
-            "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
+                        "ALTER TABLE IF EXISTS departments ALTER COLUMN created_at SET DEFAULT NOW()",
+            "UPDATE departments SET created_at = NOW() WHERE created_at IS NULL",
+"ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS skill_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS version VARCHAR(64)",
