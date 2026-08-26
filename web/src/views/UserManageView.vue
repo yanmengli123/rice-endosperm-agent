@@ -434,8 +434,6 @@ onMounted(() => {
         </div>
       </div>
     </a-drawer>
-  </div>
-</template>
     <a-drawer
       v-model:open="detailDrawer.open"
       :title="`用户详情 · ${detailDrawer.username}`"
@@ -534,6 +532,9 @@ onMounted(() => {
         </a-tab-pane>
       </a-tabs>
     </a-drawer>
+
+  </div>
+</template>
 
 <style scoped>
 .user-manage-view {
