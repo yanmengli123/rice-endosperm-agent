@@ -295,6 +295,41 @@ routes:
         rejected_code: 429
         show_limit_quota_header: true
         allow_degradation: true
+  - id: yuxi-public-onboarding-exchange
+    name: yuxi-public-onboarding-exchange
+    uri: /api/auth/onboarding/exchange
+    methods:
+      - POST
+    priority: 90
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 10
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
 
   - id: yuxi-model-list
     name: yuxi-model-list
