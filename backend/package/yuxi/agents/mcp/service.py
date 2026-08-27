@@ -11,10 +11,12 @@
 均无需感知本次重构。
 """
 
+import hashlib
+import json
 import shutil
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.agents.mcp.health import (
@@ -24,16 +26,31 @@ from yuxi.agents.mcp.health import (
     STAGE_CONFIG,
     STAGE_DISCOVERY,
     STAGE_RUNTIME,
+    STAGE_TRANSPORT,
     McpHealthResult,
     error_result,
     ok_result,
 )
+from yuxi.agents.mcp.credentials import inject_credential, open_mcp_credential
+from yuxi.agents.mcp.domain import (
+    McpDataAccessLevel,
+    McpDependencyMode,
+    McpLifecycleStatus,
+    McpRuntimeLevel,
+    development_runtime_allowed,
+)
+from yuxi.agents.mcp.execution import get_mcp_execution_context
 from yuxi.agents.mcp.host import McpHostError, get_host
 from yuxi.agents.mcp.langchain_adapter import assemble_tools, set_host_resolver
 from yuxi.agents.mcp.policy import (
     PolicyError,
     assert_transport_allowed,
     expand_env_refs,
+)
+from yuxi.agents.mcp.security import (
+    assert_no_inline_secrets,
+    validate_remote_url_dns,
+    validate_remote_url_static,
 )
 from yuxi.agents.mcp.registry import (
     SOURCE_TYPE_BUILTIN,
@@ -46,9 +63,14 @@ from yuxi.agents.mcp.spec import (
     NormalizationError,
     SPEC_SCHEMA_VERSION,
     build_plan_from_legacy_fields,
-    to_camel_case,
+    to_camel_case as spec_to_camel_case,
 )
-from yuxi.storage.postgres.models_business import MCPServer
+from yuxi.storage.postgres.models_business import (
+    DEFAULT_TENANT_ID,
+    MCPCatalog,
+    MCPServer,
+    TenantMCPInstallation,
+)
 from yuxi.utils import logger
 
 set_host_resolver(get_host)
@@ -110,6 +132,13 @@ _SYNCED_MCP_FIELDS = (
     "icon",
     "source_type",
     "source_ref",
+    "lifecycle_status",
+    "runtime_level",
+    "runtime_artifact",
+    "data_access_level",
+    "dependency_mode",
+    "raw_manifest",
+    "normalized_manifest",
 )
 
 
@@ -166,6 +195,104 @@ def build_spec(*, transport: str, url: str | None, command: str | None, args: li
         return {"schema_version": SPEC_SCHEMA_VERSION, "normalized": False, "error": str(e)}
 
 
+def _content_digest(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def _upsert_catalog_installation(
+    db: AsyncSession,
+    *,
+    server: MCPServer,
+    tenant_id: int,
+    installed_by: str,
+) -> TenantMCPInstallation:
+    raw_manifest = dict(server.raw_manifest or {})
+    normalized = dict(server.normalized_manifest or server.spec or {})
+    catalog = await db.scalar(select(MCPCatalog).where(MCPCatalog.slug == server.slug))
+    if catalog is None:
+        catalog = MCPCatalog(
+            slug=server.slug,
+            name=server.name,
+            description=server.description,
+            source_type=server.source_type or SOURCE_TYPE_MANUAL,
+            source_ref=server.source_ref,
+            raw_manifest=raw_manifest,
+            manifest_schema_url=server.manifest_schema_url,
+            normalized_manifest=normalized,
+            content_digest=_content_digest(raw_manifest or normalized or {"slug": server.slug}),
+            provenance={"compatibility_server_id": server.id},
+        )
+        db.add(catalog)
+        await db.flush()
+    else:
+        catalog.name = server.name
+        catalog.description = server.description
+        catalog.source_type = server.source_type or SOURCE_TYPE_MANUAL
+        catalog.source_ref = server.source_ref
+        catalog.raw_manifest = raw_manifest
+        catalog.manifest_schema_url = server.manifest_schema_url
+        catalog.normalized_manifest = normalized
+        catalog.content_digest = _content_digest(raw_manifest or normalized or {"slug": server.slug})
+    installation = await db.scalar(
+        select(TenantMCPInstallation).where(
+            TenantMCPInstallation.tenant_id == tenant_id,
+            TenantMCPInstallation.catalog_id == catalog.id,
+        )
+    )
+    if installation is None:
+        installation = TenantMCPInstallation(
+            tenant_id=tenant_id,
+            catalog_id=catalog.id,
+            lifecycle_status=server.lifecycle_status,
+            runtime_level=server.runtime_level,
+            runtime_artifact=server.runtime_artifact,
+            credential_id=server.credential_id,
+            data_access_level=server.data_access_level,
+            dependency_mode=server.dependency_mode,
+            capability_snapshot=server.capability_snapshot or {},
+            enabled=bool(server.enabled),
+            installed_by=installed_by,
+        )
+        db.add(installation)
+    else:
+        installation.lifecycle_status = server.lifecycle_status
+        installation.runtime_level = server.runtime_level
+        installation.runtime_artifact = server.runtime_artifact
+        installation.credential_id = server.credential_id
+        installation.data_access_level = server.data_access_level
+        installation.dependency_mode = server.dependency_mode
+        installation.capability_snapshot = server.capability_snapshot or {}
+        installation.enabled = bool(server.enabled)
+    await db.flush()
+    return installation
+
+
+async def _runtime_config_for_server(
+    db: AsyncSession,
+    server: MCPServer,
+    *,
+    credential_id: Any = _UNSET_SENTINEL,
+) -> dict[str, Any]:
+    config = server.to_mcp_config()
+    if credential_id is _UNSET_SENTINEL:
+        credential_id = getattr(server, "credential_id", None)
+    if credential_id is None:
+        return config
+    context = get_mcp_execution_context()
+    if context is None:
+        raise PolicyError(f"MCP '{server.slug}' requires a credential-bound execution context")
+    opened = await open_mcp_credential(
+        db,
+        tenant_id=context.tenant_id,
+        uid=context.uid,
+        credential_id=int(credential_id),
+    )
+    if opened is None:
+        raise PolicyError(f"MCP '{server.slug}' credential is missing, revoked, or belongs to another user")
+    return inject_credential(config, opened)
+
+
 async def _load_enabled_mcp_server_configs(
     *,
     names: list[str] | None = None,
@@ -173,12 +300,39 @@ async def _load_enabled_mcp_server_configs(
 ) -> dict[str, dict[str, Any]]:
     """Load enabled MCP server configs directly from the database."""
     if db is not None:
-        stmt = select(MCPServer).where(MCPServer.enabled == 1)
+        context = get_mcp_execution_context()
+        if context is not None:
+            stmt = (
+                select(MCPServer, TenantMCPInstallation)
+                .join(MCPCatalog, MCPCatalog.slug == MCPServer.slug)
+                .join(TenantMCPInstallation, TenantMCPInstallation.catalog_id == MCPCatalog.id)
+                .where(
+                    MCPServer.lifecycle_status == McpLifecycleStatus.READY.value,
+                    TenantMCPInstallation.tenant_id == context.tenant_id,
+                    TenantMCPInstallation.enabled.is_(True),
+                    TenantMCPInstallation.lifecycle_status == McpLifecycleStatus.READY.value,
+                )
+            )
+            if names:
+                stmt = stmt.where(MCPServer.slug.in_(names))
+            rows = (await db.execute(stmt)).all()
+            return {
+                server.slug: await _runtime_config_for_server(
+                    db,
+                    server,
+                    credential_id=installation.credential_id,
+                )
+                for server, installation in rows
+            }
+
+        stmt = select(MCPServer).where(
+            MCPServer.enabled == 1,
+            MCPServer.lifecycle_status == McpLifecycleStatus.READY.value,
+        )
         if names:
             stmt = stmt.where(MCPServer.slug.in_(names))
-        result = await db.execute(stmt)
-        servers = result.scalars().all()
-        return {server.slug: server.to_mcp_config() for server in servers}
+        servers = (await db.execute(stmt)).scalars().all()
+        return {server.slug: await _runtime_config_for_server(db, server) for server in servers}
 
     from yuxi.storage.postgres.manager import pg_manager
 
@@ -195,13 +349,46 @@ async def get_enabled_mcp_server_config(server_slug: str, *, db: AsyncSession | 
 async def get_enabled_mcp_server_slugs(*, db: AsyncSession | None = None) -> list[str]:
     """Get enabled MCP server slugs from the database."""
     if db is not None:
-        result = await db.execute(select(MCPServer.slug).where(MCPServer.enabled == 1))
+        stmt = select(MCPServer.slug).where(
+            MCPServer.enabled == 1,
+            MCPServer.lifecycle_status == McpLifecycleStatus.READY.value,
+        )
+        context = get_mcp_execution_context()
+        if context is not None:
+            stmt = (
+                stmt.join(MCPCatalog, MCPCatalog.slug == MCPServer.slug)
+                .join(TenantMCPInstallation, TenantMCPInstallation.catalog_id == MCPCatalog.id)
+                .where(
+                    TenantMCPInstallation.tenant_id == context.tenant_id,
+                    TenantMCPInstallation.enabled.is_(True),
+                    TenantMCPInstallation.lifecycle_status == McpLifecycleStatus.READY.value,
+                )
+            )
+        result = await db.execute(stmt)
         return [name for name in result.scalars().all() if isinstance(name, str)]
 
     from yuxi.storage.postgres.manager import pg_manager
 
     async with pg_manager.get_async_session_context() as session:
         return await get_enabled_mcp_server_slugs(db=session)
+
+
+async def get_mcp_dependency_mode(server_slug: str) -> str:
+    context = get_mcp_execution_context()
+    if context is None:
+        return McpDependencyMode.OPTIONAL.value
+    from yuxi.storage.postgres.manager import pg_manager
+
+    async with pg_manager.get_async_session_context() as session:
+        mode = await session.scalar(
+            select(TenantMCPInstallation.dependency_mode)
+            .join(MCPCatalog, MCPCatalog.id == TenantMCPInstallation.catalog_id)
+            .where(
+                TenantMCPInstallation.tenant_id == context.tenant_id,
+                MCPCatalog.slug == server_slug,
+            )
+        )
+    return str(mode or McpDependencyMode.OPTIONAL.value)
 
 
 # =============================================================================
@@ -228,23 +415,32 @@ async def ensure_builtin_mcp_servers_in_db() -> None:
                     logger.info(f"Removed retired built-in MCP server '{slug}' from database")
 
             for slug, config in _DEFAULT_MCP_SERVERS.items():
+                builtin_values = _builtin_row_values(slug, config)
                 result = await session.execute(select(MCPServer).filter(MCPServer.slug == slug))
                 existing = result.scalar_one_or_none()
                 if not existing:
-                    session.add(MCPServer(**_builtin_row_values(slug, config)))
+                    existing = MCPServer(**builtin_values)
+                    session.add(existing)
+                    await session.flush()
                     any_changed = True
                     logger.info(f"Added built-in MCP server '{slug}' to database")
-                    continue
-
-                server_changed = False
-                for field in _SYNCED_MCP_FIELDS:
-                    next_value = config.get(field)
-                    if getattr(existing, field) != next_value:
-                        setattr(existing, field, next_value)
-                        server_changed = True
-                if server_changed:
-                    existing.updated_by = "system"
-                    any_changed = True
+                else:
+                    server_changed = False
+                    for field in _SYNCED_MCP_FIELDS:
+                        next_value = builtin_values.get(field)
+                        if getattr(existing, field) != next_value:
+                            setattr(existing, field, next_value)
+                            server_changed = True
+                    if server_changed:
+                        existing.updated_by = "system"
+                        any_changed = True
+                await _upsert_catalog_installation(
+                    session,
+                    server=existing,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    installed_by="system",
+                )
+                any_changed = True
 
             if any_changed:
                 await session.commit()
@@ -258,6 +454,15 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
     plan = build_plan_from_legacy_fields(
         transport=config["transport"], url=config.get("url"), command=config.get("command"), args=config.get("args")
     )
+    development = development_runtime_allowed()
+    runtime_artifact = {
+        "kind": "development_stdio",
+        "transport": "stdio",
+        "command": config.get("command"),
+        "args": config.get("args") or [],
+        "immutable": False,
+        "provenance": {"source_ref": config.get("source_ref", f"builtin:{slug}")},
+    }
     values: dict[str, Any] = {
         "slug": slug,
         "name": config.get("name", slug),
@@ -277,6 +482,15 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": config.get("source_ref", f"{SOURCE_TYPE_BUILTIN}:{slug}"),
         "spec": plan.to_dict(),
+        "lifecycle_status": (
+            McpLifecycleStatus.READY.value if development else McpLifecycleStatus.BUILD_REQUIRED.value
+        ),
+        "runtime_level": McpRuntimeLevel.DEVELOPMENT.value,
+        "runtime_artifact": runtime_artifact,
+        "data_access_level": McpDataAccessLevel.PUBLIC.value,
+        "dependency_mode": McpDependencyMode.OPTIONAL.value,
+        "raw_manifest": {"builtin": True, "slug": slug, "config": plan.to_dict()},
+        "normalized_manifest": {"schema_version": 2, "deployment": runtime_artifact},
         "created_by": "system",
         "updated_by": "system",
     }
@@ -414,6 +628,104 @@ async def get_all_mcp_tools(server_slug: str) -> list[Any]:
     return assemble_tools([(server_slug, alive, runtime_config)])
 
 
+async def discover_mcp_capabilities(
+    server_slug: str,
+    *,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    """Discover tools, resources and prompts without flattening protocol data."""
+    server = await get_mcp_server(db, server_slug)
+    if server is None:
+        raise ValueError(f"Server '{server_slug}' does not exist")
+    runtime_config = build_runtime_config(
+        server_slug,
+        await _runtime_config_for_server(db, server),
+    )
+    host = get_host()
+    tools, info = await host.discover(server_slug, runtime_config, force_refresh=True, update_cache=False)
+    try:
+        resources = await host.discover_resources(server_slug, runtime_config)
+    except McpHostError as exc:
+        logger.info(f"MCP '{server_slug}' resources unavailable: {exc}")
+        resources = []
+    try:
+        prompts = await host.discover_prompts(server_slug, runtime_config)
+    except McpHostError as exc:
+        logger.info(f"MCP '{server_slug}' prompts unavailable: {exc}")
+        prompts = []
+    snapshot = {
+        "tools": [
+            {
+                "name": item.name,
+                "stable_id": item.stable_id,
+                "description": item.description,
+                "annotations": item.annotations,
+                "output_schema": item.output_schema,
+            }
+            for item in tools
+        ],
+        "resources": [
+            {
+                "uri": item.uri,
+                "name": item.name,
+                "description": item.description,
+                "mime_type": item.mime_type,
+                "annotations": item.annotations,
+            }
+            for item in resources
+        ],
+        "prompts": [
+            {
+                "name": item.name,
+                "description": item.description,
+                "arguments": item.arguments,
+            }
+            for item in prompts
+        ],
+        "tool_count": len(tools),
+        "resource_count": len(resources),
+        "prompt_count": len(prompts),
+        "protocol_note": info.protocol_note,
+    }
+    server.capability_snapshot = snapshot
+    server.lifecycle_status = McpLifecycleStatus.READY.value
+    await _upsert_catalog_installation(
+        db,
+        server=server,
+        tenant_id=int(server.tenant_id or DEFAULT_TENANT_ID),
+        installed_by=server.updated_by or "system",
+    )
+    await db.commit()
+    return snapshot
+
+
+async def read_mcp_resource(
+    server_slug: str,
+    uri: str,
+    *,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    server = await get_mcp_server(db, server_slug)
+    if server is None:
+        raise ValueError(f"Server '{server_slug}' does not exist")
+    runtime_config = build_runtime_config(server_slug, await _runtime_config_for_server(db, server))
+    return (await get_host().read_resource(server_slug, runtime_config, uri)).to_dict()
+
+
+async def render_mcp_prompt(
+    server_slug: str,
+    name: str,
+    arguments: dict[str, str] | None,
+    *,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    server = await get_mcp_server(db, server_slug)
+    if server is None:
+        raise ValueError(f"Server '{server_slug}' does not exist")
+    runtime_config = build_runtime_config(server_slug, await _runtime_config_for_server(db, server))
+    return (await get_host().get_prompt(server_slug, runtime_config, name, arguments)).to_dict()
+
+
 async def get_mcp_client(server_configs: dict[str, Any] | None = None) -> Any | None:
     """Deprecated: 旧直连适配器入口，仅为兼容保留；新代码一律走 McpHost。"""
     try:
@@ -432,18 +744,39 @@ async def get_mcp_client(server_configs: dict[str, Any] | None = None) -> Any | 
 
 def to_camel_case(s: str) -> str:
     """Convert string to lowerCamelCase。（规范实现位于 spec.py，此处兼容保留）"""
-    return to_camel_case(s)
+    return spec_to_camel_case(s)
 
 
-async def get_mcp_server(db: AsyncSession, slug: str) -> MCPServer | None:
+async def get_mcp_server(
+    db: AsyncSession,
+    slug: str,
+    *,
+    tenant_id: int | None = None,
+) -> MCPServer | None:
     """Get single server configuration by slug."""
-    result = await db.execute(select(MCPServer).filter(MCPServer.slug == slug))
+    stmt = select(MCPServer).filter(MCPServer.slug == slug)
+    effective_tenant = tenant_id
+    if effective_tenant is None and get_mcp_execution_context() is not None:
+        effective_tenant = get_mcp_execution_context().tenant_id
+    if effective_tenant is not None:
+        stmt = stmt.where(or_(MCPServer.tenant_id.is_(None), MCPServer.tenant_id == effective_tenant))
+    result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
 
-async def get_all_mcp_servers(db: AsyncSession) -> list[MCPServer]:
+async def get_all_mcp_servers(
+    db: AsyncSession,
+    *,
+    tenant_id: int | None = None,
+) -> list[MCPServer]:
     """Get all server configurations."""
-    result = await db.execute(select(MCPServer))
+    stmt = select(MCPServer)
+    effective_tenant = tenant_id
+    if effective_tenant is None and get_mcp_execution_context() is not None:
+        effective_tenant = get_mcp_execution_context().tenant_id
+    if effective_tenant is not None:
+        stmt = stmt.where(or_(MCPServer.tenant_id.is_(None), MCPServer.tenant_id == effective_tenant))
+    result = await db.execute(stmt)
     return list(result.scalars().all())
 
 
@@ -478,6 +811,10 @@ async def create_mcp_server(
     created_by: str = None,
     source_type: str = None,
     source_ref: str = None,
+    tenant_id: int = DEFAULT_TENANT_ID,
+    credential_id: int | None = None,
+    data_access_level: str = McpDataAccessLevel.PUBLIC.value,
+    dependency_mode: str = McpDependencyMode.OPTIONAL.value,
 ) -> MCPServer:
     """Create server（先过策略闸门，落库时同步生成 InstallPlan spec）。"""
     existing = await get_mcp_server(db, slug)
@@ -487,6 +824,47 @@ async def create_mcp_server(
     _validate_for_policy(
         transport=transport, command=command, created_by=created_by, source_type=source_type
     )
+    assert_no_inline_secrets(env, section="env")
+    assert_no_inline_secrets(headers, section="headers")
+    if transport in ("sse", "streamable_http"):
+        url = validate_remote_url_static(str(url or ""))
+        lifecycle_status = McpLifecycleStatus.RESOLVED.value
+        runtime_level = McpRuntimeLevel.TRUSTED_REMOTE.value
+        runtime_artifact = {
+            "kind": "remote_http",
+            "transport": transport,
+            "endpoint": url,
+            "immutable": True,
+        }
+    elif development_runtime_allowed():
+        lifecycle_status = McpLifecycleStatus.RESOLVED.value
+        runtime_level = McpRuntimeLevel.DEVELOPMENT.value
+        runtime_artifact = {
+            "kind": "development_stdio",
+            "transport": "stdio",
+            "command": command,
+            "args": args or [],
+            "immutable": False,
+        }
+    else:
+        lifecycle_status = McpLifecycleStatus.BUILD_REQUIRED.value
+        runtime_level = McpRuntimeLevel.MANAGED_OCI.value
+        runtime_artifact = None
+
+    if data_access_level not in {item.value for item in McpDataAccessLevel}:
+        raise ValueError("invalid MCP data_access_level")
+    if dependency_mode not in {item.value for item in McpDependencyMode}:
+        raise ValueError("invalid MCP dependency_mode")
+
+    normalized_spec = build_spec(transport=transport, url=url, command=command, args=args)
+    raw_manifest = {
+        "slug": slug,
+        "name": name,
+        "transport": transport,
+        "url": url,
+        "command": command,
+        "args": args or [],
+    }
 
     server = MCPServer(
         slug=slug,
@@ -502,14 +880,35 @@ async def create_mcp_server(
         sse_read_timeout=sse_read_timeout,
         tags=tags,
         icon=icon,
-        enabled=1,
+        enabled=0,
         source_type=source_type or SOURCE_TYPE_MANUAL,
         source_ref=source_ref,
-        spec=build_spec(transport=transport, url=url, command=command, args=args),
+        spec=normalized_spec,
+        tenant_id=tenant_id,
+        lifecycle_status=lifecycle_status,
+        runtime_level=runtime_level,
+        runtime_artifact=runtime_artifact,
+        credential_id=credential_id,
+        data_access_level=data_access_level,
+        dependency_mode=dependency_mode,
+        raw_manifest=raw_manifest,
+        normalized_manifest={
+            "schema_version": 2,
+            "install_plan": normalized_spec,
+            "runtime_artifact": runtime_artifact,
+            "lifecycle_status": lifecycle_status,
+        },
         created_by=created_by,
         updated_by=created_by,
     )
     db.add(server)
+    await db.flush()
+    await _upsert_catalog_installation(
+        db,
+        server=server,
+        tenant_id=tenant_id,
+        installed_by=created_by or "system",
+    )
     await db.commit()
     await db.refresh(server)
 
@@ -535,6 +934,9 @@ async def update_mcp_server(
     tags: list = None,
     icon: str = None,
     updated_by: str = None,
+    credential_id: Any = _UNSET_SENTINEL,
+    data_access_level: str | None = None,
+    dependency_mode: str | None = None,
 ) -> MCPServer:
     """Update server configuration。transport/command 变更会重新过策略闸门。"""
     server = await get_mcp_server(db, slug)
@@ -565,6 +967,16 @@ async def update_mcp_server(
         server.tags = tags
     if icon is not None:
         server.icon = icon
+    if credential_id is not _UNSET_SENTINEL:
+        server.credential_id = credential_id
+    if data_access_level is not None:
+        if data_access_level not in {item.value for item in McpDataAccessLevel}:
+            raise ValueError("invalid MCP data_access_level")
+        server.data_access_level = data_access_level
+    if dependency_mode is not None:
+        if dependency_mode not in {item.value for item in McpDependencyMode}:
+            raise ValueError("invalid MCP dependency_mode")
+        server.dependency_mode = dependency_mode
     if updated_by is not None:
         server.updated_by = updated_by
 
@@ -574,6 +986,37 @@ async def update_mcp_server(
         created_by=server.created_by,
         source_type=getattr(server, "source_type", None),
     )
+    assert_no_inline_secrets(server.env, section="env")
+    assert_no_inline_secrets(server.headers, section="headers")
+    connection_changed = any(
+        value is not None
+        for value in (transport, url, command, args, headers, timeout, sse_read_timeout)
+    ) or env is not _UNSET_SENTINEL
+    if server.transport in ("sse", "streamable_http"):
+        server.url = validate_remote_url_static(str(server.url or ""))
+        server.runtime_level = McpRuntimeLevel.TRUSTED_REMOTE.value
+        server.runtime_artifact = {
+            "kind": "remote_http",
+            "transport": server.transport,
+            "endpoint": server.url,
+            "immutable": True,
+        }
+    elif development_runtime_allowed():
+        server.runtime_level = McpRuntimeLevel.DEVELOPMENT.value
+        server.runtime_artifact = {
+            "kind": "development_stdio",
+            "transport": "stdio",
+            "command": server.command,
+            "args": server.args or [],
+            "immutable": False,
+        }
+    else:
+        server.runtime_level = McpRuntimeLevel.MANAGED_OCI.value
+        server.runtime_artifact = None
+        server.lifecycle_status = McpLifecycleStatus.BUILD_REQUIRED.value
+    if connection_changed and server.lifecycle_status != McpLifecycleStatus.BUILD_REQUIRED.value:
+        server.lifecycle_status = McpLifecycleStatus.RESOLVED.value
+        server.enabled = 0
 
     # spec 跟随连接字段重建；归一化失败时保留旧 spec
     refreshed_spec = build_spec(
@@ -581,6 +1024,19 @@ async def update_mcp_server(
     )
     if refreshed_spec.get("normalized") is not False:
         server.spec = refreshed_spec
+    server.normalized_manifest = {
+        "schema_version": 2,
+        "install_plan": server.spec,
+        "runtime_artifact": server.runtime_artifact,
+        "lifecycle_status": server.lifecycle_status,
+    }
+
+    await _upsert_catalog_installation(
+        db,
+        server=server,
+        tenant_id=int(server.tenant_id or DEFAULT_TENANT_ID),
+        installed_by=updated_by or server.updated_by or "system",
+    )
 
     await db.commit()
     await db.refresh(server)
@@ -619,9 +1075,20 @@ async def set_server_enabled(
     if not server:
         raise ValueError(f"Server '{slug}' does not exist")
 
+    if enabled and server.lifecycle_status != McpLifecycleStatus.READY.value:
+        raise ValueError(
+            f"MCP '{slug}' is {server.lifecycle_status}; run verification/capability discovery before enabling"
+        )
+
     server.enabled = 1 if enabled else 0
     if updated_by is not None:
         server.updated_by = updated_by
+    await _upsert_catalog_installation(
+        db,
+        server=server,
+        tenant_id=int(server.tenant_id or DEFAULT_TENANT_ID),
+        installed_by=updated_by or server.updated_by or "system",
+    )
     await db.commit()
 
     is_enabled = bool(server.enabled)
@@ -672,6 +1139,8 @@ async def probe_mcp_server(
     *,
     db: AsyncSession | None = None,
     persist: bool = True,
+    tenant_id: int | None = None,
+    uid: str | None = None,
 ) -> McpHealthResult:
     """对单个 MCP 做全链路探测：config → runtime → transport/discovery。
 
@@ -699,7 +1168,59 @@ async def probe_mcp_server(
     if server is None:
         return await _finish(error_result(STAGE_CONFIG, CODE_CONFIG_MISSING, f"MCP '{slug}' 不存在"))
 
+    if server.lifecycle_status in {
+        McpLifecycleStatus.BUILD_REQUIRED.value,
+        McpLifecycleStatus.BLOCKED.value,
+    }:
+        return await _finish(
+            error_result(
+                STAGE_RUNTIME,
+                "BUILD_REQUIRED",
+                f"MCP '{slug}' has no verified runtime artifact ({server.lifecycle_status})",
+                retryable=False,
+            )
+        )
+
     server_config = server.to_mcp_config()
+    if server.credential_id is not None:
+        effective_tenant = int(tenant_id or server.tenant_id or 0)
+        if not effective_tenant or not uid:
+            return await _finish(
+                error_result(
+                    STAGE_CONFIG,
+                    "CREDENTIAL_CONTEXT_REQUIRED",
+                    "credential-bound MCP verification requires tenant and user context",
+                    retryable=False,
+                )
+            )
+        session = db
+        if session is None:
+            from yuxi.storage.postgres.manager import pg_manager
+
+            async with pg_manager.get_async_session_context() as credential_session:
+                opened = await open_mcp_credential(
+                    credential_session,
+                    tenant_id=effective_tenant,
+                    uid=uid,
+                    credential_id=int(server.credential_id),
+                )
+        else:
+            opened = await open_mcp_credential(
+                session,
+                tenant_id=effective_tenant,
+                uid=uid,
+                credential_id=int(server.credential_id),
+            )
+        if opened is None:
+            return await _finish(
+                error_result(
+                    STAGE_CONFIG,
+                    "CREDENTIAL_UNAVAILABLE",
+                    "MCP credential is missing, revoked, or belongs to another tenant/user",
+                    retryable=False,
+                )
+            )
+        server_config = inject_credential(server_config, opened)
     runtime_config = build_runtime_config(slug, server_config)
 
     try:
@@ -729,6 +1250,14 @@ async def probe_mcp_server(
             )
         )
 
+    if server.transport in ("sse", "streamable_http"):
+        try:
+            runtime_config["url"] = await validate_remote_url_dns(str(runtime_config.get("url") or ""))
+        except ValueError as exc:
+            return await _finish(
+                error_result(STAGE_TRANSPORT, "SSRF_POLICY_REJECTED", str(exc), retryable=False)
+            )
+
     source_type_attr = getattr(server, "source_type", None)
     if not _is_builtin_source(source_type_attr, getattr(server, "created_by", None)) and server.transport == "stdio":
         from yuxi.agents.mcp.policy import stdio_command_allowed
@@ -756,7 +1285,42 @@ async def probe_mcp_server(
         tool_count=len(descriptors),
         protocol_note=info.protocol_note,
     )
+    if persist:
+        await _persist_capability_snapshot(
+            slug,
+            {
+                "tools": [
+                    {
+                        "name": descriptor.name,
+                        "stable_id": descriptor.stable_id,
+                        "description": descriptor.description,
+                        "annotations": getattr(descriptor, "annotations", {}) or {},
+                    }
+                    for descriptor in descriptors
+                ],
+                "tool_count": len(descriptors),
+                "protocol_note": info.protocol_note,
+            },
+        )
     return await _finish(result)
+
+
+async def _persist_capability_snapshot(slug: str, snapshot: dict[str, Any]) -> None:
+    from yuxi.storage.postgres.manager import pg_manager
+
+    async with pg_manager.get_async_session_context() as session:
+        server = await session.scalar(select(MCPServer).where(MCPServer.slug == slug))
+        if server is None:
+            return
+        server.capability_snapshot = snapshot
+        server.lifecycle_status = McpLifecycleStatus.READY.value
+        await _upsert_catalog_installation(
+            session,
+            server=server,
+            tenant_id=int(server.tenant_id or DEFAULT_TENANT_ID),
+            installed_by=server.updated_by or "system",
+        )
+        await session.commit()
 
 
 async def _persist_last_health(slug: str, payload: dict[str, Any]) -> None:
@@ -794,6 +1358,7 @@ async def import_mcp_servers(
     payload: Any,
     *,
     created_by: str | None = None,
+    tenant_id: int = DEFAULT_TENANT_ID,
 ) -> list[dict[str, Any]]:
     """批量导入外部格式的 MCP 定义；导入的服务器默认 disabled，人工确认后启用。
 
@@ -816,44 +1381,82 @@ async def import_mcp_servers(
                     outcomes.append(outcome)
                     continue
 
-                if record.unpinned:
-                    outcome.update({"status": "rejected", "reason": "包版本未固定（需要精确版本号）"})
-                    outcomes.append(outcome)
-                    continue
-
-                _validate_for_policy(
-                    transport=record.transport,
-                    command=record.command,
-                    created_by=created_by or "system",
-                    source_type=record.source_type,
+                deployment = record.deployment
+                lifecycle_status = (
+                    deployment.status.value if deployment else McpLifecycleStatus.RESOLVED.value
                 )
+                runtime_level = (
+                    deployment.runtime_level.value if deployment and deployment.runtime_level else None
+                )
+                runtime_artifact = (
+                    deployment.runtime_artifact.to_dict()
+                    if deployment and deployment.runtime_artifact
+                    else None
+                )
+
+                assert_no_inline_secrets(record.env, section="env")
+                assert_no_inline_secrets(record.headers, section="headers")
+                if record.url:
+                    record.url = validate_remote_url_static(record.url)
+
+                if runtime_artifact is not None:
+                    _validate_for_policy(
+                        transport=record.transport,
+                        command=record.command,
+                        created_by=created_by or "system",
+                        source_type=record.source_type,
+                    )
 
                 spec_payload = record.plan.to_dict() if record.plan else {
                     "schema_version": SPEC_SCHEMA_VERSION,
                     "normalized": False,
                 }
-                session.add(
-                    MCPServer(
-                        slug=record.slug,
-                        name=record.name[:100],
-                        description=record.description,
-                        transport=record.transport,
-                        url=record.url,
-                        command=record.command,
-                        args=record.args,
-                        env=record.env,
-                        headers=record.headers,
-                        tags=record.tags,
-                        icon=record.icon,
-                        enabled=0,
-                        source_type=record.source_type,
-                        source_ref=record.source_ref,
-                        spec=spec_payload,
-                        created_by=created_by or "system",
-                        updated_by=created_by or "system",
-                    )
+                server = MCPServer(
+                    slug=record.slug,
+                    name=record.name[:100],
+                    description=record.description,
+                    transport=record.transport or "stdio",
+                    url=record.url,
+                    command=record.command,
+                    args=record.args,
+                    env=record.env,
+                    headers=record.headers,
+                    tags=record.tags,
+                    icon=record.icon,
+                    enabled=0,
+                    source_type=record.source_type,
+                    source_ref=record.source_ref,
+                    spec=spec_payload,
+                    tenant_id=tenant_id,
+                    lifecycle_status=lifecycle_status,
+                    runtime_level=runtime_level,
+                    runtime_artifact=runtime_artifact,
+                    data_access_level=McpDataAccessLevel.PUBLIC.value,
+                    dependency_mode=McpDependencyMode.OPTIONAL.value,
+                    raw_manifest=record.raw_manifest or {},
+                    manifest_schema_url=record.manifest_schema_url,
+                    normalized_manifest=record.normalized_manifest or spec_payload,
+                    created_by=created_by or "system",
+                    updated_by=created_by or "system",
                 )
-                outcome.update({"status": "created", "enabled": False})
+                session.add(server)
+                await session.flush()
+                installation = await _upsert_catalog_installation(
+                    session,
+                    server=server,
+                    tenant_id=tenant_id,
+                    installed_by=created_by or "system",
+                )
+                outcome.update(
+                    {
+                        "status": "created",
+                        "enabled": False,
+                        "lifecycle_status": lifecycle_status,
+                        "runtime_level": runtime_level,
+                        "installation_id": installation.id,
+                        "deployment_reason": deployment.reason if deployment else None,
+                    }
+                )
             except PolicyError as e:
                 outcome.update({"status": "rejected", "reason": str(e)})
             except (ImportFormatError, ValueError) as e:

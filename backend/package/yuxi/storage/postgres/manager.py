@@ -1024,6 +1024,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0010_tenant_scope_backfill", "_migration_0010_tenant_scope_backfill"),
         ("0011_apikeys_tenant_scope", "_migration_0011_apikeys_tenant_scope"),
         ("0012_identity_created_at_required", "_migration_0012_identity_created_at_required"),
+        ("0013_server_grade_biomcp", "_migration_0013_server_grade_biomcp"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -1081,6 +1082,139 @@ class PostgresManager(metaclass=SingletonMeta):
         for table in ("users", "departments"):
             await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
             await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN created_at SET NOT NULL"))
+
+    async def _migration_0013_server_grade_biomcp(self, conn) -> None:
+        """Introduce the normalized, tenant-scoped BioMCP control plane.
+
+        mcp_servers remains a compatibility projection for existing Agent code.
+        Existing rows are registered in the catalog and installed for the seeded
+        default tenant without changing their enabled state.
+        """
+        compatibility_columns = (
+            "tenant_id BIGINT",
+            "lifecycle_status VARCHAR(40) NOT NULL DEFAULT 'READY'",
+            "runtime_level VARCHAR(32)",
+            "runtime_artifact JSONB",
+            "credential_id BIGINT",
+            "data_access_level VARCHAR(32) NOT NULL DEFAULT 'PUBLIC'",
+            "dependency_mode VARCHAR(32) NOT NULL DEFAULT 'OPTIONAL'",
+            "raw_manifest JSONB",
+            "manifest_schema_url VARCHAR(500)",
+            "normalized_manifest JSONB",
+            "capability_snapshot JSONB",
+        )
+        for definition in compatibility_columns:
+            await conn.execute(text(f"ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS {definition}"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mcp_servers_tenant_id ON mcp_servers(tenant_id)"))
+
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS mcp_catalog ("
+                "id BIGSERIAL PRIMARY KEY, slug VARCHAR(100) NOT NULL UNIQUE, name VARCHAR(100) NOT NULL, "
+                "description TEXT, source_type VARCHAR(32) NOT NULL, source_ref VARCHAR(500), "
+                "raw_manifest JSONB NOT NULL DEFAULT '{}'::jsonb, manifest_schema_url VARCHAR(500), "
+                "normalized_manifest JSONB NOT NULL DEFAULT '{}'::jsonb, content_digest VARCHAR(80) NOT NULL, "
+                "provenance JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "updated_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mcp_catalog_digest ON mcp_catalog(content_digest)"))
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS user_mcp_credentials ("
+                "id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE, name VARCHAR(128) NOT NULL, "
+                "auth_type VARCHAR(32) NOT NULL DEFAULT 'bearer', secret_ciphertext TEXT NOT NULL, "
+                "masked_hint VARCHAR(64), metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "status VARCHAR(32) NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "revoked_at TIMESTAMPTZ)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_mcp_credentials_active "
+                "ON user_mcp_credentials(tenant_id, uid, name) WHERE status = 'active'"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS tenant_mcp_installations ("
+                "id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "catalog_id BIGINT NOT NULL REFERENCES mcp_catalog(id) ON DELETE CASCADE, "
+                "lifecycle_status VARCHAR(40) NOT NULL DEFAULT 'DISCOVERED', runtime_level VARCHAR(32), "
+                "runtime_artifact JSONB, credential_id BIGINT REFERENCES user_mcp_credentials(id), "
+                "data_access_level VARCHAR(32) NOT NULL DEFAULT 'PUBLIC', "
+                "dependency_mode VARCHAR(32) NOT NULL DEFAULT 'OPTIONAL', "
+                "policy_json JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "capability_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb, enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "last_error TEXT, installed_by VARCHAR(64) NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "updated_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(tenant_id, catalog_id))"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS agent_mcp_bindings ("
+                "id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE, "
+                "installation_id BIGINT NOT NULL REFERENCES tenant_mcp_installations(id) ON DELETE CASCADE, "
+                "dependency_mode VARCHAR(32) NOT NULL DEFAULT 'OPTIONAL', "
+                "policy_json JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "UNIQUE(tenant_id, agent_id, installation_id))"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS mcp_runtime_instances ("
+                "id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "installation_id BIGINT NOT NULL REFERENCES tenant_mcp_installations(id) ON DELETE CASCADE, "
+                "provider VARCHAR(32) NOT NULL, runtime_ref VARCHAR(255) NOT NULL UNIQUE, image_digest VARCHAR(500), "
+                "endpoint VARCHAR(500), state VARCHAR(40) NOT NULL, metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS mcp_call_audit ("
+                "id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id), uid VARCHAR NOT NULL, "
+                "run_id VARCHAR(64), agent_slug VARCHAR(80), installation_id BIGINT, "
+                "server_slug VARCHAR(100) NOT NULL, "
+                "capability_type VARCHAR(32) NOT NULL, capability_name VARCHAR(255) NOT NULL, "
+                "arguments_digest VARCHAR(80), result_digest VARCHAR(80), status VARCHAR(32) NOT NULL, "
+                "duration_ms INTEGER, data_access_level VARCHAR(32) NOT NULL DEFAULT 'PUBLIC', "
+                "provenance JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_mcp_call_audit_tenant_time "
+                "ON mcp_call_audit(tenant_id, created_at)"
+            )
+        )
+
+        await conn.execute(
+            text(
+                "INSERT INTO mcp_catalog(slug, name, description, source_type, source_ref, raw_manifest, "
+                "normalized_manifest, content_digest, provenance) "
+                "SELECT s.slug, s.name, s.description, COALESCE(s.source_type, 'legacy'), s.source_ref, "
+                "COALESCE(s.raw_manifest, '{}'::jsonb), COALESCE(s.normalized_manifest, s.spec, '{}'::jsonb), "
+                "'legacy:' || s.id::text, jsonb_build_object('migration', '0013') FROM mcp_servers s "
+                "ON CONFLICT (slug) DO NOTHING"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO tenant_mcp_installations(tenant_id, catalog_id, lifecycle_status, runtime_level, "
+                "runtime_artifact, data_access_level, dependency_mode, policy_json, capability_snapshot, "
+                "enabled, installed_by) "
+                "SELECT COALESCE(s.tenant_id, 1), c.id, COALESCE(s.lifecycle_status, 'READY'), s.runtime_level, "
+                "s.runtime_artifact, COALESCE(s.data_access_level, 'PUBLIC'), COALESCE(s.dependency_mode, 'OPTIONAL'), "
+                "'{}'::jsonb, "
+                "COALESCE(s.capability_snapshot, '{}'::jsonb), s.enabled = 1, COALESCE(s.created_by, 'migration-0013') "
+                "FROM mcp_servers s JOIN mcp_catalog c ON c.slug = s.slug "
+                "ON CONFLICT (tenant_id, catalog_id) DO NOTHING"
+            )
+        )
 
     async def _apply_versioned_migrations(self):
         self._check_initialized()

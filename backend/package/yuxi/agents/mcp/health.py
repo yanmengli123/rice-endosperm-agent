@@ -15,7 +15,7 @@ stage 枚举刻意保持最小集：install/capabilities 等阶段等对应能�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 # =============================================================================
@@ -136,12 +136,16 @@ def failure_from_exception(exc: BaseException, *, fallback_stage: str) -> McpHea
     if stage_hint == STAGE_RUNTIME:
         stage = STAGE_RUNTIME
     elif stage_hint == STAGE_TRANSPORT:
-        stage = STAGE_TRANSPORT if fallback_stage in (STAGE_RUNTIME, STAGE_TRANSPORT, STAGE_DISCOVERY) else fallback_stage
+        stage = (
+            STAGE_TRANSPORT
+            if fallback_stage in (STAGE_RUNTIME, STAGE_TRANSPORT, STAGE_DISCOVERY)
+            else fallback_stage
+        )
     return error_result(stage, code, f"{type(exc).__name__}: {exc}")
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 __all__ = [

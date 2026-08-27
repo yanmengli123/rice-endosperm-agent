@@ -95,7 +95,7 @@ def get_tool_instances_by_category(category: str) -> list[Any]:
 
 
 async def resolve_configured_runtime_tools(context) -> list[Any]:
-    from yuxi.agents.mcp.service import get_enabled_mcp_tools
+    from yuxi.agents.mcp.service import get_enabled_mcp_tools, get_mcp_dependency_mode
 
     selected_tools = []
     selected_tool_names: set[str] = set()
@@ -116,13 +116,22 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
         if not isinstance(server_name, str) or server_name in selected_mcp_servers:
             continue
         selected_mcp_servers.add(server_name)
+        dependency_mode = await get_mcp_dependency_mode(server_name)
         try:
             mcp_tools = await get_enabled_mcp_tools(server_name)
         except Exception as e:
-            logger.warning(f"Failed to load configured MCP tools '{server_name}': {e}")
+            if dependency_mode in {"REQUIRED", "AUTHORITATIVE"}:
+                raise RuntimeError(
+                    f"Required MCP '{server_name}' is unavailable ({dependency_mode}): {e}"
+                ) from e
+            logger.warning(f"Optional MCP '{server_name}' unavailable: {e}")
             continue
         if not mcp_tools:
-            logger.warning(f"Configured MCP unavailable, skip: {server_name}")
+            if dependency_mode in {"REQUIRED", "AUTHORITATIVE"}:
+                raise RuntimeError(
+                    f"Required MCP '{server_name}' exposes no usable tools ({dependency_mode})"
+                )
+            logger.warning(f"Optional MCP unavailable, skip: {server_name}")
             continue
         for tool in mcp_tools:
             if tool.name in selected_tool_names:

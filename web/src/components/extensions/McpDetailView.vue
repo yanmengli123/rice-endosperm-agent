@@ -176,15 +176,15 @@
                           editForm.transport === 'streamable_http' || editForm.transport === 'sse'
                         "
                       >
-                        <a-form-item label="HTTP 请求头" class="form-item form-item-full">
+                        <a-form-item label="非敏感 HTTP 请求头" class="form-item form-item-full">
                           <a-textarea
                             v-model:value="editForm.headersText"
-                            placeholder='JSON 格式，如：{"Authorization": "Bearer xxx"}'
+                            placeholder='仅允许非敏感配置，如：{"X-Client-Version": "1"}'
                             :rows="4"
                             class="config-textarea"
                           />
                           <div class="form-helper">
-                            请输入合法 JSON 对象，留空表示不发送额外请求头。
+                            认证密钥必须在“添加 MCP”时选择加密凭据，不得写入请求头 JSON。
                           </div>
                         </a-form-item>
                       </template>
@@ -235,6 +235,25 @@
                         server.transport
                       }}</a-tag>
                     </span>
+                  </div>
+                  <div class="info-item">
+                    <label>生命周期</label>
+                    <span><a-tag>{{ server.lifecycle_status || 'UNKNOWN' }}</a-tag></span>
+                  </div>
+                  <div class="info-item">
+                    <label>运行形态</label>
+                    <span>{{ server.runtime_level || '-' }}</span>
+                  </div>
+                  <div class="info-item">
+                    <label>数据/依赖策略</label>
+                    <span>
+                      {{ server.data_access_level || 'PUBLIC' }} ·
+                      {{ server.dependency_mode || 'OPTIONAL' }}
+                    </span>
+                  </div>
+                  <div class="info-item" v-if="server.runtime_artifact">
+                    <label>运行产物</label>
+                    <pre class="code-pre">{{ JSON.stringify(server.runtime_artifact, null, 2) }}</pre>
                   </div>
                   <div
                     class="info-item"
@@ -672,6 +691,7 @@ const handleTestServer = async () => {
         detail += `（${health.duration_ms}ms）`
       }
       message.success(detail, 4)
+      await fetchServer()
     } else {
       message.warning(result.message || '连接失败', 6)
     }
@@ -697,6 +717,13 @@ const handleDangerAction = async () => {
 
 const handleSetServerEnabled = async (srv, enabled) => {
   try {
+    if (enabled && srv.lifecycle_status !== 'READY') {
+      const verification = await mcpApi.testMcpServer(srv.slug)
+      if (!verification.success) {
+        message.error(verification.message || `MCP 当前为 ${srv.lifecycle_status || 'UNKNOWN'}，不能启用`)
+        return
+      }
+    }
     const result = await mcpApi.updateMcpServerStatus(srv.slug, enabled)
     if (result.success) {
       message.success(result.message || `MCP 已${enabled ? '添加' : '移除'}`)

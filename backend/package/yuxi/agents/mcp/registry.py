@@ -21,6 +21,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from yuxi.agents.mcp.domain import (
+    McpArtifactCandidate,
+    McpArtifactSourceKind,
+    McpDeploymentDecision,
+    choose_deployment,
+)
 from yuxi.agents.mcp.spec import (
     ARTIFACT_NPM,
     ARTIFACT_PYPI,
@@ -70,11 +76,19 @@ class NormalizedServerRecord:
     plan: McpInstallPlan | None = None   # 对应安装计划（可能为 None：未 pin 的降级路径）
     warnings: list[str] = field(default_factory=list)
     unpinned: bool = False               # 包型 artifact 未固定版本时置位，由上层裁决
+    raw_manifest: dict[str, Any] | None = None
+    manifest_schema_url: str | None = None
+    normalized_manifest: dict[str, Any] | None = None
+    candidates: list[McpArtifactCandidate] = field(default_factory=list)
+    deployment: McpDeploymentDecision | None = None
 
 
 def looks_like_official_registry(payload: dict[str, Any]) -> bool:
     return isinstance(payload, dict) and (
-        "packages" in payload or "remotes" in payload or "serverName" in payload or "name" in payload and "title" in payload
+        "packages" in payload
+        or "remotes" in payload
+        or "serverName" in payload
+        or ("name" in payload and "title" in payload)
     )
 
 
@@ -130,106 +144,132 @@ def _base_record(name: str, source_type: str, source_ref: str | None) -> Normali
 
 
 def parse_official_registry(server_json: dict[str, Any]) -> NormalizedServerRecord:
-    """官方 Registry 单个 server.json → 归一化记录。
-
-    schema 参考：modelcontextprotocol/registry 的 server.schema.json。
-    按 RUNTIME_PREFERENCE 在 packages[] 与 remotes[] 中选最佳候选。
-    """
+    """Resolve every official Registry alternative, then apply deployment policy."""
     name = str(server_json.get("name") or server_json.get("serverName") or "").strip()
     if not name:
         raise ImportFormatError("server.json 缺少 name 字段")
     version_hint = server_json.get("version")
     record = _base_record(name, SOURCE_TYPE_REGISTRY, f"official-registry:{name}")
     record.description = str(server_json.get("description") or "") or None
+    record.raw_manifest = dict(server_json)
+    record.manifest_schema_url = str(server_json.get("$schema") or "") or None
 
     packages = [p for p in (server_json.get("packages") or []) if isinstance(p, dict)]
     remotes = [r for r in (server_json.get("remotes") or []) if isinstance(r, dict)]
-
-    # 遍历所有组合找偏好最高的候选，同时记录为什么落空
-    best: tuple[int, dict[str, Any]] | None = None
-    unsupported_seen: set[str] = set()
 
     for remote in remotes:
         transport_raw = str(remote.get("transport") or remote.get("type") or "streamable-http")
         try:
             transport = normalize_transport(transport_raw)
-        except NormalizationError:
+        except NormalizationError as exc:
+            record.warnings.append(f"remote transport {transport_raw!r} 无法识别：{exc}")
             continue
         url = remote.get("url")
         if not url:
+            record.warnings.append("remote candidate 缺少 url，已忽略")
             continue
-        score = RUNTIME_PREFERENCE.index("remote")
-        if best is None or score < best[0]:
-            best = (score, {"kind": "remote", "remote": remote, "transport": transport, "url": str(url)})
+        record.candidates.append(
+            McpArtifactCandidate(
+                kind=McpArtifactSourceKind.REMOTE,
+                identifier=str(url),
+                endpoint=str(url),
+                transport=transport,
+                metadata={"remote": remote},
+            )
+        )
 
+    kind_map = {
+        "npm": McpArtifactSourceKind.NPM,
+        "pypi": McpArtifactSourceKind.PYPI,
+        "python": McpArtifactSourceKind.PYPI,
+        "cargo": McpArtifactSourceKind.CARGO,
+        "nuget": McpArtifactSourceKind.NUGET,
+        "oci": McpArtifactSourceKind.OCI,
+        "mcpb": McpArtifactSourceKind.MCPB,
+        "bioconda": McpArtifactSourceKind.BIOCONDA,
+        "conda": McpArtifactSourceKind.BIOCONDA,
+        "binary": McpArtifactSourceKind.BINARY,
+    }
     for package in packages:
         registry_type = str(package.get("registryType") or package.get("registry_type") or "").lower()
-        if registry_type == "npm":
-            kind, pref = ARTIFACT_NPM, RUNTIME_PREFERENCE.index("npm")
-        elif registry_type in ("pypi", "python"):
-            kind, pref = ARTIFACT_PYPI, RUNTIME_PREFERENCE.index("pypi")
-        else:
-            unsupported_seen.add(registry_type or "unknown")
+        kind = kind_map.get(registry_type)
+        if kind is None:
+            record.warnings.append(f"未知 registryType={registry_type or 'unknown'}，已保留原始清单但不作为候选")
             continue
         identifier = str(package.get("identifier") or package.get("name") or "").strip()
         if not identifier:
+            record.warnings.append(f"{registry_type} package 缺少 identifier，已忽略")
             continue
         candidate_version = str(package.get("version") or version_hint or "").strip() or None
         transport_block = package.get("transport") or {}
-        transport_raw = str(transport_block.get("type") or "stdio")
+        transport_raw = str(
+            transport_block.get("type") if isinstance(transport_block, dict) else transport_block or "stdio"
+        )
         try:
             transport = normalize_transport(transport_raw)
         except NormalizationError as e:
             record.warnings.append(f"package {identifier}: transport {transport_raw!r} 无法识别（{e}），跳过该候选")
             continue
         if transport != "stdio":
-            record.warnings.append(f"package {identifier}: 非 stdio transport 暂不支持按包运行，跳过")
+            record.warnings.append(f"package {identifier}: package build source 应使用 stdio transport，已忽略")
             continue
-        if best is None or pref < best[0]:
-            best = (pref, {"kind": kind, "package": package, "transport": transport,
-                           "identifier": identifier, "version": candidate_version})
-
-    if best is None:
-        hint = f"；检测到暂不支持的类型：{', '.join(sorted(unsupported_seen))}" if unsupported_seen else ""
-        raise ImportFormatError(
-            f"server.json 中没有可安装的候选（支持 remote/pypi/npm{hint}）"
+        record.candidates.append(
+            McpArtifactCandidate(
+                kind=kind,
+                identifier=identifier,
+                version=candidate_version,
+                transport=transport,
+                metadata={"package": package},
+            )
         )
 
-    choice = best[1]
-    if choice["kind"] == "remote":
-        plan = build_plan_from_legacy_fields(transport=choice["transport"], url=choice["url"])
+    if not record.candidates:
+        raise ImportFormatError("server.json 中没有可解析的 remote/package/OCI 候选")
+
+    record.deployment = choose_deployment(record.candidates)
+    choice = record.deployment.candidate
+    if choice and choice.kind == McpArtifactSourceKind.REMOTE:
+        plan = build_plan_from_legacy_fields(transport=choice.transport, url=choice.endpoint)
         record.transport = plan.transport
         record.url = plan.identifier
         record.plan = plan
-    else:
-        version = choice.get("version")
-        record.unpinned = version is None
+        remote = choice.metadata.get("remote") or {}
+        headers_spec = remote.get("headers") if isinstance(remote, dict) else None
+        if isinstance(headers_spec, list):
+            record.headers = {
+                str(item.get("name")): item.get("value", "${" + str(item.get("name")).upper().replace("-", "_") + "}")
+                for item in headers_spec
+                if isinstance(item, dict) and item.get("name")
+            }
+        elif isinstance(headers_spec, dict):
+            record.headers = {str(k): v for k, v in headers_spec.items()}
+    elif choice:
+        record.transport = choice.transport
+        record.unpinned = not choice.pinned
         if record.unpinned:
-            record.warnings.append("候选包没有精确版本号；保存后保持禁用状态，需人工补版本再启用")
-        record.plan = McpInstallPlan(
-            artifact_kind=choice["kind"],
-            identifier=choice["identifier"],
-            version=version,
-            runtime_provider="uv" if choice["kind"] == ARTIFACT_PYPI else "node",
-            entrypoint=None,
-            transport=choice["transport"],
-        )
+            record.warnings.append("候选包没有精确版本号，无法进入构建队列")
+        if choice.kind in {McpArtifactSourceKind.PYPI, McpArtifactSourceKind.NPM}:
+            artifact_kind = ARTIFACT_PYPI if choice.kind == McpArtifactSourceKind.PYPI else ARTIFACT_NPM
+            record.plan = McpInstallPlan(
+                artifact_kind=artifact_kind,
+                identifier=choice.identifier,
+                version=choice.version,
+                runtime_provider="uv" if choice.kind == McpArtifactSourceKind.PYPI else "node",
+                entrypoint=None,
+                transport=choice.transport,
+            )
         record.tags = ["registry"]
         record.icon = "📦"
+    else:
+        record.unpinned = True
 
-    # 远程认证信息暂透传 headers（P3 AuthProvider 替代）
-    headers_spec = None
-    if choice["kind"] == "remote":
-        headers_spec = choice["remote"].get("headers")
-    if isinstance(headers_spec, list):
-        # registry 里 headers 是 [{name, value}] 形式
-        record.headers = {
-            str(item.get("name")): item.get("value", "${" + str(item.get("name")).upper().replace("-", "_") + "}")
-            for item in headers_spec
-            if isinstance(item, dict) and item.get("name")
-        }
-    elif isinstance(headers_spec, dict):
-        record.headers = {str(k): v for k, v in headers_spec.items()}
+    record.normalized_manifest = {
+        "schema_version": 2,
+        "name": name,
+        "version": version_hint,
+        "candidates": [candidate.to_dict() for candidate in record.candidates],
+        "deployment": record.deployment.to_dict(),
+    }
     return record
 
 
@@ -302,9 +342,31 @@ def parse_single_server(
     record.transport = plan.transport
     if plan.artifact_kind == ARTIFACT_REMOTE:
         record.url = plan.identifier
+        candidate = McpArtifactCandidate(
+            kind=McpArtifactSourceKind.REMOTE,
+            identifier=plan.identifier,
+            endpoint=plan.identifier,
+            transport=plan.transport,
+            metadata={"remote": dict(body)},
+        )
     else:
         record.command = command
         record.args = [str(a) for a in args] if args else []
+        candidate_kind = {
+            ARTIFACT_PYPI: McpArtifactSourceKind.PYPI,
+            ARTIFACT_NPM: McpArtifactSourceKind.NPM,
+        }.get(plan.artifact_kind, McpArtifactSourceKind.BINARY)
+        candidate = McpArtifactCandidate(
+            kind=candidate_kind,
+            identifier=plan.identifier,
+            version=plan.version,
+            transport=plan.transport,
+            metadata={
+                "command": str(command),
+                "args": record.args,
+                "development_requested": True,
+            },
+        )
         if plan.artifact_kind in (ARTIFACT_PYPI, ARTIFACT_NPM) and plan.version is None:
             record.unpinned = True
             record.warnings.append("未能从命令参数中解析出精确版本号；保存后保持禁用状态")
@@ -316,6 +378,15 @@ def parse_single_server(
         record.description = str(body["description"])[:500]
     if body.get("icon"):
         record.icon = str(body["icon"])
+    record.raw_manifest = dict(body)
+    record.candidates = [candidate]
+    record.deployment = choose_deployment(record.candidates)
+    record.normalized_manifest = {
+        "schema_version": 2,
+        "name": record.slug,
+        "candidates": [candidate.to_dict()],
+        "deployment": record.deployment.to_dict(),
+    }
     return record
 
 
@@ -325,12 +396,8 @@ def parse_single_server(
 
 
 def parse_url(url: str, transport_hint: str | None = None) -> NormalizedServerRecord:
-    plan = build_plan_from_legacy_fields(transport=transport_hint or "streamable_http", url=url.strip())
-    host = re.sub(r"^https?://", "", plan.identifier).split("/")[0]
-    record = _base_record(host, SOURCE_TYPE_MANUAL, None)
-    record.plan = plan
-    record.transport = plan.transport
-    record.url = plan.identifier
+    record = parse_single_server({"url": url.strip(), "transport": transport_hint or "streamable_http"})
+    record.source_type = SOURCE_TYPE_MANUAL
     return record
 
 

@@ -35,7 +35,7 @@
           v-for="server in filteredEnabledServers"
           :key="server.slug"
           variant="mini"
-          :title="formatExtensionCardTitle(server.name)"
+          :title="cardTitle(server)"
           :description="server.description || '暂无描述'"
           @click="handleCardClick(server)"
         >
@@ -63,7 +63,7 @@
           v-for="server in filteredDisabledServers"
           :key="server.slug"
           variant="mini"
-          :title="formatExtensionCardTitle(server.name)"
+          :title="cardTitle(server)"
           :description="server.description || '暂无描述'"
           @click="openBasicInfo(server)"
         >
@@ -120,6 +120,23 @@
             <label>传输类型</label>
             <span>{{ previewServer.transport || '-' }}</span>
           </div>
+          <div class="mcp-basic-info-row">
+            <label>生命周期</label>
+            <a-tag :color="lifecycleColor(previewServer.lifecycle_status)">
+              {{ previewServer.lifecycle_status || 'UNKNOWN' }}
+            </a-tag>
+          </div>
+          <div class="mcp-basic-info-row">
+            <label>生产运行形态</label>
+            <span>{{ previewServer.runtime_level || '-' }}</span>
+          </div>
+          <div class="mcp-basic-info-row">
+            <label>数据/依赖策略</label>
+            <span>
+              {{ previewServer.data_access_level || 'PUBLIC' }} ·
+              {{ previewServer.dependency_mode || 'OPTIONAL' }}
+            </span>
+          </div>
           <div
             v-if="Array.isArray(previewServer.tags) && previewServer.tags.length > 0"
             class="mcp-basic-info-row"
@@ -161,8 +178,9 @@
     >
       <div class="mcp-import-panel">
         <p class="mcp-import-hint">
-          支持官方 Registry 的 server.json、Claude/Cursor 风格 mcpServers 配置（含 stdio 包、
-          远程 URL），或直接粘贴一个 http(s) MCP 地址。导入后默认停用，请在列表中确认后启用。
+          支持官方 Registry server.json、Claude/Cursor 配置和远程 URL。系统会保留全部候选；
+          PyPI/npm/Cargo/NuGet/MCPB/Bioconda 只作为 OCI 构建源，不会在生产服务器直接执行。
+          远程端点完成 SSRF/TLS/能力验证后才可启用。
         </p>
         <a-textarea
           v-model:value="importPayloadText"
@@ -177,6 +195,9 @@
           <div v-for="item in importResults" :key="item.slug" class="mcp-import-result-item">
             <a-tag :color="resultTagColor(item.status)">{{ resultStatusText(item.status) }}</a-tag>
             <span class="mcp-import-result-name">{{ item.name || item.slug }}</span>
+            <a-tag v-if="item.lifecycle_status" :color="lifecycleColor(item.lifecycle_status)">
+              {{ item.lifecycle_status }}
+            </a-tag>
             <span v-if="item.reason" class="mcp-import-result-reason">{{ item.reason }}</span>
             <ul v-if="item.warnings && item.warnings.length" class="mcp-import-result-warnings">
               <li v-for="(w, i) in item.warnings" :key="i">{{ w }}</li>
@@ -207,6 +228,23 @@ import McpFormModal from './McpFormModal.vue'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 
 const router = useRouter()
+
+const lifecycleColor = (status) =>
+  ({
+    READY: 'green',
+    RESOLVED: 'blue',
+    VERIFIED: 'cyan',
+    BUILD_REQUIRED: 'orange',
+    BLOCKED: 'red',
+    FAILED: 'red'
+  })[status] || 'default'
+
+const cardTitle = (server) => {
+  const name = formatExtensionCardTitle(server.name)
+  return server.lifecycle_status && server.lifecycle_status !== 'READY'
+    ? `${name} · ${server.lifecycle_status}`
+    : name
+}
 
 const loading = ref(false)
 const servers = ref([])
@@ -313,6 +351,16 @@ const handleFormSubmitted = async () => {
 const handleSetServerEnabled = async (server, enabled) => {
   try {
     actionLoadingSlug.value = server.slug
+    if (enabled && server.lifecycle_status !== 'READY') {
+      const verification = await mcpApi.testMcpServer(server.slug)
+      if (!verification.success) {
+        message.error(
+          verification.message ||
+            `MCP 当前为 ${server.lifecycle_status || 'UNKNOWN'}，尚未生成可启用的运行产物`
+        )
+        return
+      }
+    }
     const result = await mcpApi.updateMcpServerStatus(server.slug, enabled)
     if (result.success) {
       message.success(result.message || `MCP 已${enabled ? '添加' : '移除'}`)

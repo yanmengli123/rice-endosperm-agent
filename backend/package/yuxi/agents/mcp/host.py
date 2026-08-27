@@ -17,6 +17,7 @@ import hashlib
 import json
 import time
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,6 +28,11 @@ from yuxi.agents.mcp.health import (
     failure_from_exception,
 )
 from yuxi.agents.mcp.spec import to_camel_case
+from yuxi.agents.mcp.execution import record_mcp_call
+from yuxi.agents.mcp.security import (
+    build_safe_httpx_client_factory,
+    validate_remote_url_dns,
+)
 
 ADAPTER_LEGACY_HTTP_DIALECT = "streamable-http"
 ADAPTER_MODERN_HTTP_DIALECT = "streamable_http"
@@ -53,6 +59,8 @@ class McpToolDescriptor:
     stable_id: str                              # mcp__{server_cc}__{tool_cc}
     description: str = ""
     args_model: type | None = None              # pydantic schema（adapter 构造），UI/LangChain 共用
+    annotations: dict[str, Any] = field(default_factory=dict)
+    output_schema: dict[str, Any] | None = None
     raw_tool: Any = field(default=None, repr=False, compare=False)
 
 
@@ -62,6 +70,40 @@ class McpToolResult:
 
     text: str
     is_error: bool = False
+    structured_content: dict[str, Any] | None = None
+    content_blocks: list[Any] = field(default_factory=list)
+    resource_links: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "is_error": self.is_error,
+            "structured_content": self.structured_content,
+            "content_blocks": self.content_blocks,
+            "resource_links": self.resource_links,
+            "metadata": self.metadata,
+            "provenance": self.provenance,
+        }
+
+
+@dataclass
+class McpResourceDescriptor:
+    server_slug: str
+    uri: str
+    name: str
+    description: str = ""
+    mime_type: str | None = None
+    annotations: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class McpPromptDescriptor:
+    server_slug: str
+    name: str
+    description: str = ""
+    arguments: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -69,6 +111,8 @@ class McpDiscoveryInfo:
     server_slug: str
     duration_ms: int | None = None
     tool_count: int = 0
+    resource_count: int = 0
+    prompt_count: int = 0
     protocol_note: str | None = None
 
 
@@ -92,6 +136,26 @@ class McpHost(ABC):
         config: dict[str, Any],
         tool_name: str,
         arguments: dict[str, Any] | None,
+    ) -> McpToolResult: ...
+
+    @abstractmethod
+    async def discover_resources(
+        self, slug: str, config: dict[str, Any]
+    ) -> list[McpResourceDescriptor]: ...
+
+    @abstractmethod
+    async def read_resource(
+        self, slug: str, config: dict[str, Any], uri: str
+    ) -> McpToolResult: ...
+
+    @abstractmethod
+    async def discover_prompts(
+        self, slug: str, config: dict[str, Any]
+    ) -> list[McpPromptDescriptor]: ...
+
+    @abstractmethod
+    async def get_prompt(
+        self, slug: str, config: dict[str, Any], name: str, arguments: dict[str, str] | None
     ) -> McpToolResult: ...
 
 
@@ -118,6 +182,56 @@ def _streamable_http_dialect() -> str:
 
 
 _HTTP_DIALECT_CACHE: str | None = None
+
+
+def _jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", by_alias=True)
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _normalize_tool_output(output: Any, *, provenance: dict[str, Any]) -> McpToolResult:
+    artifact = None
+    content = output
+    if isinstance(output, tuple) and len(output) == 2:
+        content, artifact = output
+    blocks = _jsonable(content)
+    block_list = blocks if isinstance(blocks, list) else [blocks]
+    text_parts: list[str] = []
+    resource_links: list[dict[str, Any]] = []
+    for block in block_list:
+        if isinstance(block, str):
+            text_parts.append(block)
+        elif isinstance(block, dict):
+            if block.get("type") == "text" and block.get("text") is not None:
+                text_parts.append(str(block["text"]))
+            if block.get("url") or block.get("uri"):
+                resource_links.append(block)
+    text = "\n".join(part for part in text_parts if part)
+    if not text:
+        text = json.dumps(blocks, ensure_ascii=False, default=str)
+    artifact_data = _jsonable(artifact) if artifact is not None else None
+    structured = None
+    if isinstance(artifact_data, dict):
+        candidate = artifact_data.get("structured_content") or artifact_data.get("structuredContent")
+        if isinstance(candidate, dict):
+            structured = candidate
+    is_error = text.lstrip().lower().startswith("error:")
+    return McpToolResult(
+        text=text,
+        is_error=is_error,
+        structured_content=structured,
+        content_blocks=block_list,
+        resource_links=resource_links,
+        metadata={"artifact": artifact_data} if artifact_data is not None else {},
+        provenance=provenance,
+    )
 
 
 class LegacyLangChainHost(McpHost):
@@ -181,6 +295,10 @@ class LegacyLangChainHost(McpHost):
                 return cached
 
         client_config = self._client_config(config)
+        if client_config.get("transport") in {"sse", ADAPTER_LEGACY_HTTP_DIALECT, ADAPTER_MODERN_HTTP_DIALECT}:
+            validated_url = await validate_remote_url_dns(str(client_config.get("url") or ""))
+            client_config["url"] = validated_url
+            client_config["httpx_client_factory"] = build_safe_httpx_client_factory(validated_url)
         started = time.perf_counter()
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -220,12 +338,16 @@ class LegacyLangChainHost(McpHost):
     def _descriptor_from_raw(self, slug: str, raw: Any) -> McpToolDescriptor:
         name = getattr(raw, "name", "") or ""
         args_model = getattr(raw, "args_schema", None)
+        metadata = getattr(raw, "metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
         return McpToolDescriptor(
             server_slug=slug,
             name=name,
             stable_id=f"mcp__{to_camel_case(slug)}__{to_camel_case(name)}",
             description=str(getattr(raw, "description", "") or ""),
             args_model=args_model if isinstance(args_model, type) else None,
+            annotations=dict(metadata.get("annotations") or {}),
+            output_schema=metadata.get("output_schema") if isinstance(metadata.get("output_schema"), dict) else None,
             raw_tool=raw,
         )
 
@@ -267,6 +389,7 @@ class LegacyLangChainHost(McpHost):
         tool_name: str,
         arguments: dict[str, Any] | None,
     ) -> McpToolResult:
+        started = time.perf_counter()
         raw_tools = await self._ensure_raw_tools(slug, config, force_refresh=False)
         target = next((t for t in raw_tools if t.name == tool_name), None)
         if target is None:
@@ -284,8 +407,177 @@ class LegacyLangChainHost(McpHost):
             raised = failure_from_exception(e, fallback_stage=STAGE_TRANSPORT)
             if raised.code in (CODE_DISCOVERY_FAILED, CODE_CLIENT_INIT_FAILED):
                 raise McpHostError(raised.message, stage=raised.stage, code=raised.code) from e
-            return McpToolResult(text=f"Error: {e}", is_error=True)
-        return McpToolResult(text=str(output))
+            result = McpToolResult(text=f"Error: {e}", is_error=True)
+            await record_mcp_call(
+                server_slug=slug,
+                capability_type="tool",
+                capability_name=tool_name,
+                arguments=arguments or {},
+                result=result.to_dict(),
+                status="error",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                provenance={"protocol": self._note_adapter_version()},
+            )
+            return result
+        result = _normalize_tool_output(
+            output,
+            provenance={"server_slug": slug, "tool": tool_name, "protocol": self._note_adapter_version()},
+        )
+        await record_mcp_call(
+            server_slug=slug,
+            capability_type="tool",
+            capability_name=tool_name,
+            arguments=arguments or {},
+            result=result.to_dict(),
+            status="error" if result.is_error else "success",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            provenance=result.provenance,
+        )
+        return result
+
+    @asynccontextmanager
+    async def _official_session(self, config: dict[str, Any]):
+        """Open an official SDK session for resources/prompts without flattening."""
+        from mcp import ClientSession, StdioServerParameters
+
+        transport = str(config.get("transport") or "")
+        if transport == "stdio":
+            from mcp.client.stdio import stdio_client
+
+            params = StdioServerParameters(
+                command=str(config.get("command") or ""),
+                args=[str(item) for item in config.get("args") or []],
+                env={str(key): str(value) for key, value in (config.get("env") or {}).items()} or None,
+            )
+            async with stdio_client(params) as streams:
+                async with ClientSession(*streams) as session:
+                    await session.initialize()
+                    yield session
+            return
+
+        url = await validate_remote_url_dns(str(config.get("url") or ""))
+        factory = build_safe_httpx_client_factory(url)
+        headers = dict(config.get("headers") or {}) or None
+        if transport == "sse":
+            from mcp.client.sse import sse_client
+
+            client = sse_client(
+                url,
+                headers=headers,
+                timeout=float(config.get("timeout") or 30),
+                sse_read_timeout=float(config.get("sse_read_timeout") or 300),
+                httpx_client_factory=factory,
+            )
+        else:
+            from mcp.client.streamable_http import streamablehttp_client
+
+            client = streamablehttp_client(
+                url,
+                headers=headers,
+                timeout=float(config.get("timeout") or 30),
+                sse_read_timeout=float(config.get("sse_read_timeout") or 300),
+                httpx_client_factory=factory,
+            )
+        async with client as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                yield session
+
+    async def discover_resources(
+        self, slug: str, config: dict[str, Any]
+    ) -> list[McpResourceDescriptor]:
+        try:
+            async with self._official_session(config) as session:
+                response = await session.list_resources()
+        except Exception as exc:  # noqa: BLE001
+            raised = failure_from_exception(exc, fallback_stage=STAGE_TRANSPORT)
+            raise McpHostError(raised.message, stage=raised.stage, code=raised.code) from exc
+        return [
+            McpResourceDescriptor(
+                server_slug=slug,
+                uri=str(item.uri),
+                name=str(item.name or item.uri),
+                description=str(item.description or ""),
+                mime_type=getattr(item, "mimeType", None),
+                annotations=_jsonable(getattr(item, "annotations", None)) or {},
+            )
+            for item in response.resources
+        ]
+
+    async def read_resource(
+        self, slug: str, config: dict[str, Any], uri: str
+    ) -> McpToolResult:
+        started = time.perf_counter()
+        try:
+            async with self._official_session(config) as session:
+                response = await session.read_resource(uri)
+            blocks = [_jsonable(item) for item in response.contents]
+            result = _normalize_tool_output(
+                blocks,
+                provenance={"server_slug": slug, "resource_uri": uri, "protocol": self._note_adapter_version()},
+            )
+            status = "success"
+        except Exception as exc:  # noqa: BLE001
+            result = McpToolResult(text=f"Error: {exc}", is_error=True)
+            status = "error"
+        await record_mcp_call(
+            server_slug=slug,
+            capability_type="resource",
+            capability_name=uri,
+            arguments={"uri": uri},
+            result=result.to_dict(),
+            status=status,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            provenance=result.provenance,
+        )
+        return result
+
+    async def discover_prompts(
+        self, slug: str, config: dict[str, Any]
+    ) -> list[McpPromptDescriptor]:
+        try:
+            async with self._official_session(config) as session:
+                response = await session.list_prompts()
+        except Exception as exc:  # noqa: BLE001
+            raised = failure_from_exception(exc, fallback_stage=STAGE_TRANSPORT)
+            raise McpHostError(raised.message, stage=raised.stage, code=raised.code) from exc
+        return [
+            McpPromptDescriptor(
+                server_slug=slug,
+                name=str(item.name),
+                description=str(item.description or ""),
+                arguments=[_jsonable(argument) for argument in (item.arguments or [])],
+            )
+            for item in response.prompts
+        ]
+
+    async def get_prompt(
+        self, slug: str, config: dict[str, Any], name: str, arguments: dict[str, str] | None
+    ) -> McpToolResult:
+        started = time.perf_counter()
+        try:
+            async with self._official_session(config) as session:
+                response = await session.get_prompt(name, arguments or {})
+            blocks = [_jsonable(item) for item in response.messages]
+            result = _normalize_tool_output(
+                blocks,
+                provenance={"server_slug": slug, "prompt": name, "protocol": self._note_adapter_version()},
+            )
+            status = "success"
+        except Exception as exc:  # noqa: BLE001
+            result = McpToolResult(text=f"Error: {exc}", is_error=True)
+            status = "error"
+        await record_mcp_call(
+            server_slug=slug,
+            capability_type="prompt",
+            capability_name=name,
+            arguments=arguments or {},
+            result=result.to_dict(),
+            status=status,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            provenance=result.provenance,
+        )
+        return result
 
     # ------------------------------------------------------------------
     # 缓存管理（供门面/路由使用）
@@ -335,6 +627,8 @@ __all__ = [
     "McpHostError",
     "McpToolDescriptor",
     "McpToolResult",
+    "McpResourceDescriptor",
+    "McpPromptDescriptor",
     "McpDiscoveryInfo",
     "LegacyLangChainHost",
     "get_host",

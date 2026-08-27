@@ -836,6 +836,21 @@ class MCPServer(Base):
     source_ref = Column(String(255), nullable=True, comment="来源标识（registry 名、导入渠道等）")
     last_health = Column(JSON, nullable=True, comment="最近一次结构化健康诊断结果")
 
+    # BioMCP v2 compatibility projection. The normalized source of truth lives
+    # in mcp_catalog/tenant_mcp_installations; these columns keep existing Agent
+    # and Web code operational while it migrates to installation identifiers.
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)
+    lifecycle_status = Column(String(40), nullable=False, default="READY")
+    runtime_level = Column(String(32), nullable=True)
+    runtime_artifact = Column(JSON, nullable=True)
+    credential_id = Column(BigInteger, nullable=True)
+    data_access_level = Column(String(32), nullable=False, default="PUBLIC")
+    dependency_mode = Column(String(32), nullable=False, default="OPTIONAL")
+    raw_manifest = Column(JSON, nullable=True)
+    manifest_schema_url = Column(String(500), nullable=True)
+    normalized_manifest = Column(JSON, nullable=True)
+    capability_snapshot = Column(JSON, nullable=True)
+
     # 状态字段
     enabled = Column(Integer, nullable=False, default=1, comment="是否启用：1=是，0=否")
     disabled_tools = Column(JSON, nullable=True, comment="禁用的工具名称列表")
@@ -870,6 +885,17 @@ class MCPServer(Base):
             "source_ref": getattr(self, "source_ref", None),
             "spec": getattr(self, "spec", None),
             "last_health": getattr(self, "last_health", None),
+            "tenant_id": getattr(self, "tenant_id", None),
+            "lifecycle_status": getattr(self, "lifecycle_status", "READY"),
+            "runtime_level": getattr(self, "runtime_level", None),
+            "runtime_artifact": getattr(self, "runtime_artifact", None),
+            "credential_id": getattr(self, "credential_id", None),
+            "data_access_level": getattr(self, "data_access_level", "PUBLIC"),
+            "dependency_mode": getattr(self, "dependency_mode", "OPTIONAL"),
+            "raw_manifest": getattr(self, "raw_manifest", None),
+            "manifest_schema_url": getattr(self, "manifest_schema_url", None),
+            "normalized_manifest": getattr(self, "normalized_manifest", None),
+            "capability_snapshot": getattr(self, "capability_snapshot", None),
             "created_by": self.created_by,
             "updated_by": self.updated_by,
             "created_at": format_utc_datetime(self.created_at),
@@ -918,6 +944,143 @@ class MCPServer(Base):
         if self.disabled_tools:
             config["disabled_tools"] = self.disabled_tools
         return config
+
+
+class MCPCatalog(Base):
+    """Global catalog identity with raw and normalized manifest provenance."""
+
+    __tablename__ = "mcp_catalog"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    slug = Column(String(100), nullable=False, unique=True, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    source_type = Column(String(32), nullable=False)
+    source_ref = Column(String(500), nullable=True)
+    raw_manifest = Column(JSON, nullable=False, default=dict)
+    manifest_schema_url = Column(String(500), nullable=True)
+    normalized_manifest = Column(JSON, nullable=False, default=dict)
+    content_digest = Column(String(80), nullable=False, index=True)
+    provenance = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class MCPUserCredential(Base):
+    """Encrypted MCP auth material; installations store only its id."""
+
+    __tablename__ = "user_mcp_credentials"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    auth_type = Column(String(32), nullable=False, default="bearer")
+    secret_ciphertext = Column(Text, nullable=False)
+    masked_hint = Column(String(64), nullable=True)
+    metadata_json = Column(JSON, nullable=False, default=dict)
+    status = Column(String(32), nullable=False, default="active")
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_user_mcp_credentials_active",
+            "tenant_id",
+            "uid",
+            "name",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+
+class TenantMCPInstallation(Base):
+    """Tenant-owned deployment decision for one catalog entry."""
+
+    __tablename__ = "tenant_mcp_installations"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    catalog_id = Column(BigInteger, ForeignKey("mcp_catalog.id", ondelete="CASCADE"), nullable=False, index=True)
+    lifecycle_status = Column(String(40), nullable=False, default="DISCOVERED", index=True)
+    runtime_level = Column(String(32), nullable=True)
+    runtime_artifact = Column(JSON, nullable=True)
+    credential_id = Column(BigInteger, ForeignKey("user_mcp_credentials.id"), nullable=True)
+    data_access_level = Column(String(32), nullable=False, default="PUBLIC")
+    dependency_mode = Column(String(32), nullable=False, default="OPTIONAL")
+    policy_json = Column(JSON, nullable=False, default=dict)
+    capability_snapshot = Column(JSON, nullable=False, default=dict)
+    enabled = Column(Boolean, nullable=False, default=False)
+    last_error = Column(Text, nullable=True)
+    installed_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+    __table_args__ = (Index("uq_tenant_mcp_installation", "tenant_id", "catalog_id", unique=True),)
+
+
+class AgentMCPBinding(Base):
+    """Explicit Agent-to-installation dependency and policy override."""
+
+    __tablename__ = "agent_mcp_bindings"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    installation_id = Column(
+        BigInteger, ForeignKey("tenant_mcp_installations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    dependency_mode = Column(String(32), nullable=False, default="OPTIONAL")
+    policy_json = Column(JSON, nullable=False, default=dict)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+    __table_args__ = (Index("uq_agent_mcp_binding", "tenant_id", "agent_id", "installation_id", unique=True),)
+
+
+class MCPRuntimeInstance(Base):
+    """Observed isolated runtime state; no secret material is stored here."""
+
+    __tablename__ = "mcp_runtime_instances"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    installation_id = Column(
+        BigInteger, ForeignKey("tenant_mcp_installations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider = Column(String(32), nullable=False)
+    runtime_ref = Column(String(255), nullable=False, unique=True)
+    image_digest = Column(String(500), nullable=True)
+    endpoint = Column(String(500), nullable=True)
+    state = Column(String(40), nullable=False, index=True)
+    metadata_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class MCPCallAudit(Base):
+    """Append-only MCP call provenance and policy audit."""
+
+    __tablename__ = "mcp_call_audit"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)
+    uid = Column(String, nullable=False, index=True)
+    run_id = Column(String(64), nullable=True, index=True)
+    agent_slug = Column(String(80), nullable=True, index=True)
+    installation_id = Column(BigInteger, nullable=True, index=True)
+    server_slug = Column(String(100), nullable=False, index=True)
+    capability_type = Column(String(32), nullable=False)
+    capability_name = Column(String(255), nullable=False)
+    arguments_digest = Column(String(80), nullable=True)
+    result_digest = Column(String(80), nullable=True)
+    status = Column(String(32), nullable=False)
+    duration_ms = Column(Integer, nullable=True)
+    data_access_level = Column(String(32), nullable=False, default="PUBLIC")
+    provenance = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
 
 
 class ModelProvider(Base):

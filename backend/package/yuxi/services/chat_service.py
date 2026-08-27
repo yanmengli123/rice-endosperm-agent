@@ -1021,6 +1021,17 @@ async def stream_agent_chat(
         meta["request_id"] = str(uuid.uuid4())
 
     uid = str(current_user.uid)
+    from yuxi.agents.mcp.execution import McpExecutionContext, set_mcp_execution_context
+    from yuxi.services.principal import resolve_tenant_id
+
+    mcp_context_token = set_mcp_execution_context(
+        McpExecutionContext(
+            tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
+            uid=uid,
+            run_id=meta.get("run_id"),
+            agent_slug=agent_slug,
+        )
+    )
     if not thread_id:
         thread_id = str(uuid.uuid4())
         logger.warning(f"No thread_id provided, generated new thread_id: {thread_id}")
@@ -1045,6 +1056,9 @@ async def stream_agent_chat(
             agent_kind="subagent" if meta.get("run_type") == "subagent" else "main",
         )
     except ValueError as e:
+        from yuxi.agents.mcp.execution import reset_mcp_execution_context
+
+        reset_mcp_execution_context(mcp_context_token)
         yield make_chunk(status="error", error_type="invalid_agent", error_message=str(e), meta=meta)
         return
 
@@ -1405,6 +1419,9 @@ async def stream_agent_chat(
             from yuxi.agents.models import reset_user_credential_override
 
             reset_user_credential_override(credential_context_token)
+        from yuxi.agents.mcp.execution import reset_mcp_execution_context
+
+        reset_mcp_execution_context(mcp_context_token)
         flush_langfuse()
 
 
@@ -1433,6 +1450,17 @@ async def stream_agent_resume(
     resume_command = Command(resume=resume_input)
 
     uid = str(current_user.uid)
+    from yuxi.agents.mcp.execution import McpExecutionContext, set_mcp_execution_context
+    from yuxi.services.principal import resolve_tenant_id
+
+    mcp_context_token = set_mcp_execution_context(
+        McpExecutionContext(
+            tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
+            uid=uid,
+            run_id=meta.get("run_id"),
+            agent_slug=meta.get("agent_slug"),
+        )
+    )
     try:
         agent_item, agent, agent_config = await _resolve_agent_runtime(
             db=db,
@@ -1441,6 +1469,9 @@ async def stream_agent_resume(
             thread_id=thread_id,
         )
     except ValueError as e:
+        from yuxi.agents.mcp.execution import reset_mcp_execution_context
+
+        reset_mcp_execution_context(mcp_context_token)
         yield make_resume_chunk(status="error", error_type="invalid_agent", error_message=str(e), meta=meta)
         return
 
@@ -1685,6 +1716,9 @@ async def stream_agent_resume(
             from yuxi.agents.models import reset_user_credential_override
 
             reset_user_credential_override(credential_context_token)
+        from yuxi.agents.mcp.execution import reset_mcp_execution_context
+
+        reset_mcp_execution_context(mcp_context_token)
         flush_langfuse()
 
 

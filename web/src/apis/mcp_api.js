@@ -132,6 +132,30 @@ export const toggleMcpServerTool = async (serverName, toolName) => {
   )
 }
 
+export const getMcpCatalog = async () => apiGet(`${BASE_URL}/catalog`)
+
+export const installMcpCatalogEntry = async (slug, data = {}) =>
+  apiAdminPost(`${BASE_URL}/catalog/${encodeURIComponent(slug)}/install`, data)
+
+export const getMcpCredentials = async () => apiGet(`${BASE_URL}/credentials`)
+
+export const createMcpCredential = async (data) => apiAdminPost(`${BASE_URL}/credentials`, data)
+
+export const revokeMcpCredential = async (credentialId) =>
+  apiAdminDelete(`${BASE_URL}/credentials/${encodeURIComponent(credentialId)}`)
+
+export const refreshMcpCapabilities = async (name) =>
+  apiAdminPost(`${BASE_URL}/${encodeURIComponent(name)}/capabilities/refresh`, {})
+
+export const readMcpResource = async (name, uri) =>
+  apiAdminPost(`${BASE_URL}/${encodeURIComponent(name)}/resources/read`, { uri })
+
+export const renderMcpPrompt = async (name, promptName, argumentsMap = {}) =>
+  apiAdminPost(
+    `${BASE_URL}/${encodeURIComponent(name)}/prompts/${encodeURIComponent(promptName)}`,
+    { arguments: argumentsMap }
+  )
+
 export const mcpApi = {
   getMcpServers,
   getMcpServer,
@@ -144,7 +168,15 @@ export const mcpApi = {
   updateMcpServerStatus,
   getMcpServerTools,
   refreshMcpServerTools,
-  toggleMcpServerTool
+  toggleMcpServerTool,
+  getMcpCatalog,
+  installMcpCatalogEntry,
+  getMcpCredentials,
+  createMcpCredential,
+  revokeMcpCredential,
+  refreshMcpCapabilities,
+  readMcpResource,
+  renderMcpPrompt
 }
 
 export default mcpApi

@@ -49,9 +49,9 @@ def build_mcp_base_tool(
             arguments=(dict, Field(default_factory=dict, description="MCP 工具入参对象")),
         )
 
-    async def _arun(**kwargs: Any) -> str:
+    async def _arun(**kwargs: Any) -> tuple[str, dict[str, Any]]:
         result = await host.call_tool(descriptor.server_slug, config, descriptor.name, kwargs)
-        return result.text
+        return result.text, result.to_dict()
 
     def _run(**kwargs: Any) -> str:  # 同步路径：不主动支持，防误用给出明确报错
         raise McpHostError(
@@ -67,12 +67,15 @@ def build_mcp_base_tool(
         func=_run,
         coroutine=_arun,
         handle_tool_error=True,
+        response_format="content_and_artifact",
         metadata={
             "id": descriptor.stable_id,
             "server": descriptor.server_slug,
             "mcp_tool_name": descriptor.name,
             "model_facing_name": tool_name,
             "aliased": bool(model_facing_name and model_facing_name != descriptor.name),
+            "mcp_annotations_untrusted": descriptor.annotations,
+            "mcp_output_schema": descriptor.output_schema,
         },
     )
     return structured

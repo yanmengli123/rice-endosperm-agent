@@ -43,10 +43,19 @@
         <a-form-item label="MCP URL" required class="form-item">
           <a-input v-model:value="form.url" placeholder="https://example.com/mcp" />
         </a-form-item>
-        <a-form-item label="HTTP 请求头" class="form-item">
+        <a-form-item label="认证凭据" class="form-item">
+          <a-select
+            v-model:value="form.credential_id"
+            allow-clear
+            placeholder="无认证，或选择已加密凭据"
+            :options="credentialOptions"
+          />
+          <small class="field-hint">密钥只保存在服务端密文仓库，MCP 配置仅保存 credential_id。</small>
+        </a-form-item>
+        <a-form-item label="非敏感 HTTP 请求头" class="form-item">
           <a-textarea
             v-model:value="form.headersText"
-            placeholder='JSON 格式，如：{"Authorization": "Bearer xxx"}'
+            placeholder='仅允许非敏感配置，如：{"X-Client-Version": "1"}'
             :rows="3"
           />
         </a-form-item>
@@ -74,6 +83,13 @@
         </a-row>
       </template>
       <template v-if="isStdioTransport">
+        <a-alert
+          type="warning"
+          show-icon
+          class="runtime-alert"
+          message="stdio 仅用于开发环境"
+          description="生产环境会把包视为 OCI 构建源；未生成并验证镜像摘要前不能启用。"
+        />
         <a-form-item label="命令" required class="form-item">
           <a-input v-model:value="form.command" placeholder="例如：npx 或 /path/to/server" />
         </a-form-item>
@@ -89,6 +105,27 @@
           <McpEnvEditor v-model="form.env" />
         </a-form-item>
       </template>
+      <a-row :gutter="16">
+        <a-col :span="12">
+          <a-form-item label="数据级别" class="form-item">
+            <a-select v-model:value="form.data_access_level">
+              <a-select-option value="PUBLIC">PUBLIC</a-select-option>
+              <a-select-option value="INTERNAL">INTERNAL</a-select-option>
+              <a-select-option value="CONTROLLED">CONTROLLED</a-select-option>
+              <a-select-option value="HUMAN_SENSITIVE">HUMAN_SENSITIVE</a-select-option>
+            </a-select>
+          </a-form-item>
+        </a-col>
+        <a-col :span="12">
+          <a-form-item label="依赖语义" class="form-item">
+            <a-select v-model:value="form.dependency_mode">
+              <a-select-option value="OPTIONAL">OPTIONAL</a-select-option>
+              <a-select-option value="REQUIRED">REQUIRED</a-select-option>
+              <a-select-option value="AUTHORITATIVE">AUTHORITATIVE</a-select-option>
+            </a-select>
+          </a-form-item>
+        </a-col>
+      </a-row>
       <a-form-item label="标签" class="form-item">
         <a-select
           v-model:value="form.tags"
@@ -121,6 +158,15 @@ const visible = computed({
 })
 
 const formLoading = ref(false)
+const credentials = ref([])
+const credentialOptions = computed(() =>
+  credentials.value
+    .filter((item) => item.status === 'active')
+    .map((item) => ({
+      label: `${item.name}（${item.auth_type} · ${item.masked_hint || '已加密'}）`,
+      value: item.credential_id
+    }))
+)
 
 const form = reactive({
   slug: '',
@@ -135,7 +181,10 @@ const form = reactive({
   timeout: null,
   sse_read_timeout: null,
   tags: [],
-  icon: ''
+  icon: '',
+  credential_id: null,
+  data_access_level: 'PUBLIC',
+  dependency_mode: 'OPTIONAL'
 })
 
 const isStdioTransport = computed(
@@ -145,9 +194,19 @@ const isStdioTransport = computed(
       .toLowerCase() === 'stdio'
 )
 
+const loadCredentials = async () => {
+  try {
+    const result = await mcpApi.getMcpCredentials()
+    credentials.value = result.success ? result.data || [] : []
+  } catch {
+    credentials.value = []
+  }
+}
+
 watch(
   () => props.open,
   (val) => {
+    if (val) loadCredentials()
     if (val && props.editData) {
       Object.assign(form, {
         slug: props.editData.slug || '',
@@ -162,7 +221,10 @@ watch(
         timeout: props.editData.timeout,
         sse_read_timeout: props.editData.sse_read_timeout,
         tags: props.editData.tags || [],
-        icon: props.editData.icon || ''
+        icon: props.editData.icon || '',
+        credential_id: props.editData.credential_id || null,
+        data_access_level: props.editData.data_access_level || 'PUBLIC',
+        dependency_mode: props.editData.dependency_mode || 'OPTIONAL'
       })
     } else if (val && !props.editData) {
       Object.assign(form, {
@@ -178,7 +240,10 @@ watch(
         timeout: null,
         sse_read_timeout: null,
         tags: [],
-        icon: ''
+        icon: '',
+        credential_id: null,
+        data_access_level: 'PUBLIC',
+        dependency_mode: 'OPTIONAL'
       })
     }
   },
@@ -210,7 +275,10 @@ const handleFormSubmit = async () => {
       timeout: form.timeout || null,
       sse_read_timeout: form.sse_read_timeout || null,
       tags: form.tags.length > 0 ? form.tags : null,
-      icon: form.icon || null
+      icon: form.icon || null,
+      credential_id: form.credential_id || null,
+      data_access_level: form.data_access_level,
+      dependency_mode: form.dependency_mode
     }
     if (!data.slug?.trim()) {
       message.error('MCP 标识不能为空')
@@ -267,4 +335,15 @@ const handleFormSubmit = async () => {
 
 <style lang="less" scoped>
 @import '@/assets/css/extensions.less';
+
+.runtime-alert {
+  margin-bottom: 16px;
+}
+
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--gray-500);
+  line-height: 1.5;
+}
 </style>

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.agents.mcp import service as mcp_service
+from yuxi.agents.mcp.host import McpToolDescriptor
 from yuxi.storage.postgres import manager as postgres_manager
 from yuxi.storage.postgres.models_business import MCPServer
 
@@ -163,13 +164,10 @@ async def test_get_mcp_tools_rebuilds_cache_when_config_hash_changes(monkeypatch
         return configs[0]
 
     def make_descriptor(name):
-        return SimpleNamespace(
+        return McpToolDescriptor(
             server_slug="demo",
             name=name,
             stable_id=f"mcp__demo__{name}",
-            description="",
-            args_model=None,
-            raw_tool=None,
         )
 
     @_host_noop_methods
@@ -232,13 +230,10 @@ async def test_get_tools_from_all_servers_loads_names_from_db_once(monkeypatch):
         return server_configs
 
     def make_descriptor(name):
-        return SimpleNamespace(
+        return McpToolDescriptor(
             server_slug=name.split("_")[0],
             name=name,
             stable_id=name,
-            description="",
-            args_model=None,
-            raw_tool=None,
         )
 
     @_host_noop_methods
@@ -280,13 +275,10 @@ async def test_get_mcp_tools_sets_handle_tool_error(monkeypatch):
         del db
         return config
 
-    descriptor = SimpleNamespace(
+    descriptor = McpToolDescriptor(
         server_slug="demo",
         name="demo_tool",
         stable_id="mcp__demo__demoTool",
-        description="",
-        args_model=None,
-        raw_tool=None,
     )
 
     @_host_noop_methods
