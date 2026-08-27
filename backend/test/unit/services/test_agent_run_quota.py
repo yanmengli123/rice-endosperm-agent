@@ -8,7 +8,16 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.services.agent_run_service import _enforce_user_quota
-from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation, Department, Tenant, TenantMembership, TenantUserEntitlement, User
+from yuxi.storage.postgres.models_business import (
+    AgentRun,
+    Base,
+    Conversation,
+    Department,
+    Tenant,
+    TenantMembership,
+    TenantUserEntitlement,
+    User,
+)
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]

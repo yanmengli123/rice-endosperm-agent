@@ -189,6 +189,66 @@ routes:
         show_limit_quota_header: true
         allow_degradation: true
 
+  - id: yuxi-public-desktop-login
+    name: yuxi-public-desktop-login
+    uri: /api/auth/desktop/login
+    methods:
+      - POST
+    priority: 100
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      request-validation:
+        body_schema:
+          type: object
+          required:
+            - login_id
+            - password
+            - api_key
+          properties:
+            login_id:
+              type: string
+              minLength: 2
+              maxLength: 64
+            password:
+              type: string
+              minLength: 8
+              maxLength: 256
+            api_key:
+              type: string
+              minLength: 16
+              maxLength: 256
+              pattern: "^yxkey_[A-Za-z0-9_-]+$"
+          additionalProperties: false
+        rejected_code: 400
+        rejected_msg: invalid request
+      limit-count:
+        count: 10
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
   - id: yuxi-public-cli-session-create
     name: yuxi-public-cli-session-create
     uri: /api/auth/cli/sessions

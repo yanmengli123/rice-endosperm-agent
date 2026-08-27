@@ -66,6 +66,8 @@ class APIKeyResponse(BaseModel):
     last_used_at: str | None
     created_by: str
     created_at: str
+    owner_uid: str | None = None
+    owner_username: str | None = None
 
 
 class APIKeyCreateResponse(BaseModel):
@@ -172,18 +174,31 @@ async def list_api_keys(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(APIKey).order_by(APIKey.created_at.desc()).offset(skip).limit(limit)
+    query = (
+        select(APIKey, User.uid, User.username)
+        .join(User, User.id == APIKey.user_id)
+        .order_by(APIKey.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
     count_query = select(func.count(APIKey.id))
     if current_user.role != "superadmin":
         query = query.filter(APIKey.user_id == current_user.id)
         count_query = count_query.filter(APIKey.user_id == current_user.id)
 
     result = await db.execute(query)
-    api_keys = result.scalars().all()
+    api_key_rows = result.all()
     total_result = await db.execute(count_query)
 
+    api_keys = []
+    for api_key, owner_uid, owner_username in api_key_rows:
+        item = api_key.to_dict()
+        item["owner_uid"] = owner_uid
+        item["owner_username"] = owner_username
+        api_keys.append(item)
+
     return {
-        "api_keys": [key.to_dict() for key in api_keys],
+        "api_keys": api_keys,
         "total": total_result.scalar(),
     }
 

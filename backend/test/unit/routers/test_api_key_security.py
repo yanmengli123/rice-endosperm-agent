@@ -8,7 +8,14 @@ import pytest_asyncio
 from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from server.routers.auth_router import UserUpdate, delete_user, login_for_access_token, update_user
+from server.routers.auth_router import (
+    DesktopLoginRequest,
+    UserUpdate,
+    delete_user,
+    login_desktop_client,
+    login_for_access_token,
+    update_user,
+)
 from server.routers.user_router import APIKeyCreate, _admin_guard, create_api_key, disable_user, enable_user
 from server.utils.auth_middleware import _verify_api_key, get_current_user
 from yuxi.repositories import user_repository as user_repository_module
@@ -263,6 +270,66 @@ async def test_login_does_not_disclose_whether_identifier_exists(session):
 
     assert existing_exc.value.status_code == missing_exc.value.status_code == 401
     assert existing_exc.value.detail == missing_exc.value.detail == "登录标识或密码错误"
+
+
+async def test_atomic_desktop_login_uses_server_account_scope_and_matching_key(session):
+    db = session["db"]
+    user = session["regular_user"]
+    user.password_hash = AuthUtils.hash_password("desktop-password")
+    secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="desktop login",
+        user_id=user.id,
+        department_id=user.department_id,
+        tenant_id=1,
+        purpose="desktop_legacy",
+        created_by=str(session["superadmin"].id),
+    )
+    db.add(api_key)
+    await db.commit()
+    await db.refresh(api_key)
+
+    response = await login_desktop_client(
+        DesktopLoginRequest(login_id=user.username, password="desktop-password", api_key=secret),
+        Request({"type": "http", "method": "POST", "path": "/api/auth/desktop/login", "headers": []}),
+        db,
+    )
+
+    assert response.uid == user.uid
+    assert response.username == user.username
+    assert response.account_scope_id == user.account_scope_id
+    assert response.api_key_id == api_key.id
+
+
+async def test_atomic_desktop_login_rejects_key_owned_by_another_user(session):
+    db = session["db"]
+    user = session["regular_user"]
+    user.password_hash = AuthUtils.hash_password("desktop-password")
+    secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="other user key",
+        user_id=session["superadmin"].id,
+        department_id=session["superadmin"].department_id,
+        tenant_id=1,
+        purpose="desktop_legacy",
+        created_by=str(session["superadmin"].id),
+    )
+    db.add(api_key)
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await login_desktop_client(
+            DesktopLoginRequest(login_id=user.uid, password="desktop-password", api_key=secret),
+            Request({"type": "http", "method": "POST", "path": "/api/auth/desktop/login", "headers": []}),
+            db,
+        )
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "登录信息或 API Key 错误"
 
 
 async def test_department_admin_cannot_manage_user_from_another_department(session):

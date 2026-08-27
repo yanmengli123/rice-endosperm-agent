@@ -265,3 +265,31 @@ async def test_versioned_migrations_take_advisory_lock_before_reading_versions()
     statements = "\n".join(connection.statements)
     assert "pg_advisory_xact_lock" in statements
     assert statements.index("pg_advisory_xact_lock") < statements.index("SELECT version FROM schema_migrations")
+
+
+@pytest.mark.asyncio
+async def test_identity_created_at_migration_backfills_before_enforcing_constraints():
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager._apply_versioned_migrations()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+    user_backfill = "UPDATE users AS u SET created_at"
+    department_backfill = "UPDATE departments AS d SET created_at"
+    user_constraint = "ALTER TABLE users ALTER COLUMN created_at SET NOT NULL"
+    department_constraint = "ALTER TABLE departments ALTER COLUMN created_at SET NOT NULL"
+
+    assert user_backfill in statements
+    assert department_backfill in statements
+    assert "ALTER TABLE users ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP" in statements
+    assert "ALTER TABLE departments ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP" in statements
+    assert statements.index(user_backfill) < statements.index(user_constraint)
+    assert statements.index(department_backfill) < statements.index(department_constraint)

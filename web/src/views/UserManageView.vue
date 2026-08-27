@@ -107,18 +107,20 @@ async function createUser() {
       password: createModal.password,
       role: createModal.role
     })
+    if (!created.api_key_secret) {
+      throw new Error('用户已创建，但服务端未返回一次性 API Key，请在用户详情中重置密钥')
+    }
     message.success('用户已创建')
     // P5：开户卡——随机签发的桌面端密钥明文仅此一次展示，关闭后不可再看
-    if (created.api_key_secret) {
-      Object.assign(onboardingCard, {
-        open: true,
-        username: created.username || createModal.username.trim(),
-        uid: created.uid,
-        password: createModal.password,
-        apiKeySecret: created.api_key_secret,
-        apiKeyExpiresAt: (created.api_key_expires_at || '').slice(0, 10)
-      })
-    }
+    Object.assign(onboardingCard, {
+      open: true,
+      username: created.username || createModal.username.trim(),
+      uid: created.uid,
+      password: createModal.password,
+      apiKeySecret: created.api_key_secret,
+      apiKeyExpiresAt: (created.api_key_expires_at || '').slice(0, 10)
+    })
+    window.dispatchEvent(new CustomEvent('yuxi:api-keys-changed'))
     createModal.open = false
     createModal.username = ''
     createModal.password = ''
@@ -144,6 +146,17 @@ async function copyOnboardingCard() {
   } catch {
     message.warning('复制失败，请手动选择文本复制')
   }
+}
+
+function clearOnboardingCard() {
+  Object.assign(onboardingCard, {
+    open: false,
+    username: '',
+    uid: '',
+    password: '',
+    apiKeySecret: '',
+    apiKeyExpiresAt: ''
+  })
 }
 
 // P5：管理员查看普通用户的问答记录
@@ -189,6 +202,19 @@ async function selectConversation(conv) {
     message.error(error.message || '加载问答失败')
   } finally {
     qaDrawer.messagesLoading = false
+  }
+}
+
+async function loadConversationsInto(target, uid) {
+  target.conversationsLoading = true
+  try {
+    const data = await authApi.listManagedUserConversations(uid)
+    target.conversations = data.conversations || []
+  } catch (error) {
+    target.conversations = []
+    message.error(error.message || '加载会话列表失败')
+  } finally {
+    target.conversationsLoading = false
   }
 }
 
@@ -395,7 +421,9 @@ onMounted(() => {
       :open="onboardingCard.open"
       title="开户成功 · 请妥善保存以下信息"
       :footer="null"
+      :mask-closable="false"
       @cancel="onboardingCard.open = false"
+      @afterClose="clearOnboardingCard"
     >
       <div class="onboarding-card">
         <p><b>登录显示名：</b>{{ onboardingCard.username }}</p>

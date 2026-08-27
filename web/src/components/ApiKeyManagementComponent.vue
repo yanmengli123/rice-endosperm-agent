@@ -48,6 +48,12 @@
               </div>
 
               <div class="card-content">
+                <div v-if="key.owner_username || key.owner_uid" class="info-item">
+                  <span class="info-label">所属用户:</span>
+                  <span class="info-value">
+                    {{ key.owner_username || '-' }}（{{ key.owner_uid || '-' }}）
+                  </span>
+                </div>
                 <div class="info-item">
                   <span class="info-label">过期时间:</span>
                   <span class="info-value">{{ key.expires_at || '永不过期' }}</span>
@@ -149,7 +155,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onBeforeUnmount, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { Plus, RefreshCw, Trash2, Copy } from '@lucide/vue'
 import { Key as KeyIcon } from '@lucide/vue'
@@ -281,8 +287,17 @@ const deleteKey = async (key) => {
   }
 }
 
+const handleApiKeysChanged = () => {
+  loadApiKeys()
+}
+
 onMounted(() => {
   loadApiKeys()
+  window.addEventListener('yuxi:api-keys-changed', handleApiKeysChanged)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('yuxi:api-keys-changed', handleApiKeysChanged)
 })
 </script>
 

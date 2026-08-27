@@ -5,8 +5,6 @@ from uuid import uuid4
 
 import pytest
 
-from datetime import UTC, datetime
-
 from yuxi.services import auth_service
 from yuxi.utils.auth_utils import AuthUtils
 

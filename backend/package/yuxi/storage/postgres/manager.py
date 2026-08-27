@@ -1023,6 +1023,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0009_entitlements_activation", "_migration_0009_entitlements_activation"),
         ("0010_tenant_scope_backfill", "_migration_0010_tenant_scope_backfill"),
         ("0011_apikeys_tenant_scope", "_migration_0011_apikeys_tenant_scope"),
+        ("0012_identity_created_at_required", "_migration_0012_identity_created_at_required"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -1053,6 +1054,33 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(
             text("CREATE INDEX IF NOT EXISTS ix_api_keys_tenant ON api_keys(tenant_id)")
         )
+
+    async def _migration_0012_identity_created_at_required(self, conn) -> None:
+        """修复历史用户/部门缺失创建时间导致管理列表响应校验失败。
+
+        ORM 的 ``default`` 只覆盖经 SQLAlchemy 创建的数据，早期脚本或直接 SQL
+        写入可能留下 NULL。先用可审计的关联时间回填，再增加数据库默认值和
+        NOT NULL 约束，确保任何写入路径都不能再次制造同类脏数据。
+        """
+        await conn.execute(
+            text(
+                "UPDATE users AS u SET created_at = COALESCE("
+                "(SELECT MIN(tm.created_at AT TIME ZONE 'UTC') "
+                "FROM tenant_memberships AS tm WHERE tm.uid = u.uid), "
+                "u.last_login, u.deleted_at, CURRENT_TIMESTAMP) "
+                "WHERE u.created_at IS NULL"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE departments AS d SET created_at = COALESCE("
+                "(SELECT MIN(u.created_at) FROM users AS u WHERE u.department_id = d.id), "
+                "CURRENT_TIMESTAMP) WHERE d.created_at IS NULL"
+            )
+        )
+        for table in ("users", "departments"):
+            await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
+            await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN created_at SET NOT NULL"))
 
     async def _apply_versioned_migrations(self):
         self._check_initialized()

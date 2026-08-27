@@ -256,6 +256,34 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <a-modal
+      v-model:open="onboardingCard.open"
+      title="新用户开箱信息"
+      :footer="null"
+      :mask-closable="false"
+      width="560px"
+      @afterClose="clearOnboardingCard"
+    >
+      <div class="onboarding-card">
+        <a-alert
+          type="warning"
+          message="API Key 和初始密码仅在本次创建后显示，请立即通过安全渠道交付给用户。"
+          show-icon
+        />
+        <div class="onboarding-grid">
+          <span>用户名</span><strong>{{ onboardingCard.username }}</strong>
+          <span>登录 ID</span><code>{{ onboardingCard.uid }}</code>
+          <span>初始密码</span><code>{{ onboardingCard.password }}</code>
+          <span>桌面端 API Key</span><code class="onboarding-secret">{{ onboardingCard.apiKeySecret }}</code>
+          <span>有效期至</span><strong>{{ onboardingCard.apiKeyExpiresAt || '90 天后' }}</strong>
+        </div>
+        <a-button type="primary" block class="copy-onboarding-btn" @click="copyOnboardingCard">
+          <Copy :size="15" />
+          复制完整开箱信息
+        </a-button>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -264,6 +292,7 @@ import { reactive, onMounted, watch, computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis'
+import { authApi } from '@/apis/auth_api'
 import {
   Plus,
   SquarePen,
@@ -272,7 +301,8 @@ import {
   UserLock,
   UserStar,
   RefreshCw,
-  Search
+  Search,
+  Copy
 } from '@lucide/vue'
 import { formatDateTime } from '@/utils/time'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
@@ -281,6 +311,42 @@ import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 
 const userStore = useUserStore()
+
+const onboardingCard = reactive({
+  open: false,
+  username: '',
+  uid: '',
+  password: '',
+  apiKeySecret: '',
+  apiKeyExpiresAt: ''
+})
+
+const clearOnboardingCard = () => {
+  Object.assign(onboardingCard, {
+    open: false,
+    username: '',
+    uid: '',
+    password: '',
+    apiKeySecret: '',
+    apiKeyExpiresAt: ''
+  })
+}
+
+const copyOnboardingCard = async () => {
+  const text = [
+    `用户名：${onboardingCard.username}`,
+    `登录 ID：${onboardingCard.uid}`,
+    `初始密码：${onboardingCard.password}`,
+    `桌面端 API Key：${onboardingCard.apiKeySecret}`,
+    `有效期至：${onboardingCard.apiKeyExpiresAt || '90 天后'}`
+  ].join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    message.success('开箱信息已复制，请通过安全渠道交付')
+  } catch {
+    message.warning('复制失败，请手动选择文本复制')
+  }
+}
 
 // 用户管理相关状态
 const userManagement = reactive({
@@ -379,6 +445,7 @@ const fetchDepartments = async () => {
     departmentManagement.departments = departments
   } catch (error) {
     console.error('获取部门列表失败:', error)
+    departmentManagement.departments = []
   }
 }
 
@@ -499,7 +566,8 @@ const handleRefresh = async () => {
 }
 
 // 打开添加用户模态框
-const showAddUserModal = () => {
+const showAddUserModal = async () => {
+  await fetchDepartments()
   userManagement.modalTitle = '添加用户'
   userManagement.editMode = false
   userManagement.editUserId = null
@@ -624,7 +692,19 @@ const handleUserFormSubmit = async () => {
         createData.phone_number = userManagement.form.phoneNumber
       }
 
-      await userStore.createUser(createData)
+      const created = await authApi.createManagedUser(createData)
+      if (!created.api_key_secret) {
+        throw new Error('用户已创建，但服务端未返回一次性 API Key，请在用户详情中重置密钥')
+      }
+      Object.assign(onboardingCard, {
+        open: true,
+        username: created.username || createData.username,
+        uid: created.uid,
+        password: createData.password,
+        apiKeySecret: created.api_key_secret,
+        apiKeyExpiresAt: (created.api_key_expires_at || '').slice(0, 10)
+      })
+      window.dispatchEvent(new CustomEvent('yuxi:api-keys-changed'))
       message.success('用户创建成功')
     }
 
@@ -997,6 +1077,43 @@ onMounted(async () => {
         font-size: 13px;
       }
     }
+  }
+}
+
+.onboarding-card {
+  display: grid;
+  gap: 16px;
+
+  .onboarding-grid {
+    display: grid;
+    grid-template-columns: 110px minmax(0, 1fr);
+    gap: 10px 14px;
+    align-items: start;
+
+    > span {
+      color: var(--gray-600);
+    }
+
+    code,
+    strong {
+      color: var(--gray-900);
+      word-break: break-all;
+      user-select: all;
+    }
+
+    .onboarding-secret {
+      padding: 8px 10px;
+      border: 1px solid var(--gray-150);
+      border-radius: 8px;
+      background: var(--gray-50);
+    }
+  }
+
+  .copy-onboarding-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
   }
 }
 </style>

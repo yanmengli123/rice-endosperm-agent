@@ -137,6 +137,86 @@ async def test_admin_can_create_and_delete_user(test_client, admin_headers):
     assert delete_payload["message"] == "用户已删除"
 
 
+async def test_superadmin_create_user_rejects_unknown_department_as_json(test_client, admin_headers):
+    await _require_superadmin(test_client, admin_headers)
+    username = f"baddept_{uuid.uuid4().hex[:8]}"
+
+    response = await test_client.post(
+        "/api/auth/users",
+        json={
+            "username": username,
+            "password": "routerTest123!",
+            "role": "user",
+            "department_id": 2_147_483_647,
+        },
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"] == "所选部门不存在或不属于当前企业，请刷新页面后重新选择"
+
+    list_response = await test_client.get("/api/auth/users?limit=1000", headers=admin_headers)
+    assert list_response.status_code == 200, list_response.text
+    assert username not in {user["username"] for user in list_response.json()}
+
+
+async def test_superadmin_created_user_receives_listed_key_and_can_use_atomic_desktop_login(
+    test_client, admin_headers
+):
+    await _require_superadmin(test_client, admin_headers)
+    suffix = uuid.uuid4().hex[:8]
+    username = f"desktop_{suffix}"
+    password = f"Desk!{suffix}Pass"
+    created_user = None
+
+    try:
+        create_response = await test_client.post(
+            "/api/auth/users",
+            json={"username": username, "password": password, "role": "user"},
+            headers=admin_headers,
+        )
+        assert create_response.status_code == 200, create_response.text
+        created_user = create_response.json()
+        secret = created_user["api_key_secret"]
+        assert secret.startswith("yxkey_")
+        assert created_user["api_key_expires_at"]
+
+        keys_response = await test_client.get("/api/user/apikey/?limit=500", headers=admin_headers)
+        assert keys_response.status_code == 200, keys_response.text
+        created_key = next(
+            key for key in keys_response.json()["api_keys"] if key["user_id"] == created_user["id"]
+        )
+        assert created_key["owner_uid"] == created_user["uid"]
+        assert created_key["owner_username"] == username
+        assert secret.startswith(created_key["key_prefix"])
+
+        desktop_response = await test_client.post(
+            "/api/auth/desktop/login",
+            json={"login_id": created_user["uid"], "password": password, "api_key": secret},
+        )
+        assert desktop_response.status_code == 200, desktop_response.text
+        desktop_identity = desktop_response.json()
+        assert desktop_identity["uid"] == created_user["uid"]
+        assert desktop_identity["username"] == username
+        assert desktop_identity["api_key_id"] == created_key["id"]
+        assert desktop_identity["account_scope_id"].startswith("yxacct_")
+
+        mismatch_response = await test_client.post(
+            "/api/auth/desktop/login",
+            json={
+                "login_id": created_user["uid"],
+                "password": password,
+                "api_key": "yxkey_000000000000000000000000000000000000000000000000",
+            },
+        )
+        assert mismatch_response.status_code == 401, mismatch_response.text
+        assert mismatch_response.json()["detail"] == "登录信息或 API Key 错误"
+    finally:
+        if created_user is not None:
+            await _cleanup_user(test_client, admin_headers, created_user["id"])
+
+
 async def test_admin_password_mutations_reject_passwords_shorter_than_eight_characters(
     test_client, admin_headers, standard_user
 ):

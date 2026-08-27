@@ -41,7 +41,12 @@ class Department(Base):
     name = Column(String(50), nullable=False)  # 租户内唯一（迁移 0011 前身 0010 的联合唯一索引强制）
     tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)  # 迁移 0010 回填
     description = Column(String(255), nullable=True)
-    created_at = Column(DateTime, default=utc_now_naive)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=utc_now_naive,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
 
     # 关联关系
     users = relationship("User", back_populates="department", cascade="all, delete-orphan")
@@ -251,7 +256,12 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False, default="user")  # 角色: superadmin, admin, user
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)  # 部门ID
-    created_at = Column(DateTime, default=utc_now_naive)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=utc_now_naive,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
     last_login = Column(DateTime, nullable=True)
 
     # 登录失败限制相关字段

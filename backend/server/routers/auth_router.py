@@ -9,7 +9,7 @@ from yuxi.utils import logger
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status, UploadFile, File
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -216,6 +216,23 @@ class CLIAuthTokenResponse(BaseModel):
     session: DeviceSessionPair | None = None
 
 
+class DesktopLoginRequest(BaseModel):
+    """桌面端三要素登录；敏感字段使用 SecretStr，避免进入异常 repr。"""
+
+    login_id: str = Field(min_length=2, max_length=64)
+    password: SecretStr = Field(min_length=8, max_length=256)
+    api_key: SecretStr = Field(min_length=16, max_length=256)
+
+
+class DesktopLoginResponse(BaseModel):
+    account_scope_id: str
+    username: str
+    uid: str
+    api_key_id: int
+    key_prefix: str
+    expires_at: str | None = None
+
+
 # =============================================================================
 # === 工具函数 ===
 # =============================================================================
@@ -228,6 +245,17 @@ def _raise_cli_auth_error(exc: CLIAuthError) -> None:
     ) from exc
 
 
+async def _find_login_user(db: AsyncSession, login_identifier: str) -> User | None:
+    """按稳定登录 ID、显示用户名、手机号依次解析，避免跨字段 OR 查询歧义。"""
+
+    for field in (User.uid, User.username, User.phone_number):
+        result = await db.execute(select(User).filter(field == login_identifier))
+        user = result.scalar_one_or_none()
+        if user is not None:
+            return user
+    return None
+
+
 # 路由：登录获取令牌
 # =============================================================================
 # === 认证分组 ===
@@ -236,17 +264,9 @@ def _raise_cli_auth_error(exc: CLIAuthError) -> None:
 
 @auth.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    # 查找用户 - 支持user_id和phone_number登录
-    login_identifier = form_data.username  # OAuth2表单中的username字段作为登录标识符
-
-    # 尝试通过user_id查找
-    result = await db.execute(select(User).filter(User.uid == login_identifier))
-    user = result.scalar_one_or_none()
-
-    # 如果通过user_id没找到，尝试通过phone_number查找
-    if not user:
-        result = await db.execute(select(User).filter(User.phone_number == login_identifier))
-        user = result.scalar_one_or_none()
+    # OAuth2 表单中的 username 支持稳定登录 ID、显示用户名和手机号。
+    login_identifier = form_data.username.strip()
+    user = await _find_login_user(db, login_identifier)
 
     # 如果用户不存在，执行一次真实 Argon2 校验以降低时序枚举风险。
     if not user:
@@ -340,6 +360,119 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         "department_id": user.department_id,
         "department_name": department_name,
     }
+
+
+@auth.post("/desktop/login", response_model=DesktopLoginResponse)
+async def login_desktop_client(
+    data: DesktopLoginRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """原子校验桌面端的账号、密码与 API Key 归属，不签发额外 JWT。"""
+
+    login_identifier = data.login_id.strip()
+    password = data.password.get_secret_value()
+    raw_api_key = data.api_key.get_secret_value()
+
+    user = await _find_login_user(db, login_identifier)
+    password_matches = AuthUtils.verify_password(
+        user.password_hash if user is not None else DUMMY_PASSWORD_HASH,
+        password,
+    )
+
+    key_hash = hashlib.sha256(raw_api_key.encode()).hexdigest()
+    key_row = (
+        await db.execute(
+            select(APIKey, User)
+            .join(User, User.id == APIKey.user_id)
+            .filter(APIKey.key_hash == key_hash)
+        )
+    ).one_or_none()
+    api_key, key_owner = key_row if key_row is not None else (None, None)
+
+    if not password_matches:
+        if user is not None and not user.is_deleted and not user.is_disabled:
+            user.increment_failed_login()
+            await db.commit()
+            await log_operation(
+                db,
+                user.id,
+                "桌面端登录失败",
+                f"密码错误，失败次数: {user.login_failed_count}",
+                request,
+            )
+            if user.is_login_locked():
+                remaining_time = user.get_remaining_lock_time()
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail=f"由于多次登录失败，账户已被锁定 {remaining_time} 秒",
+                    headers={"X-Lock-Remaining": str(remaining_time)},
+                )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="登录信息或 API Key 错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 只有同时持有正确密码与同账号 Key 后，才披露账号状态。
+    key_matches_user = (
+        user is not None
+        and api_key is not None
+        and key_owner is not None
+        and key_owner.id == user.id
+        and api_key.is_valid()
+        and user.department_id is not None
+        and api_key.department_id == user.department_id
+    )
+    if not key_matches_user:
+        if user is not None:
+            await log_operation(db, user.id, "桌面端登录失败", "API Key 无效或与登录账号不匹配", request)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="登录信息或 API Key 错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    assert user is not None and api_key is not None
+    if user.is_deleted:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="该账户已注销")
+    if user.is_disabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已被停用，请联系管理员")
+    if user.is_login_locked():
+        remaining_time = user.get_remaining_lock_time()
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"登录被锁定，请等待 {remaining_time} 秒后再试",
+            headers={"X-Lock-Remaining": str(remaining_time)},
+        )
+
+    from yuxi.services.principal import PrincipalResolutionError, resolve_principal
+
+    try:
+        principal = await resolve_principal(db, user)
+    except PrincipalResolutionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号企业归属无效，请联系管理员") from exc
+    if api_key.tenant_id != principal.tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="登录信息或 API Key 错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user.reset_failed_login()
+    user.last_login = utc_now_naive()
+    api_key.last_used_at = utc_now_naive()
+    await db.commit()
+    await log_operation(db, user.id, "桌面端登录", f"API Key: {api_key.key_prefix}", request)
+
+    return DesktopLoginResponse(
+        account_scope_id=user.account_scope_id or AuthUtils.account_scope_id(user.uid),
+        username=user.username,
+        uid=user.uid,
+        api_key_id=api_key.id,
+        key_prefix=api_key.key_prefix,
+        expires_at=api_key.to_dict()["expires_at"],
+    )
 
 
 # =============================================================================
@@ -745,30 +878,52 @@ async def create_user(
             detail="管理员只能创建普通用户账户",
         )
 
-    # 部门分配逻辑
+    # get_admin_user 已验证成员资格；此处再次解析是为了取得本次开户的权威租户，
+    # 并且必须发生在 db.add(new_user) 之前，避免身份查询触发待写用户的 autoflush。
+    from yuxi.services.principal import ensure_tenant_membership, resolve_principal
+
+    principal = await resolve_principal(db, current_user)
+
+    # 部门分配和存在性校验必须使用同一个请求事务，并锁住目标部门直至开户提交，
+    # 防止页面缓存的旧 ID 或并发删除穿透为外键 500。
     if current_user.role == "superadmin":
-        # 超级管理员创建用户时，使用指定的部门或默认部门
-        department_id = user_data.department_id
-        if department_id is None:
-            # 获取默认部门
-            dept_repo = DepartmentRepository()
-            departments = await dept_repo.list_departments()
-            default_dept = next((d for d in departments if d.name == "默认部门"), None)
-            department_id = default_dept.id if default_dept else None
-    else:
-        # 普通管理员创建用户时，自动继承该管理员的部门
-        department_id = current_user.department_id
-        if department_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="管理员必须属于部门才能创建用户",
+        if user_data.department_id is None:
+            department_query = select(Department).where(
+                Department.tenant_id == principal.tenant_id,
+                Department.name == "默认部门",
             )
+            missing_department_message = "当前企业没有可用的默认部门，请先创建部门"
+        else:
+            department_query = select(Department).where(
+                Department.id == int(user_data.department_id),
+                Department.tenant_id == principal.tenant_id,
+            )
+            missing_department_message = "所选部门不存在或不属于当前企业，请刷新页面后重新选择"
+    else:
         # 非超级管理员不能指定部门
         if user_data.department_id is not None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="普通管理员不能指定部门",
             )
+        if current_user.department_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="管理员必须属于部门才能创建用户",
+            )
+        department_query = select(Department).where(
+            Department.id == int(current_user.department_id),
+            Department.tenant_id == principal.tenant_id,
+        )
+        missing_department_message = "管理员所属部门不存在或不属于当前企业，请联系超级管理员"
+
+    department = (await db.execute(department_query.with_for_update())).scalar_one_or_none()
+    if department is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=missing_department_message,
+        )
+    department_id = int(department.id)
 
     # P5：改用请求级会话直接构造用户——user_repo.create 使用独立会话并立即提交，
     # 返回的游离实例会让后续"成员关系/密钥签发/审计"跨会话访问而 500。
@@ -781,11 +936,16 @@ async def create_user(
         department_id=department_id,
     )
     db.add(new_user)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="用户名、手机号或账号标识已存在，请检查后重试",
+        ) from exc
 
     # P1：开户流程显式把新用户加入创建者的活动租户。
-    from yuxi.services.principal import ensure_tenant_membership, resolve_principal
-
-    principal = await resolve_principal(db, current_user)
     await ensure_tenant_membership(db, new_user, tenant_id=principal.tenant_id)
 
     # P5：为新建用户随机签发桌面端访问密钥（90 天有效）；明文仅在本次响应出现
