@@ -47,6 +47,11 @@ from yuxi.utils.logging_config import logger
 from yuxi.utils.question_utils import (
     normalize_questions as _normalize_interrupt_questions,
 )
+from yuxi.utils.reasoning_visibility import (
+    ReasoningVisibilityBuffer,
+    redact_reasoning_metadata,
+    sanitize_visible_text,
+)
 from yuxi.utils.thread_utils import extract_thread_id as _metadata_thread_id
 
 
@@ -347,14 +352,17 @@ def _message_chunk_yuxi_events(
     additional_kwargs = msg_dict.get("additional_kwargs") if isinstance(msg_dict.get("additional_kwargs"), dict) else {}
     reasoning_content = msg_dict.get("reasoning_content")
     additional_reasoning_content = additional_kwargs.get("reasoning_content")
+    reasoning_state = additional_kwargs.get("reasoning_state")
 
     message_event: dict[str, Any] = {"type": "message_delta", "message_id": message_id, **route}
     if isinstance(content, str) and content:
         message_event["content"] = content
-    if isinstance(reasoning_content, str) and reasoning_content:
-        message_event["reasoning_content"] = reasoning_content
-    if isinstance(additional_reasoning_content, str) and additional_reasoning_content:
-        message_event["additional_reasoning_content"] = additional_reasoning_content
+    has_reasoning = (isinstance(reasoning_content, str) and bool(reasoning_content)) or (
+        isinstance(additional_reasoning_content, str) and bool(additional_reasoning_content)
+    )
+    if has_reasoning or reasoning_state == "thinking":
+        # 原始 chain-of-thought 不属于产品输出协议；仅公开非敏感状态。
+        message_event["reasoning_state"] = "thinking"
     if len(message_event) > 4:
         events.append(message_event)
 
@@ -430,6 +438,32 @@ def _stream_event_response(event: dict[str, Any]) -> str:
     if event.get("type") != "message_delta":
         return ""
     return str(event.get("content") or "")
+
+
+def _sanitize_stream_event(
+    event: dict[str, Any],
+    buffers: dict[str, ReasoningVisibilityBuffer],
+) -> dict[str, Any]:
+    """Redact structured and tagged reasoning before an event leaves the worker."""
+
+    if event.get("type") != "message_delta":
+        return event
+    safe = dict(event)
+    structured_reasoning = bool(
+        safe.pop("reasoning_content", None) or safe.pop("additional_reasoning_content", None)
+    )
+    message_id = str(safe.get("message_id") or "default")
+    content = safe.get("content")
+    tagged_reasoning = False
+    if isinstance(content, str) and content:
+        visible_delta, tagged_reasoning = buffers.setdefault(message_id, ReasoningVisibilityBuffer()).feed(content)
+        if visible_delta:
+            safe["content"] = visible_delta
+        else:
+            safe.pop("content", None)
+    if structured_reasoning or tagged_reasoning or safe.get("reasoning_state") == "thinking":
+        safe["reasoning_state"] = "thinking"
+    return safe
 
 
 def _message_payload_yuxi_events(
@@ -508,7 +542,8 @@ async def _save_ai_message(
         )
     elif not isinstance(content, str):
         content = str(content)
-    extra_metadata = dict(msg_dict)
+    content = sanitize_visible_text(content)
+    extra_metadata = redact_reasoning_metadata(msg_dict)
     if trace_info:
         extra_metadata.update(trace_info)
 
@@ -573,7 +608,8 @@ async def save_partial_message(
         if full_msg:
             msg_dict = full_msg.model_dump() if hasattr(full_msg, "model_dump") else {}
             content = full_msg.content if hasattr(full_msg, "content") else str(full_msg)
-            extra_metadata = msg_dict | extra_metadata
+            content = sanitize_visible_text(content if isinstance(content, str) else str(content))
+            extra_metadata = redact_reasoning_metadata(msg_dict) | extra_metadata
         else:
             content = ""
 
@@ -1163,6 +1199,7 @@ async def stream_agent_chat(
         # 无需手动加载或传递
 
         protocol_message_ids: dict[tuple[str, str], str] = {}
+        reasoning_visibility: dict[str, ReasoningVisibilityBuffer] = {}
         async for mode, payload in _stream_agent_events(
             agent,
             messages,
@@ -1211,6 +1248,7 @@ async def stream_agent_chat(
             )
 
             for stream_event in stream_events:
+                stream_event = _sanitize_stream_event(stream_event, reasoning_visibility)
                 content = _stream_event_response(stream_event)
                 if not is_subagent_chunk and content:
                     trace_info = get_trace_info(langfuse_run)
@@ -1454,6 +1492,7 @@ async def stream_agent_resume(
     )
 
     protocol_message_ids: dict[tuple[str, str], str] = {}
+    reasoning_visibility: dict[str, ReasoningVisibilityBuffer] = {}
     accumulated_content: list[str] = []
     conv_repo = ConversationRepository(db)
 
@@ -1507,6 +1546,7 @@ async def stream_agent_resume(
             )
 
             for stream_event in stream_events:
+                stream_event = _sanitize_stream_event(stream_event, reasoning_visibility)
                 content = _stream_event_response(stream_event)
                 if chunk_thread_id == thread_id and content:
                     # 与 chat 流一致的双道内容护栏（滚动检查），防止借 resume

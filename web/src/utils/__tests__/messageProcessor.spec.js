@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 import { MessageProcessor } from '../messageProcessor.js'
+import { ReasoningVisibilityBuffer } from '../reasoningVisibility.js'
 
 const databases = [{ name: '财税库' }, { name: 'DifyKB' }, { name: 'LightGraphKB' }]
 
@@ -113,7 +114,24 @@ const run = () => {
     type: 'ai',
     content: '<think>推理过程</think>最终答案'
   })
-  assert.deepEqual(assistantBody, { content: '最终答案', reasoningContent: '推理过程' })
+  assert.deepEqual(assistantBody, { content: '最终答案', reasoningContent: '思考中…' })
+
+  const escapedReasoning = MessageProcessor.parseAssistantMessageBody({
+    type: 'ai',
+    content: '\\\\<think>private chain</think>公开答案'
+  })
+  assert.deepEqual(escapedReasoning, { content: '公开答案', reasoningContent: '思考中…' })
+
+  const truncatedReasoning = MessageProcessor.parseAssistantMessageBody({
+    type: 'ai',
+    content: '<think>private chain'
+  })
+  assert.deepEqual(truncatedReasoning, { content: '', reasoningContent: '思考中…' })
+
+  const reasoningBuffer = new ReasoningVisibilityBuffer()
+  assert.equal(reasoningBuffer.feed('<th'), '')
+  assert.equal(reasoningBuffer.feed('ink>private chain'), '')
+  assert.equal(reasoningBuffer.feed('</think>公开答案'), '公开答案')
 
   console.log('messageProcessor extractKnowledgeChunksFromConversation: all assertions passed')
 }

@@ -2,6 +2,20 @@ import { message } from 'ant-design-vue'
 import { handleChatError } from '@/utils/errorHandler'
 import { unref } from 'vue'
 import { extractPendingInterrupt } from '@/composables/useApproval'
+import { ReasoningVisibilityBuffer } from '@/utils/reasoningVisibility'
+
+const reasoningVisibilityByMessage = new Map()
+
+const safeStreamContent = (messageId, content) => {
+  if (typeof content !== 'string' || !content) return ''
+  if (!reasoningVisibilityByMessage.has(messageId)) {
+    if (reasoningVisibilityByMessage.size >= 256) {
+      reasoningVisibilityByMessage.delete(reasoningVisibilityByMessage.keys().next().value)
+    }
+    reasoningVisibilityByMessage.set(messageId, new ReasoningVisibilityBuffer())
+  }
+  return reasoningVisibilityByMessage.get(messageId).feed(content)
+}
 
 const serializeToolArgs = (args) => {
   if (typeof args === 'string') return args
@@ -18,13 +32,14 @@ const streamEventToMessageChunk = (streamEvent) => {
     const chunk = {
       id: messageId,
       type: 'AIMessageChunk',
-      content: streamEvent.content || ''
+      content: safeStreamContent(messageId, streamEvent.content)
     }
-    if (streamEvent.reasoning_content) {
-      chunk.reasoning_content = streamEvent.reasoning_content
-    }
-    if (streamEvent.additional_reasoning_content) {
-      chunk.additional_kwargs = { reasoning_content: streamEvent.additional_reasoning_content }
+    if (
+      streamEvent.reasoning_state === 'thinking' ||
+      streamEvent.reasoning_content ||
+      streamEvent.additional_reasoning_content
+    ) {
+      chunk.additional_kwargs = { reasoning_state: 'thinking' }
     }
     return chunk
   }
@@ -57,7 +72,23 @@ const loadingMessageChunk = (chunk) => {
 
   const msg = chunk?.msg
   if (msg?.event) return null
-  return msg || null
+  if (!msg || typeof msg !== 'object') return null
+
+  const { reasoning_content: rawReasoning, ...safeMessage } = msg
+  const additionalKwargs =
+    msg.additional_kwargs && typeof msg.additional_kwargs === 'object'
+      ? { ...msg.additional_kwargs }
+      : {}
+  const additionalReasoning = additionalKwargs.reasoning_content
+  delete additionalKwargs.reasoning_content
+  const messageId = msg.id || chunk?.request_id || 'legacy-message'
+  safeMessage.content = safeStreamContent(messageId, msg.content)
+  if (rawReasoning || additionalReasoning) {
+    additionalKwargs.reasoning_state = 'thinking'
+  }
+  if (Object.keys(additionalKwargs).length) safeMessage.additional_kwargs = additionalKwargs
+  else delete safeMessage.additional_kwargs
+  return safeMessage
 }
 
 // 工具结果不走 messages 流，而是以 method=tools 的 stream_event 事件返回（tool-started/tool-finished）。

@@ -37,6 +37,40 @@ def _sse_data(chunk: str) -> dict:
     raise AssertionError(f"SSE chunk has no data line: {chunk}")
 
 
+def test_compact_run_event_never_keeps_raw_reasoning() -> None:
+    compact = agent_run_service._compact_semantic_stream_event(
+        {
+            "type": "message_delta",
+            "message_id": "message-1",
+            "reasoning_content": "private chain",
+        }
+    )
+    assert compact == {
+        "type": "message_delta",
+        "message_id": "message-1",
+        "reasoning_state": "thinking",
+    }
+
+
+def test_run_progress_uses_fixed_thinking_status() -> None:
+    progress = agent_run_service._progress_message_from_chunk(
+        {
+            "stream_event": {
+                "type": "message_delta",
+                "message_id": "message-1",
+                "reasoning_content": "private chain",
+            }
+        },
+        seq="1-0",
+    )
+    assert progress == {
+        "seq": "1-0",
+        "message_id": "message-1",
+        "kind": "assistant_reasoning",
+        "content": "思考中…",
+    }
+
+
 def test_openai_content_parts_build_and_restore_multimodal_message():
     input_message = build_chat_input_message_from_openai_content(
         [

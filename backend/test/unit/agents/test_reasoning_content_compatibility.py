@@ -90,6 +90,27 @@ def test_non_stream_response_preserves_reasoning_content() -> None:
     assert result.generations[0].message.additional_kwargs["reasoning_content"] == "The evidence supports GS3."
 
 
+def test_non_stream_response_redacts_tagged_reasoning_from_visible_content() -> None:
+    model = _model()
+
+    result = model._create_chat_result(
+        {
+            "model": "test-model",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "<think>private chain</think>你好！我是稻芯智析。",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    )
+
+    assert result.generations[0].message.content == "你好！我是稻芯智析。"
+
+
 def test_legacy_deepseek_tool_history_disables_thinking_without_guessing_reasoning() -> None:
     model = _model(legacy_compatibility=True)
 

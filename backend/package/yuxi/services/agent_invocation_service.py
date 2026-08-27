@@ -37,6 +37,7 @@ from yuxi.services.input_message_service import (
 from yuxi.services.run_queue_service import list_run_stream_events
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
+from yuxi.utils.reasoning_visibility import sanitize_visible_text
 
 EVALUATION_SOURCE = "agent_evaluation"
 EVALUATION_FIELDS = ("dataset_name", "dataset_item_id", "experiment_name")
@@ -471,7 +472,7 @@ def _agent_call_finish_reason(status: str) -> str | None:
 
 def _build_agent_call_response(result: dict[str, Any]) -> dict[str, Any]:
     status = str(result.get("status") or "unknown")
-    output = result.get("output") if isinstance(result.get("output"), str) else ""
+    output = sanitize_visible_text(result.get("output")) if isinstance(result.get("output"), str) else ""
     usage = _normalize_agent_call_usage_metadata(result.get("usage"))
     payload: dict[str, Any] = {
         "run_id": result.get("agent_run_id") or result.get("run_id"),

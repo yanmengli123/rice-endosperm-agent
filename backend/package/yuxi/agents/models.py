@@ -8,6 +8,7 @@ from yuxi import config as sys_config
 from yuxi.models.providers.cache import model_cache
 from yuxi.utils import get_docker_safe_url
 from yuxi.utils.logging_config import logger
+from yuxi.utils.reasoning_visibility import ReasoningVisibilityBuffer, sanitize_visible_text
 
 
 def resolve_chat_model_spec(model_spec: str | None, *, fallback: str | None = None) -> str:
@@ -154,16 +155,28 @@ class _ToolCallChunkFixChatOpenAI(ChatOpenAI):
             reasoning_content = message.get("reasoning_content") if isinstance(message, dict) else None
             if isinstance(reasoning_content, str):
                 generation.message.additional_kwargs["reasoning_content"] = reasoning_content
+            if isinstance(generation.message.content, str):
+                generation.message.content = sanitize_visible_text(generation.message.content)
         return result
 
     async def _astream(self, *args, **kwargs):
+        visibility = ReasoningVisibilityBuffer()
         async for chunk in super()._astream(*args, **kwargs):
             _normalize_tool_call_chunks(chunk.message)
+            if isinstance(chunk.message.content, str):
+                chunk.message.content, thinking = visibility.feed(chunk.message.content)
+                if thinking:
+                    chunk.message.additional_kwargs["reasoning_state"] = "thinking"
             yield chunk
 
     def _stream(self, *args, **kwargs):
+        visibility = ReasoningVisibilityBuffer()
         for chunk in super()._stream(*args, **kwargs):
             _normalize_tool_call_chunks(chunk.message)
+            if isinstance(chunk.message.content, str):
+                chunk.message.content, thinking = visibility.feed(chunk.message.content)
+                if thinking:
+                    chunk.message.additional_kwargs["reasoning_state"] = "thinking"
             yield chunk
 
 

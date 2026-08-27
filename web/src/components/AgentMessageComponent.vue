@@ -37,19 +37,9 @@
 
     <!-- 助手消息 -->
     <div v-else-if="message.type === 'ai'" class="assistant-message">
-      <div v-if="parsedData.reasoning_content" class="reasoning-box">
-        <a-collapse v-model:activeKey="reasoningActiveKey" :bordered="false">
-          <template #expandIcon="{ isActive }">
-            <caret-right-outlined :rotate="isActive ? 90 : 0" />
-          </template>
-          <a-collapse-panel
-            key="show"
-            :header="message.status == 'reasoning' ? '正在思考...' : '推理过程'"
-            class="reasoning-header"
-          >
-            <p class="reasoning-content">{{ parsedData.reasoning_content }}</p>
-          </a-collapse-panel>
-        </a-collapse>
+      <div v-if="parsedData.reasoning_content && !parsedData.content" class="reasoning-status">
+        <LoaderCircle :size="15" aria-hidden="true" />
+        <span>思考中…</span>
       </div>
 
       <!-- 消息内容 -->
@@ -60,8 +50,6 @@
         code-copy
         class="message-md"
       />
-
-      <div v-else-if="parsedData.reasoning_content" class="empty-block"></div>
 
       <!-- 错误提示块 -->
       <div v-if="displayError" class="error-hint">
@@ -148,9 +136,8 @@
 
 <script setup>
 import { computed, ref, onUnmounted } from 'vue'
-import { CaretRightOutlined } from '@ant-design/icons-vue'
 import RefsComponent from '@/components/RefsComponent.vue'
-import { Copy, Check, X } from '@lucide/vue'
+import { Copy, Check, LoaderCircle, X } from '@lucide/vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import MentionTextRenderer from '@/components/common/MentionTextRenderer.vue'
@@ -179,7 +166,7 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
-  // 是否显示推理过程
+  // 是否显示非敏感的思考状态
   showRefs: {
     type: [Array, Boolean],
     default: () => false
@@ -259,9 +246,6 @@ const copyToClipboard = async (text) => {
     console.error('Failed to copy: ', err)
   }
 }
-
-// 推理面板展开状态
-const reasoningActiveKey = ref(['hide'])
 
 // 错误消息处理
 const displayError = computed(() => {
@@ -437,52 +421,16 @@ const parsedData = computed(() => {
     animation: colorPulse 1s infinite ease-in-out;
   }
 
-  .reasoning-box {
-    margin-top: 10px;
-    margin-bottom: 15px;
-    border-radius: 8px;
-    border: 1px solid var(--gray-150);
-    background-color: var(--gray-25);
-    overflow: hidden;
-    transition: all 0.2s ease;
+  .reasoning-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.35rem 0;
+    color: var(--gray-600);
+    font-size: 14px;
 
-    :deep(.ant-collapse) {
-      background-color: transparent;
-      border: none;
-
-      .ant-collapse-item {
-        border: none;
-
-        .ant-collapse-header {
-          padding: 8px 12px;
-          font-size: 14px;
-          font-weight: 500;
-          color: var(--gray-700);
-          transition: all 0.2s ease;
-
-          .ant-collapse-expand-icon {
-            color: var(--gray-400);
-          }
-        }
-
-        .ant-collapse-content {
-          border: none;
-          background-color: transparent;
-
-          .ant-collapse-content-box {
-            padding: 16px;
-            background-color: var(--gray-25);
-          }
-        }
-      }
-    }
-
-    .reasoning-content {
-      font-size: 13px;
-      color: var(--gray-800);
-      white-space: pre-wrap;
-      margin: 0;
-      line-height: 1.6;
+    svg {
+      animation: rotate 1s linear infinite;
     }
   }
 

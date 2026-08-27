@@ -62,6 +62,7 @@ from yuxi.storage.postgres.models_business import (
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.hash_utils import hash_id
 from yuxi.utils.logging_config import logger
+from yuxi.utils.reasoning_visibility import sanitize_visible_text
 
 SSE_HEARTBEAT_SECONDS = int(os.getenv("RUN_SSE_HEARTBEAT_SECONDS", "15"))  # SSE 连接空闲多久发送心跳
 SSE_MAX_CONNECTION_MINUTES = int(os.getenv("RUN_SSE_MAX_CONNECTION_MINUTES", "30"))  # SSE 连接最大持续时间
@@ -257,11 +258,18 @@ def _compact_message_dict(message: dict) -> dict:
 def _compact_semantic_stream_event(stream_event: dict) -> dict:
     event_type = stream_event.get("type")
     if event_type == "message_delta":
-        return {
+        compact = {
             key: stream_event[key]
-            for key in ("type", "message_id", "content", "reasoning_content", "additional_reasoning_content")
+            for key in ("type", "message_id", "content", "reasoning_state")
             if stream_event.get(key)
         }
+        if stream_event.get("reasoning_content") or stream_event.get("additional_reasoning_content"):
+            compact["reasoning_state"] = "thinking"
+        if isinstance(compact.get("content"), str):
+            compact["content"] = sanitize_visible_text(compact["content"])
+            if not compact["content"]:
+                compact.pop("content")
+        return compact
 
     if event_type in {"tool_call", "tool_call_delta"}:
         compact = {
@@ -407,13 +415,17 @@ def _progress_message_from_chunk(chunk: dict, *, seq: str) -> dict | None:
     content = ""
     kind = ""
     if stream_type == "message_delta":
-        content = (
-            stream_event.get("content")
+        raw_content = stream_event.get("content")
+        content = sanitize_visible_text(raw_content) if isinstance(raw_content, str) else ""
+        if content:
+            kind = "assistant_message"
+        elif (
+            stream_event.get("reasoning_state") == "thinking"
             or stream_event.get("reasoning_content")
             or stream_event.get("additional_reasoning_content")
-            or ""
-        )
-        kind = "assistant_message" if stream_event.get("content") else "assistant_reasoning"
+        ):
+            content = "思考中…"
+            kind = "assistant_reasoning"
     elif stream_type in {"tool_call", "tool_call_delta"}:
         tool_name = str(stream_event.get("name") or stream_event.get("tool_call_id") or "工具").strip()
         content = f"调用工具 {tool_name}" if stream_type == "tool_call" else f"正在准备工具 {tool_name}"
@@ -1099,7 +1111,7 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
 
     payload: dict[str, Any] = {
         "status": run.status,
-        "output": output_message.content if output_message else "",
+        "output": sanitize_visible_text(output_message.content) if output_message else "",
         "agent_slug": run.agent_slug,
         "thread_id": run.conversation_thread_id,
         "conversation_id": run.conversation_id,

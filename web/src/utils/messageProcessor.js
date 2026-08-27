@@ -1,3 +1,5 @@
+import { splitReasoningText } from './reasoningVisibility.js'
+
 /**
  * 消息处理工具类
  */
@@ -289,20 +291,20 @@ export class MessageProcessor {
    * @returns {{content: string, reasoningContent: string}}
    */
   static parseAssistantMessageBody(message) {
-    let content = typeof message?.content === 'string' ? message.content.trim() : ''
-    let reasoningContent = message?.additional_kwargs?.reasoning_content || ''
-
-    if (!reasoningContent && content) {
-      const thinkRegex = /<think>(.*?)<\/think>|<think>(.*?)$/s
-      const thinkMatch = content.match(thinkRegex)
-
-      if (thinkMatch) {
-        reasoningContent = (thinkMatch[1] || thinkMatch[2] || '').trim()
-        content = content.replace(thinkMatch[0], '').trim()
-      }
+    const split = splitReasoningText(message?.content)
+    const hasReasoning = Boolean(
+      message?.reasoning_state === 'thinking' ||
+        message?.additional_kwargs?.reasoning_state === 'thinking' ||
+        message?.reasoning_content ||
+        message?.additional_kwargs?.reasoning_content ||
+        split.hadReasoning ||
+        split.reasoningOpen
+    )
+    return {
+      content: split.visible.trim(),
+      // This is a presentation state only; model chain-of-thought is never returned.
+      reasoningContent: hasReasoning ? '思考中…' : ''
     }
-
-    return { content, reasoningContent }
   }
 
   /**

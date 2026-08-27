@@ -8,6 +8,7 @@ from langchain.messages import AIMessageChunk, HumanMessage
 
 from yuxi.services import chat_service as svc
 from yuxi.services.input_message_service import build_chat_input_message
+from yuxi.utils.reasoning_visibility import ReasoningVisibilityBuffer
 
 
 async def _fake_normalize_agent_context_config(context, **_kwargs):
@@ -31,6 +32,47 @@ class _FakeSession:
 
     async def commit(self):
         self.commit_count += 1
+
+
+def test_message_stream_protocol_never_exposes_structured_reasoning() -> None:
+    events = svc._message_chunk_yuxi_events(
+        {
+            "content": "",
+            "additional_kwargs": {"reasoning_content": "private chain"},
+        },
+        message_id="message-1",
+        thread_id="thread-1",
+        namespace=[],
+    )
+
+    assert events == [
+        {
+            "type": "message_delta",
+            "message_id": "message-1",
+            "thread_id": "thread-1",
+            "namespace": [],
+            "reasoning_state": "thinking",
+        }
+    ]
+    assert "private chain" not in json.dumps(events)
+
+
+def test_stream_boundary_redacts_tagged_reasoning_across_deltas() -> None:
+    buffers: dict[str, ReasoningVisibilityBuffer] = {}
+    first = svc._sanitize_stream_event(
+        {"type": "message_delta", "message_id": "message-1", "content": "<th"}, buffers
+    )
+    second = svc._sanitize_stream_event(
+        {"type": "message_delta", "message_id": "message-1", "content": "ink>private chain"}, buffers
+    )
+    third = svc._sanitize_stream_event(
+        {"type": "message_delta", "message_id": "message-1", "content": "</think>公开答案"}, buffers
+    )
+
+    assert first == {"type": "message_delta", "message_id": "message-1", "reasoning_state": "thinking"}
+    assert second == {"type": "message_delta", "message_id": "message-1", "reasoning_state": "thinking"}
+    assert third["content"] == "公开答案"
+    assert "private chain" not in json.dumps((first, second, third))
 
 
 @pytest.fixture(autouse=True)

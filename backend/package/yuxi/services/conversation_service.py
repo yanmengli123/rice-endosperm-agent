@@ -22,6 +22,7 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_isoformat
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import VIRTUAL_PATH_UPLOADS
+from yuxi.utils.reasoning_visibility import redact_reasoning_metadata, sanitize_visible_text
 from yuxi.utils.upload_utils import read_upload_with_limit, write_upload_to_path
 
 ATTACHMENT_ALLOWED_EXTENSIONS: tuple[str, ...] = ()
@@ -947,6 +948,10 @@ async def get_thread_history_view(
                     break
 
         extra_metadata = dict(msg.extra_metadata or {})
+        content = msg.content
+        if msg.role == "assistant":
+            extra_metadata = redact_reasoning_metadata(extra_metadata)
+            content = sanitize_visible_text(content)
         request_id = extra_metadata.get("request_id")
         if msg.role == "user" and request_id and not extra_metadata.get("attachments"):
             extra_metadata["attachments"] = attachments_by_request_id.get(str(request_id), [])
@@ -954,7 +959,7 @@ async def get_thread_history_view(
         msg_dict = {
             "id": msg.id,
             "type": role_type_map.get(msg.role, msg.role),
-            "content": msg.content,
+            "content": content,
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
             "run_id": msg.run_id,
             "request_id": msg.request_id,
