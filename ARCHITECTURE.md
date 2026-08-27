@@ -27,6 +27,7 @@ Yuxi 是一个面向 RAG、知识图谱和多智能体工作流的知识库平�
 `backend/package/yuxi` 是后端主体：
 
 - `agents` 定义 LangGraph 智能体体系。`BaseAgent` 是智能体基类，`BaseContext` 是运行配置上下文；`buildin` 放内置智能体；`middlewares` 负责把知识库、Skills、MCP、附件、运行配置等能力挂到运行时；`toolkits` 放工具注册与内置工具；`backends` 对接沙盒和 Skills 等外部执行/资源后端。
+- `agents/mcp` 是 MCP 子系统的分层边界：`service.py` 只做门面编排（配置装载 → 策略闸门 → Host 探测/调用 → 装配），对外函数签名是 Agent 与路由的唯一入口；`spec.py` 定义 `McpInstallPlan` 并负责 transport/runtime 两维度归一化；`policy.py` 收口用户可建 transport 与 stdio command 白名单并处理 `${VAR}` 引用；`registry.py` 把官方 Registry server.json / Claude-Cursor 配置 / URL 翻译成归一化记录；`host.py` 是协议边界抽象（业务代码不得直接 import langchain_mcp_adapters，切换官方 SDK 时只替换此层实现）；`langchain_adapter.py` 将描述符装配成 BaseTool 并消解跨服务器重名；`health.py` 提供分级结构化诊断（落库 last_health）。新增传输或运行时形态时扩展 host/spec，而不是往 service 堆分支。
 - `services` 是用例层，负责串联 repositories、agents、knowledge、storage 和外部系统。聊天、运行队列、文件视图、Skills、MCP、SubAgents、评估等跨模块流程都从这里找入口。
 - `repositories` 是数据库访问边界，封装业务对象和知识库元数据的 SQLAlchemy 查询。不要让路由绕过 repository 直接操作模型，除非已有局部模式要求这样做。
 - `storage` 放持久化基础设施。`storage/postgres` 管理业务表、知识库表和 LangGraph checkpoint 所需连接池；`storage/minio` 管理对象存储。

@@ -1,16 +1,27 @@
-"""MCP 服务器管理路由"""
+"""MCP 服务器管理路由。
+
+路由层只做请求解析、认证与响应装配；策略闸门（transport 收口、stdio allowlist）、
+健康探测、导入解析均在 yuxi.agents.mcp 各分层实现。本文件的 /test 已升级为
+结构化健康诊断：返回 McpHealthResult（stage/code/retryable），同时保留
+success/message/tool_count 旧字段保证前端兼容。
+"""
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.agents.mcp.policy import PolicyError
+from yuxi.agents.mcp.registry import ImportFormatError
 from yuxi.agents.mcp.service import (
     create_mcp_server,
-    get_mcp_tools_stats,
     delete_mcp_server,
     get_all_mcp_servers,
     get_all_mcp_tools,
+    get_last_health,
     get_mcp_server,
+    get_mcp_tools_stats,
+    import_mcp_servers,
+    probe_mcp_server,
     set_server_enabled,
     toggle_tool_enabled,
     update_mcp_server,
@@ -32,13 +43,13 @@ class CreateMcpServerRequest(BaseModel):
 
     slug: str = Field(..., description="稳定标识")
     name: str = Field(..., description="展示名称")
-    transport: str = Field(..., description="传输类型：sse/streamable_http/stdio")
+    transport: str = Field(..., description="传输类型：sse/streamable_http/stdio（受策略白名单约束）")
     url: str | None = Field(None, description="服务器 URL（sse/streamable_http）")
-    command: str | None = Field(None, description="命令（stdio）")
+    command: str | None = Field(None, description="命令（stdio，需命中允许列表）")
     args: list | None = Field(None, description="命令参数数组（stdio）")
-    env: dict | None = Field(None, description="环境变量（stdio）")
+    env: dict | None = Field(None, description="环境变量（stdio），值支持 ${VAR} 引用语法")
     description: str | None = Field(None, description="描述")
-    headers: dict | None = Field(None, description="HTTP 请求头")
+    headers: dict | None = Field(None, description="HTTP 请求头，值支持 ${VAR} 引用语法")
     timeout: int | None = Field(None, description="HTTP 超时时间（秒）")
     sse_read_timeout: int | None = Field(None, description="SSE 读取超时（秒）")
     tags: list | None = Field(None, description="标签数组")
@@ -66,6 +77,18 @@ class UpdateMcpServerStatusRequest(BaseModel):
     enabled: bool = Field(..., description="是否启用")
 
 
+class ImportMcpServersRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payload: str | dict = Field(
+        ...,
+        description=(
+            "导入内容：官方 Registry server.json 对象、"
+            "Claude/Cursor 风格 {'mcpServers': {...}} 配置、单个 {url|command} 描述，或以上内容的 JSON 字符串 / http(s) URL"
+        ),
+    )
+
+
 # =============================================================================
 # === Helpers ===
 # =============================================================================
@@ -77,6 +100,10 @@ async def get_server_or_404(db: AsyncSession, slug: str):
     if not server:
         raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
     return server
+
+
+def _policy_http_error(e: PolicyError) -> HTTPException:
+    return HTTPException(status_code=400, detail=str(e))
 
 
 # =============================================================================
@@ -118,13 +145,8 @@ async def create_mcp_server_route(
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """创建新的 MCP 服务器"""
-    # 校验传输类型
-    valid_transports = ("sse", "streamable_http", "stdio")
-    if request.transport not in valid_transports:
-        raise HTTPException(status_code=400, detail=f"传输类型必须是 {', '.join(valid_transports)} 之一")
-
-    # 根据传输类型校验必填字段
+    """创建新的 MCP 服务器（stdio 受 allowlist 策略约束）"""
+    # 根据传输类型校验必填字段（策略闸门在 service 层统一执行）
     if request.transport in ("sse", "streamable_http") and not request.url:
         raise HTTPException(status_code=400, detail=f"传输类型为 {request.transport} 时，url 必填")
     if request.transport == "stdio" and not request.command:
@@ -149,10 +171,33 @@ async def create_mcp_server_route(
             created_by=current_user.username,
         )
         return {"success": True, "data": server.to_dict()}
+    except PolicyError as e:
+        raise _policy_http_error(e)
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         logger.error(f"Failed to create MCP server: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@mcp.post("/import")
+async def import_mcp_servers_route(
+    request: ImportMcpServersRequest,
+    current_user: User = Depends(get_admin_user),
+):
+    """批量导入外部格式 MCP 定义（server.json / mcpServers 配置 / URL）；导入后默认禁用待人工确认启用"""
+    try:
+        results = await import_mcp_servers(request.payload, created_by=current_user.username)
+        created = sum(1 for item in results if item.get("status") == "created")
+        failed = sum(1 for item in results if item.get("status") in ("failed", "rejected"))
+        summary = f"导入完成：新增 {created} 个"
+        if failed:
+            summary += f"，{failed} 个被拒绝或失败（详见明细）"
+        return {"success": True, "message": summary, "data": results}
+    except ImportFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to import MCP servers: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -181,11 +226,6 @@ async def update_mcp_server_route(
     db: AsyncSession = Depends(get_db),
 ):
     """更新 MCP 服务器配置"""
-    # 校验传输类型
-    valid_transports = ("sse", "streamable_http", "stdio")
-    if request.transport is not None and request.transport not in valid_transports:
-        raise HTTPException(status_code=400, detail=f"传输类型必须是 {', '.join(valid_transports)} 之一")
-
     try:
         fields_set = request.model_fields_set
         update_kwargs = {}
@@ -210,6 +250,8 @@ async def update_mcp_server_route(
             **update_kwargs,
         )
         return {"success": True, "data": server.to_dict()}
+    except PolicyError as e:
+        raise _policy_http_error(e)
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve))
     except Exception as e:
@@ -252,23 +294,55 @@ async def test_mcp_server(
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """测试 MCP 服务器连接"""
+    """测试 MCP 服务器连接——结构化健康探测（config/runtime/transport/discovery 分级）
+
+    返回体在旧字段（success/message/tool_count）之上附带 health 结构；
+    探测结果持久化到 last_health。
+    """
     try:
         await get_server_or_404(db, slug)
 
-        try:
-            tools = await get_all_mcp_tools(slug)
-            return {
-                "success": True,
-                "message": f"连接成功，共发现 {len(tools)} 个工具",
-                "tool_count": len(tools),
-            }
-        except Exception as test_error:
-            raise HTTPException(status_code=500, detail=f"连接失败: {str(test_error)}")
+        health = await probe_mcp_server(slug, persist=True)
+        health_payload = health.to_dict()
+
+        if health.ok:
+            message_text = f"连接成功，共发现 {health.tool_count} 个工具"
+        else:
+            code_tag = f"/{health.code}" if health.code else ""
+            message_text = f"[{health.stage}{code_tag}] {health.message}"
+
+        return {
+            "success": bool(health.ok),
+            "message": message_text,
+            "tool_count": health.tool_count or 0,
+            "health": health_payload,
+        }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to test MCP server: {e}")
+        logger.error(f"Failed to test MCP server '{slug}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@mcp.get("/{slug}/health")
+async def get_mcp_server_health(
+    slug: str,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """读取最近一次结构化诊断结果（不触发实时探测）"""
+    try:
+        await get_server_or_404(db, slug)
+        last = await get_last_health(slug, db=db)
+        return {
+            "success": True,
+            "status": (last or {}).get("status") if last else "unknown",
+            "data": last,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get MCP server health '{slug}': {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -317,11 +391,14 @@ async def get_mcp_server_tools(
             tool_list = []
 
             for tool in tools:
-                original_name = tool.name
-                unique_id = tool.metadata.get("id") if tool.metadata else original_name
+                metadata = tool.metadata or {}
+                original_name = metadata.get("mcp_tool_name", tool.name)
+                unique_id = metadata.get("id") or original_name
 
                 tool_info = {
                     "name": original_name,
+                    "model_facing_name": metadata.get("model_facing_name") or tool.name,
+                    "aliased": bool(metadata.get("aliased")),
                     "id": unique_id,
                     "description": getattr(tool, "description", ""),
                     "enabled": original_name not in disabled_tools,

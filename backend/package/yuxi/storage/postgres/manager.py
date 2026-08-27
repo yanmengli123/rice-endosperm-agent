@@ -1122,6 +1122,10 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS content_hash VARCHAR(128)",
             "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS env JSONB",
+            "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS spec JSONB",
+            "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS source_type VARCHAR(32)",
+            "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS source_ref VARCHAR(255)",
+            "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS last_health JSONB",
             """
             CREATE TABLE IF NOT EXISTS agent_envs (
                 id SERIAL PRIMARY KEY,

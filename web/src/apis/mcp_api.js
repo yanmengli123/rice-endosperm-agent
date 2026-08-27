@@ -61,9 +61,27 @@ export const deleteMcpServer = async (name) => {
 // =============================================================================
 
 /**
+ * 批量导入外部格式 MCP 定义（官方 Registry server.json / Claude-Cursor 配置 / URL）
+ * @param {string|Object} payload - 导入内容：JSON 字符串或已解析对象
+ * @returns {Promise} - {success, message, data:[{slug,name,status,warnings}]}
+ */
+export const importMcpConfig = async (payload) => {
+  return apiAdminPost(`${BASE_URL}/import`, { payload })
+}
+
+/**
+ * 读取最近一次结构化健康诊断结果（不触发实时探测）
+ * @param {string} name - 服务器名称
+ * @returns {Promise} - {success, status, data}
+ */
+export const getMcpServerHealth = async (name) => {
+  return apiAdminGet(`${BASE_URL}/${encodeURIComponent(name)}/health`)
+}
+
+/**
  * 测试 MCP 服务器连接
  * @param {string} name - 服务器名称
- * @returns {Promise} - 测试结果
+ * @returns {Promise} - 测试结果（含结构化 health 字段）
  */
 export const testMcpServer = async (name) => {
   return apiAdminPost(`${BASE_URL}/${encodeURIComponent(name)}/test`, {})
@@ -120,6 +138,8 @@ export const mcpApi = {
   createMcpServer,
   updateMcpServer,
   deleteMcpServer,
+  importMcpConfig,
+  getMcpServerHealth,
   testMcpServer,
   updateMcpServerStatus,
   getMcpServerTools,

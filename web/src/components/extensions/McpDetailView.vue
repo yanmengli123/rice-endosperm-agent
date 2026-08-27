@@ -665,9 +665,15 @@ const handleTestServer = async () => {
     testLoading.value = server.value.name
     const result = await mcpApi.testMcpServer(server.value.slug)
     if (result.success) {
-      message.success(result.message)
+      // 结构化健康信息（duration_ms/protocol_note）仅作补充提示，缺失时退回原文案
+      const health = result.health || {}
+      let detail = result.message || '连接成功'
+      if (health.duration_ms != null) {
+        detail += `（${health.duration_ms}ms）`
+      }
+      message.success(detail, 4)
     } else {
-      message.warning(result.message || '连接失败')
+      message.warning(result.message || '连接失败', 6)
     }
   } catch (err) {
     message.error(err.message || '测试失败')

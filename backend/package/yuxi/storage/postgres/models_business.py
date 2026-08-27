@@ -830,6 +830,12 @@ class MCPServer(Base):
     tags = Column(JSON, nullable=True, comment="标签数组")
     icon = Column(String(50), nullable=True, comment="图标（emoji）")
 
+    # 归一化规格与诊断（结构定义见 yuxi.agents.mcp.spec / yuxi.agents.mcp.health）
+    spec = Column(JSON, nullable=True, comment="McpInstallPlan：artifact/runtime/transport 归一化计划")
+    source_type = Column(String(32), nullable=True, comment="来源：builtin/registry/import/manual")
+    source_ref = Column(String(255), nullable=True, comment="来源标识（registry 名、导入渠道等）")
+    last_health = Column(JSON, nullable=True, comment="最近一次结构化健康诊断结果")
+
     # 状态字段
     enabled = Column(Integer, nullable=False, default=1, comment="是否启用：1=是，0=否")
     disabled_tools = Column(JSON, nullable=True, comment="禁用的工具名称列表")
@@ -860,6 +866,10 @@ class MCPServer(Base):
             "icon": self.icon,
             "enabled": bool(self.enabled),
             "disabled_tools": self.disabled_tools or [],
+            "source_type": getattr(self, "source_type", None),
+            "source_ref": getattr(self, "source_ref", None),
+            "spec": getattr(self, "spec", None),
+            "last_health": getattr(self, "last_health", None),
             "created_by": self.created_by,
             "updated_by": self.updated_by,
             "created_at": format_utc_datetime(self.created_at),

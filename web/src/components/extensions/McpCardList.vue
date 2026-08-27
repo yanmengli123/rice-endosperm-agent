@@ -6,6 +6,10 @@
           <Plus :size="14" />
           <span>添加 MCP</span>
         </a-button>
+        <a-button class="lucide-icon-btn" @click="importModalVisible = true">
+          <FileDown :size="14" />
+          <span>导入配置</span>
+        </a-button>
         <a-tooltip title="刷新 MCP" placement="bottom">
           <a-button class="lucide-icon-btn" :disabled="loading" @click="fetchServers">
             <RefreshCw :size="14" />
@@ -146,6 +150,42 @@
       </div>
     </a-modal>
 
+    <a-modal
+      v-model:open="importModalVisible"
+      title="导入 MCP 配置"
+      :confirm-loading="importLoading"
+      width="640px"
+      ok-text="解析并导入"
+      cancel-text="取消"
+      @ok="handleImportSubmit"
+    >
+      <div class="mcp-import-panel">
+        <p class="mcp-import-hint">
+          支持官方 Registry 的 server.json、Claude/Cursor 风格 mcpServers 配置（含 stdio 包、
+          远程 URL），或直接粘贴一个 http(s) MCP 地址。导入后默认停用，请在列表中确认后启用。
+        </p>
+        <a-textarea
+          v-model:value="importPayloadText"
+          :rows="8"
+          placeholder='{
+  "mcpServers": {
+    "my-mcp": { "command": "npx", "args": ["-y", "@scope/pkg@1.2.3"] }
+  }
+}'
+        />
+        <div v-if="importResults.length" class="mcp-import-results">
+          <div v-for="item in importResults" :key="item.slug" class="mcp-import-result-item">
+            <a-tag :color="resultTagColor(item.status)">{{ resultStatusText(item.status) }}</a-tag>
+            <span class="mcp-import-result-name">{{ item.name || item.slug }}</span>
+            <span v-if="item.reason" class="mcp-import-result-reason">{{ item.reason }}</span>
+            <ul v-if="item.warnings && item.warnings.length" class="mcp-import-result-warnings">
+              <li v-for="(w, i) in item.warnings" :key="i">{{ w }}</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </a-modal>
+
     <McpFormModal
       v-model:open="formModalVisible"
       :edit-mode="false"
@@ -158,7 +198,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { Check, Plus, RefreshCw, Trash2 } from '@lucide/vue'
+import { Check, FileDown, Plus, RefreshCw, Trash2 } from '@lucide/vue'
 import { mcpApi } from '@/apis/mcp_api'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
@@ -223,6 +263,46 @@ const isActionLoading = (server) => actionLoadingSlug.value === server?.slug
 
 const handleMcpAdd = () => {
   formModalVisible.value = true
+}
+
+// ── 导入配置 ──
+const importModalVisible = ref(false)
+const importLoading = ref(false)
+const importPayloadText = ref('')
+const importResults = ref([])
+
+const resultStatusText = (status) =>
+  ({ created: '已导入', exists: '已存在', rejected: '被拒绝', failed: '失败' })[status] || status
+
+const resultTagColor = (status) =>
+  ({ created: 'green', exists: 'blue', rejected: 'orange', failed: 'red' })[status] || 'default'
+
+const handleImportSubmit = async () => {
+  const text = importPayloadText.value.trim()
+  if (!text) {
+    message.warning('请粘贴要导入的配置内容')
+    return
+  }
+  try {
+    importLoading.value = true
+    let payload = text
+    if (!/^https?:\/\//.test(text)) {
+      payload = JSON.parse(text)
+    }
+    const result = await mcpApi.importMcpConfig(payload)
+    if (result.success) {
+      message.success(result.message || '导入完成')
+      importResults.value = result.data || []
+      await fetchServers()
+    } else {
+      message.error(result.message || '导入失败')
+    }
+  } catch (err) {
+    // JSON 解析错误给出本地提示；接口错误透传后端原因（含策略拒绝说明）
+    message.error(err instanceof SyntaxError ? `JSON 解析失败：${err.message}` : err.message || '导入失败')
+  } finally {
+    importLoading.value = false
+  }
 }
 
 const handleFormSubmitted = async () => {
@@ -469,5 +549,50 @@ defineExpose({ fetchServers, loading })
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.mcp-import-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mcp-import-hint {
+  margin: 0;
+  color: var(--text-color-secondary, #888);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.mcp-import-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.mcp-import-result-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+
+  .mcp-import-result-name {
+    font-weight: 500;
+  }
+
+  .mcp-import-result-reason {
+    color: #d46b08;
+    font-size: 12px;
+  }
+
+  .mcp-import-result-warnings {
+    width: 100%;
+    margin: 0;
+    padding-left: 18px;
+    color: #ad6800;
+    font-size: 12px;
+  }
 }
 </style>
