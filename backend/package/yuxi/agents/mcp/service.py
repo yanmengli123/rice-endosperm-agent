@@ -73,11 +73,16 @@ _DEFAULT_MCP_SERVERS = {
         "source_ref": "builtin:mcp-server-chart",
     },
     # P0：BioMCP 以独立 uvx 环境接入（包内依赖 mcp 2.x，绝不 pip 进主环境）。
-    # 版本必须 pin；UV_DEFAULT_INDEX 走 ${} 引用，国内网络可在容器环境配置。
+    # 该项目未发布到 PyPI，只能从 GitHub tag 安装并 pin commit 级别的 refs/tags/v0.5.0；
+    # UV_DEFAULT_INDEX 走 ${} 引用，国内网络可在容器环境配置。
     "bio-mcp": {
         "name": "BioMCP",
         "command": "uvx",
-        "args": ["--from", "bio-mcp==0.5.0", "bio-mcp"],
+        "args": [
+            "--from",
+            "bio-mcp @ git+https://github.com/qgeng1465/bio-mcp@refs/tags/v0.5.0",
+            "bio-mcp",
+        ],
         "transport": "stdio",
         "description": "生物信息学 MCP：覆盖 36 个公开数据库 / 68 个工具"
         "（文献、基因、变异、通路、植物科研等），来源 qgeng1465/bio-mcp",
