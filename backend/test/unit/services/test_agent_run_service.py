@@ -1277,7 +1277,11 @@ async def test_get_agent_run_result_exposes_authoritative_model_scope_and_retrie
     payload = await agent_run_service.get_agent_run_result(run_id="run-1", current_uid="user-1", db=object())
 
     context = payload["run_context"]
-    assert context["protocol_version"] == "1.1"
+    assert context["protocol_version"] == "1.2"
+    assert context["agent_slug"] == "default-chatbot"
+    assert context["thread_id"] == "thread-1"
+    assert context["request_id"] == "req-1"
+    assert context["result_authority"] == "yuxi_server"
     assert context["model_spec"] == "minimax-cn:MiniMax-M3"
     assert context["knowledge_scope"]["kb_count"] == 1
     assert context["knowledge_scope"]["members"][0]["kb_name"] == "水稻胚乳发育neo4j"

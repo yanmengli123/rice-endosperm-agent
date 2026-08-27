@@ -116,6 +116,29 @@ async def test_admin_can_read_default_agent(test_client, admin_headers):
     assert agent["agent_id"]
 
 
+async def test_thread_create_accepts_idempotent_client_thread_id(test_client, admin_headers):
+    agent_response = await test_client.get("/api/agent/default", headers=admin_headers)
+    assert agent_response.status_code == 200, agent_response.text
+    agent_slug = agent_response.json()["agent"]["agent_id"]
+    requested_thread_id = f"desktop-{uuid.uuid4()}"
+    payload = {
+        "agent_id": agent_slug,
+        "thread_id": requested_thread_id,
+        "title": "桌面端原生会话",
+        "metadata": {"client": "rice-endosperm-desktop"},
+    }
+
+    first = await test_client.post("/api/chat/thread", json=payload, headers=admin_headers)
+    second = await test_client.post("/api/chat/thread", json=payload, headers=admin_headers)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["id"] == requested_thread_id
+    assert second.json()["id"] == requested_thread_id
+    assert second.json()["agent_id"] == agent_slug
+    assert second.json()["metadata"]["client"] == "rice-endosperm-desktop"
+
+
 async def test_agent_detail_filters_configurable_items_by_role(
     test_client,
     admin_headers,

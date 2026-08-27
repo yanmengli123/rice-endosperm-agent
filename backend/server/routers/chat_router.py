@@ -122,6 +122,13 @@ class ThreadCreate(BaseModel):
     title: str | None = None
     agent_id: str
     metadata: dict | None = None
+    thread_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+        description="可选的客户端幂等线程 ID；同一用户和智能体重复提交时返回同一线程",
+    )
 
 
 class ThreadResponse(BaseModel):
@@ -278,6 +285,7 @@ async def create_thread(
         agent_slug=thread.agent_id,
         title=thread.title,
         metadata=thread.metadata,
+        requested_thread_id=thread.thread_id,
         db=db,
         current_uid=str(current_user.uid),
     )

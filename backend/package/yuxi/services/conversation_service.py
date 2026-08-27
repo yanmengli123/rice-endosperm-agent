@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 from fastapi import HTTPException, UploadFile
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.backends.sandbox import (
     ensure_thread_dirs,
@@ -410,6 +411,7 @@ async def create_thread_view(
     agent_slug: str,
     title: str | None,
     metadata: dict | None,
+    requested_thread_id: str | None = None,
     db: AsyncSession,
     current_uid: str,
 ) -> dict:
@@ -423,23 +425,53 @@ async def create_thread_view(
     if not agent_item:
         raise HTTPException(status_code=404, detail="智能体不存在")
 
-    thread_id = str(uuid.uuid4())
     conv_repo = ConversationRepository(db)
+    thread_id = str(requested_thread_id or "").strip() or str(uuid.uuid4())
+    existing = await conv_repo.get_conversation_by_thread_id(thread_id)
+    if existing:
+        if (
+            str(existing.uid) != str(current_uid)
+            or existing.agent_id != agent_item.slug
+            or existing.status == "deleted"
+        ):
+            raise HTTPException(status_code=409, detail="thread_id 已被占用")
+        return _serialize_thread(existing)
+
     thread_metadata = dict(metadata or {})
     thread_metadata["backend_id"] = agent_item.backend_id
-    conversation = await conv_repo.create_conversation(
-        uid=str(current_uid),
-        agent_id=agent_item.slug,
-        title=title or "新的对话",
-        thread_id=thread_id,
-        metadata=thread_metadata,
-    )
+    try:
+        conversation = await conv_repo.create_conversation(
+            uid=str(current_uid),
+            agent_id=agent_item.slug,
+            title=title or "新的对话",
+            thread_id=thread_id,
+            metadata=thread_metadata,
+        )
+    except IntegrityError:
+        # 两个相同客户端请求并发到达时，唯一索引只允许一个提交。回滚失败事务后
+        # 再按所有者 + 智能体核验，只有同一语义请求可以复用既有线程。
+        await db.rollback()
+        existing = await conv_repo.get_conversation_by_thread_id(thread_id)
+        if (
+            existing
+            and str(existing.uid) == str(current_uid)
+            and existing.agent_id == agent_item.slug
+            and existing.status != "deleted"
+        ):
+            return _serialize_thread(existing)
+        raise HTTPException(status_code=409, detail="thread_id 已被占用") from None
 
+    return _serialize_thread(conversation)
+
+
+def _serialize_thread(conversation) -> dict:
+    """统一线程响应，保证幂等创建和首次创建返回完全相同的契约。"""
     return {
         "id": conversation.thread_id,
         "uid": conversation.uid,
         "agent_id": conversation.agent_id,
         "title": conversation.title,
+        "is_pinned": bool(conversation.is_pinned),
         "created_at": conversation.created_at.isoformat(),
         "updated_at": conversation.updated_at.isoformat(),
         "metadata": conversation.extra_metadata or {},

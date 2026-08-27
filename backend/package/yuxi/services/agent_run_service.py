@@ -70,7 +70,7 @@ SSE_POLL_INTERVAL_SECONDS = float(os.getenv("RUN_SSE_POLL_INTERVAL_SECONDS", "1.
 RUN_PROGRESS_RECENT_EVENT_SCAN_LIMIT = 100
 RUN_PROGRESS_MESSAGE_LIMIT = 3
 RUN_PROGRESS_CONTENT_MAX_CHARS = 800
-AGENT_RUN_PROTOCOL_VERSION = "1.1"
+AGENT_RUN_PROTOCOL_VERSION = "1.2"
 
 
 def _public_knowledge_scope(snapshot: object) -> dict[str, Any]:
@@ -136,6 +136,10 @@ def _build_server_run_context(run: object, retrieval_records: list[object] | Non
         input_payload = {}
     return {
         "protocol_version": AGENT_RUN_PROTOCOL_VERSION,
+        "agent_slug": getattr(run, "agent_slug", None),
+        "thread_id": getattr(run, "conversation_thread_id", None),
+        "request_id": getattr(run, "request_id", None),
+        "result_authority": "yuxi_server",
         "model_spec": input_payload.get("model_spec"),
         "knowledge_scope": _public_knowledge_scope(input_payload.get("knowledge_scope_snapshot")),
         "knowledge_retrievals": [_public_retrieval_summary(record) for record in (retrieval_records or [])],

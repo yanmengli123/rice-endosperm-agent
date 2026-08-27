@@ -560,6 +560,218 @@ routes:
         show_limit_quota_header: true
         allow_degradation: true
 
+  # 桌面端与 Web 端共用原生 Conversation + AgentRun 契约。
+  # 这些边界路由只开放问答所需的最小集合；身份与资源归属仍由 Yuxi 校验。
+  - id: yuxi-desktop-default-agent
+    name: yuxi-desktop-default-agent
+    uri: /api/agent/default
+    methods:
+      - GET
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-desktop-thread-create
+    name: yuxi-desktop-thread-create
+    uri: /api/chat/thread
+    methods:
+      - POST
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      request-validation:
+        body_schema:
+          type: object
+          required:
+            - agent_id
+            - thread_id
+          properties:
+            agent_id:
+              type: string
+              pattern: "^[a-z0-9][a-z0-9_-]{0,63}$"
+            thread_id:
+              type: string
+              minLength: 1
+              maxLength: 128
+              pattern: "^[A-Za-z0-9._:-]+$"
+            title:
+              type: string
+              maxLength: 2000
+            metadata:
+              type: object
+          additionalProperties: false
+        rejected_code: 400
+        rejected_msg: invalid request
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-desktop-native-run-create
+    name: yuxi-desktop-native-run-create
+    uri: /api/agent/runs
+    methods:
+      - POST
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      request-validation:
+        body_schema:
+          type: object
+          required:
+            - query
+            - agent_slug
+            - thread_id
+            - meta
+          properties:
+            query:
+              type: string
+              minLength: 1
+              maxLength: 20000
+            agent_slug:
+              type: string
+              pattern: "^[a-z0-9][a-z0-9_-]{0,63}$"
+            thread_id:
+              type: string
+              minLength: 1
+              maxLength: 128
+              pattern: "^[A-Za-z0-9._:-]+$"
+            meta:
+              type: object
+              required:
+                - request_id
+              properties:
+                request_id:
+                  type: string
+                  minLength: 16
+                  maxLength: 64
+                  pattern: "^[A-Za-z0-9._:-]+$"
+                client:
+                  type: string
+                  enum:
+                    - rice-endosperm-desktop
+              additionalProperties: false
+            model_spec:
+              type: string
+              minLength: 1
+              maxLength: 200
+          additionalProperties: false
+        rejected_code: 400
+        rejected_msg: invalid request
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-desktop-native-run-result
+    name: yuxi-desktop-native-run-result
+    uri: /api/agent/runs/:run_id/result
+    methods:
+      - GET
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
   - id: yuxi-public-agent-events
     name: yuxi-public-agent-events
     uri: /api/agent/runs/:run_id/events
