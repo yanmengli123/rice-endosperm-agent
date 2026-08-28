@@ -52,6 +52,7 @@ from yuxi.utils.reasoning_visibility import (
     redact_reasoning_metadata,
     sanitize_visible_text,
 )
+from yuxi.utils.markdown_tables import normalize_markdown_tables
 from yuxi.utils.thread_utils import extract_thread_id as _metadata_thread_id
 
 
@@ -547,7 +548,7 @@ async def _save_ai_message(
         )
     elif not isinstance(content, str):
         content = str(content)
-    content = sanitize_visible_text(content)
+    content = normalize_markdown_tables(sanitize_visible_text(content))
     extra_metadata = redact_reasoning_metadata(msg_dict)
     if trace_info:
         extra_metadata.update(trace_info)
@@ -613,7 +614,9 @@ async def save_partial_message(
         if full_msg:
             msg_dict = full_msg.model_dump() if hasattr(full_msg, "model_dump") else {}
             content = full_msg.content if hasattr(full_msg, "content") else str(full_msg)
-            content = sanitize_visible_text(content if isinstance(content, str) else str(content))
+            content = normalize_markdown_tables(
+                sanitize_visible_text(content if isinstance(content, str) else str(content))
+            )
             extra_metadata = redact_reasoning_metadata(msg_dict) | extra_metadata
         else:
             content = ""

@@ -8,6 +8,7 @@ import { escapeHtml } from '@/utils/html'
 import { normalizeCodeLanguage } from '@/utils/file_preview'
 import { renderSvgBlocks } from './svgRenderer'
 import { renderHtmlPreviewBlocks } from './htmlPreviewRenderer'
+import { normalizeMarkdownTables } from './markdown_tables'
 
 const markdownKatexPlugin = markdownItKatex.default || markdownItKatex
 const FRONTMATTER_MARKER = '---'
@@ -211,7 +212,9 @@ const setCachedHtml = (cacheKey, html) => {
 
 export const renderMarkdown = async (content, { theme = 'github-light' } = {}) => {
   try {
-    const normalizedContent = normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content))
+    const normalizedContent = normalizeMarkdownTables(
+      normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content))
+    )
     const htmlPreviewContent = renderHtmlPreviewBlocks(normalizedContent, {
       sanitizeHtml: sanitizeHtmlPreviewSrcdoc
     })

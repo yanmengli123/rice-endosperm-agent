@@ -293,6 +293,23 @@ async def test_save_messages_from_langgraph_state_backfills_run_output_message(m
 
 
 @pytest.mark.asyncio
+async def test_save_ai_message_normalizes_malformed_markdown_table() -> None:
+    conv_repo = _FakeConvRepo(None)
+
+    await svc._save_ai_message(
+        conv_repo,
+        "thread-1",
+        {
+            "id": "ai-table",
+            "type": "ai",
+            "content": "A | B | C\n|—|—|\n| 1 | 2 | 3 |",
+        },
+    )
+
+    assert conv_repo.saved_messages[0]["content"] == ("| A | B | C |\n| --- | --- | --- |\n| 1 | 2 | 3 |")
+
+
+@pytest.mark.asyncio
 async def test_build_agent_input_context_loads_all_workspace_agent_context_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -14,6 +14,7 @@ def test_prompt_uses_rice_endosperm_brand_identity():
     assert "水稻胚乳发育与品质研究" in prompt
     assert "不编造基因功能、论文题目、作者、DOI" in prompt
     assert "我是“稻芯智析”" in prompt
+    assert "表头、分隔行和每条数据行的列数必须一致" in prompt
 
 
 def test_identity_guard_is_appended_after_custom_prompt():
