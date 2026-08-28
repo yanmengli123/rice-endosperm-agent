@@ -165,6 +165,9 @@ class UserModelCredential(Base):
     provider_id = Column(String(100), nullable=False, index=True)
     label = Column(String(128), nullable=False, default="我的凭据")
     api_key_ciphertext = Column(String(1000), nullable=False)
+    protocol = Column(String(32), nullable=True)
+    base_url = Column(String(1000), nullable=True)
+    model_id = Column(String(255), nullable=True)
     masked_hint = Column(String(64), nullable=True)
     status = Column(String(32), nullable=False, default="active")
     superseded_by_id = Column(BigIntPk, nullable=True)  # 替换链指针，版本化不可变的关键

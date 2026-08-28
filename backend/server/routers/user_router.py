@@ -1,12 +1,16 @@
 """用户级配置与凭据路由"""
 
 import asyncio
+import csv
+import io
 import re
 import secrets
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -24,6 +28,8 @@ from yuxi.storage.postgres.models_business import (
     AgentEnv,
     AgentRun,
     CLIAuthSession,
+    Conversation,
+    Message,
     OperationLog,
     TenantUserEntitlement,
     UsageLedger,
@@ -485,9 +491,44 @@ async def get_model_preference(current_user: User = Depends(get_required_user), 
 
 
 class UserCredentialPayload(BaseModel):
-    provider_id: str = Field(..., min_length=1, max_length=100)
+    provider_id: str | None = Field(None, min_length=1, max_length=100)
     api_key: str = Field(..., min_length=4, max_length=500)
     label: str | None = Field(None, max_length=128)
+    protocol: str | None = Field(None, description="自定义端点协议：openai / anthropic")
+    base_url: str | None = Field(None, max_length=1000)
+    model: str | None = Field(None, max_length=255)
+    activate_as_default: bool = True
+
+
+class UserCredentialJsonImportPayload(BaseModel):
+    configuration: str | dict[str, Any]
+    label: str | None = Field(None, max_length=128)
+    activate_as_default: bool = True
+
+
+async def _ensure_user_byok_allowed(db: AsyncSession, uid: str) -> int:
+    from yuxi.services.principal import resolve_entitlement, resolve_tenant_id
+
+    tenant_id = await resolve_tenant_id(db, uid)
+    entitlement = await resolve_entitlement(db, uid, tenant_id)
+    if entitlement.credential_policy == TenantUserEntitlement.CREDENTIAL_POLICY_PLATFORM_ONLY:
+        raise HTTPException(status_code=403, detail="当前账号未启用自有模型，请联系管理员将模型策略设为 BYOK 可选")
+    return tenant_id
+
+
+async def _set_user_model_preference_row(
+    db: AsyncSession,
+    *,
+    uid: str,
+    model_spec: str,
+) -> None:
+    result = await db.execute(select(UserModelPreference).where(UserModelPreference.uid == uid))
+    preference = result.scalar_one_or_none()
+    if preference is None:
+        db.add(UserModelPreference(uid=uid, chat_model_spec=model_spec, updated_by=uid))
+    else:
+        preference.chat_model_spec = model_spec
+        preference.updated_by = uid
 
 
 async def _load_manage_target(db: AsyncSession, uid: str, current_user: User) -> User:
@@ -714,9 +755,21 @@ async def list_user_conversations_for_admin(
         offset=offset,
         exclude_sources=("agent",),
     )
+    total = (
+        await db.execute(
+            select(func.count(Conversation.id)).where(
+                Conversation.uid == target_user.uid,
+                Conversation.status == "active",
+                func.coalesce(Conversation.extra_metadata["source"].as_string(), "") != "agent",
+            )
+        )
+    ).scalar() or 0
     return {
         "uid": target_user.uid,
         "username": target_user.username,
+        "page": page,
+        "page_size": page_size,
+        "total": int(total),
         "conversations": [
             {
                 "thread_id": c.thread_id,
@@ -756,6 +809,7 @@ async def list_user_conversation_messages_for_admin(
         "title": conversation.title,
         "messages": [
             {
+                "id": message.id,
                 "role": message.role,
                 "content": message.content or "",
                 "created_at": message.created_at.isoformat() if message.created_at else None,
@@ -764,6 +818,67 @@ async def list_user_conversation_messages_for_admin(
             if message.role in ("user", "assistant") and (message.content or "").strip()
         ],
     }
+
+
+def _csv_safe(value: Any) -> str:
+    text_value = str(value or "")
+    if text_value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + text_value
+    return text_value
+
+
+@user_router.get("/manage/{uid}/conversations-export")
+async def export_user_conversations_for_admin(
+    uid: str,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """导出目标用户的全部有效问答为 UTF-8 CSV，并记录敏感导出审计。"""
+    target_user = await _load_manage_target(db, uid, current_user)
+    rows = (
+        await db.execute(
+            select(Conversation, Message)
+            .join(Message, Message.conversation_id == Conversation.id)
+            .where(
+                Conversation.uid == target_user.uid,
+                Conversation.status == "active",
+                Message.role.in_(("user", "assistant")),
+                func.length(func.trim(Message.content)) > 0,
+            )
+            .order_by(Conversation.created_at, Message.created_at, Message.id)
+        )
+    ).all()
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["会话ID", "会话标题", "会话创建时间", "消息时间", "角色", "内容"])
+    for conversation, chat_message in rows:
+        writer.writerow(
+            [
+                _csv_safe(conversation.thread_id),
+                _csv_safe(conversation.title or "未命名会话"),
+                conversation.created_at.isoformat() if conversation.created_at else "",
+                chat_message.created_at.isoformat() if chat_message.created_at else "",
+                "提问" if chat_message.role == "user" else "回答",
+                _csv_safe(chat_message.content),
+            ]
+        )
+
+    db.add(
+        OperationLog(
+            user_id=current_user.id,
+            tenant_id=await resolve_operator_tenant_id(db, current_user.id),
+            operation="导出用户问答记录",
+            details=f"uid={target_user.uid}, conversations={len({row[0].id for row in rows})}, messages={len(rows)}",
+        )
+    )
+    await db.commit()
+    filename = quote(f"{target_user.username}-问答记录.csv")
+    return Response(
+        content=output.getvalue().encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 @user_router.get("/model-credentials")
@@ -784,29 +899,106 @@ async def upsert_model_credential(
     db: AsyncSession = Depends(get_db),
 ):
     """创建/替换本供应商下的自有凭据（BYOK）。"""
-    from yuxi.models.providers.cache import model_cache
-    from yuxi.services.user_credential_service import upsert_user_credential
+    from yuxi.services.user_credential_service import (
+        custom_model_spec,
+        upsert_user_credential,
+        validate_custom_model_configuration,
+    )
 
-    known_providers = {info.provider_id for info in model_cache.get_all_specs()}
-    if payload.provider_id not in known_providers:
-        raise HTTPException(status_code=422, detail=f"未知模型供应商: '{payload.provider_id}'")
+    custom_fields = (payload.protocol, payload.base_url, payload.model)
+    is_custom = any(value is not None for value in custom_fields)
+    if is_custom:
+        if not all(isinstance(value, str) and value.strip() for value in custom_fields):
+            raise HTTPException(status_code=422, detail="自定义模型必须同时填写 protocol、base_url 和 model")
+        try:
+            normalized = validate_custom_model_configuration(
+                protocol=payload.protocol or "",
+                base_url=payload.base_url or "",
+                api_key=payload.api_key,
+                model_id=payload.model or "",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        provider_id = normalized["provider_id"]
+    else:
+        known_providers = {info.provider_id for info in model_cache.get_all_specs()}
+        provider_id = (payload.provider_id or "").strip()
+        if provider_id not in known_providers:
+            raise HTTPException(status_code=422, detail=f"未知模型供应商: '{provider_id}'")
+        normalized = {}
 
-    from yuxi.services.principal import resolve_tenant_id
+    tenant_id = await _ensure_user_byok_allowed(db, current_user.uid)
 
     credential = await upsert_user_credential(
         db,
         uid=current_user.uid,
-        provider_id=payload.provider_id,
+        provider_id=provider_id,
         api_key=payload.api_key,
         label=payload.label,
-        tenant_id=await resolve_tenant_id(db, current_user.uid),
+        tenant_id=tenant_id,
+        protocol=normalized.get("protocol"),
+        base_url=normalized.get("base_url"),
+        model_id=normalized.get("model_id"),
     )
+    model_spec = custom_model_spec(credential)
+    if model_spec and payload.activate_as_default:
+        await _set_user_model_preference_row(db, uid=current_user.uid, model_spec=model_spec)
     await db.commit()
     return {
         "credential_id": credential.id,
         "provider_id": credential.provider_id,
         "masked_hint": credential.masked_hint,
         "status": credential.status,
+        "protocol": credential.protocol,
+        "base_url": credential.base_url,
+        "model_id": credential.model_id,
+        "model_spec": model_spec,
+    }
+
+
+@user_router.post("/model-credentials/import")
+async def import_model_credential_json(
+    payload: UserCredentialJsonImportPayload,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """导入 Claude Code 风格 JSON；只提取三项模型配置，不执行或保存任意环境变量。"""
+    from yuxi.services.user_credential_service import (
+        custom_model_spec,
+        parse_claude_model_configuration,
+        upsert_user_credential,
+    )
+
+    try:
+        normalized = parse_claude_model_configuration(payload.configuration)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    tenant_id = await _ensure_user_byok_allowed(db, current_user.uid)
+    credential = await upsert_user_credential(
+        db,
+        uid=current_user.uid,
+        provider_id=normalized["provider_id"],
+        api_key=normalized["api_key"],
+        label=payload.label or "JSON 导入模型",
+        tenant_id=tenant_id,
+        protocol=normalized["protocol"],
+        base_url=normalized["base_url"],
+        model_id=normalized["model_id"],
+    )
+    model_spec = custom_model_spec(credential)
+    if model_spec and payload.activate_as_default:
+        await _set_user_model_preference_row(db, uid=current_user.uid, model_spec=model_spec)
+    await db.commit()
+    return {
+        "credential_id": credential.id,
+        "provider_id": credential.provider_id,
+        "masked_hint": credential.masked_hint,
+        "status": credential.status,
+        "protocol": credential.protocol,
+        "base_url": credential.base_url,
+        "model_id": credential.model_id,
+        "model_spec": model_spec,
+        "ignored_fields": normalized.get("ignored_fields", []),
     }
 
 
@@ -836,7 +1028,10 @@ async def put_model_preference(
     spec = (data.chat_model_spec or "").strip() or None
     if spec:
         info = model_cache.get_model_info(spec)
-        if not info or info.model_type != "chat":
+        from yuxi.services.user_credential_service import list_active_custom_model_specs
+
+        custom_specs = await list_active_custom_model_specs(db, current_user.uid)
+        if (not info or info.model_type != "chat") and spec not in custom_specs:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"未找到可用聊天模型: {spec}")
 
     result = await db.execute(select(UserModelPreference).filter(UserModelPreference.uid == current_user.uid))

@@ -190,6 +190,7 @@ def resolve_agent_run_model_spec(
     agent_item,
     agent_backend,
     user_model_spec: str | None = None,
+    allowed_custom_model_specs: set[str] | None = None,
 ) -> str:
     """解析本次 run 实际使用的模型：显式覆盖优先，否则配置模型，最后系统默认模型。
 
@@ -206,13 +207,15 @@ def resolve_agent_run_model_spec(
     normalized = model_spec.strip() if isinstance(model_spec, str) else None
     if normalized:
         info = model_cache.get_model_info(normalized)
-        if not info or info.model_type != "chat":
+        if (not info or info.model_type != "chat") and normalized not in (allowed_custom_model_specs or set()):
             raise HTTPException(status_code=422, detail=f"未找到可用聊天模型: '{normalized}'")
         return normalized
 
     if user_model_spec:
         user_info = model_cache.get_model_info(user_model_spec)
-        if user_info and user_info.model_type == "chat":
+        if (user_info and user_info.model_type == "chat") or user_model_spec in (
+            allowed_custom_model_specs or set()
+        ):
             return user_model_spec
         # 用户偏好指向的模型可能已被管理员下线；此时回落智能体/系统默认并留痕
         logger.warning(f"用户级模型偏好已失效，回退默认解析: {user_model_spec}")
@@ -640,21 +643,32 @@ async def create_agent_run_view(
     # 避免同一用户的并发请求同时通过“先计数、后创建”的检查窗口。
     entitlement_snapshot = await _enforce_user_quota(db=db, uid=current_uid)
 
+    from yuxi.services.user_credential_service import (
+        get_active_user_credential,
+        list_active_custom_model_specs,
+    )
+
+    custom_model_specs: set[str] = set()
     if run_type == "resume":
         resolved_model_spec = scope.parent_run.input_payload["model_spec"]
     else:
         user_model_spec = await _get_user_model_pref(db=db, uid=current_uid)
+        requested_model_spec = model_spec.strip() if isinstance(model_spec, str) else ""
+        custom_prefixes = ("user-openai-compatible:", "user-anthropic-compatible:")
+        if requested_model_spec.startswith(custom_prefixes) or (user_model_spec or "").startswith(
+            custom_prefixes
+        ):
+            custom_model_specs = await list_active_custom_model_specs(db, current_uid)
         resolved_model_spec = resolve_agent_run_model_spec(
             model_spec,
             scope.agent_item,
             scope.agent_backend,
             user_model_spec=user_model_spec,
+            allowed_custom_model_specs=custom_model_specs,
         )
 
     # P5 BYOK 决策：智能体凭据策略覆盖用户权益策略；byok_required 缺凭据直接 422 引导
     user_credential_ref = None
-    from yuxi.services.user_credential_service import get_active_user_credential
-
     provider_id = resolved_model_spec.split(":", 1)[0] if resolved_model_spec else None
     agent_credential_policy = getattr(scope.agent_item, "credential_policy", "inherit_user") or "inherit_user"
     effective_policy = (
@@ -662,6 +676,9 @@ async def create_agent_run_view(
         if agent_credential_policy != "inherit_user"
         else str(entitlement_snapshot.get("credential_policy") or "platform_only")
     )
+    is_custom_model = resolved_model_spec in custom_model_specs
+    if is_custom_model and effective_policy == "platform_only":
+        raise HTTPException(status_code=403, detail="当前账号未启用自有模型，请联系管理员调整模型接入策略")
     if provider_id and effective_policy != "platform_only":
         credential = await get_active_user_credential(db=db, uid=current_uid, provider_id=provider_id)
         if credential is not None:

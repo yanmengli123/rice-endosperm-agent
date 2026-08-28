@@ -5,7 +5,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from yuxi import config as sys_config
-from yuxi.models.providers.cache import model_cache
+from yuxi.models.providers.cache import ModelInfo, model_cache
 from yuxi.utils import get_docker_safe_url
 from yuxi.utils.logging_config import logger
 from yuxi.utils.reasoning_visibility import ReasoningVisibilityBuffer, sanitize_visible_text
@@ -24,14 +24,31 @@ def resolve_chat_model_spec(model_spec: str | None, *, fallback: str | None = No
 
 
 # P3 BYOK：Worker 执行期按 run 冻结的用户凭据覆盖平台 Key（任务级隔离）
-_user_credential_ctx: "contextvars.ContextVar[tuple[str, str] | None]" = contextvars.ContextVar(
+_user_credential_ctx: "contextvars.ContextVar[dict[str, str | None] | None]" = contextvars.ContextVar(
     "user_model_credential", default=None
 )
 
 
-def set_user_credential_override(provider_id: str, api_key: str):
+def set_user_credential_override(
+    provider_id: str,
+    api_key: str,
+    *,
+    model_spec: str | None = None,
+    model_id: str | None = None,
+    base_url: str | None = None,
+    protocol: str | None = None,
+):
     """在当前异步任务内激活用户凭据；返回可传给 ContextVar.reset 的 token。"""
-    return _user_credential_ctx.set((provider_id, api_key))
+    return _user_credential_ctx.set(
+        {
+            "provider_id": provider_id,
+            "api_key": api_key,
+            "model_spec": model_spec,
+            "model_id": model_id,
+            "base_url": base_url,
+            "protocol": protocol,
+        }
+    )
 
 
 def reset_user_credential_override(token) -> None:
@@ -43,15 +60,33 @@ def apply_credential_override(info):
     from dataclasses import replace
 
     override = _user_credential_ctx.get()
-    if override and override[0] == info.provider_id and override[1]:
-        return replace(info, api_key=override[1])
+    if override and override["provider_id"] == info.provider_id and override["api_key"]:
+        return replace(info, api_key=override["api_key"])
     return info
+
+
+def _custom_model_override(model_spec: str) -> ModelInfo | None:
+    override = _user_credential_ctx.get()
+    if not override or override.get("model_spec") != model_spec:
+        return None
+    required = ("provider_id", "api_key", "model_id", "base_url", "protocol")
+    if not all(isinstance(override.get(key), str) and override[key] for key in required):
+        return None
+    return ModelInfo(
+        provider_id=str(override["provider_id"]),
+        model_id=str(override["model_id"]),
+        model_type="chat",
+        display_name=str(override["model_id"]),
+        api_key=str(override["api_key"]),
+        base_url=str(override["base_url"]),
+        provider_type=str(override["protocol"]),
+    )
 
 
 def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel:
     fully_specified_name = resolve_chat_model_spec(fully_specified_name)
 
-    info = model_cache.get_model_info(fully_specified_name)
+    info = _custom_model_override(fully_specified_name) or model_cache.get_model_info(fully_specified_name)
     if not info:
         available_specs = model_cache.get_all_specs("chat")
         available_ids = [item.spec for item in available_specs[:10]]

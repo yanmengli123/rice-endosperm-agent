@@ -1025,6 +1025,8 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0011_apikeys_tenant_scope", "_migration_0011_apikeys_tenant_scope"),
         ("0012_identity_created_at_required", "_migration_0012_identity_created_at_required"),
         ("0013_server_grade_biomcp", "_migration_0013_server_grade_biomcp"),
+        ("0014_user_custom_model_endpoints", "_migration_0014_user_custom_model_endpoints"),
+        ("0015_legacy_user_byok_optional", "_migration_0015_legacy_user_byok_optional"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -1213,6 +1215,30 @@ class PostgresManager(metaclass=SingletonMeta):
                 "COALESCE(s.capability_snapshot, '{}'::jsonb), s.enabled = 1, COALESCE(s.created_by, 'migration-0013') "
                 "FROM mcp_servers s JOIN mcp_catalog c ON c.slug = s.slug "
                 "ON CONFLICT (tenant_id, catalog_id) DO NOTHING"
+            )
+        )
+
+    async def _migration_0014_user_custom_model_endpoints(self, conn) -> None:
+        """为用户级 BYOK 增加协议、端点和默认模型，旧凭据保持原语义。"""
+        await conn.execute(
+            text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS protocol VARCHAR(32)")
+        )
+        await conn.execute(
+            text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS base_url VARCHAR(1000)")
+        )
+        await conn.execute(
+            text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS model_id VARCHAR(255)")
+        )
+
+    async def _migration_0015_legacy_user_byok_optional(self, conn) -> None:
+        """只升级从未被管理员改动过的旧默认策略，保留显式 platform_only 决策。"""
+        await conn.execute(
+            text(
+                "UPDATE tenant_user_entitlements AS entitlement "
+                "SET credential_policy = 'byok_optional', policy_version = 2, updated_by = 'migration-0015' "
+                "FROM users AS account WHERE account.uid = entitlement.uid "
+                "AND account.role = 'user' AND account.is_deleted = 0 "
+                "AND entitlement.credential_policy = 'platform_only' AND entitlement.policy_version = 1"
             )
         )
 

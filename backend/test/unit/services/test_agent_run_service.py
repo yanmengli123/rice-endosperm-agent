@@ -1444,6 +1444,17 @@ def test_resolve_agent_run_model_spec_strips_explicit_chat_model(monkeypatch: py
     assert seen == ["gpt-x"]
 
 
+def test_resolve_agent_run_model_spec_accepts_owned_custom_model(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(agent_run_service.model_cache, "get_model_info", lambda spec: None)
+    spec = "user-anthropic-compatible:glm-5.3-flash[1M]"
+    assert agent_run_service.resolve_agent_run_model_spec(
+        spec,
+        SimpleNamespace(config_json={}),
+        _FakeBackend(),
+        allowed_custom_model_specs={spec},
+    ) == spec
+
+
 def _patch_agent_run_creation(
     monkeypatch: pytest.MonkeyPatch,
     *,

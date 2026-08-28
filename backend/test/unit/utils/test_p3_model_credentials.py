@@ -6,8 +6,11 @@ import pytest
 
 from yuxi.services.user_credential_service import (
     _mask,
+    custom_model_spec,
     get_active_user_credential,
     open_user_credential_key,
+    open_user_credential_runtime,
+    parse_claude_model_configuration,
     upsert_user_credential,
     validate_public_base_url,
 )
@@ -114,6 +117,34 @@ class TestUpsertAndOpen:
         cred.status = "revoked"
         assert await get_active_user_credential(db, "bob", "deepseek") is None
 
+    @pytest.mark.asyncio
+    async def test_custom_endpoint_roundtrip_returns_runtime_without_exposing_in_list(self):
+        db = _FakeDB()
+        credential = await upsert_user_credential(
+            db,
+            "alice",
+            "user-anthropic-compatible",
+            "free",
+            protocol="anthropic",
+            base_url="https://free.example.org",
+            model_id="glm-5.3-flash[1M]",
+        )
+
+        assert custom_model_spec(credential) == "user-anthropic-compatible:glm-5.3-flash[1M]"
+        runtime = await open_user_credential_runtime(
+            db,
+            "alice",
+            credential.id,
+            expected_provider_id="user-anthropic-compatible",
+        )
+        assert runtime == {
+            "api_key": "free",
+            "protocol": "anthropic",
+            "base_url": "https://free.example.org",
+            "model_id": "glm-5.3-flash[1M]",
+            "model_spec": "user-anthropic-compatible:glm-5.3-flash[1M]",
+        }
+
 
 class TestMask:
     def test_mask_keeps_hint_only(self):
@@ -146,6 +177,51 @@ class TestSsrfGuard:
         assert validate_public_base_url(
             "http://127.0.0.1:8000", allow_loopback=True
         ).startswith("http://127.0.0.1")
+
+    def test_accepts_unambiguous_markdown_url_from_rich_text_copy(self):
+        assert validate_public_base_url(
+            "[https://free.example.org](https://free.example.org)"
+        ) == "https://free.example.org"
+
+    def test_rejects_query_parameters_that_could_leak_credentials(self):
+        with pytest.raises(ValueError, match="查询参数"):
+            validate_public_base_url("https://api.example.org/v1?api_key=secret")
+
+
+class TestClaudeJsonImport:
+    def test_extracts_only_supported_anthropic_fields(self):
+        parsed = parse_claude_model_configuration(
+            {
+                "env": {
+                    "ANTHROPIC_MODEL": "glm-5.3-flash[1M]",
+                    "ANTHROPIC_BASE_URL": "https://free.example.org",
+                    "ANTHROPIC_API_KEY": "free",
+                    "API_TIMEOUT_MS": "3000000",
+                },
+                "includeCoAuthoredBy": False,
+            }
+        )
+        assert parsed["provider_id"] == "user-anthropic-compatible"
+        assert parsed["model_id"] == "glm-5.3-flash[1M]"
+        assert parsed["api_key"] == "free"
+        assert parsed["ignored_fields"] == ["API_TIMEOUT_MS", "includeCoAuthoredBy"]
+
+    @pytest.mark.parametrize("payload", ["{}", "[]", {"env": {}}])
+    def test_rejects_incomplete_or_non_object_json(self, payload):
+        with pytest.raises(ValueError):
+            parse_claude_model_configuration(payload)
+
+    def test_rejects_plain_http_custom_endpoint(self):
+        with pytest.raises(ValueError, match="HTTPS"):
+            parse_claude_model_configuration(
+                {
+                    "env": {
+                        "ANTHROPIC_MODEL": "model",
+                        "ANTHROPIC_BASE_URL": "http://api.example.org",
+                        "ANTHROPIC_API_KEY": "free",
+                    }
+                }
+            )
 
 
 class TestLockedModelPolicy:
@@ -217,7 +293,7 @@ class TestCredentialOverrideSeam:
         async def unavailable(*_args, **_kwargs):
             return None
 
-        monkeypatch.setattr(user_credential_service, "open_user_credential_key", unavailable)
+        monkeypatch.setattr(user_credential_service, "open_user_credential_runtime", unavailable)
         with pytest.raises(RuntimeError, match="冻结的用户模型凭据不可用"):
             await chat_service._activate_user_credential(
                 db=object(),
@@ -249,6 +325,27 @@ class TestCredentialOverrideSeam:
             assert other.api_key == "platform-key"
         finally:
             reset_user_credential_override(token)
+
+    def test_custom_model_override_builds_user_scoped_model_info(self):
+        from yuxi.agents import models
+
+        spec = "user-anthropic-compatible:glm-5.3-flash[1M]"
+        token = models.set_user_credential_override(
+            "user-anthropic-compatible",
+            "free",
+            model_spec=spec,
+            model_id="glm-5.3-flash[1M]",
+            base_url="https://free.example.org",
+            protocol="anthropic",
+        )
+        try:
+            info = models._custom_model_override(spec)
+            assert info is not None
+            assert info.api_key == "free"
+            assert info.base_url == "https://free.example.org"
+            assert info.provider_type == "anthropic"
+        finally:
+            models.reset_user_credential_override(token)
 
     def test_no_override_keeps_platform_key(self):
         from yuxi.agents.models import apply_credential_override

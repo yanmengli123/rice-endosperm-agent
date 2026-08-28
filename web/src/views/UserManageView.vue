@@ -6,6 +6,7 @@ import { useUserStore } from '@/stores/user'
 import PageHeader from '@/components/shared/PageHeader.vue'
 
 const loading = ref(false)
+const exportingUid = ref('')
 const users = ref([])
 const quotaModal = reactive({ open: false, uid: '', dailyRunLimit: null, monthlyTokenLimit: null })
 const createModal = reactive({ open: false, username: '', password: '', role: 'user' })
@@ -183,6 +184,9 @@ async function openQaDrawer(user) {
   try {
     const data = await authApi.listManagedUserConversations(user.uid)
     qaDrawer.conversations = data.conversations || []
+    if (qaDrawer.conversations.length) {
+      await loadConversationMessagesInto(qaDrawer, user.uid, qaDrawer.conversations[0])
+    }
   } catch (error) {
     message.error(error.message || '加载会话列表失败')
   } finally {
@@ -191,17 +195,21 @@ async function openQaDrawer(user) {
 }
 
 async function selectConversation(conv) {
-  qaDrawer.activeThread = conv.thread_id
-  qaDrawer.activeTitle = conv.title || conv.thread_id
-  qaDrawer.messages = []
-  qaDrawer.messagesLoading = true
+  await loadConversationMessagesInto(qaDrawer, qaDrawer.uid, conv)
+}
+
+async function loadConversationMessagesInto(target, uid, conv) {
+  target.activeThread = conv.thread_id
+  if ('activeTitle' in target) target.activeTitle = conv.title || conv.thread_id
+  target.messages = []
+  target.messagesLoading = true
   try {
-    const data = await authApi.listManagedUserMessages(qaDrawer.uid, conv.thread_id)
-    qaDrawer.messages = data.messages || []
+    const data = await authApi.listManagedUserMessages(uid, conv.thread_id)
+    target.messages = data.messages || []
   } catch (error) {
     message.error(error.message || '加载问答失败')
   } finally {
-    qaDrawer.messagesLoading = false
+    target.messagesLoading = false
   }
 }
 
@@ -210,6 +218,9 @@ async function loadConversationsInto(target, uid) {
   try {
     const data = await authApi.listManagedUserConversations(uid)
     target.conversations = data.conversations || []
+    if (target.conversations.length) {
+      await loadConversationMessagesInto(target, uid, target.conversations[0])
+    }
   } catch (error) {
     target.conversations = []
     message.error(error.message || '加载会话列表失败')
@@ -226,6 +237,7 @@ async function openDetailDrawer(user) {
   detailDrawer.info = { ...user }
   detailDrawer.keys = []
   detailDrawer.conversations = []
+  detailDrawer.activeThread = ''
   detailDrawer.messages = []
   detailDrawer.stats = null
 
@@ -250,9 +262,29 @@ async function openDetailDrawer(user) {
 }
 
 async function selectConversationInDetail(conv) {
-  detailDrawer.activeThread = conv.thread_id
-  const data = await authApi.listManagedUserMessages(detailDrawer.uid, conv.thread_id)
-  detailDrawer.messages = data.messages || []
+  await loadConversationMessagesInto(detailDrawer, detailDrawer.uid, conv)
+}
+
+async function exportUserConversations(uid, username) {
+  exportingUid.value = uid
+  try {
+    const response = await authApi.exportManagedUserConversations(uid)
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    const safeName = String(username || uid).replace(/[\\/:*?"<>|]/g, '_')
+    anchor.download = `${safeName}-问答记录.csv`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+    message.success('问答记录已导出')
+  } catch (error) {
+    message.error(error.message || '导出问答记录失败')
+  } finally {
+    exportingUid.value = ''
+  }
 }
 
 async function resetManagedKey(key) {
@@ -441,6 +473,13 @@ onMounted(() => {
       width="720"
       destroy-on-close
     >
+      <template #extra>
+        <a-button
+          size="small"
+          :loading="exportingUid === qaDrawer.uid"
+          @click="exportUserConversations(qaDrawer.uid, qaDrawer.username)"
+        >导出全部问答</a-button>
+      </template>
       <div class="qa-layout">
         <div class="qa-conversations">
           <a-spin :spinning="qaDrawer.conversationsLoading">
@@ -525,17 +564,35 @@ onMounted(() => {
           </a-spin>
         </a-tab-pane>
         <a-tab-pane key="qa" tab="问答记录（表格）">
-          <a-select
-            v-model:value="detailDrawer.activeThread"
-            placeholder="选择会话"
-            style="width: 100%; margin-bottom: 12px"
-            @change="selectConversationInDetail({ thread_id: $event })"
+          <div class="qa-table-toolbar">
+            <a-select
+              v-model:value="detailDrawer.activeThread"
+              placeholder="选择会话"
+              @change="selectConversationInDetail({ thread_id: $event })"
+            >
+              <a-select-option v-for="conv in detailDrawer.conversations" :key="conv.thread_id" :value="conv.thread_id">
+                {{ conv.title || conv.thread_id }}
+              </a-select-option>
+            </a-select>
+            <a-button
+              :loading="exportingUid === detailDrawer.uid"
+              @click="exportUserConversations(detailDrawer.uid, detailDrawer.username)"
+            >导出全部问答</a-button>
+          </div>
+          <a-empty
+            v-if="!detailDrawer.conversationsLoading && !detailDrawer.conversations.length"
+            description="该用户暂无会话"
+          />
+          <a-table
+            v-else
+            :data-source="detailDrawer.messages"
+            :loading="detailDrawer.messagesLoading"
+            row-key="id"
+            :pagination="{ pageSize: 20 }"
+            :scroll="{ x: 760 }"
+            size="small"
+            table-layout="fixed"
           >
-            <a-select-option v-for="conv in detailDrawer.conversations" :key="conv.thread_id" :value="conv.thread_id">
-              {{ conv.title || conv.thread_id }}
-            </a-select-option>
-          </a-select>
-          <a-table :data-source="detailDrawer.messages" row-key="created_at" :pagination="{ pageSize: 20 }" size="small">
             <a-table-column title="时间" data-index="created_at" :width="180">
               <template #default="{ record }">{{ (record.created_at || '').slice(0, 19).replace('T', ' ') }}</template>
             </a-table-column>
@@ -544,7 +601,11 @@ onMounted(() => {
                 <a-tag :color="record.role === 'user' ? 'blue' : 'green'">{{ record.role === 'user' ? '提问' : '回答' }}</a-tag>
               </template>
             </a-table-column>
-            <a-table-column title="内容" data-index="content" />
+            <a-table-column title="内容" data-index="content">
+              <template #default="{ record }">
+                <div class="qa-table-content">{{ record.content }}</div>
+              </template>
+            </a-table-column>
           </a-table>
         </a-tab-pane>
         <a-tab-pane key="monitor" tab="监控面板">
@@ -593,8 +654,6 @@ onMounted(() => {
   margin-bottom: 6px;
   color: var(--gray-600);
 }
-</style>
-
 
 /* P5 开户卡与问答抽屉 */
 .onboarding-card p {
@@ -685,7 +744,27 @@ onMounted(() => {
 
 .qa-content {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  line-height: 1.65;
+}
+
+.qa-table-toolbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.qa-table-toolbar :deep(.ant-select) {
+  flex: 1;
+  min-width: 0;
+}
+
+.qa-table-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.6;
 }
 /* P5 用户详情：监控卡片 */
 .monitor-cards {
@@ -696,3 +775,4 @@ onMounted(() => {
   margin: 12px 0 8px;
   font-weight: 600;
 }
+</style>

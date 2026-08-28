@@ -15,7 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import APIKey, Department, OperationLog, User
+from yuxi.storage.postgres.models_business import (
+    APIKey,
+    Department,
+    OperationLog,
+    TenantUserEntitlement,
+    User,
+)
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.repositories.department_repository import DepartmentRepository
 from server.utils.auth_middleware import (
@@ -880,7 +886,7 @@ async def create_user(
 
     # get_admin_user 已验证成员资格；此处再次解析是为了取得本次开户的权威租户，
     # 并且必须发生在 db.add(new_user) 之前，避免身份查询触发待写用户的 autoflush。
-    from yuxi.services.principal import ensure_tenant_membership, resolve_principal
+    from yuxi.services.principal import ensure_tenant_membership, resolve_entitlement, resolve_principal
 
     principal = await resolve_principal(db, current_user)
 
@@ -947,6 +953,9 @@ async def create_user(
 
     # P1：开户流程显式把新用户加入创建者的活动租户。
     await ensure_tenant_membership(db, new_user, tenant_id=principal.tenant_id)
+    entitlement = await resolve_entitlement(db, new_user.uid, principal.tenant_id)
+    entitlement.credential_policy = TenantUserEntitlement.CREDENTIAL_POLICY_BYOK_OPTIONAL
+    entitlement.updated_by = current_user.uid
 
     # P5：为新建用户随机签发桌面端访问密钥（90 天有效）；明文仅在本次响应出现
     full_key, key_hash, key_prefix = AuthUtils.generate_api_key()

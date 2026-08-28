@@ -208,7 +208,7 @@ async def test_stream_agent_resume_init_does_not_render_resume_input():
     stream = stream_agent_resume(
         thread_id="thread-1",
         resume_input={"language": "python"},
-        meta={"request_id": "req-1"},
+        meta={"request_id": "req-1", "tenant_id": 1},
         current_user=SimpleNamespace(uid="user-1"),
         db=object(),
     )
@@ -285,7 +285,7 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
     stream = stream_agent_resume(
         thread_id="parent-thread",
         resume_input={"ok": True},
-        meta={"request_id": "req-1"},
+        meta={"request_id": "req-1", "tenant_id": 1},
         current_user=SimpleNamespace(uid="user-1"),
         db=db,
     )

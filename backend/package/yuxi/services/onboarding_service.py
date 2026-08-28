@@ -52,7 +52,7 @@ async def create_onboarding_invitation(
     display_name: str,
     password: str,
     department_id: int,
-    credential_policy: str = "platform_only",
+    credential_policy: str = "byok_optional",
     daily_run_limit: int | None = None,
     monthly_platform_token_limit: int | None = None,
     byok_platform_token_exempt: bool = False,

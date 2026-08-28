@@ -229,17 +229,24 @@ async def _activate_user_credential(*, db, uid: str, meta: dict | None):
     if not credential_id or not provider_id:
         return None
     from yuxi.agents.models import set_user_credential_override
-    from yuxi.services.user_credential_service import open_user_credential_key
+    from yuxi.services.user_credential_service import open_user_credential_runtime
 
-    api_key = await open_user_credential_key(
+    runtime = await open_user_credential_runtime(
         db,
         str(uid),
         int(credential_id),
         expected_provider_id=str(provider_id),
     )
-    if not api_key:
+    if not runtime or not runtime.get("api_key"):
         raise RuntimeError(f"本次运行冻结的用户模型凭据不可用: credential={credential_id}")
-    return set_user_credential_override(str(provider_id), api_key)
+    return set_user_credential_override(
+        str(provider_id),
+        str(runtime["api_key"]),
+        model_spec=runtime.get("model_spec"),
+        model_id=runtime.get("model_id"),
+        base_url=runtime.get("base_url"),
+        protocol=runtime.get("protocol"),
+    )
 
 
 def _apply_subagent_runtime_context(input_context: dict, meta: dict | None) -> None:
@@ -1021,17 +1028,6 @@ async def stream_agent_chat(
         meta["request_id"] = str(uuid.uuid4())
 
     uid = str(current_user.uid)
-    from yuxi.agents.mcp.execution import McpExecutionContext, set_mcp_execution_context
-    from yuxi.services.principal import resolve_tenant_id
-
-    mcp_context_token = set_mcp_execution_context(
-        McpExecutionContext(
-            tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
-            uid=uid,
-            run_id=meta.get("run_id"),
-            agent_slug=agent_slug,
-        )
-    )
     if not thread_id:
         thread_id = str(uuid.uuid4())
         logger.warning(f"No thread_id provided, generated new thread_id: {thread_id}")
@@ -1046,6 +1042,18 @@ async def stream_agent_chat(
             status="error", error_type="content_guard_blocked", error_message="输入内容包含敏感词", meta=meta
         )
         return
+
+    from yuxi.agents.mcp.execution import McpExecutionContext, set_mcp_execution_context
+    from yuxi.services.principal import resolve_tenant_id
+
+    mcp_context_token = set_mcp_execution_context(
+        McpExecutionContext(
+            tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
+            uid=uid,
+            run_id=meta.get("run_id"),
+            agent_slug=agent_slug,
+        )
+    )
 
     try:
         agent_item, agent, agent_config = await _resolve_agent_runtime(

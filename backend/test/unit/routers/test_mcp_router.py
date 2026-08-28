@@ -57,7 +57,11 @@ def test_update_mcp_server_status(monkeypatch):
         captured["updated_by"] = updated_by
         return enabled, DummyServer(enabled)
 
+    async def fake_get_server_or_404(db, name, *, tenant_id=None):
+        return DummyServer(True)
+
     monkeypatch.setattr("server.routers.mcp_router.set_server_enabled", fake_set_server_enabled)
+    monkeypatch.setattr("server.routers.mcp_router.get_server_or_404", fake_get_server_or_404)
 
     client = TestClient(_build_app())
     resp = client.put("/api/system/mcp-servers/demo-mcp/status", json={"enabled": False})
@@ -73,7 +77,11 @@ def test_update_mcp_server_status_not_found(monkeypatch):
     async def fake_set_server_enabled(db, name, enabled, updated_by=None):
         raise ValueError(f"Server '{name}' does not exist")
 
+    async def fake_get_server_or_404(db, name, *, tenant_id=None):
+        return object()
+
     monkeypatch.setattr("server.routers.mcp_router.set_server_enabled", fake_set_server_enabled)
+    monkeypatch.setattr("server.routers.mcp_router.get_server_or_404", fake_get_server_or_404)
 
     client = TestClient(_build_app())
     resp = client.put("/api/system/mcp-servers/missing/status", json={"enabled": True})
@@ -106,7 +114,7 @@ def test_get_mcp_servers_normal_user_is_stripped(monkeypatch):
                 "enabled": bool(self.enabled),
             }
 
-    async def fake_get_all_mcp_servers(db):
+    async def fake_get_all_mcp_servers(db, *, tenant_id=None):
         return [DummyServer()]
 
     monkeypatch.setattr("server.routers.mcp_router.get_all_mcp_servers", fake_get_all_mcp_servers)

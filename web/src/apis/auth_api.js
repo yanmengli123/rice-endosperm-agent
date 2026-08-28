@@ -142,6 +142,14 @@ async function listManagedUserMessages(uid, threadId) {
   )
 }
 
+async function exportManagedUserConversations(uid) {
+  return apiAdminGet(
+    `/api/user/manage/${encodeURIComponent(uid)}/conversations-export`,
+    {},
+    'blob'
+  )
+}
+
 
 async function listManagedApiKeys(uid) {
   const data = await apiAdminGet(`/api/user/manage/${encodeURIComponent(uid)}/api-keys`)
@@ -184,6 +192,7 @@ export const authApi = {
   setManagedUserQuota,
   listManagedUserConversations,
   listManagedUserMessages,
+  exportManagedUserConversations,
   listManagedApiKeys,
   resetManagedApiKey,
   deleteManagedApiKey,

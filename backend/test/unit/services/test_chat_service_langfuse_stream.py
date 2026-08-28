@@ -287,7 +287,7 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
     async for chunk in svc.stream_agent_chat(
         agent_slug="test-agent",
         thread_id="thread-1",
-        meta={"request_id": "req-1"},
+        meta={"request_id": "req-1", "tenant_id": 1},
         input_message=build_chat_input_message("hello"),
         current_user=SimpleNamespace(id=1, uid="user-1", role="user", department_id="dept-1"),
         db=db,
@@ -425,7 +425,7 @@ async def test_stream_agent_chat_maps_raw_protocol_events_to_yuxi_stream_events(
     async for chunk in svc.stream_agent_chat(
         agent_slug="test-agent",
         thread_id="thread-1",
-        meta={"request_id": "req-1"},
+        meta={"request_id": "req-1", "tenant_id": 1},
         input_message=build_chat_input_message("hello"),
         current_user=SimpleNamespace(id=1, uid="user-1", role="user", department_id="dept-1"),
         db=_FakeSession(),
@@ -516,7 +516,7 @@ async def test_stream_agent_chat_emits_realtime_agent_state_from_values(monkeypa
     async for chunk in svc.stream_agent_chat(
         agent_slug="test-agent",
         thread_id="thread-1",
-        meta={"request_id": "req-1"},
+        meta={"request_id": "req-1", "tenant_id": 1},
         input_message=build_chat_input_message("hello"),
         current_user=SimpleNamespace(id=1, uid="user-1", role="user", department_id="dept-1"),
         db=_FakeSession(),
@@ -601,7 +601,7 @@ async def test_stream_agent_chat_maps_custom_compression_event_to_context_compre
     async for chunk in svc.stream_agent_chat(
         agent_slug="test-agent",
         thread_id="thread-1",
-        meta={"request_id": "req-1"},
+        meta={"request_id": "req-1", "tenant_id": 1},
         input_message=build_chat_input_message("hello"),
         current_user=SimpleNamespace(id=1, uid="user-1", role="user", department_id="dept-1"),
         db=_FakeSession(),
