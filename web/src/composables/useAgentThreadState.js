@@ -15,6 +15,7 @@ export function useAgentThreadState({
   const resetThreadUiState = (threadState) => {
     if (!threadState) return
     threadState.replyLoadingVisible = false
+    threadState.replyLoadingMessage = ''
     threadState.pendingRequestId = null
   }
 
@@ -28,6 +29,7 @@ export function useAgentThreadState({
         runLastSeq: '0-0',
         lastRetryableJobTry: null,
         replyLoadingVisible: false,
+        replyLoadingMessage: '',
         pendingRequestId: null,
         pendingInterrupt: null,
         onGoingConv: createOnGoingConvState(),

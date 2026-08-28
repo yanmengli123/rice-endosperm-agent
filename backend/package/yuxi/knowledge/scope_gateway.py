@@ -33,6 +33,11 @@ _CANDIDATE_MARKERS = {"candidate", "hypothesis", "hypothetical", "predicted", "p
 _REJECTED_MARKERS = {"rejected", "refuted", "false", "invalid", "disproved"}
 _STRICT_MARKERS = {"strict", "high", "direct", "verified", "confirmed", "gold"}
 
+# A scope can fan out to many independently managed knowledge bases. One slow
+# embedding/reranker/provider must never hold the whole conversation open.
+KNOWLEDGE_DOCUMENT_SOURCE_TIMEOUT_SECONDS = 45.0
+KNOWLEDGE_GRAPH_SOURCE_TIMEOUT_SECONDS = 20.0
+
 
 def _stable_id(prefix: str, *parts: Any) -> str:
     raw = "\x1f".join(str(part or "").strip() for part in parts)
@@ -154,6 +159,30 @@ async def _query_document_source(member: dict[str, Any], query_text: str) -> tup
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Scope document retrieval failed for {kb_id}: {exc}")
         return [], f"DOCUMENT_ERROR: {exc}"
+
+
+async def _query_source_with_timeout(
+    source_coro,
+    *,
+    kb_id: str,
+    source_type: str,
+    timeout_seconds: float,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Bound one retrieval channel while preserving successful sibling results."""
+
+    try:
+        return await asyncio.wait_for(source_coro, timeout=timeout_seconds)
+    except TimeoutError:
+        logger.warning(
+            "Scope source timed out: "
+            f"kb={kb_id}, source={source_type}, timeout={timeout_seconds:.1f}s"
+        )
+        return [], f"{source_type}_TIMEOUT"
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - one source must not abort the full scope
+        logger.exception(f"Scope source failed unexpectedly: kb={kb_id}, source={source_type}")
+        return [], f"{source_type}_ERROR: {exc}"
 
 
 async def _query_managed_graph_source(
@@ -544,18 +573,36 @@ async def query_knowledge_scope_gateway(
     task_labels = []
     per_source_limit = max(top_k, 8)
     for member in members:
+        kb_id = member["kb_id"]
         tasks.extend(
             [
-                _query_document_source(member, query_text),
-                _query_managed_graph_source(member, query_text, limit=per_source_limit),
+                _query_source_with_timeout(
+                    _query_document_source(member, query_text),
+                    kb_id=kb_id,
+                    source_type="DOCUMENT",
+                    timeout_seconds=KNOWLEDGE_DOCUMENT_SOURCE_TIMEOUT_SECONDS,
+                ),
+                _query_source_with_timeout(
+                    _query_managed_graph_source(member, query_text, limit=per_source_limit),
+                    kb_id=kb_id,
+                    source_type="GRAPH_STRUCTURED",
+                    timeout_seconds=KNOWLEDGE_GRAPH_SOURCE_TIMEOUT_SECONDS,
+                ),
             ]
         )
-        task_labels.extend([(member["kb_id"], "DOCUMENT"), (member["kb_id"], "GRAPH_STRUCTURED")])
+        task_labels.extend([(kb_id, "DOCUMENT"), (kb_id, "GRAPH_STRUCTURED")])
 
-    results = await asyncio.gather(*tasks) if tasks else []
+    results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
     all_rows: list[dict[str, Any]] = []
     source_errors: list[str] = []
-    for (kb_id, source_type), (rows, error) in zip(task_labels, results):
+    for (kb_id, source_type), result in zip(task_labels, results):
+        if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            logger.error(f"Scope source task failed: kb={kb_id}, source={source_type}, error={result}")
+            rows, error = [], f"{source_type}_ERROR: {result}"
+        else:
+            rows, error = result
         all_rows.extend(rows)
         if error:
             logger.warning(f"Scope source unavailable: kb={kb_id}, source={source_type}, error={error}")

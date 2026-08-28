@@ -191,6 +191,7 @@ export function useAgentRunStream({
     ts.lastRetryableJobTry = null
     ts.runReconnectAttempts = 0
     ts.replyLoadingVisible = false
+    ts.replyLoadingMessage = ''
     ts.pendingRequestId = null
     fetchThreadMessages({ agentId: unref(currentAgentId), threadId, delay }).finally(() => {
       resetOnGoingConv(threadId)
@@ -214,6 +215,7 @@ export function useAgentRunStream({
     ts.lastRetryableJobTry = null
     ts.isStreaming = false
     ts.replyLoadingVisible = false
+    ts.replyLoadingMessage = ''
     ts.pendingRequestId = null
     saveActiveRunSnapshot(threadId, run.id, ts.runLastSeq)
 
@@ -243,6 +245,7 @@ export function useAgentRunStream({
       ts.activeRunId = null
       ts.isStreaming = false
       ts.replyLoadingVisible = false
+      ts.replyLoadingMessage = ''
       ts.pendingRequestId = null
       clearActiveRunSnapshot(threadId)
       return false
@@ -411,6 +414,7 @@ export function useAgentRunStream({
         }
       } else if (ts.activeRunId !== runId) {
         ts.replyLoadingVisible = false
+        ts.replyLoadingMessage = ''
         ts.pendingRequestId = null
       }
     } finally {
@@ -420,6 +424,7 @@ export function useAgentRunStream({
       if (!ts.activeRunId) {
         ts.isStreaming = false
         ts.replyLoadingVisible = false
+        ts.replyLoadingMessage = ''
         ts.pendingRequestId = null
       }
     }
@@ -449,6 +454,7 @@ export function useAgentRunStream({
           ts.activeRunId = null
           ts.isStreaming = false
           ts.replyLoadingVisible = false
+          ts.replyLoadingMessage = ''
           ts.pendingRequestId = null
           clearPendingInterruptForRun(threadId, run.id)
           clearActiveRunSnapshot(threadId)
@@ -525,6 +531,7 @@ export function useAgentRunStream({
     ts.runLastSeq = '0-0'
     ts.isStreaming = false
     ts.replyLoadingVisible = false
+    ts.replyLoadingMessage = ''
     ts.pendingRequestId = null
     ts.pendingInterrupt = null
     clearActiveRunSnapshot(threadId)

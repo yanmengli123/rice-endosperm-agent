@@ -84,6 +84,7 @@ export function useApproval({ getThreadState, fetchThreadMessages }) {
 
     threadState.isStreaming = false
     threadState.replyLoadingVisible = false
+    threadState.replyLoadingMessage = ''
     threadState.pendingRequestId = null
     applyInterruptToApprovalState(pendingInterrupt, threadId)
     return true

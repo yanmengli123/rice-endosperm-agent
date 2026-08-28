@@ -1762,7 +1762,9 @@ const isReplyLoading = computed(() => {
   return Boolean(threadState?.replyLoadingVisible)
 })
 const replyLoadingText = computed(() =>
-  currentThreadState.value?.contextCompressing ? '正在压缩上下文...' : '正在生成回复...'
+  currentThreadState.value?.contextCompressing
+    ? '正在压缩上下文...'
+    : currentThreadState.value?.replyLoadingMessage || '正在生成回复...'
 )
 const isSendButtonDisabled = computed(() => {
   return (
@@ -1823,6 +1825,7 @@ const insertOptimisticHumanMessage = (
   if (!threadState || !requestId) return
   threadState.pendingRequestId = requestId
   threadState.replyLoadingVisible = false
+  threadState.replyLoadingMessage = ''
   threadState.onGoingConv.msgChunks[requestId] = [
     buildOptimisticHumanMessage({ requestId, text, imageContent, attachments })
   ]
@@ -2512,6 +2515,7 @@ const handleSendMessage = async ({ image } = {}) => {
   } catch (error) {
     threadState.isStreaming = false
     threadState.replyLoadingVisible = false
+    threadState.replyLoadingMessage = ''
     threadState.pendingRequestId = null
     rollbackAttachments(threadId, previousAttachments)
     resetOnGoingConv(threadId)
@@ -2595,6 +2599,7 @@ const handleApprovalWithStream = async (answer) => {
     }
     threadState.isStreaming = false
     threadState.replyLoadingVisible = false
+    threadState.replyLoadingMessage = ''
     handleChatError(error, 'resume')
   }
 }

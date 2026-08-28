@@ -14,6 +14,9 @@ EMBEDDING_RATE_LIMIT_MAX_RETRIES = 10
 EMBEDDING_TRANSIENT_MAX_RETRIES = 2
 EMBEDDING_RETRY_MAX_DELAY_SECONDS = 10.0
 EMBEDDING_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+EMBEDDING_CONNECT_TIMEOUT_SECONDS = 10.0
+EMBEDDING_READ_TIMEOUT_SECONDS = 60.0
+EMBEDDING_TOTAL_TIMEOUT_SECONDS = 120.0
 
 
 def sigmoid(x):
@@ -179,9 +182,20 @@ class OtherEmbedding(BaseEmbeddingModel):
     def encode(self, message: list[str] | str) -> list[list[float]]:
         payload = self.build_payload(message)
         retry_index = 0
+        deadline = time.monotonic() + EMBEDDING_TOTAL_TIMEOUT_SECONDS
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Embedding request exceeded {EMBEDDING_TOTAL_TIMEOUT_SECONDS:.0f}s total timeout"
+                )
             try:
-                response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=60)
+                response = requests.post(
+                    self.base_url,
+                    json=payload,
+                    headers=self.headers,
+                    timeout=(EMBEDDING_CONNECT_TIMEOUT_SECONDS, min(EMBEDDING_READ_TIMEOUT_SECONDS, remaining)),
+                )
                 response.raise_for_status()
                 return self._extract_embeddings(response.json())
             except requests.RequestException as e:
@@ -193,6 +207,10 @@ class OtherEmbedding(BaseEmbeddingModel):
                 )
                 if retry:
                     retry_index, delay = retry
+                    if delay >= deadline - time.monotonic():
+                        raise TimeoutError(
+                            f"Embedding request exceeded {EMBEDDING_TOTAL_TIMEOUT_SECONDS:.0f}s total timeout"
+                        ) from e
                     time.sleep(delay)
                     continue
 
@@ -211,12 +229,34 @@ class OtherEmbedding(BaseEmbeddingModel):
                 raise ValueError(error_msg) from e
 
     async def aencode(self, message: list[str] | str) -> list[list[float]]:
+        try:
+            return await asyncio.wait_for(
+                self._aencode_with_retries(message),
+                timeout=EMBEDDING_TOTAL_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Embedding request exceeded {EMBEDDING_TOTAL_TIMEOUT_SECONDS:.0f}s total timeout"
+            ) from exc
+
+    async def _aencode_with_retries(self, message: list[str] | str) -> list[list[float]]:
         payload = self.build_payload(message)
+        timeout = httpx.Timeout(
+            EMBEDDING_READ_TIMEOUT_SECONDS,
+            connect=EMBEDDING_CONNECT_TIMEOUT_SECONDS,
+            write=EMBEDDING_READ_TIMEOUT_SECONDS,
+            pool=EMBEDDING_CONNECT_TIMEOUT_SECONDS,
+        )
         async with httpx.AsyncClient() as client:
             retry_index = 0
             while True:
                 try:
-                    response = await client.post(self.base_url, json=payload, headers=self.headers, timeout=60)
+                    response = await client.post(
+                        self.base_url,
+                        json=payload,
+                        headers=self.headers,
+                        timeout=timeout,
+                    )
                     response.raise_for_status()
                     return self._extract_embeddings(response.json())
                 except httpx.HTTPStatusError as e:

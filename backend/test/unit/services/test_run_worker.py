@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -32,6 +33,18 @@ class _BytesAsyncIter:
         value = self._values[self._idx]
         self._idx += 1
         return value
+
+
+class _NeverAsyncIter:
+    async def __anext__(self):
+        await asyncio.Event().wait()
+
+
+class _NeverCancelledContext:
+    run_id = "run-never"
+
+    async def wait_cancelled(self):
+        await asyncio.Event().wait()
 
 
 def _build_run() -> SimpleNamespace:
@@ -233,6 +246,90 @@ async def test_process_agent_run_retryable_error_fails_without_auto_retry(monkey
     assert any(
         item["event_type"] == "error" and item["payload"]["chunk"].get("error_type") == "retryable_worker_error"
         for item in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_wait_emits_progress_then_times_out(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(run_worker, "RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS", 0.005)
+    monkeypatch.setattr(run_worker, "RUN_STREAM_IDLE_TIMEOUT_SECONDS", 0.02)
+
+    stream = run_worker._consume_stream_with_cancel(_NeverAsyncIter(), _NeverCancelledContext())
+    assert await stream.__anext__() is run_worker._STREAM_WAITING
+    with pytest.raises(run_worker.RunStreamIdleTimeout):
+        while True:
+            await stream.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_stream_total_deadline_applies_even_when_idle_deadline_is_long(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(run_worker, "RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS", 1.0)
+    monkeypatch.setattr(run_worker, "RUN_STREAM_IDLE_TIMEOUT_SECONDS", 10.0)
+    monkeypatch.setattr(run_worker, "RUN_STREAM_TOTAL_TIMEOUT_SECONDS", 0.01)
+
+    stream = run_worker._consume_stream_with_cancel(_NeverAsyncIter(), _NeverCancelledContext())
+    with pytest.raises(run_worker.RunStreamTotalTimeout):
+        await stream.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_progress_publisher_emits_application_event(monkeypatch: pytest.MonkeyPatch):
+    events: list[dict] = []
+    done = asyncio.Event()
+
+    async def fake_append_event(run_id: str, event_type: str, payload: dict, **kwargs):
+        del kwargs
+        events.append({"run_id": run_id, "event_type": event_type, "payload": payload})
+        done.set()
+
+    monkeypatch.setattr(run_worker, "RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS", 0.005)
+    monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
+
+    await asyncio.wait_for(
+        run_worker._publish_run_progress(
+            run_id="run-1",
+            thread_id="thread-1",
+            request_id="req-1",
+            done_event=done,
+        ),
+        timeout=0.1,
+    )
+
+    assert events[0]["event_type"] == "custom"
+    assert events[0]["payload"]["name"] == "yuxi.progress"
+    assert events[0]["payload"]["chunk"]["status"] == "progress"
+
+
+@pytest.mark.asyncio
+async def test_process_agent_run_idle_timeout_reaches_failed_terminal(monkeypatch: pytest.MonkeyPatch):
+    run_obj = _build_run()
+    _patch_common(monkeypatch, run_obj)
+    events: list[dict] = []
+    terminal_updates: list[tuple[str, str | None]] = []
+
+    async def fake_append_event(run_id: str, event_type: str, payload: dict, **kwargs):
+        del run_id, kwargs
+        events.append({"event_type": event_type, "payload": payload})
+
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
+        del run_id, error_message
+        terminal_updates.append((status, error_type))
+
+    def fake_consume(stream, run_ctx):
+        del stream, run_ctx
+        return _RaisingAsyncIter(run_worker.RunStreamIdleTimeout("idle"))
+
+    monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
+    monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
+    monkeypatch.setattr(run_worker, "_consume_stream_with_cancel", fake_consume)
+
+    await run_worker.process_agent_run({"job_try": 1}, "run-1")
+
+    assert terminal_updates == [("failed", "run_idle_timeout")]
+    assert any(
+        event["event_type"] == "error"
+        and event["payload"]["chunk"]["error_type"] == "run_idle_timeout"
+        for event in events
     )
 
 

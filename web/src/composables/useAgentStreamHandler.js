@@ -154,12 +154,14 @@ export function useAgentStreamHandler({
             threadState.onGoingConv.msgChunks[resolvedRequestId] = [initMessage]
           }
           threadState.replyLoadingVisible = true
+          threadState.replyLoadingMessage = ''
           threadState.contextCompressing = false
         }
         return false
 
       case 'loading':
         {
+          threadState.replyLoadingMessage = ''
           const messageChunk = loadingMessageChunk(chunk)
           if (messageChunk?.id) {
             messageChunk.run_id = chunk.run_id || messageChunk.run_id
@@ -180,6 +182,14 @@ export function useAgentStreamHandler({
             }
           }
         }
+        return false
+
+      case 'progress':
+        threadState.replyLoadingVisible = true
+        threadState.replyLoadingMessage =
+          typeof chunkMessage === 'string' && chunkMessage.trim()
+            ? chunkMessage.trim()
+            : '服务端正在处理请求…'
         return false
 
       case 'stream_event':
@@ -203,6 +213,7 @@ export function useAgentStreamHandler({
         if (threadState) {
           threadState.isStreaming = false
           threadState.replyLoadingVisible = false
+          threadState.replyLoadingMessage = ''
           threadState.pendingRequestId = null
           threadState.pendingInterrupt = null
           threadState.contextCompressing = false
@@ -213,6 +224,7 @@ export function useAgentStreamHandler({
       case 'human_approval_required':
         streamSmoother?.flushThread(threadId)
         threadState.replyLoadingVisible = false
+        threadState.replyLoadingMessage = ''
         console.log(`${debugPrefix}[approval_required]`, {
           threadId,
           currentAgentId: unref(currentAgentId)
@@ -261,6 +273,7 @@ export function useAgentStreamHandler({
         if (threadState) {
           threadState.isStreaming = false
           threadState.replyLoadingVisible = false
+          threadState.replyLoadingMessage = ''
           threadState.pendingRequestId = null
           threadState.pendingInterrupt = null
           threadState.contextCompressing = false
@@ -294,6 +307,7 @@ export function useAgentStreamHandler({
         if (threadState) {
           threadState.isStreaming = false
           threadState.replyLoadingVisible = false
+          threadState.replyLoadingMessage = ''
           threadState.pendingRequestId = null
           threadState.contextCompressing = false
           const pendingInterrupt = extractPendingInterrupt(chunk, threadId)

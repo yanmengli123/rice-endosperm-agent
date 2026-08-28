@@ -1,4 +1,14 @@
-from yuxi.knowledge.scope_gateway import _compact_evidence, _deduplicate_and_rerank, classify_evidence_status
+import asyncio
+
+import pytest
+
+from yuxi.knowledge import scope_gateway
+from yuxi.knowledge.scope_gateway import (
+    _compact_evidence,
+    _deduplicate_and_rerank,
+    classify_evidence_status,
+    query_knowledge_scope_gateway,
+)
 
 
 def _evidence(*, kb_id: str, direction: str = "POSITIVE", status: str = "STRICT") -> dict:
@@ -91,3 +101,47 @@ def test_compact_evidence_removes_internal_fields_and_duplicate_content():
     assert "metadata" not in compact
     assert "priority" not in compact
     assert "raw_score" not in compact
+
+
+@pytest.mark.asyncio
+async def test_scope_timeout_keeps_successful_graph_evidence(monkeypatch: pytest.MonkeyPatch):
+    async def slow_document(member, query_text):
+        del member, query_text
+        await asyncio.sleep(60)
+        return [], None
+
+    async def available_graph(member, query_text, *, limit):
+        del query_text, limit
+        row = _evidence(kb_id=member["kb_id"])
+        row["claim_eligible"] = True
+        row["outcome_class"] = "OTHER"
+        return [row], None
+
+    monkeypatch.setattr(scope_gateway, "_query_document_source", slow_document)
+    monkeypatch.setattr(scope_gateway, "_query_managed_graph_source", available_graph)
+    monkeypatch.setattr(scope_gateway, "KNOWLEDGE_DOCUMENT_SOURCE_TIMEOUT_SECONDS", 0.01)
+
+    result = await query_knowledge_scope_gateway(
+        query_text="OsFIE1",
+        scope_snapshot={
+            "members": [
+                {
+                    "kb_id": "kb-a",
+                    "kb_name": "Rice graph",
+                    "priority": 100,
+                    "document_enabled": True,
+                    "graph_enabled": True,
+                    "structured_enabled": True,
+                    "evidence_strict": True,
+                    "evidence_supporting": True,
+                    "evidence_candidate": False,
+                    "evidence_rejected": False,
+                }
+            ],
+            "effective_kb_ids": ["kb-a"],
+        },
+        top_k=5,
+    )
+
+    assert [item["evidence_id"] for item in result["evidence"]] == ["ev-kb-a"]
+    assert any("DOCUMENT_TIMEOUT" in warning for warning in result["warnings"])

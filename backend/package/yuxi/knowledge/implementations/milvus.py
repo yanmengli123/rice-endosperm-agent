@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 import time
 import traceback
@@ -930,8 +931,13 @@ class MilvusKB(KnowledgeBase):
             retrieved_chunks: list[dict] = []
             if search_mode == "vector":
                 embedding_model_spec = self.databases_meta[kb_id].get("embedding_model_spec")
-                embedding_function = self._get_embedding_function(embedding_model_spec, sync=True)
-                query_embedding = await _run_milvus_query_io(embedding_function, [query_text])
+                # Embedding is network I/O and already exposes an async API. Running
+                # synchronous HTTP in a shielded thread made retrieval cancellation
+                # ineffective and could occupy all query-offload slots for minutes.
+                embedding_function = self._get_embedding_function(embedding_model_spec)
+                query_embedding = embedding_function([query_text])
+                if inspect.isawaitable(query_embedding):
+                    query_embedding = await query_embedding
 
                 search_params = {"metric_type": metric_type, "params": {"nprobe": 10}}
 
@@ -985,8 +991,10 @@ class MilvusKB(KnowledgeBase):
                 logger.debug(f"Milvus BM25 query response: {len(retrieved_chunks)} chunks found")
             else:
                 embedding_model_spec = self.databases_meta[kb_id].get("embedding_model_spec")
-                embedding_function = self._get_embedding_function(embedding_model_spec, sync=True)
-                query_embedding = await _run_milvus_query_io(embedding_function, [query_text])
+                embedding_function = self._get_embedding_function(embedding_model_spec)
+                query_embedding = embedding_function([query_text])
+                if inspect.isawaitable(query_embedding):
+                    query_embedding = await query_embedding
                 bm25_top_k = int(merged_kwargs.get("bm25_top_k", recall_top_k))
                 bm25_top_k = max(bm25_top_k, 1)
                 bm25_drop_ratio_search = float(merged_kwargs.get("bm25_drop_ratio_search", 0.0))

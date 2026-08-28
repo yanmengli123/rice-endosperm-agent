@@ -32,7 +32,19 @@ from yuxi.utils.thread_utils import extract_thread_id
 LOADING_FLUSH_INTERVAL_MS = 100
 LOADING_FLUSH_MAX_CHARS = 512
 RUN_CANCEL_POLL_SECONDS = 0.2
+RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS = 15.0
+RUN_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
+RUN_STREAM_TOTAL_TIMEOUT_SECONDS = 300.0
 SUPPORTED_RUN_TYPES = {"chat", "resume", "subagent"}
+_STREAM_WAITING = object()
+
+
+class RunStreamIdleTimeout(TimeoutError):
+    """Raised when an agent stream produces no event for the configured deadline."""
+
+
+class RunStreamTotalTimeout(TimeoutError):
+    """Raised when a run exceeds its interactive wall-clock deadline."""
 
 
 @dataclass
@@ -244,23 +256,104 @@ async def _append_end_event(run_id: str, status: str, *, thread_id: str | None, 
     await append_run_event(run_id, "end", end_payload, thread_id=thread_id)
 
 
+async def _publish_run_progress(
+    *,
+    run_id: str,
+    thread_id: str | None,
+    request_id: str,
+    done_event: asyncio.Event,
+) -> None:
+    """Publish visible progress independently from internal LangGraph events."""
+
+    try:
+        while True:
+            try:
+                await asyncio.wait_for(
+                    done_event.wait(),
+                    timeout=RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS,
+                )
+                return
+            except TimeoutError:
+                pass
+
+            try:
+                await append_run_event(
+                    run_id,
+                    "custom",
+                    {
+                        "name": "yuxi.progress",
+                        "chunk": {
+                            "status": "progress",
+                            "stage": "agent_processing",
+                            "message": "服务端正在检索知识并生成回复…",
+                            "request_id": request_id,
+                        },
+                    },
+                    thread_id=thread_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - telemetry must not fail the run
+                logger.exception(f"Failed to publish progress for run {run_id}")
+    except asyncio.CancelledError:
+        return
+
+
 async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
+    stream_started_at = time.monotonic()
     while True:
+        if time.monotonic() - stream_started_at >= RUN_STREAM_TOTAL_TIMEOUT_SECONDS:
+            raise RunStreamTotalTimeout(
+                f"agent stream exceeded {RUN_STREAM_TOTAL_TIMEOUT_SECONDS:.0f} seconds total runtime"
+            )
         next_task = asyncio.create_task(agen.__anext__())
-        cancel_task = asyncio.create_task(run_ctx.wait_cancelled())
-        done, _ = await asyncio.wait({next_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        idle_started_at = time.monotonic()
+        while True:
+            cancel_task = asyncio.create_task(run_ctx.wait_cancelled())
+            idle_remaining = RUN_STREAM_IDLE_TIMEOUT_SECONDS - (time.monotonic() - idle_started_at)
+            total_remaining = RUN_STREAM_TOTAL_TIMEOUT_SECONDS - (time.monotonic() - stream_started_at)
+            wait_seconds = max(
+                0.0,
+                min(RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS, idle_remaining, total_remaining),
+            )
+            done, _ = await asyncio.wait(
+                {next_task, cancel_task},
+                timeout=wait_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
-        if cancel_task in done:
-            next_task.cancel()
-            await asyncio.gather(next_task, return_exceptions=True)
-            raise asyncio.CancelledError(f"run {run_ctx.run_id} cancelled")
+            if cancel_task in done:
+                next_task.cancel()
+                await asyncio.gather(next_task, return_exceptions=True)
+                raise asyncio.CancelledError(f"run {run_ctx.run_id} cancelled")
 
-        cancel_task.cancel()
-        await asyncio.gather(cancel_task, return_exceptions=True)
-        try:
-            yield next_task.result()
-        except StopAsyncIteration:
-            return
+            cancel_task.cancel()
+            await asyncio.gather(cancel_task, return_exceptions=True)
+
+            if next_task in done:
+                try:
+                    yield next_task.result()
+                except StopAsyncIteration:
+                    return
+                break
+
+            if time.monotonic() - idle_started_at >= RUN_STREAM_IDLE_TIMEOUT_SECONDS:
+                next_task.cancel()
+                await asyncio.gather(next_task, return_exceptions=True)
+                raise RunStreamIdleTimeout(
+                    f"agent stream produced no event for {RUN_STREAM_IDLE_TIMEOUT_SECONDS:.0f} seconds"
+                )
+
+            if time.monotonic() - stream_started_at >= RUN_STREAM_TOTAL_TIMEOUT_SECONDS:
+                next_task.cancel()
+                await asyncio.gather(next_task, return_exceptions=True)
+                raise RunStreamTotalTimeout(
+                    f"agent stream exceeded {RUN_STREAM_TOTAL_TIMEOUT_SECONDS:.0f} seconds total runtime"
+                )
+
+            # Yield control to the worker loop while the authoritative background
+            # progress publisher keeps clients informed.
+            yield _STREAM_WAITING
 
 
 async def process_agent_run(ctx, run_id: str):
@@ -388,6 +481,15 @@ async def process_agent_run(ctx, run_id: str):
         thread_id=thread_id,
     )
     terminal_outcome: tuple[str, str | None, str | None, dict] | None = None
+    progress_done = asyncio.Event()
+    progress_task = asyncio.create_task(
+        _publish_run_progress(
+            run_id=run_id,
+            thread_id=thread_id,
+            request_id=request_id,
+            done_event=progress_done,
+        )
+    )
 
     try:
         async with pg_manager.get_async_session_context() as db:
@@ -414,6 +516,8 @@ async def process_agent_run(ctx, run_id: str):
 
             draining_for_terminal = False
             async for chunk_bytes in _consume_stream_with_cancel(stream, run_ctx):
+                if chunk_bytes is _STREAM_WAITING:
+                    continue
                 if draining_for_terminal:
                     # 已捕获终态 chunk：继续排空生成器直到自然结束，而不是提前 break。
                     # stream 的会话消息落库发生在生成器收尾（save_messages_from_langgraph_state），
@@ -507,6 +611,33 @@ async def process_agent_run(ctx, run_id: str):
             await mark_run_terminal(run_id, "completed")
             await _append_end_event(run_id, "completed", thread_id=thread_id, payload={"chunk": finished_chunk})
 
+    except (RunStreamIdleTimeout, RunStreamTotalTimeout) as e:
+        await writer.flush()
+        error_message = "服务端长时间未收到检索或模型输出，已安全结束本次任务，请重试。"
+        error_type = "run_total_timeout" if isinstance(e, RunStreamTotalTimeout) else "run_idle_timeout"
+        error_chunk = {
+            "status": "error",
+            "error_type": error_type,
+            "error_message": error_message,
+            "message": error_message,
+            "request_id": request_id,
+            "retryable": True,
+        }
+        await append_run_event(
+            run_id,
+            "error",
+            {"chunk": error_chunk, "retryable": True},
+            thread_id=thread_id,
+        )
+        await mark_run_terminal(
+            run_id,
+            "failed",
+            error_type=error_type,
+            error_message=error_message,
+        )
+        await _append_end_event(run_id, "failed", thread_id=thread_id, payload={"chunk": error_chunk})
+        logger.error(f"Run timeout {run_id}: {e}")
+        return
     except asyncio.CancelledError:
         await writer.flush()
         cancel_chunk = {"status": "interrupted", "message": "对话已取消", "request_id": request_id}
@@ -574,6 +705,9 @@ async def process_agent_run(ctx, run_id: str):
         await _append_end_event(run_id, "failed", thread_id=thread_id, payload={"chunk": error_chunk})
         return
     finally:
+        progress_done.set()
+        progress_task.cancel()
+        await asyncio.gather(progress_task, return_exceptions=True)
         await run_ctx.close()
         await clear_cancel_signal(run_id)
 
