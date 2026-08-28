@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from langchain.messages import AIMessageChunk, HumanMessage
 
+from yuxi.agents.mcp.execution import get_mcp_execution_context
 from yuxi.services import chat_service as svc
 from yuxi.services.input_message_service import build_chat_input_message
 from yuxi.utils.reasoning_visibility import ReasoningVisibilityBuffer
@@ -34,6 +35,29 @@ class _FakeSession:
         self.commit_count += 1
 
 
+@pytest.mark.asyncio
+async def test_stream_agent_chat_invalid_agent_cleans_mcp_context(monkeypatch: pytest.MonkeyPatch):
+    async def fail_resolve(**_kwargs):
+        raise ValueError("agent 不存在")
+
+    monkeypatch.setattr(svc, "_resolve_agent_runtime", fail_resolve)
+
+    chunks = [
+        json.loads(chunk)
+        async for chunk in svc.stream_agent_chat(
+            agent_slug="missing-agent",
+            thread_id="thread-1",
+            meta={"request_id": "req-1", "tenant_id": 1},
+            input_message=build_chat_input_message("hello"),
+            current_user=SimpleNamespace(uid="user-1"),
+            db=_FakeSession(),
+        )
+    ]
+
+    assert chunks[-1]["error_type"] == "invalid_agent"
+    assert get_mcp_execution_context() is None
+
+
 def test_message_stream_protocol_never_exposes_structured_reasoning() -> None:
     events = svc._message_chunk_yuxi_events(
         {
@@ -59,9 +83,7 @@ def test_message_stream_protocol_never_exposes_structured_reasoning() -> None:
 
 def test_stream_boundary_redacts_tagged_reasoning_across_deltas() -> None:
     buffers: dict[str, ReasoningVisibilityBuffer] = {}
-    first = svc._sanitize_stream_event(
-        {"type": "message_delta", "message_id": "message-1", "content": "<th"}, buffers
-    )
+    first = svc._sanitize_stream_event({"type": "message_delta", "message_id": "message-1", "content": "<th"}, buffers)
     second = svc._sanitize_stream_event(
         {"type": "message_delta", "message_id": "message-1", "content": "ink>private chain"}, buffers
     )

@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from yuxi.agents.mcp.execution import get_mcp_execution_context
+
 sys.path.insert(0, os.getcwd())
 
 from yuxi.services.chat_service import (
@@ -219,6 +221,27 @@ async def test_stream_agent_resume_init_does_not_render_resume_input():
     assert first_chunk["status"] == "init"
     assert "msg" not in first_chunk
     assert "Resume with input" not in json.dumps(first_chunk, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_resume_invalid_agent_cleans_mcp_context(monkeypatch):
+    async def fail_resolve(**_kwargs):
+        raise ValueError("agent 不存在")
+
+    monkeypatch.setattr(svc, "_resolve_agent_runtime", fail_resolve)
+    stream = stream_agent_resume(
+        thread_id="thread-1",
+        resume_input={"language": "python"},
+        meta={"request_id": "req-1", "tenant_id": 1},
+        current_user=SimpleNamespace(uid="user-1"),
+        db=_FakeSession(),
+    )
+
+    await stream.__anext__()
+    error_chunk = json.loads((await stream.__anext__()).decode("utf-8"))
+
+    assert error_chunk["error_type"] == "invalid_agent"
+    assert get_mcp_execution_context() is None
 
 
 @pytest.mark.asyncio

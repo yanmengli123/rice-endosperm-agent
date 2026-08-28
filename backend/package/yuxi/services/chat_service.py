@@ -456,9 +456,7 @@ def _sanitize_stream_event(
     if event.get("type") != "message_delta":
         return event
     safe = dict(event)
-    structured_reasoning = bool(
-        safe.pop("reasoning_content", None) or safe.pop("additional_reasoning_content", None)
-    )
+    structured_reasoning = bool(safe.pop("reasoning_content", None) or safe.pop("additional_reasoning_content", None))
     message_id = str(safe.get("message_id") or "default")
     content = safe.get("content")
     tagged_reasoning = False
@@ -1064,6 +1062,7 @@ async def stream_agent_chat(
             agent_kind="subagent" if meta.get("run_type") == "subagent" else "main",
         )
     except ValueError as e:
+        # 该分支发生在主流式 try/finally 之前，必须在返回前显式清理。
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
 
         reset_mcp_execution_context(mcp_context_token)
@@ -1477,6 +1476,7 @@ async def stream_agent_resume(
             thread_id=thread_id,
         )
     except ValueError as e:
+        # 该分支同样尚未进入下方主 try/finally。
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
 
         reset_mcp_execution_context(mcp_context_token)

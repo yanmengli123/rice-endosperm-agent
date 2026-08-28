@@ -52,7 +52,20 @@ def set_user_credential_override(
 
 
 def reset_user_credential_override(token) -> None:
-    _user_credential_ctx.reset(token)
+    """跨异步上下文安全地清理用户凭据覆盖（清理失败绝不能污染回答流）。
+
+    与 ``execution.reset_mcp_execution_context`` 同源问题：``ContextVar.reset``
+    对跨 Context 抛 ``ValueError``，对已使用 token 抛 ``RuntimeError``；异常消息
+    包含 Token repr，如果沿流式生成器 finally 逸出，会污染已完成结果。
+    这里对同 Context 首次 reset 走原生恢复；跨 Context / 重复 reset 降级为
+    no-op，不抛异常。
+    """
+    if token is None:
+        return
+    try:
+        _user_credential_ctx.reset(token)
+    except (ValueError, RuntimeError):
+        return
 
 
 def apply_credential_override(info):
