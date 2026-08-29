@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-CITATION_VALIDATOR_VERSION = "1.0"
+CITATION_VALIDATOR_VERSION = "1.1"
+
+NARRATIVE_CITATION_MARKER = "〔引文编号见“规范科研结果”〕"
 
 _NARRATIVE_IDENTIFIER_PATTERNS = {
     "PMID": re.compile(r"\bPMID\s*[:：]?\s*\d{5,10}\b", flags=re.IGNORECASE),
@@ -14,12 +16,45 @@ _NARRATIVE_IDENTIFIER_PATTERNS = {
     ),
 }
 
+_ADJACENT_CITATION_MARKERS = re.compile(
+    rf"{re.escape(NARRATIVE_CITATION_MARKER)}(?:\s*[,，;；、/]\s*{re.escape(NARRATIVE_CITATION_MARKER)})+"
+)
+
 
 def redact_narrative_citation_identifiers(text: str) -> str:
     result = str(text or "")
     for kind, pattern in _NARRATIVE_IDENTIFIER_PATTERNS.items():
         result = pattern.sub(f"[{kind}_IN_STRUCTURED_TABLE]", result)
     return result
+
+
+def sanitize_narrative_citations(text: str) -> tuple[str, dict[str, Any], list[str]]:
+    """Move citation identifiers out of model prose without discarding its scientific content.
+
+    PMID, DOI and evidence_id are rendered by the deterministic result card. Official
+    biological identifiers such as NCBI Gene IDs, RAP/MSU loci and protein accessions
+    are intentionally not matched by this sanitizer.
+    """
+    source_text = str(text or "")
+    validation, _ = validate_narrative_citations(source_text)
+    if validation["status"] == "PASS":
+        return source_text, validation, []
+
+    sanitized = source_text
+    for pattern in _NARRATIVE_IDENTIFIER_PATTERNS.values():
+        sanitized = pattern.sub(NARRATIVE_CITATION_MARKER, sanitized)
+    sanitized = _ADJACENT_CITATION_MARKERS.sub(NARRATIVE_CITATION_MARKER, sanitized)
+
+    post_validation, _ = validate_narrative_citations(sanitized)
+    result = {
+        **validation,
+        "source_status": validation["status"],
+        "status": post_validation["status"],
+        "action": "IDENTIFIERS_MOVED_TO_STRUCTURED_RESULTS",
+        "post_sanitization_status": post_validation["status"],
+    }
+    warnings = ["模型正文中的引文编号已移至“规范科研结果”，科研叙述内容已保留。"]
+    return sanitized, result, warnings
 
 
 def validate_narrative_citations(text: str) -> tuple[dict[str, Any], list[str]]:
@@ -35,7 +70,7 @@ def validate_narrative_citations(text: str) -> tuple[dict[str, Any], list[str]]:
         "status": status,
         "detected_identifiers": detected,
     }
-    warnings = [] if status == "PASS" else ["模型叙述包含引用标识符，已改用无引用的确定性摘要。"]
+    warnings = [] if status == "PASS" else ["模型叙述包含应由后端结构化结果呈现的引文标识符。"]
     return result, warnings
 
 

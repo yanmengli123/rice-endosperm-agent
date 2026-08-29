@@ -10,7 +10,10 @@ from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResp
 from langchain_core.messages import AIMessage, ToolMessage
 
 from yuxi.knowledge.rendering.answer_context_builder import build_answer_context
-from yuxi.knowledge.validation.citation_validator import validate_narrative_citations
+from yuxi.knowledge.validation.citation_validator import (
+    NARRATIVE_CITATION_MARKER,
+    sanitize_narrative_citations,
+)
 
 _STALE_RUNTIME_STATE = re.compile(
     r"(?:当前|本次|这个)?(?:会话)?.{0,12}(?:没有挂载|未挂载|知识库为空|无法访问|不可用).{0,12}知识库|"
@@ -56,15 +59,77 @@ def _compact_tool_contract(contract: dict) -> str:
     )
 
 
-def _citation_guard_fallback(contract: dict) -> str:
+def _deterministic_claim_fallback(contract: dict) -> str:
+    """Render a useful answer when model prose contains no text beyond citation IDs."""
     completeness = contract.get("completeness") or {}
-    claim_count = len(contract.get("claims") or [])
-    evidence_count = len(contract.get("evidence") or [])
-    return (
-        "本次科研引用由后端结构化证据表确定性呈现。模型叙述中的引用标识未通过校验，已自动拦截。\n\n"
-        f"当前返回 {claim_count} 条可引用 Claim、{evidence_count} 条合格 Evidence；"
-        f"完整性状态为 {completeness.get('status') or 'UNVERIFIED'}。请展开上方“规范科研结果”逐项核验。"
-    )
+    claims = contract.get("claims") or []
+    lines = ["基于本次冻结知识范围，后端已验证的可引用结果如下："]
+    for claim in claims[:20]:
+        subject = str((claim.get("subject") or {}).get("name") or "未命名实体")
+        predicate = str(claim.get("predicate") or "相关")
+        target = str((claim.get("object") or {}).get("name") or "未命名对象")
+        relation_group = str(claim.get("relation_group") or "未分类关系")
+        evidence_count = len(claim.get("evidence") or [])
+        lines.append(f"- **{subject}** — `{predicate}` → {target}（{relation_group}；{evidence_count} 条证据）")
+    if len(claims) > 20:
+        lines.append(f"- 其余 {len(claims) - 20} 条结果请在“规范科研结果”中展开核验。")
+    if not claims:
+        lines.append("- 本次未返回可渲染的规范 Claim；请调整问题或知识范围后重试。")
+    lines.append(f"\n完整性状态：{completeness.get('status') or 'UNVERIFIED'}。引文编号由“规范科研结果”确定性呈现。")
+    return "\n".join(lines)
+
+
+def _has_substantive_narrative(text: str) -> bool:
+    without_markers = str(text or "").replace(NARRATIVE_CITATION_MARKER, "")
+    normalized = re.sub(r"[\s.,，。;；:：、/\\|()（）\[\]{}<>《》\-—_`*#]+", "", without_markers)
+    return len(normalized) >= 4
+
+
+def _narrative_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+            parts.append(str(block.get("text") or ""))
+    return "\n".join(parts)
+
+
+def _sanitize_message_content(content, *, contract: dict):
+    if isinstance(content, str):
+        sanitized, validation, warnings = sanitize_narrative_citations(content)
+        if validation.get("source_status") == "FAIL" and not _has_substantive_narrative(sanitized):
+            sanitized = _deterministic_claim_fallback(contract)
+            validation["action"] = "DETERMINISTIC_CLAIM_FALLBACK"
+        return sanitized, validation, warnings
+
+    _, aggregate_validation, aggregate_warnings = sanitize_narrative_citations(_narrative_text(content))
+    sanitized_blocks = []
+    for block in content:
+        if isinstance(block, str):
+            sanitized, _, _ = sanitize_narrative_citations(block)
+            sanitized_blocks.append(sanitized)
+        elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+            sanitized, _, _ = sanitize_narrative_citations(str(block.get("text") or ""))
+            sanitized_blocks.append({**block, "text": sanitized})
+        else:
+            sanitized_blocks.append(block)
+
+    sanitized_text = _narrative_text(sanitized_blocks)
+    if aggregate_validation.get("source_status") == "FAIL" and not _has_substantive_narrative(sanitized_text):
+        non_text_blocks = [
+            block
+            for block in sanitized_blocks
+            if not isinstance(block, str)
+            and not (isinstance(block, dict) and block.get("type") in {"text", "output_text"})
+        ]
+        sanitized_blocks = [{"type": "text", "text": _deterministic_claim_fallback(contract)}, *non_text_blocks]
+        aggregate_validation["action"] = "DETERMINISTIC_CLAIM_FALLBACK"
+    return sanitized_blocks, aggregate_validation, aggregate_warnings
 
 
 def _guard_model_response(response: ModelResponse, *, contract: dict | None) -> ModelResponse:
@@ -79,21 +144,12 @@ def _guard_model_response(response: ModelResponse, *, contract: dict | None) -> 
     changed = False
     for message in model_response.result or []:
         content = message.content if isinstance(message, AIMessage) else None
-        if isinstance(content, str):
-            narrative_text = content
-        elif isinstance(content, list):
-            narrative_text = "\n".join(
-                str(block.get("text") or "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") in {"text", "output_text"}
-            )
-        else:
-            narrative_text = ""
+        narrative_text = _narrative_text(content)
         if not narrative_text or getattr(message, "tool_calls", None):
             guarded_messages.append(message)
             continue
-        validation, warnings = validate_narrative_citations(narrative_text)
-        if validation["status"] == "PASS":
+        sanitized_content, validation, warnings = _sanitize_message_content(content, contract=contract)
+        if validation is None or validation.get("source_status") != "FAIL":
             guarded_messages.append(message)
             continue
         changed = True
@@ -103,7 +159,7 @@ def _guard_model_response(response: ModelResponse, *, contract: dict | None) -> 
         guarded_messages.append(
             message.model_copy(
                 update={
-                    "content": _citation_guard_fallback(contract),
+                    "content": sanitized_content,
                     "additional_kwargs": additional_kwargs,
                 }
             )

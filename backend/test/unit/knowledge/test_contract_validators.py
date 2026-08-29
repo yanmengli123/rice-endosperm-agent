@@ -1,4 +1,9 @@
-from yuxi.knowledge.validation.citation_validator import validate_narrative_citations, validate_structured_citations
+from yuxi.knowledge.validation.citation_validator import (
+    NARRATIVE_CITATION_MARKER,
+    sanitize_narrative_citations,
+    validate_narrative_citations,
+    validate_structured_citations,
+)
 from yuxi.knowledge.validation.claim_validator import validate_deterministic_claims
 
 
@@ -54,4 +59,27 @@ def test_narrative_citation_validator_reserves_identifiers_for_structured_render
 
     assert result["status"] == "FAIL"
     assert result["detected_identifiers"]["PMID"] == ["PMID: 12345678"]
+    assert warnings
+
+
+def test_narrative_citation_sanitizer_preserves_scientific_answer_and_official_ids():
+    text = (
+        "Wx 对应 NCBI Gene ID 4340018、RAP/MSU LOC_Os06g04200 和 UniProt Q0DEV5，"
+        "编码颗粒结合型淀粉合酶 I（PMID: 12345678；DOI: 10.1000/wx-study；"
+        "evidence_id: ev_12345678）。"
+    )
+
+    sanitized, result, warnings = sanitize_narrative_citations(text)
+
+    assert "NCBI Gene ID 4340018" in sanitized
+    assert "LOC_Os06g04200" in sanitized
+    assert "Q0DEV5" in sanitized
+    assert "编码颗粒结合型淀粉合酶 I" in sanitized
+    assert "12345678" not in sanitized
+    assert "10.1000/wx-study" not in sanitized
+    assert "ev_12345678" not in sanitized
+    assert NARRATIVE_CITATION_MARKER in sanitized
+    assert result["source_status"] == "FAIL"
+    assert result["status"] == "PASS"
+    assert result["post_sanitization_status"] == "PASS"
     assert warnings

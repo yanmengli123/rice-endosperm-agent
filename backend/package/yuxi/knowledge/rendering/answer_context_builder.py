@@ -110,7 +110,9 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         + "\n</AUTHORITATIVE_KNOWLEDGE_CONTRACT>\n"
         "规则：仅依据上面的 Claim 组织科研解释。PMID、DOI、evidence_id 和完整结构化表由后端工具卡呈现，"
-        "不要自行生成、补全或改写这些标识符。FUNCTIONAL_REGULATION 可表述为功能调控；"
+        "不要自行生成、补全或改写这些引文标识符；plant_gene_lookup 等工具返回的官方基因、转录本、蛋白和"
+        "RAP/MSU 位点 ID 不属于引文标识，可以在正文保留。即使存在引文标识格式问题，也必须完成基于 Claim 的"
+        "科研解读，不得改为拒答或只返回计数。FUNCTIONAL_REGULATION 可表述为功能调控；"
         "PERTURBATION_EVIDENCE 只能表述为遗传/实验扰动证据；ASSOCIATION_OR_CONTEXT 不得升级为因果。"
         "Neo4j graph_expansion 只用于机制和路径上下文，不能替代 PostgreSQL canonical Claim。"
         "统计时必须区分 result_counts.claim_count 与 unique_subject_count：回答基因数量只能使用 "
