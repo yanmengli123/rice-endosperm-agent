@@ -58,7 +58,7 @@ class McpToolDescriptor:
     name: str                                   # 原始 MCP tool name（disabled_tools 匹配依据）
     stable_id: str                              # mcp__{server_cc}__{tool_cc}
     description: str = ""
-    args_model: type | None = None              # pydantic schema（adapter 构造），UI/LangChain 共用
+    args_model: Any = None                      # pydantic 模型类或 JSON-schema dict（adapter 构造），UI/LangChain 共用
     annotations: dict[str, Any] = field(default_factory=dict)
     output_schema: dict[str, Any] | None = None
     raw_tool: Any = field(default=None, repr=False, compare=False)
@@ -340,12 +340,22 @@ class LegacyLangChainHost(McpHost):
         args_model = getattr(raw, "args_schema", None)
         metadata = getattr(raw, "metadata", None)
         metadata = metadata if isinstance(metadata, dict) else {}
+        # args_schema 有两种合法形态：pydantic 模型类（新版 adapters）或
+        # 原始 JSON-schema dict（adapters 0.2.x）。两者都必须透传——
+        # 丢弃会导致工具退化为通用 arguments:dict 兜底，模型按真实字段名
+        # （如 symbol）传参时全部被校验拒绝。
+        if isinstance(args_model, type):
+            args_schema: Any = args_model
+        elif isinstance(args_model, dict):
+            args_schema = args_model
+        else:
+            args_schema = None
         return McpToolDescriptor(
             server_slug=slug,
             name=name,
             stable_id=f"mcp__{to_camel_case(slug)}__{to_camel_case(name)}",
             description=str(getattr(raw, "description", "") or ""),
-            args_model=args_model if isinstance(args_model, type) else None,
+            args_model=args_schema,
             annotations=dict(metadata.get("annotations") or {}),
             output_schema=metadata.get("output_schema") if isinstance(metadata.get("output_schema"), dict) else None,
             raw_tool=raw,

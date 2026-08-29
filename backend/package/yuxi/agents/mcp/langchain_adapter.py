@@ -27,8 +27,9 @@ def build_mcp_base_tool(
     """descriptor → LangChain BaseTool。
 
     说明：
-    - args_schema 直接复用 adapter 构造的 pydantic 模型（零损失），
-      缺失时回退通用 dict 形参；
+    - args_schema 三形态兼容：pydantic 模型类 / 原始 JSON-schema dict
+      （adapters 0.2.x，langchain-core 原生支持）都零损失透传，
+      两者皆缺时才回退通用 dict 形参；
     - coroutine 绑定 host.call_tool，异常路径已在 host 层归一化为
       McpToolResult(is_error=True) 文本，与旧 handle_tool_error 行为等价。
     """
@@ -38,12 +39,15 @@ def build_mcp_base_tool(
     host = _resolve_host()
 
     args_schema = descriptor.args_model
-    # adapters 构造的 schema 在不同栈下可能是 pydantic v2 或 v1-compat 模型，
-    # 只要有任一 schema 出口（model_json_schema / schema）就透传，避免误判降级。
+    # args_schema 兼容三种形态：
+    # 1) pydantic v2 / v1-compat 模型类 —— 有任一 schema 出口即透传；
+    # 2) 原始 JSON-schema dict（adapters 0.2.x）—— langchain-core ≥0.3 原生支持
+    #    dict schema（bind_tools 会让模型看到真实字段，如 symbol），直接透传；
+    # 3) 都不是 —— 回退通用 arguments:dict 兜底（仅描述符缺 schema 时才会发生）。
     schema_capable = isinstance(args_schema, type) and (
         hasattr(args_schema, "model_json_schema") or hasattr(args_schema, "schema")
     )
-    if not schema_capable:
+    if not schema_capable and not isinstance(args_schema, dict):
         args_schema = create_model(
             f"{to_camel_case(descriptor.name).capitalize() or 'Mcp'}Args",
             arguments=(dict, Field(default_factory=dict, description="MCP 工具入参对象")),

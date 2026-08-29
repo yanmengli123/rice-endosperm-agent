@@ -783,9 +783,16 @@ async def get_mcp_server_tools(
                     "description": getattr(tool, "description", ""),
                     "enabled": original_name not in disabled_tools,
                 }
-                # 提取参数信息
+                # 提取参数信息（args_schema 可能是 pydantic 类或 JSON-schema dict）
                 if hasattr(tool, "args_schema") and tool.args_schema:
-                    schema = tool.args_schema.schema() if hasattr(tool.args_schema, "schema") else {}
+                    if isinstance(tool.args_schema, dict):
+                        schema = tool.args_schema
+                    elif hasattr(tool.args_schema, "model_json_schema"):
+                        schema = tool.args_schema.model_json_schema()
+                    elif hasattr(tool.args_schema, "schema"):
+                        schema = tool.args_schema.schema()
+                    else:
+                        schema = {}
                     tool_info["parameters"] = schema.get("properties", {})
                     tool_info["required"] = schema.get("required", [])
                 else:
