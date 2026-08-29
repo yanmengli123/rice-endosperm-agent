@@ -298,10 +298,53 @@ def validate_custom_model_configuration(
     }
 
 
+_API_KEY_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+_BASE_URL_ENV_KEYS = ("ANTHROPIC_BASE_URL",)
+_MODEL_ENV_KEYS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+    "ANTHROPIC_REASONING_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+)
+
+
+def _env_scalar(env: dict[str, Any], key: str) -> str | None:
+    """读取 env 标量值：容忍数值型写法（如 ``"TIMEOUT": 300000``），拒绝布尔与复合类型。"""
+    value = env.get(key)
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _resolve_env_value(env: dict[str, Any], keys: tuple[str, ...]) -> tuple[str | None, str | None]:
+    """按别名顺序解析 env 字段，返回 (来源键, 值)；全部缺失返回 (None, None)。"""
+    for key in keys:
+        value = _env_scalar(env, key)
+        if value:
+            return key, value
+    return None, None
+
+
+
 def parse_claude_model_configuration(raw_configuration: str | dict[str, Any]) -> dict[str, Any]:
     """把 Claude Code 风格 JSON 收敛为 Yuxi 支持的最小 Anthropic 配置。
 
-    未识别字段不会进入进程环境，也不会透传到模型 SDK；调用方可展示 ignored_fields。
+    API Key 接受 ``ANTHROPIC_API_KEY`` 或 ``ANTHROPIC_AUTH_TOKEN``（Claude Code
+    两种标准写法）；模型名按 ``ANTHROPIC_MODEL`` 与各 ``ANTHROPIC_DEFAULT_*_MODEL``
+    别名链回退。未识别字段不会进入进程环境，也不会透传到模型 SDK；
+    调用方可展示 ignored_fields 与 resolved_sources。
     """
     if isinstance(raw_configuration, str):
         if len(raw_configuration.encode("utf-8")) > MAX_CONFIGURATION_JSON_BYTES:
@@ -322,15 +365,19 @@ def parse_claude_model_configuration(raw_configuration: str | dict[str, Any]) ->
     env = payload.get("env")
     if not isinstance(env, dict):
         raise ValueError("JSON 必须包含 env 对象")
-    api_key = env.get("ANTHROPIC_API_KEY")
-    base_url = env.get("ANTHROPIC_BASE_URL")
-    model_id = (
-        env.get("ANTHROPIC_MODEL")
-        or env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
-        or env.get("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME")
-    )
-    if not all(isinstance(value, str) and value.strip() for value in (api_key, base_url, model_id)):
-        raise ValueError("env 必须包含 ANTHROPIC_API_KEY、ANTHROPIC_BASE_URL 和 ANTHROPIC_MODEL")
+    api_key_source, api_key = _resolve_env_value(env, _API_KEY_ENV_KEYS)
+    base_url_source, base_url = _resolve_env_value(env, _BASE_URL_ENV_KEYS)
+    model_source, model_id = _resolve_env_value(env, _MODEL_ENV_KEYS)
+
+    missing: list[str] = []
+    if not api_key:
+        missing.append(f"API Key（按顺序尝试 {'、'.join(_API_KEY_ENV_KEYS)}）")
+    if not base_url:
+        missing.append("API Base URL（ANTHROPIC_BASE_URL）")
+    if not model_id:
+        missing.append(f"模型名（按顺序尝试 {'、'.join(_MODEL_ENV_KEYS)}）")
+    if missing:
+        raise ValueError("env 缺少必需字段：" + "；".join(missing))
 
     normalized = validate_custom_model_configuration(
         protocol="anthropic",
@@ -338,14 +385,13 @@ def parse_claude_model_configuration(raw_configuration: str | dict[str, Any]) ->
         api_key=api_key,
         model_id=model_id,
     )
-    supported = {
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-    }
+    supported = {*_API_KEY_ENV_KEYS, *_BASE_URL_ENV_KEYS, *_MODEL_ENV_KEYS}
     normalized["ignored_fields"] = sorted(str(key) for key in env if key not in supported)
+    normalized["resolved_sources"] = {
+        "api_key": api_key_source,
+        "base_url": base_url_source,
+        "model_id": model_source,
+    }
     if "includeCoAuthoredBy" in payload:
         normalized["ignored_fields"].append("includeCoAuthoredBy")
     return normalized

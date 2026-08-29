@@ -211,6 +211,78 @@ class TestClaudeJsonImport:
         with pytest.raises(ValueError):
             parse_claude_model_configuration(payload)
 
+    def test_accepts_auth_token_alias_with_default_model_fallback(self):
+        """Claude Code 官方写法：AUTH_TOKEN + DEFAULT_*_MODEL 系列，无 ANTHROPIC_MODEL。"""
+        parsed = parse_claude_model_configuration(
+            {
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-cp-test-token",
+                    "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MiniMax-M3",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M3",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3",
+                    "ANTHROPIC_REASONING_MODEL": "MiniMax-M3",
+                    "API_TIMEOUT_MS": 300000,
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
+                },
+                "includeCoAuthoredBy": False,
+            }
+        )
+        assert parsed["provider_id"] == "user-anthropic-compatible"
+        assert parsed["model_id"] == "MiniMax-M3"
+        assert parsed["api_key"] == "sk-cp-test-token"
+        assert parsed["ignored_fields"] == [
+            "API_TIMEOUT_MS",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "includeCoAuthoredBy",
+        ]
+
+    def test_model_fallback_prefers_sonnet_over_reasoning_and_haiku(self):
+        parsed = parse_claude_model_configuration(
+            {
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-test",
+                    "ANTHROPIC_BASE_URL": "https://api.example.org",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku-model",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet-model",
+                }
+            }
+        )
+        assert parsed["model_id"] == "sonnet-model"
+
+    def test_error_message_lists_tried_aliases(self):
+        with pytest.raises(ValueError, match="ANTHROPIC_AUTH_TOKEN"):
+            parse_claude_model_configuration(
+                {
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://api.example.org",
+                        "ANTHROPIC_MODEL": "model",
+                    }
+                }
+            )
+        with pytest.raises(ValueError, match="ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"):
+            parse_claude_model_configuration(
+                {
+                    "env": {
+                        "ANTHROPIC_API_KEY": "sk-test",
+                        "ANTHROPIC_BASE_URL": "https://api.example.org",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "",
+                    }
+                }
+            )
+
+    def test_boolean_env_values_are_rejected_as_missing(self):
+        with pytest.raises(ValueError):
+            parse_claude_model_configuration(
+                {
+                    "env": {
+                        "ANTHROPIC_API_KEY": True,
+                        "ANTHROPIC_BASE_URL": "https://api.example.org",
+                        "ANTHROPIC_MODEL": "model",
+                    }
+                }
+            )
+
     def test_rejects_plain_http_custom_endpoint(self):
         with pytest.raises(ValueError, match="HTTPS"):
             parse_claude_model_configuration(
