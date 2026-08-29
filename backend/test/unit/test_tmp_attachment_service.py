@@ -206,6 +206,53 @@ async def test_confirm_tmp_thread_attachments_materializes_original_and_parsed_f
 
 
 @pytest.mark.asyncio
+async def test_confirm_tmp_thread_attachments_is_idempotent_for_same_tmp_object(monkeypatch):
+    fake_minio = FakeMinioClient()
+    fake_repo = FakeConversationRepository(db=None)
+    fake_repo.attachments.append(
+        {
+            "file_id": "existing-file-id",
+            "source_tmp_file_id": "tmp-1",
+            "file_name": "demo.pdf",
+            "file_type": "application/pdf",
+            "file_size": 9,
+            "status": "parsed",
+            "uploaded_at": "2026-08-29T00:00:00+00:00",
+            "path": "/home/gem/user-data/uploads/attachments/existing.md",
+            "original_path": "/home/gem/user-data/uploads/existing_demo.pdf",
+        }
+    )
+    monkeypatch.setattr(service, "get_minio_client", lambda: fake_minio)
+    monkeypatch.setattr(service, "ConversationRepository", lambda db: fake_repo)
+
+    async def noop_sync(**kwargs):
+        return None
+
+    async def noop_invalidate(thread_id: str):
+        return None
+
+    monkeypatch.setattr(service, "_sync_thread_upload_state", noop_sync)
+    monkeypatch.setattr(service, "invalidate_mention_cache", noop_invalidate)
+
+    response = await service.confirm_tmp_thread_attachments_view(
+        thread_id="thread-1",
+        attachments=[
+            {
+                "file_name": "demo.pdf",
+                "file_type": "application/pdf",
+                "bucket_name": "knowledgebases",
+                "object_name": "tmp/chat_attachments/user-1/tmp-1/original/demo.pdf",
+            }
+        ],
+        db=None,
+        current_uid="user-1",
+    )
+
+    assert [item["file_id"] for item in response["attachments"]] == ["existing-file-id"]
+    assert len(fake_repo.attachments) == 1
+
+
+@pytest.mark.asyncio
 async def test_parse_tmp_attachment_uses_object_name_for_type_validation(monkeypatch):
     fake_minio = FakeMinioClient()
     object_name = "tmp/chat_attachments/user-1/tmp-1/original/demo.docx"

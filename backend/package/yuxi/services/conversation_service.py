@@ -721,6 +721,12 @@ async def confirm_tmp_thread_attachments_view(
     minio_client = get_minio_client()
     expected_bucket = _get_tmp_attachment_bucket()
     prepared_items: list[dict] = []
+    existing_attachments = await conv_repo.get_attachments(conversation.id)
+    existing_by_tmp_id = {
+        str(record.get("source_tmp_file_id")): record
+        for record in existing_attachments
+        if record.get("source_tmp_file_id")
+    }
 
     for item in attachments:
         object_name = str(item.get("object_name") or "")
@@ -729,6 +735,10 @@ async def confirm_tmp_thread_attachments_view(
             raise HTTPException(status_code=400, detail="无效的临时附件 bucket")
 
         tmp_file_id, file_name = _require_tmp_object_section(object_name, str(current_uid), "original")
+        existing_record = existing_by_tmp_id.get(tmp_file_id)
+        if existing_record is not None:
+            prepared_items.append({"existing_record": existing_record})
+            continue
         try:
             file_content = await minio_client.adownload_file(bucket_name, object_name)
         except StorageError as exc:
@@ -755,6 +765,7 @@ async def confirm_tmp_thread_attachments_view(
 
         prepared_items.append(
             {
+                "source_tmp_file_id": tmp_file_id,
                 "file_name": file_name,
                 "file_type": item.get("file_type"),
                 "file_content": file_content,
@@ -764,7 +775,11 @@ async def confirm_tmp_thread_attachments_view(
         )
 
     added_records: list[dict] = []
+    result_records: list[dict] = []
     for prepared in prepared_items:
+        if existing_record := prepared.get("existing_record"):
+            result_records.append(existing_record)
+            continue
         file_id = uuid.uuid4().hex
         materialized = _materialize_tmp_attachment_files(
             thread_id=thread_id,
@@ -777,6 +792,7 @@ async def confirm_tmp_thread_attachments_view(
         )
         attachment_record = {
             "file_id": file_id,
+            "source_tmp_file_id": prepared["source_tmp_file_id"],
             "file_name": prepared["file_name"],
             "file_type": prepared["file_type"],
             "file_size": len(prepared["file_content"]),
@@ -794,8 +810,10 @@ async def confirm_tmp_thread_attachments_view(
             if optional_key in materialized:
                 attachment_record[optional_key] = materialized[optional_key]
         added_records.append(attachment_record)
+        result_records.append(attachment_record)
 
-    await conv_repo.add_attachments(conversation.id, added_records)
+    if added_records:
+        await conv_repo.add_attachments(conversation.id, added_records)
     all_attachments = await conv_repo.get_attachments(conversation.id)
     await _sync_thread_upload_state(
         thread_id=thread_id,
@@ -806,7 +824,7 @@ async def confirm_tmp_thread_attachments_view(
     )
     await invalidate_mention_cache(thread_id)
 
-    return {"attachments": [serialize_attachment(item) for item in added_records]}
+    return {"attachments": [serialize_attachment(item) for item in result_records]}
 
 
 async def upload_thread_attachment_view(
