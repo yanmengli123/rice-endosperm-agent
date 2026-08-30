@@ -10,10 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp
 
 WORKDIR /app
-RUN python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
-      "https://raw.githubusercontent.com/florensiawidjaja/BioinfoMCP/${BIOINFOMCP_COMMIT}/mcp-servers/mcp_bamCoverage/requirements.txt" \
-      /tmp/requirements.txt \
-    && printf '%s  %s\n' "$REQUIREMENTS_SHA256" /tmp/requirements.txt | sha256sum --check --strict \
+COPY docker/mcp/bioinfomcp-tools/bioinfomcp-trim-galore/upstream/requirements.txt /tmp/requirements.txt
+RUN printf '%s  %s\n' "$REQUIREMENTS_SHA256" /tmp/requirements.txt | sha256sum --check --strict \
     && conda install --name base --yes --channel conda-forge "python=3.12" \
     && python -m pip install --no-cache-dir -r /tmp/requirements.txt \
     && conda clean --all --yes \
@@ -21,27 +19,19 @@ RUN python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1
 ARG SERVER_SHA256=545f29c0060057562030a579a69beece6d09a23dc22ef7863ff41c6c5dc3d8df
 ARG ENV_YAML_SHA256=1330cbd72e7edc701076d866394bcc92c95698f9d18ed693a7fde170883ba76d
 ARG LICENSE_SHA256=09d32674c53a40205382e0293a22951c40fa4eb259b9b5ee1cb7770cc02b9e5e
-RUN python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
-      "https://raw.githubusercontent.com/florensiawidjaja/BioinfoMCP/${BIOINFOMCP_COMMIT}/mcp-servers/mcp_trim-galore/environment.yaml" \
-      /tmp/environment.yaml
+COPY docker/mcp/bioinfomcp-tools/bioinfomcp-trim-galore/upstream/environment.yaml /tmp/environment.yaml
 # 强制更新 base；上游文件声明 name=mcp-tool，原 Dockerfile 会把 CLI 装进未激活环境。
 RUN printf '%s  %s\n' "$ENV_YAML_SHA256" /tmp/environment.yaml | sha256sum --check --strict \
     && conda env update --name base --file /tmp/environment.yaml \
     && conda clean --all --yes \
     && rm -rf /root/.cache /tmp/environment.yaml
 
-RUN python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
-      "https://raw.githubusercontent.com/florensiawidjaja/BioinfoMCP/${BIOINFOMCP_COMMIT}/mcp-servers/mcp_trim-galore/app/trim-galore_server.py" \
-      /app/trim-galore_server.py \
-    && printf '%s  %s\n' "$SERVER_SHA256" /app/trim-galore_server.py | sha256sum --check --strict \
-    && mkdir -p /usr/share/doc/bioinfomcp \
-    && python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
-      "https://raw.githubusercontent.com/florensiawidjaja/BioinfoMCP/${BIOINFOMCP_COMMIT}/LICENSE" \
-      /usr/share/doc/bioinfomcp/LICENSE \
+COPY docker/mcp/bioinfomcp-tools/bioinfomcp-trim-galore/upstream/trim-galore_server.py /app/trim-galore_server.py
+COPY docker/mcp/bioinfomcp-tools/bioinfomcp-trim-galore/upstream/LICENSE /usr/share/doc/bioinfomcp/LICENSE
+RUN printf '%s  %s\n' "$SERVER_SHA256" /app/trim-galore_server.py | sha256sum --check --strict \
     && printf '%s  %s\n' "$LICENSE_SHA256" /usr/share/doc/bioinfomcp/LICENSE | sha256sum --check --strict
 
-COPY docker/mcp/bioinfomcp-tools/THIRD_PARTY_NOTICES.md \
-     /usr/share/doc/bioinfomcp/THIRD_PARTY_NOTICES.md
+COPY docker/mcp/bioinfomcp-tools/THIRD_PARTY_NOTICES.md /usr/share/doc/bioinfomcp/THIRD_PARTY_NOTICES.md
 
 LABEL org.opencontainers.image.title="Yuxi BioinfoMCP trim-galore" \
       org.opencontainers.image.source="https://github.com/florensiawidjaja/BioinfoMCP" \
