@@ -490,6 +490,7 @@ class SelfRegisterRequest(BaseModel):
     uid: str = Field(..., description="登录标识，3-20 位字母/数字/下划线")
     username: str = Field(..., description="显示名称")
     password: str = Field(..., min_length=8, max_length=128, description="密码，8-128 位")
+    department_id: int = Field(..., description="申请加入的部门 ID（注册时必选）")
     invite_code: str | None = Field(None, max_length=256, description="邀请码（启用邀请码时必填）")
 
 
@@ -499,16 +500,27 @@ def _register_enabled() -> bool:
 
 @auth.get("/register-config")
 async def get_register_config():
-    """返回非敏感注册开关，供登录页决定是否展示自助注册入口。"""
+    """返回非敏感注册开关与可选部门列表，供注册页渲染。"""
+    departments: list[dict] = []
+    async with pg_manager.get_async_session_context() as session:
+        rows = (
+            await session.execute(select(Department).order_by(Department.id))
+        ).scalars().all()
+        departments = [{"id": d.id, "name": d.name} for d in rows]
     return {
         "enabled": _register_enabled(),
         "invite_required": bool(os.getenv("REGISTER_INVITE_CODE", "").strip()),
+        "departments": departments,
     }
 
 
 @auth.post("/register")
 async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(get_db)):
-    """自助注册普通用户；由 REGISTER_ENABLED 显式开启，可选邀请码与默认部门。"""
+    """自助注册：创建停用待审账号并自动生成 API Key，管理员在用户管理中启用后生效。
+
+    企业审批流：注册成功 ≠ 可用。账号以 is_disabled=True 落库，登录与 API Key
+    鉴权门禁（auth_middleware）天然拒绝，直到管理员在 /user-manage 点击启用。
+    """
     if not _register_enabled():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="系统未开放自助注册")
 
@@ -538,36 +550,51 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
         conflict = "登录标识" if existing.uid == data.uid else "显示名称"
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"该{conflict}已被使用")
 
-    department_id = None
-    default_department_id = os.getenv("REGISTER_DEPARTMENT_ID", "").strip()
-    if default_department_id.isdigit():
-        department = (
-            await db.execute(select(Department).filter(Department.id == int(default_department_id)))
-        ).scalar_one_or_none()
-        if department is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="注册部门配置无效")
-        department_id = department.id
+    department = (
+        await db.execute(select(Department).filter(Department.id == data.department_id))
+    ).scalar_one_or_none()
+    if department is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选部门不存在")
 
     new_user = User(
         username=data.username.strip(),
         uid=data.uid,
         password_hash=AuthUtils.hash_password(data.password),
         role="user",
-        department_id=department_id,
-        last_login=utc_now_naive(),
+        department_id=department.id,
+        # 审批流：注册即停用，管理员在用户管理中点击启用后方可登录与调用
+        is_disabled=True,
+        last_login=None,
     )
     db.add(new_user)
     try:
         await db.flush()
-        from yuxi.services.principal import ensure_tenant_membership
+        from yuxi.services.principal import ensure_tenant_membership, resolve_tenant_id
 
         await ensure_tenant_membership(db, new_user)
+
+        # 自动生成 API Key：启用前被门禁拦截，启用后立即可用（明文不落库）。
+        full_key, key_hash, key_prefix = AuthUtils.generate_api_key()
+        valid_days = int(os.getenv("REGISTER_API_KEY_VALID_DAYS", "90"))
+        api_key = APIKey(
+            key_hash=key_hash,
+            key_prefix=key_prefix,
+            name="注册自动生成",
+            user_id=new_user.id,
+            department_id=department.id,
+            tenant_id=await resolve_tenant_id(db, new_user.uid),
+            expires_at=(utc_now_naive() + timedelta(days=valid_days)).replace(tzinfo=None),
+            purpose="external_agent",
+            created_by=str(new_user.id),
+        )
+        db.add(api_key)
+
         db.add(
             OperationLog(
                 user_id=new_user.id,
                 tenant_id=await resolve_operator_tenant_id(db, new_user.id),
                 operation="自助注册",
-                details=f"uid={new_user.uid}",
+                details=f"uid={new_user.uid}, 部门={department.name}, 待管理员审核启用",
             )
         )
         await db.commit()
@@ -576,17 +603,15 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
         await db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="登录标识或显示名称已被使用") from exc
 
-    access_token = AuthUtils.create_access_token(
-        {"sub": str(new_user.id), "auth_version": new_user.auth_version}
-    )
     return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user_id": new_user.id,
-        "username": new_user.username,
+        "status": "pending_approval",
+        "message": "注册已提交，等待管理员审核启用后方可登录使用",
         "uid": new_user.uid,
-        "role": new_user.role,
-        "department_id": new_user.department_id,
+        "username": new_user.username,
+        "department": department.name,
+        # 明文仅此一次返回，服务端只保存哈希；管理员详情页可见前缀并可重置
+        "api_key": full_key,
+        "api_key_prefix": key_prefix,
     }
 
 

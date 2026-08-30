@@ -373,7 +373,8 @@ onMounted(() => {
       </a-table-column>
       <a-table-column title="状态" key="status">
         <template #default="{ record }">
-          <a-tag v-if="record.is_disabled" color="red">已停用</a-tag>
+          <a-tag v-if="record.is_disabled && !record.last_login" color="orange">待审核</a-tag>
+          <a-tag v-else-if="record.is_disabled" color="red">已停用</a-tag>
           <a-tag v-else color="green">正常</a-tag>
         </template>
       </a-table-column>
