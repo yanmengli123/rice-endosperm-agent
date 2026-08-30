@@ -8,7 +8,13 @@ import PageHeader from '@/components/shared/PageHeader.vue'
 const loading = ref(false)
 const exportingUid = ref('')
 const users = ref([])
-const quotaModal = reactive({ open: false, uid: '', dailyRunLimit: null, monthlyTokenLimit: null })
+const quotaModal = reactive({
+  open: false,
+  uid: '',
+  dailyRunLimit: null,
+  monthlyTokenLimit: null,
+  modelAccessPolicy: 'byok_optional'
+})
 const createModal = reactive({ open: false, username: '', password: '', role: 'user' })
 // P5：用户详情抽屉（账户 / 密钥 / 问答 / 监控 四合一）
 const detailDrawer = reactive({
@@ -74,10 +80,12 @@ async function openQuota(user) {
   quotaModal.uid = user.uid
   quotaModal.dailyRunLimit = null
   quotaModal.monthlyTokenLimit = null
+  quotaModal.modelAccessPolicy = 'byok_optional'
   try {
     const data = await authApi.getManagedUserQuota(user.uid)
     quotaModal.dailyRunLimit = data.daily_run_limit
     quotaModal.monthlyTokenLimit = data.monthly_token_limit
+    quotaModal.modelAccessPolicy = data.model_access_policy || 'byok_optional'
     quotaModal.open = true
   } catch (error) {
     message.error(error.message || '加载配额失败')
@@ -88,7 +96,9 @@ async function saveQuota() {
   try {
     await authApi.setManagedUserQuota(quotaModal.uid, {
       daily_run_limit: quotaModal.dailyRunLimit,
-      monthly_token_limit: quotaModal.monthlyTokenLimit
+      monthly_token_limit: quotaModal.monthlyTokenLimit,
+      model_access_policy: quotaModal.modelAccessPolicy,
+      byok_platform_token_exempt: quotaModal.modelAccessPolicy !== 'platform_only'
     })
     message.success('配额已保存')
     quotaModal.open = false
@@ -415,15 +425,24 @@ onMounted(() => {
       @ok="saveQuota"
       @cancel="quotaModal.open = false"
     >
-      <p class="quota-hint">留空表示不限制；配额在每次创建运行时预检。</p>
+      <p class="quota-hint">每日次数用于滥用防护；月度额度只统计企业平台模型。用户 BYOK 独立计量，不占平台 Token。</p>
       <label class="quota-field">
         <span>每日运行次数上限</span>
         <a-input-number v-model:value="quotaModal.dailyRunLimit" :min="1" placeholder="不限制" style="width: 100%" />
       </label>
       <label class="quota-field">
-        <span>每月 token 用量上限</span>
+        <span>每月平台模型 Token 上限</span>
         <a-input-number v-model:value="quotaModal.monthlyTokenLimit" :min="1" placeholder="不限制" style="width: 100%" />
       </label>
+      <label class="quota-field">
+        <span>个人模型接入策略</span>
+        <a-select v-model:value="quotaModal.modelAccessPolicy" style="width: 100%">
+          <a-select-option value="byok_optional">允许个人模型（推荐）</a-select-option>
+          <a-select-option value="byok_required">必须使用个人模型</a-select-option>
+          <a-select-option value="platform_only">仅允许企业平台模型</a-select-option>
+        </a-select>
+      </label>
+      <p v-if="quotaModal.modelAccessPolicy !== 'platform_only'" class="quota-hint">平台额度耗尽后，用户可在桌面端“设置与连接”中导入自己的模型并继续问答。</p>
     </a-modal>
 
     <a-modal
@@ -614,7 +633,7 @@ onMounted(() => {
             <template v-if="detailDrawer.stats">
               <a-row :gutter="12" class="monitor-cards">
                 <a-col :span="6"><a-card size="small"><a-statistic title="总运行次数" :value="detailDrawer.stats.total_runs" /></a-card></a-col>
-                <a-col :span="6"><a-card size="small"><a-statistic title="总 Token 用量" :value="detailDrawer.stats.total_tokens" /></a-card></a-col>
+                <a-col :span="6"><a-card size="small"><a-statistic title="平台 Token" :value="detailDrawer.stats.platform_tokens" /></a-card></a-col>
                 <a-col :span="6"><a-card size="small"><a-statistic title="BYOK 自费 Token" :value="detailDrawer.stats.byok_tokens" /></a-card></a-col>
                 <a-col :span="6"><a-card size="small"><a-statistic title="接入策略" :value="detailDrawer.stats.entitlement.credential_policy" /></a-card></a-col>
               </a-row>

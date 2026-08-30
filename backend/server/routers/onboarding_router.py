@@ -25,10 +25,10 @@ class InvitationCreate(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=64)
     password: str = Field(..., min_length=8, max_length=128)
     department_id: int
-    credential_policy: str = Field("platform_only")
+    credential_policy: str = Field("byok_optional")
     daily_run_limit: int | None = Field(None, ge=1)
     monthly_platform_token_limit: int | None = Field(None, ge=1)
-    byok_platform_token_exempt: bool = Field(False)
+    byok_platform_token_exempt: bool = Field(True)
     device_name: str = Field("桌面端", max_length=128)
 
 
@@ -123,4 +123,3 @@ async def exchange_activation(payload: ActivationExchange, db: AsyncSession = De
         return await consume_onboarding_activation(db, code)
     except OnboardingError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"error": exc.code, "message": exc.message}) from exc
-

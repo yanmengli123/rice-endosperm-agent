@@ -297,6 +297,14 @@ class _NoneResult:
         return None
 
 
+class _ScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
 class _CreateRunDb:
     def __init__(
         self,
@@ -325,6 +333,15 @@ class _CreateRunDb:
         self.runs_by_id = runs_by_id or {}
         self.raise_create_integrity_error = raise_create_integrity_error
         self._message_id = message_id
+        self.entitlement = SimpleNamespace(
+            tenant_id=1,
+            uid="user-1",
+            credential_policy="byok_optional",
+            policy_version=1,
+            byok_platform_token_exempt=True,
+            daily_run_limit=None,
+            monthly_platform_token_limit=None,
+        )
 
     async def execute(self, stmt):
         description = str(stmt)
@@ -334,7 +351,9 @@ class _CreateRunDb:
         # P5：权益预检会解析成员关系（返回一行默认租户）、读权益与 BYOK（视为无数据）
         if 'tenant_memberships' in description:
             return _RowsResult([SimpleNamespace(tenant_id=1)])
-        if 'tenant_user_entitlements' in description or 'model_user_credentials' in description:
+        if 'tenant_user_entitlements' in description:
+            return _ScalarResult(self.entitlement)
+        if 'model_user_credentials' in description:
             return _NoneResult()
         return _UserResult()
 
@@ -788,7 +807,8 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
         "model_spec": "agent-default-model",
         "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
         "policy_version": 1,
-        "credential_policy": "platform_only",
+        "credential_policy": "byok_optional",
+        "credential_source": "platform",
     }
     assert "model_spec" not in db.added[0].extra_metadata
     assert db.added[0].extra_metadata["raw_message"]["type"] == "human"
@@ -1558,6 +1578,42 @@ async def test_create_chat_run_persists_validated_model_spec(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_create_chat_run_freezes_owned_custom_model_credential(monkeypatch: pytest.MonkeyPatch):
+    from yuxi.services import user_credential_service
+
+    model_spec = "user-anthropic-compatible:enterprise-model"
+    monkeypatch.setattr(
+        user_credential_service,
+        "list_active_custom_model_specs",
+        AsyncMock(return_value={model_spec}),
+    )
+    monkeypatch.setattr(
+        user_credential_service,
+        "get_active_user_credential",
+        AsyncMock(return_value=SimpleNamespace(id=42)),
+    )
+    db = _patch_agent_run_creation(monkeypatch)
+
+    await agent_run_service.create_agent_run_view(
+        input_message=_chat_input("hello"),
+        agent_slug="default",
+        thread_id="thread-1",
+        meta={"request_id": "req-custom-model"},
+        current_uid="user-1",
+        db=db,
+        model_spec=model_spec,
+    )
+
+    payload = db.created_run_kwargs["input_payload"]
+    assert payload["model_spec"] == model_spec
+    assert payload["credential_source"] == "user_byok"
+    assert payload["user_credential"] == {
+        "credential_id": 42,
+        "provider_id": "user-anthropic-compatible",
+    }
+
+
+@pytest.mark.asyncio
 async def test_create_chat_run_with_image_persists_multimodal_message_type(monkeypatch: pytest.MonkeyPatch):
     db = _patch_agent_run_creation(monkeypatch)
 
@@ -1574,7 +1630,8 @@ async def test_create_chat_run_with_image_persists_multimodal_message_type(monke
         "model_spec": "agent-default-model",
         "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
         "policy_version": 1,
-        "credential_policy": "platform_only",
+        "credential_policy": "byok_optional",
+        "credential_source": "platform",
     }
     assert db.added[0].message_type == "multimodal_image"
     assert db.added[0].image_content == "base64-image"
@@ -1657,6 +1714,42 @@ async def test_create_resume_run_inherits_parent_model_spec(monkeypatch: pytest.
     )
 
     assert db.created_run_kwargs["input_payload"]["model_spec"] == "parent-model"
+
+
+@pytest.mark.asyncio
+async def test_resume_custom_model_fails_closed_when_credential_was_revoked(monkeypatch: pytest.MonkeyPatch):
+    from yuxi.services import user_credential_service
+
+    model_spec = "user-openai-compatible:revoked-model"
+    monkeypatch.setattr(
+        user_credential_service,
+        "list_active_custom_model_specs",
+        AsyncMock(return_value=set()),
+    )
+    db = _patch_agent_run_creation(
+        monkeypatch,
+        parent_run=SimpleNamespace(
+            id="parent-run",
+            conversation_thread_id="thread-1",
+            status="interrupted",
+            input_payload={"model_spec": model_spec},
+        ),
+    )
+
+    with pytest.raises(agent_run_service.HTTPException) as exc:
+        await agent_run_service.create_agent_run_view(
+            input_message=None,
+            agent_slug="default",
+            thread_id="thread-1",
+            meta={"request_id": "resume-revoked-model"},
+            current_uid="user-1",
+            db=db,
+            resume={"answer": "continue"},
+            created_by_run_id="parent-run",
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["code"] == "custom_model_credential_unavailable"
 
 
 def test_compact_stream_chunk_retains_compression_field():

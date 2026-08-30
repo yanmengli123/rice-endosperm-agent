@@ -55,7 +55,7 @@ async def create_onboarding_invitation(
     credential_policy: str = "byok_optional",
     daily_run_limit: int | None = None,
     monthly_platform_token_limit: int | None = None,
-    byok_platform_token_exempt: bool = False,
+    byok_platform_token_exempt: bool = True,
     device_name: str = "桌面端",
 ) -> dict:
     """单事务完成：建户 → 成员 → 权益 → 激活凭证 → 审计。

@@ -512,7 +512,14 @@ async def _ensure_user_byok_allowed(db: AsyncSession, uid: str) -> int:
     tenant_id = await resolve_tenant_id(db, uid)
     entitlement = await resolve_entitlement(db, uid, tenant_id)
     if entitlement.credential_policy == TenantUserEntitlement.CREDENTIAL_POLICY_PLATFORM_ONLY:
-        raise HTTPException(status_code=403, detail="当前账号未启用自有模型，请联系管理员将模型策略设为 BYOK 可选")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "byok_not_allowed",
+                "message": "当前账号未启用自有模型，请联系管理员将模型策略设为 BYOK 可选",
+                "action": "contact_admin",
+            },
+        )
     return tenant_id
 
 
@@ -670,6 +677,9 @@ async def get_managed_user_stats(
 ):
     """单用户监控面板数据：按日 run/token 趋势 + 权益配额 + 分域用量。"""
     target_user = await _load_manage_target(db, uid, current_user)
+    from yuxi.services.principal import resolve_tenant_id
+
+    tenant_id = await resolve_tenant_id(db, target_user.uid)
 
     day_start = utc_now_naive().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
     daily_rows = (
@@ -703,14 +713,27 @@ async def get_managed_user_stats(
         await db.execute(
             select(func.coalesce(func.sum(UsageLedger.total_tokens), 0)).where(
                 UsageLedger.uid == target_user.uid,
+                UsageLedger.tenant_id == tenant_id,
                 UsageLedger.credential_source == "user_byok",
+            )
+        )
+    ).scalar()
+    platform_tokens_row = (
+        await db.execute(
+            select(func.coalesce(func.sum(UsageLedger.total_tokens), 0)).where(
+                UsageLedger.uid == target_user.uid,
+                UsageLedger.tenant_id == tenant_id,
+                UsageLedger.credential_source.in_(("platform", "legacy_unknown")),
             )
         )
     ).scalar()
 
     entitlement = (
         await db.execute(
-            select(TenantUserEntitlement).where(TenantUserEntitlement.uid == target_user.uid)
+            select(TenantUserEntitlement).where(
+                TenantUserEntitlement.tenant_id == tenant_id,
+                TenantUserEntitlement.uid == target_user.uid,
+            )
         )
     ).scalar_one_or_none()
 
@@ -719,10 +742,11 @@ async def get_managed_user_stats(
         "username": target_user.username,
         "total_runs": int(total_runs_row or 0),
         "total_tokens": int(total_tokens_row or 0),
+        "platform_tokens": int(platform_tokens_row or 0),
         "byok_tokens": int(byok_tokens_row or 0),
         "daily": daily,
         "entitlement": {
-            "credential_policy": entitlement.credential_policy if entitlement else "platform_only",
+            "credential_policy": entitlement.credential_policy if entitlement else "byok_optional",
             "daily_run_limit": entitlement.daily_run_limit if entitlement else None,
             "monthly_platform_token_limit": entitlement.monthly_platform_token_limit if entitlement else None,
             "policy_version": entitlement.policy_version if entitlement else None,
@@ -1068,6 +1092,9 @@ async def get_my_usage(
     db: AsyncSession = Depends(get_db),
 ):
     """按天返回当前用户的 run 数与 token 用量（来自 agent_runs 终态计量）。"""
+    from yuxi.services.principal import resolve_tenant_id
+
+    tenant_id = await resolve_tenant_id(db, current_user.uid)
     since = utc_now_naive() - timedelta(days=days)
     month_start = utc_now_naive().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     rows = (
@@ -1089,9 +1116,31 @@ async def get_my_usage(
             )
         )
     ).scalar()
+    monthly_platform_tokens = (
+        await db.execute(
+            select(func.coalesce(func.sum(UsageLedger.total_tokens), 0)).where(
+                UsageLedger.uid == current_user.uid,
+                UsageLedger.tenant_id == tenant_id,
+                UsageLedger.created_at >= month_start,
+                UsageLedger.credential_source.in_(("platform", "legacy_unknown")),
+            )
+        )
+    ).scalar()
+    monthly_byok_tokens = (
+        await db.execute(
+            select(func.coalesce(func.sum(UsageLedger.total_tokens), 0)).where(
+                UsageLedger.uid == current_user.uid,
+                UsageLedger.tenant_id == tenant_id,
+                UsageLedger.created_at >= month_start,
+                UsageLedger.credential_source == "user_byok",
+            )
+        )
+    ).scalar()
     return {
         "daily": [{"date": str(row.day), "run_count": row.run_count, "tokens": int(row.tokens or 0)} for row in rows],
         "monthly_tokens": int(monthly_tokens or 0),
+        "monthly_platform_tokens": int(monthly_platform_tokens or 0),
+        "monthly_byok_tokens": int(monthly_byok_tokens or 0),
     }
 
 
@@ -1164,15 +1213,18 @@ async def put_user_quota(
 
     tenant_id = await resolve_tenant_id(db, uid)
     entitlement = await resolve_entitlement(db, uid, tenant_id)
-    entitlement.daily_run_limit = (
-        data.daily_run_limit if data.daily_run_limit is not None else entitlement.daily_run_limit
-    )
-    if data.monthly_token_limit is not None:
+    fields_set = data.model_fields_set
+    if "daily_run_limit" in fields_set:
+        entitlement.daily_run_limit = data.daily_run_limit
+    if "monthly_token_limit" in fields_set:
         entitlement.monthly_platform_token_limit = data.monthly_token_limit
     if data.model_access_policy is not None:
         entitlement.credential_policy = data.model_access_policy
-    if data.byok_platform_token_exempt is not None:
-        entitlement.byok_platform_token_exempt = data.byok_platform_token_exempt
+    # 平台 token 池只统计 platform/legacy_unknown；BYOK 永远独立计量。
+    # 保留兼容字段，但不允许把用户自费 token 混回企业平台配额。
+    entitlement.byok_platform_token_exempt = (
+        entitlement.credential_policy != TenantUserEntitlement.CREDENTIAL_POLICY_PLATFORM_ONLY
+    )
     entitlement.policy_version += 1
     entitlement.updated_by = current_user.uid
     db.add(

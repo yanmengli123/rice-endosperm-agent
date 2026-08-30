@@ -569,9 +569,14 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
     db.add(new_user)
     try:
         await db.flush()
-        from yuxi.services.principal import ensure_tenant_membership, resolve_tenant_id
+        from yuxi.services.principal import ensure_tenant_membership, resolve_entitlement, resolve_tenant_id
 
         await ensure_tenant_membership(db, new_user)
+        tenant_id = await resolve_tenant_id(db, new_user.uid)
+        entitlement = await resolve_entitlement(db, new_user.uid, tenant_id)
+        entitlement.credential_policy = TenantUserEntitlement.CREDENTIAL_POLICY_BYOK_OPTIONAL
+        entitlement.byok_platform_token_exempt = True
+        entitlement.updated_by = "self-register"
 
         # 自动生成 API Key：启用前被门禁拦截，启用后立即可用（明文不落库）。
         full_key, key_hash, key_prefix = AuthUtils.generate_api_key()
@@ -582,9 +587,9 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
             name="注册自动生成",
             user_id=new_user.id,
             department_id=department.id,
-            tenant_id=await resolve_tenant_id(db, new_user.uid),
+            tenant_id=tenant_id,
             expires_at=(utc_now_naive() + timedelta(days=valid_days)).replace(tzinfo=None),
-            purpose="external_agent",
+            purpose="desktop_legacy",
             created_by=str(new_user.id),
         )
         db.add(api_key)
@@ -980,6 +985,7 @@ async def create_user(
     await ensure_tenant_membership(db, new_user, tenant_id=principal.tenant_id)
     entitlement = await resolve_entitlement(db, new_user.uid, principal.tenant_id)
     entitlement.credential_policy = TenantUserEntitlement.CREDENTIAL_POLICY_BYOK_OPTIONAL
+    entitlement.byok_platform_token_exempt = True
     entitlement.updated_by = current_user.uid
 
     # P5：为新建用户随机签发桌面端访问密钥（90 天有效）；明文仅在本次响应出现

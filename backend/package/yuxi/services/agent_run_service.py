@@ -56,6 +56,7 @@ from yuxi.storage.postgres.models_business import (
     AgentRun,
     Message,
     TenantUserEntitlement,
+    UsageLedger,
     User,
     UserModelPreference,
 )
@@ -497,18 +498,104 @@ async def _get_user_model_pref(*, db: AsyncSession, uid: str) -> str | None:
     return pref.chat_model_spec if pref else None
 
 
-async def _enforce_user_quota(*, db: AsyncSession, uid: str) -> dict:
+def _quota_detail(*, code: str, message: str, action: str | None = None) -> dict[str, str]:
+    """Return a stable error contract while keeping FastAPI's ``detail`` envelope."""
+    detail = {"code": code, "message": message}
+    if action:
+        detail["action"] = action
+    return detail
+
+
+async def _enforce_platform_token_quota(
+    *,
+    db: AsyncSession,
+    uid: str,
+    tenant_id: int,
+    monthly_platform_token_limit: int | None,
+    now,
+) -> None:
+    """Enforce only the platform-funded token pool.
+
+    ``usage_ledger`` is the accounting source of truth.  User BYOK rows are
+    intentionally excluded; historical ``legacy_unknown`` rows are counted
+    conservatively until an operator classifies them.
+    """
+    if monthly_platform_token_limit is None:
+        return
+
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    used_tokens = (
+        await db.execute(
+            select(func.coalesce(func.sum(UsageLedger.total_tokens), 0)).where(
+                UsageLedger.tenant_id == tenant_id,
+                UsageLedger.uid == uid,
+                UsageLedger.created_at >= month_start,
+                UsageLedger.credential_source.in_(("platform", "legacy_unknown")),
+            )
+        )
+    ).scalar() or 0
+    if int(used_tokens) >= int(monthly_platform_token_limit):
+        raise HTTPException(
+            status_code=429,
+            detail=_quota_detail(
+                code="platform_token_quota_exceeded",
+                message=(
+                    f"本月平台模型 token 用量已达配额（{monthly_platform_token_limit}）。"
+                    "请在设置中配置并选择自己的模型继续使用，或联系管理员调整平台额度"
+                ),
+                action="configure_byok",
+            ),
+        )
+
+    # Token usage is settled after a model call.  The entitlement row is
+    # already locked by ``_enforce_user_quota``; admitting at most one
+    # platform-funded top-level run closes the unbounded concurrency window.
+    # A concurrent user-BYOK run does not reserve platform budget.
+    active_payloads = (
+        await db.execute(
+            select(AgentRun.input_payload).where(
+                AgentRun.tenant_id == tenant_id,
+                AgentRun.uid == uid,
+                AgentRun.run_type.in_(("chat", "resume")),
+                AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
+            )
+        )
+    ).scalars().all()
+    has_active_platform_run = any(
+        not isinstance(payload, dict) or not payload.get("user_credential") for payload in active_payloads
+    )
+    if has_active_platform_run:
+        raise HTTPException(
+            status_code=429,
+            detail=_quota_detail(
+                code="platform_token_quota_reservation_busy",
+                message="当前已有平台模型运行正在计量；请等待该运行结束后重试",
+                action="wait_for_active_run",
+            ),
+        )
+
+
+async def _enforce_user_quota(
+    *,
+    db: AsyncSession,
+    uid: str,
+    credential_source: Literal["platform", "user_byok"] | None = "platform",
+) -> dict:
     """P5 权益驱动的配额预检；返回随 run 冻结的权益快照。
 
-    行锁加在 tenant_user_entitlements 行上直到事务提交，串行化同一用户的并发创建；
-    byok_allowed/byok_required 且开启豁免时跳过月度平台 token 检查（自费流量不占平台成本），
-    每日运行次数始终生效作为滥用防护。
+    行锁加在 tenant_user_entitlements 行上直到事务提交，串行化同一用户的并发创建。
+    每日运行次数始终生效；月度 token 只约束 ``platform``，用户 BYOK 永不占用
+    企业平台额度。传入 ``None`` 时只锁定权益并执行每日门禁，调用方在模型与凭据
+    来源确定后再执行平台月度门禁。
     """
     if not uid:
         return {}
-    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.services.principal import resolve_entitlement, resolve_tenant_id
 
     tenant_id = await resolve_tenant_id(db, uid)
+    # 旧账号可能只有租户成员关系而缺少权益行。先按企业默认策略补齐，再加行锁，
+    # 避免返回一个没有落库、后续请求又变化的伪快照。
+    await resolve_entitlement(db, uid, tenant_id)
     ent_result = await db.execute(
         select(TenantUserEntitlement)
         .where(
@@ -518,15 +605,8 @@ async def _enforce_user_quota(*, db: AsyncSession, uid: str) -> dict:
         .with_for_update()
     )
     entitlement = ent_result.scalar_one_or_none()
-    if entitlement is None:
-        # resolve_tenant_id 已自愈成员关系但权益行缺失（理论不可达），按默认放行并返回快照
-        return {
-            "tenant_id": tenant_id,
-            "uid": uid,
-            "credential_policy": TenantUserEntitlement.CREDENTIAL_POLICY_PLATFORM_ONLY,
-            "policy_version": 1,
-            "byok_platform_token_exempt": False,
-        }
+    if entitlement is None:  # pragma: no cover - resolve_entitlement above guarantees the row
+        raise RuntimeError(f"用户权益行创建失败: uid={uid}, tenant_id={tenant_id}")
 
     now = utc_now_naive()
     if entitlement.daily_run_limit is not None:
@@ -544,60 +624,31 @@ async def _enforce_user_quota(*, db: AsyncSession, uid: str) -> dict:
         if int(used_runs) >= int(entitlement.daily_run_limit):
             raise HTTPException(
                 status_code=429,
-                detail=f"今日运行次数已达配额（{entitlement.daily_run_limit} 次），请联系管理员调整",
+                detail=_quota_detail(
+                    code="daily_run_quota_exceeded",
+                    message=f"今日运行次数已达配额（{entitlement.daily_run_limit} 次），请联系管理员调整",
+                    action="contact_admin",
+                ),
             )
 
-    monthly_platform = entitlement.monthly_platform_token_limit
-    byok_active = (
-        entitlement.credential_policy
-        in (
-            TenantUserEntitlement.CREDENTIAL_POLICY_BYOK_OPTIONAL,
-            TenantUserEntitlement.CREDENTIAL_POLICY_BYOK_REQUIRED,
-        )
-        and entitlement.byok_platform_token_exempt
-    )
-    if monthly_platform is not None and not byok_active:
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        used_tokens = (
-            await db.execute(
-                select(func.coalesce(func.sum(AgentRun.total_tokens), 0)).filter(
-                    AgentRun.uid == uid,
-                    AgentRun.created_at >= month_start,
-                )
-            )
-        ).scalar() or 0
-        if int(used_tokens) >= int(monthly_platform):
-            raise HTTPException(
-                status_code=429,
-                detail=f"本月 token 用量已达配额（{monthly_platform}），请联系管理员调整",
-            )
-        # Token usage can only be reconciled after a model call completes.  The
-        # entitlement row is locked for the surrounding run-creation transaction, so
-        # admitting at most one top-level in-flight run closes the otherwise
-        # unbounded concurrent preflight window.  Subagent runs remain usable
-        # under their already-admitted parent and still contribute token usage.
-        active_top_level_runs = (
-            await db.execute(
-                select(func.count(AgentRun.id)).filter(
-                    AgentRun.uid == uid,
-                    AgentRun.run_type.in_(["chat", "resume"]),
-                    AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
-                )
-            )
-        ).scalar() or 0
-        if int(active_top_level_runs) > 0:
-            raise HTTPException(
-                status_code=429,
-                detail="当前已有运行正在计量；月度 token 配额启用时请等待该运行结束后重试",
-            )
-
-    return {
+    quota_snapshot = {
         "tenant_id": tenant_id,
         "uid": uid,
         "credential_policy": entitlement.credential_policy,
         "policy_version": entitlement.policy_version,
         "byok_platform_token_exempt": entitlement.byok_platform_token_exempt,
+        "monthly_platform_token_limit": entitlement.monthly_platform_token_limit,
     }
+    if credential_source == "platform":
+        await _enforce_platform_token_quota(
+            db=db,
+            uid=uid,
+            tenant_id=tenant_id,
+            monthly_platform_token_limit=entitlement.monthly_platform_token_limit,
+            now=now,
+        )
+
+    return quota_snapshot
 
 
 async def create_agent_run_view(
@@ -639,9 +690,13 @@ async def create_agent_run_view(
     if scope.existing_run:
         return _build_run_response(scope.existing_run)
 
-    # 幂等命中不重复消耗配额。锁定用户权益行直到本次 run 创建事务提交，
-    # 避免同一用户的并发请求同时通过“先计数、后创建”的检查窗口。
-    entitlement_snapshot = await _enforce_user_quota(db=db, uid=current_uid)
+    # 幂等命中不重复消耗配额。先锁定权益并执行每日门禁；模型来源确定后，
+    # 只有平台凭据运行才进入月度平台 token 门禁。
+    entitlement_snapshot = await _enforce_user_quota(
+        db=db,
+        uid=current_uid,
+        credential_source=None,
+    )
 
     from yuxi.services.user_credential_service import (
         get_active_user_credential,
@@ -649,12 +704,25 @@ async def create_agent_run_view(
     )
 
     custom_model_specs: set[str] = set()
+    custom_prefixes = ("user-openai-compatible:", "user-anthropic-compatible:")
     if run_type == "resume":
         resolved_model_spec = scope.parent_run.input_payload["model_spec"]
+        # Resume 必须沿用父运行冻结的模型，但仍要重新确认该自定义模型属于
+        # 当前用户且凭据仍处于 active；不能把已撤销的 BYOK 静默回落为平台模型。
+        if resolved_model_spec.startswith(custom_prefixes):
+            custom_model_specs = await list_active_custom_model_specs(db, current_uid)
+            if resolved_model_spec not in custom_model_specs:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "custom_model_credential_unavailable",
+                        "message": "该会话使用的自有模型凭据已撤销或被替换，请重新配置后再继续",
+                        "action": "configure_byok",
+                    },
+                )
     else:
         user_model_spec = await _get_user_model_pref(db=db, uid=current_uid)
         requested_model_spec = model_spec.strip() if isinstance(model_spec, str) else ""
-        custom_prefixes = ("user-openai-compatible:", "user-anthropic-compatible:")
         if requested_model_spec.startswith(custom_prefixes) or (user_model_spec or "").startswith(
             custom_prefixes
         ):
@@ -670,6 +738,7 @@ async def create_agent_run_view(
     # P5 BYOK 决策：智能体凭据策略覆盖用户权益策略；byok_required 缺凭据直接 422 引导
     user_credential_ref = None
     provider_id = resolved_model_spec.split(":", 1)[0] if resolved_model_spec else None
+
     agent_credential_policy = getattr(scope.agent_item, "credential_policy", "inherit_user") or "inherit_user"
     effective_policy = (
         agent_credential_policy
@@ -678,7 +747,14 @@ async def create_agent_run_view(
     )
     is_custom_model = resolved_model_spec in custom_model_specs
     if is_custom_model and effective_policy == "platform_only":
-        raise HTTPException(status_code=403, detail="当前账号未启用自有模型，请联系管理员调整模型接入策略")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "byok_not_allowed",
+                "message": "当前账号未启用自有模型，请联系管理员将模型策略设为 BYOK 可选",
+                "action": "contact_admin",
+            },
+        )
     if provider_id and effective_policy != "platform_only":
         credential = await get_active_user_credential(db=db, uid=current_uid, provider_id=provider_id)
         if credential is not None:
@@ -686,8 +762,23 @@ async def create_agent_run_view(
         elif effective_policy == "byok_required":
             raise HTTPException(
                 status_code=422,
-                detail="该智能体要求使用您自己的模型密钥，请先在设置中配置后再发起对话",
+                detail={
+                    "code": "byok_required",
+                    "message": "该智能体要求使用您自己的模型密钥，请先在设置中配置后再发起对话",
+                    "action": "configure_byok",
+                },
             )
+
+    credential_source = "user_byok" if user_credential_ref else "platform"
+    if credential_source == "platform":
+        await _enforce_platform_token_quota(
+            db=db,
+            uid=current_uid,
+            tenant_id=int(entitlement_snapshot["tenant_id"]),
+            monthly_platform_token_limit=entitlement_snapshot.get("monthly_platform_token_limit"),
+            now=utc_now_naive(),
+        )
+    entitlement_snapshot["credential_source"] = credential_source
 
     parent_payload = scope.parent_run.input_payload if run_type == "resume" else None
     knowledge_scope_snapshot = (
@@ -720,6 +811,7 @@ async def create_agent_run_view(
         "knowledge_scope_snapshot": knowledge_scope_snapshot,
         "policy_version": entitlement_snapshot.get("policy_version"),
         "credential_policy": effective_policy,
+        "credential_source": credential_source,
     }
     if user_credential_ref:
         input_payload["user_credential"] = user_credential_ref

@@ -111,11 +111,13 @@ class TenantUserEntitlement(Base):
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False)
-    credential_policy = Column(String(16), nullable=False, default=CREDENTIAL_POLICY_PLATFORM_ONLY)
+    # 企业默认允许成员自带模型；管理员仍可显式收紧为 platform_only。
+    credential_policy = Column(String(16), nullable=False, default=CREDENTIAL_POLICY_BYOK_OPTIONAL)
     daily_run_limit = Column(Integer, nullable=True)
     monthly_platform_token_limit = Column(BigInteger, nullable=True)  # 仅统计平台凭据消耗；BYOK 不占
     concurrent_run_limit = Column(Integer, nullable=True)  # P5b 预留：并发上限，暂不强制
-    byok_platform_token_exempt = Column(Boolean, nullable=False, default=False)
+    # 兼容字段：BYOK 用量在 usage_ledger 中独立分域，默认不占平台 token 配额。
+    byok_platform_token_exempt = Column(Boolean, nullable=False, default=True)
     policy_version = Column(Integer, nullable=False, default=1)  # 每次变更 +1，run 冻结用
     updated_by = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)

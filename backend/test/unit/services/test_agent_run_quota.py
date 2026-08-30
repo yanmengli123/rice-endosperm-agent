@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.services.agent_run_service import _enforce_user_quota
+from yuxi.services.principal import resolve_entitlement
 from yuxi.storage.postgres.models_business import (
     AgentRun,
     Base,
@@ -16,6 +17,7 @@ from yuxi.storage.postgres.models_business import (
     Tenant,
     TenantMembership,
     TenantUserEntitlement,
+    UsageLedger,
     User,
 )
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -59,6 +61,7 @@ def _run(*, user: User, conversation: Conversation, run_type: str, status: str, 
     run_id = str(uuid.uuid4())
     return AgentRun(
         id=run_id,
+        tenant_id=1,
         conversation_thread_id=conversation.thread_id,
         conversation_id=conversation.id,
         agent_slug="chatbot",
@@ -70,6 +73,28 @@ def _run(*, user: User, conversation: Conversation, run_type: str, status: str, 
         input_payload={},
         created_at=utc_now_naive(),
     )
+
+
+def _usage(*, run: AgentRun, source: str, total_tokens: int) -> UsageLedger:
+    return UsageLedger(
+        run_id=str(run.id),
+        uid=str(run.uid),
+        tenant_id=1,
+        model_spec="test:model",
+        total_tokens=total_tokens,
+        credential_source=source,
+    )
+
+
+async def test_missing_entitlement_self_heals_to_byok_optional(quota_session):
+    db, user, quota, _conversation = quota_session
+    await db.delete(quota)
+    await db.commit()
+
+    entitlement = await resolve_entitlement(db, user.uid, 1)
+
+    assert entitlement.credential_policy == "byok_optional"
+    assert entitlement.byok_platform_token_exempt is True
 
 
 async def test_daily_quota_counts_only_user_initiated_chat_runs(quota_session):
@@ -104,15 +129,14 @@ async def test_monthly_token_quota_rejects_second_concurrent_top_level_run(quota
 async def test_monthly_token_quota_rejects_exhausted_usage(quota_session):
     db, user, quota, conversation = quota_session
     quota.monthly_platform_token_limit = 1_000
-    db.add(
-        _run(
-            user=user,
-            conversation=conversation,
-            run_type="subagent",
-            status="completed",
-            total_tokens=1_000,
-        )
+    run = _run(
+        user=user,
+        conversation=conversation,
+        run_type="subagent",
+        status="completed",
+        total_tokens=1_000,
     )
+    db.add_all([run, _usage(run=run, source="platform", total_tokens=1_000)])
     await db.commit()
 
     with pytest.raises(HTTPException) as exc:
@@ -120,3 +144,54 @@ async def test_monthly_token_quota_rejects_exhausted_usage(quota_session):
 
     assert exc.value.status_code == 429
     assert "token 用量" in str(exc.value.detail)
+    assert exc.value.detail["code"] == "platform_token_quota_exceeded"
+
+
+async def test_monthly_platform_quota_excludes_user_byok_usage(quota_session):
+    db, user, quota, conversation = quota_session
+    quota.monthly_platform_token_limit = 1_000
+    run = _run(
+        user=user,
+        conversation=conversation,
+        run_type="subagent",
+        status="completed",
+        total_tokens=9_000,
+    )
+    db.add_all([run, _usage(run=run, source="user_byok", total_tokens=9_000)])
+    await db.commit()
+
+    await _enforce_user_quota(db=db, uid=user.uid)
+
+
+async def test_user_byok_run_bypasses_exhausted_platform_pool(quota_session):
+    db, user, quota, conversation = quota_session
+    quota.monthly_platform_token_limit = 1_000
+    quota.credential_policy = "byok_optional"
+    quota.byok_platform_token_exempt = False  # 旧数据也必须按资金来源正确分域
+    run = _run(
+        user=user,
+        conversation=conversation,
+        run_type="subagent",
+        status="completed",
+        total_tokens=1_000,
+    )
+    db.add_all([run, _usage(run=run, source="platform", total_tokens=1_000)])
+    await db.commit()
+
+    snapshot = await _enforce_user_quota(
+        db=db,
+        uid=user.uid,
+        credential_source="user_byok",
+    )
+    assert snapshot["credential_policy"] == "byok_optional"
+
+
+async def test_active_byok_run_does_not_reserve_platform_budget(quota_session):
+    db, user, quota, conversation = quota_session
+    quota.monthly_platform_token_limit = 1_000
+    run = _run(user=user, conversation=conversation, run_type="chat", status="running")
+    run.input_payload = {"user_credential": {"credential_id": 1, "provider_id": "mine"}}
+    db.add(run)
+    await db.commit()
+
+    await _enforce_user_quota(db=db, uid=user.uid)

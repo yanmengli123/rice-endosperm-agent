@@ -1027,6 +1027,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0013_server_grade_biomcp", "_migration_0013_server_grade_biomcp"),
         ("0014_user_custom_model_endpoints", "_migration_0014_user_custom_model_endpoints"),
         ("0015_legacy_user_byok_optional", "_migration_0015_legacy_user_byok_optional"),
+        ("0016_byok_platform_quota_split", "_migration_0016_byok_platform_quota_split"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -1239,6 +1240,45 @@ class PostgresManager(metaclass=SingletonMeta):
                 "FROM users AS account WHERE account.uid = entitlement.uid "
                 "AND account.role = 'user' AND account.is_deleted = 0 "
                 "AND entitlement.credential_policy = 'platform_only' AND entitlement.policy_version = 1"
+            )
+        )
+
+    async def _migration_0016_byok_platform_quota_split(self, conn) -> None:
+        """补齐用户权益，并把 BYOK 与平台 token 配额语义固定为独立分域。
+
+        显式 ``platform_only`` 决策保持不变；已有 ``byok_optional`` / ``byok_required``
+        账号统一标记 BYOK 不占平台额度。缺失权益行的活跃成员采用企业默认
+        ``byok_optional``，修复旧注册流程只创建 membership 的历史缺口。
+        """
+        await conn.execute(
+            text(
+                "ALTER TABLE tenant_user_entitlements ALTER COLUMN credential_policy "
+                "SET DEFAULT 'byok_optional'"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE tenant_user_entitlements ALTER COLUMN byok_platform_token_exempt "
+                "SET DEFAULT TRUE"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO tenant_user_entitlements "
+                "(tenant_id, uid, credential_policy, byok_platform_token_exempt, policy_version, updated_by) "
+                "SELECT membership.tenant_id, membership.uid, 'byok_optional', TRUE, 1, 'migration-0016' "
+                "FROM tenant_memberships AS membership "
+                "JOIN users AS account ON account.uid = membership.uid "
+                "WHERE membership.status = 'active' AND account.is_deleted = 0 "
+                "ON CONFLICT (tenant_id, uid) DO NOTHING"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE tenant_user_entitlements "
+                "SET byok_platform_token_exempt = TRUE "
+                "WHERE credential_policy IN ('byok_optional', 'byok_required') "
+                "AND byok_platform_token_exempt = FALSE"
             )
         )
 

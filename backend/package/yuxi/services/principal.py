@@ -32,7 +32,11 @@ def map_membership_role(users_role: str | None) -> str:
 
 
 async def resolve_entitlement(db: AsyncSession, uid: str, tenant_id: int):
-    """解析用户在租户内的权益（策略与配额唯一权威）；缺失时自愈默认行（platform_only）。"""
+    """解析用户在租户内的权益（策略与配额唯一权威）；缺失时自愈默认行（byok_optional）。
+
+    默认 byok_optional：允许用户在平台模型之外自带模型密钥（超额自救的前提）；
+    需要收紧的账号由管理员在权益配置中显式设为 platform_only。
+    """
     from yuxi.storage.postgres.models_business import TenantUserEntitlement
 
     result = await db.execute(
@@ -44,21 +48,15 @@ async def resolve_entitlement(db: AsyncSession, uid: str, tenant_id: int):
     entitlement = result.scalar_one_or_none()
     if entitlement is not None:
         return entitlement
-    db.add(
-        TenantUserEntitlement(
-            tenant_id=tenant_id,
-            uid=uid,
-            credential_policy=TenantUserEntitlement.CREDENTIAL_POLICY_PLATFORM_ONLY,
-        )
+    entitlement = TenantUserEntitlement(
+        tenant_id=tenant_id,
+        uid=uid,
+        credential_policy=TenantUserEntitlement.CREDENTIAL_POLICY_BYOK_OPTIONAL,
+        byok_platform_token_exempt=True,
     )
+    db.add(entitlement)
     await db.flush()
-    result = await db.execute(
-        select(TenantUserEntitlement).where(
-            TenantUserEntitlement.tenant_id == tenant_id,
-            TenantUserEntitlement.uid == uid,
-        )
-    )
-    return result.scalar_one_or_none()
+    return entitlement
 
 
 @dataclass(frozen=True)
