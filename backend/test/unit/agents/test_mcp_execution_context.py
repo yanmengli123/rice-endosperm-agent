@@ -64,6 +64,18 @@ def test_reset_none_token_is_noop():
     assert get_mcp_execution_context() is None
 
 
+def test_context_keeps_thread_scope_for_workspace_mcp_runtime():
+    token = set_mcp_execution_context(
+        McpExecutionContext(tenant_id=3, uid="u-3", thread_id="thread-3", run_id="run-3")
+    )
+    try:
+        current = get_mcp_execution_context()
+        assert current is not None
+        assert current.thread_id == "thread-3"
+    finally:
+        reset_mcp_execution_context(token)
+
+
 def test_reset_does_not_resurrect_stale_value_in_current_context():
     """当前 Context 已被外层设置为另一租户时，跨 Context reset 不得覆盖当前值。"""
     outer_token = set_mcp_execution_context(_context(tenant_id=1, uid="u-outer"))

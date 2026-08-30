@@ -1,0 +1,434 @@
+{
+  "bioinfomcp_commit": "7ada7918b9e515604d3c0ae264d3a9af10bf6e54",
+  "bioinfomcp_tree": "d0cf9c227bbe5ea9f5eda0ea8749cc3228282c99",
+  "license_sha256": "09d32674c53a40205382e0293a22951c40fa4eb259b9b5ee1cb7770cc02b9e5e",
+  "tools": {
+    "bamCoverage": {
+      "env_yaml_sha256": "4ff826dba1799f8f9cf30e49072e5d6c07201a5761f212d15f8f80df8a8c13b9",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "bamCoverage_server.py",
+      "server_sha256": "bb9871e71c04512a739f5355da4291f9e3d635d70bf5a4859a9e3d72f076a4db",
+      "tool_count": 1,
+      "tool_names": [
+        "bamCoverage"
+      ]
+    },
+    "bcftools": {
+      "env_yaml_sha256": "c99baaa13137fd0fa59b6976db27ed7ca2313ce47c2423c2b22f22eba0ce2aec",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "bcftools_server.py",
+      "server_sha256": "f0de66d13da276c7855128c6ae1da2a757ee27916815791bcea0df8c906d9afa",
+      "tool_count": 9,
+      "tool_names": [
+        "bcftools_annotate",
+        "bcftools_call",
+        "bcftools_view",
+        "bcftools_index",
+        "bcftools_concat",
+        "bcftools_query",
+        "bcftools_stats",
+        "bcftools_sort",
+        "bcftools_plugin"
+      ]
+    },
+    "bedtools_coverage": {
+      "env_yaml_sha256": "75f17780fa3dcf8ea73b3f34e8f62418122294b0d448544e133a660099615afb",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "bedtools_coverage_server.py",
+      "server_sha256": "9beff977839525678bf29d5124ec1464b0a44b046a976caedebf757720496c82",
+      "tool_count": 1,
+      "tool_names": [
+        "bedtools_coverage"
+      ]
+    },
+    "bedtools_intersect": {
+      "env_yaml_sha256": "75f17780fa3dcf8ea73b3f34e8f62418122294b0d448544e133a660099615afb",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "bedtools_intersect_server.py",
+      "server_sha256": "6a98ff2d83e527dfc2cfce5090a1dda76f2412a92ddaa62363e41454de976596",
+      "tool_count": 1,
+      "tool_names": [
+        "bedtools_intersect"
+      ]
+    },
+    "bowtie2": {
+      "env_yaml_sha256": "c9de603b76bc6deb25418add34e5e3df46938d5cd0fa822e5baf95c81ae3b5c1",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "bowtie2_server.py",
+      "server_sha256": "e88296d9cbda76b196b6db19e83deea95c82e5791a37cbf01f08b568291c7329",
+      "tool_count": 3,
+      "tool_names": [
+        "bowtie2_align",
+        "bowtie2_build",
+        "bowtie2_inspect"
+      ]
+    },
+    "bwa": {
+      "env_yaml_sha256": "f0e0ee2f46fdc7362e9a65d772ec26241302b35b1a42056354064ff2f3344af3",
+      "env_yaml_synthesized": true,
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "requirements_synthesized": true,
+      "server_file": "bwa_server.py",
+      "server_sha256": "3ca5dd077feaed236fac9a0e1171bca743c12e1b3204a8804f8a7a78f5255c7e",
+      "tool_count": 6,
+      "tool_names": [
+        "bwa_index",
+        "bwa_mem",
+        "bwa_aln",
+        "bwa_samse",
+        "bwa_sampe",
+        "bwa_bwasw"
+      ]
+    },
+    "computeGCBias": {
+      "env_yaml_sha256": "4ff826dba1799f8f9cf30e49072e5d6c07201a5761f212d15f8f80df8a8c13b9",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "computeGCBias_server.py",
+      "server_sha256": "0ea73dd225bed155b2e8863fa731736568075378244c02c43e19a7c3a24a02a6",
+      "tool_count": 1,
+      "tool_names": [
+        "computeGCBias"
+      ]
+    },
+    "correctGCBias": {
+      "env_yaml_sha256": "4ff826dba1799f8f9cf30e49072e5d6c07201a5761f212d15f8f80df8a8c13b9",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "correctGCBias_server.py",
+      "server_sha256": "5ddb8836cb199d9b691f6565075a24a144bd6593b1a1002ffa33d8a7563e0f35",
+      "tool_count": 1,
+      "tool_names": [
+        "correctGCBias"
+      ]
+    },
+    "cutadapt": {
+      "env_yaml_sha256": "3da662535aad3cff7c5e03724bfe3ac1a7f00ee5518331028aaa5eed8383629a",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "cutadapt_server.py",
+      "server_sha256": "9eaef0c1c0f5c3d2c86e5b0ac8b0964dc744b28924e22bce8cad4acb73a11e2c",
+      "tool_count": 1,
+      "tool_names": [
+        "cutadapt"
+      ]
+    },
+    "faToTwoBit": {
+      "env_yaml_sha256": "de93fc4ff24e4490aa7284789bdef8998bb44625568a3b79087140cebc1b9e1d",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "faToTwoBit_server.py",
+      "server_sha256": "61948190b1507ee0a6792d5dfaf617f3d144f6e2dd831efd894650a7749b07b3",
+      "tool_count": 1,
+      "tool_names": [
+        "faToTwoBit"
+      ]
+    },
+    "fastp": {
+      "env_yaml_sha256": "b4c70a421b2a6f9843e2f5f7383c7996dd8ca986ca6f881b70dbab2a374f1fa0",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "fastp_server.py",
+      "server_sha256": "222593f7a98ce31bf976deee6a922ea167106b10dde3de60b19b6f5ad6c96dc7",
+      "tool_count": 1,
+      "tool_names": [
+        "fastp"
+      ]
+    },
+    "flye": {
+      "env_yaml_sha256": "466a196ee8e8e4abaa37aaef56b728ce8835ad5228b76073d7893bdb1357083c",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "flye_server.py",
+      "server_sha256": "7ab2abf0f69b6cc2ac79621a0e5ecc3930ef61e0a78073b3d5e9c6f6fe3ea4d1",
+      "tool_count": 1,
+      "tool_names": [
+        "flye"
+      ]
+    },
+    "freebayes": {
+      "env_yaml_sha256": "482ca0426058c6607dd4d7080ed9c28840ef006e46f544300f6f41b319c3df05",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "freebayes_server.py",
+      "server_sha256": "76561ec7936630d811202709cf450f93013c2f1e6b1ec434892f6c26cdf8ba72",
+      "tool_count": 1,
+      "tool_names": [
+        "freebayes"
+      ]
+    },
+    "gatk_ApplyBQSR": {
+      "env_yaml_sha256": "d87f20e3f3afefe317cf7f4c0acda61cfebb89f77f8f9048ad446c6d987e9089",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "gatk_ApplyBQSR_server.py",
+      "server_sha256": "df1dfdb4dade9ac37b056ad7435f631d0841fb8315c28fc6c7e5c94f4e10b5b9",
+      "tool_count": 1,
+      "tool_names": [
+        "gatk_ApplyBQSR"
+      ]
+    },
+    "gatk_BaseRecalibrator": {
+      "env_yaml_sha256": "d87f20e3f3afefe317cf7f4c0acda61cfebb89f77f8f9048ad446c6d987e9089",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "gatk_BaseRecalibrator_server.py",
+      "server_sha256": "96798ab8f98eae68f6a9e2b51e8549c4405d6cb778b0998b2f5a8582c767f56b",
+      "tool_count": 1,
+      "tool_names": [
+        "gatk_BaseRecalibrator"
+      ]
+    },
+    "gatk_HaplotypeCaller": {
+      "env_yaml_sha256": "d87f20e3f3afefe317cf7f4c0acda61cfebb89f77f8f9048ad446c6d987e9089",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "gatk_HaplotypeCaller_server.py",
+      "server_sha256": "2e3b222f9388b84d190700a70a08b2b86ffad47601bb72291d4ccd36bb5faa39",
+      "tool_count": 1,
+      "tool_names": [
+        "gatk_HaplotypeCaller"
+      ]
+    },
+    "gatk_SelectVariants": {
+      "env_yaml_sha256": "d87f20e3f3afefe317cf7f4c0acda61cfebb89f77f8f9048ad446c6d987e9089",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "gatk_SelectVariants_server.py",
+      "server_sha256": "8c60c18aa34d3b52e755ace0dccfe9417c4df8b689929f0a72a3ab966e265c61",
+      "tool_count": 1,
+      "tool_names": [
+        "gatk_SelectVariants"
+      ]
+    },
+    "gunzip": {
+      "env_yaml_sha256": "acb4f3215b93e1648bf8da284d9f35f364b2ff2a44f9cc4a7e8743c758aff956",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "gunzip_server.py",
+      "server_sha256": "791b068eb2a863a9da4c29c221a0b4ae66ea3f06f06315c1add8ab0755614bb4",
+      "tool_count": 3,
+      "tool_names": [
+        "gunzip",
+        "gzip",
+        "zcat"
+      ]
+    },
+    "hisat2": {
+      "env_yaml_sha256": "4d79f170d5740e4356eb38900f0ef9dfc9cadb4e58304e09e09272afadf7f14a",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "hisat2_server.py",
+      "server_sha256": "842cf00abbcc5f2cf1c22f56e7537e7bf7f6e18676056919a8900a166058d1c9",
+      "tool_count": 1,
+      "tool_names": [
+        "hisat2_align"
+      ]
+    },
+    "kallisto": {
+      "env_yaml_sha256": "5335be62e4b25e544c7fb9d8e53e1971cce3355ca6eaf73efdb584eb8535ac6d",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "kallisto_server.py",
+      "server_sha256": "0020ed110fa1e9f529aca60e3e620892dc481d44b2f0ed2389ffe99a23b5b1a4",
+      "tool_count": 8,
+      "tool_names": [
+        "index",
+        "quant",
+        "quant_tcc",
+        "bus",
+        "h5dump",
+        "inspect",
+        "version",
+        "cite"
+      ]
+    },
+    "macs3_callpeak": {
+      "env_yaml_sha256": "dfa8da6cf707c082107598cecfddcf45287351e95f1c4cc69c4bfba5c93b5414",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "macs3_callpeak_server.py",
+      "server_sha256": "9636b6f599f541af146e6add1a855012206a44565b5d8f026c23abd9056f4520",
+      "tool_count": 1,
+      "tool_names": [
+        "macs3_callpeak"
+      ]
+    },
+    "macs3_hmmratac": {
+      "env_yaml_sha256": "dfa8da6cf707c082107598cecfddcf45287351e95f1c4cc69c4bfba5c93b5414",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "macs3_hmmratac_server.py",
+      "server_sha256": "01684fe43d60891af32a996664b0fe3074cb75accfce33fdf008ec4851b9f879",
+      "tool_count": 1,
+      "tool_names": [
+        "macs3_hmmratac"
+      ]
+    },
+    "mafft": {
+      "env_yaml_sha256": "32b8314b5c6bc55151cb959aa504da483e46fbaaadfaac1531168bd36fdde7df",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "mafft_server.py",
+      "server_sha256": "821644541549418b78d2aaca4e5963f832188d7aca268e3ee86c6384dc88d6c7",
+      "tool_count": 9,
+      "tool_names": [
+        "mafft",
+        "linsi",
+        "ginsi",
+        "einsi",
+        "fftnsi",
+        "fftns",
+        "nwnsi",
+        "nwns",
+        "mafft_profile"
+      ]
+    },
+    "meme": {
+      "env_yaml_sha256": "a66ab26118bc9b483692fe8720513d9ee22f73805a0765038e342dd4f41b4e98",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "meme_server.py",
+      "server_sha256": "3d8d78c7abf3e70c677b96d310a8d1903a3f6d2b5e236b628c1bfc612bbb02e5",
+      "tool_count": 1,
+      "tool_names": [
+        "meme"
+      ]
+    },
+    "minimap2": {
+      "env_yaml_sha256": "7b944b72dbcb71dc1a81309b3d664d83852d2937151ef3567a28b969e6005647",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "minimap2_server.py",
+      "server_sha256": "2a071a6567084aa18e11b2b784beb15e02b918af2fd2d7fe686411b2e316822b",
+      "tool_count": 3,
+      "tool_names": [
+        "minimap_index",
+        "minimap_map",
+        "minimap_version"
+      ]
+    },
+    "multiqc": {
+      "env_yaml_sha256": "98587193a3730a94b1cc44c0ee239ffd76ea0b5b9c8d7a6e4563f7b7becaa6c1",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "multiqc_server.py",
+      "server_sha256": "db3e9efa0c8f8581ec0ce7139495a31cf981f6eed87a3f394bf626e6cafc70d9",
+      "tool_count": 1,
+      "tool_names": [
+        "multiqc"
+      ]
+    },
+    "plotCorrelation": {
+      "env_yaml_sha256": "4ff826dba1799f8f9cf30e49072e5d6c07201a5761f212d15f8f80df8a8c13b9",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "plotCorrelation_server.py",
+      "server_sha256": "39664512362ec0930e63da02879280b6f7fcb0b2a49e343a513a75d8b4169ea3",
+      "tool_count": 1,
+      "tool_names": [
+        "plotCorrelation"
+      ]
+    },
+    "qualimap": {
+      "env_yaml_sha256": "5d7477096d339e9cbc66327aaff4ab7a68c46d7639f55e12e0a9fa909c053785",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "qualimap_server.py",
+      "server_sha256": "8be33c62896be135e44c1970c968a10236f8fcf991b2324d928313d372fda03e",
+      "tool_count": 6,
+      "tool_names": [
+        "bamqc",
+        "rnaseq",
+        "multi_bamqc",
+        "counts",
+        "clustering",
+        "comp_counts"
+      ]
+    },
+    "quast": {
+      "env_yaml_sha256": "97f233b882ef5ff39e94fc52166cfd1fa99e91e9d800fe5b6bf2438432040713",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "quast_server.py",
+      "server_sha256": "a44f0bd3521f53f6e75f58007aab75942afd3698e1702cd9083dc36b7962cf6f",
+      "tool_count": 1,
+      "tool_names": [
+        "quast"
+      ]
+    },
+    "salmon": {
+      "env_yaml_sha256": "7c2edb5b03c6ba7151ee14aeea74a09578484ba94c0a218571319c6cdb588311",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "salmon_server.py",
+      "server_sha256": "e036bba06aa223f79c4ddcffadafcef637c40f789375f7c9521a74a8f2ec26cc",
+      "tool_count": 2,
+      "tool_names": [
+        "salmon_index",
+        "salmon_quant"
+      ]
+    },
+    "samtools": {
+      "env_yaml_sha256": "d830e3431fae5b8aa07b2eface744f1c14d96ed67d7cb9c3a0ae040364f96cb3",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "samtools_server.py",
+      "server_sha256": "a1c2628e3e78613cf266c2035ef7a280a92ab226fbf432ed94e05057901de868",
+      "tool_count": 11,
+      "tool_names": [
+        "samtools_view",
+        "samtools_sort",
+        "samtools_index",
+        "samtools_flagstat",
+        "samtools_merge",
+        "samtools_faidx",
+        "samtools_fastq",
+        "samtools_flag_convert",
+        "samtools_quickcheck",
+        "samtools_stats",
+        "samtools_depth"
+      ]
+    },
+    "seqtk": {
+      "env_yaml_sha256": "16b7d8477b9f50a92d98b5e416e9e79f197ab9aad0bdfd6f39dcd8f83c5efab4",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "seqtk_server.py",
+      "server_sha256": "8be3e6d578517d8c557cd14e85c61d9613e63b6df378c32e4bd2a28873dfd797",
+      "tool_count": 1,
+      "tool_names": [
+        "seqtk_seq"
+      ]
+    },
+    "spades": {
+      "env_yaml_sha256": "59d94ba561fb966d0cbc575b12c6a9bb505270e9faf2f0dd8412785d53b0ee56",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "spades_server.py",
+      "server_sha256": "0326723aa04b6b66b59a2aea1a71e3d61f78a811ac727cd3de1e811cb7067385",
+      "tool_count": 1,
+      "tool_names": [
+        "spades"
+      ]
+    },
+    "star": {
+      "env_yaml_sha256": "27412bcd14d010296ee6490dbedfb20ba333da49d85f53a543c140833d034f54",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "star_server.py",
+      "server_sha256": "640003049ae4a9fa3d2be48a57a8b45463f114b510284211a51023e120687807",
+      "tool_count": 2,
+      "tool_names": [
+        "star_genome_generate",
+        "star_align_reads"
+      ]
+    },
+    "stringtie": {
+      "env_yaml_sha256": "395d474ba9905efd6934364b918688def082c200c86889938b6e42959b3bf15e",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "stringtie_server.py",
+      "server_sha256": "bab0826ddb728f3a04b479ee99d4fca9a427e2e0d96800f492d8a06550b52fb3",
+      "tool_count": 3,
+      "tool_names": [
+        "stringtie_assemble",
+        "stringtie_merge",
+        "stringtie_version"
+      ]
+    },
+    "trim-galore": {
+      "env_yaml_sha256": "1330cbd72e7edc701076d866394bcc92c95698f9d18ed693a7fde170883ba76d",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "trim-galore_server.py",
+      "server_sha256": "545f29c0060057562030a579a69beece6d09a23dc22ef7863ff41c6c5dc3d8df",
+      "tool_count": 1,
+      "tool_names": [
+        "trim_galore"
+      ]
+    },
+    "trimmomatic": {
+      "env_yaml_sha256": "dc1a8b6301cf7951ae8659441215ec633c14ee14c3002f5481db7d0483a8ad77",
+      "requirements_sha256": "8bbd7043a0a9dc7985cfe91436603ac333a1f894f942b460d62665f05d68b06a",
+      "server_file": "trimmomatic_server.py",
+      "server_sha256": "98700cb136981c70ede0988e64266a70eb0a53ed86d4917afbcffeca9c7c52dd",
+      "tool_count": 2,
+      "tool_names": [
+        "trimmomatic_se",
+        "trimmomatic_pe"
+      ]
+    }
+  },
+  "upstream_source": "https://github.com/florensiawidjaja/BioinfoMCP"
+}

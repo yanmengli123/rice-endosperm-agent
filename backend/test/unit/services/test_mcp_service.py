@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest_asyncio
@@ -7,9 +8,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.agents.mcp import service as mcp_service
+from yuxi.agents.mcp.bioinfomcp_catalog import (
+    BIOINFOMCP_EXPECTED_TOOLS,
+    BIOINFOMCP_SERVERS,
+)
+from yuxi.agents.mcp.execution import (
+    McpExecutionContext,
+    reset_mcp_execution_context,
+    set_mcp_execution_context,
+)
 from yuxi.agents.mcp.host import McpToolDescriptor
 from yuxi.storage.postgres import manager as postgres_manager
-from yuxi.storage.postgres.models_business import MCPServer
+from yuxi.storage.postgres.models_business import MCPCatalog, MCPServer, TenantMCPInstallation
 
 
 class _AsyncSessionContext:
@@ -28,6 +38,8 @@ async def mcp_session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(MCPServer.__table__.create)
+        await conn.run_sync(MCPCatalog.__table__.create)
+        await conn.run_sync(TenantMCPInstallation.__table__.create)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
@@ -82,8 +94,49 @@ async def test_ensure_builtin_mcp_servers_removes_retired_system_server(monkeypa
 
     retired = await mcp_session.scalar(select(MCPServer).where(MCPServer.slug == "sequentialthinking"))
     chart = await mcp_session.scalar(select(MCPServer).where(MCPServer.slug == "mcp-server-chart"))
+    fastqc = await mcp_session.scalar(select(MCPServer).where(MCPServer.slug == "bioinfomcp-fastqc"))
     assert retired is None
     assert chart is not None
+    assert fastqc is not None
+    assert fastqc.command == "/usr/local/bin/yuxi-bioinfomcp-fastqc"
+    assert fastqc.to_mcp_config()["args"] == []
+    assert "timeout" not in fastqc.to_mcp_config()
+    assert "7ada7918" in str(fastqc.source_ref)
+
+
+def test_bioinfomcp_catalog_exposes_all_38_servers_and_92_tools():
+    assert len(BIOINFOMCP_SERVERS) == 37
+    assert len(BIOINFOMCP_EXPECTED_TOOLS) == 37
+    assert sum(map(len, BIOINFOMCP_EXPECTED_TOOLS.values())) == 91
+    assert len(mcp_service._WORKSPACE_SCOPED_MCP_SLUGS) == 38
+    assert BIOINFOMCP_SERVERS["bioinfomcp-samtools"]["args"] == ["bioinfomcp-samtools"]
+    assert len(BIOINFOMCP_EXPECTED_TOOLS["bioinfomcp-samtools"]) == 11
+
+
+def test_bioinfomcp_runtime_requires_revision_slug_and_schema(monkeypatch):
+    monkeypatch.setattr(mcp_service.shutil, "which", lambda _command: "/usr/bin/docker")
+
+    def inspect_with(labels):
+        return SimpleNamespace(returncode=0, stdout=json.dumps(labels))
+
+    expected = {
+        "org.opencontainers.image.revision": mcp_service.BIOINFOMCP_COMMIT,
+        "io.yuxi.bioinfomcp.slug": "bioinfomcp-samtools",
+        "io.yuxi.bioinfomcp.runtime-schema": mcp_service.BIOINFOMCP_RUNTIME_SCHEMA,
+    }
+    monkeypatch.setattr(mcp_service.subprocess, "run", lambda *_args, **_kwargs: inspect_with(expected))
+    mcp_service._bioinfomcp_runtime_ready.cache_clear()
+    assert mcp_service._bioinfomcp_runtime_ready("bioinfomcp-samtools") is True
+
+    without_schema = dict(expected)
+    without_schema.pop("io.yuxi.bioinfomcp.runtime-schema")
+    monkeypatch.setattr(
+        mcp_service.subprocess,
+        "run",
+        lambda *_args, **_kwargs: inspect_with(without_schema),
+    )
+    mcp_service._bioinfomcp_runtime_ready.cache_clear()
+    assert mcp_service._bioinfomcp_runtime_ready("bioinfomcp-samtools") is False
 
 
 async def test_ensure_builtin_mcp_servers_preserves_user_server_with_retired_slug(monkeypatch, mcp_session):
@@ -147,6 +200,65 @@ async def test_get_enabled_mcp_tools_loads_latest_config_from_db(monkeypatch):
             "disabled_tools": ["tool_b"],
         }
     ]
+
+
+def test_bioinfomcp_runtime_receives_only_current_execution_scope(monkeypatch):
+    monkeypatch.setenv("YUXI_BIOINFOMCP_FASTQC_IMAGE", "registry.example/fastqc@sha256:123")
+    token = set_mcp_execution_context(
+        McpExecutionContext(tenant_id=9, uid="u-9", thread_id="thread-9", run_id="run-9")
+    )
+    try:
+        config = mcp_service.build_runtime_config(
+            "bioinfomcp-fastqc",
+            {
+                "transport": "stdio",
+                "command": "/usr/local/bin/yuxi-bioinfomcp-fastqc",
+            },
+        )
+    finally:
+        reset_mcp_execution_context(token)
+
+    assert config["env"]["YUXI_MCP_EXECUTION_UID"] == "u-9"
+    assert config["env"]["YUXI_MCP_EXECUTION_THREAD_ID"] == "thread-9"
+    assert config["env"]["YUXI_BIOINFOMCP_FASTQC_IMAGE"] == "registry.example/fastqc@sha256:123"
+    assert "tenant" not in " ".join(config["env"]).lower()
+
+
+def test_generic_bioinfomcp_runtime_does_not_receive_fastqc_image_override(monkeypatch):
+    monkeypatch.setenv("YUXI_BIOINFOMCP_FASTQC_IMAGE", "registry.example/private-fastqc")
+    token = set_mcp_execution_context(
+        McpExecutionContext(tenant_id=9, uid="u-9", thread_id="thread-9")
+    )
+    try:
+        config = mcp_service.build_runtime_config(
+            "bioinfomcp-samtools",
+            {
+                "transport": "stdio",
+                "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
+                "args": ["bioinfomcp-samtools"],
+            },
+        )
+    finally:
+        reset_mcp_execution_context(token)
+
+    assert config["env"]["YUXI_MCP_EXECUTION_UID"] == "u-9"
+    assert config["env"]["YUXI_MCP_EXECUTION_THREAD_ID"] == "thread-9"
+    assert "YUXI_BIOINFOMCP_FASTQC_IMAGE" not in config["env"]
+
+
+def test_unrelated_mcp_does_not_receive_execution_scope():
+    token = set_mcp_execution_context(
+        McpExecutionContext(tenant_id=9, uid="u-private", thread_id="thread-private")
+    )
+    try:
+        config = mcp_service.build_runtime_config(
+            "unrelated",
+            {"transport": "stdio", "command": "unrelated"},
+        )
+    finally:
+        reset_mcp_execution_context(token)
+
+    assert "env" not in config
 
 
 async def test_get_mcp_tools_rebuilds_cache_when_config_hash_changes(monkeypatch):

@@ -17,6 +17,7 @@ from yuxi.utils import logger
 class McpExecutionContext:
     tenant_id: int
     uid: str
+    thread_id: str | None = None
     run_id: str | None = None
     agent_slug: str | None = None
     installation_id: int | None = None

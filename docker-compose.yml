@@ -9,6 +9,7 @@ x-api-worker-env: &api-worker-env
   YUXI_MCP_BUILDER_TOKEN: ${YUXI_MCP_BUILDER_TOKEN:-}
   YUXI_MCP_RUNTIME_URL: ${YUXI_MCP_RUNTIME_URL:-}
   YUXI_MCP_RUNTIME_TOKEN: ${YUXI_MCP_RUNTIME_TOKEN:-}
+  YUXI_BIOINFOMCP_FASTQC_IMAGE: ${YUXI_BIOINFOMCP_FASTQC_IMAGE:-yuxi-bioinfomcp-fastqc:7ada7918}
   YUXI_BIOCOMPUTE_BROKER_URL: ${YUXI_BIOCOMPUTE_BROKER_URL:-}
   YUXI_BIOCOMPUTE_BROKER_TOKEN: ${YUXI_BIOCOMPUTE_BROKER_TOKEN:-}
   # DBs and other services
@@ -169,6 +170,312 @@ services:
       sandbox-provisioner:
         condition: service_healthy
 
+  # BioinfoMCP 是 38 个独立 stdio 服务的集合。该 profile 只构建隔离运行镜像，
+  # 不会把这些工具作为常驻服务启动。
+  bioinfomcp-fastqc-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-fastqc/Dockerfile
+    image: ${YUXI_BIOINFOMCP_FASTQC_IMAGE:-yuxi-bioinfomcp-fastqc:7ada7918}
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-bamcoverage-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-bamcoverage/Dockerfile
+    image: yuxi-bioinfomcp-bamcoverage:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-bcftools-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-bcftools/Dockerfile
+    image: yuxi-bioinfomcp-bcftools:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-bedtools-coverage-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-bedtools-coverage/Dockerfile
+    image: yuxi-bioinfomcp-bedtools-coverage:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-bedtools-intersect-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-bedtools-intersect/Dockerfile
+    image: yuxi-bioinfomcp-bedtools-intersect:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-bowtie2-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-bowtie2/Dockerfile
+    image: yuxi-bioinfomcp-bowtie2:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-bwa-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-bwa/Dockerfile
+    image: yuxi-bioinfomcp-bwa:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-computegcbias-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-computegcbias/Dockerfile
+    image: yuxi-bioinfomcp-computegcbias:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-correctgcbias-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-correctgcbias/Dockerfile
+    image: yuxi-bioinfomcp-correctgcbias:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-cutadapt-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-cutadapt/Dockerfile
+    image: yuxi-bioinfomcp-cutadapt:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-fatotwobit-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-fatotwobit/Dockerfile
+    image: yuxi-bioinfomcp-fatotwobit:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-fastp-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-fastp/Dockerfile
+    image: yuxi-bioinfomcp-fastp:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-flye-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-flye/Dockerfile
+    image: yuxi-bioinfomcp-flye:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-freebayes-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-freebayes/Dockerfile
+    image: yuxi-bioinfomcp-freebayes:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-gatk-applybqsr-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-gatk-applybqsr/Dockerfile
+    image: yuxi-bioinfomcp-gatk-applybqsr:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-gatk-baserecalibrator-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-gatk-baserecalibrator/Dockerfile
+    image: yuxi-bioinfomcp-gatk-baserecalibrator:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-gatk-haplotypecaller-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-gatk-haplotypecaller/Dockerfile
+    image: yuxi-bioinfomcp-gatk-haplotypecaller:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-gatk-selectvariants-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-gatk-selectvariants/Dockerfile
+    image: yuxi-bioinfomcp-gatk-selectvariants:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-gunzip-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-gunzip/Dockerfile
+    image: yuxi-bioinfomcp-gunzip:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-hisat2-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-hisat2/Dockerfile
+    image: yuxi-bioinfomcp-hisat2:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-kallisto-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-kallisto/Dockerfile
+    image: yuxi-bioinfomcp-kallisto:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-macs3-callpeak-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-macs3-callpeak/Dockerfile
+    image: yuxi-bioinfomcp-macs3-callpeak:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-macs3-hmmratac-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-macs3-hmmratac/Dockerfile
+    image: yuxi-bioinfomcp-macs3-hmmratac:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-mafft-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-mafft/Dockerfile
+    image: yuxi-bioinfomcp-mafft:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-meme-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-meme/Dockerfile
+    image: yuxi-bioinfomcp-meme:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-minimap2-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-minimap2/Dockerfile
+    image: yuxi-bioinfomcp-minimap2:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-multiqc-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-multiqc/Dockerfile
+    image: yuxi-bioinfomcp-multiqc:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-plotcorrelation-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-plotcorrelation/Dockerfile
+    image: yuxi-bioinfomcp-plotcorrelation:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-qualimap-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-qualimap/Dockerfile
+    image: yuxi-bioinfomcp-qualimap:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-quast-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-quast/Dockerfile
+    image: yuxi-bioinfomcp-quast:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-salmon-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-salmon/Dockerfile
+    image: yuxi-bioinfomcp-salmon:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-samtools-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-samtools/Dockerfile
+    image: yuxi-bioinfomcp-samtools:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-seqtk-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-seqtk/Dockerfile
+    image: yuxi-bioinfomcp-seqtk:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-spades-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-spades/Dockerfile
+    image: yuxi-bioinfomcp-spades:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-star-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-star/Dockerfile
+    image: yuxi-bioinfomcp-star:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-stringtie-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-stringtie/Dockerfile
+    image: yuxi-bioinfomcp-stringtie:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-trim-galore-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-trim-galore/Dockerfile
+    image: yuxi-bioinfomcp-trim-galore:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  bioinfomcp-trimmomatic-image:
+    profiles: ["bioinfomcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/bioinfomcp-tools/bioinfomcp-trimmomatic/Dockerfile
+    image: yuxi-bioinfomcp-trimmomatic:7ada791
+    entrypoint: ["/bin/true"]
+    restart: "no"
   sandbox-provisioner:
     build:
       context: ./docker/sandbox_provisioner

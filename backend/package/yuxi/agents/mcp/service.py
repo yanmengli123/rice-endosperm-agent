@@ -13,7 +13,10 @@
 
 import hashlib
 import json
+import os
 import shutil
+import subprocess
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import or_, select
@@ -57,6 +60,12 @@ from yuxi.agents.mcp.registry import (
     SOURCE_TYPE_MANUAL,
     ImportFormatError,
     smart_parse,
+)
+from yuxi.agents.mcp.bioinfomcp_catalog import (
+    BIOINFOMCP_COMMIT,
+    BIOINFOMCP_RUNTIME_SCHEMA,
+    BIOINFOMCP_SERVERS,
+    BIOINFOMCP_SLUGS,
 )
 from yuxi.agents.mcp.spec import (
     ARTIFACT_NPM,
@@ -114,7 +123,29 @@ _DEFAULT_MCP_SERVERS = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": "builtin:bio-mcp",
     },
+    # BioinfoMCP 与上面的 BioMCP 不是同一项目：前者把传统生信 CLI 暴露为
+    # 独立 MCP 服务。上游仓库没有可启动的聚合根服务，因此先按其 Benchmark
+    # 接入 FastQC，并固定到已核验提交；其他 CLI 后续继续按一个工具一个镜像扩展。
+    "bioinfomcp-fastqc": {
+        "name": "BioinfoMCP · FastQC",
+        "command": "/usr/local/bin/yuxi-bioinfomcp-fastqc",
+        "args": [],
+        "transport": "stdio",
+        "description": "隔离运行 FastQC，对 FASTQ/BAM 原始测序数据执行质量控制；"
+        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada7918",
+        "icon": "🧬",
+        "tags": ["内置", "BioinfoMCP", "质控", "FastQC"],
+        "timeout": 300,
+        "source_type": SOURCE_TYPE_BUILTIN,
+        "source_ref": (
+            "https://github.com/florensiawidjaja/BioinfoMCP@"
+            "7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_fastqc"
+        ),
+    },
 }
+# BioinfoMCP 其余 37 个工具：由 bioinfomcp_catalog.py 生成（固定上游提交，
+# 每工具一个隔离镜像 + 统一受控启动器），镜像构建后即可在管理页启用。
+_DEFAULT_MCP_SERVERS.update(BIOINFOMCP_SERVERS)
 
 _RETIRED_BUILTIN_MCP_SERVER_SLUGS = ("sequentialthinking",)
 
@@ -156,6 +187,47 @@ def _is_builtin_source(source_type: str | None, created_by: str | None = None, s
 
 
 _UNSET_SENTINEL = object()
+# 会话级工作区隔离的容器化 MCP：执行时注入 YUXI_MCP_EXECUTION_UID/THREAD_ID，
+# 由受控启动器只挂载本用户共享工作区与本会话 user-data。
+_WORKSPACE_SCOPED_MCP_SLUGS = frozenset({"bioinfomcp-fastqc"}) | BIOINFOMCP_SLUGS
+
+
+def _bioinfomcp_runtime_image(slug: str) -> str | None:
+    if slug == "bioinfomcp-fastqc":
+        return os.environ.get(
+            "YUXI_BIOINFOMCP_FASTQC_IMAGE",
+            "yuxi-bioinfomcp-fastqc:7ada7918",
+        )
+    if slug in BIOINFOMCP_SLUGS:
+        return f"yuxi-{slug}:{BIOINFOMCP_COMMIT[:7]}"
+    return None
+
+
+@lru_cache(maxsize=64)
+def _bioinfomcp_runtime_ready(slug: str) -> bool:
+    """Return true only for a locally installed, correctly labelled image."""
+
+    image = _bioinfomcp_runtime_image(slug)
+    if image is None or shutil.which("docker") is None:
+        return False
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", image],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if completed.returncode != 0:
+            return False
+        labels = json.loads(completed.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError):
+        return False
+    return (
+        labels.get("org.opencontainers.image.revision") == BIOINFOMCP_COMMIT
+        and labels.get("io.yuxi.bioinfomcp.slug") == slug
+        and labels.get("io.yuxi.bioinfomcp.runtime-schema") == BIOINFOMCP_RUNTIME_SCHEMA
+    )
 
 
 # =============================================================================
@@ -182,6 +254,27 @@ def build_runtime_config(slug: str, server_config: dict[str, Any]) -> dict[str, 
         logger.warning(
             f"MCP '{slug}' 引用的环境变量不存在，相关条目已剔除: {', '.join(missing_notes)}"
         )
+
+    if slug in _WORKSPACE_SCOPED_MCP_SLUGS:
+        # 只给经过代码审计的内置容器 wrapper 注入当前执行身份。wrapper 根据这
+        # 两个值只挂载本用户共享工作区和本会话 user-data；管理页连接测试没有
+        # thread_id，因此只会拿到空 tmpfs，绝不会接触任一用户文件。
+        context = get_mcp_execution_context()
+        scoped_env = dict(runtime.get("env") or {})
+        scoped_env["PATH"] = os.environ.get(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+        if slug == "bioinfomcp-fastqc":
+            scoped_env["YUXI_BIOINFOMCP_FASTQC_IMAGE"] = os.environ.get(
+                "YUXI_BIOINFOMCP_FASTQC_IMAGE",
+                "yuxi-bioinfomcp-fastqc:7ada7918",
+            )
+        if context is not None:
+            scoped_env["YUXI_MCP_EXECUTION_UID"] = context.uid
+            if context.thread_id:
+                scoped_env["YUXI_MCP_EXECUTION_THREAD_ID"] = context.thread_id
+        runtime["env"] = scoped_env
     return runtime
 
 
@@ -455,6 +548,9 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
         transport=config["transport"], url=config.get("url"), command=config.get("command"), args=config.get("args")
     )
     development = development_runtime_allowed()
+    bioinfomcp_runtime_ready = (
+        _bioinfomcp_runtime_ready(slug) if slug in _WORKSPACE_SCOPED_MCP_SLUGS else True
+    )
     runtime_artifact = {
         "kind": "development_stdio",
         "transport": "stdio",
@@ -483,7 +579,9 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
         "source_ref": config.get("source_ref", f"{SOURCE_TYPE_BUILTIN}:{slug}"),
         "spec": plan.to_dict(),
         "lifecycle_status": (
-            McpLifecycleStatus.READY.value if development else McpLifecycleStatus.BUILD_REQUIRED.value
+            McpLifecycleStatus.READY.value
+            if development and bioinfomcp_runtime_ready
+            else McpLifecycleStatus.BUILD_REQUIRED.value
         ),
         "runtime_level": McpRuntimeLevel.DEVELOPMENT.value,
         "runtime_artifact": runtime_artifact,
@@ -1172,14 +1270,19 @@ async def probe_mcp_server(
         McpLifecycleStatus.BUILD_REQUIRED.value,
         McpLifecycleStatus.BLOCKED.value,
     }:
-        return await _finish(
-            error_result(
-                STAGE_RUNTIME,
-                "BUILD_REQUIRED",
-                f"MCP '{slug}' has no verified runtime artifact ({server.lifecycle_status})",
-                retryable=False,
+        # BioinfoMCP 镜像可能由管理员在服务启动后构建。重新检查受信标签，
+        # 让管理页“连接测试”完成 BUILD_REQUIRED -> READY 的闭环。
+        if slug in _WORKSPACE_SCOPED_MCP_SLUGS:
+            _bioinfomcp_runtime_ready.cache_clear()
+        if slug not in _WORKSPACE_SCOPED_MCP_SLUGS or not _bioinfomcp_runtime_ready(slug):
+            return await _finish(
+                error_result(
+                    STAGE_RUNTIME,
+                    "BUILD_REQUIRED",
+                    f"MCP '{slug}' has no verified runtime artifact ({server.lifecycle_status})",
+                    retryable=False,
+                )
             )
-        )
 
     server_config = server.to_mcp_config()
     if server.credential_id is not None:

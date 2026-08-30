@@ -1,0 +1,4 @@
+docker/mcp/bioinfomcp-fastqc/upstream/fastqc_server.py text eol=lf
+docker/mcp/run-bioinfomcp-fastqc.sh text eol=lf
+docker/mcp/run-bioinfomcp-tool.sh text eol=lf
+docker/mcp/bioinfomcp-tools/** text eol=lf

@@ -914,13 +914,17 @@ class MCPServer(Base):
             config["url"] = self.url
         if self.command:
             config["command"] = self.command
-        # args 只用于 stdio 传输类型，必须是列表
-        if self.transport == "stdio" and self.args:
+        # args 只用于 stdio 传输类型，且新版 MCP adapter 要求字段始终存在；
+        # 无参数命令必须传 []，不能因为空列表是假值而省略。
+        if self.transport == "stdio":
+            config["args"] = []
             if isinstance(self.args, list):
                 config["args"] = self.args
             elif isinstance(self.args, str):
                 try:
-                    config["args"] = json.loads(self.args)
+                    parsed_args = json.loads(self.args)
+                    if isinstance(parsed_args, list):
+                        config["args"] = parsed_args
                 except json.JSONDecodeError:
                     pass
         if self.transport == "stdio" and self.env:
@@ -940,9 +944,11 @@ class MCPServer(Base):
                     config["headers"] = json.loads(self.headers)
                 except json.JSONDecodeError:
                     pass
-        if self.timeout is not None:
+        # timeout / sse_read_timeout 是 HTTP transport 的连接参数；传给新版
+        # stdio adapter 会触发 unexpected keyword argument。
+        if self.transport != "stdio" and self.timeout is not None:
             config["timeout"] = self.timeout
-        if self.sse_read_timeout is not None:
+        if self.transport != "stdio" and self.sse_read_timeout is not None:
             config["sse_read_timeout"] = self.sse_read_timeout
         if self.disabled_tools:
             config["disabled_tools"] = self.disabled_tools

@@ -1051,6 +1051,7 @@ async def stream_agent_chat(
         McpExecutionContext(
             tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
             uid=uid,
+            thread_id=thread_id,
             run_id=meta.get("run_id"),
             agent_slug=agent_slug,
         )
@@ -1467,6 +1468,7 @@ async def stream_agent_resume(
         McpExecutionContext(
             tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
             uid=uid,
+            thread_id=thread_id,
             run_id=meta.get("run_id"),
             agent_slug=meta.get("agent_slug"),
         )
