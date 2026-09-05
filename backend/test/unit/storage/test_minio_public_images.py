@@ -6,6 +6,7 @@ from yuxi.storage.minio.client import MinIOClient, normalize_public_minio_url
 class FakeMinio:
     def __init__(self):
         self.policy = None
+        self.copy_call = None
 
     def bucket_exists(self, bucket_name: str) -> bool:
         return False
@@ -17,6 +18,10 @@ class FakeMinio:
         self.policy = json.loads(policy)
 
     def put_object(self, **kwargs):
+        return object()
+
+    def copy_object(self, **kwargs):
+        self.copy_call = kwargs
         return object()
 
 
@@ -52,3 +57,15 @@ def test_legacy_public_minio_url_preserves_query_and_fragment(monkeypatch):
         normalize_public_minio_url("http://example.test:9000/public/avatar/user.png?v=123#preview")
         == "/minio/public/avatar/user.png?v=123#preview"
     )
+
+
+def test_copy_object_uses_current_minio_source_parameter():
+    client = MinIOClient()
+    fake_minio = FakeMinio()
+    client._client = fake_minio
+
+    assert client.copy_object("knowledgebases", "target/image.png", "source/image.png") is True
+    assert fake_minio.copy_call["bucket_name"] == "knowledgebases"
+    assert fake_minio.copy_call["object_name"] == "target/image.png"
+    assert fake_minio.copy_call["source"].bucket_name == "knowledgebases"
+    assert fake_minio.copy_call["source"].object_name == "source/image.png"

@@ -12,6 +12,34 @@ EvidenceCapability = Literal[
 
 
 @dataclass(frozen=True)
+class EvidenceFragment:
+    """One physical rectangle belonging to a semantic evidence anchor.
+
+    ``page_index`` is deliberately zero based because that is the coordinate
+    convention used by MinerU and PDF.js.  ``page`` remains available on the
+    parent anchor as the one-based, human-facing compatibility field.
+    """
+
+    page_index: int
+    bbox: tuple[float, float, float, float]
+    coordinate_space: str = "pdf_points"
+    text: str = ""
+    source_block_id: str = ""
+
+
+@dataclass(frozen=True)
+class PageGeometry:
+    """Authoritative PyMuPDF geometry for one physical PDF page."""
+
+    page_index: int
+    width: float
+    height: float
+    cropbox: tuple[float, float, float, float]
+    mediabox: tuple[float, float, float, float]
+    rotation: int = 0
+
+
+@dataclass(frozen=True)
 class EvidenceAnchor:
     anchor_id: str
     page: int
@@ -22,6 +50,12 @@ class EvidenceAnchor:
     quote_hash: str
     prefix_hash: str
     suffix_hash: str
+    fragments: tuple[EvidenceFragment, ...] = ()
+    anchor_type: str = "paragraph"
+    locator_quality: str = "HIGH"
+    confidence: float = 1.0
+    locatable: bool = True
+    source: str = "pymupdf"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -34,6 +68,7 @@ class NativePdfSnapshot:
     pages: list[dict[str, Any]]
     anchors: list[EvidenceAnchor]
     quality: dict[str, Any]
+    page_geometry: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

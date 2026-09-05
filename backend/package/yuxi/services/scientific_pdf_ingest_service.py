@@ -107,9 +107,7 @@ def _scientific_chunking_contract() -> dict[str, Any]:
     }
 
 
-def _persistent_processing_params(
-    runtime_params: dict[str, Any], chunking: dict[str, Any]
-) -> dict[str, Any]:
+def _persistent_processing_params(runtime_params: dict[str, Any], chunking: dict[str, Any]) -> dict[str, Any]:
     """Return the JSON-safe configuration persisted on ``KnowledgeFile``.
 
     ``asset_uri_builder`` and ``image_prefix`` are execution capabilities, not
@@ -147,6 +145,15 @@ def _safe_name(value: str) -> str:
     name = Path(value).name
     cleaned = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in name)
     return cleaned[:180] or "artifact.bin"
+
+
+_CAPABILITY_RANK = {
+    "REJECTED": 0,
+    "FAILED": 0,
+    "INDEXED_TEXT_ONLY": 1,
+    "INDEXED_CONTENT_ONLY": 2,
+    "INDEXED_FULL": 3,
+}
 
 
 async def _load_source(file_record: KnowledgeFile) -> bytes:
@@ -208,9 +215,7 @@ async def create_or_reuse_scientific_pdf_ingest(
                 select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == revision_id)
             )
         ).scalar_one()
-        file_row = (
-            await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == file_id))
-        ).scalar_one()
+        file_row = (await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == file_id))).scalar_one()
         if revision.status in TERMINAL_PARSE_STATUSES - {"REJECTED"}:
             desired_fingerprint = _chunker_fingerprint(revision_id, _scientific_chunking_contract())
             active_index = None
@@ -439,7 +444,9 @@ async def _load_cached_pipeline_result(source_revision_id: str, parser_fingerpri
         artifacts = list(
             (
                 await session.execute(
-                    select(KnowledgeParseArtifact).where(KnowledgeParseArtifact.revision_id == source_revision_id)
+                    select(KnowledgeParseArtifact)
+                    .where(KnowledgeParseArtifact.revision_id == source_revision_id)
+                    .order_by(KnowledgeParseArtifact.kind.asc(), KnowledgeParseArtifact.id.desc())
                 )
             )
             .scalars()
@@ -504,6 +511,116 @@ async def _load_cached_pipeline_result(source_revision_id: str, parser_fingerpri
         annotated_markdown,
         parser_fingerprint,
     )
+
+
+async def _load_compatible_mineru_cache(
+    target_revision: KnowledgeParseRevision,
+) -> tuple[str, list[ParserArtifact]] | None:
+    """Reuse immutable MinerU output when only downstream contracts changed.
+
+    The source SHA is the hard boundary. GROBID, alignment, quality and
+    chunking are deliberately rerun so a V2 revision cannot inherit V1
+    locator decisions.
+    """
+    async with pg_manager.get_async_session_context() as session:
+        candidates = list(
+            (
+                await session.execute(
+                    select(KnowledgeParseRevision)
+                    .where(
+                        KnowledgeParseRevision.tenant_id == target_revision.tenant_id,
+                        KnowledgeParseRevision.source_sha256 == target_revision.source_sha256,
+                        KnowledgeParseRevision.revision_id != target_revision.revision_id,
+                        KnowledgeParseRevision.status.in_(("INDEXED_FULL", "INDEXED_CONTENT_ONLY")),
+                    )
+                    .order_by(KnowledgeParseRevision.completed_at.desc().nullslast())
+                    .limit(5)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        candidate_ids = [candidate.revision_id for candidate in candidates]
+        rows = (
+            list(
+                (
+                    await session.execute(
+                        select(KnowledgeParseArtifact)
+                        .where(KnowledgeParseArtifact.revision_id.in_(candidate_ids))
+                        .order_by(KnowledgeParseArtifact.id.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if candidate_ids
+            else []
+        )
+    artifacts_by_revision: dict[str, list[KnowledgeParseArtifact]] = {}
+    for row in rows:
+        artifacts_by_revision.setdefault(row.revision_id, []).append(row)
+    minio = get_minio_client()
+    for source_revision in candidates:
+        source_rows = artifacts_by_revision.get(source_revision.revision_id, [])
+        article_row = next((row for row in source_rows if row.kind == "unified_article"), None)
+        mineru_rows = [row for row in source_rows if row.kind.startswith("mineru_")]
+        layout_rows = [
+            row
+            for row in mineru_rows
+            if str((row.metadata_json or {}).get("filename") or "")
+            .casefold()
+            .endswith(("content_list.json", "content_list_v2.json"))
+        ]
+        if article_row is None or not layout_rows:
+            continue
+        try:
+            bucket, object_name = parse_minio_url(article_row.object_uri)
+            article_payload = await minio.adownload_file(bucket, object_name)
+            article = json.loads(article_payload.decode("utf-8"))
+            if article.get("source_sha256") != target_revision.source_sha256:
+                continue
+            await materialize_reused_revision_assets(source_revision, target_revision)
+            markdown = rewrite_kbasset_uri(
+                str(article.get("markdown") or ""),
+                source_file_id=source_revision.file_id,
+                source_revision_id=source_revision.revision_id,
+                target_file_id=target_revision.file_id,
+                target_revision_id=target_revision.revision_id,
+            )
+            copied: list[ParserArtifact] = []
+            for row in mineru_rows:
+                bucket, object_name = parse_minio_url(row.object_uri)
+                content = await minio.adownload_file(bucket, object_name)
+                filename = str((row.metadata_json or {}).get("filename") or f"{row.kind}.bin")
+                lowered = filename.casefold()
+                if lowered.endswith("content_list_v2.json"):
+                    kind = "mineru_content_list_v2"
+                elif lowered.endswith("content_list.json"):
+                    kind = "mineru_content_list"
+                elif lowered == "full.md":
+                    kind = "mineru_markdown"
+                else:
+                    kind = row.kind
+                copied.append(
+                    ParserArtifact(
+                        kind=kind,
+                        filename=filename,
+                        content=content,
+                        content_type=row.content_type or "application/octet-stream",
+                    )
+                )
+            if markdown.strip():
+                logger.info(
+                    "Reusing immutable MinerU artifacts for downstream PDF pipeline upgrade: "
+                    f"source={source_revision.revision_id}, target={target_revision.revision_id}"
+                )
+                return markdown, copied
+        except Exception as cache_error:  # noqa: BLE001
+            logger.warning(
+                "Compatible MinerU artifact reuse failed; trying another candidate: "
+                f"source={source_revision.revision_id}: {cache_error}"
+            )
+    return None
 
 
 async def _publish_identity_cache(revision: KnowledgeParseRevision) -> None:
@@ -763,12 +880,16 @@ async def _store_artifacts(revision: KnowledgeParseRevision, artifacts: list[Par
             await session.execute(
                 pg_insert(KnowledgeParseArtifact)
                 .values(**row)
-                .on_conflict_do_nothing(
-                    index_elements=[
-                        KnowledgeParseArtifact.revision_id,
-                        KnowledgeParseArtifact.kind,
-                        KnowledgeParseArtifact.sha256,
-                    ]
+                .on_conflict_do_update(
+                    index_elements=[KnowledgeParseArtifact.revision_id, KnowledgeParseArtifact.kind],
+                    set_={
+                        "artifact_id": row["artifact_id"],
+                        "object_uri": row["object_uri"],
+                        "sha256": row["sha256"],
+                        "content_type": row["content_type"],
+                        "size_bytes": row["size_bytes"],
+                        "metadata_json": row["metadata_json"],
+                    },
                 )
             )
     return uris
@@ -793,6 +914,19 @@ async def _persist_article_records(revision_id: str, article: dict[str, Any]) ->
                     prefix_hash=anchor["prefix_hash"],
                     suffix_hash=anchor["suffix_hash"],
                     quote=anchor["quote"],
+                    fragments=anchor.get("fragments")
+                    or [
+                        {
+                            "page_index": int(anchor["page"]) - 1,
+                            "bbox": list(anchor["bbox"]),
+                            "coordinate_space": "pdf_points",
+                        }
+                    ],
+                    anchor_type=str(anchor.get("anchor_type") or "paragraph"),
+                    locator_quality=str(anchor.get("locator_quality") or "MEDIUM"),
+                    confidence=float(anchor.get("confidence") or 0.0),
+                    locatable=bool(anchor.get("locatable", False)),
+                    source=str(anchor.get("source") or "pymupdf"),
                 )
                 for anchor in article.get("anchors") or []
             ]
@@ -862,6 +996,7 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
     temp_path = ""
     index_revision_id: str | None = None
     pipeline_result: PipelineResult | None = None
+    previous_activation: dict[str, Any] = {}
     lease_stop = asyncio.Event()
     lease_task = asyncio.create_task(
         _renew_revision_lease(revision_id, worker_id, lease_stop),
@@ -914,16 +1049,13 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 if source_revision is not None:
                     try:
                         await materialize_reused_revision_assets(source_revision, revision)
-                        pipeline_result = _rewrite_reused_markdown_identity(
-                            pipeline_result, source_revision, revision
-                        )
+                        pipeline_result = _rewrite_reused_markdown_identity(pipeline_result, source_revision, revision)
                     except Exception as materialize_error:  # noqa: BLE001
                         # Canonical images/identity cannot be reproduced; fall back
                         # to a full deterministic re-parse instead of serving broken
                         # kbasset references.
                         logger.warning(
-                            "Scientific PDF reuse materialization failed; re-parsing: "
-                            "revision=%s source=%s: %s",
+                            "Scientific PDF reuse materialization failed; re-parsing: revision=%s source=%s: %s",
                             revision_id,
                             revision.reused_from_revision_id,
                             materialize_error,
@@ -936,10 +1068,12 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 for stage_name in ("NATIVE", "MINERU", "GROBID", "UNIFIED", "QUALITY"):
                     await _set_stage_status(revision_id, stage_name, "REUSED", worker_id=worker_id)
         if pipeline_result is None:
+            mineru_cache = await _load_compatible_mineru_cache(revision)
             pipeline_result = await ScientificPdfPipeline().run(
                 temp_path,
                 params,
                 stage_callback=stage_callback,
+                mineru_cache=mineru_cache,
             )
         artifacts = [
             ParserArtifact("original_pdf", _safe_name(filename), source_bytes, "application/pdf"),
@@ -1078,6 +1212,15 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             file_row = (
                 await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id))
             ).scalar_one()
+            previous_activation = {
+                "active_parse_revision_id": file_row.active_parse_revision_id,
+                "active_index_revision_id": file_row.active_index_revision_id,
+                "markdown_file": file_row.markdown_file,
+                "status": file_row.status,
+                "processing_params": file_row.processing_params,
+                "evidence_status": file_row.evidence_status,
+                "evidence_capabilities": file_row.evidence_capabilities,
+            }
             file_row.markdown_file = markdown_uri
             file_row.status = "parsed"
             file_row.processing_params = _persistent_processing_params(params, chunking)
@@ -1112,30 +1255,52 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                     select(KnowledgeIndexRevision).where(KnowledgeIndexRevision.revision_id == index_revision_id)
                 )
             ).scalar_one()
-            await session.execute(
-                update(KnowledgeIndexRevision)
-                .where(
-                    KnowledgeIndexRevision.file_id == revision.file_id,
-                    KnowledgeIndexRevision.revision_id != index_revision_id,
-                    KnowledgeIndexRevision.status == "ACTIVE",
-                )
-                .values(status="SUPERSEDED")
-            )
-            index_revision.status = "ACTIVE"
             index_revision.chunk_count = int(index_result.get("chunk_count") or 0)
             index_revision.token_count = int(index_result.get("token_count") or 0)
-            index_revision.activated_at = now
             index_revision.completed_at = now
             file_row = (
                 await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id))
             ).scalar_one()
-            file_row.active_parse_revision_id = revision_id
-            file_row.active_index_revision_id = index_revision_id
-            file_row.evidence_status = pipeline_result.capability
+            previous_status = str(previous_activation.get("evidence_status") or "")
+            quality_downgrade = bool(
+                previous_activation.get("active_index_revision_id")
+                and _CAPABILITY_RANK.get(previous_status, 0) > _CAPABILITY_RANK.get(pipeline_result.capability, 0)
+            )
+            if quality_downgrade:
+                index_revision.status = "SUPERSEDED"
+                file_row.active_parse_revision_id = previous_activation.get("active_parse_revision_id")
+                file_row.active_index_revision_id = previous_activation.get("active_index_revision_id")
+                file_row.markdown_file = previous_activation.get("markdown_file")
+                file_row.status = previous_activation.get("status")
+                file_row.processing_params = previous_activation.get("processing_params")
+                file_row.evidence_status = previous_status
+                file_row.evidence_capabilities = previous_activation.get("evidence_capabilities")
+                logger.warning(
+                    "Scientific PDF candidate was not activated because it would downgrade evidence quality: "
+                    f"file={revision.file_id}, active={previous_status}, candidate={pipeline_result.capability}"
+                )
+            else:
+                await session.execute(
+                    update(KnowledgeIndexRevision)
+                    .where(
+                        KnowledgeIndexRevision.file_id == revision.file_id,
+                        KnowledgeIndexRevision.revision_id != index_revision_id,
+                        KnowledgeIndexRevision.status == "ACTIVE",
+                    )
+                    .values(status="SUPERSEDED")
+                )
+                index_revision.status = "ACTIVE"
+                index_revision.activated_at = now
+                file_row.active_parse_revision_id = revision_id
+                file_row.active_index_revision_id = index_revision_id
+                file_row.evidence_status = pipeline_result.capability
         await _set_stage_status(revision_id, "ACTIVATE", "SUCCEEDED", worker_id=worker_id)
+        active_index_revision_id = (
+            str(previous_activation.get("active_index_revision_id")) if quality_downgrade else index_revision_id
+        )
         try:
             await knowledge_base.cleanup_inactive_file_index_revisions(
-                revision.kb_id, revision.file_id, index_revision_id
+                revision.kb_id, revision.file_id, active_index_revision_id
             )
         except Exception as cleanup_error:  # noqa: BLE001
             logger.warning(f"Scientific PDF stale index cleanup deferred: revision={revision_id}: {cleanup_error}")
@@ -1143,6 +1308,7 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             "revision_id": revision_id,
             "index_revision_id": index_revision_id,
             "status": pipeline_result.capability,
+            "activated": not quality_downgrade,
         }
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"Scientific PDF ingest failed: revision={revision_id}: {exc}")
@@ -1391,6 +1557,8 @@ async def get_scientific_pdf_status(*, kb_id: str, file_id: str) -> dict[str, An
         )
     anchors_by_revision: dict[str, list[dict[str, Any]]] = {}
     for anchor in anchors:
+        if not anchor.locatable or anchor.locator_quality != "HIGH":
+            continue
         samples = anchors_by_revision.setdefault(anchor.parse_revision_id, [])
         if len(samples) >= 5:
             continue
@@ -1400,6 +1568,12 @@ async def get_scientific_pdf_status(*, kb_id: str, file_id: str) -> dict[str, An
                 "page": anchor.page,
                 "bbox": anchor.bbox,
                 "quote": anchor.quote,
+                "fragments": anchor.fragments,
+                "anchor_type": anchor.anchor_type,
+                "locator_quality": anchor.locator_quality,
+                "confidence": anchor.confidence,
+                "locatable": anchor.locatable,
+                "source": anchor.source,
             }
         )
     return {

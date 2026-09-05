@@ -511,7 +511,7 @@ class MilvusKB(KnowledgeBase):
     def _calculate_chunk_stats(self, chunks: list[dict]) -> dict[str, int]:
         return {
             "chunk_count": len(chunks),
-            "token_count": sum(count_tokens(chunk["content"]) for chunk in chunks),
+            "token_count": sum(count_tokens(chunk.get("retrieval_content") or chunk["content"]) for chunk in chunks),
         }
 
     def _build_chunk_pg_records(self, kb_id: str, chunks: list[dict]) -> list[dict[str, Any]]:
@@ -529,6 +529,7 @@ class MilvusKB(KnowledgeBase):
                 "graph_indexed": bool(chunk.get("graph_indexed", False)),
                 "ent_ids": chunk.get("ent_ids"),
                 "tags": chunk.get("tags"),
+                "source_provenance": chunk.get("source_provenance"),
                 "extraction_result": chunk.get("extraction_result"),
             }
             for chunk in chunks
@@ -547,7 +548,7 @@ class MilvusKB(KnowledgeBase):
 
         entities = [
             [chunk["id"] for chunk in chunks],
-            [chunk["content"] for chunk in chunks],
+            [chunk.get("retrieval_content") or chunk["content"] for chunk in chunks],
             [chunk["chunk_id"] for chunk in chunks],
             [chunk["file_id"] for chunk in chunks],
             [chunk["chunk_index"] for chunk in chunks],
@@ -594,7 +595,7 @@ class MilvusKB(KnowledgeBase):
         chunk_batch_size = max(int(chunk_batch_size), 1)
         for start in range(0, len(chunks), chunk_batch_size):
             batch_chunks = chunks[start : start + chunk_batch_size]
-            texts = [chunk["content"] for chunk in batch_chunks]
+            texts = [chunk.get("retrieval_content") or chunk["content"] for chunk in batch_chunks]
             embeddings = await embedding_function(texts)
             await self._insert_chunks_to_stores(
                 kb_id,
@@ -652,20 +653,14 @@ class MilvusKB(KnowledgeBase):
                 filtered.append(chunk)
         return filtered
 
-    async def cleanup_inactive_file_index_revisions(
-        self, kb_id: str, file_id: str, active_revision_id: str
-    ) -> int:
+    async def cleanup_inactive_file_index_revisions(self, kb_id: str, file_id: str, active_revision_id: str) -> int:
         """Physically collect stale revisions only after durable activation commits."""
         collection = await self._get_milvus_collection(kb_id)
         if not collection:
             return 0
         active_token = self._index_revision_token(active_revision_id)
         chunks = await KnowledgeChunkRepository().list_by_file_id(file_id)
-        stale_ids = [
-            chunk.chunk_id
-            for chunk in chunks
-            if f"_rev_{active_token}_" not in str(chunk.chunk_id or "")
-        ]
+        stale_ids = [chunk.chunk_id for chunk in chunks if f"_rev_{active_token}_" not in str(chunk.chunk_id or "")]
         if not stale_ids:
             return 0
         await KnowledgeChunkRepository().delete_by_chunk_ids(stale_ids)
@@ -687,16 +682,12 @@ class MilvusKB(KnowledgeBase):
             metadata["source"] = filenames.get(str(metadata.get("file_id") or ""), "") or "未知来源"
 
     async def _hydrate_chunk_provenance(self, chunks: list[dict]) -> None:
-        chunk_ids = [
-            str(chunk_id)
-            for chunk in chunks
-            if (chunk_id := (chunk.get("metadata") or {}).get("chunk_id"))
-        ]
+        chunk_ids = [str(chunk_id) for chunk in chunks if (chunk_id := (chunk.get("metadata") or {}).get("chunk_id"))]
         records = await KnowledgeChunkRepository().list_by_chunk_ids(chunk_ids)
         provenance_by_id = {
-            str(record.chunk_id): dict(record.extraction_result or {})
+            str(record.chunk_id): dict(record.source_provenance or record.extraction_result or {})
             for record in records
-            if record.extraction_result
+            if record.source_provenance or record.extraction_result
         }
         for chunk in chunks:
             metadata = chunk.get("metadata")
@@ -707,9 +698,7 @@ class MilvusKB(KnowledgeBase):
                 metadata["scientific_provenance"] = provenance
 
     @staticmethod
-    def _select_scientific_pdf_context(
-        query_text: str, chunks: list[dict], final_top_k: int
-    ) -> list[dict]:
+    def _select_scientific_pdf_context(query_text: str, chunks: list[dict], final_top_k: int) -> list[dict]:
         """Boost exact scientific identifiers and avoid one article/section monopolizing context."""
         identifiers = {
             token.casefold()
@@ -850,14 +839,14 @@ class MilvusKB(KnowledgeBase):
                     chunk_id = f"{file_id}_rev_{revision_token}_chunk_{chunk['chunk_index']}"
                     chunk["id"] = chunk_id
                     chunk["chunk_id"] = chunk_id
-                    provenance = dict(chunk.get("extraction_result") or {})
+                    provenance = dict(chunk.get("source_provenance") or {})
                     provenance.update(
                         {
                             "parse_revision_id": parse_revision_id or None,
                             "index_revision_id": shadow_revision_id,
                         }
                     )
-                    chunk["extraction_result"] = provenance
+                    chunk["source_provenance"] = provenance
             logger.info(
                 f"Split {filename} into {len(chunks)} chunks with params: "
                 f"chunk_preset_id={params.get('chunk_preset_id')}, "
@@ -1444,6 +1433,7 @@ class MilvusKB(KnowledgeBase):
                     "graph_indexed": chunk.graph_indexed,
                     "ent_ids": chunk.ent_ids,
                     "tags": chunk.tags,
+                    "source_provenance": chunk.source_provenance,
                     "extraction_result": chunk.extraction_result,
                 }
                 for chunk in chunks

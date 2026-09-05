@@ -205,6 +205,9 @@ class KnowledgeChunk(Base):
     graph_indexed = Column(Boolean, default=False)
     ent_ids = Column(JSON_VALUE)
     tags = Column(JSON_VALUE)
+    # Immutable source locator/provenance.  Graph extraction owns
+    # ``extraction_result`` and must never overwrite this column.
+    source_provenance = Column(JSON_VALUE)
     extraction_result = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
@@ -283,9 +286,7 @@ class KnowledgeDocumentIdentityCache(Base):
 
     __tablename__ = "knowledge_document_identity_cache"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "source_sha256", "parser_fingerprint", name="uq_knowledge_document_identity"
-        ),
+        UniqueConstraint("tenant_id", "source_sha256", "parser_fingerprint", name="uq_knowledge_document_identity"),
     )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -302,9 +303,7 @@ class KnowledgeParseArtifact(Base):
     """Content-addressed immutable raw parser artifact."""
 
     __tablename__ = "knowledge_parse_artifacts"
-    __table_args__ = (
-        UniqueConstraint("revision_id", "kind", "sha256", name="uq_knowledge_parse_artifact_content"),
-    )
+    __table_args__ = (UniqueConstraint("revision_id", "kind", name="uq_knowledge_parse_artifact_role"),)
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     artifact_id = Column(String(64), nullable=False, unique=True, index=True)
@@ -367,14 +366,18 @@ class EvidenceAnchorRecord(Base):
     prefix_hash = Column(String(64), nullable=False)
     suffix_hash = Column(String(64), nullable=False)
     quote = Column(Text, nullable=False)
+    fragments = Column(JSON_VALUE)
+    anchor_type = Column(String(32), nullable=False, default="paragraph")
+    locator_quality = Column(String(16), nullable=False, default="MEDIUM")
+    confidence = Column(Float, nullable=False, default=0.0)
+    locatable = Column(Boolean, nullable=False, default=False)
+    source = Column(String(32), nullable=False, default="pymupdf")
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
 class ArticleReference(Base):
     __tablename__ = "article_references"
-    __table_args__ = (
-        UniqueConstraint("parse_revision_id", "reference_id", name="uq_article_reference_revision"),
-    )
+    __table_args__ = (UniqueConstraint("parse_revision_id", "reference_id", name="uq_article_reference_revision"),)
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     parse_revision_id = Column(
@@ -390,9 +393,7 @@ class ArticleReference(Base):
 
 class CitationMention(Base):
     __tablename__ = "citation_mentions"
-    __table_args__ = (
-        UniqueConstraint("parse_revision_id", "mention_id", name="uq_citation_mention_revision"),
-    )
+    __table_args__ = (UniqueConstraint("parse_revision_id", "mention_id", name="uq_citation_mention_revision"),)
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     parse_revision_id = Column(

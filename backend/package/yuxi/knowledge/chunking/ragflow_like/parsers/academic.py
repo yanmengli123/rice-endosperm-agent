@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from bs4 import BeautifulSoup
+
 from yuxi.knowledge.chunking.ragflow_like import nlp
 
 _ANCHOR_PATTERN = re.compile(r"<!--\s*yuxi-evidence-anchor:(?P<id>[a-zA-Z0-9_-]+);page=(?P<page>\d+)\s*-->")
@@ -12,12 +14,11 @@ _BACK_MATTER_HEADING = re.compile(
     r"^(acknowledg(?:e)?ments?|funding|disclosures?|conflicts? of interest|author contributions?)$",
     re.IGNORECASE,
 )
-_REFERENCE_ENTRY = re.compile(
-    r"^\s*(?:\[\d{1,3}\]|\d{1,3}[.)])\s+[A-Z][\s\S]{15,}?(?:19|20)\d{2}\b"
-)
+_REFERENCE_ENTRY = re.compile(r"^\s*(?:\[\d{1,3}\]|\d{1,3}[.)])\s+[A-Z][\s\S]{15,}?(?:19|20)\d{2}\b")
 _CAPTION_PATTERN = re.compile(r"^(fig(?:ure)?\.?|table|图|表)\s*[\dA-Za-z]", re.IGNORECASE)
 _FIGURE_PATTERN = re.compile(r"!\[[^\]]*\]\([^)]+\)")
-ACADEMIC_CHUNKER_VERSION = "academic_scientific_v2"
+ACADEMIC_CHUNKER_VERSION = "academic_scientific_v6"
+TABLE_RETRIEVAL_VERSION = "table_nl_v1"
 
 
 def _block_type(text: str, section_path: list[str]) -> str:
@@ -46,6 +47,127 @@ def _split_hard(text: str, hard_limit: int) -> list[str]:
     return nlp.hard_split_by_token_limit(text, hard_limit, hard_limit_token_num=hard_limit)
 
 
+def _paragraphs_preserving_tables(body: str) -> list[str]:
+    """Split prose while keeping every complete HTML table as one input block."""
+    parts: list[str] = []
+    cursor = 0
+    for match in re.finditer(r"<table\b[\s\S]*?</table\s*>", body, re.IGNORECASE):
+        prose = body[cursor : match.start()]
+        anchor_suffix = ""
+        anchor_match = re.search(
+            r"((?:<!--\s*yuxi-evidence-anchor:[^>]+-->\s*)+)$",
+            prose,
+            re.IGNORECASE,
+        )
+        if anchor_match:
+            anchor_suffix = anchor_match.group(1).strip()
+            prose = prose[: anchor_match.start()]
+        prose_parts = [item.strip() for item in re.split(r"\n\s*\n", prose) if item.strip()]
+        caption = ""
+        if prose_parts:
+            caption_candidate = _ANCHOR_PATTERN.sub("", prose_parts[-1]).strip()
+            if _CAPTION_PATTERN.match(caption_candidate):
+                caption = caption_candidate
+                prose_parts.pop()
+        parts.extend(prose_parts)
+        table_text = match.group(0).strip()
+        parts.append("\n".join(item for item in (anchor_suffix, caption, table_text) if item).strip())
+        cursor = match.end()
+    tail = body[cursor:]
+    parts.extend(item.strip() for item in re.split(r"\n\s*\n", tail) if item.strip())
+    return parts
+
+
+def _split_html_table(text: str, hard_limit: int) -> list[str]:
+    """Split only between table rows and always emit balanced table markup."""
+    soup = BeautifulSoup(text, "html.parser")
+    table = soup.find("table")
+    if table is None or nlp.count_tokens(text) <= hard_limit:
+        return [text]
+    rows = table.find_all("tr")
+    if not rows:
+        return [text]
+    header_count = 0
+    for row in rows:
+        if row.find("th") is None and header_count:
+            break
+        if row.find("th") is None:
+            break
+        header_count += 1
+    if header_count == 0:
+        header_count = 1
+    headers = [str(row) for row in rows[:header_count]]
+    data_rows = [str(row) for row in rows[header_count:]]
+    if not data_rows:
+        return [text]
+    caption = table.find("caption")
+    caption_html = str(caption) if caption else ""
+    table_match = re.search(r"<table\b", text, re.IGNORECASE)
+    prefix = text[: table_match.start()].strip() if table_match else ""
+    opening_tag = str(table).split(">", 1)[0] + ">"
+    opening = "\n".join(item for item in (prefix, opening_tag + caption_html + "".join(headers)) if item)
+    closing = "</table>"
+    chunks: list[str] = []
+    current: list[str] = []
+    for row in data_rows:
+        candidate = opening + "".join([*current, row]) + closing
+        if current and nlp.count_tokens(candidate) > hard_limit:
+            chunks.append(opening + "".join(current) + closing)
+            current = []
+        current.append(row)
+    if current:
+        chunks.append(opening + "".join(current) + closing)
+    return chunks
+
+
+def _html_table_retrieval_text(text: str) -> str:
+    """Create deterministic row semantics for dense embedding and model context."""
+    soup = BeautifulSoup(text, "html.parser")
+    table = soup.find("table")
+    if table is None:
+        return BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
+    table_match = re.search(r"<table\b", text, re.IGNORECASE)
+    prefix = BeautifulSoup(text[: table_match.start()] if table_match else "", "html.parser").get_text(" ", strip=True)
+    caption_node = table.find("caption")
+    caption = caption_node.get_text(" ", strip=True) if caption_node else prefix
+    rows = table.find_all("tr")
+    if not rows:
+        return "\n".join(item for item in (caption, table.get_text(" ", strip=True)) if item)
+    header_cells = rows[0].find_all(["th", "td"])
+    headers = [cell.get_text(" ", strip=True) or f"Column {index + 1}" for index, cell in enumerate(header_cells)]
+    lines = [f"Table: {caption}" if caption else "Table"]
+    if headers:
+        lines.append("Columns: " + " | ".join(headers))
+    for row_index, row in enumerate(rows[1:], start=1):
+        values = [cell.get_text(" ", strip=True) for cell in row.find_all(["th", "td"])]
+        pairs = [
+            f"{headers[index] if index < len(headers) else f'Column {index + 1}'}: {value}"
+            for index, value in enumerate(values)
+            if value
+        ]
+        if pairs:
+            lines.append(f"Row {row_index}: " + "; ".join(pairs))
+    return "\n".join(lines)
+
+
+def _split_markdown_table(text: str, hard_limit: int) -> list[str]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 3 or nlp.count_tokens(text) <= hard_limit:
+        return [text]
+    header = lines[:2]
+    chunks: list[str] = []
+    current: list[str] = []
+    for row in lines[2:]:
+        candidate = "\n".join([*header, *current, row])
+        if current and nlp.count_tokens(candidate) > hard_limit:
+            chunks.append("\n".join([*header, *current]))
+            current = []
+        current.append(row)
+    if current:
+        chunks.append("\n".join([*header, *current]))
+    return chunks
+
+
 def _iter_section_blocks(markdown: str) -> list[dict[str, Any]]:
     sections: list[dict[str, Any]] = []
     stack: list[str] = []
@@ -56,11 +178,11 @@ def _iter_section_blocks(markdown: str) -> list[dict[str, Any]]:
         buffer.clear()
         if not body:
             return
-        for paragraph in re.split(r"\n\s*\n", body):
+        for paragraph in _paragraphs_preserving_tables(body):
             cleaned = paragraph.strip()
             if not cleaned:
                 continue
-            anchors = [match.group("id") for match in _ANCHOR_PATTERN.finditer(cleaned)]
+            anchors = list(dict.fromkeys(match.group("id") for match in _ANCHOR_PATTERN.finditer(cleaned)))
             pages = sorted({int(match.group("page")) for match in _ANCHOR_PATTERN.finditer(cleaned)})
             cleaned = _ANCHOR_PATTERN.sub("", cleaned).strip()
             if cleaned:
@@ -160,8 +282,32 @@ def chunk_markdown(markdown_content: str, parser_config: dict[str, Any] | None =
             current = []
             current_path = path
 
-        # Tables, formulas and captions remain atomic unless the embedding hard limit requires splitting.
-        if block["block_type"] in {"table", "figure", "formula", "caption"}:
+        # Tables are structural records: split only at row boundaries and
+        # repeat headers.  Generic token slicing creates invalid fragments
+        # such as chunks beginning with ``td>`` and is never allowed here.
+        if block["block_type"] == "table":
+            emit()
+            current = []
+            if re.search(r"<table\b", block["text"], re.IGNORECASE):
+                table_parts = _split_html_table(block["text"], hard_limit)
+            else:
+                table_parts = _split_markdown_table(block["text"], hard_limit)
+            for part in table_parts:
+                embedding_text = (
+                    _html_table_retrieval_text(part) if re.search(r"<table\b", part, re.IGNORECASE) else part
+                )
+                chunks.append(
+                    {
+                        **block,
+                        "text": part,
+                        "embedding_text": embedding_text,
+                        "retrieval_representation": TABLE_RETRIEVAL_VERSION,
+                    }
+                )
+            continue
+
+        # Figures, formulas and captions remain atomic unless the embedding hard limit requires splitting.
+        if block["block_type"] in {"figure", "formula", "caption"}:
             emit()
             current = []
             for part in _split_hard(block["text"], hard_limit):

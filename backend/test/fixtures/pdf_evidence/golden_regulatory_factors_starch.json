@@ -1,0 +1,19 @@
+{
+  "fixture_version": "pdf_evidence_golden_v1",
+  "source_sha256": "4bc4b6734db2aac859a12cc5e14aa3038b60db5381cb7efac9f640dd7f84e2d4",
+  "doi": "10.1007/s11103-026-01722-w",
+  "page_basis": "one_based_display",
+  "landmarks": [
+    {"label": "abstract", "quote": "Abstract", "pages": [1]},
+    {"label": "introduction", "quote": "Introduction", "pages": [1]},
+    {"label": "table_1", "quote": "Table 1 Main regulators of starch synthesis", "pages": [3, 4]},
+    {
+      "label": "transcription_factor_section",
+      "quote": "Transcription factor regulating starch biosynthesis",
+      "pages": [7]
+    },
+    {"label": "conclusions", "quote": "Conclusions and perspectives", "pages": [9]},
+    {"label": "references_start", "quote": "References", "pages": [10]},
+    {"label": "figure_2", "quote": "Fig. 2 The pathway of starch degradation", "pages": [10]}
+  ]
+}

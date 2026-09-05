@@ -9,17 +9,24 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from yuxi.knowledge.chunking.ragflow_like.parsers.academic import ACADEMIC_CHUNKER_VERSION
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
 from yuxi.knowledge.pdf_evidence.aligner import ALIGNER_VERSION, align_texts_to_anchors
 from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact, PipelineResult, UnifiedArticle
 from yuxi.knowledge.pdf_evidence.grobid import GrobidClient
+from yuxi.knowledge.pdf_evidence.mineru_layout import (
+    MINERU_LAYOUT_ADAPTER_VERSION,
+    build_mineru_anchors,
+    extract_mineru_blocks,
+)
 from yuxi.knowledge.pdf_evidence.native import PYMUPDF_PROVIDER_VERSION, inspect_native_pdf
+from yuxi.knowledge.pdf_evidence.page_map import PHYSICAL_PAGE_MAP_VERSION, build_physical_page_map
 from yuxi.utils import logger
 
 # v1.1: 图片引用由 MinIO URL 改为 kbasset:// 逻辑 URI（鉴权 Asset API 渲染），
 # canonical Markdown 内容变化，重新解析需生成新 parse revision。
-PIPELINE_VERSION = "scientific_pdf_v1.1"
-QUALITY_PROFILE_VERSION = "pdf_evidence_v1"
+PIPELINE_VERSION = "scientific_pdf_v2.8"
+QUALITY_PROFILE_VERSION = "pdf_evidence_v2"
 ANCHOR_MARKER = "<!-- yuxi-evidence-anchor:{anchor_id};page={page} -->"
 
 
@@ -37,6 +44,8 @@ def build_parser_fingerprint(source_sha256: str, params: dict[str, Any]) -> str:
         "grobid_profile": "no-consolidation-v1",
         "native_provider": f"pymupdf-{PYMUPDF_PROVIDER_VERSION}",
         "aligner": ALIGNER_VERSION,
+        "mineru_layout_adapter": MINERU_LAYOUT_ADAPTER_VERSION,
+        "academic_chunker": ACADEMIC_CHUNKER_VERSION,
         "quality_profile": QUALITY_PROFILE_VERSION,
     }
     return hashlib.sha256(_stable_json(identity).encode("utf-8")).hexdigest()
@@ -87,13 +96,27 @@ def annotate_markdown_with_anchors(markdown: str, anchors: list[dict[str, Any]])
             continue
         candidate = next(match_iter)
         if candidate and not block.lstrip().startswith("#"):
-            annotated.append(
-                ANCHOR_MARKER.format(anchor_id=candidate["anchor_id"], page=candidate["page"]) + "\n" + block
+            markers = "\n".join(
+                ANCHOR_MARKER.format(anchor_id=anchor_id, page=page)
+                for anchor_id, page in zip(
+                    candidate.get("anchor_ids") or [candidate["anchor_id"]],
+                    candidate.get("anchor_pages") or [candidate["page"]],
+                    strict=True,
+                )
             )
+            annotated.append(markers + "\n" + block)
             alignments.append({"block_hash": hashlib.sha256(block.encode()).hexdigest(), **candidate})
         else:
             annotated.append(block)
     return "".join(annotated), alignments
+
+
+def _eligible_markdown_block_count(markdown: str) -> int:
+    return sum(
+        1
+        for block in re.split(r"\n\s*\n", markdown)
+        if len(re.sub(r"<[^>]+>", " ", block).strip()) >= 12 and not block.lstrip().startswith("#")
+    )
 
 
 class ScientificPdfPipeline:
@@ -105,6 +128,7 @@ class ScientificPdfPipeline:
         params: dict[str, Any] | None = None,
         *,
         stage_callback: Callable[[str, str, dict[str, Any] | None], Awaitable[None]] | None = None,
+        mineru_cache: tuple[str, list[ParserArtifact]] | None = None,
     ) -> PipelineResult:
         async def emit(stage: str, status: str, detail: dict[str, Any] | None = None) -> None:
             if stage_callback:
@@ -151,24 +175,29 @@ class ScientificPdfPipeline:
             }
         )
         await emit("MINERU", "RUNNING")
-        try:
-            processor = DocumentProcessorFactory.get_processor(engine)
-            structured_method = getattr(processor, "process_file_with_artifacts", None)
-            if structured_method:
-                result = await asyncio.to_thread(structured_method, str(path), engine_params)
-                markdown = str(result["markdown"])
-                artifacts.extend(result.get("artifacts") or [])
-            else:
-                markdown = await asyncio.to_thread(processor.process_file, str(path), engine_params)
+        if mineru_cache is not None:
+            markdown, cached_artifacts = mineru_cache
+            artifacts.extend(cached_artifacts)
             mineru_ok = bool(markdown.strip())
-        except Exception as exc:  # noqa: BLE001
-            mineru_error = f"{type(exc).__name__}: {exc}"
-            logger.warning(f"科研 PDF 主解析器不可用，评估原生文本降级: {path.name}: {exc}")
+        else:
+            try:
+                processor = DocumentProcessorFactory.get_processor(engine)
+                structured_method = getattr(processor, "process_file_with_artifacts", None)
+                if structured_method:
+                    result = await asyncio.to_thread(structured_method, str(path), engine_params)
+                    markdown = str(result["markdown"])
+                    artifacts.extend(result.get("artifacts") or [])
+                else:
+                    markdown = await asyncio.to_thread(processor.process_file, str(path), engine_params)
+                mineru_ok = bool(markdown.strip())
+            except Exception as exc:  # noqa: BLE001
+                mineru_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(f"科研 PDF 主解析器不可用，评估原生文本降级: {path.name}: {exc}")
 
         if not mineru_ok and native.quality["native_text_usable"]:
             markdown = "\n\n".join(page["text"] for page in native.pages if page["text"])
         if mineru_ok:
-            await emit("MINERU", "SUCCEEDED")
+            await emit("MINERU", "REUSED" if mineru_cache is not None else "SUCCEEDED")
         else:
             await emit(
                 "MINERU",
@@ -226,7 +255,23 @@ class ScientificPdfPipeline:
             await emit("GROBID", "SKIPPED")
 
         await emit("UNIFIED", "RUNNING")
-        anchor_dicts = [anchor.to_dict() for anchor in native.anchors]
+        mineru_blocks = extract_mineru_blocks(artifacts, native.page_geometry) if mineru_ok else []
+        mineru_anchors = (
+            build_mineru_anchors(
+                native.pdf_sha256,
+                artifacts,
+                page_geometry=native.page_geometry,
+                blocks=mineru_blocks,
+            )
+            if mineru_blocks
+            else []
+        )
+        # MinerU content_list geometry is the primary locator because it is
+        # emitted from the same semantic blocks as canonical Markdown.
+        # PyMuPDF remains a medium-confidence fallback for old/parser-lite
+        # output, never a reason to claim full highlight capability.
+        canonical_anchors = mineru_anchors or native.anchors
+        anchor_dicts = [anchor.to_dict() for anchor in canonical_anchors]
         annotated_markdown, alignments = await asyncio.to_thread(
             annotate_markdown_with_anchors,
             markdown,
@@ -242,9 +287,10 @@ class ScientificPdfPipeline:
             if match:
                 mention["anchor_id"] = match["anchor_id"]
                 mention["anchor_confidence"] = match["score"]
+        physical_page_map = build_physical_page_map(native, mineru_blocks, grobid_data)
         grobid_metadata = grobid_data.get("metadata") or {}
         article = UnifiedArticle(
-            schema_version="1.0",
+            schema_version="2.0",
             source_sha256=native.pdf_sha256,
             title=str(grobid_metadata.get("title") or _markdown_title(markdown, path.name)),
             markdown=markdown,
@@ -252,6 +298,7 @@ class ScientificPdfPipeline:
                 **grobid_metadata,
                 "filename": path.name,
                 "page_count": native.page_count,
+                "page_geometry": native.page_geometry,
             },
             sections=_markdown_sections(markdown),
             references=list(grobid_data.get("references") or []),
@@ -262,9 +309,20 @@ class ScientificPdfPipeline:
                 "parser_fingerprint": fingerprint,
                 "canonical_content_source": "mineru" if mineru_ok else "pymupdf",
                 "pymupdf": {"ok": True},
-                "mineru": {"ok": mineru_ok, "engine": engine, "error": mineru_error},
+                "mineru": {
+                    "ok": mineru_ok,
+                    "engine": engine,
+                    "error": mineru_error,
+                    "reused": mineru_cache is not None,
+                },
                 "grobid": {"attempted": grobid_attempted, "ok": grobid_ok, "error": grobid_error},
                 "alignment": {"version": ALIGNER_VERSION, "matches": alignments},
+                "locator": {
+                    "schema_version": "evidence_anchor_v2",
+                    "primary_source": "mineru" if mineru_anchors else "pymupdf_fallback",
+                    "physical_page_map_version": PHYSICAL_PAGE_MAP_VERSION,
+                    "validation": physical_page_map["validation"],
+                },
             },
         )
         artifact_payload = _stable_json(article.to_dict()).encode("utf-8")
@@ -276,9 +334,48 @@ class ScientificPdfPipeline:
                 content_type="application/json",
             )
         )
+        evidence_map_payload = _stable_json(
+            {
+                "schema_version": "evidence_map_v1",
+                "source_sha256": native.pdf_sha256,
+                "physical_page_map": physical_page_map,
+                "anchors": anchor_dicts,
+                "alignments": alignments,
+            }
+        ).encode("utf-8")
+        artifacts.append(
+            ParserArtifact(
+                kind="evidence_map",
+                filename="evidence-map.json",
+                content=evidence_map_payload,
+                content_type="application/json",
+            )
+        )
         await emit("UNIFIED", "SUCCEEDED")
 
-        if mineru_ok and grobid_ok:
+        eligible_blocks = _eligible_markdown_block_count(markdown)
+        high_quality_alignments = [
+            match
+            for match in alignments
+            if match.get("locatable")
+            and match.get("locator_quality") == "HIGH"
+            and float(match.get("score", 0)) >= 0.85
+        ]
+        locator_coverage = len(high_quality_alignments) / eligible_blocks if eligible_blocks else 0.0
+        structured_tables = [anchor for anchor in mineru_anchors if anchor.anchor_type == "table"]
+        structured_figures = [
+            anchor
+            for anchor in mineru_anchors
+            if anchor.anchor_type in {"image", "figure"}
+            and re.search(
+                r"(?:^|\s)(?:fig(?:ure)?\.?|图)\s*[\dA-Za-z]",
+                anchor.quote,
+                re.IGNORECASE,
+            )
+        ]
+        invalid_geometry_count = int(physical_page_map["validation"].get("invalid_mineru_block_count") or 0)
+        full_locator_ready = bool(mineru_anchors and locator_coverage >= 0.75 and invalid_geometry_count == 0)
+        if mineru_ok and grobid_ok and full_locator_ready:
             capability = "INDEXED_FULL"
         elif mineru_ok:
             capability = "INDEXED_CONTENT_ONLY"
@@ -289,7 +386,7 @@ class ScientificPdfPipeline:
             "accepted": True,
             "capability": capability,
             "native": native.quality,
-            "mineru": {"ok": mineru_ok, "error": mineru_error},
+            "mineru": {"ok": mineru_ok, "error": mineru_error, "reused": mineru_cache is not None},
             "grobid": {"attempted": grobid_attempted, "ok": grobid_ok, "error": grobid_error},
             "quality_profile": QUALITY_PROFILE_VERSION,
             "counts": {
@@ -299,6 +396,17 @@ class ScientificPdfPipeline:
                 "references": len(article.references),
                 "citation_mentions": len(article.citation_mentions),
                 "aligned_blocks": len(alignments),
+                "high_confidence_aligned_blocks": len(high_quality_alignments),
+                "eligible_markdown_blocks": eligible_blocks,
+                "structured_tables": len(structured_tables),
+                "structured_figures": len(structured_figures),
+            },
+            "locator_profile": {
+                "schema_version": "evidence_anchor_v2",
+                "primary_source": "mineru" if mineru_anchors else "pymupdf_fallback",
+                "high_confidence_coverage": round(locator_coverage, 4),
+                "minimum_full_coverage": 0.75,
+                "invalid_geometry_count": invalid_geometry_count,
             },
             "capabilities": {
                 "fulltext_search": True,
@@ -308,11 +416,9 @@ class ScientificPdfPipeline:
                     and article.references
                     and any(mention.get("anchor_id") for mention in article.citation_mentions)
                 ),
-                "pdf_highlight": bool(alignments),
-                "figure_retrieval": bool(re.search(r"!\[[^\]]*\]\([^)]+\)", markdown)),
-                "table_retrieval": bool(
-                    re.search(r"(?im)^\s*\|.+\|\s*$|<table\b", markdown)
-                ),
+                "pdf_highlight": bool(high_quality_alignments),
+                "figure_retrieval": bool(structured_figures),
+                "table_retrieval": bool(structured_tables),
                 "formula_retrieval": bool(re.search(r"\$[^$]+\$|\\\[.+?\\\]", markdown, re.DOTALL)),
             },
         }

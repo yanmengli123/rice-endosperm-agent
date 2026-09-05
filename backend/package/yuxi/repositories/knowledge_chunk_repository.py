@@ -25,6 +25,7 @@ class KnowledgeChunkRepository:
         "graph_indexed",
         "ent_ids",
         "tags",
+        "source_provenance",
         "extraction_result",
     }
 

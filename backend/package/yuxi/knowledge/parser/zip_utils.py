@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import os
 import re
-import time
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -175,8 +174,12 @@ async def process_images(
             with zip_file.open(img_name) as f:
                 data = f.read()
 
-            timestamp = int(time.time() * 1000000)
-            object_name = f"{normalized_prefix}/{timestamp}_{Path(img_name).name}"
+            # A content-addressed name makes parser retries idempotent.  The
+            # same source image now produces the same canonical Markdown and
+            # the same MinIO object instead of timestamp-dependent variants.
+            content_digest = hashlib.sha256(data).hexdigest()
+            safe_name = Path(img_name).name
+            object_name = f"{normalized_prefix}/{content_digest[:24]}-{safe_name}"
 
             result = await minio_client.aupload_file(
                 bucket_name=image_bucket,

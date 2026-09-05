@@ -176,7 +176,7 @@ class MinIOClient:
             self.client.copy_object(
                 bucket_name=bucket_name,
                 object_name=object_name,
-                source_object_name=CopySource(bucket_name, source_object_name),
+                source=CopySource(bucket_name, source_object_name),
             )
             return True
         except S3Error as e:

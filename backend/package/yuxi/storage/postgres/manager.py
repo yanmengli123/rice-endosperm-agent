@@ -1031,6 +1031,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0017_scientific_pdf_evidence", "_migration_0017_scientific_pdf_evidence"),
         ("0018_scientific_pdf_workflow_cache", "_migration_0018_scientific_pdf_workflow_cache"),
         ("0019_scientific_pdf_single_active_index", "_migration_0019_scientific_pdf_single_active_index"),
+        ("0020_scientific_pdf_locator_v2", "_migration_0020_scientific_pdf_locator_v2"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -1455,6 +1456,43 @@ class PostgresManager(metaclass=SingletonMeta):
             text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_index_one_active_per_file "
                 "ON knowledge_index_revisions(file_id) WHERE status = 'ACTIVE'"
+            )
+        )
+
+    async def _migration_0020_scientific_pdf_locator_v2(self, conn) -> None:
+        """Add stable semantic locators and isolate them from graph extraction."""
+        await conn.execute(text("ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS source_provenance JSONB"))
+        for definition in (
+            "fragments JSONB",
+            "anchor_type VARCHAR(32) NOT NULL DEFAULT 'paragraph'",
+            "locator_quality VARCHAR(16) NOT NULL DEFAULT 'MEDIUM'",
+            "confidence DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "locatable BOOLEAN NOT NULL DEFAULT FALSE",
+            "source VARCHAR(32) NOT NULL DEFAULT 'pymupdf'",
+        ):
+            await conn.execute(text(f"ALTER TABLE evidence_anchors ADD COLUMN IF NOT EXISTS {definition}"))
+        await conn.execute(
+            text(
+                "UPDATE evidence_anchors SET fragments = jsonb_build_array(jsonb_build_object("
+                "'page_index', page - 1, 'bbox', bbox, 'coordinate_space', 'pdf_points')) "
+                "WHERE fragments IS NULL"
+            )
+        )
+        # Older retries could persist several different artifacts for the same
+        # semantic role. Keep the newest audit row, then enforce one role.
+        await conn.execute(
+            text(
+                "DELETE FROM knowledge_parse_artifacts older USING knowledge_parse_artifacts newer "
+                "WHERE older.revision_id = newer.revision_id AND older.kind = newer.kind AND older.id < newer.id"
+            )
+        )
+        await conn.execute(
+            text("ALTER TABLE knowledge_parse_artifacts DROP CONSTRAINT IF EXISTS uq_knowledge_parse_artifact_content")
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_parse_artifact_role "
+                "ON knowledge_parse_artifacts(revision_id, kind)"
             )
         )
 

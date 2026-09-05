@@ -7,7 +7,7 @@ from pathlib import Path
 
 import fitz
 
-from yuxi.knowledge.pdf_evidence.contracts import EvidenceAnchor, NativePdfSnapshot
+from yuxi.knowledge.pdf_evidence.contracts import EvidenceAnchor, EvidenceFragment, NativePdfSnapshot
 
 PYMUPDF_PROVIDER_VERSION = str(fitz.VersionBind)
 
@@ -101,6 +101,17 @@ def inspect_native_pdf(file_path: str | Path) -> NativePdfSnapshot:
                     quote_hash=quote_hash,
                     prefix_hash=_digest(prefix),
                     suffix_hash=_digest(suffix),
+                    fragments=(
+                        EvidenceFragment(
+                            page_index=page_index,
+                            bbox=bbox,
+                            text=quote,
+                            source_block_id=f"pymupdf:{page_index}:{block_index}",
+                        ),
+                    ),
+                    locator_quality="MEDIUM",
+                    confidence=0.75,
+                    source="pymupdf",
                 )
                 anchors.append(anchor)
                 blocks.append({"block_index": block_index, "anchor_id": anchor.anchor_id, "text": quote})
@@ -110,6 +121,9 @@ def inspect_native_pdf(file_path: str | Path) -> NativePdfSnapshot:
                     "page": page_index + 1,
                     "width": round(float(page.rect.width), 2),
                     "height": round(float(page.rect.height), 2),
+                    "cropbox": [round(float(value), 2) for value in page.cropbox],
+                    "mediabox": [round(float(value), 2) for value in page.mediabox],
+                    "rotation": int(page.rotation),
                     "text": page_text,
                     "words": word_rows,
                     "blocks": blocks,
@@ -139,4 +153,16 @@ def inspect_native_pdf(file_path: str | Path) -> NativePdfSnapshot:
         pages=pages,
         anchors=anchors,
         quality=quality,
+        page_geometry=[
+            {
+                "page_index": index,
+                "page": page["page"],
+                "width": page["width"],
+                "height": page["height"],
+                "cropbox": page["cropbox"],
+                "mediabox": page["mediabox"],
+                "rotation": page["rotation"],
+            }
+            for index, page in enumerate(pages)
+        ],
     )

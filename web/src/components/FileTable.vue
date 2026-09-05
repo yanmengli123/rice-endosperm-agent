@@ -99,7 +99,7 @@
             :key="anchor.anchor_id"
             type="button"
             class="evidence-anchor-row"
-            :disabled="evidenceAnchorOpening === anchor.anchor_id"
+            :disabled="evidenceAnchorOpening === anchor.anchor_id || !anchor.locatable"
             @click="openEvidenceAnchor(anchor)"
           >
             <span class="evidence-anchor-page">第 {{ anchor.page }} 页</span>
@@ -586,8 +586,12 @@ const openEvidenceAnchor = async (anchor) => {
     const response = await documentApi.downloadDocument(store.kbId, record.file_id)
     const blob = await response.blob()
     const objectUrl = URL.createObjectURL(blob)
+    const fragment = Array.isArray(anchor.fragments) ? anchor.fragments[0] : null
+    const bbox = Array.isArray(fragment?.bbox) ? fragment.bbox : anchor.bbox
+    const left = Math.max(Math.round(Number(bbox?.[0]) || 0), 0)
+    const top = Math.max(Math.round(Number(bbox?.[1]) || 0), 0)
     const link = document.createElement('a')
-    link.href = `${objectUrl}#page=${Math.max(Number(anchor.page) || 1, 1)}`
+    link.href = `${objectUrl}#page=${Math.max(Number(anchor.page) || 1, 1)}&zoom=page-width,${left},${top}`
     link.target = '_blank'
     link.rel = 'noopener noreferrer'
     link.click()

@@ -98,6 +98,8 @@ def chunk_markdown(
             if anchor_ids:
                 provenance.append(f"【证据锚点】{'、'.join(anchor_ids)}")
             content = "\n".join([*provenance, text]) if provenance else text
+            embedding_text = sanitize_extracted_text(str(chunk.get("embedding_text") or "")).strip()
+            retrieval_content = "\n".join([*provenance, embedding_text]) if embedding_text else content
             found_at = sanitized_markdown.find(text, search_from)
             end_at = found_at + len(text) if found_at >= 0 else None
             if end_at is not None:
@@ -107,6 +109,7 @@ def chunk_markdown(
                 {
                     "id": chunk_id,
                     "content": content,
+                    "retrieval_content": retrieval_content,
                     "file_id": file_id,
                     "filename": filename,
                     "chunk_index": index,
@@ -117,13 +120,15 @@ def chunk_markdown(
                     "start_token_pos": None,
                     "end_token_pos": None,
                     "tags": ["scientific_pdf", str(chunk.get("block_type") or "paragraph")],
-                    "extraction_result": {
-                        "schema_version": "scientific_pdf_chunk_v1",
+                    "source_provenance": {
+                        "schema_version": "scientific_pdf_chunk_v2",
                         "section_path": section_path,
                         "page_numbers": pages,
                         "evidence_anchor_ids": anchor_ids,
                         "block_type": str(chunk.get("block_type") or "paragraph"),
+                        "retrieval_representation": chunk.get("retrieval_representation"),
                     },
+                    "extraction_result": None,
                 }
             )
         return records

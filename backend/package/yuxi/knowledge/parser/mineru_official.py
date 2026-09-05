@@ -113,9 +113,7 @@ class MinerUOfficialParser(BaseDocumentProcessor):
         """上传本地文档、轮询任务，并返回 MinerU 生成的 Markdown。"""
         return str(self.process_file_with_artifacts(file_path, params)["markdown"])
 
-    def process_file_with_artifacts(
-        self, file_path: str, params: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
+    def process_file_with_artifacts(self, file_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return Markdown plus immutable raw MinerU files for the evidence pipeline."""
         if not os.path.exists(file_path):
             raise DocumentParserException(f"文件不存在: {file_path}", self.get_service_name(), "file_not_found")
@@ -185,7 +183,7 @@ class MinerUOfficialParser(BaseDocumentProcessor):
         max_total_bytes = 100 * 1024 * 1024
         total_bytes = 0
         with zipfile.ZipFile(zip_path, "r") as archive:
-            for info in archive.infolist():
+            for info in sorted(archive.infolist(), key=lambda item: item.filename.casefold()):
                 path = Path(info.filename)
                 if info.is_dir() or path.suffix.lower() not in allowed_suffixes:
                     continue
@@ -200,9 +198,23 @@ class MinerUOfficialParser(BaseDocumentProcessor):
                     ".html": "text/html",
                     ".md": "text/markdown",
                 }.get(path.suffix.lower(), "text/plain")
+                filename = path.name.casefold()
+                if filename == "content_list.json":
+                    kind = "mineru_content_list"
+                elif filename == "content_list_v2.json":
+                    kind = "mineru_content_list_v2"
+                elif filename == "full.md":
+                    kind = "mineru_markdown"
+                elif filename.endswith("model.json"):
+                    kind = "mineru_model"
+                else:
+                    # The relative path participates in the role so two files
+                    # with the same stem can never overwrite one another.
+                    role = "_".join(part for part in path.with_suffix("").parts if part)[-48:]
+                    kind = f"mineru_{role}"
                 artifacts.append(
                     ParserArtifact(
-                        kind=f"mineru_{path.stem[:48]}",
+                        kind=kind,
                         filename=path.name,
                         content=content,
                         content_type=content_type,

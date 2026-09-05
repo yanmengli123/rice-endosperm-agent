@@ -58,6 +58,7 @@ export default defineConfig({
           { text: '配置系统详解', link: '/advanced/configuration' },
           { text: 'Langfuse 集成', link: '/advanced/langfuse-integration' },
           { text: '文档解析', link: '/advanced/document-processing' },
+          { text: '科研 PDF 证据定位', link: '/advanced/scientific-pdf-locator-v2' },
           { text: '品牌自定义', link: '/advanced/branding' },
           { text: '其他配置', link: '/advanced/misc' },
           { text: '生产部署', link: '/advanced/deployment' },
