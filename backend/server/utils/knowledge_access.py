@@ -2,7 +2,7 @@
 
 from fastapi import Depends, HTTPException, Request
 
-from server.utils.auth_middleware import get_admin_user
+from server.utils.auth_middleware import get_authenticated_user
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.storage.postgres.models_business import User
 
@@ -39,7 +39,7 @@ async def authorize_knowledge_resource(
 
 async def authorize_knowledge_path(
     request: Request,
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ) -> None:
     """对所有含 kb_id 的知识管理路由执行同一套读写授权。
 

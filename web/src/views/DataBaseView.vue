@@ -607,12 +607,19 @@ const FORMAT_TEMPLATES = [
   {
     key: 'pdf_literature',
     label: '📄 PDF 文献证据库',
-    description: 'MinerU 解析 + 语义分块；每个 chunk 自动附加文献标题、DOI/PMID、章节路径与证据级别（Results=direct，Discussion=inferred）。上传 PDF 时建议使用 MinerU 官方引擎。',
+    description: '全自动科研证据链：PyMuPDF 原生锚点 + MinerU 正文/版面 + 条件式 GROBID 题录与引用；质量门禁、学术分块、混合检索和版本化索引均自动完成。',
     nameSuffix: '文献证据库',
     apply: {
-      chunk_preset_id: 'semantic',
-      chunk_parser_config: { chunk_token_num: 512, literature_enrichment: true },
-      format_template: 'pdf_literature'
+      chunk_preset_id: 'academic',
+      chunk_parser_config: {
+        chunk_token_num: 600,
+        hard_token_limit: 900,
+        overlap_token_num: 64,
+        include_references: false
+      },
+      format_template: 'pdf_literature',
+      pdf_evidence_pipeline: true,
+      grobid_enabled: true
     }
   },
   {
@@ -817,6 +824,10 @@ const buildRequestData = () => {
   const template = getFormatTemplate(state.formatTemplate)
   if (template && newDatabase.kb_type === 'milvus') {
     requestData.additional_params.format_template = template.apply.format_template
+    if (template.apply.pdf_evidence_pipeline) {
+      requestData.additional_params.pdf_evidence_pipeline = true
+      requestData.additional_params.grobid_enabled = template.apply.grobid_enabled !== false
+    }
     if (template.key === 'csv_dataset') {
       requestData.additional_params.chunk_preset_id =
         state.formatCsvMode === 'qa' ? 'qa' : 'separator'

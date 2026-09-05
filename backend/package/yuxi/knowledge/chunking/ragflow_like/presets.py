@@ -28,6 +28,13 @@ CHUNK_PRESETS: dict[str, dict[str, str]] = {
         "label": "Semantic",
         "description": "语义分块：利用嵌入和聚类算法进行语义切分，并自动增强标题上下文。",
     },
+    "academic": {
+        "label": "Academic PDF",
+        "description": (
+            "科研文献分块：按章节和段落组织，保留页码与证据锚点，"
+            "图表/公式独立成块，参考文献不进入普通问答。"
+        ),
+    },
     "separator": {
         "label": "Separator",
         "description": "严格分隔：命中分隔符即切分，仅超长片段内部继续按长度切分。",
@@ -73,7 +80,13 @@ def map_to_internal_parser_id(preset_id: str) -> str:
 
 
 def get_default_chunk_parser_config(preset_id: str) -> dict[str, Any]:
-    normalize_chunk_preset_id(preset_id)
+    if normalize_chunk_preset_id(preset_id) == "academic":
+        return {
+            "chunk_token_num": 600,
+            "hard_token_limit": 900,
+            "overlap_token_num": 64,
+            "include_references": False,
+        }
     return {}
 
 

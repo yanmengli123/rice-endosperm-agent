@@ -90,8 +90,16 @@ def make_kb(collection: FakeCollection) -> MilvusKB:
         for chunk in chunks:
             chunk["metadata"]["source"] = "demo.md"
 
+    async def filter_active_index_chunks(kb_id: str, chunks: list[dict]) -> list[dict]:
+        return chunks
+
+    async def hydrate_chunk_provenance(chunks: list[dict]) -> None:
+        return None
+
     kb._get_milvus_collection = get_collection
     kb._hydrate_chunk_sources = hydrate_chunk_sources
+    kb._filter_active_index_chunks = filter_active_index_chunks
+    kb._hydrate_chunk_provenance = hydrate_chunk_provenance
     return kb
 
 
@@ -487,22 +495,22 @@ async def test_insert_chunks_to_stores_inserts_current_batch(monkeypatch):
     assert [record["chunk_id"] for record in repos[0].upsert_calls[0]] == ["chunk-0", "chunk-1", "chunk-2"]
 
 
-async def test_insert_chunks_to_stores_rolls_back_file_when_milvus_insert_fails(monkeypatch):
+async def test_insert_chunks_to_stores_rolls_back_attempted_batch_when_milvus_insert_fails(monkeypatch):
     repos = []
 
     class FakeChunkRepo:
         def __init__(self):
             self.upsert_calls = []
-            self.delete_calls = []
+            self.delete_chunk_id_calls = []
             repos.append(self)
 
         async def batch_upsert(self, chunks):
             self.upsert_calls.append(chunks)
             return []
 
-        async def delete_by_file_id(self, file_id):
-            self.delete_calls.append(file_id)
-            return 0
+        async def delete_by_chunk_ids(self, chunk_ids):
+            self.delete_chunk_id_calls.append(list(chunk_ids))
+            return len(chunk_ids)
 
     class FailingCollection(FakeCollection):
         def insert(self, entities):
@@ -514,18 +522,18 @@ async def test_insert_chunks_to_stores_rolls_back_file_when_milvus_insert_fails(
     collection = FailingCollection()
     milvus_delete_calls = []
 
-    async def delete_file_chunks_from_milvus(collection_arg, file_id):
-        milvus_delete_calls.append((collection_arg, file_id))
+    async def delete_chunks_from_milvus(collection_arg, chunk_ids):
+        milvus_delete_calls.append((collection_arg, list(chunk_ids)))
 
-    kb._delete_file_chunks_from_milvus = delete_file_chunks_from_milvus
+    kb._delete_chunks_from_milvus = delete_chunks_from_milvus
     chunks = [make_chunk(index) for index in range(2)]
     embeddings = [[0.1, 0.2] for _ in chunks]
 
     with pytest.raises(RuntimeError, match="milvus boom"):
         await kb._insert_chunks_to_stores("db", "file-1", collection, chunks, embeddings)
 
-    assert repos[0].delete_calls == ["file-1"]
-    assert milvus_delete_calls == [(collection, "file-1")]
+    assert repos[0].delete_chunk_id_calls == [["chunk-0", "chunk-1"]]
+    assert milvus_delete_calls == [(collection, ["chunk-0", "chunk-1"])]
 
 
 async def test_update_content_uses_streaming_chunk_store(monkeypatch):

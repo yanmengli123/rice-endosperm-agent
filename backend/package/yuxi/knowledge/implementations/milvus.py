@@ -1,6 +1,8 @@
 import asyncio
+import hashlib
 import inspect
 import os
+import re
 import time
 import traceback
 import weakref
@@ -563,13 +565,14 @@ class MilvusKB(KnowledgeBase):
         if not errors:
             return
 
-        logger.error(f"Chunk double-write failed for file {file_id}, rolling back PostgreSQL and Milvus chunks")
+        inserted_chunk_ids = [str(chunk["chunk_id"]) for chunk in chunks]
+        logger.error(f"Chunk double-write failed for file {file_id}, rolling back only the attempted chunk batch")
         try:
-            await chunk_repo.delete_by_file_id(file_id)
+            await chunk_repo.delete_by_chunk_ids(inserted_chunk_ids)
         except Exception as cleanup_error:
             logger.error(f"Failed to rollback PostgreSQL chunks for {file_id}: {cleanup_error}")
         try:
-            await self._delete_file_chunks_from_milvus(collection, file_id)
+            await self._delete_chunks_from_milvus(collection, inserted_chunk_ids)
         except Exception as cleanup_error:
             logger.error(f"Failed to rollback Milvus chunks for {file_id}: {cleanup_error}")
         raise errors[0]
@@ -615,6 +618,60 @@ class MilvusKB(KnowledgeBase):
 
         await asyncio.to_thread(_delete_from_milvus)
 
+    async def _delete_chunks_from_milvus(self, collection: Collection, chunk_ids: list[str]) -> None:
+        normalized = [chunk_id.replace('"', '\\"') for chunk_id in chunk_ids if chunk_id]
+        if not normalized:
+            return
+        for start in range(0, len(normalized), 500):
+            joined = '", "'.join(normalized[start : start + 500])
+            await asyncio.to_thread(collection.delete, f'id in ["{joined}"]')
+        await asyncio.to_thread(collection.flush)
+
+    @staticmethod
+    def _index_revision_token(revision_id: str) -> str:
+        return hashlib.sha256(revision_id.encode("utf-8")).hexdigest()[:12]
+
+    async def _filter_active_index_chunks(self, kb_id: str, chunks: list[dict]) -> list[dict]:
+        file_ids = sorted(
+            {str(file_id) for chunk in chunks if (file_id := (chunk.get("metadata") or {}).get("file_id"))}
+        )
+        visibility = await KnowledgeFileRepository().get_index_visibility(kb_id=kb_id, file_ids=file_ids)
+        filtered: list[dict] = []
+        for chunk in chunks:
+            metadata = chunk.get("metadata") or {}
+            file_id = str(metadata.get("file_id") or "")
+            file_visibility = visibility.get(file_id) or {}
+            revision_id = file_visibility.get("active_index_revision_id")
+            if not revision_id:
+                if file_visibility.get("evidence_status") in {"PENDING", "RUNNING", "INDEXING"}:
+                    continue
+                filtered.append(chunk)
+                continue
+            token = self._index_revision_token(revision_id)
+            if f"_rev_{token}_" in str(metadata.get("chunk_id") or ""):
+                filtered.append(chunk)
+        return filtered
+
+    async def cleanup_inactive_file_index_revisions(
+        self, kb_id: str, file_id: str, active_revision_id: str
+    ) -> int:
+        """Physically collect stale revisions only after durable activation commits."""
+        collection = await self._get_milvus_collection(kb_id)
+        if not collection:
+            return 0
+        active_token = self._index_revision_token(active_revision_id)
+        chunks = await KnowledgeChunkRepository().list_by_file_id(file_id)
+        stale_ids = [
+            chunk.chunk_id
+            for chunk in chunks
+            if f"_rev_{active_token}_" not in str(chunk.chunk_id or "")
+        ]
+        if not stale_ids:
+            return 0
+        await KnowledgeChunkRepository().delete_by_chunk_ids(stale_ids)
+        await self._delete_chunks_from_milvus(collection, stale_ids)
+        return len(stale_ids)
+
     async def _hydrate_chunk_sources(self, kb_id: str, chunks: list[dict]) -> None:
         file_ids = sorted(
             {str(file_id) for chunk in chunks if (file_id := (chunk.get("metadata") or {}).get("file_id"))}
@@ -628,6 +685,69 @@ class MilvusKB(KnowledgeBase):
             if not isinstance(metadata, dict):
                 continue
             metadata["source"] = filenames.get(str(metadata.get("file_id") or ""), "") or "未知来源"
+
+    async def _hydrate_chunk_provenance(self, chunks: list[dict]) -> None:
+        chunk_ids = [
+            str(chunk_id)
+            for chunk in chunks
+            if (chunk_id := (chunk.get("metadata") or {}).get("chunk_id"))
+        ]
+        records = await KnowledgeChunkRepository().list_by_chunk_ids(chunk_ids)
+        provenance_by_id = {
+            str(record.chunk_id): dict(record.extraction_result or {})
+            for record in records
+            if record.extraction_result
+        }
+        for chunk in chunks:
+            metadata = chunk.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            provenance = provenance_by_id.get(str(metadata.get("chunk_id") or ""))
+            if provenance:
+                metadata["scientific_provenance"] = provenance
+
+    @staticmethod
+    def _select_scientific_pdf_context(
+        query_text: str, chunks: list[dict], final_top_k: int
+    ) -> list[dict]:
+        """Boost exact scientific identifiers and avoid one article/section monopolizing context."""
+        identifiers = {
+            token.casefold()
+            for token in re.findall(r"(?u)\b[\w.-]{3,}\b", query_text)
+            if any(char.isdigit() or char.isupper() for char in token)
+        }
+        for chunk in chunks:
+            content_folded = str(chunk.get("content") or "").casefold()
+            exact_hits = sum(1 for identifier in identifiers if identifier in content_folded)
+            base_score = float(chunk.get("rerank_score", chunk.get("score", 0.0)) or 0.0)
+            chunk["scientific_context_score"] = base_score + min(exact_hits, 3) * 0.04
+        ranked = sorted(chunks, key=lambda item: item["scientific_context_score"], reverse=True)
+
+        selected: list[dict] = []
+        selected_ids: set[str] = set()
+        per_file: dict[str, int] = {}
+        per_section: dict[tuple[str, tuple[str, ...]], int] = {}
+        for chunk in ranked:
+            metadata = chunk.get("metadata") or {}
+            provenance = metadata.get("scientific_provenance") or {}
+            file_id = str(metadata.get("file_id") or "")
+            section = tuple(str(item) for item in provenance.get("section_path") or [])
+            section_key = (file_id, section)
+            if per_file.get(file_id, 0) >= 3 or per_section.get(section_key, 0) >= 2:
+                continue
+            selected.append(chunk)
+            selected_ids.add(str(metadata.get("chunk_id") or id(chunk)))
+            per_file[file_id] = per_file.get(file_id, 0) + 1
+            per_section[section_key] = per_section.get(section_key, 0) + 1
+            if len(selected) >= final_top_k:
+                return selected
+        for chunk in ranked:
+            chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or id(chunk))
+            if chunk_id not in selected_ids:
+                selected.append(chunk)
+            if len(selected) >= final_top_k:
+                break
+        return selected
 
     async def _build_file_name_expr(self, kb_id: str, file_name: str | None) -> str | None:
         if not file_name:
@@ -678,6 +798,9 @@ class MilvusKB(KnowledgeBase):
             FileStatus.INDEXED,
             "done",
         }
+        requested_params = dict(params or {})
+        shadow_revision_id = str(requested_params.get("_index_revision_id") or "")
+        parse_revision_id = str(requested_params.get("_parse_revision_id") or "")
         params = resolve_processing_params(
             kb_additional_params=self.databases_meta.get(kb_id, {}).get("metadata"),
             file_processing_params=file_meta.get("processing_params"),
@@ -713,6 +836,7 @@ class MilvusKB(KnowledgeBase):
 
         logger.debug(f"[index_file] file_id={file_id}, processing_params={params}")
 
+        chunks: list[dict] = []
         try:
             # Read markdown
             markdown_content = await self._read_markdown_from_minio(file_meta["markdown_file"])
@@ -720,6 +844,20 @@ class MilvusKB(KnowledgeBase):
 
             # Split
             chunks = self._split_text_into_chunks(markdown_content, file_id, filename, params)
+            if shadow_revision_id:
+                revision_token = self._index_revision_token(shadow_revision_id)
+                for chunk in chunks:
+                    chunk_id = f"{file_id}_rev_{revision_token}_chunk_{chunk['chunk_index']}"
+                    chunk["id"] = chunk_id
+                    chunk["chunk_id"] = chunk_id
+                    provenance = dict(chunk.get("extraction_result") or {})
+                    provenance.update(
+                        {
+                            "parse_revision_id": parse_revision_id or None,
+                            "index_revision_id": shadow_revision_id,
+                        }
+                    )
+                    chunk["extraction_result"] = provenance
             logger.info(
                 f"Split {filename} into {len(chunks)} chunks with params: "
                 f"chunk_preset_id={params.get('chunk_preset_id')}, "
@@ -728,8 +866,16 @@ class MilvusKB(KnowledgeBase):
 
             chunk_stats = self._calculate_chunk_stats(chunks)
 
-            # Clean up existing chunks if any (for re-indexing)
-            await self.delete_file_chunks_only(kb_id, file_id)
+            if not shadow_revision_id:
+                # Legacy/manual indexing keeps its existing replace semantics.
+                await self.delete_file_chunks_only(kb_id, file_id)
+            elif chunks:
+                # A hard process crash may leave a partial build without reaching the
+                # exception cleanup. Revision-derived IDs make this cleanup fenced and
+                # idempotent; the currently active revision is never touched here.
+                attempted_chunk_ids = [str(chunk["chunk_id"]) for chunk in chunks]
+                await KnowledgeChunkRepository().delete_by_chunk_ids(attempted_chunk_ids)
+                await self._delete_chunks_from_milvus(collection, attempted_chunk_ids)
 
             if chunks:
                 await self._embed_and_store_chunks(kb_id, file_id, collection, chunks, embedding_function)
@@ -766,6 +912,13 @@ class MilvusKB(KnowledgeBase):
                     current_task.uncancel()
             error_msg = "File indexing was cancelled" if isinstance(e, asyncio.CancelledError) else str(e)
             logger.error(f"Indexing failed for {file_id}: {error_msg}")
+            if shadow_revision_id and chunks:
+                attempted_chunk_ids = [str(chunk["chunk_id"]) for chunk in chunks]
+                try:
+                    await KnowledgeChunkRepository().delete_by_chunk_ids(attempted_chunk_ids)
+                    await self._delete_chunks_from_milvus(collection, attempted_chunk_ids)
+                except Exception as cleanup_error:  # noqa: BLE001
+                    logger.error(f"Failed to clean incomplete shadow index for {file_id}: {cleanup_error}")
             update_data = {"status": FileStatus.ERROR_INDEXING, "error_message": error_msg}
             if operator_id:
                 update_data["updated_by"] = operator_id
@@ -1042,12 +1195,17 @@ class MilvusKB(KnowledgeBase):
                     graph_weight = float(merged_kwargs.get("graph_weight", 1.0))
                     retrieved_chunks = self._fuse_chunk_rankings(retrieved_chunks, graph_chunks, graph_weight)
 
+            retrieved_chunks = await self._filter_active_index_chunks(kb_id, retrieved_chunks)
+
             if not retrieved_chunks:
                 return []
 
             await self._hydrate_chunk_sources(kb_id, retrieved_chunks)
+            await self._hydrate_chunk_provenance(retrieved_chunks)
 
             if not use_reranker:
+                if merged_kwargs.get("scientific_pdf_diversity"):
+                    return self._select_scientific_pdf_context(query_text, retrieved_chunks, final_top_k)
                 return retrieved_chunks[:final_top_k]
 
             # 使用重排序模型
@@ -1080,6 +1238,9 @@ class MilvusKB(KnowledgeBase):
 
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"Reranking failed: {exc}, falling back to vector scores")
+
+            if merged_kwargs.get("scientific_pdf_diversity"):
+                return self._select_scientific_pdf_context(query_text, retrieved_chunks, final_top_k)
 
             # 统一返回结果
             return retrieved_chunks[:final_top_k]

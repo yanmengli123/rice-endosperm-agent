@@ -128,6 +128,17 @@ class KnowledgeChunkRepository:
             result = await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.file_id == file_id))
             return int(result.rowcount or 0)
 
+    async def delete_by_chunk_ids(self, chunk_ids: list[str]) -> int:
+        normalized = [chunk_id for chunk_id in chunk_ids if chunk_id]
+        if not normalized:
+            return 0
+        deleted = 0
+        async with pg_manager.get_async_session_context() as session:
+            for batch in self._iter_batches(normalized):
+                result = await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.chunk_id.in_(batch)))
+                deleted += int(result.rowcount or 0)
+        return deleted
+
     async def delete_by_kb_id(self, kb_id: str) -> int:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.kb_id == kb_id))

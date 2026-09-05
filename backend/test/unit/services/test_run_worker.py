@@ -555,8 +555,14 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
     async def fake_ensure_business_schema():
         calls.append("ensure_business_schema")
 
+    async def fake_initialize_knowledge_base():
+        calls.append("initialize_knowledge_base")
+
     async def fake_reconcile_stale_agent_runs():
         calls.append("reconcile_stale_agent_runs")
+
+    async def fake_recover_stale_scientific_pdf_ingests():
+        calls.append("recover_stale_scientific_pdf_ingests")
 
     async def fake_ensure_builtin_mcp_servers_in_db():
         calls.append("ensure_builtin_mcp_servers_in_db")
@@ -588,6 +594,15 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
     monkeypatch.setattr(run_worker.pg_manager, "create_business_tables", fake_create_business_tables)
     monkeypatch.setattr(run_worker.pg_manager, "ensure_business_schema", fake_ensure_business_schema)
     monkeypatch.setattr(run_worker, "reconcile_stale_agent_runs", fake_reconcile_stale_agent_runs)
+    monkeypatch.setattr(
+        run_worker,
+        "recover_stale_scientific_pdf_ingests",
+        fake_recover_stale_scientific_pdf_ingests,
+    )
+    monkeypatch.setattr(
+        "yuxi.knowledge.runtime.knowledge_base.initialize",
+        fake_initialize_knowledge_base,
+    )
     monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
     monkeypatch.setattr(run_worker, "ensure_builtin_mcp_servers_in_db", fake_ensure_builtin_mcp_servers_in_db)
     monkeypatch.setattr(run_worker, "init_builtin_skills", fake_init_builtin_skills)
@@ -605,7 +620,9 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "initialize",
         "create_business_tables",
         "ensure_business_schema",
+        "initialize_knowledge_base",
         "reconcile_stale_agent_runs",
+        "recover_stale_scientific_pdf_ingests",
         "ensure_builtin_mcp_servers_in_db",
         "init_builtin_skills",
         "ensure_builtin_ocr_provider_in_db",

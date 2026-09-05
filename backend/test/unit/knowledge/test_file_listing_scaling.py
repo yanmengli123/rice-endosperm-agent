@@ -138,6 +138,31 @@ async def test_get_database_info_omits_files_by_default():
     assert result["stats"]["total_size"] == 1024
 
 
+async def test_worker_refreshes_metadata_for_database_created_after_startup(monkeypatch):
+    manager = KnowledgeBaseManager("/tmp/yuxi-test")
+
+    class LazyMetadataKnowledgeBase:
+        def __init__(self):
+            self.loaded = False
+            self.reload_count = 0
+
+        def get_database_info(self, kb_id, include_files=False):
+            del include_files
+            return {"kb_id": kb_id} if self.loaded else None
+
+        async def _load_metadata(self):
+            self.reload_count += 1
+            self.loaded = True
+
+    instance = LazyMetadataKnowledgeBase()
+    monkeypatch.setattr(manager, "_get_or_create_kb_instance", lambda kb_type: instance)
+
+    resolved = await manager._get_kb_for_database("kb_1")
+
+    assert resolved is instance
+    assert instance.reload_count == 1
+
+
 async def test_list_document_files_returns_lightweight_paginated_items():
     manager = KnowledgeBaseManager("/tmp/yuxi-test")
 

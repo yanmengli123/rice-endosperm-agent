@@ -24,6 +24,10 @@ x-api-worker-env: &api-worker-env
   MINIO_URI: ${MINIO_URI:-http://minio:9000}
   # 文档解析
   MINERU_API_URI: ${MINERU_API_URI:-http://mineru-api:30001}
+  GROBID_URL: ${GROBID_URL:-http://grobid:8070}
+  GROBID_VERSION: ${GROBID_VERSION:-0.9.1}
+  GROBID_TIMEOUT_SECONDS: ${GROBID_TIMEOUT_SECONDS:-180}
+  SCIENTIFIC_PDF_MAX_CONCURRENCY: ${SCIENTIFIC_PDF_MAX_CONCURRENCY:-2}
   PADDLEX_URI: ${PADDLEX_URI:-http://paddlex:8080}
   # Sandbox related
   YUXI_DOCKER_API_BASE: ${YUXI_DOCKER_API_BASE:-http://localhost}
@@ -42,8 +46,8 @@ x-api-worker-env: &api-worker-env
   RUN_EVENTS_STREAM_TTL_SECONDS: ${RUN_EVENTS_STREAM_TTL_SECONDS:-7200}
   YUXI_CORS_ORIGINS: ${YUXI_CORS_ORIGINS:-}
   # 其他环境变量
-  NO_PROXY: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd-dev,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
-  no_proxy: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd-dev,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
+  NO_PROXY: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd-dev,etcd,mineru,grobid,paddlex,sandbox-provisioner,api.siliconflow.cn
+  no_proxy: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd-dev,etcd,mineru,grobid,paddlex,sandbox-provisioner,api.siliconflow.cn
 
 services:
   api:
@@ -169,6 +173,19 @@ services:
         condition: service_healthy
       sandbox-provisioner:
         condition: service_healthy
+
+  # GROBID only enriches native-text PDFs with bibliographic structure. The
+  # ingest worker degrades explicitly when it is unavailable, so this service
+  # does not become a hard dependency for ordinary Yuxi startup.
+  grobid:
+    image: ${GROBID_IMAGE:-grobid/grobid:0.9.1-full}
+    container_name: yuxi-grobid
+    profiles: ["pdf-evidence"]
+    restart: unless-stopped
+    networks:
+      - app-network
+    mem_limit: ${GROBID_MEMORY_LIMIT:-4g}
+    cpus: ${GROBID_CPU_LIMIT:-2.0}
 
   # BioinfoMCP 是 38 个独立 stdio 服务的集合。该 profile 只构建隔离运行镜像，
   # 不会把这些工具作为常驻服务启动。

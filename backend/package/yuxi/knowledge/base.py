@@ -176,6 +176,10 @@ class KnowledgeBase(ABC):
             "updated_at": utc_isoformat(record.updated_at) if record.updated_at else None,
             "original_filename": record.original_filename,
             "minio_url": record.minio_url,
+            "active_parse_revision_id": getattr(record, "active_parse_revision_id", None),
+            "active_index_revision_id": getattr(record, "active_index_revision_id", None),
+            "evidence_status": getattr(record, "evidence_status", None),
+            "evidence_capabilities": getattr(record, "evidence_capabilities", None),
         }
 
     @staticmethod
@@ -198,6 +202,10 @@ class KnowledgeBase(ABC):
             "processing_params": sanitize_processing_params(meta.get("processing_params")),
             "is_folder": meta.get("is_folder", False),
             "error_message": meta.get("error"),
+            "active_parse_revision_id": meta.get("active_parse_revision_id"),
+            "active_index_revision_id": meta.get("active_index_revision_id"),
+            "evidence_status": meta.get("evidence_status"),
+            "evidence_capabilities": meta.get("evidence_capabilities"),
             "created_by": str(meta.get("created_by")) if meta.get("created_by") else None,
             "updated_by": str(meta.get("updated_by")) if meta.get("updated_by") else None,
         }

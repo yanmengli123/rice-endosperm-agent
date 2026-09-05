@@ -99,6 +99,7 @@ async def test_self_register_non_ascii_invite_returns_forbidden_instead_of_500(a
             "uid": "new_user",
             "username": "New User",
             "password": "correct-horse-battery-staple",
+            "department_id": 1,
             "invite_code": "水稻邀请码",
         },
     )

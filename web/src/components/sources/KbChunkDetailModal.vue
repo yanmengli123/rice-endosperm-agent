@@ -21,6 +21,7 @@
     <MarkdownPreview
       v-if="chunk?.content"
       :content="chunk.content"
+      :knowledge-base-id="chunk?.metadata?.kb_id || chunk?.kb_id || ''"
       class="chunk-markdown-content"
     />
     <div v-else class="empty-text">暂无内容</div>

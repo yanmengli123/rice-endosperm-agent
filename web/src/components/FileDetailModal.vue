@@ -85,6 +85,7 @@
         <MarkdownPreview
           v-else-if="mergedContent"
           :content="mergedContent"
+          :knowledge-base-id="kbId"
           class="markdown-content"
         />
         <div v-else class="empty-content">

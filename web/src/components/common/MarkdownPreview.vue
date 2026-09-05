@@ -14,6 +14,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 import { renderMarkdown } from '@/utils/markdown_preview'
+import { collectAssetUris, createAssetResolverSession } from '@/utils/asset_resolver'
 import { HTML_PREVIEW_MAX_HEIGHT, HTML_PREVIEW_MIN_HEIGHT } from '@/utils/htmlPreviewRenderer'
 import 'katex/dist/katex.min.css'
 
@@ -29,6 +30,10 @@ const props = defineProps({
   codeCopy: {
     type: Boolean,
     default: false
+  },
+  knowledgeBaseId: {
+    type: [String, Number],
+    default: ''
   }
 })
 
@@ -325,10 +330,40 @@ window.addEventListener('message', handleHtmlPreviewHeight)
 onBeforeUnmount(() => {
   window.removeEventListener('message', handleHtmlPreviewHeight)
   htmlPreviewFrames.clear()
+  assetSession.abortAll()
+  assetSession.revokeAll()
 })
 
+/**
+ * 科研证据资源（kbasset://）解析：内容渲染前把逻辑 URI 换成本会话的
+ * Blob URL。会话边界 = content 变化；旧会话先 abort + revoke，避免
+ * 幽灵请求、竞态覆盖与 Blob 内存泄漏。
+ */
+let assetSession = createAssetResolverSession()
+let resolveAssetGeneration = 0
+
+const resolveKbassetUris = async (content, isExpired) => {
+  const uris = collectAssetUris(content)
+  if (!uris.length) return content
+
+  const generation = ++resolveAssetGeneration
+  assetSession.abortAll()
+  assetSession.revokeAll()
+
+  const replacements = await assetSession.resolveAssets(uris, {
+    kbId: props.knowledgeBaseId
+  })
+  if (isExpired() || generation !== resolveAssetGeneration) return null
+
+  let resolved = content
+  for (const [uri, blobUrl] of replacements) {
+    resolved = resolved.split(uri).join(blobUrl || uri)
+  }
+  return resolved
+}
+
 watch(
-  [() => props.content, shikiTheme, () => props.codeCopy],
+  [() => props.content, shikiTheme, () => props.codeCopy, () => props.knowledgeBaseId],
   async ([content, theme, codeCopy], _, onCleanup) => {
     let expired = false
     onCleanup(() => {
@@ -341,7 +376,10 @@ watch(
       return
     }
 
-    const html = await renderMarkdown(content, { theme })
+    const resolvedContent = await resolveKbassetUris(content, () => expired)
+    if (resolvedContent === null) return
+
+    const html = await renderMarkdown(resolvedContent, { theme })
     if (!expired) {
       replaceHtmlPreservingPreviews(html)
       cleanupHtmlPreviewFrames()

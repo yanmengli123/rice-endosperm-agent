@@ -14,6 +14,7 @@ import requests
 from yuxi.knowledge.parser.base import BaseDocumentProcessor, DocumentParserException
 from yuxi.knowledge.parser.credential_cache import ocr_credential_cache
 from yuxi.knowledge.parser.zip_utils import process_zip_file_sync
+from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact
 from yuxi.utils import hashstr, logger
 
 _SERVICE_ID = "mineru_official"
@@ -110,6 +111,12 @@ class MinerUOfficialParser(BaseDocumentProcessor):
 
     def process_file(self, file_path: str, params: dict[str, Any] | None = None) -> str:
         """上传本地文档、轮询任务，并返回 MinerU 生成的 Markdown。"""
+        return str(self.process_file_with_artifacts(file_path, params)["markdown"])
+
+    def process_file_with_artifacts(
+        self, file_path: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Return Markdown plus immutable raw MinerU files for the evidence pipeline."""
         if not os.path.exists(file_path):
             raise DocumentParserException(f"文件不存在: {file_path}", self.get_service_name(), "file_not_found")
 
@@ -135,18 +142,21 @@ class MinerUOfficialParser(BaseDocumentProcessor):
                     f"MinerU Official 处理成功: {os.path.basename(file_path)} - "
                     f"{len(text)} 字符 ({time.time() - start_time:.2f}s)"
                 )
-                return text
+                return {"markdown": text, "artifacts": []}
 
             try:
                 processed = process_zip_file_sync(
                     zip_path,
                     image_bucket=params.get("image_bucket") or "public",
                     image_prefix=params.get("image_prefix") or "unknown/kb-images",
+                    asset_uri_builder=params.get("asset_uri_builder"),
                 )
                 text = processed["markdown_content"]
+                artifacts = self._collect_raw_artifacts(zip_path)
             except Exception:
                 logger.exception(f"处理 MinerU 结果包失败，改用结果包中的 Markdown: {zip_path}")
                 text = self._read_markdown_from_zip(zip_path)
+                artifacts = self._collect_raw_artifacts(zip_path)
             finally:
                 try:
                     os.unlink(zip_path)
@@ -157,7 +167,7 @@ class MinerUOfficialParser(BaseDocumentProcessor):
                 f"MinerU Official 处理成功: {os.path.basename(file_path)} - "
                 f"{len(text)} 字符 ({time.time() - start_time:.2f}s)"
             )
-            return text
+            return {"markdown": text, "artifacts": artifacts}
         except DocumentParserException:
             raise
         except Exception as exc:
@@ -165,6 +175,40 @@ class MinerUOfficialParser(BaseDocumentProcessor):
             raise DocumentParserException(
                 f"MinerU Official 处理失败: {exc}", self.get_service_name(), "processing_failed"
             ) from exc
+
+    @staticmethod
+    def _collect_raw_artifacts(zip_path: str) -> list[ParserArtifact]:
+        """Keep parser source files, excluding duplicate images and embedded source PDFs."""
+        artifacts: list[ParserArtifact] = []
+        allowed_suffixes = {".json", ".md", ".txt", ".html", ".xml"}
+        max_artifact_bytes = 50 * 1024 * 1024
+        max_total_bytes = 100 * 1024 * 1024
+        total_bytes = 0
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            for info in archive.infolist():
+                path = Path(info.filename)
+                if info.is_dir() or path.suffix.lower() not in allowed_suffixes:
+                    continue
+                if info.file_size > max_artifact_bytes or total_bytes + info.file_size > max_total_bytes:
+                    logger.warning(f"跳过超限 MinerU 原始产物: {info.filename} ({info.file_size} bytes)")
+                    continue
+                content = archive.read(info)
+                total_bytes += len(content)
+                content_type = {
+                    ".json": "application/json",
+                    ".xml": "application/xml",
+                    ".html": "text/html",
+                    ".md": "text/markdown",
+                }.get(path.suffix.lower(), "text/plain")
+                artifacts.append(
+                    ParserArtifact(
+                        kind=f"mineru_{path.stem[:48]}",
+                        filename=path.name,
+                        content=content,
+                        content_type=content_type,
+                    )
+                )
+        return artifacts
 
     def _runtime_config(self) -> tuple[str, str, str]:
         runtime = None if self._api_token_override else ocr_credential_cache.get(_SERVICE_ID)

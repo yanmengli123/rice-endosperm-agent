@@ -52,6 +52,25 @@ Yuxi 将上传文件先保存为原文件，再解析为 Markdown 并按知识�
 
 PDF 使用云端 OCR 时，上传、轮询和结果下载会对连接中断、超时、限流及 5xx 响应执行有限次数退避重试。如果 OCR 最终仍不可用，但 PDF 自带不少于 80 个非空白字符的文本层，系统会自动回退到本地文本提取并继续分块入库；扫描版 PDF 没有可用文本层时仍会明确失败，避免把空内容误标为已入库。可在处理参数中设置 `ocr_fallback_to_text: false` 关闭该回退。
 
+## PDF 文献证据库
+
+在“智能体扩展 → 知识库 → 新建知识库”选择“PDF 文献证据库”后，上传 PDF 会自动进入专用证据流水线，不需要逐篇选择解析和入库步骤：
+
+1. 原始 PDF 按 SHA-256 固化到私有 `knowledgebases` bucket，解析版本不覆盖原文。
+2. PyMuPDF 必定提取页面、词坐标和稳定证据锚点，并判断原生文本层是否可用。
+3. MinerU Official 作为正文、表格、公式与图片说明的主解析源，原始 JSON/Markdown 结果包随解析版本保留。
+4. 原生文本可用时，GROBID 自动增强题录、章节、参考文献和文内引用；GROBID 不可用不会丢弃 MinerU 正文。
+5. 系统构建可重建的 `UnifiedArticle`，执行质量门禁并生成 `INDEXED_FULL`、`INDEXED_CONTENT_ONLY`、`INDEXED_TEXT_ONLY` 或 `REJECTED` 能力状态。
+6. 文献按章节与段落分块，图表/公式保持独立，参考文献不进入普通问答；新索引完整写入后才替换活动版本。
+
+GROBID 是服务端内部依赖，不向公网暴露端口。首次部署或更新后启动一次：
+
+```bash
+docker compose --profile pdf-evidence up -d grobid worker
+```
+
+未启动 GROBID 时，原生文本 PDF 会显示“正文证据”而不是“完整证据”；扫描 PDF 不会调用 GROBID。后台 Worker 每五分钟重新领取租约过期的解析任务，API 或 Worker 重启不会把旧活动索引删除。
+
 ## OCR 方案选择
 
 系统提供多种 OCR 方案，适用于不同场景：
@@ -153,7 +172,7 @@ PADDLEOCR_API_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
 
 ## 解析参数与分块快照
 
-知识库分块配置由两部分组成：`chunk_preset_id` 只表示策略（`general`、`qa`、`book`、`laws`、`semantic`、`separator`），具体参数统一放在 `chunk_parser_config` 中。不要再写入旧的根级 `chunk_size`、`chunk_overlap` 或 `qa_separator` 字段。
+知识库分块配置由两部分组成：`chunk_preset_id` 只表示策略（`general`、`qa`、`book`、`laws`、`semantic`、`separator`、`academic`），具体参数统一放在 `chunk_parser_config` 中。`academic` 由 PDF 文献证据库自动选择，默认目标 600 token、硬上限 900 token、同章节重叠 64 token。不要再写入旧的根级 `chunk_size`、`chunk_overlap` 或 `qa_separator` 字段。
 
 文件级 `processing_params` 会同时保存 `ocr_engine`、`ocr_engine_config`、分块策略和 `chunk_parser_config`。重新解析或入库时，系统以文件记录、知识库配置和本次请求合并后的快照为准，便于复现历史处理结果。
 

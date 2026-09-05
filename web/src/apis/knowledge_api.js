@@ -8,6 +8,7 @@ import {
   apiAdminDelete,
   apiRequest
 } from './base'
+import { buildKnowledgeAssetUrl } from '@/utils/kbasset_contract'
 
 /**
  * 知识库管理API模块
@@ -232,6 +233,23 @@ export const documentApi = {
    */
   getDocumentContent: async (kbId, docId) => {
     return apiAdminGet(`/api/knowledge/databases/${kbId}/documents/${docId}/content`)
+  },
+
+  getEvidenceStatus: async (kbId, docId) => {
+    return apiAdminGet(`/api/knowledge/databases/${kbId}/documents/${docId}/evidence-status`)
+  },
+
+  /**
+   * Fetch a private scientific-PDF asset through Yuxi's authenticated boundary.
+   * The response remains a Response so the renderer can validate MIME and create
+   * a short-lived Blob URL without ever exposing a MinIO object key.
+   */
+  getDocumentAsset: async (kbId, asset, signal) => {
+    return apiGet(buildKnowledgeAssetUrl(kbId, asset), { signal }, true, 'blob')
+  },
+
+  retryEvidenceIngest: async (kbId, docId) => {
+    return apiAdminPost(`/api/knowledge/databases/${kbId}/documents/${docId}/evidence-retry`, {})
   },
 
   /**

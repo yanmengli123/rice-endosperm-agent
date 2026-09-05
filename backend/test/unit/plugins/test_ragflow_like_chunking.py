@@ -201,8 +201,16 @@ def test_chunk_preset_options_include_description() -> None:
 
 
 def test_chunk_preset_defaults_only_include_strategy_specific_fields() -> None:
+    expected_defaults = {
+        "academic": {
+            "chunk_token_num": 600,
+            "hard_token_limit": 900,
+            "overlap_token_num": 64,
+            "include_references": False,
+        },
+    }
     for preset_id in CHUNK_PRESET_IDS:
-        assert get_default_chunk_parser_config(preset_id) == {}
+        assert get_default_chunk_parser_config(preset_id) == expected_defaults.get(preset_id, {})
 
 
 def test_laws_chunking_should_apply_overlength_protection() -> None:
@@ -325,6 +333,7 @@ def test_sanitize_processing_params_should_drop_non_persistent_fields() -> None:
             "content_hashes": {"a.md": "hash-a"},
             "enable_ocr": "mineru_ocr",
             "_preprocessed_map": {"a.md": {"path": "/tmp/a.md"}},
+            "asset_uri_builder": lambda object_name: f"kbasset://{object_name}",
         }
     )
 

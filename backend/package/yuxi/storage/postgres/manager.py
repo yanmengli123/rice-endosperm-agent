@@ -1028,15 +1028,16 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0014_user_custom_model_endpoints", "_migration_0014_user_custom_model_endpoints"),
         ("0015_legacy_user_byok_optional", "_migration_0015_legacy_user_byok_optional"),
         ("0016_byok_platform_quota_split", "_migration_0016_byok_platform_quota_split"),
+        ("0017_scientific_pdf_evidence", "_migration_0017_scientific_pdf_evidence"),
+        ("0018_scientific_pdf_workflow_cache", "_migration_0018_scientific_pdf_workflow_cache"),
+        ("0019_scientific_pdf_single_active_index", "_migration_0019_scientific_pdf_single_active_index"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
         """P5 补遗：api_keys.tenant_id 在 ORM 中声明但 0010 漏建，导致所有
         api_keys 的 SELECT/INSERT 全部失败（建 Key、设备码签发、删用户级联）。
         回填来源：所属用户的活跃租户成员关系（与 0010 其他表一致）。"""
-        await conn.execute(
-            text("ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS tenant_id BIGINT")
-        )
+        await conn.execute(text("ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
         await conn.execute(
             text(
                 "UPDATE api_keys k SET tenant_id = COALESCE("
@@ -1052,12 +1053,12 @@ class PostgresManager(metaclass=SingletonMeta):
         ).scalar()
         if not constraint_exists:
             await conn.execute(
-                text("ALTER TABLE api_keys ADD CONSTRAINT fk_api_keys_tenant "
-                     "FOREIGN KEY (tenant_id) REFERENCES tenants(id)")
+                text(
+                    "ALTER TABLE api_keys ADD CONSTRAINT fk_api_keys_tenant "
+                    "FOREIGN KEY (tenant_id) REFERENCES tenants(id)"
+                )
             )
-        await conn.execute(
-            text("CREATE INDEX IF NOT EXISTS ix_api_keys_tenant ON api_keys(tenant_id)")
-        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_tenant ON api_keys(tenant_id)"))
 
     async def _migration_0012_identity_created_at_required(self, conn) -> None:
         """修复历史用户/部门缺失创建时间导致管理列表响应校验失败。
@@ -1189,10 +1190,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         )
         await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_mcp_call_audit_tenant_time "
-                "ON mcp_call_audit(tenant_id, created_at)"
-            )
+            text("CREATE INDEX IF NOT EXISTS ix_mcp_call_audit_tenant_time ON mcp_call_audit(tenant_id, created_at)")
         )
 
         await conn.execute(
@@ -1200,7 +1198,8 @@ class PostgresManager(metaclass=SingletonMeta):
                 "INSERT INTO mcp_catalog(slug, name, description, source_type, source_ref, raw_manifest, "
                 "normalized_manifest, content_digest, provenance) "
                 "SELECT s.slug, s.name, s.description, COALESCE(s.source_type, 'legacy'), s.source_ref, "
-                "COALESCE(s.raw_manifest, '{}'::jsonb), COALESCE(s.normalized_manifest, s.spec, '{}'::jsonb), "
+                "COALESCE(s.raw_manifest::jsonb, '{}'::jsonb), "
+                "COALESCE(s.normalized_manifest::jsonb, s.spec::jsonb, '{}'::jsonb), "
                 "'legacy:' || s.id::text, jsonb_build_object('migration', '0013') FROM mcp_servers s "
                 "ON CONFLICT (slug) DO NOTHING"
             )
@@ -1211,9 +1210,11 @@ class PostgresManager(metaclass=SingletonMeta):
                 "runtime_artifact, data_access_level, dependency_mode, policy_json, capability_snapshot, "
                 "enabled, installed_by) "
                 "SELECT COALESCE(s.tenant_id, 1), c.id, COALESCE(s.lifecycle_status, 'READY'), s.runtime_level, "
-                "s.runtime_artifact, COALESCE(s.data_access_level, 'PUBLIC'), COALESCE(s.dependency_mode, 'OPTIONAL'), "
+                "s.runtime_artifact::jsonb, COALESCE(s.data_access_level, 'PUBLIC'), "
+                "COALESCE(s.dependency_mode, 'OPTIONAL'), "
                 "'{}'::jsonb, "
-                "COALESCE(s.capability_snapshot, '{}'::jsonb), s.enabled = 1, COALESCE(s.created_by, 'migration-0013') "
+                "COALESCE(s.capability_snapshot::jsonb, '{}'::jsonb), s.enabled = 1, "
+                "COALESCE(s.created_by, 'migration-0013') "
                 "FROM mcp_servers s JOIN mcp_catalog c ON c.slug = s.slug "
                 "ON CONFLICT (tenant_id, catalog_id) DO NOTHING"
             )
@@ -1221,15 +1222,9 @@ class PostgresManager(metaclass=SingletonMeta):
 
     async def _migration_0014_user_custom_model_endpoints(self, conn) -> None:
         """为用户级 BYOK 增加协议、端点和默认模型，旧凭据保持原语义。"""
-        await conn.execute(
-            text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS protocol VARCHAR(32)")
-        )
-        await conn.execute(
-            text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS base_url VARCHAR(1000)")
-        )
-        await conn.execute(
-            text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS model_id VARCHAR(255)")
-        )
+        await conn.execute(text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS protocol VARCHAR(32)"))
+        await conn.execute(text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS base_url VARCHAR(1000)"))
+        await conn.execute(text("ALTER TABLE model_user_credentials ADD COLUMN IF NOT EXISTS model_id VARCHAR(255)"))
 
     async def _migration_0015_legacy_user_byok_optional(self, conn) -> None:
         """只升级从未被管理员改动过的旧默认策略，保留显式 platform_only 决策。"""
@@ -1251,16 +1246,10 @@ class PostgresManager(metaclass=SingletonMeta):
         ``byok_optional``，修复旧注册流程只创建 membership 的历史缺口。
         """
         await conn.execute(
-            text(
-                "ALTER TABLE tenant_user_entitlements ALTER COLUMN credential_policy "
-                "SET DEFAULT 'byok_optional'"
-            )
+            text("ALTER TABLE tenant_user_entitlements ALTER COLUMN credential_policy SET DEFAULT 'byok_optional'")
         )
         await conn.execute(
-            text(
-                "ALTER TABLE tenant_user_entitlements ALTER COLUMN byok_platform_token_exempt "
-                "SET DEFAULT TRUE"
-            )
+            text("ALTER TABLE tenant_user_entitlements ALTER COLUMN byok_platform_token_exempt SET DEFAULT TRUE")
         )
         await conn.execute(
             text(
@@ -1279,6 +1268,193 @@ class PostgresManager(metaclass=SingletonMeta):
                 "SET byok_platform_token_exempt = TRUE "
                 "WHERE credential_policy IN ('byok_optional', 'byok_required') "
                 "AND byok_platform_token_exempt = FALSE"
+            )
+        )
+
+    async def _migration_0017_scientific_pdf_evidence(self, conn) -> None:
+        """Versioned PDF evidence parsing, immutable artifacts and shadow index metadata."""
+        for definition in (
+            "active_parse_revision_id VARCHAR(64)",
+            "active_index_revision_id VARCHAR(64)",
+            "evidence_status VARCHAR(32)",
+            "evidence_capabilities JSONB",
+        ):
+            await conn.execute(text(f"ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS {definition}"))
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_files_active_parse "
+                "ON knowledge_files(active_parse_revision_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_files_active_index "
+                "ON knowledge_files(active_index_revision_id)"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_knowledge_files_evidence_status ON knowledge_files(evidence_status)")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_parse_revisions ("
+                "id BIGSERIAL PRIMARY KEY, revision_id VARCHAR(64) NOT NULL UNIQUE, "
+                "tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "kb_id VARCHAR(80) NOT NULL REFERENCES knowledge_bases(kb_id) ON DELETE CASCADE, "
+                "file_id VARCHAR(64) NOT NULL REFERENCES knowledge_files(file_id) ON DELETE CASCADE, "
+                "source_sha256 VARCHAR(64) NOT NULL, parser_fingerprint VARCHAR(64) NOT NULL, "
+                "pipeline_version VARCHAR(32) NOT NULL, status VARCHAR(32) NOT NULL DEFAULT 'PENDING', "
+                "attempt INTEGER NOT NULL DEFAULT 0, lease_owner VARCHAR(128), lease_expires_at TIMESTAMPTZ, "
+                "article_uri VARCHAR(1024), article_summary JSONB, qa_report JSONB, capabilities JSONB, "
+                "error_message TEXT, created_by VARCHAR(64), created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, updated_at TIMESTAMPTZ DEFAULT NOW(), "
+                "CONSTRAINT uq_knowledge_parse_revision_fingerprint "
+                "UNIQUE(tenant_id, file_id, parser_fingerprint))"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_parse_revision_lease "
+                "ON knowledge_parse_revisions(status, lease_expires_at)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_parse_artifacts ("
+                "id BIGSERIAL PRIMARY KEY, artifact_id VARCHAR(64) NOT NULL UNIQUE, "
+                "revision_id VARCHAR(64) NOT NULL REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE, "
+                "kind VARCHAR(64) NOT NULL, object_uri VARCHAR(1024) NOT NULL, sha256 VARCHAR(64) NOT NULL, "
+                "content_type VARCHAR(128), size_bytes BIGINT NOT NULL, metadata_json JSONB, "
+                "created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "CONSTRAINT uq_knowledge_parse_artifact_content UNIQUE(revision_id, kind, sha256))"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_index_revisions ("
+                "id BIGSERIAL PRIMARY KEY, revision_id VARCHAR(64) NOT NULL UNIQUE, "
+                "tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "kb_id VARCHAR(80) NOT NULL REFERENCES knowledge_bases(kb_id) ON DELETE CASCADE, "
+                "file_id VARCHAR(64) NOT NULL REFERENCES knowledge_files(file_id) ON DELETE CASCADE, "
+                "parse_revision_id VARCHAR(64) NOT NULL "
+                "REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE, "
+                "chunker_fingerprint VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL DEFAULT 'PENDING', "
+                "chunk_count INTEGER NOT NULL DEFAULT 0, token_count BIGINT NOT NULL DEFAULT 0, "
+                "error_message TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), activated_at TIMESTAMPTZ, "
+                "completed_at TIMESTAMPTZ, "
+                "CONSTRAINT uq_knowledge_index_revision_fingerprint "
+                "UNIQUE(parse_revision_id, chunker_fingerprint))"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_index_revision_file_status "
+                "ON knowledge_index_revisions(file_id, status)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS evidence_anchors ("
+                "id BIGSERIAL PRIMARY KEY, anchor_id VARCHAR(64) NOT NULL, "
+                "parse_revision_id VARCHAR(64) NOT NULL "
+                "REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE, "
+                "page INTEGER NOT NULL, bbox JSONB NOT NULL, word_start INTEGER NOT NULL, word_end INTEGER NOT NULL, "
+                "quote_hash VARCHAR(64) NOT NULL, prefix_hash VARCHAR(64) NOT NULL, suffix_hash VARCHAR(64) NOT NULL, "
+                "quote TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "CONSTRAINT uq_evidence_anchor_revision UNIQUE(parse_revision_id, anchor_id))"
+            )
+        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_evidence_anchor_lookup ON evidence_anchors(anchor_id)"))
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS article_references ("
+                "id BIGSERIAL PRIMARY KEY, parse_revision_id VARCHAR(64) NOT NULL "
+                "REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE, "
+                "reference_id VARCHAR(128) NOT NULL, title TEXT, doi VARCHAR(512), raw_text TEXT, "
+                "metadata_json JSONB, created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "CONSTRAINT uq_article_reference_revision UNIQUE(parse_revision_id, reference_id))"
+            )
+        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_article_references_doi ON article_references(doi)"))
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS citation_mentions ("
+                "id BIGSERIAL PRIMARY KEY, parse_revision_id VARCHAR(64) NOT NULL "
+                "REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE, "
+                "mention_id VARCHAR(128) NOT NULL, reference_id VARCHAR(128), mention_text TEXT, "
+                "anchor_id VARCHAR(64), metadata_json JSONB, created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "CONSTRAINT uq_citation_mention_revision UNIQUE(parse_revision_id, mention_id))"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_citation_mentions_anchor ON citation_mentions(anchor_id)")
+        )
+
+    async def _migration_0018_scientific_pdf_workflow_cache(self, conn) -> None:
+        """Stage-level audit state and tenant-local immutable document parse reuse."""
+        await conn.execute(
+            text("ALTER TABLE knowledge_parse_revisions ADD COLUMN IF NOT EXISTS reused_from_revision_id VARCHAR(64)")
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_parse_revisions_reused_from "
+                "ON knowledge_parse_revisions(reused_from_revision_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_parse_stages ("
+                "id BIGSERIAL PRIMARY KEY, stage_id VARCHAR(64) NOT NULL UNIQUE, "
+                "revision_id VARCHAR(64) NOT NULL "
+                "REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE, "
+                "stage_name VARCHAR(32) NOT NULL, status VARCHAR(32) NOT NULL DEFAULT 'PENDING', "
+                "attempt INTEGER NOT NULL DEFAULT 0, lease_owner VARCHAR(128), lease_expires_at TIMESTAMPTZ, "
+                "input_fingerprint VARCHAR(64) NOT NULL, output_artifact_id VARCHAR(64), "
+                "error_code VARCHAR(64), error_detail TEXT, started_at TIMESTAMPTZ, "
+                "finished_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "updated_at TIMESTAMPTZ DEFAULT NOW(), "
+                "CONSTRAINT uq_knowledge_parse_stage_name UNIQUE(revision_id, stage_name))"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_parse_stage_lease "
+                "ON knowledge_parse_stages(status, lease_expires_at)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_document_identity_cache ("
+                "id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL "
+                "REFERENCES tenants(id) ON DELETE CASCADE, source_sha256 VARCHAR(64) NOT NULL, "
+                "parser_fingerprint VARCHAR(64) NOT NULL, canonical_revision_id VARCHAR(64), "
+                "status VARCHAR(32) NOT NULL DEFAULT 'BUILDING', created_at TIMESTAMPTZ DEFAULT NOW(), "
+                "updated_at TIMESTAMPTZ DEFAULT NOW(), "
+                "CONSTRAINT uq_knowledge_document_identity "
+                "UNIQUE(tenant_id, source_sha256, parser_fingerprint))"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_document_identity_cache_source "
+                "ON knowledge_document_identity_cache(tenant_id, source_sha256)"
+            )
+        )
+
+    async def _migration_0019_scientific_pdf_single_active_index(self, conn) -> None:
+        """Make the file pointer and index-revision audit state agree deterministically."""
+        await conn.execute(
+            text(
+                "UPDATE knowledge_index_revisions AS revision SET status = 'SUPERSEDED' "
+                "WHERE revision.status = 'ACTIVE' AND NOT EXISTS ("
+                "SELECT 1 FROM knowledge_files AS file "
+                "WHERE file.active_index_revision_id = revision.revision_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_index_one_active_per_file "
+                "ON knowledge_index_revisions(file_id) WHERE status = 'ACTIVE'"
             )
         )
 
@@ -1307,9 +1483,9 @@ class PostgresManager(metaclass=SingletonMeta):
         self._check_initialized()
         await self._apply_versioned_migrations()
         stmts = [
-                        "ALTER TABLE IF EXISTS departments ALTER COLUMN created_at SET DEFAULT NOW()",
+            "ALTER TABLE IF EXISTS departments ALTER COLUMN created_at SET DEFAULT NOW()",
             "UPDATE departments SET created_at = NOW() WHERE created_at IS NULL",
-"ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS skill_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS version VARCHAR(64)",

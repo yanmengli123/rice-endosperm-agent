@@ -34,6 +34,10 @@ class KnowledgeFileRepository:
         "processing_params",
         "is_folder",
         "error_message",
+        "active_parse_revision_id",
+        "active_index_revision_id",
+        "evidence_status",
+        "evidence_capabilities",
         "created_by",
         "updated_by",
     }
@@ -114,6 +118,45 @@ class KnowledgeFileRepository:
                 )
             )
             return {str(file_id): str(filename or "") for file_id, filename in result.all()}
+
+    async def get_active_index_revisions(self, *, kb_id: str, file_ids: list[str]) -> dict[str, str]:
+        normalized_ids = [file_id for file_id in file_ids if file_id]
+        if not normalized_ids:
+            return {}
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(KnowledgeFile.file_id, KnowledgeFile.active_index_revision_id).where(
+                    KnowledgeFile.kb_id == kb_id,
+                    KnowledgeFile.file_id.in_(normalized_ids),
+                    KnowledgeFile.active_index_revision_id.is_not(None),
+                )
+            )
+            return {str(file_id): str(revision_id) for file_id, revision_id in result.all() if revision_id}
+
+    async def get_index_visibility(self, *, kb_id: str, file_ids: list[str]) -> dict[str, dict[str, Any]]:
+        normalized_ids = [file_id for file_id in file_ids if file_id]
+        if not normalized_ids:
+            return {}
+        visibility: dict[str, dict[str, Any]] = {}
+        async with pg_manager.get_async_session_context() as session:
+            for batch in self._iter_batches(normalized_ids):
+                result = await session.execute(
+                    select(
+                        KnowledgeFile.file_id,
+                        KnowledgeFile.active_index_revision_id,
+                        KnowledgeFile.evidence_status,
+                    ).where(KnowledgeFile.kb_id == kb_id, KnowledgeFile.file_id.in_(batch))
+                )
+                visibility.update(
+                    {
+                        str(file_id): {
+                            "active_index_revision_id": str(revision_id) if revision_id else None,
+                            "evidence_status": str(evidence_status) if evidence_status else None,
+                        }
+                        for file_id, revision_id, evidence_status in result.all()
+                    }
+                )
+        return visibility
 
     async def list_children(self, *, kb_id: str, parent_id: str | None) -> list[KnowledgeFile]:
         async with pg_manager.get_async_session_context() as session:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from yuxi.knowledge.chunking.ragflow_like.parsers import book, general, laws, qa, semantic, separator
+from yuxi.knowledge.chunking.ragflow_like.parsers import academic, book, general, laws, qa, semantic, separator
 from yuxi.knowledge.chunking.ragflow_like.presets import map_to_internal_parser_id, normalize_chunk_preset_id
 from yuxi.knowledge.utils.text_utils import sanitize_extracted_text
 
@@ -78,6 +78,56 @@ def chunk_markdown(
     parser_config = params.get("chunk_parser_config") if isinstance(params.get("chunk_parser_config"), dict) else {}
 
     sanitized_markdown = sanitize_extracted_text(markdown_content)
+    if preset_id == "academic":
+        academic_chunks = academic.chunk_markdown(sanitized_markdown, parser_config)
+        records: list[dict[str, Any]] = []
+        search_from = 0
+        for index, chunk in enumerate(academic_chunks):
+            text = sanitize_extracted_text(str(chunk.get("text") or "")).strip()
+            if not text:
+                continue
+            section_path = [str(item) for item in chunk.get("section_path") or [] if item]
+            pages = [int(page) for page in chunk.get("pages") or []]
+            anchor_ids = [str(anchor_id) for anchor_id in chunk.get("anchor_ids") or [] if anchor_id]
+            provenance = []
+            if section_path:
+                provenance.append(f"【章节】{' > '.join(section_path)}")
+            if pages:
+                page_label = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}"
+                provenance.append(f"【页码】{page_label}")
+            if anchor_ids:
+                provenance.append(f"【证据锚点】{'、'.join(anchor_ids)}")
+            content = "\n".join([*provenance, text]) if provenance else text
+            found_at = sanitized_markdown.find(text, search_from)
+            end_at = found_at + len(text) if found_at >= 0 else None
+            if end_at is not None:
+                search_from = end_at
+            chunk_id = f"{file_id}_chunk_{index}"
+            records.append(
+                {
+                    "id": chunk_id,
+                    "content": content,
+                    "file_id": file_id,
+                    "filename": filename,
+                    "chunk_index": index,
+                    "source": filename,
+                    "chunk_id": chunk_id,
+                    "start_char_pos": found_at if found_at >= 0 else None,
+                    "end_char_pos": end_at,
+                    "start_token_pos": None,
+                    "end_token_pos": None,
+                    "tags": ["scientific_pdf", str(chunk.get("block_type") or "paragraph")],
+                    "extraction_result": {
+                        "schema_version": "scientific_pdf_chunk_v1",
+                        "section_path": section_path,
+                        "page_numbers": pages,
+                        "evidence_anchor_ids": anchor_ids,
+                        "block_type": str(chunk.get("block_type") or "paragraph"),
+                    },
+                }
+            )
+        return records
+
     text_chunks = _dispatch_markdown_parser(preset_id, filename, sanitized_markdown, parser_config)
     return _build_chunk_records(text_chunks, file_id, filename, sanitized_markdown)
 

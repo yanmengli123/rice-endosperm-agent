@@ -31,6 +31,93 @@
       </div>
     </a-modal>
 
+    <a-modal
+      v-model:open="evidenceDetailVisible"
+      title="科研 PDF 证据处理详情"
+      width="760px"
+      :footer="null"
+    >
+      <a-spin :spinning="evidenceDetailLoading">
+        <a-alert
+          v-if="latestEvidenceRevision?.status === 'REJECTED'"
+          type="error"
+          show-icon
+          message="该版本未通过确定性质量门禁"
+          description="请查看拒绝原因并更换原始 PDF，或调整解析器版本后重新上传；系统不会反复重跑相同指纹的确定性失败。"
+        />
+        <a-descriptions v-if="latestEvidenceRevision" bordered size="small" :column="2">
+          <a-descriptions-item label="能力状态">
+            <a-tag :color="getEvidenceStatusView(latestEvidenceRevision.status).color">
+              {{ getEvidenceStatusView(latestEvidenceRevision.status).label }}
+            </a-tag>
+          </a-descriptions-item>
+          <a-descriptions-item label="执行次数">
+            {{ latestEvidenceRevision.attempt || 0 }}
+          </a-descriptions-item>
+          <a-descriptions-item label="解析版本" :span="2">
+            <code>{{ latestEvidenceRevision.revision_id }}</code>
+          </a-descriptions-item>
+          <a-descriptions-item label="页数">
+            {{ latestEvidenceRevision.qa_report?.counts?.pages ?? '-' }}
+          </a-descriptions-item>
+          <a-descriptions-item label="证据锚点">
+            {{ latestEvidenceRevision.qa_report?.counts?.anchors ?? '-' }}
+          </a-descriptions-item>
+          <a-descriptions-item label="参考文献">
+            {{ latestEvidenceRevision.qa_report?.counts?.references ?? '-' }}
+          </a-descriptions-item>
+          <a-descriptions-item label="引文标记">
+            {{ latestEvidenceRevision.qa_report?.counts?.citation_mentions ?? '-' }}
+          </a-descriptions-item>
+          <a-descriptions-item v-if="evidenceReasonText" label="诊断" :span="2">
+            <span class="evidence-diagnostic">{{ evidenceReasonText }}</span>
+          </a-descriptions-item>
+          <a-descriptions-item label="可用能力" :span="2">
+            <div class="evidence-capabilities">
+              <a-tag
+                v-for="capability in evidenceCapabilities"
+                :key="capability.key"
+                :color="capability.enabled ? 'green' : 'default'"
+              >
+                {{ capability.label }} · {{ capability.enabled ? '可用' : '不可用' }}
+              </a-tag>
+            </div>
+          </a-descriptions-item>
+        </a-descriptions>
+        <div v-if="latestEvidenceRevision?.stages?.length" class="evidence-stages">
+          <div class="evidence-section-title">处理阶段</div>
+          <div v-for="stage in latestEvidenceRevision.stages" :key="stage.stage" class="evidence-stage-row">
+            <span>{{ getEvidenceStageLabel(stage.stage) }}</span>
+            <a-tag :color="getEvidenceStageColor(stage.status)">{{ stage.status }}</a-tag>
+            <span class="evidence-stage-attempt">第 {{ stage.attempt || 0 }} 次</span>
+          </div>
+        </div>
+        <div v-if="latestEvidenceRevision?.anchor_samples?.length" class="evidence-anchors">
+          <div class="evidence-section-title">原文定位样例</div>
+          <button
+            v-for="anchor in latestEvidenceRevision.anchor_samples"
+            :key="anchor.anchor_id"
+            type="button"
+            class="evidence-anchor-row"
+            :disabled="evidenceAnchorOpening === anchor.anchor_id"
+            @click="openEvidenceAnchor(anchor)"
+          >
+            <span class="evidence-anchor-page">第 {{ anchor.page }} 页</span>
+            <span class="evidence-anchor-quote">{{ anchor.quote }}</span>
+            <span class="evidence-anchor-action">
+              {{ evidenceAnchorOpening === anchor.anchor_id ? '正在打开…' : '定位原文' }}
+            </span>
+          </button>
+        </div>
+        <a-empty v-else-if="!evidenceDetailLoading" description="暂无证据处理版本" />
+        <div v-if="latestEvidenceRevision?.status === 'FAILED'" class="evidence-detail-actions">
+          <a-button type="primary" :loading="evidenceRetryLoading" @click="retryEvidenceIngest">
+            重试失败任务
+          </a-button>
+        </div>
+      </a-spin>
+    </a-modal>
+
     <!-- 新建文件夹模态框 -->
     <a-modal
       v-model:open="createFolderModalVisible"
@@ -235,12 +322,18 @@
                 <component :is="getStatusIcon(text)" />
               </span>
               <span>{{ getStatusText(text) }}</span>
+              <a-tag v-if="row.evidence_status" :color="getEvidenceStatusView(row.evidence_status).color">
+                {{ getEvidenceStatusView(row.evidence_status).label }}
+              </a-tag>
             </button>
             <span v-else class="file-status-pill file-status-static">
               <span v-if="getStatusIcon(text)" :class="['file-status-icon', getStatusTone(text)]">
                 <component :is="getStatusIcon(text)" />
               </span>
               <span>{{ getStatusText(text) }}</span>
+              <a-tag v-if="row.evidence_status" :color="getEvidenceStatusView(row.evidence_status).color">
+                {{ getEvidenceStatusView(row.evidence_status).label }}
+              </a-tag>
             </span>
           </template>
         </div>
@@ -321,6 +414,27 @@
                   </a-button>
 
                   <a-button
+                    v-if="row.evidence_status"
+                    type="text"
+                    block
+                    @click="openEvidenceDetail(row)"
+                  >
+                    <template #icon><component :is="h(ShieldCheck)" size="14" /></template>
+                    证据处理详情
+                  </a-button>
+
+                  <a-button
+                    v-if="row.evidence_status === 'FAILED'"
+                    type="text"
+                    block
+                    @click="retryEvidenceIngest(row)"
+                    :disabled="lock || evidenceRetryLoading"
+                  >
+                    <template #icon><component :is="h(RotateCw)" size="14" /></template>
+                    重试证据流程
+                  </a-button>
+
+                  <a-button
                     type="text"
                     block
                     danger
@@ -377,11 +491,113 @@ import {
   CheckSquare,
   FileText,
   Database,
+  ShieldCheck,
   Filter,
   MoreHorizontal
 } from '@lucide/vue'
 
 const store = useDatabaseStore()
+const evidenceDetailVisible = ref(false)
+const evidenceDetailLoading = ref(false)
+const evidenceRetryLoading = ref(false)
+const evidenceAnchorOpening = ref(null)
+const evidenceDetailRecord = ref(null)
+const evidenceDetail = ref(null)
+const latestEvidenceRevision = computed(() => evidenceDetail.value?.revisions?.[0] || null)
+const evidenceReasonText = computed(() => {
+  const revision = latestEvidenceRevision.value
+  const reasons = revision?.qa_report?.reasons
+  if (Array.isArray(reasons) && reasons.length) return reasons.join('；')
+  return revision?.error || ''
+})
+const evidenceCapabilityLabels = {
+  fulltext_search: '全文检索',
+  academic_structure: '学术结构',
+  citation_navigation: '引文导航',
+  pdf_highlight: 'PDF 定位',
+  figure_retrieval: '图片与图注',
+  table_retrieval: '表格检索',
+  formula_retrieval: '公式检索'
+}
+const evidenceCapabilities = computed(() => {
+  const capabilities = latestEvidenceRevision.value?.capabilities || {}
+  return Object.entries(evidenceCapabilityLabels).map(([key, label]) => ({
+    key,
+    label,
+    enabled: capabilities[key] === true
+  }))
+})
+const evidenceStageLabels = {
+  NATIVE: '原生版面证据',
+  MINERU: 'MinerU 正文恢复',
+  GROBID: 'GROBID 学术结构',
+  UNIFIED: '统一文献 IR',
+  QUALITY: '质量与能力门禁',
+  INDEX: '学术分块与索引',
+  ACTIVATE: '原子激活'
+}
+const getEvidenceStageLabel = (stage) => evidenceStageLabels[stage] || stage
+const getEvidenceStageColor = (status) => {
+  if (['SUCCEEDED', 'REUSED'].includes(status)) return 'green'
+  if (['RUNNING', 'PENDING'].includes(status)) return 'processing'
+  if (['DEGRADED', 'SKIPPED'].includes(status)) return 'gold'
+  return 'red'
+}
+
+const openEvidenceDetail = async (record) => {
+  closePopover(record.file_id)
+  evidenceDetailRecord.value = record
+  evidenceDetail.value = null
+  evidenceDetailVisible.value = true
+  evidenceDetailLoading.value = true
+  try {
+    evidenceDetail.value = await documentApi.getEvidenceStatus(store.kbId, record.file_id)
+  } catch (error) {
+    message.error(error.message || '读取证据处理详情失败')
+  } finally {
+    evidenceDetailLoading.value = false
+  }
+}
+
+const retryEvidenceIngest = async (record = evidenceDetailRecord.value) => {
+  if (!record?.file_id || evidenceRetryLoading.value) return
+  closePopover(record.file_id)
+  evidenceRetryLoading.value = true
+  try {
+    await documentApi.retryEvidenceIngest(store.kbId, record.file_id)
+    message.success('证据处理任务已重新提交')
+    store.startAutoRefresh()
+    await applyFilters()
+    if (evidenceDetailVisible.value) {
+      evidenceDetail.value = await documentApi.getEvidenceStatus(store.kbId, record.file_id)
+    }
+  } catch (error) {
+    message.error(error.message || '重试证据处理失败')
+  } finally {
+    evidenceRetryLoading.value = false
+  }
+}
+
+const openEvidenceAnchor = async (anchor) => {
+  const record = evidenceDetailRecord.value
+  if (!record?.file_id || !anchor?.anchor_id || evidenceAnchorOpening.value) return
+  evidenceAnchorOpening.value = anchor.anchor_id
+  try {
+    const response = await documentApi.downloadDocument(store.kbId, record.file_id)
+    const blob = await response.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = `${objectUrl}#page=${Math.max(Number(anchor.page) || 1, 1)}`
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 300000)
+  } catch (error) {
+    message.error(error.message || '打开原文定位失败')
+  } finally {
+    evidenceAnchorOpening.value = null
+  }
+}
 
 const applyFilters = async (overrides = {}) => {
   const nextStatus = overrides.status ?? statusFilter.value
@@ -423,11 +639,30 @@ const getStatusIcon = (status) => {
   return statusIconMap[icon] || null
 }
 
+const getEvidenceStatusView = (status) => {
+  const views = {
+    PENDING: { label: '证据排队', color: 'blue' },
+    WAITING_CACHE: { label: '等待复用', color: 'purple' },
+    RUNNING: { label: '证据解析', color: 'processing' },
+    INDEXING: { label: '证据入库', color: 'processing' },
+    INDEXED_FULL: { label: '完整证据', color: 'green' },
+    INDEXED_CONTENT_ONLY: { label: '正文证据', color: 'cyan' },
+    INDEXED_TEXT_ONLY: { label: '文本证据', color: 'gold' },
+    REJECTED: { label: '质量拒绝', color: 'red' },
+    FAILED: { label: '证据失败', color: 'red' }
+  }
+  return views[status] || { label: status, color: 'default' }
+}
+
 const hasStatusAction = (record) => {
+  if (record?.evidence_status === 'FAILED') return true
+  if (record?.evidence_status === 'REJECTED') return false
   return Boolean(getFilePrimaryAction(record))
 }
 
 const getStatusActionTitle = (record) => {
+  if (record?.evidence_status === 'FAILED') return '重试证据处理流程'
+  if (record?.evidence_status === 'REJECTED') return '未通过科研 PDF 质量门禁，请查看详情'
   const action = getFilePrimaryAction(record)
   if (action) return action.label
   return getStatusText(record.status)
@@ -623,7 +858,7 @@ const columnsCompact = [
     title: '状态',
     dataIndex: 'status',
     key: 'status',
-    width: 104,
+    width: 220,
     sorter: (a, b) => {
       return getFileStatusSortWeight(a) - getFileStatusSortWeight(b)
     },
@@ -870,6 +1105,11 @@ const handleParseFile = async (record) => {
 const handleStatusAction = async (record) => {
   if (lock.value || !hasStatusAction(record)) return
 
+  if (record.evidence_status === 'FAILED') {
+    await retryEvidenceIngest(record)
+    return
+  }
+
   const action = getFilePrimaryAction(record)
   if (action?.type === FILE_ACTIONS.PARSE) {
     await handleParseFile(record)
@@ -1096,6 +1336,100 @@ import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 
 .index-pending-alert {
   margin-bottom: 12px;
+}
+
+.evidence-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.evidence-diagnostic {
+  color: var(--color-error-600);
+  overflow-wrap: anywhere;
+}
+
+.evidence-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.evidence-stages {
+  margin-top: 16px;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.evidence-anchors {
+  margin-top: 16px;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.evidence-anchor-row {
+  width: 100%;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 72px;
+  gap: 10px;
+  align-items: center;
+  color: var(--gray-700);
+  background: var(--gray-0);
+  border: 0;
+  border-top: 1px solid var(--gray-100);
+  text-align: left;
+  cursor: pointer;
+}
+
+.evidence-anchor-row:hover:not(:disabled) {
+  background: var(--color-primary-50);
+}
+
+.evidence-anchor-row:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.evidence-anchor-page,
+.evidence-anchor-action {
+  color: var(--color-primary-700);
+  font-weight: 500;
+}
+
+.evidence-anchor-quote {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-anchor-action {
+  text-align: right;
+}
+
+.evidence-section-title,
+.evidence-stage-row {
+  padding: 8px 12px;
+}
+
+.evidence-section-title {
+  color: var(--gray-700);
+  font-weight: 600;
+  background: var(--gray-50);
+}
+
+.evidence-stage-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 120px 72px;
+  align-items: center;
+  border-top: 1px solid var(--gray-100);
+}
+
+.evidence-stage-attempt {
+  color: var(--gray-500);
+  text-align: right;
 }
 
 .file-name-cell,

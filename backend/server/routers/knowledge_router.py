@@ -5,8 +5,8 @@ import time
 import traceback
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 from yuxi import config
@@ -32,13 +32,24 @@ from yuxi.knowledge.utils.sample_question_utils import (
 from yuxi.knowledge.utils.url_fetcher import fetch_url_content
 from yuxi.models.providers.cache import model_cache
 from yuxi.services.task_service import TaskContext, tasker
+from yuxi.services.scientific_pdf_ingest_service import (
+    create_or_reuse_scientific_pdf_ingest,
+    get_scientific_pdf_status,
+)
+from yuxi.services.knowledge_asset_service import (
+    KnowledgeAssetError,
+    asset_response_headers,
+    etag_matches,
+    resolve_asset,
+    stream_asset,
+)
 from yuxi.services.workspace_service import MAX_WORKSPACE_UPLOAD_SIZE_BYTES, resolve_workspace_file_path
 from yuxi.storage.minio.client import MinIOClient, StorageError, aupload_file_to_minio, get_minio_client
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.upload_utils import MAX_UPLOAD_SIZE_BYTES, read_upload_with_limit, write_upload_to_path
 
-from server.utils.auth_middleware import get_admin_user, get_required_user
+from server.utils.auth_middleware import get_authenticated_user, get_admin_user, get_required_user
 from server.utils.knowledge_access import authorize_knowledge_path
 
 knowledge = APIRouter(
@@ -189,6 +200,20 @@ def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
         if source_path is not None and (not isinstance(source_path, str) or not source_path.strip()):
             raise HTTPException(status_code=400, detail=f"Invalid source_path for file: {item}")
 
+        if params.get("pdf_evidence_pipeline"):
+            preprocessed_name = ""
+            if isinstance(preprocessed, dict):
+                preprocessed_name = str(
+                    preprocessed.get("original_filename") or preprocessed.get("filename") or ""
+                )
+            _, object_name = parse_minio_url(item)
+            candidate_name = str(source_path or preprocessed_name or object_name)
+            if not candidate_name.lower().split("?", 1)[0].endswith(".pdf"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"PDF 文献证据库只接受 .pdf 文件: {candidate_name}",
+                )
+
 
 def _params_for_uploaded_document_item(item: str, params: dict) -> dict:
     source_paths = params.get("source_paths")
@@ -301,6 +326,28 @@ async def create_database(
             created_by_department_id=current_user.department_id,
             **additional_params,
         )
+
+        if additional_params.get("pdf_evidence_pipeline"):
+            from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
+            reranker_model = getattr(config, "reranker", None)
+            query_options = {
+                "search_mode": "hybrid",
+                "recall_top_k": 50,
+                "final_top_k": 12,
+                "similarity_threshold": 0.15,
+                "vector_weight": 0.7,
+                "bm25_weight": 0.3,
+                "scientific_pdf_diversity": True,
+                "use_reranker": bool(reranker_model),
+            }
+            if reranker_model:
+                query_options["reranker_model"] = reranker_model
+            await KnowledgeBaseRepository().update(
+                database_info["kb_id"],
+                {"query_params": {"options": query_options}},
+            )
+            database_info["query_params"] = {"options": query_options}
 
         # 需要重新加载所有智能体，因为工具刷新了
         from yuxi.agents.buildin import agent_manager
@@ -699,6 +746,40 @@ async def document_file_exists(
     return {"kb_id": kb_id, "filename": normalized_filename, "exists": exists}
 
 
+@knowledge.get("/databases/{kb_id}/documents/{file_id}/evidence-status")
+async def scientific_pdf_evidence_status(
+    kb_id: str,
+    file_id: str,
+    current_user: User = Depends(get_admin_user),
+):
+    if not await knowledge_base.check_accessible(
+        {"role": current_user.role, "uid": current_user.uid}, kb_id
+    ):
+        raise HTTPException(status_code=404, detail="Database not found")
+    return await get_scientific_pdf_status(kb_id=kb_id, file_id=file_id)
+
+
+@knowledge.post("/databases/{kb_id}/documents/{file_id}/evidence-retry")
+async def retry_scientific_pdf_evidence(
+    kb_id: str,
+    file_id: str,
+    current_user: User = Depends(get_admin_user),
+):
+    if not await knowledge_base.check_accessible(
+        {"role": current_user.role, "uid": current_user.uid}, kb_id
+    ):
+        raise HTTPException(status_code=404, detail="Database not found")
+    try:
+        result = await create_or_reuse_scientific_pdf_ingest(
+            kb_id=kb_id,
+            file_id=file_id,
+            operator_id=current_user.uid,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**result, "message": "科研 PDF 解析任务已提交"}
+
+
 @knowledge.post("/databases/{kb_id}/documents")
 async def add_documents(
     kb_id: str, items: list[str] = Body(...), params: dict = Body(...), current_user: User = Depends(get_admin_user)
@@ -711,7 +792,30 @@ async def add_documents(
         raise HTTPException(status_code=404, detail="Database not found")
     await _ensure_database_supports_documents(kb_id, "文档添加/解析/入库")
 
+    database_info = await knowledge_base.get_database_info(kb_id)
+    database_params = (database_info or {}).get("metadata") or {}
+    scientific_pdf_pipeline = bool(
+        database_params.get("pdf_evidence_pipeline")
+        or database_params.get("format_template") == "pdf_literature"
+        or params.get("pdf_evidence_pipeline")
+    )
+
     params = _ensure_document_params(params)
+    if scientific_pdf_pipeline:
+        params = {
+            **params,
+            "pdf_evidence_pipeline": True,
+            "format_template": "pdf_literature",
+            "grobid_enabled": True,
+            "ocr_engine": params.get("ocr_engine") or "mineru_official",
+            "chunk_preset_id": "academic",
+            "chunk_parser_config": {
+                "chunk_token_num": 600,
+                "hard_token_limit": 900,
+                "overlap_token_num": 64,
+                "include_references": False,
+            },
+        }
     content_type = params.get("content_type", "file")
     # 自动入库参数
     auto_index = params.get("auto_index", False)
@@ -730,6 +834,66 @@ async def add_documents(
         raise HTTPException(status_code=400, detail=f"Unsupported content_type: {content_type}")
 
     _validate_uploaded_document_items(items, params)
+
+    if scientific_pdf_pipeline:
+        processed_items: list[dict] = []
+        queued_count = 0
+        deferred_count = 0
+        for item in items:
+            try:
+                file_meta = await knowledge_base.add_file_record(
+                    kb_id,
+                    item,
+                    params=_params_for_uploaded_document_item(item, params),
+                    operator_id=current_user.uid,
+                )
+                enqueue_result = await create_or_reuse_scientific_pdf_ingest(
+                    kb_id=kb_id,
+                    file_id=file_meta["file_id"],
+                    operator_id=current_user.uid,
+                )
+                queued_count += 1
+                deferred_count += int(bool(enqueue_result.get("enqueue_deferred")))
+                processed_items.append(
+                    {
+                        **file_meta,
+                        "status": "parsing",
+                        "evidence_status": enqueue_result["status"],
+                        "parse_revision_id": enqueue_result["revision_id"],
+                        "enqueue_deferred": bool(enqueue_result.get("enqueue_deferred")),
+                    }
+                )
+            except Exception as ingest_error:  # noqa: BLE001
+                logger.exception("科研 PDF 接收失败 %s", item)
+                processed_items.append(
+                    {
+                        "item": item,
+                        "status": "failed",
+                        "error": f"科研 PDF 接收失败: {ingest_error}",
+                        "error_type": "evidence_intake_failed",
+                    }
+                )
+
+        failed_count = len([item for item in processed_items if _is_failed_item(item)])
+        recovery_note = (
+            f"；{deferred_count} 个任务已持久化并等待恢复队列补偿" if deferred_count else ""
+        )
+        return {
+            "message": (
+                f"科研 PDF 已持久接收：提交 {len(items)}，进入证据流水线 {queued_count}，"
+                f"失败 {failed_count}{recovery_note}"
+            ),
+            "status": "queued",
+            "result": {
+                "kb_id": kb_id,
+                "item_type": "科研 PDF",
+                "submitted": len(items),
+                "queued": queued_count,
+                "deferred": deferred_count,
+                "failed": failed_count,
+                "items": processed_items,
+            },
+        }
 
     async def run_ingest(context: TaskContext):
         await context.set_message("任务初始化")
@@ -1424,6 +1588,43 @@ async def get_document_content(kb_id: str, doc_id: str, current_user: User = Dep
     except Exception as e:
         logger.error(f"Failed to get file content, {e}, {kb_id=}, {doc_id=}, {traceback.format_exc()}")
         return {"message": "Failed to get file content", "status": "failed"}
+
+
+@knowledge.get("/databases/{kb_id}/documents/{file_id}/revisions/{revision_id}/assets/{asset_name}")
+async def get_knowledge_asset(
+    kb_id: str,
+    file_id: str,
+    revision_id: str,
+    asset_name: str,
+    request: Request,
+    current_user: User = Depends(get_authenticated_user),
+):
+    """Serve a private PDF-derived image through an authenticated, KB-scoped proxy.
+
+    Assets live in the private ``knowledgebases`` bucket.  Never expose MinIO
+    URLs in Markdown; the browser must reference ``kbasset://`` logical URIs
+    that resolve to this endpoint.  Unauthorized/missing/forged assets all
+    return 404 to avoid resource enumeration.
+    """
+    try:
+        resolved = await resolve_asset(
+            kb_id=kb_id,
+            file_id=file_id,
+            revision_id=revision_id,
+            asset_name=asset_name,
+            user=current_user,
+        )
+    except KnowledgeAssetError as exc:
+        raise HTTPException(status_code=exc.status_code, detail="Not Found") from exc
+
+    # ETag-based conditional GET: the browser already has a matching copy.
+    if etag_matches(request.headers.get("if-none-match"), resolved.get("etag")):
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers=asset_response_headers(resolved),
+        )
+
+    return await stream_asset(resolved)
 
 
 @knowledge.delete("/databases/{kb_id}/documents/batch")

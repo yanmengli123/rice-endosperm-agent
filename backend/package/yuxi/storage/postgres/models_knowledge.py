@@ -171,6 +171,10 @@ class KnowledgeFile(Base):
     processing_params = Column(JSON_VALUE)
     is_folder = Column(Boolean, default=False)
     error_message = Column(Text)
+    active_parse_revision_id = Column(String(64), index=True)
+    active_index_revision_id = Column(String(64), index=True)
+    evidence_status = Column(String(32), index=True)
+    evidence_capabilities = Column(JSON_VALUE)
     created_by = Column(String(64))
     updated_by = Column(String(64))
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
@@ -204,6 +208,202 @@ class KnowledgeChunk(Base):
     extraction_result = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class KnowledgeParseRevision(Base):
+    """Immutable parser run identity and its recoverable workflow state."""
+
+    __tablename__ = "knowledge_parse_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "file_id",
+            "parser_fingerprint",
+            name="uq_knowledge_parse_revision_fingerprint",
+        ),
+        Index("ix_knowledge_parse_revision_lease", "status", "lease_expires_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    revision_id = Column(String(64), nullable=False, unique=True, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False, index=True)
+    source_sha256 = Column(String(64), nullable=False, index=True)
+    parser_fingerprint = Column(String(64), nullable=False, index=True)
+    pipeline_version = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING", index=True)
+    attempt = Column(Integer, nullable=False, default=0)
+    lease_owner = Column(String(128))
+    lease_expires_at = Column(DateTime(timezone=True))
+    article_uri = Column(String(1024))
+    article_summary = Column(JSON_VALUE)
+    qa_report = Column(JSON_VALUE)
+    capabilities = Column(JSON_VALUE)
+    error_message = Column(Text)
+    created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    reused_from_revision_id = Column(String(64), index=True)
+
+
+class KnowledgeParseStage(Base):
+    """Durable, auditable state for each deterministic ingestion stage."""
+
+    __tablename__ = "knowledge_parse_stages"
+    __table_args__ = (
+        UniqueConstraint("revision_id", "stage_name", name="uq_knowledge_parse_stage_name"),
+        Index("ix_knowledge_parse_stage_lease", "status", "lease_expires_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    stage_id = Column(String(64), nullable=False, unique=True, index=True)
+    revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    stage_name = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING", index=True)
+    attempt = Column(Integer, nullable=False, default=0)
+    lease_owner = Column(String(128))
+    lease_expires_at = Column(DateTime(timezone=True))
+    input_fingerprint = Column(String(64), nullable=False)
+    output_artifact_id = Column(String(64))
+    error_code = Column(String(64))
+    error_detail = Column(Text)
+    started_at = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class KnowledgeDocumentIdentityCache(Base):
+    """Tenant-local parse cache for the same immutable PDF and pipeline."""
+
+    __tablename__ = "knowledge_document_identity_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "source_sha256", "parser_fingerprint", name="uq_knowledge_document_identity"
+        ),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_sha256 = Column(String(64), nullable=False, index=True)
+    parser_fingerprint = Column(String(64), nullable=False, index=True)
+    canonical_revision_id = Column(String(64), index=True)
+    status = Column(String(32), nullable=False, default="BUILDING", index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class KnowledgeParseArtifact(Base):
+    """Content-addressed immutable raw parser artifact."""
+
+    __tablename__ = "knowledge_parse_artifacts"
+    __table_args__ = (
+        UniqueConstraint("revision_id", "kind", "sha256", name="uq_knowledge_parse_artifact_content"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    artifact_id = Column(String(64), nullable=False, unique=True, index=True)
+    revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind = Column(String(64), nullable=False)
+    object_uri = Column(String(1024), nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    content_type = Column(String(128))
+    size_bytes = Column(BigInteger, nullable=False)
+    metadata_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class KnowledgeIndexRevision(Base):
+    """Index build revision; activation happens only after all chunks are committed."""
+
+    __tablename__ = "knowledge_index_revisions"
+    __table_args__ = (
+        UniqueConstraint("parse_revision_id", "chunker_fingerprint", name="uq_knowledge_index_revision_fingerprint"),
+        Index("ix_knowledge_index_revision_file_status", "file_id", "status"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    revision_id = Column(String(64), nullable=False, unique=True, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False, index=True)
+    parse_revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    chunker_fingerprint = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING", index=True)
+    chunk_count = Column(Integer, nullable=False, default=0)
+    token_count = Column(BigInteger, nullable=False, default=0)
+    error_message = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    activated_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+
+
+class EvidenceAnchorRecord(Base):
+    __tablename__ = "evidence_anchors"
+    __table_args__ = (
+        UniqueConstraint("parse_revision_id", "anchor_id", name="uq_evidence_anchor_revision"),
+        Index("ix_evidence_anchor_lookup", "anchor_id"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    anchor_id = Column(String(64), nullable=False)
+    parse_revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    page = Column(Integer, nullable=False)
+    bbox = Column(JSON_VALUE, nullable=False)
+    word_start = Column(Integer, nullable=False)
+    word_end = Column(Integer, nullable=False)
+    quote_hash = Column(String(64), nullable=False)
+    prefix_hash = Column(String(64), nullable=False)
+    suffix_hash = Column(String(64), nullable=False)
+    quote = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class ArticleReference(Base):
+    __tablename__ = "article_references"
+    __table_args__ = (
+        UniqueConstraint("parse_revision_id", "reference_id", name="uq_article_reference_revision"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    parse_revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    reference_id = Column(String(128), nullable=False)
+    title = Column(Text)
+    doi = Column(String(512), index=True)
+    raw_text = Column(Text)
+    metadata_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class CitationMention(Base):
+    __tablename__ = "citation_mentions"
+    __table_args__ = (
+        UniqueConstraint("parse_revision_id", "mention_id", name="uq_citation_mention_revision"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    parse_revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    mention_id = Column(String(128), nullable=False)
+    reference_id = Column(String(128))
+    mention_text = Column(Text)
+    anchor_id = Column(String(64), index=True)
+    metadata_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
 class KnowledgeGraphEntity(Base):

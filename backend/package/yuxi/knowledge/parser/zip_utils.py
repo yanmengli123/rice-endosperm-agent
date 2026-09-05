@@ -4,6 +4,7 @@ import os
 import re
 import time
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 from yuxi.storage.minio import get_minio_client
@@ -22,6 +23,7 @@ async def process_zip_file(
     zip_path: str,
     image_bucket: str = DEFAULT_IMAGE_BUCKET,
     image_prefix: str = DEFAULT_IMAGE_PREFIX,
+    asset_uri_builder: "Callable[[str], str] | None" = None,
 ) -> dict:
     """
     处理ZIP文件，提取markdown内容和图片
@@ -30,6 +32,8 @@ async def process_zip_file(
         zip_path: ZIP文件路径
         image_bucket: 图片上传的目标 bucket
         image_prefix: 图片上传对象前缀
+        asset_uri_builder: 可选回调，接收 MinIO object_name，返回写入 Markdown 的
+            逻辑资源 URI（如 ``kbasset://``）。提供时 Markdown 不再携带 MinIO URL。
 
     Returns:
         dict: {
@@ -64,6 +68,7 @@ async def process_zip_file(
                 images_dir,
                 image_bucket=image_bucket,
                 image_prefix=normalized_prefix,
+                asset_uri_builder=asset_uri_builder,
             )
             markdown_content = replace_image_links(markdown_content, images_info)
 
@@ -80,12 +85,20 @@ def process_zip_file_sync(
     zip_path: str,
     image_bucket: str = DEFAULT_IMAGE_BUCKET,
     image_prefix: str = DEFAULT_IMAGE_PREFIX,
+    asset_uri_builder: "Callable[[str], str] | None" = None,
 ) -> dict:
     """同步调用 ZIP 处理，供同步解析器使用。"""
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(process_zip_file(zip_path, image_bucket=image_bucket, image_prefix=image_prefix))
+        return asyncio.run(
+            process_zip_file(
+                zip_path,
+                image_bucket=image_bucket,
+                image_prefix=image_prefix,
+                asset_uri_builder=asset_uri_builder,
+            )
+        )
 
     result: dict | None = None
     error: Exception | None = None
@@ -93,7 +106,14 @@ def process_zip_file_sync(
     def runner() -> None:
         nonlocal result, error
         try:
-            result = asyncio.run(process_zip_file(zip_path, image_bucket=image_bucket, image_prefix=image_prefix))
+            result = asyncio.run(
+                process_zip_file(
+                    zip_path,
+                    image_bucket=image_bucket,
+                    image_prefix=image_prefix,
+                    asset_uri_builder=asset_uri_builder,
+                )
+            )
         except Exception as exc:  # pragma: no cover - pass through outer raise
             error = exc
 
@@ -134,6 +154,7 @@ async def process_images(
     images_dir: str,
     image_bucket: str,
     image_prefix: str,
+    asset_uri_builder: "Callable[[str], str] | None" = None,
 ) -> list[dict]:
     """处理图片：上传到MinIO并返回信息"""
     supported_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -165,12 +186,12 @@ async def process_images(
 
             img_info = {
                 "name": Path(img_name).name,
-                "url": result.url,
+                "url": asset_uri_builder(object_name) if asset_uri_builder else result.url,
                 "path": f"images/{Path(img_name).name}",
             }
             images.append(img_info)
 
-            logger.debug(f"图片上传成功: {Path(img_name).name} -> {result.url}")
+            logger.debug(f"图片上传成功: {Path(img_name).name} -> {img_info['url']}")
 
         except Exception as e:
             logger.error(f"上传图片失败 {Path(img_name).name}: {e}")

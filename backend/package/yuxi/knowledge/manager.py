@@ -119,7 +119,18 @@ class KnowledgeBaseManager:
         if not KnowledgeBaseFactory.is_type_supported(kb_type):
             raise KBNotFoundError(f"Unsupported knowledge base type: {kb_type}")
 
-        return self._get_or_create_kb_instance(kb_type)
+        kb_instance = self._get_or_create_kb_instance(kb_type)
+        if not kb_instance.get_database_info(kb_id, include_files=False):
+            # API and worker are separate processes. A database created after
+            # worker startup is absent from the worker-local metadata snapshot.
+            # Refresh lazily at the authoritative access boundary so the first
+            # durable ingest job can index it without requiring a worker restart.
+            async with self._metadata_lock:
+                if not kb_instance.get_database_info(kb_id, include_files=False):
+                    await kb_instance._load_metadata()
+        if not kb_instance.get_database_info(kb_id, include_files=False):
+            raise KBNotFoundError(f"Database {kb_id} not found in {kb_type} metadata")
+        return kb_instance
 
     # =============================================================================
     # 统一的外部接口
@@ -472,6 +483,26 @@ class KnowledgeBaseManager:
 
     async def parse_file(self, kb_id: str, file_id: str, operator_id: str | None = None) -> dict:
         """Parse file to Markdown"""
+        from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
+        record = await KnowledgeFileRepository().get_by_file_id(file_id)
+        processing_params = dict(getattr(record, "processing_params", None) or {}) if record else {}
+        if record and record.kb_id == kb_id and processing_params.get("pdf_evidence_pipeline"):
+            from yuxi.services.scientific_pdf_ingest_service import (
+                create_or_reuse_scientific_pdf_ingest,
+            )
+
+            queued = await create_or_reuse_scientific_pdf_ingest(
+                kb_id=kb_id,
+                file_id=file_id,
+                operator_id=operator_id or record.created_by or "system",
+            )
+            return {
+                "file_id": file_id,
+                "status": "parsing",
+                "evidence_status": queued["status"],
+                "parse_revision_id": queued["revision_id"],
+            }
         kb_instance = await self._get_kb_for_database(kb_id)
         return await kb_instance.parse_file(kb_id, file_id, operator_id)
 
@@ -481,6 +512,15 @@ class KnowledgeBaseManager:
         """Index parsed file"""
         kb_instance = await self._get_kb_for_database(kb_id)
         return await kb_instance.index_file(kb_id, file_id, operator_id, params=params)
+
+    async def cleanup_inactive_file_index_revisions(
+        self, kb_id: str, file_id: str, active_revision_id: str
+    ) -> int:
+        kb_instance = await self._get_kb_for_database(kb_id)
+        cleanup = getattr(kb_instance, "cleanup_inactive_file_index_revisions", None)
+        if cleanup is None:
+            return 0
+        return await cleanup(kb_id, file_id, active_revision_id)
 
     async def update_file_params(self, kb_id: str, file_id: str, params: dict, operator_id: str | None = None) -> None:
         """Update file processing params"""
@@ -522,6 +562,10 @@ class KnowledgeBaseManager:
             "has_parsed_markdown": bool(getattr(record, "markdown_file", None)),
             "is_virtual_folder": bool(getattr(record, "is_virtual_folder", False)),
             "path_prefix": getattr(record, "path_prefix", None),
+            "evidence_status": getattr(record, "evidence_status", None),
+            "evidence_capabilities": getattr(record, "evidence_capabilities", None),
+            "active_parse_revision_id": getattr(record, "active_parse_revision_id", None),
+            "active_index_revision_id": getattr(record, "active_index_revision_id", None),
         }
 
     async def _get_database_file_stats(self, kb_id: str) -> dict[str, int]:
@@ -577,6 +621,10 @@ class KnowledgeBaseManager:
                     "parent_id": getattr(record, "parent_id", None),
                     "chunk_count": int(getattr(record, "chunk_count", 0) or 0),
                     "token_count": int(getattr(record, "token_count", 0) or 0),
+                    "evidence_status": getattr(record, "evidence_status", None),
+                    "evidence_capabilities": getattr(record, "evidence_capabilities", None),
+                    "active_parse_revision_id": getattr(record, "active_parse_revision_id", None),
+                    "active_index_revision_id": getattr(record, "active_index_revision_id", None),
                 }
                 for record in records
             }

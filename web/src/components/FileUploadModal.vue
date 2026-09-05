@@ -498,6 +498,7 @@ const emit = defineEmits(['update:visible', 'success'])
 const store = useDatabaseStore()
 const configStore = useConfigStore()
 const DEFAULT_OCR_ENGINE = 'rapid_ocr'
+const isPdfEvidenceLibrary = computed(() => props.formatTemplate === 'pdf_literature')
 
 // 文件夹选择相关
 const selectedFolderId = ref(null)
@@ -528,7 +529,8 @@ watch(
       autoIndex.value = true
       selectedFolderId.value = props.currentFolderId
       isFolderUpload.value = props.isFolderMode
-      uploadMode.value = props.mode || (props.isFolderMode ? 'folder' : 'file')
+      const requestedMode = props.mode || (props.isFolderMode ? 'folder' : 'file')
+      uploadMode.value = isPdfEvidenceLibrary.value && requestedMode === 'url' ? 'file' : requestedMode
       if (uploadMode.value === 'workspace') {
         loadWorkspaceFiles()
       }
@@ -562,6 +564,9 @@ const applySupportedFileTypes = (extensions) => {
 }
 
 const acceptedFileTypes = computed(() => {
+  if (isPdfEvidenceLibrary.value) {
+    return '.pdf,application/pdf'
+  }
   if (!supportedFileTypes.value.length) {
     return ''
   }
@@ -571,6 +576,9 @@ const acceptedFileTypes = computed(() => {
 })
 
 const uploadHint = computed(() => {
+  if (isPdfEvidenceLibrary.value) {
+    return '.pdf（科研原文将自动执行 PyMuPDF + MinerU + GROBID 证据流水线）'
+  }
   if (!supportedFileTypes.value.length) {
     return '加载中...'
   }
@@ -582,6 +590,9 @@ const uploadHint = computed(() => {
 const isSupportedExtension = (fileName) => {
   if (!fileName) {
     return true
+  }
+  if (isPdfEvidenceLibrary.value) {
+    return String(fileName).toLowerCase().endsWith('.pdf')
   }
   if (!supportedFileTypes.value.length) {
     return true
@@ -732,7 +743,7 @@ const uploadModeOptions = computed(() => [
       h('span', { class: 'option-text' }, '工作区')
     ])
   }
-])
+].filter((option) => !(isPdfEvidenceLibrary.value && option.value === 'url')))
 
 watch(uploadMode, (val) => {
   isFolderUpload.value = val === 'folder'
@@ -966,6 +977,25 @@ const buildAutoIndexParams = () => {
   return buildChunkParamsPayload(indexParams.value, {
     includeSizeOverlap: true
   })
+}
+
+const withEvidencePipelineParams = (params) => {
+  if (props.formatTemplate !== 'pdf_literature') return params
+  return {
+    ...params,
+    pdf_evidence_pipeline: true,
+    format_template: 'pdf_literature',
+    grobid_enabled: true,
+    ocr_engine: 'mineru_official',
+    chunk_preset_id: 'academic',
+    chunk_parser_config: {
+      chunk_token_num: 600,
+      hard_token_limit: 900,
+      overlap_token_num: 64,
+      include_references: false
+    },
+    auto_index: true
+  }
 }
 
 const isFolderUpload = ref(false)
@@ -1546,11 +1576,12 @@ const chunkData = async () => {
         }
       }
 
-      const params = { ...processingParams.value, content_hashes, file_sizes }
+      let params = { ...processingParams.value, content_hashes, file_sizes }
       if (autoIndex.value) {
         params.auto_index = true
         Object.assign(params, buildAutoIndexParams())
       }
+      params = withEvidencePipelineParams(params)
 
       const submitted = await store.addFiles({
         items,
@@ -1607,11 +1638,12 @@ const chunkData = async () => {
 
     try {
       store.state.chunkLoading = true
-      const params = { ...processingParams.value }
+      let params = { ...processingParams.value }
       if (autoIndex.value) {
         params.auto_index = true
         Object.assign(params, buildAutoIndexParams())
       }
+      params = withEvidencePipelineParams(params)
 
       // 构造 _preprocessed_map 和 items (minio urls)
       const items = []
@@ -1692,11 +1724,12 @@ const chunkData = async () => {
 
   try {
     store.state.chunkLoading = true
-    const params = { ...processingParams.value, content_hashes, file_sizes, source_paths }
+    let params = { ...processingParams.value, content_hashes, file_sizes, source_paths }
     if (autoIndex.value) {
       params.auto_index = true
       Object.assign(params, buildAutoIndexParams())
     }
+    params = withEvidencePipelineParams(params)
 
     const submitted = await store.addFiles({
       items,

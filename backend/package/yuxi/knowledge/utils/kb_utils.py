@@ -12,6 +12,10 @@ _DROPPED_PROCESSING_PARAM_KEYS = {
     "content_hashes",
     "file_sizes",
     "enable_ocr",
+    "_index_revision_id",
+    "_parse_revision_id",
+    # Runtime-only callback; persisting it would also fail JSON serialization.
+    "asset_uri_builder",
 }
 
 

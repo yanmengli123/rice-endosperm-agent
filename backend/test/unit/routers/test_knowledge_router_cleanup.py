@@ -3,7 +3,7 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Response, UploadFile
 from httpx import ASGITransport, AsyncClient
 
 from server.routers import knowledge_router
@@ -123,6 +123,91 @@ async def test_document_file_exists_rejects_blank_filename(monkeypatch):
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "filename is required"
+
+
+async def test_private_knowledge_asset_route_supports_conditional_get(monkeypatch):
+    async def fake_user():
+        return SimpleNamespace(uid="reader-1", role="user", department_id=1)
+
+    async def fake_resolve_asset(**kwargs):
+        assert kwargs == {
+            "kb_id": "kb_1",
+            "file_id": "file_1",
+            "revision_id": "spr_1",
+            "asset_name": "figure-1.png",
+            "user": await fake_user(),
+        }
+        return {
+            "etag": "asset-etag",
+            "size": 3,
+            "media_type": "image/png",
+        }
+
+    async def unexpected_stream(_resolved):
+        raise AssertionError("304 must not read the private object body")
+
+    monkeypatch.setattr(knowledge_router, "resolve_asset", fake_resolve_asset)
+    monkeypatch.setattr(knowledge_router, "stream_asset", unexpected_stream)
+
+    app = FastAPI()
+    app.include_router(knowledge_router.knowledge, prefix="/api")
+    app.dependency_overrides[knowledge_router.get_authenticated_user] = fake_user
+    app.dependency_overrides[knowledge_router.authorize_knowledge_path] = lambda: None
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/knowledge/databases/kb_1/documents/file_1/revisions/spr_1/assets/figure-1.png",
+            headers={"If-None-Match": 'W/"asset-etag"'},
+        )
+
+    assert response.status_code == 304
+    assert response.headers["etag"] == '"asset-etag"'
+    assert response.headers["cache-control"] == "private, max-age=300"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_private_knowledge_asset_route_streams_allowed_image(monkeypatch):
+    user = SimpleNamespace(uid="reader-1", role="user", department_id=1)
+
+    async def fake_user():
+        return user
+
+    async def fake_resolve_asset(**kwargs):
+        assert kwargs["user"] is user
+        return {
+            "etag": "asset-etag",
+            "size": 3,
+            "media_type": "image/png",
+        }
+
+    async def fake_stream(_resolved):
+        return Response(
+            content=b"png",
+            media_type="image/png",
+            headers={
+                "ETag": '"asset-etag"',
+                "Cache-Control": "private, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    monkeypatch.setattr(knowledge_router, "resolve_asset", fake_resolve_asset)
+    monkeypatch.setattr(knowledge_router, "stream_asset", fake_stream)
+
+    app = FastAPI()
+    app.include_router(knowledge_router.knowledge, prefix="/api")
+    app.dependency_overrides[knowledge_router.get_authenticated_user] = fake_user
+    app.dependency_overrides[knowledge_router.authorize_knowledge_path] = lambda: None
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/knowledge/databases/kb_1/documents/file_1/revisions/spr_1/assets/figure-1.png"
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"png"
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.headers["etag"] == '"asset-etag"'
 
 
 async def test_upload_file_rejects_jsonl_uploads():
@@ -678,6 +763,73 @@ async def test_add_documents_auto_index_treats_error_none_as_success(monkeypatch
     assert context.result["submitted"] == 1
     assert context.result["failed"] == 0
     assert context.result["items"] == [{"file_id": "file_1", "status": "indexed", "error": None}]
+
+
+async def test_scientific_pdf_add_is_persisted_before_request_returns(monkeypatch):
+    item = "minio://knowledgebases/kb_1/upload/rice.pdf"
+    captured = {}
+
+    async def fake_check_accessible(user, kb_id):
+        return True
+
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+        return None
+
+    async def fake_get_database_info(kb_id: str) -> dict:
+        return {
+            "name": "科研文献库",
+            "metadata": {"format_template": "pdf_literature", "pdf_evidence_pipeline": True},
+        }
+
+    async def fake_add_file_record(kb_id: str, item_path: str, params: dict, operator_id: str):
+        captured["add"] = (kb_id, item_path, params, operator_id)
+        return {"file_id": "file_pdf_1", "filename": "rice.pdf", "status": "uploaded"}
+
+    async def fake_create_or_reuse(*, kb_id: str, file_id: str, operator_id: str):
+        captured["revision"] = (kb_id, file_id, operator_id)
+        return {
+            "revision_id": "spr_1",
+            "status": "PENDING",
+            "reused": False,
+            "enqueue_deferred": True,
+        }
+
+    async def fail_tasker_enqueue(**kwargs):
+        pytest.fail(f"scientific PDF intake must not use the in-memory tasker: {kwargs}")
+
+    monkeypatch.setattr(knowledge_router.knowledge_base, "check_accessible", fake_check_accessible)
+    monkeypatch.setattr(
+        knowledge_router,
+        "_ensure_database_supports_documents",
+        fake_ensure_database_supports_documents,
+    )
+    monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
+    monkeypatch.setattr(knowledge_router.knowledge_base, "add_file_record", fake_add_file_record)
+    monkeypatch.setattr(
+        knowledge_router,
+        "create_or_reuse_scientific_pdf_ingest",
+        fake_create_or_reuse,
+    )
+    monkeypatch.setattr(knowledge_router.tasker, "enqueue", fail_tasker_enqueue)
+
+    result = await knowledge_router.add_documents(
+        "kb_1",
+        [item],
+        params={
+            "content_type": "file",
+            "content_hashes": {item: "a" * 64},
+            "source_paths": {item: "rice/rice.pdf"},
+        },
+        current_user=SimpleNamespace(uid="uid-user", role="admin", department_id=1),
+    )
+
+    assert result["status"] == "queued"
+    assert result["result"]["queued"] == 1
+    assert result["result"]["deferred"] == 1
+    assert result["result"]["items"][0]["parse_revision_id"] == "spr_1"
+    assert captured["revision"] == ("kb_1", "file_pdf_1", "uid-user")
+    assert captured["add"][2]["pdf_evidence_pipeline"] is True
+    assert captured["add"][2]["source_path"] == "rice/rice.pdf"
 
 
 async def test_add_uploaded_documents_rejects_empty_items(monkeypatch):

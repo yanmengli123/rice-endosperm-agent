@@ -10,12 +10,14 @@ import os
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from io import BytesIO
+from typing import Any
 from urllib.parse import quote, urlsplit
 
 from urllib3 import BaseHTTPResponse
 from yuxi.utils import logger
 
 from minio import Minio
+from minio.commonconfig import CopySource
 from minio.error import S3Error
 
 
@@ -168,6 +170,24 @@ class MinIOClient:
         )
         return result
 
+    def copy_object(self, bucket_name: str, object_name: str, source_object_name: str) -> bool:
+        """同桶服务端复制对象；源对象不存在时返回 False。"""
+        try:
+            self.client.copy_object(
+                bucket_name=bucket_name,
+                object_name=object_name,
+                source_object_name=CopySource(bucket_name, source_object_name),
+            )
+            return True
+        except S3Error as e:
+            if e.code in {"NoSuchKey", "NoSuchObject"}:
+                return False
+            raise StorageError(f"复制对象失败: {e}")
+
+    async def acopy_object(self, bucket_name: str, object_name: str, source_object_name: str) -> bool:
+        """异步同桶服务端复制对象；源对象不存在时返回 False。"""
+        return await asyncio.to_thread(self.copy_object, bucket_name, object_name, source_object_name)
+
     def upload_file_from_path(self, bucket_name: str, object_name: str, file_path: str) -> UploadResult:
         """从文件路径上传文件"""
         try:
@@ -303,6 +323,21 @@ class MinIOClient:
         await asyncio.to_thread(_delete_objects)
         return deleted_count
 
+    def list_object_names_by_prefix(self, bucket_name: str, prefix: str) -> list[str]:
+        """按前缀列出对象名（浅层递归，仅名字）。"""
+        try:
+            return [
+                obj.object_name
+                for obj in self.client.list_objects(bucket_name, prefix=prefix, recursive=True)
+                if obj.object_name
+            ]
+        except S3Error as e:
+            raise StorageError(f"列出对象失败: {e}")
+
+    async def alist_object_names_by_prefix(self, bucket_name: str, prefix: str) -> list[str]:
+        """异步按前缀列出对象名。"""
+        return await asyncio.to_thread(self.list_object_names_by_prefix, bucket_name, prefix)
+
     async def adelete_bucket(self, bucket_name: str) -> bool:
         """
         删除 bucket（先删除所有对象，再删除 bucket）
@@ -349,6 +384,19 @@ class MinIOClient:
     async def astat_file(self, bucket_name: str, object_name: str) -> int | None:
         """异步获取文件大小（字节），文件不存在时返回 None"""
         return await asyncio.to_thread(self.stat_file, bucket_name, object_name)
+
+    def stat_object(self, bucket_name: str, object_name: str) -> Any | None:
+        """返回 MinIO 对象完整 stat（含 size/etag/mtime）；不存在时返回 None。"""
+        try:
+            return self.client.stat_object(bucket_name=bucket_name, object_name=object_name)
+        except S3Error as e:
+            if e.code == "NoSuchKey":
+                return None
+            raise StorageError(f"获取文件信息失败: {e}")
+
+    async def astat_object(self, bucket_name: str, object_name: str) -> Any | None:
+        """异步返回 MinIO 对象完整 stat（含 size/etag/mtime）；不存在时返回 None。"""
+        return await asyncio.to_thread(self.stat_object, bucket_name, object_name)
 
     def _ensure_public_read_access(self, bucket_name: str) -> None:
         """设置存储桶策略，允许公开读取对象"""
