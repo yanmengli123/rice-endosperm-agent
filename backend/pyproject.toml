@@ -8,7 +8,7 @@ dependencies = [
     "fastapi>=0.121",
     "uvicorn[standard]>=0.34.2",
     "arq>=0.26.3",
-    "yuxi",
+    "yuxi[ragas]",
 ]
 [tool.ruff]
 line-length = 120  # 代码最大行宽

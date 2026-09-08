@@ -11,7 +11,8 @@ export const graphApi = {
       node_label = '*',
       max_depth = 2,
       max_nodes = 100,
-      exclude_chunk = false
+      exclude_chunk = false,
+      full_graph = false
     } = params
 
     if (!kb_id) {
@@ -25,6 +26,9 @@ export const graphApi = {
       max_nodes: max_nodes.toString(),
       exclude_chunk: exclude_chunk.toString()
     })
+    if (full_graph) {
+      queryParams.set('full_graph', 'true')
+    }
 
     return await apiGet(`/api/graph/subgraph?${queryParams.toString()}`, {}, true)
   },

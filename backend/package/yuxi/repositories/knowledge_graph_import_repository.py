@@ -315,6 +315,52 @@ class KnowledgeGraphImportRepository:
                 raise ValueError("知识库尚未配置 Embedding 模型")
             return str(model_spec)
 
+    async def export_snapshot(self, kb_id: str) -> dict[str, Any]:
+        """导出专用一致性快照：实体/三元组/证据/别名/库名在同一 session 同一事务内读取。"""
+        async with pg_manager.get_async_session_context() as session:
+            entities = list(
+                (await session.execute(select(KnowledgeGraphEntity).where(KnowledgeGraphEntity.kb_id == kb_id)))
+                .scalars()
+                .all()
+            )
+            triples = list(
+                (await session.execute(select(KnowledgeGraphTriple).where(KnowledgeGraphTriple.kb_id == kb_id)))
+                .scalars()
+                .all()
+            )
+            evidence = list(
+                (
+                    await session.execute(
+                        select(KnowledgeGraphRelationEvidence).where(KnowledgeGraphRelationEvidence.kb_id == kb_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            alias_rows = list(
+                (
+                    await session.execute(
+                        select(
+                            KnowledgeGraphEntityAlias.entity_id,
+                            KnowledgeGraphEntityAlias.alias,
+                        ).where(KnowledgeGraphEntityAlias.kb_id == kb_id)
+                    )
+                )
+                .all()
+            )
+            kb_name = await session.scalar(select(KnowledgeBase.name).where(KnowledgeBase.kb_id == kb_id))
+
+        aliases: dict[str, list[str]] = {}
+        for entity_id, alias in alias_rows:
+            aliases.setdefault(entity_id, []).append(alias)
+        return {
+            "entities": [self.entity_to_dict(item) for item in entities],
+            "triples": [self.triple_to_dict(item) for item in triples],
+            "evidence": [self.evidence_to_dict(item) for item in evidence],
+            "aliases": aliases,
+            "kb_name": kb_name,
+        }
+
     async def set_phase(self, import_id: str, status: str, *, error: str | None = None) -> None:
         values: dict[str, Any] = {"status": status, "error_message": error}
         if status in {"SUCCEEDED", "FAILED", "ROLLED_BACK"}:
@@ -519,6 +565,8 @@ class KnowledgeGraphImportRepository:
 
     @staticmethod
     def entity_to_dict(record: KnowledgeGraphEntity) -> dict[str, Any]:
+        # chunk 抽取路径可能写入非 dict 的 attributes（如 list），统一按空 dict 处理
+        attributes = record.attributes if isinstance(record.attributes, dict) else {}
         return {
             "entity_id": record.entity_id,
             "kb_id": record.kb_id,
@@ -526,13 +574,13 @@ class KnowledgeGraphImportRepository:
             "normalized_name": record.normalized_name,
             "label": record.label,
             "name": record.name,
-            "attributes": record.attributes or {},
+            "attributes": attributes,
             "content": " ".join(
                 [
                     record.name,
                     record.label,
-                    *((record.attributes or {}).get("rap_ids") or []),
-                    *((record.attributes or {}).get("msu_ids") or []),
+                    *(attributes.get("rap_ids") or []),
+                    *(attributes.get("msu_ids") or []),
                 ]
             ),
         }

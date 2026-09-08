@@ -10,8 +10,16 @@ from yuxi.knowledge.eval.benchmark_generation import (
     normalize_generation_concurrency_count,
 )
 from yuxi.knowledge.eval.evaluator import aggregate_metrics, evaluate_question
+from yuxi.knowledge.eval.ragas_metrics import (
+    DEFAULT_RAGAS_WEIGHTS,
+    RAGAS_METRIC_PREFIX,
+    SUPPORTED_RAGAS_METRICS,
+    build_ragas_engine,
+    resolve_metric_selection,
+)
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.models import select_model
+from yuxi.models.embed import select_embedding_model
 from yuxi.repositories.evaluation_repository import EvaluationRepository
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
@@ -19,6 +27,63 @@ from yuxi.repositories.task_repository import TaskRepository
 from yuxi.services.task_service import TaskContext, tasker
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
+
+EVAL_MODES = {"simple", "ragas", "both"}
+MAX_RAGAS_CONCURRENCY = 8
+
+
+def _normalize_ragas_model_config(model_config: dict[str, Any] | None) -> dict[str, Any]:
+    """校验并归一化评估模式与 RAGAS 配置；非法配置抛 ValueError（路由层转 400）。"""
+    config = model_config or {}
+    eval_mode = config.get("eval_mode", "simple")
+    if eval_mode not in EVAL_MODES:
+        raise ValueError(f"不支持的评估模式 eval_mode: {eval_mode}（可选 simple/ragas/both）")
+    normalized: dict[str, Any] = {"eval_mode": eval_mode}
+    if eval_mode == "simple":
+        return normalized
+
+    ragas_llm = str(config.get("ragas_llm") or "").strip()
+    if not ragas_llm:
+        raise ValueError("RAGAS 评估需要配置 ragas_llm（RAGAS 评判模型）")
+    normalized["ragas_llm"] = ragas_llm
+
+    metrics = config.get("ragas_metrics")
+    if metrics is not None:
+        if not isinstance(metrics, list) or not metrics or not all(isinstance(m, str) and m for m in metrics):
+            raise ValueError("ragas_metrics 必须是非空字符串数组")
+        unknown = [m for m in metrics if m not in SUPPORTED_RAGAS_METRICS]
+        if unknown:
+            raise ValueError(f"不支持的 RAGAS 指标: {', '.join(unknown)}")
+        normalized["ragas_metrics"] = metrics
+
+    if config.get("ragas_embeddings"):
+        normalized["ragas_embeddings"] = str(config["ragas_embeddings"])
+
+    try:
+        concurrency = int(config.get("ragas_concurrency", 4))
+    except (TypeError, ValueError):
+        raise ValueError("ragas_concurrency 必须是整数")
+    normalized["ragas_concurrency"] = min(max(concurrency, 1), MAX_RAGAS_CONCURRENCY)
+
+    weights = config.get("ragas_weights")
+    if weights:
+        if not isinstance(weights, dict):
+            raise ValueError("ragas_weights 必须是 {ragas_指标: 权重} 对象")
+        invalid = [
+            key
+            for key, value in weights.items()
+            if not key.startswith(RAGAS_METRIC_PREFIX) or not isinstance(value, (int, float)) or value <= 0
+        ]
+        if invalid:
+            raise ValueError(f"ragas_weights 键/值非法: {', '.join(invalid)}")
+        normalized["ragas_weights"] = weights
+
+    language = config.get("ragas_language", "chinese")
+    if language not in {"chinese", "english"}:
+        raise ValueError("ragas_language 仅支持 chinese/english")
+    normalized["ragas_language"] = language
+    normalized["ragas_prompt_adapt_instruction"] = bool(config.get("ragas_prompt_adapt_instruction", True))
+    return normalized
 
 
 def build_evaluation_run_name(started_at=None, hash_value: str | None = None) -> str:
@@ -65,6 +130,7 @@ class EvaluationService:
 
     def _run_item_to_dict(self, item) -> dict[str, Any]:
         return {
+            "item_index": item.item_index,
             "query": item.query_text,
             "gold_chunk_ids": item.gold_chunk_ids,
             "gold_answer": item.gold_answer,
@@ -75,9 +141,16 @@ class EvaluationService:
 
     def _is_error_run_item(self, item) -> bool:
         metrics = item.metrics or {}
-        return metrics.get("score", 1.0) <= 0.5 or any(
-            metrics.get(key, 1.0) < 0.3 for key in metrics if key.startswith("recall@")
-        )
+        if metrics.get("score", 1.0) <= 0.5:
+            return True
+        if any(metrics.get(key, 1.0) < 0.3 for key in metrics if key.startswith("recall@")):
+            return True
+        ragas_values = [
+            value
+            for key, value in metrics.items()
+            if key.startswith(RAGAS_METRIC_PREFIX) and isinstance(value, (int, float))
+        ]
+        return bool(ragas_values) and any(value < 0.3 for value in ragas_values)
 
     def _normalize_run_name(self, name: str | None, run_id: str) -> str:
         run_name = (name or "").strip()
@@ -489,7 +562,14 @@ class EvaluationService:
                 logger.error(f"获取知识库检索配置失败: {e}")
 
             if model_config:
-                retrieval_config.update(model_config)
+                normalized_ragas_config = _normalize_ragas_model_config(model_config)
+                filtered_config = {
+                    key: value
+                    for key, value in model_config.items()
+                    if key != "eval_mode" and not key.startswith("ragas_")
+                }
+                filtered_config.update(normalized_ragas_config)
+                retrieval_config.update(filtered_config)
 
             await self.eval_repo.create_run(
                 {
@@ -549,8 +629,45 @@ class EvaluationService:
             if not kb_instance:
                 raise ValueError(f"Knowledge Base {kb_id} not found")
 
+            eval_mode = retrieval_config.get("eval_mode", "simple")
+            ragas_engine = None
+            enabled_ragas_keys: list[str] = []
+            skipped_ragas: dict[str, str] = {}
+            ragas_weights = retrieval_config.get("ragas_weights") or None
+
+            if eval_mode in {"ragas", "both"}:
+                ragas_llm_spec = retrieval_config.get("ragas_llm")
+                if not ragas_llm_spec:
+                    raise ValueError("RAGAS 评估需要配置 ragas_llm（RAGAS 评判模型）")
+                ragas_embeddings_spec = retrieval_config.get("ragas_embeddings")
+                if not ragas_embeddings_spec:
+                    kb_meta = getattr(kb_instance, "databases_meta", None) or {}
+                    ragas_embeddings_spec = (kb_meta.get(kb_id) or {}).get("embedding_model_spec")
+                enabled_ragas_keys, skipped_ragas = resolve_metric_selection(
+                    retrieval_config.get("ragas_metrics"),
+                    has_reference=bool(dataset_row.has_gold_answers),
+                    has_response_source=bool(retrieval_config.get("answer_llm")),
+                    has_embeddings=bool(ragas_embeddings_spec),
+                )
+                if not enabled_ragas_keys:
+                    reasons = "; ".join(f"{key}: {reason}" for key, reason in skipped_ragas.items())
+                    raise ValueError(f"RAGAS 评估无可用指标（{reasons}）")
+
+                await context.set_progress(8, "初始化 RAGAS 评测组件")
+                ragas_engine = build_ragas_engine(
+                    ragas_llm_spec=ragas_llm_spec,
+                    ragas_embeddings_spec=ragas_embeddings_spec if ragas_embeddings_spec else None,
+                    metric_keys=enabled_ragas_keys,
+                    weights=ragas_weights,
+                    language=retrieval_config.get("ragas_language", "chinese"),
+                    adapt_instruction=retrieval_config.get("ragas_prompt_adapt_instruction", True),
+                    select_model_fn=select_model,
+                    select_embedding_fn=select_embedding_model,
+                )
+                await ragas_engine.prepare()
+
             judge_llm = None
-            if dataset_row.has_gold_answers:
+            if eval_mode in {"simple", "both"} and dataset_row.has_gold_answers:
                 judge_model_spec = retrieval_config.get("judge_llm") or retrieval_config.get("answer_llm")
                 if judge_model_spec:
                     try:
@@ -561,6 +678,7 @@ class EvaluationService:
 
             all_retrieval_metrics = []
             all_answer_metrics = []
+            all_ragas_metrics = []
             total_items = len(dataset_items)
 
             async def update_run_db(status=None, completed=None, metrics=None, final_score=None):
@@ -578,17 +696,21 @@ class EvaluationService:
                 if data:
                     await self.eval_repo.update_run(run_id, data)
 
-            for index, item in enumerate(dataset_items):
-                await context.raise_if_cancelled()
-                progress = 10 + (index / total_items) * 80
-                await context.set_progress(progress, f"评估 {index + 1}/{total_items}")
+            def accumulate_scores(question_data: dict[str, Any], question_result: dict[str, Any]) -> None:
+                if dataset_row.has_gold_chunks and question_data.get("gold_chunk_ids"):
+                    all_retrieval_metrics.append(question_result["retrieval_scores"])
+                if dataset_row.has_gold_answers and question_data.get("gold_answer") and judge_llm:
+                    all_answer_metrics.append(question_result["answer_scores"])
+                if ragas_engine is not None:
+                    all_ragas_metrics.append(question_result["ragas_scores"])
 
+            async def evaluate_item(index: int, item) -> dict[str, Any]:
                 question_data = {
                     "query": item.query_text,
                     "gold_chunk_ids": item.gold_chunk_ids or [],
                     "gold_answer": item.gold_answer,
                 }
-                question_result = await evaluate_question(
+                return await evaluate_question(
                     kb_instance=kb_instance,
                     kb_id=kb_id,
                     question_data=question_data,
@@ -597,30 +719,101 @@ class EvaluationService:
                     has_gold_answers=dataset_row.has_gold_answers,
                     judge_llm=judge_llm,
                     select_model_fn=select_model,
+                    ragas_engine=ragas_engine,
                 )
 
-                if dataset_row.has_gold_chunks and question_data.get("gold_chunk_ids"):
-                    all_retrieval_metrics.append(question_result["retrieval_scores"])
-                if dataset_row.has_gold_answers and question_data.get("gold_answer") and judge_llm:
-                    all_answer_metrics.append(question_result["answer_scores"])
-
+            async def persist_item_result(index: int, item, question_result: dict[str, Any]) -> None:
                 await self.eval_repo.upsert_run_item(
                     run_id=run_id,
                     item_index=index,
                     data={"dataset_item_id": item.item_id, **question_result["detail"]},
                 )
 
-                if (index + 1) % 5 == 0 or (index + 1) == total_items:
-                    current_metrics, _ = aggregate_metrics(all_retrieval_metrics, all_answer_metrics)
-                    await context.set_result(
-                        {"current_metrics": current_metrics, "completed_items": index + 1, "total_items": total_items}
+            ragas_concurrency = (
+                min(max(int(retrieval_config.get("ragas_concurrency", 4)), 1), MAX_RAGAS_CONCURRENCY)
+                if ragas_engine is not None
+                else 1
+            )
+
+            if ragas_concurrency > 1:
+                for chunk_start in range(0, total_items, ragas_concurrency):
+                    await context.raise_if_cancelled()
+                    chunk_end = min(chunk_start + ragas_concurrency, total_items)
+                    await context.set_progress(
+                        10 + (chunk_start / total_items) * 80,
+                        f"评估 {chunk_start + 1}-{chunk_end}/{total_items}",
                     )
-                    await update_run_db(completed=index + 1)
+                    chunk = [(index, dataset_items[index]) for index in range(chunk_start, chunk_end)]
+                    results = await asyncio.gather(*(evaluate_item(index, item) for index, item in chunk))
+                    for (index, item), question_result in zip(chunk, results):
+                        accumulate_scores(
+                            {
+                                "query": item.query_text,
+                                "gold_chunk_ids": item.gold_chunk_ids or [],
+                                "gold_answer": item.gold_answer,
+                            },
+                            question_result,
+                        )
+                        await persist_item_result(index, item, question_result)
+                    current_metrics, _ = aggregate_metrics(
+                        all_retrieval_metrics, all_answer_metrics, all_ragas_metrics, ragas_weights
+                    )
+                    await context.set_result(
+                        {
+                            "current_metrics": current_metrics,
+                            "completed_items": chunk_end,
+                            "total_items": total_items,
+                        }
+                    )
+                    await update_run_db(completed=chunk_end)
+            else:
+                for index, item in enumerate(dataset_items):
+                    await context.raise_if_cancelled()
+                    progress = 10 + (index / total_items) * 80
+                    await context.set_progress(progress, f"评估 {index + 1}/{total_items}")
+
+                    question_data = {
+                        "query": item.query_text,
+                        "gold_chunk_ids": item.gold_chunk_ids or [],
+                        "gold_answer": item.gold_answer,
+                    }
+                    question_result = await evaluate_item(index, item)
+                    accumulate_scores(question_data, question_result)
+                    await persist_item_result(index, item, question_result)
+
+                    if (index + 1) % 5 == 0 or (index + 1) == total_items:
+                        current_metrics, _ = aggregate_metrics(
+                            all_retrieval_metrics, all_answer_metrics, all_ragas_metrics, ragas_weights
+                        )
+                        await context.set_result(
+                            {
+                                "current_metrics": current_metrics,
+                                "completed_items": index + 1,
+                                "total_items": total_items,
+                            }
+                        )
+                        await update_run_db(completed=index + 1)
 
             await context.set_progress(95, "计算最终指标")
             overall_metrics, overall_score = aggregate_metrics(
-                all_retrieval_metrics, all_answer_metrics, include_overall_score=True
+                all_retrieval_metrics,
+                all_answer_metrics,
+                all_ragas_metrics,
+                ragas_weights,
+                include_overall_score=True,
             )
+            metrics_meta = {"eval_mode": eval_mode}
+            if ragas_engine is not None:
+                metrics_meta["ragas"] = {
+                    "requested": retrieval_config.get("ragas_metrics") or [],
+                    "enabled": enabled_ragas_keys,
+                    "skipped": skipped_ragas,
+                    "weights": {**DEFAULT_RAGAS_WEIGHTS, **(ragas_weights or {})},
+                    "language": retrieval_config.get("ragas_language", "chinese"),
+                    "prompt_adaptation": ragas_engine.prompt_adaptation,
+                    "usage": ragas_engine.usage_stats(),
+                }
+            overall_metrics["metrics_meta"] = metrics_meta
             await update_run_db(
                 status="completed",
                 completed=total_items,

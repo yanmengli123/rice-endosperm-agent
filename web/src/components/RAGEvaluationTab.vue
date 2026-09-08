@@ -44,6 +44,17 @@
                   </div>
 
                   <div class="dropdown-model-fields">
+                    <a-form-item label="评估模式">
+                      <a-radio-group
+                        v-model:value="configForm.eval_mode"
+                        :options="EVAL_MODE_OPTIONS"
+                        option-type="button"
+                        button-style="solid"
+                        size="small"
+                        class="eval-mode-radio"
+                      />
+                    </a-form-item>
+
                     <a-form-item label="评估名称">
                       <a-input
                         v-model:value="configForm.name"
@@ -83,22 +94,25 @@
 
                     <a-form-item
                       :label="
-                        selectedDataset?.has_gold_answers
-                          ? '答案生成模型（可选）'
-                          : '答案生成模型（当前基准无需）'
+                        isRagasModeOnly
+                          ? '答案生成模型（RAGAS 可选）'
+                          : selectedDataset?.has_gold_answers
+                            ? '答案生成模型（可选）'
+                            : '答案生成模型（当前基准无需）'
                       "
                     >
                       <ModelSelectorComponent
                         v-model:model_spec="configForm.answer_llm"
                         size="small"
                         displayName="mini"
-                        :disabled="!selectedDataset || !selectedDataset.has_gold_answers"
+                        :disabled="!selectedDataset || (!selectedDataset.has_gold_answers && !isRagasMode)"
                         @select-model="(value) => (configForm.answer_llm = value)"
                         style="width: 100%"
                       />
                     </a-form-item>
 
                     <a-form-item
+                      v-if="!isRagasModeOnly"
                       :label="
                         selectedDataset?.has_gold_answers
                           ? '答案评判模型（可选）'
@@ -114,6 +128,29 @@
                         style="width: 100%"
                       />
                     </a-form-item>
+
+                    <template v-if="isRagasMode">
+                      <a-form-item label="RAGAS 评判模型" required>
+                        <ModelSelectorComponent
+                          v-model:model_spec="configForm.ragas_llm"
+                          size="small"
+                          displayName="mini"
+                          @select-model="(value) => (configForm.ragas_llm = value)"
+                          style="width: 100%"
+                        />
+                      </a-form-item>
+
+                      <a-form-item label="RAGAS 指标">
+                        <a-select
+                          v-model:value="configForm.ragas_metrics"
+                          mode="multiple"
+                          :options="ragasMetricSelectOptions"
+                          placeholder="默认启用全部可用指标"
+                          size="small"
+                          style="width: 100%"
+                        />
+                      </a-form-item>
+                    </template>
                   </div>
 
                   <div class="dropdown-hint">
@@ -173,6 +210,12 @@
               </div>
             </div>
             <div class="last-evaluation-metrics">
+              <div v-for="metric in getRagasRunMetrics(latestEvaluation)" :key="metric.key" class="metric-card">
+                <span class="metric-label">{{ getMetricTitle(metric.key) }}</span>
+                <strong :style="{ color: getMetricColor(metric.value) }">
+                  {{ formatMetricValue(metric.value) }}
+                </strong>
+              </div>
               <div class="metric-card">
                 <span class="metric-label">Recall@10</span>
                 <strong :style="{ color: getMetricColor(getRecall10(latestEvaluation)) }">
@@ -352,11 +395,30 @@
               checked-children="换行"
               un-checked-children="不换行"
             />
+            <a-button
+              size="small"
+              class="expand-all-btn"
+              :disabled="detailedResults.length === 0"
+              @click="toggleExpandAll"
+            >
+              {{ allRowsExpanded ? '收起全部' : '展开全部' }}
+            </a-button>
+          </div>
+
+          <div
+            v-if="selectedResult && getRagasRunMetrics(selectedResult).length >= 3"
+            class="ragas-radar-panel"
+          >
+            <div class="ragas-radar-title">RAGAS 指标雷达图</div>
+            <div ref="ragasRadarRef" class="ragas-radar-chart"></div>
           </div>
 
           <a-table
             :columns="resultColumns"
             :data-source="detailedResults"
+            row-key="item_index"
+            :expanded-row-keys="expandedRowKeys"
+            @expandedRowsChange="onExpandedRowsChange"
             :pagination="{
               current: currentPage,
               pageSize: pageSize,
@@ -373,6 +435,58 @@
             size="small"
             :loading="resultsLoading"
           >
+            <template #expandedRowRender="{ record }">
+              <div class="result-detail-card">
+                <div class="detail-field">
+                  <div class="detail-label">问题</div>
+                  <div class="detail-content">{{ record.query || '-' }}</div>
+                </div>
+                <div class="detail-field">
+                  <div class="detail-label">标准答案（ground truth）</div>
+                  <div class="detail-content">
+                    {{ record.gold_answer || '—（当前基准未提供标准答案）' }}
+                  </div>
+                </div>
+                <div class="detail-field">
+                  <div class="detail-label">生成答案（answer）</div>
+                  <div class="detail-content">
+                    {{ record.generated_answer || '—（未生成答案）' }}
+                  </div>
+                </div>
+                <div class="detail-field">
+                  <div class="detail-label">
+                    检索上下文（contexts）
+                    <span v-if="getRecordContexts(record).length" class="detail-label-extra">
+                      共 {{ getRecordContexts(record).length }} 条，命中标准块
+                      {{ countGoldHits(record) }} 条
+                    </span>
+                    <span v-else class="detail-label-extra">无</span>
+                  </div>
+                  <div v-if="getRecordContexts(record).length" class="context-list">
+                    <div
+                      v-for="(chunk, index) in getRecordContexts(record)"
+                      :key="index"
+                      class="context-item"
+                      :class="{ 'context-gold': isGoldChunk(chunk, record) }"
+                    >
+                      <div class="context-meta">
+                        <span class="context-index">#{{ index + 1 }}</span>
+                        <a-tag v-if="isGoldChunk(chunk, record)" color="green" :bordered="false">
+                          命中标准块
+                        </a-tag>
+                        <span class="context-chunk-id" :title="getChunkId(chunk)">
+                          {{ getChunkId(chunk) || '无 chunk_id' }}
+                        </span>
+                        <span v-if="getChunkScore(chunk) != null" class="context-score">
+                          score {{ getChunkScore(chunk) }}
+                        </span>
+                      </div>
+                      <div class="context-content">{{ getChunkContent(chunk) }}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'query'">
                 <div class="query-text" :title="record.query">{{ record.query }}</div>
@@ -384,26 +498,12 @@
               </template>
               <template v-else-if="column.key === 'retrieval_score'">
                 <div
-                  v-if="
-                    record.metrics &&
-                    Object.keys(record.metrics).some(
-                      (k) =>
-                        k.startsWith('recall') ||
-                        k.startsWith('precision') ||
-                        k === 'map' ||
-                        k === 'ndcg'
-                    )
-                  "
+                  v-if="record.metrics && Object.keys(record.metrics).some(isEvalMetricKey)"
                   class="retrieval-metrics"
                 >
                   <template v-for="(val, key) in record.metrics" :key="key">
                     <span
-                      v-if="
-                        key.startsWith('recall') ||
-                        key.startsWith('precision') ||
-                        key === 'map' ||
-                        key === 'ndcg'
-                      "
+                      v-if="isEvalMetricKey(key)"
                       class="metric-content"
                       :class="`metric-${getMetricType(key)}`"
                     >
@@ -430,6 +530,14 @@
                     {{ record.metrics.reasoning }}
                   </div>
                 </div>
+                <div
+                  v-else-if="record.metrics && typeof record.metrics.ragas_answer_correctness === 'number'"
+                  class="answer-judgement"
+                >
+                  <a-tag :color="getScoreTagColor(record.metrics.ragas_answer_correctness)">
+                    正确性 {{ (record.metrics.ragas_answer_correctness * 100).toFixed(0) }}%
+                  </a-tag>
+                </div>
                 <span v-else>-</span>
               </template>
             </template>
@@ -447,8 +555,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, computed, watch, h } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch, h, nextTick } from 'vue'
 import { message } from 'ant-design-vue'
+import * as echarts from 'echarts'
 import { evaluationApi } from '@/apis/knowledge_api'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import { BarChart3, ChevronDown, ClipboardList, RefreshCw, X } from '@lucide/vue'
@@ -500,6 +609,14 @@ const resultColumnWidths = reactive({
 const isDatasetCompleted = (dataset) =>
   (dataset?.build_metadata?.status || 'completed') === 'completed'
 
+// 评估指标键 = 检索指标（recall/precision/map/ndcg）+ RAGAS 指标（ragas_*）
+const isEvalMetricKey = (key) =>
+  key.startsWith('ragas_') ||
+  key.startsWith('recall') ||
+  key.startsWith('precision') ||
+  key === 'map' ||
+  key === 'ndcg'
+
 const latestEvaluation = computed(() => evaluationHistory.value[0] || null)
 
 const createDefaultNameHash = () => {
@@ -526,15 +643,62 @@ const buildDefaultEvaluationName = () => {
 const configForm = reactive({
   name: buildDefaultEvaluationName(),
   answer_llm: '', // 答案生成模型
-  judge_llm: '' // 评判模型
+  judge_llm: '', // 评判模型
+  eval_mode: 'simple', // simple | ragas | both
+  ragas_llm: '', // RAGAS 评判模型
+  ragas_metrics: [] // 留空 = 启用全部可用指标
 })
 
+const EVAL_MODE_OPTIONS = [
+  { value: 'simple', label: '简单' },
+  { value: 'ragas', label: 'RAGAS' },
+  { value: 'both', label: '双模式' }
+]
+
+const RAGAS_METRIC_OPTIONS = [
+  { value: 'faithfulness', label: '忠实度', needs_reference: false },
+  { value: 'answer_relevancy', label: '答案相关性', needs_reference: false },
+  { value: 'context_precision', label: '上下文精确率', needs_reference: false },
+  { value: 'context_recall', label: '上下文召回率', needs_reference: true },
+  { value: 'answer_correctness', label: '答案正确性', needs_reference: true }
+]
+
+const isRagasMode = computed(() => configForm.eval_mode !== 'simple')
+const isRagasModeOnly = computed(() => configForm.eval_mode === 'ragas')
+
+const ragasMetricSelectOptions = computed(() =>
+  RAGAS_METRIC_OPTIONS.map((option) => ({
+    value: option.value,
+    label: option.label,
+    disabled: option.needs_reference && !selectedDataset.value?.has_gold_answers
+  }))
+)
+
 const evaluationStartHint = computed(() => {
-  if (!selectedDataset.value?.has_gold_answers) return '当前基准只会执行检索评估，无需选择模型。'
-  if (!configForm.answer_llm && !configForm.judge_llm) return '不选择模型时，将仅执行检索评估。'
-  if (configForm.answer_llm && configForm.judge_llm) return '将执行检索评估与答案评估。'
-  return '答案生成模型和答案评判模型需要同时选择。'
+  const hasGoldAnswers = !!selectedDataset.value?.has_gold_answers
+  if (!isRagasMode.value) {
+    if (!hasGoldAnswers) return '当前基准只会执行检索评估，无需选择模型。'
+    if (!configForm.answer_llm && !configForm.judge_llm) return '不选择模型时，将仅执行检索评估。'
+    if (configForm.answer_llm && configForm.judge_llm) return '将执行检索评估与答案评估。'
+    return '答案生成模型和答案评判模型需要同时选择。'
+  }
+  const hints = []
+  if (!configForm.ragas_llm) hints.push('需要选择 RAGAS 评判模型')
+  if (!hasGoldAnswers) hints.push('当前基准缺少标准答案，上下文召回率与答案正确性将自动跳过')
+  else if (!configForm.answer_llm)
+    hints.push('未选择答案生成模型时，忠实度/答案相关性/上下文精确率将自动跳过')
+  return hints.length ? `${hints.join('；')}。` : '将执行 RAGAS 指标评估（中文提示词自动适配）。'
 })
+
+watch(
+  () => configForm.eval_mode,
+  (mode) => {
+    // RAGAS 模式下简单评判模型不参与，清空避免歧义
+    if (mode === 'ragas') {
+      configForm.judge_llm = ''
+    }
+  }
+)
 
 // 表格列定义
 const resultColumns = computed(() => {
@@ -557,19 +721,16 @@ const resultColumns = computed(() => {
     }
   ]
 
-  // 检查是否有检索指标数据
+  // 检查是否有评估指标数据（检索指标或 RAGAS 指标）
   const hasRetrievalMetrics = detailedResults.value.some((item) => {
     if (!item.metrics) return false
-    return Object.keys(item.metrics).some(
-      (key) =>
-        key.startsWith('recall') || key.startsWith('precision') || key === 'map' || key === 'ndcg'
-    )
+    return Object.keys(item.metrics).some(isEvalMetricKey)
   })
 
-  // 如果有检索指标数据，添加检索指标列
+  // 如果有评估指标数据，添加评估指标列
   if (hasRetrievalMetrics) {
     columns.splice(2, 0, {
-      title: '检索指标',
+      title: '评估指标',
       key: 'retrieval_score',
       width: resultColumnWidths.retrieval_score
     })
@@ -642,6 +803,12 @@ const historyColumns = [
     customRender: ({ record }) => getDatasetName(record.dataset_id)
   },
   {
+    title: '模式',
+    key: 'eval_mode',
+    width: 82,
+    customRender: ({ record }) => renderEvalModeTag(record)
+  },
+  {
     title: '数据量',
     key: 'items',
     width: 92,
@@ -684,10 +851,57 @@ const toggleErrorOnly = async () => {
   resultsLoading.value = true
   showErrorsOnly.value = !showErrorsOnly.value
   currentPage.value = 1 // 切换模式时重置到第一页
+  expandedRowKeys.value = [] // 过滤口径变化，清空展开状态
 
   // 立即加载新的分页数据
   await loadResultsWithPagination()
 }
+
+// ---------------------------------------------------------------------------
+// 展开行详情（question / ground truth / contexts / answer）
+// ---------------------------------------------------------------------------
+const expandedRowKeys = ref([])
+const allRowsExpanded = computed(
+  () =>
+    detailedResults.value.length > 0 &&
+    detailedResults.value.every((item) => expandedRowKeys.value.includes(item.item_index))
+)
+
+const onExpandedRowsChange = (keys) => {
+  expandedRowKeys.value = keys
+}
+
+const toggleExpandAll = () => {
+  expandedRowKeys.value = allRowsExpanded.value
+    ? []
+    : detailedResults.value.map((item) => item.item_index)
+}
+
+const getRecordContexts = (record) => {
+  const chunks = record?.retrieved_chunks
+  return Array.isArray(chunks) ? chunks : []
+}
+
+const getChunkId = (chunk) => {
+  const id = chunk?.chunk_id ?? chunk?.metadata?.chunk_id
+  return id != null ? String(id) : ''
+}
+
+const getChunkContent = (chunk) => chunk?.content ?? ''
+
+const getChunkScore = (chunk) => {
+  const score = chunk?.score
+  return typeof score === 'number' ? score.toFixed(4) : null
+}
+
+const isGoldChunk = (chunk, record) => {
+  const chunkId = getChunkId(chunk)
+  if (!chunkId) return false
+  const goldIds = Array.isArray(record?.gold_chunk_ids) ? record.gold_chunk_ids : []
+  return goldIds.some((goldId) => String(goldId) === chunkId)
+}
+
+const countGoldHits = (record) => getRecordContexts(record).filter((chunk) => isGoldChunk(chunk, record)).length
 
 // 处理分页变化
 const handlePageChange = (page, size) => {
@@ -853,14 +1067,21 @@ const startEvaluation = async () => {
     return
   }
 
-  const answerModel = selectedDataset.value.has_gold_answers ? configForm.answer_llm : ''
-  const judgeModel = selectedDataset.value.has_gold_answers ? configForm.judge_llm : ''
+  // RAGAS 模式下即使无标准答案，答案生成模型也用于产出待评答案
+  const answerModel =
+    selectedDataset.value.has_gold_answers || isRagasMode.value ? configForm.answer_llm : ''
+  const judgeModel = selectedDataset.value.has_gold_answers && !isRagasModeOnly.value ? configForm.judge_llm : ''
   const hasAnswerModel = !!answerModel
   const hasJudgeModel = !!judgeModel
   const runName = configForm.name.trim()
 
-  if (hasAnswerModel !== hasJudgeModel) {
+  // RAGAS 单模式下后端不执行简单评判，answer/judge 无需成对
+  if (!isRagasModeOnly.value && hasAnswerModel !== hasJudgeModel) {
     message.warning('生成模型和评估模型必须同时选择或者同时不选择')
+    return
+  }
+  if (isRagasMode.value && !configForm.ragas_llm) {
+    message.warning('请选择 RAGAS 评判模型')
     return
   }
   if (!runName) {
@@ -870,13 +1091,22 @@ const startEvaluation = async () => {
 
   startingEvaluation.value = true
 
+  const modelConfig = {
+    eval_mode: configForm.eval_mode,
+    answer_llm: answerModel,
+    judge_llm: judgeModel
+  }
+  if (isRagasMode.value) {
+    modelConfig.ragas_llm = configForm.ragas_llm
+    if (configForm.ragas_metrics.length > 0) {
+      modelConfig.ragas_metrics = [...configForm.ragas_metrics]
+    }
+  }
+
   const params = {
     dataset_id: selectedDataset.value.dataset_id,
     name: runName,
-    model_config: {
-      answer_llm: answerModel,
-      judge_llm: judgeModel
-    }
+    model_config: modelConfig
   }
 
   try {
@@ -940,15 +1170,10 @@ const calculateEvaluationStats = (results) => {
       }
     }
 
-    // 检索指标统计
+    // 评估指标统计（检索 + RAGAS）
     if (item.metrics) {
       Object.keys(item.metrics).forEach((key) => {
-        if (
-          key.startsWith('recall') ||
-          key.startsWith('precision') ||
-          key === 'map' ||
-          key === 'ndcg'
-        ) {
+        if (isEvalMetricKey(key) && typeof item.metrics[key] === 'number') {
           if (!metricSums[key]) {
             metricSums[key] = 0
             metricCounts[key] = 0
@@ -979,6 +1204,7 @@ const viewResults = async (runId) => {
     // 重置分页状态
     currentPage.value = 1
     showErrorsOnly.value = false
+    expandedRowKeys.value = []
 
     // 先获取基本信息（不分页）
     const response = await evaluationApi.getRunResults(props.kbId, runId)
@@ -1009,6 +1235,7 @@ const viewResults = async (runId) => {
 
       // 加载分页数据
       await loadResultsWithPagination()
+      renderRagasRadar()
     } else {
       message.error('获取评估结果失败：数据格式错误')
     }
@@ -1164,6 +1391,72 @@ const getStatusText = (status) => {
   return texts[status] || status
 }
 
+const EVAL_MODE_BADGES = {
+  simple: { label: '简单', color: 'default' },
+  ragas: { label: 'RAGAS', color: 'purple' },
+  both: { label: '双模式', color: 'geekblue' }
+}
+
+const getEvalMode = (record) => record?.retrieval_config?.eval_mode || 'simple'
+
+const renderEvalModeTag = (record) => {
+  const badge = EVAL_MODE_BADGES[getEvalMode(record)] || EVAL_MODE_BADGES.simple
+  return h('a-tag', { color: badge.color, bordered: false }, () => badge.label)
+}
+
+// 从 run 级指标中提取 RAGAS 指标（用于最后一次评估卡片与雷达图）
+const getRagasRunMetrics = (record) => {
+  const metrics = record?.metrics || {}
+  return Object.entries(metrics)
+    .filter(([key, value]) => key.startsWith('ragas_') && isFiniteNumber(value))
+    .map(([key, value]) => ({ key, value }))
+}
+
+// RAGAS 雷达图（≥3 个指标时展示）
+const ragasRadarRef = ref(null)
+let ragasRadarChart = null
+
+const renderRagasRadar = async () => {
+  const metrics = getRagasRunMetrics(selectedResult.value)
+  if (!resultModalVisible.value || metrics.length < 3) return
+  await nextTick()
+  if (!ragasRadarRef.value) return
+  if (!ragasRadarChart) {
+    ragasRadarChart = echarts.init(ragasRadarRef.value)
+  }
+  ragasRadarChart.setOption({
+    radar: {
+      indicator: metrics.map((metric) => ({ name: getMetricTitle(metric.key), max: 1 })),
+      radius: '68%',
+      splitNumber: 4,
+      axisName: { color: '#6b7280', fontSize: 11 }
+    },
+    series: [
+      {
+        type: 'radar',
+        symbolSize: 4,
+        data: [
+          {
+            value: metrics.map((metric) => metric.value),
+            name: getRunName(selectedResult.value),
+            areaStyle: { opacity: 0.18 },
+            lineStyle: { width: 2 }
+          }
+        ]
+      }
+    ]
+  })
+}
+
+const disposeRagasRadar = () => {
+  ragasRadarChart?.dispose()
+  ragasRadarChart = null
+}
+
+watch(resultModalVisible, (open) => {
+  if (!open) disposeRagasRadar()
+})
+
 const getMetricTitle = (key) => {
   const titles = {
     precision: '精确率',
@@ -1175,7 +1468,12 @@ const getMetricTitle = (key) => {
     answer_correctness: '答案准确性',
     score: '评分',
     reasoning: '理由',
-    overall_score: '综合评分'
+    overall_score: '综合评分',
+    ragas_faithfulness: '忠实度',
+    ragas_answer_relevancy: '答案相关性',
+    ragas_context_precision: '上下文精确率',
+    ragas_context_recall: '上下文召回率',
+    ragas_answer_correctness: '答案正确性'
   }
   // 处理 recall@k
   if (key.startsWith('recall@')) return `召回率 (${key.split('@')[1]})`
@@ -1186,6 +1484,7 @@ const getMetricTitle = (key) => {
 
 // 获取指标类型
 const getMetricType = (key) => {
+  if (key.startsWith('ragas_')) return 'ragas'
   if (key.startsWith('recall')) return 'recall'
   if (key.startsWith('precision')) return 'precision'
   if (key === 'map') return 'map'
@@ -1201,7 +1500,14 @@ const getMetricShortName = (key) => {
   if (key === 'recall') return 'Recall'
   if (key === 'map') return 'MAP'
   if (key === 'ndcg') return 'NDCG'
-  return key
+  const shortNames = {
+    ragas_faithfulness: '忠实度',
+    ragas_answer_relevancy: '相关性',
+    ragas_context_precision: '上下文P',
+    ragas_context_recall: '上下文R',
+    ragas_answer_correctness: '正确性'
+  }
+  return shortNames[key] || key
 }
 
 // 格式化指标值
@@ -1242,6 +1548,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopEvaluationRefresh()
   stopColumnResize?.()
+  disposeRagasRadar()
 })
 </script>
 
@@ -1316,6 +1623,16 @@ onUnmounted(() => {
   color: var(--color-info-700);
   font-size: 12px;
   line-height: 1.5;
+}
+
+:global(.evaluation-start-dropdown .eval-mode-radio) {
+  display: flex;
+  width: 100%;
+
+  .ant-radio-button-wrapper {
+    flex: 1;
+    text-align: center;
+  }
 }
 
 // 评估内容区域
@@ -1537,6 +1854,12 @@ onUnmounted(() => {
       color: var(--color-accent-700);
     }
   }
+
+  &.metric-ragas {
+    .metric-value {
+      color: var(--color-purple-600, #7c3aed);
+    }
+  }
 }
 
 .metric-name {
@@ -1729,6 +2052,130 @@ onUnmounted(() => {
 
 .compact-metric {
   white-space: nowrap;
+}
+
+.ragas-radar-panel {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  background: var(--gray-25, #fafafa);
+}
+
+// 展开行详情卡（question / ground truth / contexts / answer）
+.result-detail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 8px;
+}
+
+.detail-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gray-550);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-label-extra {
+  font-weight: 400;
+  color: var(--gray-450, #9ca3af);
+  font-size: 11px;
+}
+
+.detail-content {
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--gray-800);
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  background: var(--gray-25, #fafafa);
+  border-radius: 6px;
+}
+
+.context-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.context-item {
+  border: 1px solid var(--gray-200);
+  border-left: 3px solid var(--gray-200);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--gray-25, #fafafa);
+
+  &.context-gold {
+    border-left-color: var(--color-success-500);
+    background: var(--color-success-50, #f0fdf4);
+  }
+}
+
+.context-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.context-index {
+  font-weight: 600;
+  color: var(--gray-550);
+}
+
+.context-chunk-id {
+  color: var(--gray-450, #9ca3af);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-score {
+  color: var(--gray-550);
+  font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+}
+
+.context-content {
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--gray-700);
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.expand-all-btn {
+  margin-left: 10px;
+}
+
+.ragas-radar-title {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gray-700);
+}
+
+.ragas-radar-chart {
+  width: 100%;
+  height: 190px;
 }
 
 :deep(.table-nowrap) {

@@ -14,14 +14,26 @@
             <span class="panel-title">
               {{ activeStatsPanel === 'node' ? '实体类型' : '关系类型' }}
             </span>
+            <button
+              v-if="selectedTypeHighlight"
+              class="type-clear-btn"
+              type="button"
+              title="清除类型高亮"
+              @click="clearTypeHighlight"
+            >
+              清除高亮
+            </button>
           </div>
           <div class="panel-body">
+            <div class="type-stats-hint">点击类型可在图中高亮对应{{ activeStatsPanel === 'node' ? '实体' : '关系' }}，再次点击取消</div>
             <div class="type-stats-list">
               <div
                 v-for="item in activeTypeStats"
                 :key="item.name"
                 class="type-stats-row"
+                :class="{ 'type-selected': isTypeSelected(item) }"
                 :title="`${item.name}: ${item.count}`"
+                @click="onTypeRowClick(item)"
               >
                 <span class="type-color" :style="{ backgroundColor: item.color }"></span>
                 <span class="type-name">{{ item.name }}</span>
@@ -33,22 +45,76 @@
         <div class="floating-panel graph-stats-panel">
           <button
             class="stat-item"
-            :class="{ active: activeStatsPanel === 'node' }"
+            :class="{ active: activeStatsPanel === 'node', 'stat-truncated': truncated }"
             type="button"
+            :title="truncated ? '已达显示/安全上限，画布内容被截断；可点右上「上限」按钮调整展示数目，或在图谱设置中开启全图模式' : undefined"
             @click="toggleStatsPanel('node')"
           >
             <span class="stat-label">实体</span>
-            <span class="stat-value">{{ visibleEntityCount }}</span>
+            <span class="stat-value">
+              {{ visibleEntityCount }}<span v-if="totalEntities != null" class="stat-total">/{{ totalEntities }}</span>
+            </span>
           </button>
           <button
             class="stat-item"
-            :class="{ active: activeStatsPanel === 'edge' }"
+            :class="{ active: activeStatsPanel === 'edge', 'stat-truncated': truncated }"
             type="button"
+            :title="truncated ? '已达显示/安全上限，画布内容被截断；可点右上「上限」按钮调整展示数目，或在图谱设置中开启全图模式' : undefined"
             @click="toggleStatsPanel('edge')"
           >
             <span class="stat-label">关系</span>
-            <span class="stat-value">{{ visibleRelationshipCount }}</span>
+            <span class="stat-value">
+              {{ visibleRelationshipCount
+              }}<span v-if="totalRelationships != null" class="stat-total">/{{ totalRelationships }}</span>
+            </span>
           </button>
+          <a-popover
+            v-if="limitEditable"
+            v-model:open="limitPopoverOpen"
+            trigger="click"
+            placement="rightTop"
+            overlay-class-name="graph-limit-popover"
+          >
+            <button
+              class="stat-item stat-limit-item"
+              :class="{ active: limitPopoverOpen }"
+              type="button"
+              title="自定义画布展示数目上限"
+              @click.stop
+            >
+              <span class="stat-label">上限</span>
+              <span class="stat-value">{{ displayLimit }}</span>
+            </button>
+            <template #content>
+              <div class="limit-popover">
+                <div class="limit-popover-title">展示数目上限</div>
+                <div class="limit-preset-list">
+                  <button
+                    v-for="preset in limitPresets"
+                    :key="preset"
+                    class="limit-preset"
+                    :class="{ 'limit-preset-active': displayLimit === preset }"
+                    type="button"
+                    @click="applyDisplayLimit(preset)"
+                  >
+                    {{ preset }}
+                  </button>
+                </div>
+                <div class="limit-custom-row">
+                  <a-input-number
+                    v-model:value="customLimitValue"
+                    :min="10"
+                    :max="1000"
+                    :step="10"
+                    size="small"
+                    style="width: 110px"
+                  />
+                  <a-button size="small" type="primary" @click="applyDisplayLimit(customLimitValue)">应用</a-button>
+                </div>
+                <div class="limit-popover-hint">需要全库渲染时，请在图谱设置中开启「全图模式」</div>
+              </div>
+            </template>
+          </a-popover>
         </div>
       </div>
       <div v-if="$slots.bottom" class="overlay bottom">
@@ -73,6 +139,30 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  // 全库存量（PG 规范层口径），与画布可见数组成「可见/全量」复合显示
+  totalEntities: {
+    type: Number,
+    default: null
+  },
+  totalRelationships: {
+    type: Number,
+    default: null
+  },
+  // 当前画布内容是否被显示上限/安全上限截断
+  truncated: {
+    type: Boolean,
+    default: false
+  },
+  // 当前展示数目上限（截断值），用于内联调整控件
+  displayLimit: {
+    type: Number,
+    default: 100
+  },
+  // 是否允许内联调整展示上限（全图模式下隐藏）
+  limitEditable: {
+    type: Boolean,
+    default: true
+  },
   labelField: { type: String, default: 'name' },
   autoFit: { type: Boolean, default: true },
   autoResize: { type: Boolean, default: true },
@@ -84,7 +174,14 @@ const props = defineProps({
   highlightKeywords: { type: Array, default: () => [] }
 })
 
-const emit = defineEmits(['ready', 'data-rendered', 'node-click', 'edge-click', 'canvas-click'])
+const emit = defineEmits([
+  'ready',
+  'data-rendered',
+  'node-click',
+  'edge-click',
+  'canvas-click',
+  'change-display-limit'
+])
 
 const container = ref(null)
 const rootEl = ref(null)
@@ -220,6 +317,97 @@ const activeTypeStats = computed(() =>
 
 function toggleStatsPanel(type) {
   activeStatsPanel.value = activeStatsPanel.value === type ? '' : type
+  // 切换面板维度时清除另一维度的旧高亮，避免隐藏状态
+  if (selectedTypeHighlight.value && selectedTypeHighlight.value.dimension !== type) {
+    clearTypeHighlight()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 类型点击高亮：点击类型统计行 -> 图中对应元素置 highlight、其余置 inactive
+// ---------------------------------------------------------------------------
+const selectedTypeHighlight = ref(null) // { dimension: 'node'|'edge', name }
+
+const limitPresets = [50, 100, 200, 300, 500, 1000]
+const limitPopoverOpen = ref(false)
+const customLimitValue = ref(props.displayLimit)
+
+watch(
+  () => props.displayLimit,
+  (value) => {
+    customLimitValue.value = value
+  }
+)
+
+function isTypeSelected(item) {
+  const selection = selectedTypeHighlight.value
+  return Boolean(selection && selection.dimension === activeStatsPanel.value && selection.name === item.name)
+}
+
+function onTypeRowClick(item) {
+  const current = selectedTypeHighlight.value
+  const dimension = activeStatsPanel.value
+  selectedTypeHighlight.value =
+    current && current.dimension === dimension && current.name === item.name
+      ? null
+      : { dimension, name: item.name }
+  applyTypeHighlight()
+}
+
+function clearTypeHighlight() {
+  if (!selectedTypeHighlight.value) return
+  selectedTypeHighlight.value = null
+  applyTypeHighlight()
+}
+
+async function applyTypeHighlight() {
+  if (!graphInstance) return
+  const { nodes, edges } = graphInstance.getData()
+  const updates = {}
+  const selection = selectedTypeHighlight.value
+
+  if (!selection) {
+    nodes.forEach((node) => (updates[node.id] = []))
+    edges.forEach((edge) => (updates[edge.id] = []))
+  } else if (selection.dimension === 'node') {
+    const highlightedNodes = new Set()
+    nodes.forEach((node) => {
+      const match = node.data?.visualLabel === selection.name
+      updates[node.id] = match ? ['highlight'] : ['inactive']
+      if (match) highlightedNodes.add(node.id)
+    })
+    edges.forEach((edge) => {
+      const bothEndsHighlighted = highlightedNodes.has(edge.source) && highlightedNodes.has(edge.target)
+      updates[edge.id] = bothEndsHighlighted ? [] : ['inactive']
+    })
+  } else {
+    const endpointNodes = new Set()
+    edges.forEach((edge) => {
+      const match = edge.data?.visualLabel === selection.name
+      updates[edge.id] = match ? ['highlight'] : ['inactive']
+      if (match) {
+        endpointNodes.add(edge.source)
+        endpointNodes.add(edge.target)
+      }
+    })
+    nodes.forEach((node) => {
+      updates[node.id] = endpointNodes.has(node.id) ? [] : ['inactive']
+    })
+  }
+
+  try {
+    await graphInstance.setElementState(updates)
+    await graphInstance.draw()
+  } catch (error) {
+    console.warn('类型高亮应用失败:', error)
+  }
+}
+
+function applyDisplayLimit(value) {
+  const clamped = Math.min(1000, Math.max(10, Math.round(Number(value) || 100)))
+  customLimitValue.value = clamped
+  limitPopoverOpen.value = false
+  emit('change-display-limit', clamped)
 }
 
 function formatData() {
@@ -316,6 +504,18 @@ function initGraph() {
         shadowBlur: 4,
         ...(props.nodeStyleOptions.style || {})
       },
+      state: {
+        // 类型高亮：命中元素描边强调 + 光晕
+        highlight: {
+          lineWidth: 3,
+          stroke: getCSSVariable('--main-color'),
+          halo: true,
+          haloStroke: getCSSVariable('--main-color'),
+          opacity: 1
+        },
+        // 类型高亮：未命中元素压暗
+        inactive: { opacity: 0.12 }
+      },
       palette: props.nodeStyleOptions.palette
     },
     edge: {
@@ -330,6 +530,10 @@ function initGraph() {
         lineWidth: 1.2,
         endArrow: true,
         ...(props.edgeStyleOptions.style || {})
+      },
+      state: {
+        highlight: { lineWidth: 2.6, opacity: 1 },
+        inactive: { opacity: 0.04 }
       },
       palette: props.edgeStyleOptions.palette
     },
@@ -409,6 +613,16 @@ function setGraphData() {
     highlightTimeout = setTimeout(() => {
       if (!isMounted || !graphInstance) return
       applyHighlightKeywords()
+      // 数据重载后重放类型高亮；类型已不存在时清除选中，避免悬挂状态
+      const selection = selectedTypeHighlight.value
+      if (selection) {
+        const stats = selection.dimension === 'node' ? nodeTypeStats.value : edgeTypeStats.value
+        if (stats.some((item) => item.name === selection.name)) {
+          applyTypeHighlight()
+        } else {
+          selectedTypeHighlight.value = null
+        }
+      }
       emit('data-rendered')
       console.log('图谱渲染完成，布局已稳定')
     }, 1500)
@@ -717,6 +931,10 @@ defineExpose({
         font-weight: 600;
       }
 
+      &.stat-truncated .stat-value {
+        color: var(--color-warning-600, #d97706);
+      }
+
       .stat-total {
         color: var(--color-text-quaternary);
         font-size: 11px;
@@ -728,6 +946,26 @@ defineExpose({
     width: 220px;
     max-width: calc(100vw - 40px);
     overflow: hidden;
+  }
+
+  .type-clear-btn {
+    border: 0;
+    background: transparent;
+    color: var(--main-color);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 4px;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
+  .type-stats-hint {
+    margin-bottom: 6px;
+    color: var(--color-text-quaternary);
+    font-size: 11px;
+    line-height: 1.4;
   }
 
   .type-stats-list {
@@ -747,9 +985,19 @@ defineExpose({
     min-height: 28px;
     padding: 4px 6px;
     border-radius: 6px;
+    cursor: pointer;
 
     &:hover {
       background: var(--gray-50);
+    }
+
+    &.type-selected {
+      background: var(--main-color-bg-hover, rgba(22, 119, 255, 0.1));
+
+      .type-name {
+        color: var(--main-color);
+        font-weight: 600;
+      }
     }
   }
 
@@ -829,5 +1077,63 @@ defineExpose({
 
 .highlight-animation {
   animation: highlightPulse 2s infinite ease-in-out;
+}
+</style>
+
+<style lang="less">
+// 上限 popover 渲染在 body 下，需要全局样式
+.graph-limit-popover {
+  .limit-popover {
+    width: 218px;
+  }
+
+  .limit-popover-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--gray-800, #333);
+    margin-bottom: 8px;
+  }
+
+  .limit-preset-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+
+  .limit-preset {
+    min-width: 44px;
+    padding: 2px 8px;
+    border: 1px solid var(--gray-200, #e5e7eb);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--gray-700, #374151);
+    font-size: 12px;
+    cursor: pointer;
+
+    &:hover {
+      border-color: var(--main-color, #1677ff);
+      color: var(--main-color, #1677ff);
+    }
+
+    &.limit-preset-active {
+      border-color: var(--main-color, #1677ff);
+      color: var(--main-color, #1677ff);
+      background: rgba(22, 119, 255, 0.08);
+    }
+  }
+
+  .limit-custom-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .limit-popover-hint {
+    font-size: 11px;
+    color: var(--gray-500, #6b7280);
+    line-height: 1.4;
+  }
 }
 </style>

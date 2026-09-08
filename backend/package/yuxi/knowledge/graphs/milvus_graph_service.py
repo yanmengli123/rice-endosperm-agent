@@ -34,6 +34,9 @@ GRAPH_CONFIG_KEY = "graph_build_config"
 GRAPH_TASK_TYPE = "knowledge_graph_index"
 GRAPH_INDEX_MAX_ATTEMPTS = 3
 NEO4J_QUERY_OFFLOAD_LIMIT = 8
+# 全图模式的硬安全上限：超过即截断并置 truncated 标志，保护浏览器渲染与 Neo4j 查询
+FULL_GRAPH_NODE_CAP = 3000
+FULL_GRAPH_EDGE_CAP = 6000
 _neo4j_query_offload_semaphore_refs: dict[
     int,
     tuple[weakref.ReferenceType[asyncio.AbstractEventLoop], weakref.ReferenceType[asyncio.Semaphore]],
@@ -46,6 +49,48 @@ class GraphBuildIncompleteError(RuntimeError):
         failed_details = result.get("failed_details") or []
         detail = failed_details[0].get("error") if failed_details else "存在未完成的 Chunk"
         super().__init__(f"图谱索引未全部完成，仍有 {result['remaining']} 个待索引 Chunk：{detail}")
+
+
+def _dedupe_edges_by_semantic_key(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按语义键去重边：优先 triple_id，否则 (source, type, target)。
+
+    chunk 抽取会把同一规范三元组按来源 chunk 各投影一条边；全图模式承担
+    「与规范层一致的统计可视化」职责，必须折叠为每个三元组一条边。
+    """
+    seen: set[tuple] = set()
+    deduped = []
+    for edge in edges:
+        properties = edge.get("properties") or {}
+        triple_id = properties.get("triple_id")
+        key = ("triple", triple_id) if triple_id else (
+            "st",
+            edge.get("source_id"),
+            edge.get("type"),
+            edge.get("target_id"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(edge)
+    return deduped
+
+
+def _finalize_full_graph_result(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_cap: int,
+    edge_cap: int,
+) -> dict[str, Any]:
+    """全图结果收尾（纯函数）：截断判定 -> 节点截断 -> 边按端点过滤 + 截断。
+
+    查询层已按 cap+1 取数，因此 len > cap 即视为触及上限。
+    """
+    truncated = len(nodes) > node_cap or len(edges) > edge_cap
+    final_nodes = nodes[:node_cap]
+    node_ids = {node["id"] for node in final_nodes}
+    bounded_edges = [edge for edge in edges if edge.get("source_id") in node_ids and edge.get("target_id") in node_ids]
+    final_edges = bounded_edges[:edge_cap]
+    return {"nodes": final_nodes, "edges": final_edges, "truncated": truncated}
 
 
 def _get_neo4j_query_offload_semaphore() -> asyncio.Semaphore:
@@ -665,6 +710,69 @@ class MilvusGraphService:
             if not record:
                 return {"nodes": [], "edges": []}
             return self._process_subgraph_record(record, limit, kb_id)
+
+    async def query_full_graph(
+        self,
+        kb_id: str | None = None,
+        *,
+        exclude_chunk: bool = False,
+    ) -> dict[str, Any]:
+        """全图查询：不做种子抽样/路径预算/深度截断，仅受硬安全上限保护。
+
+        与 query_nodes 的可视化子图不同，本方法用于「统计口径与画布一致的全量渲染」，
+        返回 truncated 标志提示是否触及硬上限。
+        """
+        effective_kb_id = kb_id or self.kb_id
+        if not effective_kb_id:
+            return {"nodes": [], "edges": [], "truncated": False}
+        label = safe_neo4j_label(effective_kb_id)
+        try:
+            return await _run_neo4j_query_io(
+                self._query_full_graph_sync, effective_kb_id, label, exclude_chunk
+            )
+        except Exception as e:
+            logger.error(f"Milvus full graph query failed: {e}")
+            return {"nodes": [], "edges": [], "truncated": False}
+
+    def _query_full_graph_sync(self, kb_id: str, label: str, exclude_chunk: bool) -> dict[str, Any]:
+        node_where = "WHERE NOT n:Chunk" if exclude_chunk else ""
+        edge_where = "WHERE NOT a:Chunk AND NOT b:Chunk" if exclude_chunk else ""
+        node_cypher = f"""
+        MATCH (n:MilvusKB:`{label}`)
+        {node_where}
+        RETURN n
+        LIMIT {FULL_GRAPH_NODE_CAP + 1}
+        """
+        edge_cypher = f"""
+        MATCH (a:MilvusKB:`{label}`)-[r]->(b:MilvusKB:`{label}`)
+        {edge_where}
+        RETURN a, r, b
+        LIMIT {FULL_GRAPH_EDGE_CAP + 1}
+        """
+        with self.driver.session() as session:
+            raw_nodes = [record["n"] for record in session.run(node_cypher)]
+            raw_edges = [(record["r"]) for record in session.run(edge_cypher)]
+
+        nodes = []
+        node_ids = set()
+        for raw_node in raw_nodes:
+            node = self._normalize_node(raw_node, kb_id)
+            if node and node["id"] not in node_ids:
+                nodes.append(node)
+                node_ids.add(node["id"])
+        edges = []
+        edge_ids = set()
+        for raw_edge in raw_edges:
+            edge = self._normalize_edge(raw_edge)
+            if edge and edge["id"] not in edge_ids:
+                edges.append(edge)
+                edge_ids.add(edge["id"])
+        edges = _dedupe_edges_by_semantic_key(edges)
+        result = _finalize_full_graph_result(nodes, edges, FULL_GRAPH_NODE_CAP, FULL_GRAPH_EDGE_CAP)
+        # 去重可能把超限的原始取数压回上限内；截断判定必须以原始取数为准
+        if len(raw_nodes) > FULL_GRAPH_NODE_CAP or len(raw_edges) > FULL_GRAPH_EDGE_CAP:
+            result["truncated"] = True
+        return result
 
     async def query_seed_subgraph(
         self,

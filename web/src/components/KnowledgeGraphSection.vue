@@ -12,6 +12,12 @@
         <GraphCanvas
           ref="graphRef"
           :graph-data="graph.graphData"
+          :total-entities="graphTotalEntities"
+          :total-relationships="graphTotalRelationships"
+          :truncated="graphTruncated"
+          :display-limit="subgraphParams.maxNodes"
+          :limit-editable="!subgraphParams.fullGraph"
+          @change-display-limit="onDisplayLimitChange"
           @node-click="graph.handleNodeClick"
           @edge-click="graph.handleEdgeClick"
           @canvas-click="graph.handleCanvasClick"
@@ -48,6 +54,26 @@
                 >
                   <FileUp :size="16" />
                 </a-button>
+                <a-dropdown v-if="isMilvus" :trigger="['click']" placement="bottomRight">
+                  <a-button
+                    class="action-btn"
+                    :loading="exportingGraph"
+                    title="从规范层导出图谱数据"
+                    @click.prevent
+                  >
+                    <Download :size="16" />
+                  </a-button>
+                  <template #overlay>
+                    <a-menu @click="onExportMenuClick">
+                      <a-menu-item key="roundtrip" title="严格符合导入契约的节点/关系 CSV 与清单，可直接重新导入">
+                        标准往返包（CSV + 清单）
+                      </a-menu-item>
+                      <a-menu-item key="evidence" title="实体 / 三元组 / 证据明细三张工作表，供科研审阅">
+                        证据明细（Excel）
+                      </a-menu-item>
+                    </a-menu>
+                  </template>
+                </a-dropdown>
                 <a-button
                   v-if="isMilvus"
                   class="action-btn index-action-btn"
@@ -136,13 +162,25 @@
             </div>
             <div class="panel-body">
               <a-form layout="vertical">
+                <div v-if="graphTotalEntities != null" class="graph-total-hint">
+                  本库共 {{ graphTotalEntities }} 实体 / {{ graphTotalRelationships ?? '-' }} 关系
+                </div>
+                <a-form-item label="全图模式">
+                  <div class="full-graph-row">
+                    <a-switch
+                      v-model:checked="settingsForm.fullGraph"
+                      :disabled="graphSettingsSaving"
+                    />
+                    <span class="full-graph-hint">加载全库（口径与规范层一致），忽略搜索、深度与上限</span>
+                  </div>
+                </a-form-item>
                 <a-form-item label="最大节点数 (limit)">
                   <a-input-number
                     v-model:value="settingsForm.maxNodes"
                     :min="10"
                     :max="1000"
                     :step="10"
-                    :disabled="graphSettingsSaving"
+                    :disabled="graphSettingsSaving || settingsForm.fullGraph"
                     style="width: 100%"
                   />
                 </a-form-item>
@@ -152,7 +190,7 @@
                     :min="1"
                     :max="5"
                     :step="1"
-                    :disabled="graphSettingsSaving"
+                    :disabled="graphSettingsSaving || settingsForm.fullGraph"
                     style="width: 100%"
                   />
                 </a-form-item>
@@ -394,6 +432,7 @@ import {
   Loader2,
   Database,
   FileUp,
+  Download,
   Network,
   BrainCircuit,
   ScanText
@@ -404,7 +443,7 @@ import GraphImportModal from '@/components/GraphImportModal.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
 import { getKbTypeLabel } from '@/utils/kb_utils'
 import { unifiedApi } from '@/apis/graph_api'
-import { graphBuildApi } from '@/apis/knowledge_api'
+import { graphBuildApi, graphExportApi } from '@/apis/knowledge_api'
 import { Modal, message } from 'ant-design-vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import { useGraph } from '@/composables/useGraph'
@@ -415,7 +454,8 @@ const GRAPH_SUPPORTED_KB_TYPES = new Set([MILVUS_KB_TYPE])
 const DEFAULT_GRAPH_VIEW_SETTINGS = Object.freeze({
   maxNodes: 100,
   maxDepth: 2,
-  excludeChunk: true
+  excludeChunk: true,
+  fullGraph: false
 })
 
 const props = defineProps({
@@ -537,6 +577,53 @@ const handleGraphImported = async () => {
   await Promise.all([loadGraphBuildStatus(), loadGraph()])
 }
 
+const exportingGraph = ref(false)
+
+const parseExportFilename = (contentDisposition) => {
+  if (!contentDisposition) return ''
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+  const asciiMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+  return asciiMatch ? asciiMatch[1] : ''
+}
+
+const onExportMenuClick = ({ key }) => {
+  exportGraph(key)
+}
+
+const exportGraph = async (variant) => {
+  if (!kbId.value || exportingGraph.value) return
+  exportingGraph.value = true
+  try {
+    const response = await graphExportApi.exportGraph(kbId.value, variant)
+    const blob = await response.blob()
+    const contentDisposition =
+      response.headers.get('Content-Disposition') || response.headers.get('content-disposition')
+    const suffix = variant === 'evidence' ? 'xlsx' : 'zip'
+    const filename = parseExportFilename(contentDisposition) || `graph-${variant}-${kbId.value}.${suffix}`
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+    message.success(variant === 'evidence' ? '证据明细导出成功' : '标准往返包导出成功')
+  } catch (error) {
+    console.error('图谱导出失败:', error)
+    message.error(`图谱导出失败: ${error.message || '未知错误'}`)
+  } finally {
+    exportingGraph.value = false
+  }
+}
+
 const isEditingGraphConfig = computed(() => Boolean(graphBuildStatus.value?.locked))
 
 const graphConfigTitle = computed(() =>
@@ -623,6 +710,20 @@ const normalizeGraphViewSettings = (value = {}) => ({
   maxDepth: Math.min(5, Math.max(1, Number(value.max_depth) || 2)),
   excludeChunk: typeof value.exclude_chunk === 'boolean' ? value.exclude_chunk : true
 })
+
+// 全库存量（PG 规范层口径），用于左下角「可见/全量」复合显示
+const graphTotalEntities = computed(() => {
+  const value = Number(graphBuildStatus.value?.entity_count)
+  return Number.isFinite(value) ? value : null
+})
+
+const graphTotalRelationships = computed(() => {
+  const value = Number(graphBuildStatus.value?.relationship_count)
+  return Number.isFinite(value) ? value : null
+})
+
+// 当前画布是否被显示上限/安全上限截断（普通模式：节点数触达 maxNodes；全图模式：后端 truncated 标志）
+const graphTruncated = ref(false)
 
 const resetGraphViewSettings = () => {
   Object.assign(subgraphParams, DEFAULT_GRAPH_VIEW_SETTINGS)
@@ -818,13 +919,17 @@ const loadGraph = async () => {
     graphLoaded.value = false
   }
   try {
-    const res = await unifiedApi.getSubgraph({
+    const requestParams = {
       kb_id: currentDatabaseId,
       node_label: searchInput.value || '*',
       max_nodes: subgraphParams.maxNodes,
       max_depth: subgraphParams.maxDepth,
       exclude_chunk: subgraphParams.excludeChunk
-    })
+    }
+    if (subgraphParams.fullGraph) {
+      requestParams.full_graph = true
+    }
+    const res = await unifiedApi.getSubgraph(requestParams)
 
     if (
       requestSeq === graphLoadRequestSeq &&
@@ -833,6 +938,12 @@ const loadGraph = async () => {
       res.data
     ) {
       graph.updateGraphData(res.data.nodes, res.data.edges)
+      graphTruncated.value = subgraphParams.fullGraph
+        ? Boolean(res.data.truncated)
+        : (res.data.nodes || []).length >= subgraphParams.maxNodes
+      if (graphTruncated.value && subgraphParams.fullGraph) {
+        message.warning('全图规模超过安全上限（节点 3000 / 关系 6000），画布已截断；建议改用搜索或类型过滤缩小范围')
+      }
     }
   } catch (e) {
     console.error('Failed to load graph:', e)
@@ -857,8 +968,9 @@ const applySettings = async () => {
     })
     if (currentDatabaseId !== kbId.value) return
     const settings = normalizeGraphViewSettings(response?.data)
-    Object.assign(subgraphParams, settings)
-    Object.assign(settingsForm, settings)
+    // fullGraph 是会话级 UI 开关（后端设置不持久化），从表单携带
+    Object.assign(subgraphParams, settings, { fullGraph: settingsForm.fullGraph })
+    Object.assign(settingsForm, settings, { fullGraph: settingsForm.fullGraph })
     graphSettingsLoadedKbId.value = currentDatabaseId
     showSettings.value = false
     message.success(response?.message || '图谱设置已保存并全局应用')
@@ -869,6 +981,26 @@ const applySettings = async () => {
   } finally {
     graphSettingsSaving.value = false
   }
+}
+
+// 画布内联「上限」控件：调整展示数目并持久化（会话内即时生效）
+const onDisplayLimitChange = async (value) => {
+  const clamped = Math.min(1000, Math.max(10, Math.round(Number(value) || 100)))
+  if (clamped === subgraphParams.maxNodes) return
+  subgraphParams.maxNodes = clamped
+  settingsForm.maxNodes = clamped
+  if (!kbId.value) return
+  try {
+    await unifiedApi.updateViewSettings(kbId.value, {
+      max_nodes: clamped,
+      max_depth: subgraphParams.maxDepth,
+      exclude_chunk: subgraphParams.excludeChunk
+    })
+  } catch (e) {
+    // 持久化失败不阻塞本地生效，下次进入回退为旧值
+    console.warn('保存展示上限设置失败（本地已生效）:', e)
+  }
+  await loadGraph()
 }
 
 const onSearch = () => {
@@ -1165,6 +1297,30 @@ onUnmounted(() => {
 
   .panel-body {
     padding: 10px 14px;
+  }
+}
+
+.settings-panel {
+  .graph-total-hint {
+    margin-bottom: 10px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--color-info-50);
+    color: var(--color-info-700);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .full-graph-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .full-graph-hint {
+    color: var(--gray-550);
+    font-size: 12px;
+    line-height: 1.4;
   }
 }
 

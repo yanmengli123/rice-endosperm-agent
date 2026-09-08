@@ -165,6 +165,16 @@ class EvaluationRepository:
             )
             return int(result.scalar() or 0)
 
+    async def list_all_run_items(self, run_id: str) -> list[EvaluationRunItem]:
+        """导出用：不分页取全部明细行（与分页接口同序）。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(EvaluationRunItem)
+                .where(EvaluationRunItem.run_id == run_id)
+                .order_by(EvaluationRunItem.item_index.asc())
+            )
+            return list(result.scalars().all())
+
     async def delete_all(self) -> None:
         async with pg_manager.get_async_session_context() as session:
             await session.execute(delete(EvaluationRunItem))

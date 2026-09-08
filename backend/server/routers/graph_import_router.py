@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from typing import Literal
+
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 
 from server.utils.auth_middleware import get_admin_user
 from server.utils.knowledge_access import authorize_knowledge_path
+from yuxi.knowledge.graphs.graph_export_service import (
+    ManagedGraphExportService,
+    content_disposition_header,
+)
 from yuxi.knowledge.graphs.managed_import_service import (
     GRAPH_IMPORT_ROLLBACK_TASK_TYPE,
     GRAPH_IMPORT_TASK_TYPE,
@@ -77,6 +84,30 @@ async def list_graph_imports(kb_id: str, current_user: User = Depends(get_admin_
     repository = ManagedGraphImportService().repository
     records = await repository.list(kb_id)
     return {"items": [repository.import_to_dict(record) for record in records]}
+
+
+@graph_import.get("/databases/{kb_id}/graph-export")
+async def export_graph(
+    kb_id: str,
+    variant: Literal["roundtrip", "evidence"] = Query(default="roundtrip"),
+    current_user: User = Depends(get_admin_user),
+):
+    """从 PostgreSQL 规范层导出图谱数据（往返包 zip / 证据明细 xlsx）。"""
+    try:
+        package = await ManagedGraphExportService().export(
+            kb_id, variant=variant, exported_by=current_user.uid
+        )
+    except ValueError as exc:
+        message = str(exc)
+        raise HTTPException(status_code=404 if "没有可导出" in message else 400, detail=message)
+    except Exception as exc:
+        logger.exception(f"图谱导出失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"图谱导出失败：{exc}")
+    return Response(
+        content=package["content"],
+        media_type=package["media_type"],
+        headers={"Content-Disposition": content_disposition_header(package["filename"])},
+    )
 
 
 @graph_import.get("/databases/{kb_id}/graph-imports/{import_id}")

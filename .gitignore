@@ -82,3 +82,6 @@ docs/vibe
 
 .taskr/
 .yuxi-dev-secret-master-key
+
+# RAGAS 中文 prompt 适配缓存（运行时生成）
+backend/package/yuxi/knowledge/eval/.ragas_prompt_cache/

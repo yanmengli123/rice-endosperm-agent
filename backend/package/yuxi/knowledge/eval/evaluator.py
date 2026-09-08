@@ -2,6 +2,7 @@ from collections.abc import Callable
 from typing import Any
 
 from yuxi.knowledge.eval.metrics import EvaluationMetricsCalculator
+from yuxi.knowledge.eval.ragas_metrics import aggregate_ragas_metrics, weighted_ragas_overall
 from yuxi.utils import logger
 
 
@@ -11,6 +12,10 @@ def normalize_query_result(query_result: Any) -> tuple[str, list[dict[str, Any]]
     if isinstance(query_result, list):
         return "", query_result
     return "", []
+
+
+def extract_retrieved_contexts(retrieved_chunks: list[dict[str, Any]]) -> list[str]:
+    return [c.get("content", "") for c in retrieved_chunks if c.get("content")]
 
 
 def build_answer_prompt(query: str, retrieved_chunks: list[dict[str, Any]], max_docs: int = 5) -> str:
@@ -65,6 +70,7 @@ async def evaluate_question(
     has_gold_answers: bool,
     judge_llm: Any | None,
     select_model_fn: Callable[..., Any],
+    ragas_engine: Any | None = None,
 ) -> dict[str, Any]:
     query = question_data["query"]
     query_result = await kb_instance.aquery(query, kb_id, **retrieval_config)
@@ -80,6 +86,7 @@ async def evaluate_question(
     current_metrics = {}
     retrieval_scores = {}
     answer_scores = {}
+    ragas_scores = {}
 
     if has_gold_chunks and question_data.get("gold_chunk_ids"):
         retrieval_scores = EvaluationMetricsCalculator.calculate_retrieval_metrics(
@@ -99,6 +106,15 @@ async def evaluate_question(
         else:
             logger.warning("需要计算答案指标但未配置 Judge LLM")
 
+    if ragas_engine is not None:
+        ragas_scores = await ragas_engine.score_sample(
+            user_input=query,
+            response=generated_answer,
+            retrieved_contexts=extract_retrieved_contexts(retrieved_chunks),
+            reference=question_data.get("gold_answer") or "",
+        )
+        current_metrics.update(ragas_scores)
+
     return {
         "detail": {
             "query_text": query,
@@ -110,12 +126,15 @@ async def evaluate_question(
         },
         "retrieval_scores": retrieval_scores,
         "answer_scores": answer_scores,
+        "ragas_scores": ragas_scores,
     }
 
 
 def aggregate_metrics(
     retrieval_metrics_list: list[dict[str, float]],
     answer_metrics_list: list[dict[str, Any]],
+    ragas_metrics_list: list[dict[str, Any]] | None = None,
+    ragas_weights: dict[str, float] | None = None,
     *,
     include_overall_score: bool = False,
 ) -> tuple[dict[str, Any], float | None]:
@@ -130,7 +149,16 @@ def aggregate_metrics(
         scores = [m.get("score", 0) for m in answer_metrics_list]
         overall_metrics["answer_correctness"] = sum(scores) / len(scores) if scores else 0.0
 
-    overall_score = EvaluationMetricsCalculator.calculate_overall_score(retrieval_metrics_list, answer_metrics_list)
+    ragas_overall = None
+    if ragas_metrics_list:
+        ragas_means = aggregate_ragas_metrics(ragas_metrics_list)
+        overall_metrics.update(ragas_means)
+        ragas_overall = weighted_ragas_overall(ragas_means, ragas_weights)
+
+    if ragas_overall is not None:
+        overall_score = ragas_overall
+    else:
+        overall_score = EvaluationMetricsCalculator.calculate_overall_score(retrieval_metrics_list, answer_metrics_list)
     if include_overall_score:
         overall_metrics["overall_score"] = overall_score
 
