@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import weakref
+from collections import Counter, defaultdict
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -1596,4 +1597,179 @@ async def get_scientific_pdf_status(*, kb_id: str, file_id: str) -> dict[str, An
             }
             for row in rows
         ],
+    }
+
+
+_SCI_PDF_TASK_TYPE = "pdf_ingest"
+_TASK_STATUS_BY_REVISION = {
+    "PENDING": "queued",
+    "WAITING_CACHE": "queued",
+    "RUNNING": "running",
+    "INDEXED_FULL": "success",
+    "INDEXED_CONTENT_ONLY": "success",
+    "INDEXED_TEXT_ONLY": "success",
+    "REJECTED": "failed",
+    "FAILED": "failed",
+}
+_TASK_REVISION_TERMINAL_STATUSES = TERMINAL_PARSE_STATUSES | {"FAILED"}
+_PIPELINE_STAGE_LABELS = {
+    "NATIVE": "原生解析",
+    "MINERU": "MinerU 解析",
+    "GROBID": "GROBID 结构化解析",
+    "UNIFIED": "统一文章构建",
+    "QUALITY": "质量门禁",
+    "INDEX": "向量入库",
+    "ACTIVATE": "激活解析版本",
+}
+_PIPELINE_STAGE_DONE_STATUSES = {"SUCCEEDED", "REUSED", "SKIPPED"}
+_PIPELINE_CAPABILITY_LABELS = {
+    "INDEXED_FULL": "全文证据索引完成",
+    "INDEXED_CONTENT_ONLY": "内容证据索引完成",
+    "INDEXED_TEXT_ONLY": "纯文本索引完成",
+    "REJECTED": "质量门禁拒绝该文档",
+}
+
+
+def _pipeline_stage_progress(stage_rows: list[Any]) -> tuple[float, str | None]:
+    """Derive task-center progress from durable stage rows (7 stages total)."""
+    status_by_name = {row.stage_name: str(row.status or "") for row in stage_rows}
+    done = 0.0
+    running_stage = None
+    for stage_name in PARSE_STAGE_NAMES:
+        stage_status = status_by_name.get(stage_name)
+        if not stage_status:
+            continue
+        if stage_status in _PIPELINE_STAGE_DONE_STATUSES:
+            done += 1.0
+        elif stage_status == "RUNNING" and running_stage is None:
+            running_stage = stage_name
+            done += 0.5
+    progress = round(done / len(PARSE_STAGE_NAMES) * 100.0, 1)
+    message = f"正在{_PIPELINE_STAGE_LABELS[running_stage]}" if running_stage else None
+    return progress, message
+
+
+async def list_scientific_pdf_pipeline_tasks(
+    *, status: str | None = None, limit: int = 100
+) -> dict[str, Any]:
+    """Project durable scientific PDF ingest state into task-center entries.
+
+    The pipeline executes in the ARQ worker process, so its live state lives in
+    PostgreSQL (revisions + stages), not in the API process's in-memory Tasker.
+    The task center reads this read-only projection so PDF upload/parse/index
+    progress shows up there and survives API restarts.
+    """
+    bounded_limit = max(1, min(int(limit or 100), 100))
+    retention_floor = _workflow_now() - timedelta(hours=24)
+    async with pg_manager.get_async_session_context() as session:
+        active_rows = list(
+            (
+                await session.execute(
+                    select(KnowledgeParseRevision, KnowledgeFile.original_filename, KnowledgeFile.filename)
+                    .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
+                    .where(KnowledgeParseRevision.status.in_(("PENDING", "RUNNING", "WAITING_CACHE")))
+                    .order_by(KnowledgeParseRevision.created_at.desc())
+                    .limit(bounded_limit)
+                )
+            ).all()
+        )
+        terminal_rows = list(
+            (
+                await session.execute(
+                    select(KnowledgeParseRevision, KnowledgeFile.original_filename, KnowledgeFile.filename)
+                    .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
+                    .where(
+                        KnowledgeParseRevision.status.in_(tuple(_TASK_REVISION_TERMINAL_STATUSES)),
+                        KnowledgeParseRevision.completed_at >= retention_floor,
+                    )
+                    .order_by(KnowledgeParseRevision.completed_at.desc())
+                    .limit(bounded_limit)
+                )
+            ).all()
+        )
+        revision_rows = sorted(
+            [*active_rows, *terminal_rows],
+            key=lambda row: row[0].created_at or row[0].completed_at or row[0].updated_at,
+            reverse=True,
+        )[:bounded_limit]
+        revision_ids = [row[0].revision_id for row in revision_rows]
+        stage_rows = (
+            list(
+                (
+                    await session.execute(
+                        select(KnowledgeParseStage)
+                        .where(KnowledgeParseStage.revision_id.in_(revision_ids))
+                        .order_by(KnowledgeParseStage.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if revision_ids
+            else []
+        )
+
+    stages_by_revision: dict[str, list[Any]] = defaultdict(list)
+    for stage in stage_rows:
+        stages_by_revision[stage.revision_id].append(stage)
+
+    tasks: list[dict[str, Any]] = []
+    for revision, original_filename, filename in revision_rows:
+        mapped_status = _TASK_STATUS_BY_REVISION.get(str(revision.status or ""), "running")
+        if status and mapped_status != status:
+            continue
+        progress, running_message = _pipeline_stage_progress(stages_by_revision.get(revision.revision_id, []))
+        if mapped_status == "success":
+            progress = 100.0
+            message = _PIPELINE_CAPABILITY_LABELS.get(str(revision.status or ""), "解析入库完成")
+        elif mapped_status == "running":
+            message = running_message or "正在解析文档"
+        elif mapped_status == "queued":
+            message = "排队等待解析" if revision.status == "PENDING" else "等待相同文档的解析结果复用"
+        elif mapped_status == "failed":
+            message = str(revision.error_message or "解析入库失败")
+            progress = min(progress, 95.0) if revision.status != "REJECTED" else 100.0
+        else:
+            message = "解析入库进行中"
+        tasks.append(
+            {
+                "id": f"scipdf:{revision.revision_id}",
+                "name": f"PDF 解析入库：{original_filename or filename or 'PDF 文档'}",
+                "type": _SCI_PDF_TASK_TYPE,
+                "status": mapped_status,
+                "progress": progress,
+                "message": message,
+                # Timestamps use the driver-returned isoformat (+08:00 offset) so all
+                # four fields stay on the same wall clock in the task center; the
+                # columns mix naive-UTC defaults with aware writes, so re-normalizing
+                # through ensure_utc would skew them 8h apart.
+                "created_at": revision.created_at.isoformat() if revision.created_at else None,
+                "updated_at": revision.updated_at.isoformat() if revision.updated_at else None,
+                "started_at": revision.started_at.isoformat() if revision.started_at else None,
+                "completed_at": revision.completed_at.isoformat() if revision.completed_at else None,
+                "error": revision.error_message if mapped_status == "failed" else None,
+                "cancel_requested": False,
+                "cancelable": False,
+                "deletable": False,
+                "created_by": revision.created_by,
+                "tenant_id": int(revision.tenant_id or 0),
+                "payload": {
+                    "kb_id": revision.kb_id,
+                    "file_id": revision.file_id,
+                    "revision_id": revision.revision_id,
+                    "attempt": revision.attempt,
+                },
+            }
+        )
+
+    status_counter = Counter(task["status"] for task in tasks)
+    type_counter = Counter(task["type"] for task in tasks)
+    return {
+        "tasks": tasks,
+        "summary": {
+            "total": len(tasks),
+            "filtered_total": len(tasks),
+            "status_counts": dict(status_counter),
+            "type_counts": dict(type_counter),
+        },
     }

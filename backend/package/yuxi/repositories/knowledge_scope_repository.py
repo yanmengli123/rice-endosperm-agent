@@ -47,6 +47,7 @@ def serialize_member(member: KnowledgeScopeMember) -> dict[str, Any]:
         "document_enabled": bool(member.document_enabled),
         "graph_enabled": bool(member.graph_enabled),
         "structured_enabled": bool(member.structured_enabled),
+        "wiki_navigation_enabled": bool(member.wiki_navigation_enabled),
         "evidence_strict": bool(member.evidence_strict),
         "evidence_supporting": bool(member.evidence_supporting),
         "evidence_candidate": bool(member.evidence_candidate),

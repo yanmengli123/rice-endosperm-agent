@@ -8,6 +8,8 @@
 
 ### 新增
 
+- 新增动态 LLM-Wiki 派生知识产品：Extensions 支持从同租户、同安全域的 PDF/CSV/规范图谱知识源创建 Wiki，并提供不可变快照构建、证据绑定 Claim、发布指针、历史回滚、软删除审计和 `MANUAL`/`ON_SOURCE_CHANGE`/`SCHEDULED` 自动更新。问答采用 baseline 原始检索与 Wiki 导航扩展后的原始检索双路合并；`WikiNavigationHit` 不含正文、quote 或 evidence_id，工厂、Scope 网关和答案上下文三层禁止派生内容进入证据通道。所有 Wiki API 按 `PrincipalContext` 租户和冻结来源 ACL fail closed，PDF-only Wiki 只产生章节/实体导航词，最终事实与引用仍回源到原始证据。详见 [动态 LLM-Wiki 四平面 ADR](../adr/adr-0001-dynamic-llm-wiki-four-plane.md)。
+
 - 科研 PDF 证据定位升级为 V2：以 MinerU 语义块坐标为主、GROBID 多类型 TEI 坐标为学术语义校验、PyMuPDF 为页几何和兼容回退；MinerU 0–1000 坐标统一转换为 PDF points，并生成 `PhysicalPageMap` 与可审计 `evidence-map.json`。锚点支持零基物理页、多矩形 fragment、来源与质量等级，短页脚/缩写不再误定位长正文。HTML/Markdown 表格仅按完整行拆分并重复表头，跨页锚点完整保留；HTML 用于展示，Dense embedding 使用确定性行语义文本。科研 `source_provenance` 与图谱 `extraction_result` 分列持久化，图谱重建不再覆盖页码和证据锚点。解析图片与同角色产物改为内容寻址且角色唯一，质量门禁只在高可信定位覆盖率达标且坐标无越界时声明完整 PDF 能力，详见 [科研 PDF 定位与表格分块 V2](../advanced/scientific-pdf-locator-v2.md)。
 
 - 完成科研 PDF 文献证据库 RC-G3/RC-G4 真实语料验收与恢复加固：以 3 篇水稻领域 PDF 验证 PyMuPDF、MinerU、GROBID、UnifiedArticle、学术分块、混合检索和重排全链路；统一使用带时区租约时间，修复 PostgreSQL `TIMESTAMPTZ` 比较导致的过期任务漏领；学术分块升级为 `academic_scientific_v2`，并通过迁移 0019 强制每个文件最多只有一个活动索引版本。文献图片改为持久化 `kbasset://{file_id}/{revision_id}/{asset_name}` 逻辑地址，浏览器经知识库鉴权 Asset API 拉取后以短生命周期 Blob URL 展示，私有 MinIO 对象地址不再进入 Markdown；接口校验文件、知识库、租户、解析版本和静态图片类型，支持 ETag/304、`nosniff` 与私有缓存。修复运行时图片 URI 回调误写入 JSONB 导致解析完成后无法原子激活的问题。真实 worker 中断恢复、旧索引保留、幂等重跑、GROBID 不可用降级和受鉴权图片预览均已纳入回归测试，详见 [RC-G3/RC-G4 验收记录](../advanced/rc-g3-rice-pdf-e2e.md)。

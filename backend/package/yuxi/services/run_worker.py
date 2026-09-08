@@ -27,6 +27,7 @@ from yuxi.services.scientific_pdf_ingest_service import (
     process_scientific_pdf_ingest,
     recover_stale_scientific_pdf_ingests,
 )
+from yuxi.services.wiki_service import process_dynamic_wiki_build, reconcile_dynamic_wikis
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Message, User
 from yuxi.storage.redis import get_arq_redis_settings
@@ -737,6 +738,7 @@ async def _worker_startup(ctx):
     # 释放被唯一活跃索引锁住的线程。
     await reconcile_stale_agent_runs()
     await recover_stale_scientific_pdf_ingests()
+    await reconcile_dynamic_wikis()
     await ensure_builtin_mcp_servers_in_db()
     async with pg_manager.get_async_session_context() as session:
         await init_builtin_skills(session)
@@ -755,11 +757,12 @@ async def _worker_shutdown(ctx):
 
 
 class WorkerSettings:
-    functions = [process_agent_run, process_scientific_pdf_ingest]
+    functions = [process_agent_run, process_scientific_pdf_ingest, process_dynamic_wiki_build]
     # 每 5 分钟清扫一次孤儿 run；worker 启动时也会立即执行一次。
     cron_jobs = [
         cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5))),
         cron(recover_stale_scientific_pdf_ingests, minute=set(range(0, 60, 5))),
+        cron(reconcile_dynamic_wikis, minute=set(range(0, 60))),
     ]
     # 不做 ARQ 自动重试：重跑会从 checkpoint 重复注入本轮输入（见 process_agent_run
     # 的 except 分支说明）。max_tries 保留 1 仅作为兜底声明。

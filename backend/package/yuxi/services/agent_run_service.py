@@ -91,6 +91,7 @@ def _public_knowledge_scope(snapshot: object) -> dict[str, Any]:
                 "document_enabled": bool(raw_member.get("document_enabled", False)),
                 "graph_enabled": bool(raw_member.get("graph_enabled", False)),
                 "structured_enabled": bool(raw_member.get("structured_enabled", False)),
+                "wiki_navigation_enabled": bool(raw_member.get("wiki_navigation_enabled", False)),
                 "included_via": raw_member.get("included_via"),
             }
         )

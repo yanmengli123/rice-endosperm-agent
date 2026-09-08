@@ -174,7 +174,23 @@ class KnowledgeBaseManager:
         for row in rows:
             kb_type = row.kb_type or "milvus"
             if not KnowledgeBaseFactory.is_type_supported(kb_type):
-                logger.warning(f"Skip unsupported database: kb_id={row.kb_id}, kb_type={kb_type}")
+                from yuxi.knowledge.products.registry import is_derived_product
+
+                if not is_derived_product(kb_type):
+                    logger.warning(f"Skip unsupported database: kb_id={row.kb_id}, kb_type={kb_type}")
+                    continue
+                if bool((row.additional_params or {}).get("deleted_at")):
+                    continue
+                # Derived products deliberately have no KnowledgeBase adapter.
+                # They still need to appear in discovery and scope configuration.
+                db_info = await self.get_database_info(row.kb_id, include_files=False)
+                if not db_info:
+                    continue
+                db_info["share_config"] = row.share_config or DEFAULT_SHARE_CONFIG.copy()
+                db_info["created_by"] = row.created_by
+                db_info["tenant_id"] = row.tenant_id
+                db_info["product_category"] = "derived_product"
+                all_databases.append(db_info)
                 continue
             kb_instance = self._get_or_create_kb_instance(kb_type)
             db_info = kb_instance.get_database_info(row.kb_id, include_files=False)
@@ -513,9 +529,7 @@ class KnowledgeBaseManager:
         kb_instance = await self._get_kb_for_database(kb_id)
         return await kb_instance.index_file(kb_id, file_id, operator_id, params=params)
 
-    async def cleanup_inactive_file_index_revisions(
-        self, kb_id: str, file_id: str, active_revision_id: str
-    ) -> int:
+    async def cleanup_inactive_file_index_revisions(self, kb_id: str, file_id: str, active_revision_id: str) -> int:
         kb_instance = await self._get_kb_for_database(kb_id)
         cleanup = getattr(kb_instance, "cleanup_inactive_file_index_revisions", None)
         if cleanup is None:

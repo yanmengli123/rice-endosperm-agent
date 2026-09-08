@@ -564,6 +564,9 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
     async def fake_recover_stale_scientific_pdf_ingests():
         calls.append("recover_stale_scientific_pdf_ingests")
 
+    async def fake_reconcile_dynamic_wikis():
+        calls.append("reconcile_dynamic_wikis")
+
     async def fake_ensure_builtin_mcp_servers_in_db():
         calls.append("ensure_builtin_mcp_servers_in_db")
 
@@ -599,6 +602,7 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "recover_stale_scientific_pdf_ingests",
         fake_recover_stale_scientific_pdf_ingests,
     )
+    monkeypatch.setattr(run_worker, "reconcile_dynamic_wikis", fake_reconcile_dynamic_wikis)
     monkeypatch.setattr(
         "yuxi.knowledge.runtime.knowledge_base.initialize",
         fake_initialize_knowledge_base,
@@ -623,6 +627,7 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "initialize_knowledge_base",
         "reconcile_stale_agent_runs",
         "recover_stale_scientific_pdf_ingests",
+        "reconcile_dynamic_wikis",
         "ensure_builtin_mcp_servers_in_db",
         "init_builtin_skills",
         "ensure_builtin_ocr_provider_in_db",

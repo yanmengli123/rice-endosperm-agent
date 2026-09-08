@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.knowledge.runtime import knowledge_base
+from yuxi.knowledge.products.registry import is_derived_product
 from yuxi.repositories.knowledge_scope_repository import (
     DEFAULT_QA_SCOPE_ID,
     KnowledgeScopeRepository,
@@ -20,6 +21,10 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeGraphEntity,
     KnowledgeGraphRelationEvidence,
     KnowledgeGraphTriple,
+    KnowledgeWiki,
+    WikiClaimRevision,
+    WikiPageRevision,
+    WikiPublication,
 )
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -41,6 +46,7 @@ DEFAULT_MEMBER_POLICY = {
     "document_enabled": True,
     "graph_enabled": True,
     "structured_enabled": True,
+    "wiki_navigation_enabled": False,
     "evidence_strict": True,
     "evidence_supporting": True,
     "evidence_candidate": False,
@@ -148,7 +154,18 @@ def compute_effective_scope_ids(
 
 
 def _default_policy(kb_id: str, kb_info: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {"kb_id": kb_id, "kb_name": (kb_info or {}).get("name") or kb_id, **DEFAULT_MEMBER_POLICY}
+    info = kb_info or {}
+    policy = {"kb_id": kb_id, "kb_name": info.get("name") or kb_id, **DEFAULT_MEMBER_POLICY}
+    if is_derived_product(str(info.get("kb_type") or "")):
+        policy.update(
+            {
+                "document_enabled": False,
+                "graph_enabled": False,
+                "structured_enabled": False,
+                "wiki_navigation_enabled": True,
+            }
+        )
+    return policy
 
 
 async def _accessible_knowledge_bases(user: User) -> list[dict[str, Any]]:
@@ -167,6 +184,9 @@ async def resolve_effective_knowledge_scope(
 
     Effective = Accessible ∩ Base ∩ SessionNarrowing。会话层只能缩小，永远不能扩大范围。
     """
+    from yuxi.services.principal import resolve_tenant_id
+
+    tenant_id = await resolve_tenant_id(db, str(user.uid))
     repo = KnowledgeScopeRepository(db)
     scope = await repo.ensure_default_scope(actor_uid=str(user.uid))
     agent = (await db.execute(select(Agent).where(Agent.slug == agent_slug))).scalar_one_or_none()
@@ -248,6 +268,7 @@ async def resolve_effective_knowledge_scope(
 
     return {
         "scope_id": scope.scope_id,
+        "tenant_id": tenant_id,
         "scope_slug": scope.slug,
         "scope_version": int(scope.version or 1),
         "scope_mode": mode,
@@ -275,6 +296,63 @@ async def validate_member_health(
     if not kb:
         raise LookupError("知识库不存在")
 
+    if is_derived_product(str(kb.kb_type or "")):
+        wiki = (await db.execute(select(KnowledgeWiki).where(KnowledgeWiki.kb_id == kb_id))).scalar_one_or_none()
+        publication = None
+        if wiki and wiki.current_publication_id:
+            publication = (
+                await db.execute(
+                    select(WikiPublication).where(
+                        WikiPublication.publication_id == wiki.current_publication_id,
+                        WikiPublication.status == "ACTIVE",
+                    )
+                )
+            ).scalar_one_or_none()
+        page_count = 0
+        claim_count = 0
+        if publication:
+            page_count = int(
+                (
+                    await db.execute(
+                        select(func.count(WikiPageRevision.id)).where(
+                            WikiPageRevision.build_id == publication.build_id,
+                            WikiPageRevision.status == "PUBLISHED",
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            claim_count = int(
+                (
+                    await db.execute(
+                        select(func.count(WikiClaimRevision.id)).where(
+                            WikiClaimRevision.build_id == publication.build_id,
+                            WikiClaimRevision.verification_status == "VERIFIED",
+                            WikiClaimRevision.publication_status == "PUBLISHED",
+                            WikiClaimRevision.security_status == "ACTIVE",
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+        enabled = bool(policy.get("wiki_navigation_enabled"))
+        ready = (not enabled) or publication is not None
+        return (
+            "HEALTHY" if ready and enabled else "UNAVAILABLE",
+            {
+                "kb_type": kb.kb_type,
+                "files": 0,
+                "chunks": 0,
+                "entities": 0,
+                "triples": 0,
+                "evidence": claim_count,
+                "wiki_pages": page_count,
+                "wiki_claims": claim_count,
+                "publication_id": publication.publication_id if publication else None,
+                "channels": {"wiki_navigation": {"enabled": enabled, "ready": ready}},
+            },
+        )
+
     async def count(model, *conditions) -> int:
         return int((await db.execute(select(func.count()).select_from(model).where(*conditions))).scalar_one() or 0)
 
@@ -288,6 +366,7 @@ async def validate_member_health(
         "document": (not policy.get("document_enabled")) or chunk_count > 0 or str(kb.kb_type).lower() == "dify",
         "graph": (not policy.get("graph_enabled")) or entity_count > 0 or triple_count > 0,
         "structured": (not policy.get("structured_enabled")) or evidence_count > 0,
+        "wiki_navigation": not policy.get("wiki_navigation_enabled"),
     }
     enabled_channels = [
         name
@@ -295,6 +374,7 @@ async def validate_member_health(
             ("document", policy.get("document_enabled")),
             ("graph", policy.get("graph_enabled")),
             ("structured", policy.get("structured_enabled")),
+            ("wiki_navigation", policy.get("wiki_navigation_enabled")),
         )
         if flag
     ]
@@ -329,7 +409,7 @@ async def get_default_scope_view(*, db: AsyncSession, user: User) -> dict[str, A
     for kb in databases:
         kb_id = str(kb["kb_id"])
         member = members.get(kb_id)
-        item = serialize_member(member) if member else {"kb_id": kb_id, **DEFAULT_MEMBER_POLICY, "enabled": False}
+        item = serialize_member(member) if member else {**_default_policy(kb_id, kb), "enabled": False}
         item.update(
             {
                 "kb_id": kb_id,
@@ -355,6 +435,22 @@ async def update_default_scope_member(
         raise PermissionError("知识库不存在或无权访问")
     repo = KnowledgeScopeRepository(db)
     scope = await repo.ensure_default_scope(actor_uid=str(user.uid))
+    kb = (await db.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id))).scalar_one_or_none()
+    if kb is None:
+        raise LookupError("知识库不存在")
+    if is_derived_product(str(kb.kb_type or "")):
+        values.update(
+            {
+                "document_enabled": False,
+                "graph_enabled": False,
+                "structured_enabled": False,
+                "wiki_navigation_enabled": True,
+                "evidence_candidate": False,
+                "evidence_rejected": False,
+            }
+        )
+    else:
+        values["wiki_navigation_enabled"] = False
     policy = {**DEFAULT_MEMBER_POLICY, **values}
     status, details = await validate_member_health(db=db, kb_id=kb_id, policy=policy)
     values = {

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.storage.postgres.models_business import (
     DEFAULT_TENANT_ID,
@@ -70,6 +70,27 @@ class PrincipalContext:
     department_id: int | None
 
 
+async def apply_tenant_rls_context(db: AsyncSession, tenant_id: int) -> None:
+    """Set the transaction-local tenant GUC used by PostgreSQL RLS policies.
+
+    SQLite and lightweight unit-test sessions intentionally no-op.  The value is
+    derived from the authenticated membership and is never accepted from a body.
+    """
+    get_bind = getattr(db, "get_bind", None)
+    if not callable(get_bind):
+        return
+    try:
+        bind = get_bind()
+    except Exception:  # noqa: BLE001 - test doubles may expose partial sessions
+        return
+    if getattr(getattr(bind, "dialect", None), "name", None) != "postgresql":
+        return
+    await db.execute(
+        text("SELECT set_config('yuxi.tenant_id', :tenant_id, true)"),
+        {"tenant_id": str(int(tenant_id))},
+    )
+
+
 async def ensure_tenant_membership(
     db: AsyncSession,
     user: User,
@@ -128,13 +149,17 @@ async def _resolve_active_membership(db: AsyncSession, uid: str) -> TenantMember
 async def resolve_tenant_id(db: AsyncSession, uid: str | None) -> int:
     """解析唯一活跃租户；成员资格缺失或歧义时失败关闭。"""
     if not uid or str(uid) == "system":
-        return DEFAULT_TENANT_ID
-    return int((await _resolve_active_membership(db, str(uid))).tenant_id)
+        tenant_id = DEFAULT_TENANT_ID
+    else:
+        tenant_id = int((await _resolve_active_membership(db, str(uid))).tenant_id)
+    await apply_tenant_rls_context(db, tenant_id)
+    return tenant_id
 
 
 async def resolve_principal(db: AsyncSession, user: User) -> PrincipalContext:
     """由已认证 User 构造服务端权威身份上下文。"""
     membership = await _resolve_active_membership(db, str(user.uid))
+    await apply_tenant_rls_context(db, int(membership.tenant_id))
     return PrincipalContext(
         tenant_id=int(membership.tenant_id),
         uid=str(user.uid),

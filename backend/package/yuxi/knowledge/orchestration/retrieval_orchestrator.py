@@ -15,6 +15,7 @@ from yuxi.knowledge.contracts.schemas import (
 )
 from yuxi.knowledge.planning.entity_resolver import ENTITY_RESOLVER_VERSION, resolve_entities
 from yuxi.knowledge.planning.query_planner import PLANNER_VERSION, plan_knowledge_query
+from yuxi.knowledge.products.registry import is_derived_product
 from yuxi.knowledge.rendering.structured_renderer import render_structured_rows
 from yuxi.knowledge.retrieval.canonical_graph_retriever import (
     extract_gene_identifiers,
@@ -30,6 +31,54 @@ from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.logging_config import logger
 
 ORCHESTRATOR_VERSION = "1.0"
+
+
+def _merge_gateway_results(
+    baseline: dict[str, Any],
+    guided: dict[str, Any] | None,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    """Merge raw retrieval paths while keeping Wiki hits outside evidence."""
+    if not guided:
+        return baseline
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path, result in (("BASELINE", baseline), ("WIKI_GUIDED", guided)):
+        for row in result.get("evidence") or []:
+            key = str(row.get("evidence_id") or row.get("chunk_id") or "") or _hash_contract(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            copied = dict(row)
+            copied["retrieval_path"] = path
+            merged.append(copied)
+    merged = merged[: max(1, min(int(limit), 24))]
+    warnings = list(dict.fromkeys([*(baseline.get("warnings") or []), *(guided.get("warnings") or [])]))
+    sources: dict[str, dict[str, Any]] = {}
+    for result in (baseline, guided):
+        for item in result.get("sources_used") or []:
+            kb_id = str(item.get("kb_id") or "")
+            if not kb_id:
+                continue
+            aggregate = sources.setdefault(kb_id, {"kb_id": kb_id, "source_types": set(), "hits": 0})
+            aggregate["source_types"].update(item.get("source_types") or [])
+            aggregate["hits"] += int(item.get("hits") or 0)
+    return {
+        **baseline,
+        "evidence": merged,
+        "warnings": warnings,
+        "sources_used": [
+            {**item, "source_types": sorted(item["source_types"])}
+            for item in sorted(sources.values(), key=lambda row: row["kb_id"])
+        ],
+        "retrieval_summary": {
+            **(baseline.get("retrieval_summary") or {}),
+            "baseline_hits": len(baseline.get("evidence") or []),
+            "wiki_guided_hits": len(guided.get("evidence") or []),
+            "deduplicated_hits": len(merged),
+        },
+    }
 
 
 def _hash_contract(contract: dict[str, Any]) -> str:
@@ -184,8 +233,14 @@ async def prepare_knowledge_context(
     retrieval_id = retrieval_id or f"kr_{uuid.uuid4().hex}"
     started_at = utc_now_naive()
     members = [member for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
+    raw_members = [member for member in members if not is_derived_product(str(member.get("kb_type") or ""))]
+    wiki_members = [
+        member
+        for member in members
+        if is_derived_product(str(member.get("kb_type") or "")) and member.get("wiki_navigation_enabled")
+    ]
     strategy = str(scope_snapshot.get("knowledge_strategy") or "MODEL_DECIDES").upper()
-    plan = plan_knowledge_query(question, strategy=strategy, scope_nonempty=bool(members))
+    plan = plan_knowledge_query(question, strategy=strategy, scope_nonempty=bool(raw_members))
     contract: dict[str, Any] = {
         "contract_schema_version": CONTRACT_SCHEMA_VERSION,
         "retrieval_id": retrieval_id,
@@ -196,6 +251,7 @@ async def prepare_knowledge_context(
         "claims": [],
         "evidence": [],
         "context_evidence": [],
+        "wiki_navigation_hits": [],
         "graph_expansion": {"nodes": [], "edges": []},
         "structured_result": [],
         "knowledge_source_status": [],
@@ -221,12 +277,27 @@ async def prepare_knowledge_context(
         return contract
 
     try:
+        navigation_status: list[dict[str, Any]] = []
+        scope_tenant_id = scope_snapshot.get("tenant_id")
+        if wiki_members and scope_tenant_id is not None:
+            from yuxi.services.wiki_service import navigate_scope_wikis
+
+            navigation_hits, navigation_status = await navigate_scope_wikis(
+                db,
+                tenant_id=int(scope_tenant_id),
+                question=question,
+                wiki_members=wiki_members,
+                raw_members=raw_members,
+            )
+            contract["wiki_navigation_hits"] = [item.to_dict() for item in navigation_hits]
+        elif wiki_members:
+            contract["warnings"].append("当前运行快照缺少租户标识，Wiki 导航已失败关闭；原始证据检索不受影响。")
         if plan.get("intent") == "PHENOTYPE_REGULATOR_ENUMERATION" and plan.get("target_mention"):
             async with db.begin_nested():
                 resolution = await resolve_entities(
                     db,
                     mention=str(plan["target_mention"]),
-                    kb_ids=[str(member["kb_id"]) for member in members],
+                    kb_ids=[str(member["kb_id"]) for member in raw_members],
                 )
                 contract["resolved_entities"] = resolution.get("entities") or []
                 if resolution.get("match_tier") not in {"EXACT_CANONICAL", "EXACT_ALIAS"}:
@@ -236,7 +307,7 @@ async def prepare_knowledge_context(
                 exact = await retrieve_exact_regulator_enumeration(
                     db,
                     resolved_entities=contract["resolved_entities"],
-                    members=members,
+                    members=raw_members,
                 )
             contract.update(
                 {
@@ -265,7 +336,7 @@ async def prepare_knowledge_context(
                 lookup = await retrieve_entities_by_identifiers(
                     db,
                     identifiers=identifiers,
-                    members=members,
+                    members=raw_members,
                 )
             if not lookup["matched_entities"]:
                 raise LookupError("EXACT_ENTITY_NOT_FOUND")
@@ -290,11 +361,29 @@ async def prepare_knowledge_context(
         else:
             from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway
 
-            result = await query_knowledge_scope_gateway(
+            raw_scope_snapshot = {**scope_snapshot, "members": raw_members}
+            top_k = int((scope_snapshot.get("retrieval_policy") or {}).get("bounded_top_k") or 12)
+            baseline = await query_knowledge_scope_gateway(
                 query_text=question,
-                scope_snapshot=scope_snapshot,
-                top_k=int((scope_snapshot.get("retrieval_policy") or {}).get("bounded_top_k") or 12),
+                scope_snapshot=raw_scope_snapshot,
+                top_k=top_k,
             )
+            expansion_terms = list(
+                dict.fromkeys(
+                    str(term).strip()
+                    for hit in contract.get("wiki_navigation_hits") or []
+                    for term in hit.get("expansion_terms") or []
+                    if str(term).strip() and str(term).casefold() not in question.casefold()
+                )
+            )[:12]
+            guided = None
+            if expansion_terms:
+                guided = await query_knowledge_scope_gateway(
+                    query_text=f"{question}\n导航扩展词：{' '.join(expansion_terms)}",
+                    scope_snapshot=raw_scope_snapshot,
+                    top_k=top_k,
+                )
+            result = _merge_gateway_results(baseline, guided, limit=min(top_k * 2, 24))
             claims, context_evidence = _gateway_contract(result)
             contract.update(
                 {
@@ -302,13 +391,13 @@ async def prepare_knowledge_context(
                     "claims": claims,
                     "evidence": result.get("evidence") or [],
                     "context_evidence": context_evidence,
-                    "knowledge_source_status": _gateway_source_status(result),
+                    "knowledge_source_status": [*_gateway_source_status(result), *navigation_status],
                     "completeness": {"status": "NOT_APPLICABLE"},
                     "warnings": result.get("warnings") or [],
                 }
             )
             if plan.get("intent") == "MECHANISM_EXPLANATION":
-                graph_expansion = await retrieve_neo4j_paths(question=question, members=members)
+                graph_expansion = await retrieve_neo4j_paths(question=question, members=raw_members)
                 contract["graph_expansion"] = {
                     "retriever_version": graph_expansion["retriever_version"],
                     "seeds": graph_expansion["seeds"],
@@ -316,6 +405,15 @@ async def prepare_knowledge_context(
                     "edges": graph_expansion["edges"],
                 }
                 contract["knowledge_source_status"].extend(graph_expansion["source_status"])
+        existing_status_keys = {
+            (str(item.get("kb_id") or ""), str(item.get("source") or ""))
+            for item in contract.get("knowledge_source_status") or []
+        }
+        contract["knowledge_source_status"].extend(
+            item
+            for item in navigation_status
+            if (str(item.get("kb_id") or ""), str(item.get("source") or "")) not in existing_status_keys
+        )
         contract["structured_result"] = render_structured_rows(contract["claims"])
         if plan.get("intent") in {"PHENOTYPE_REGULATOR_ENUMERATION", "ENTITY_LOOKUP"}:
             claim_validation, claim_warnings = validate_deterministic_claims(contract["claims"])
@@ -348,7 +446,7 @@ async def prepare_knowledge_context(
                         "query_status": "ERROR",
                         "hit_count": 0,
                     }
-                    for member in members
+                    for member in raw_members
                 ],
                 "completeness": {"status": "UNVERIFIED"},
             }
@@ -371,6 +469,7 @@ async def prepare_knowledge_context(
         "query": question,
         "claim_count": len(contract.get("claims") or []),
         "evidence_count": len(contract.get("evidence") or []),
+        "wiki_navigation_hit_count": len(contract.get("wiki_navigation_hits") or []),
         "web_call_count": 0,
     }
     contract["answer_instruction"] = (

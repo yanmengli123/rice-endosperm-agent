@@ -16,7 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from yuxi.storage.postgres.models_business import Base
-from yuxi.utils.datetime_utils import utc_now_naive
+from yuxi.utils.datetime_utils import utc_now, utc_now_naive
 
 JSON_VALUE = JSON().with_variant(JSONB, "postgresql")
 
@@ -91,6 +91,7 @@ class KnowledgeScopeMember(Base):
     document_enabled = Column(Boolean, nullable=False, default=True)
     graph_enabled = Column(Boolean, nullable=False, default=True)
     structured_enabled = Column(Boolean, nullable=False, default=True)
+    wiki_navigation_enabled = Column(Boolean, nullable=False, default=False)
     evidence_strict = Column(Boolean, nullable=False, default=True)
     evidence_supporting = Column(Boolean, nullable=False, default=True)
     evidence_candidate = Column(Boolean, nullable=False, default=False)
@@ -245,10 +246,12 @@ class KnowledgeParseRevision(Base):
     capabilities = Column(JSON_VALUE)
     error_message = Column(Text)
     created_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    # TIMESTAMPTZ 列默认值必须用 aware utc_now：naive 值会被上海时区会话
+    # 再解释一次，created_at 会比 started_at 早 8 小时（见 _workflow_now 注释）。
+    created_at = Column(DateTime(timezone=True), default=utc_now)
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     reused_from_revision_id = Column(String(64), index=True)
 
 
@@ -277,8 +280,8 @@ class KnowledgeParseStage(Base):
     error_detail = Column(Text)
     started_at = Column(DateTime(timezone=True))
     finished_at = Column(DateTime(timezone=True))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeDocumentIdentityCache(Base):
@@ -830,3 +833,367 @@ class EvaluationRunItem(Base):
     retrieved_chunks = Column(JSON_VALUE)
     metrics = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class KnowledgeWiki(Base):
+    """动态 LLM-Wiki 的控制面实体。
+
+    Wiki 是从权威知识源编译出的派生产品，不承载原始文档；原始知识库
+    仍然由 KnowledgeBase/KnowledgeFile/证据表作为事实来源。
+    """
+
+    __tablename__ = "knowledge_wikis"
+    __table_args__ = (
+        UniqueConstraint("wiki_id", name="uq_knowledge_wikis_wiki_id"),
+        UniqueConstraint("kb_id", name="uq_knowledge_wikis_kb_id"),
+        Index("ix_knowledge_wikis_tenant_status", "tenant_id", "status"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    wiki_id = Column(String(64), nullable=False, index=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    security_domain = Column(String(128), nullable=False, default="tenant-default")
+    trust_class = Column(String(32), nullable=False, default="DERIVED")
+    authority_class = Column(String(64), nullable=False, default="NAVIGATION_ONLY")
+    current_publication_id = Column(String(64), index=True)
+    status = Column(String(32), nullable=False, default="DRAFT", index=True)
+    update_mode = Column(String(32), nullable=False, default="MANUAL")
+    debounce_seconds = Column(Integer, nullable=False, default=300)
+    policy_json = Column(JSON_VALUE)
+    last_content_snapshot_hash = Column(String(64), index=True)
+    last_retrieval_snapshot_hash = Column(String(64), index=True)
+    created_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    deleted_at = Column(DateTime(timezone=True), index=True)
+
+
+class WikiSourceBinding(Base):
+    """可变的源选择器；一次构建实际使用的源由 WikiBuildSnapshotItem 冻结。"""
+
+    __tablename__ = "wiki_source_bindings"
+    __table_args__ = (
+        UniqueConstraint("wiki_id", "source_kb_id", name="uq_wiki_source_bindings_wiki_source"),
+        Index("ix_wiki_source_bindings_wiki_enabled", "wiki_id", "enabled"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    binding_id = Column(String(64), nullable=False, unique=True, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    source_kb_id = Column(
+        String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    security_domain = Column(String(128), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    selector_json = Column(JSON_VALUE)
+    created_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WikiBuildSnapshot(Base):
+    """不可变的构建输入快照。"""
+
+    __tablename__ = "wiki_build_snapshots"
+    __table_args__ = (UniqueConstraint("snapshot_id", name="uq_wiki_build_snapshots_snapshot_id"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_id = Column(String(64), nullable=False, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    content_snapshot_hash = Column(String(64), nullable=False, index=True)
+    retrieval_snapshot_hash = Column(String(64), nullable=False, index=True)
+    manifest_json = Column(JSON_VALUE, nullable=False)
+    captured_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiBuildSnapshotItem(Base):
+    __tablename__ = "wiki_build_snapshot_items"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "source_kb_id", "file_id", name="uq_wiki_snapshot_items_source_file"),
+        Index("ix_wiki_snapshot_items_snapshot", "snapshot_id"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_id = Column(String(64), ForeignKey("wiki_build_snapshots.snapshot_id", ondelete="CASCADE"), nullable=False)
+    source_kb_id = Column(String(80), nullable=False)
+    file_id = Column(String(64))
+    source_sha256 = Column(String(64))
+    parse_revision_id = Column(String(64))
+    evidence_revision_id = Column(String(64))
+    index_revision_id = Column(String(64))
+    parser_semantic_version = Column(String(64))
+    captured_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiBuildRun(Base):
+    __tablename__ = "wiki_build_runs"
+    __table_args__ = (
+        UniqueConstraint("build_id", name="uq_wiki_build_runs_build_id"),
+        UniqueConstraint("build_key", name="uq_wiki_build_runs_build_key"),
+        Index("ix_wiki_build_runs_wiki_status", "wiki_id", "status"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    build_id = Column(String(64), nullable=False, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_id = Column(String(64), ForeignKey("wiki_build_snapshots.snapshot_id", ondelete="SET NULL"))
+    build_key = Column(String(128), nullable=False)
+    compiler_fingerprint = Column(String(64), nullable=False)
+    verification_policy_version = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="QUEUED", index=True)
+    error_code = Column(String(128))
+    error_detail = Column(Text)
+    metrics_json = Column(JSON_VALUE)
+    created_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+
+
+class WikiBuildArtifact(Base):
+    __tablename__ = "wiki_build_artifacts"
+    __table_args__ = (UniqueConstraint("artifact_id", name="uq_wiki_build_artifacts_artifact_id"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    artifact_id = Column(String(64), nullable=False, index=True)
+    build_id = Column(
+        String(64), ForeignKey("wiki_build_runs.build_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind = Column(String(64), nullable=False)
+    object_uri = Column(String(1024), nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    metadata_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiPage(Base):
+    __tablename__ = "wiki_pages"
+    __table_args__ = (UniqueConstraint("wiki_id", "page_key", name="uq_wiki_pages_wiki_page_key"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    page_id = Column(String(64), nullable=False, unique=True, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    page_key = Column(String(256), nullable=False)
+    title = Column(String(512), nullable=False)
+    current_revision_id = Column(String(64), index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WikiPageRevision(Base):
+    __tablename__ = "wiki_page_revisions"
+    __table_args__ = (UniqueConstraint("page_revision_id", name="uq_wiki_page_revisions_revision_id"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    page_revision_id = Column(String(64), nullable=False, index=True)
+    page_id = Column(String(64), ForeignKey("wiki_pages.page_id", ondelete="CASCADE"), nullable=False, index=True)
+    build_id = Column(String(64), ForeignKey("wiki_build_runs.build_id", ondelete="SET NULL"))
+    content_markdown = Column(Text, nullable=False)
+    content_sha256 = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="DRAFT", index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiClaim(Base):
+    __tablename__ = "wiki_claims"
+    __table_args__ = (UniqueConstraint("wiki_id", "canonical_claim_key", name="uq_wiki_claims_canonical_key"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    claim_id = Column(String(64), nullable=False, unique=True, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    canonical_claim_key = Column(String(512), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiClaimRevision(Base):
+    __tablename__ = "wiki_claim_revisions"
+    __table_args__ = (UniqueConstraint("claim_revision_id", name="uq_wiki_claim_revisions_revision_id"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    claim_revision_id = Column(String(64), nullable=False, index=True)
+    claim_id = Column(String(64), ForeignKey("wiki_claims.claim_id", ondelete="CASCADE"), nullable=False, index=True)
+    page_revision_id = Column(
+        String(64), ForeignKey("wiki_page_revisions.page_revision_id", ondelete="CASCADE"), nullable=False
+    )
+    build_id = Column(String(64), ForeignKey("wiki_build_runs.build_id", ondelete="SET NULL"))
+    claim_text = Column(Text, nullable=False)
+    subject = Column(String(512))
+    predicate = Column(String(512))
+    object = Column(String(512))
+    temporal_scope = Column(String(512))
+    scope_json = Column(JSON_VALUE)
+    claim_class = Column(String(64), nullable=False, default="SOURCE_SCOPED")
+    verification_status = Column(String(32), nullable=False, default="CANDIDATE", index=True)
+    publication_status = Column(String(32), nullable=False, default="DRAFT", index=True)
+    freshness_status = Column(String(32), nullable=False, default="FRESH", index=True)
+    conflict_status = Column(String(32), nullable=False, default="NONE", index=True)
+    security_status = Column(String(32), nullable=False, default="ACTIVE", index=True)
+    effective_acl_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiClaimEvidence(Base):
+    __tablename__ = "wiki_claim_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "claim_revision_id", "evidence_ref_type", "evidence_ref_id", name="uq_wiki_claim_evidence_ref"
+        ),
+        Index("ix_wiki_claim_evidence_claim", "claim_revision_id"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    claim_revision_id = Column(
+        String(64), ForeignKey("wiki_claim_revisions.claim_revision_id", ondelete="CASCADE"), nullable=False
+    )
+    evidence_ref_type = Column(String(64), nullable=False)
+    evidence_ref_id = Column(String(512), nullable=False)
+    source_kb_id = Column(String(80), nullable=False)
+    relation = Column(String(32), nullable=False, default="SUPPORTS")
+    usage = Column(String(32), nullable=False, default="USED_FOR_GENERATION")
+    locator_json = Column(JSON_VALUE, nullable=False)
+    source_acl_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiVerificationRun(Base):
+    __tablename__ = "wiki_verification_runs"
+    __table_args__ = (UniqueConstraint("verification_id", name="uq_wiki_verification_runs_verification_id"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    verification_id = Column(String(64), nullable=False, index=True)
+    claim_revision_id = Column(
+        String(64), ForeignKey("wiki_claim_revisions.claim_revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    verifier_model = Column(String(256), nullable=False)
+    verifier_fingerprint = Column(String(64), nullable=False)
+    policy_version = Column(String(64), nullable=False)
+    verdict = Column(String(64), nullable=False)
+    reason_code = Column(String(128))
+    details_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiConflict(Base):
+    __tablename__ = "wiki_conflicts"
+    __table_args__ = (UniqueConstraint("conflict_id", name="uq_wiki_conflicts_conflict_id"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    conflict_id = Column(String(64), nullable=False, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    claim_revision_id = Column(String(64), ForeignKey("wiki_claim_revisions.claim_revision_id", ondelete="CASCADE"))
+    conflict_type = Column(String(64), nullable=False)
+    severity = Column(String(32), nullable=False, default="INFO")
+    details_json = Column(JSON_VALUE, nullable=False)
+    status = Column(String(32), nullable=False, default="OPEN", index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    resolved_at = Column(DateTime(timezone=True))
+
+
+class WikiDependency(Base):
+    __tablename__ = "wiki_dependencies"
+    __table_args__ = (
+        UniqueConstraint(
+            "wiki_id", "source_kind", "source_id", "dependent_kind", "dependent_id", name="uq_wiki_dependency_edge"
+        ),
+        Index("ix_wiki_dependencies_source", "source_kind", "source_id"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    source_kind = Column(String(64), nullable=False)
+    source_id = Column(String(512), nullable=False)
+    dependent_kind = Column(String(64), nullable=False)
+    dependent_id = Column(String(512), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiPublication(Base):
+    __tablename__ = "wiki_publications"
+    __table_args__ = (
+        UniqueConstraint("publication_id", name="uq_wiki_publications_publication_id"),
+        Index("ix_wiki_publications_wiki_status", "wiki_id", "status"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    publication_id = Column(String(64), nullable=False, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_id = Column(
+        String(64), ForeignKey("wiki_build_snapshots.snapshot_id", ondelete="RESTRICT"), nullable=False
+    )
+    build_id = Column(String(64), ForeignKey("wiki_build_runs.build_id", ondelete="RESTRICT"), nullable=False)
+    status = Column(String(32), nullable=False, default="STAGED", index=True)
+    previous_publication_id = Column(String(64))
+    manifest_hash = Column(String(64), nullable=False)
+    manifest_json = Column(JSON_VALUE, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    published_at = Column(DateTime(timezone=True))
+
+
+class WikiPublicationPage(Base):
+    __tablename__ = "wiki_publication_pages"
+    __table_args__ = (UniqueConstraint("publication_id", "page_revision_id", name="uq_wiki_publication_pages"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    publication_id = Column(
+        String(64), ForeignKey("wiki_publications.publication_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    page_revision_id = Column(
+        String(64), ForeignKey("wiki_page_revisions.page_revision_id", ondelete="RESTRICT"), nullable=False
+    )
+
+
+class WikiPublicationIndex(Base):
+    __tablename__ = "wiki_publication_indexes"
+    __table_args__ = (UniqueConstraint("publication_id", "index_kind", name="uq_wiki_publication_indexes_kind"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    publication_id = Column(
+        String(64), ForeignKey("wiki_publications.publication_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    index_kind = Column(String(64), nullable=False)
+    index_ref = Column(String(512), nullable=False)
+    status = Column(String(32), nullable=False, default="READY")
+    metadata_json = Column(JSON_VALUE)
+
+
+class WikiAuditEvent(Base):
+    __tablename__ = "wiki_audit_events"
+    __table_args__ = (Index("ix_wiki_audit_events_wiki_created", "wiki_id", "created_at"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    event_id = Column(String(64), nullable=False, unique=True, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String(64), nullable=False)
+    actor_uid = Column(String(64))
+    trace_id = Column(String(128))
+    payload_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WikiOutboxEvent(Base):
+    __tablename__ = "wiki_outbox_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_wiki_outbox_events_event_id"),
+        Index("ix_wiki_outbox_events_status", "status", "available_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    event_id = Column(String(64), nullable=False, index=True)
+    wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String(64), nullable=False)
+    payload_json = Column(JSON_VALUE, nullable=False)
+    # 索引由 __table_args__ 的 (status, available_at) 复合索引提供，避免同名重复建索引
+    status = Column(String(32), nullable=False, default="PENDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    available_at = Column(DateTime(timezone=True), default=utc_now)
+    lease_owner = Column(String(128))
+    lease_expires_at = Column(DateTime(timezone=True))
+    last_error = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    processed_at = Column(DateTime(timezone=True))

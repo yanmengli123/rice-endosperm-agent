@@ -1032,6 +1032,8 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0018_scientific_pdf_workflow_cache", "_migration_0018_scientific_pdf_workflow_cache"),
         ("0019_scientific_pdf_single_active_index", "_migration_0019_scientific_pdf_single_active_index"),
         ("0020_scientific_pdf_locator_v2", "_migration_0020_scientific_pdf_locator_v2"),
+        ("0021_dynamic_llmwiki", "_migration_0021_dynamic_llmwiki"),
+        ("0022_dynamic_llmwiki_lifecycle", "_migration_0022_dynamic_llmwiki_lifecycle"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -1494,6 +1496,51 @@ class PostgresManager(metaclass=SingletonMeta):
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_parse_artifact_role "
                 "ON knowledge_parse_artifacts(revision_id, kind)"
             )
+        )
+
+    async def _migration_0021_dynamic_llmwiki(self, conn) -> None:
+        """Create the evidence-bound Dynamic LLM-Wiki control and release planes."""
+        # Production connections support run_sync; lightweight schema recording
+        # doubles used by migration tests intentionally expose execute() only.
+        if hasattr(conn, "run_sync"):
+            await conn.run_sync(KnowledgeBase.metadata.create_all)
+        await conn.execute(
+            text(
+                "ALTER TABLE knowledge_scope_members ADD COLUMN IF NOT EXISTS "
+                "wiki_navigation_enabled BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
+        # Derived products are tenant-owned and never depend on a request-body tenant id.
+        for table in (
+            "knowledge_wikis",
+            "wiki_build_snapshots",
+            "wiki_build_runs",
+            "wiki_publications",
+            "wiki_audit_events",
+            "wiki_outbox_events",
+        ):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            policy_name = f"p_{table}_tenant"
+            policy_exists = (
+                await conn.execute(
+                    text("SELECT 1 FROM pg_policies WHERE tablename = :table AND policyname = :policy"),
+                    {"table": table, "policy": policy_name},
+                )
+            ).scalar()
+            if not policy_exists:
+                await conn.execute(
+                    text(
+                        f"CREATE POLICY {policy_name} ON {table} "
+                        "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT) "
+                        "WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)"
+                    )
+                )
+
+    async def _migration_0022_dynamic_llmwiki_lifecycle(self, conn) -> None:
+        """Add a durable tombstone so Wiki audit history survives deletion."""
+        await conn.execute(text("ALTER TABLE knowledge_wikis ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ"))
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_knowledge_wikis_deleted_at ON knowledge_wikis (deleted_at)")
         )
 
     async def _apply_versioned_migrations(self):

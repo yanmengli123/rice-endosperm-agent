@@ -58,6 +58,7 @@ class ScopeMemberUpdate(BaseModel):
     document_enabled: bool = True
     graph_enabled: bool = True
     structured_enabled: bool = True
+    wiki_navigation_enabled: bool = False
     evidence_strict: bool = True
     evidence_supporting: bool = True
     evidence_candidate: bool = False
