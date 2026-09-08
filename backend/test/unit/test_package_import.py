@@ -13,7 +13,7 @@ assert "yuxi.knowledge" not in sys.modules
 from yuxi import config
 
 assert config is yuxi.config
-assert "yuxi.knowledge" in sys.modules
+assert "yuxi.knowledge" not in sys.modules
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
