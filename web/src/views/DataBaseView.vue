@@ -19,7 +19,7 @@
           allow-clear
         >
           <a-select-option :value="null">全部类型</a-select-option>
-          <a-select-option v-for="t in kbTypes" :key="t" :value="t">
+          <a-select-option v-for="t in filterKbTypes" :key="t" :value="t">
             {{ getKbTypeLabel(t) }}
           </a-select-option>
         </a-select>
@@ -30,6 +30,9 @@
         </a-select>
       </template>
       <template #actions>
+        <a-button class="lucide-icon-btn" @click="openWikiCreateModal">
+          <BookOpenCheck :size="16" /> 新建动态 Wiki
+        </a-button>
         <a-button
           type="primary"
           class="lucide-icon-btn"
@@ -52,11 +55,17 @@
       destroyOnClose
     >
       <div class="new-database-form">
-        <!-- 按文件格式快速创建（可选模板） -->
+        <!-- 按文件格式快速创建（可选模板）：权威知识源专用 -->
         <div class="form-section">
           <h3 class="section-title">
-            按文件格式快速创建<span class="template-optional-mark">（选填，自动配置分块与解析）</span>
+            权威知识源模板<span class="template-optional-mark">（选填，自动配置分块与解析）</span>
           </h3>
+          <a-alert
+            class="derived-product-hint"
+            type="info"
+            show-icon
+            message="以上均为权威知识源（可建立事实权威）。派生知识产品（动态 LLM-Wiki）只增强导航与召回，将使用独立向导创建，不会出现在这里。"
+          />
           <div class="format-template-cards">
             <div
               v-for="template in formatTemplates"
@@ -218,6 +227,72 @@
     </a-modal>
 
     <a-modal
+      :open="wikiCreate.open"
+      title="新建动态 LLM-Wiki"
+      width="760px"
+      :confirm-loading="wikiCreate.saving"
+      destroy-on-close
+      @ok="handleCreateWiki"
+      @cancel="closeWikiCreateModal"
+    >
+      <div class="wiki-create-form">
+        <a-alert
+          type="warning"
+          show-icon
+          message="动态 Wiki 是派生导航产品，不是新的事实来源"
+          description="它会从已选权威知识源生成实体页、别名和检索路径；问答引用仍必须回到原 PDF 锚点、CSV 行或规范图谱 Evidence。"
+        />
+        <div class="form-grid two-columns">
+          <div class="form-section compact-section">
+            <h3 class="section-title">产品名称<span class="required-mark">*</span></h3>
+            <a-input
+              v-model:value="wikiCreate.form.name"
+              placeholder="例如：水稻胚乳动态知识导航"
+            />
+          </div>
+          <div class="form-section compact-section">
+            <h3 class="section-title">更新策略</h3>
+            <a-select v-model:value="wikiCreate.form.update_mode" class="full-width">
+              <a-select-option value="MANUAL">手动构建（推荐）</a-select-option>
+              <a-select-option value="ON_SOURCE_CHANGE">知识源变化后排队</a-select-option>
+              <a-select-option value="SCHEDULED">计划更新</a-select-option>
+            </a-select>
+          </div>
+        </div>
+        <div class="form-section">
+          <h3 class="section-title">绑定权威知识源<span class="required-mark">*</span></h3>
+          <a-select
+            v-model:value="wikiCreate.form.source_kb_ids"
+            mode="multiple"
+            show-search
+            option-filter-prop="label"
+            class="full-width"
+            placeholder="选择同一权限域内的 PDF、CSV 或图谱知识库"
+            :options="authorityDatabaseOptions"
+          />
+          <p class="field-hint">
+            为防止权限并集越权，服务端会强制要求所选知识源具有完全相同的共享权限域。
+          </p>
+        </div>
+        <div class="form-section">
+          <h3 class="section-title">产品说明</h3>
+          <a-textarea
+            v-model:value="wikiCreate.form.description"
+            :auto-size="{ minRows: 3, maxRows: 6 }"
+            placeholder="说明导航范围、更新目标和适用科研问题"
+          />
+        </div>
+        <div class="wiki-policy-row">
+          <div>
+            <div class="scope-section-title">构建完成后自动发布</div>
+            <div class="scope-section-hint">建议首轮关闭，人工核验 Claim 与来源后再发布。</div>
+          </div>
+          <a-switch v-model:checked="wikiCreate.form.auto_publish" />
+        </div>
+      </div>
+    </a-modal>
+
+    <a-modal
       :open="scopeModal.open"
       title="默认问答范围"
       width="680px"
@@ -254,22 +329,46 @@
         <div class="scope-section">
           <div class="scope-section-title">检索通道</div>
           <div class="scope-option-grid">
-            <label class="scope-option">
+            <label class="scope-option" :class="{ 'scope-option-locked': isWikiScopeProduct }">
               <span><FileText :size="16" /> 文档 Chunk</span>
-              <a-switch v-model:checked="scopeForm.document_enabled" size="small" />
+              <a-switch
+                v-model:checked="scopeForm.document_enabled"
+                size="small"
+                :disabled="isWikiScopeProduct"
+              />
             </label>
-            <label class="scope-option">
+            <label class="scope-option" :class="{ 'scope-option-locked': isWikiScopeProduct }">
               <span><Network :size="16" /> 知识图谱</span>
-              <a-switch v-model:checked="scopeForm.graph_enabled" size="small" />
+              <a-switch
+                v-model:checked="scopeForm.graph_enabled"
+                size="small"
+                :disabled="isWikiScopeProduct"
+              />
             </label>
-            <label class="scope-option">
+            <label class="scope-option" :class="{ 'scope-option-locked': isWikiScopeProduct }">
               <span><TableProperties :size="16" /> 结构化证据</span>
-              <a-switch v-model:checked="scopeForm.structured_enabled" size="small" />
+              <a-switch
+                v-model:checked="scopeForm.structured_enabled"
+                size="small"
+                :disabled="isWikiScopeProduct"
+              />
+            </label>
+            <label class="scope-option" :class="{ 'scope-option-locked': !isWikiScopeProduct }">
+              <span><Compass :size="16" /> Wiki 导航</span>
+              <a-tooltip
+                title="仅派生知识产品（动态 LLM-Wiki）可开启导航通道；权威知识源永远不参与 Wiki 导航。"
+              >
+                <a-switch
+                  v-model:checked="scopeForm.wiki_navigation_enabled"
+                  size="small"
+                  :disabled="!isWikiScopeProduct"
+                />
+              </a-tooltip>
             </label>
           </div>
         </div>
 
-        <div class="scope-section">
+        <div v-if="!isWikiScopeProduct" class="scope-section">
           <div class="scope-section-title">科研证据策略</div>
           <div class="evidence-options">
             <a-checkbox v-model:checked="scopeForm.evidence_strict">STRICT 严格证据</a-checkbox>
@@ -288,6 +387,13 @@
             message="候选或否定证据只用于展示不确定性与冲突，不能自动升级为已证实结论。"
           />
         </div>
+
+        <a-alert
+          v-else
+          type="info"
+          show-icon
+          message="Wiki 不提供证据等级开关；它只生成导航词，答案证据策略由绑定的权威知识源决定。"
+        />
 
         <div class="scope-section priority-row">
           <div>
@@ -320,6 +426,9 @@
       :icon="getKbTypeIcon('milvus')"
     >
       <template #actions>
+        <a-button class="lucide-icon-btn" @click="openWikiCreateModal">
+          <BookOpenCheck :size="16" /> 创建动态 Wiki
+        </a-button>
         <a-button
           type="primary"
           size="large"
@@ -394,6 +503,8 @@ import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import {
+  BookOpenCheck,
+  Compass,
   Copy,
   FileText,
   Network,
@@ -404,7 +515,7 @@ import {
   Trash2
 } from '@lucide/vue'
 import { message, Modal } from 'ant-design-vue'
-import { databaseApi, knowledgeScopeApi, typeApi } from '@/apis/knowledge_api'
+import { databaseApi, knowledgeScopeApi, typeApi, wikiApi } from '@/apis/knowledge_api'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
@@ -442,6 +553,11 @@ const knowledgeViewItems = [
 ]
 
 const kbTypes = computed(() => Object.keys(supportedKbTypes.value))
+const filterKbTypes = computed(() =>
+  Array.from(
+    new Set([...kbTypes.value, ...databases.value.map((item) => item.kb_type).filter(Boolean)])
+  )
+)
 const searchQuery = ref('')
 const typeFilter = ref(null)
 const scopeFilter = ref('all')
@@ -452,6 +568,7 @@ const emptyScopeForm = () => ({
   document_enabled: true,
   graph_enabled: true,
   structured_enabled: true,
+  wiki_navigation_enabled: false,
   evidence_strict: true,
   evidence_supporting: true,
   evidence_candidate: false,
@@ -463,6 +580,21 @@ const emptyScopeForm = () => ({
 
 const scopeForm = reactive(emptyScopeForm())
 const scopeModal = reactive({ open: false, saving: false, database: null })
+const isWikiScopeProduct = computed(() => scopeModal.database?.kb_type === 'llmwiki')
+const emptyWikiForm = () => ({
+  name: '',
+  description: '',
+  source_kb_ids: [],
+  update_mode: 'MANUAL',
+  debounce_seconds: 300,
+  auto_publish: false
+})
+const wikiCreate = reactive({ open: false, saving: false, form: emptyWikiForm() })
+const authorityDatabaseOptions = computed(() =>
+  databases.value
+    .filter((item) => item.kb_type !== 'llmwiki')
+    .map((item) => ({ value: item.kb_id, label: `${item.name} · ${getKbTypeLabel(item.kb_type)}` }))
+)
 
 const filteredDatabases = computed(() => {
   let list = databases.value
@@ -526,6 +658,16 @@ const scopeStateClass = (database) => {
 const openScopeModal = (database) => {
   const member = scopeState.members.get(database.kb_id) || emptyScopeForm()
   Object.assign(scopeForm, emptyScopeForm(), member)
+  if (database.kb_type === 'llmwiki') {
+    Object.assign(scopeForm, {
+      document_enabled: false,
+      graph_enabled: false,
+      structured_enabled: false,
+      wiki_navigation_enabled: true
+    })
+  } else {
+    scopeForm.wiki_navigation_enabled = false
+  }
   scopeModal.database = database
   scopeModal.open = true
 }
@@ -538,6 +680,13 @@ const closeScopeModal = () => {
 
 const healthMetrics = computed(() => {
   const details = scopeForm.health_details || {}
+  if (isWikiScopeProduct.value) {
+    return [
+      { label: '发布页面', value: details.wiki_pages ?? '—' },
+      { label: '验证 Claim', value: details.wiki_claims ?? '—' },
+      { label: '发布版本', value: details.publication_id ? '已激活' : '—' }
+    ]
+  }
   return [
     { label: '文件', value: details.files ?? '—' },
     { label: 'Chunks', value: details.chunks ?? '—' },
@@ -553,7 +702,8 @@ const saveScopeMember = async () => {
     scopeForm.enabled &&
     !scopeForm.document_enabled &&
     !scopeForm.graph_enabled &&
-    !scopeForm.structured_enabled
+    !scopeForm.structured_enabled &&
+    !scopeForm.wiki_navigation_enabled
   ) {
     message.warning('纳入问答时至少启用一个检索通道')
     return
@@ -566,6 +716,7 @@ const saveScopeMember = async () => {
       document_enabled: scopeForm.document_enabled,
       graph_enabled: scopeForm.graph_enabled,
       structured_enabled: scopeForm.structured_enabled,
+      wiki_navigation_enabled: scopeForm.wiki_navigation_enabled,
       evidence_strict: scopeForm.evidence_strict,
       evidence_supporting: scopeForm.evidence_supporting,
       evidence_candidate: scopeForm.evidence_candidate,
@@ -602,12 +753,53 @@ const state = reactive({
   formatCsvMode: 'record'
 })
 
+const openWikiCreateModal = () => {
+  Object.assign(wikiCreate.form, emptyWikiForm())
+  wikiCreate.open = true
+}
+
+const closeWikiCreateModal = () => {
+  wikiCreate.open = false
+  Object.assign(wikiCreate.form, emptyWikiForm())
+}
+
+const handleCreateWiki = async () => {
+  if (!wikiCreate.form.name.trim()) {
+    message.warning('请输入动态 Wiki 名称')
+    return
+  }
+  if (!wikiCreate.form.source_kb_ids.length) {
+    message.warning('请至少绑定一个权威知识源')
+    return
+  }
+  wikiCreate.saving = true
+  try {
+    const data = await wikiApi.create({
+      ...wikiCreate.form,
+      name: wikiCreate.form.name.trim(),
+      description: wikiCreate.form.description.trim()
+    })
+    closeWikiCreateModal()
+    await databaseStore.loadDatabases()
+    await loadDefaultScope()
+    message.success('动态 Wiki 已创建，请执行首轮构建并核验后发布')
+    if (data.wiki?.wiki_id) {
+      router.push(`/extensions/wiki/${data.wiki.wiki_id}`)
+    }
+  } catch (error) {
+    message.error(error.message || '动态 Wiki 创建失败')
+  } finally {
+    wikiCreate.saving = false
+  }
+}
+
 // 按文件格式快速创建模板：只做表单预填与创建后引导，kb_type 恒为 milvus
 const FORMAT_TEMPLATES = [
   {
     key: 'pdf_literature',
     label: '📄 PDF 文献证据库',
-    description: '全自动科研证据链：PyMuPDF 原生锚点 + MinerU 正文/版面 + 条件式 GROBID 题录与引用；质量门禁、学术分块、混合检索和版本化索引均自动完成。',
+    description:
+      '全自动科研证据链：PyMuPDF 原生锚点 + MinerU 正文/版面 + 条件式 GROBID 题录与引用；质量门禁、学术分块、混合检索和版本化索引均自动完成。',
     nameSuffix: '文献证据库',
     apply: {
       chunk_preset_id: 'academic',
@@ -625,7 +817,8 @@ const FORMAT_TEMPLATES = [
   {
     key: 'csv_dataset',
     label: '📊 CSV 结构化数据集',
-    description: '一行一条记录独立成块，保留行级来源；问答型 CSV（question,answer 两列）自动抽取问答对。',
+    description:
+      '一行一条记录独立成块，保留行级来源；问答型 CSV（question,answer 两列）自动抽取问答对。',
     nameSuffix: '结构化数据集',
     apply: {
       chunk_preset_id: 'separator',
@@ -636,7 +829,8 @@ const FORMAT_TEMPLATES = [
   {
     key: 'graph_csv',
     label: '🕸 科研知识图谱',
-    description: '节点 CSV + 关系 CSV + 审计 cypher；PostgreSQL 规范源、Neo4j/Milvus 双投影，创建后前往图谱页执行导入。',
+    description:
+      '节点 CSV + 关系 CSV + 审计 cypher；PostgreSQL 规范源、Neo4j/Milvus 双投影，创建后前往图谱页执行导入。',
     nameSuffix: '科研知识图谱',
     apply: { format_template: 'graph_csv' }
   }
@@ -918,10 +1112,20 @@ const cardTags = (database) => {
       color: 'blue'
     })
   }
+  if (database.kb_type === 'llmwiki') {
+    tags.push({ name: '仅导航 · 非证据', color: 'orange' })
+  }
   return tags
 }
 
 const navigateToDatabase = (database) => {
+  if (database.kb_type === 'llmwiki') {
+    const wikiId = database.additional_params?.wiki_id || database.metadata?.wiki_id
+    if (wikiId) {
+      router.push({ path: `/extensions/wiki/${wikiId}` })
+      return
+    }
+  }
   router.push({ path: `/extensions/knowledgebase/${database.kb_id}` })
 }
 
@@ -948,7 +1152,13 @@ const deleteDatabase = (database) => {
     cancelText: '取消',
     onOk: async () => {
       try {
-        await databaseApi.deleteDatabase(database.kb_id)
+        if (database.kb_type === 'llmwiki') {
+          const wikiId = database.additional_params?.wiki_id || database.metadata?.wiki_id
+          if (!wikiId) throw new Error('动态 Wiki 标识缺失')
+          await wikiApi.remove(wikiId)
+        } else {
+          await databaseApi.deleteDatabase(database.kb_id)
+        }
         message.success('知识库已删除')
         await databaseStore.loadDatabases()
       } catch (error) {
@@ -965,6 +1175,10 @@ const handleDatabaseAction = (key, database) => {
     return
   }
   if (key === 'edit') {
+    if (database.kb_type === 'llmwiki') {
+      navigateToDatabase(database)
+      return
+    }
     router.push({
       path: `/extensions/knowledgebase/${database.kb_id}`,
       query: { action: 'edit' }
@@ -1002,6 +1216,23 @@ defineExpose({
   :deep(.info-card-icon) {
     background: var(--gray-0);
   }
+}
+
+.wiki-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.wiki-policy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  background: var(--gray-10);
 }
 
 .scope-config {
@@ -1068,6 +1299,15 @@ defineExpose({
     color: var(--gray-700);
     font-size: 12px;
   }
+}
+
+.scope-option-locked {
+  opacity: 0.6;
+  background: var(--gray-25);
+}
+
+.derived-product-hint {
+  margin-bottom: 12px;
 }
 
 .evidence-options {

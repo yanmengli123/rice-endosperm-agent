@@ -127,6 +127,40 @@ export const knowledgeScopeApi = {
 }
 
 // =============================================================================
+// === 动态 LLM-Wiki（派生导航产品，不是权威证据库） ===
+// =============================================================================
+
+export const wikiApi = {
+  getProductRegistry: async () => apiGet('/api/knowledge/wikis/product-registry'),
+  list: async () => apiGet('/api/knowledge/wikis'),
+  create: async (data) => apiAdminPost('/api/knowledge/wikis', data),
+  get: async (wikiId) => apiGet(`/api/knowledge/wikis/${wikiId}`),
+  replaceSources: async (wikiId, sourceKbIds) =>
+    apiAdminPut(`/api/knowledge/wikis/${wikiId}/sources`, { source_kb_ids: sourceKbIds }),
+  updateSettings: async (wikiId, data) =>
+    apiAdminPut(`/api/knowledge/wikis/${wikiId}/settings`, data),
+  remove: async (wikiId) => apiAdminDelete(`/api/knowledge/wikis/${wikiId}`),
+  build: async (wikiId, force = false) =>
+    apiAdminPost(`/api/knowledge/wikis/${wikiId}/builds`, { force }),
+  publish: async (wikiId, buildId) =>
+    apiAdminPost(`/api/knowledge/wikis/${wikiId}/publications`, { build_id: buildId }),
+  rollback: async (wikiId, publicationId) =>
+    apiAdminPost(`/api/knowledge/wikis/${wikiId}/rollback`, {
+      publication_id: publicationId
+    }),
+  pages: async (wikiId, buildId = '') => {
+    const query = buildId ? `?build_id=${encodeURIComponent(buildId)}` : ''
+    return apiGet(`/api/knowledge/wikis/${wikiId}/pages${query}`)
+  },
+  claims: async (wikiId, buildId = '') => {
+    const query = buildId ? `?build_id=${encodeURIComponent(buildId)}` : ''
+    return apiGet(`/api/knowledge/wikis/${wikiId}/claims${query}`)
+  },
+  navigate: async (wikiId, question, limit = 8) =>
+    apiPost(`/api/knowledge/wikis/${wikiId}/navigate`, { question, limit })
+}
+
+// =============================================================================
 // === 文档管理分组 ===
 // =============================================================================
 
@@ -397,6 +431,16 @@ export const graphImportApi = {
     apiAdminPost(graphImportUrl(kbId, importId, 'execute'), { resolutions }),
 
   rollback: async (kbId, importId) => apiAdminPost(graphImportUrl(kbId, importId, 'rollback'), {})
+}
+
+// =============================================================================
+// === 知识图谱导出 ===
+// =============================================================================
+
+export const graphExportApi = {
+  // variant: 'roundtrip'（v3 往返包 zip）| 'evidence'（证据明细 xlsx）
+  exportGraph: async (kbId, variant) =>
+    apiAdminGet(`/api/knowledge/databases/${kbId}/graph-export?variant=${variant}`, {}, 'blob')
 }
 
 // =============================================================================

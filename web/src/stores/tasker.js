@@ -29,7 +29,9 @@ const toTask = (raw = {}) => ({
   payload: raw.payload || {},
   result: raw.result,
   error: raw.error,
-  cancel_requested: raw.cancel_requested || false
+  cancel_requested: raw.cancel_requested || false,
+  cancelable: raw.cancelable ?? true,
+  deletable: raw.deletable ?? true
 })
 
 export const useTaskerStore = defineStore('tasker', () => {

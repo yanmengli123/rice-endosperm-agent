@@ -1,5 +1,5 @@
 import { h } from 'vue'
-import { Database, DatabaseZap } from '@lucide/vue'
+import { BookOpenCheck, Database, DatabaseZap } from '@lucide/vue'
 
 const ICON_BASE = 'https://registry.npmmirror.com/@lobehub/icons-static-svg/latest/files/icons'
 
@@ -19,7 +19,8 @@ export const getKbTypeLabel = (type) => {
   const labels = {
     milvus: '稻芯智析知识库',
     dify: 'Dify',
-    notion: 'Notion'
+    notion: 'Notion',
+    llmwiki: '动态 LLM-Wiki'
   }
   return labels[type] || type
 }
@@ -28,7 +29,8 @@ export const getKbTypeIcon = (type) => {
   const icons = {
     milvus: DatabaseZap,
     dify: brandIcons.dify,
-    notion: brandIcons.notion
+    notion: brandIcons.notion,
+    llmwiki: BookOpenCheck
   }
   return icons[type] || Database
 }
@@ -37,12 +39,13 @@ export const getKbTypeColor = (type) => {
   const colors = {
     milvus: 'blue',
     dify: 'gold',
-    notion: 'purple'
+    notion: 'purple',
+    llmwiki: 'green'
   }
   return colors[type] || 'blue'
 }
 
-const READ_ONLY_KB_TYPES = new Set(['dify', 'notion'])
+const READ_ONLY_KB_TYPES = new Set(['dify', 'notion', 'llmwiki'])
 
 export const isReadOnlyDatabase = (database, kbTypes = {}) => {
   const kbType = (

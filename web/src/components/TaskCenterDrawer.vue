@@ -99,7 +99,7 @@
                 type="text"
                 size="small"
                 danger
-                v-if="isTaskCompleted(task)"
+                v-if="isTaskCompleted(task) && task.deletable !== false"
                 @click.stop="handleDelete(task.id, task.name)"
               >
                 删除
@@ -194,6 +194,7 @@ const TASK_TYPE_LABELS = {
   knowledge_parse: '文档解析',
   knowledge_index: '文档入库',
   knowledge_graph_index: '图谱构建',
+  pdf_ingest: 'PDF 解析入库',
   dataset_generation: '评估集生成',
   rag_evaluation: 'RAG 评估'
 }
@@ -394,7 +395,11 @@ function progressStatus(status) {
 }
 
 function canCancel(task) {
-  return Boolean(STATUS_CONFIG[task.status]?.cancelable) && !task.cancel_requested
+  return (
+    Boolean(STATUS_CONFIG[task.status]?.cancelable) &&
+    task.cancelable !== false &&
+    !task.cancel_requested
+  )
 }
 </script>
 <style scoped lang="less">
