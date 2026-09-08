@@ -2,7 +2,7 @@
  * 认证相关 API
  */
 
-import { apiAdminGet, apiAdminPost, apiAdminPut, apiGet, apiPost } from './base'
+import { apiAdminDelete, apiAdminGet, apiAdminPost, apiAdminPut, apiGet, apiPost } from './base'
 
 async function parseErrorDetail(response, fallbackMessage) {
   const contentType = response.headers.get('content-type') || ''
@@ -149,8 +149,6 @@ async function exportManagedUserConversations(uid) {
     'blob'
   )
 }
-
-
 async function listManagedApiKeys(uid) {
   const data = await apiAdminGet(`/api/user/manage/${encodeURIComponent(uid)}/api-keys`)
   return data.keys

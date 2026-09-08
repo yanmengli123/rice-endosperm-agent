@@ -248,7 +248,7 @@ export const renderMarkdown = async (content, { theme = 'github-light' } = {}) =
       // 默认 URI 白名单不含 blob:（科研图片 Blob URL）与 kbasset://（渲染前
       // 未成功解析时的占位，渲染层已收紧为受控来源）；保持默认 scheme 语义不变。
       ALLOWED_URI_REGEXP:
-        /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix|blob|kbasset):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+        /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix|blob|kbasset):|[^a-z]|[a-z+.-]+(?:[^a-z+.:-]|$))/i
     })
     setCachedHtml(cacheKey, html)
     return html

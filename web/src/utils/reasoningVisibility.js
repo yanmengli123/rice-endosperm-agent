@@ -2,7 +2,7 @@ const TAG_PATTERN =
   /\\*(?:(<|&lt;|&#0*60;|&#x0*3c;)\s*(\/\s*)?think\s*(>|&gt;|&#0*62;|&#x0*3e;))/gi
 
 const PARTIAL_OPEN_TAG_PATTERN =
-  /(?:\\+|\\*(?:\<|&lt?|&#0*60?;?|&#x0*3c?;?))(?:\s*\/?\s*(?:t?h?i?n?k?)?\s*)?$/i
+  /(?:\\+|\\*(?:<|&lt?|&#0*60?;?|&#x0*3c?;?))(?:\s*\/?\s*(?:t?h?i?n?k?)?\s*)?$/i
 
 const holdPartialOpeningTag = (text) => {
   const match = PARTIAL_OPEN_TAG_PATTERN.exec(text)
