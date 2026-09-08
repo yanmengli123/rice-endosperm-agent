@@ -25,8 +25,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bamCoverage"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bamCoverage"
         ),
     },
     "bioinfomcp-bcftools": {
@@ -41,8 +40,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bcftools"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bcftools"
         ),
     },
     "bioinfomcp-bedtools-coverage": {
@@ -58,7 +56,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
             "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bedtools_coverage"
+            "7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bedtools_coverage"
         ),
     },
     "bioinfomcp-bedtools-intersect": {
@@ -74,7 +72,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
             "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bedtools_intersect"
+            "7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bedtools_intersect"
         ),
     },
     "bioinfomcp-bowtie2": {
@@ -82,15 +80,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-bowtie2"],
         "transport": "stdio",
-        "description": "隔离运行 bowtie2：将短序列比对到参考基因组；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 bowtie2：将短序列比对到参考基因组；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bowtie2"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bowtie2"
         ),
     },
     "bioinfomcp-bwa": {
@@ -98,15 +94,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-bwa"],
         "transport": "stdio",
-        "description": "隔离运行 bwa：将测序读段比对到参考基因组；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 bwa：将测序读段比对到参考基因组；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bwa"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_bwa"
         ),
     },
     "bioinfomcp-computegcbias": {
@@ -121,8 +115,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_computeGCBias"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_computeGCBias"
         ),
     },
     "bioinfomcp-correctgcbias": {
@@ -137,8 +130,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_correctGCBias"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_correctGCBias"
         ),
     },
     "bioinfomcp-cutadapt": {
@@ -146,15 +138,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-cutadapt"],
         "transport": "stdio",
-        "description": "隔离运行 cutadapt：去除测序接头的剪切工具；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 cutadapt：去除测序接头的剪切工具；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_cutadapt"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_cutadapt"
         ),
     },
     "bioinfomcp-fatotwobit": {
@@ -169,8 +159,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_faToTwoBit"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_faToTwoBit"
         ),
     },
     "bioinfomcp-fastp": {
@@ -178,15 +167,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-fastp"],
         "transport": "stdio",
-        "description": "隔离运行 fastp：FASTQ 快速质控与过滤；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 fastp：FASTQ 快速质控与过滤；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_fastp"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_fastp"
         ),
     },
     "bioinfomcp-flye": {
@@ -194,15 +181,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-flye"],
         "transport": "stdio",
-        "description": "隔离运行 flye：长读段基因组从头组装；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 flye：长读段基因组从头组装；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 21600,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_flye"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_flye"
         ),
     },
     "bioinfomcp-freebayes": {
@@ -217,8 +202,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_freebayes"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_freebayes"
         ),
     },
     "bioinfomcp-gatk-applybqsr": {
@@ -233,8 +217,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 21600,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gatk_ApplyBQSR"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gatk_ApplyBQSR"
         ),
     },
     "bioinfomcp-gatk-baserecalibrator": {
@@ -250,7 +233,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
             "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gatk_BaseRecalibrator"
+            "7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gatk_BaseRecalibrator"
         ),
     },
     "bioinfomcp-gatk-haplotypecaller": {
@@ -266,7 +249,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
             "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gatk_HaplotypeCaller"
+            "7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gatk_HaplotypeCaller"
         ),
     },
     "bioinfomcp-gatk-selectvariants": {
@@ -282,7 +265,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
             "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gatk_SelectVariants"
+            "7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gatk_SelectVariants"
         ),
     },
     "bioinfomcp-gunzip": {
@@ -290,15 +273,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-gunzip"],
         "transport": "stdio",
-        "description": "隔离运行 gunzip：解压 .gz 压缩文件；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 gunzip：解压 .gz 压缩文件；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gunzip"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_gunzip"
         ),
     },
     "bioinfomcp-hisat2": {
@@ -313,8 +294,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_hisat2"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_hisat2"
         ),
     },
     "bioinfomcp-kallisto": {
@@ -322,15 +302,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-kallisto"],
         "transport": "stdio",
-        "description": "隔离运行 kallisto：RNA-seq 转录本定量；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 kallisto：RNA-seq 转录本定量；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_kallisto"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_kallisto"
         ),
     },
     "bioinfomcp-macs3-callpeak": {
@@ -338,15 +316,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-macs3-callpeak"],
         "transport": "stdio",
-        "description": "隔离运行 macs3_callpeak：ChIP-seq 峰值调用；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 macs3_callpeak：ChIP-seq 峰值调用；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_macs3_callpeak"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_macs3_callpeak"
         ),
     },
     "bioinfomcp-macs3-hmmratac": {
@@ -361,8 +337,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_macs3_hmmratac"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_macs3_hmmratac"
         ),
     },
     "bioinfomcp-mafft": {
@@ -370,15 +345,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-mafft"],
         "transport": "stdio",
-        "description": "隔离运行 mafft：多序列比对；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 mafft：多序列比对；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_mafft"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_mafft"
         ),
     },
     "bioinfomcp-meme": {
@@ -386,15 +359,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-meme"],
         "transport": "stdio",
-        "description": "隔离运行 meme：motif 发现与分析；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 meme：motif 发现与分析；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 21600,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_meme"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_meme"
         ),
     },
     "bioinfomcp-minimap2": {
@@ -402,15 +373,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-minimap2"],
         "transport": "stdio",
-        "description": "隔离运行 minimap2：长读段快速比对；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 minimap2：长读段快速比对；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_minimap2"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_minimap2"
         ),
     },
     "bioinfomcp-multiqc": {
@@ -425,8 +394,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_multiqc"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_multiqc"
         ),
     },
     "bioinfomcp-plotcorrelation": {
@@ -442,7 +410,7 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
             "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_plotCorrelation"
+            "7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_plotCorrelation"
         ),
     },
     "bioinfomcp-qualimap": {
@@ -450,15 +418,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-qualimap"],
         "transport": "stdio",
-        "description": "隔离运行 qualimap：比对结果质量评估；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 qualimap：比对结果质量评估；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_qualimap"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_qualimap"
         ),
     },
     "bioinfomcp-quast": {
@@ -466,15 +432,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-quast"],
         "transport": "stdio",
-        "description": "隔离运行 quast：基因组组装质量评估；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 quast：基因组组装质量评估；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 21600,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_quast"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_quast"
         ),
     },
     "bioinfomcp-salmon": {
@@ -482,15 +446,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-salmon"],
         "transport": "stdio",
-        "description": "隔离运行 salmon：转录本定量；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 salmon：转录本定量；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 7200,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_salmon"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_salmon"
         ),
     },
     "bioinfomcp-samtools": {
@@ -498,15 +460,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-samtools"],
         "transport": "stdio",
-        "description": "隔离运行 samtools：处理 SAM/BAM 比对文件；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 samtools：处理 SAM/BAM 比对文件；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_samtools"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_samtools"
         ),
     },
     "bioinfomcp-seqtk": {
@@ -514,15 +474,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-seqtk"],
         "transport": "stdio",
-        "description": "隔离运行 seqtk：FASTQ/FASTA 序列工具包；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 seqtk：FASTQ/FASTA 序列工具包；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_seqtk"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_seqtk"
         ),
     },
     "bioinfomcp-spades": {
@@ -530,15 +488,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-spades"],
         "transport": "stdio",
-        "description": "隔离运行 spades：短读段基因组从头组装；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 spades：短读段基因组从头组装；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 21600,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_spades"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_spades"
         ),
     },
     "bioinfomcp-star": {
@@ -546,15 +502,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-star"],
         "transport": "stdio",
-        "description": "隔离运行 star：RNA-seq 高速比对；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 star：RNA-seq 高速比对；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 21600,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_star"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_star"
         ),
     },
     "bioinfomcp-stringtie": {
@@ -562,15 +516,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-stringtie"],
         "transport": "stdio",
-        "description": "隔离运行 stringtie：转录本组装与定量；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 stringtie：转录本组装与定量；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_stringtie"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_stringtie"
         ),
     },
     "bioinfomcp-trim-galore": {
@@ -578,15 +530,13 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-trim-galore"],
         "transport": "stdio",
-        "description": "隔离运行 trim-galore：测序数据质量剪切；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 trim-galore：测序数据质量剪切；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_trim-galore"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_trim-galore"
         ),
     },
     "bioinfomcp-trimmomatic": {
@@ -594,56 +544,76 @@ BIOINFOMCP_SERVERS: dict[str, dict[str, Any]] = {
         "command": "/usr/local/bin/yuxi-bioinfomcp-tool",
         "args": ["bioinfomcp-trimmomatic"],
         "transport": "stdio",
-        "description": "隔离运行 trimmomatic： Illumina 读段剪切；"
-        "来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
+        "description": "隔离运行 trimmomatic： Illumina 读段剪切；来源 florensiawidjaja/BioinfoMCP 固定提交 7ada791",
         "icon": "🧬",
         "tags": ["内置", "BioinfoMCP"],
         "timeout": 1800,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            f"7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_trimmomatic"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_trimmomatic"
         ),
     },
 }
 
 BIOINFOMCP_SLUGS = frozenset(BIOINFOMCP_SERVERS)
 BIOINFOMCP_EXPECTED_TOOLS: dict[str, tuple[str, ...]] = {
-    "bioinfomcp-bamcoverage": ('bamCoverage',),
-    "bioinfomcp-bcftools": ('bcftools_annotate', 'bcftools_call', 'bcftools_view', 'bcftools_index', 'bcftools_concat', 'bcftools_query', 'bcftools_stats', 'bcftools_sort', 'bcftools_plugin'),
-    "bioinfomcp-bedtools-coverage": ('bedtools_coverage',),
-    "bioinfomcp-bedtools-intersect": ('bedtools_intersect',),
-    "bioinfomcp-bowtie2": ('bowtie2_align', 'bowtie2_build', 'bowtie2_inspect'),
-    "bioinfomcp-bwa": ('bwa_index', 'bwa_mem', 'bwa_aln', 'bwa_samse', 'bwa_sampe', 'bwa_bwasw'),
-    "bioinfomcp-computegcbias": ('computeGCBias',),
-    "bioinfomcp-correctgcbias": ('correctGCBias',),
-    "bioinfomcp-cutadapt": ('cutadapt',),
-    "bioinfomcp-fatotwobit": ('faToTwoBit',),
-    "bioinfomcp-fastp": ('fastp',),
-    "bioinfomcp-flye": ('flye',),
-    "bioinfomcp-freebayes": ('freebayes',),
-    "bioinfomcp-gatk-applybqsr": ('gatk_ApplyBQSR',),
-    "bioinfomcp-gatk-baserecalibrator": ('gatk_BaseRecalibrator',),
-    "bioinfomcp-gatk-haplotypecaller": ('gatk_HaplotypeCaller',),
-    "bioinfomcp-gatk-selectvariants": ('gatk_SelectVariants',),
-    "bioinfomcp-gunzip": ('gunzip', 'gzip', 'zcat'),
-    "bioinfomcp-hisat2": ('hisat2_align',),
-    "bioinfomcp-kallisto": ('index', 'quant', 'quant_tcc', 'bus', 'h5dump', 'inspect', 'version', 'cite'),
-    "bioinfomcp-macs3-callpeak": ('macs3_callpeak',),
-    "bioinfomcp-macs3-hmmratac": ('macs3_hmmratac',),
-    "bioinfomcp-mafft": ('mafft', 'linsi', 'ginsi', 'einsi', 'fftnsi', 'fftns', 'nwnsi', 'nwns', 'mafft_profile'),
-    "bioinfomcp-meme": ('meme',),
-    "bioinfomcp-minimap2": ('minimap_index', 'minimap_map', 'minimap_version'),
-    "bioinfomcp-multiqc": ('multiqc',),
-    "bioinfomcp-plotcorrelation": ('plotCorrelation',),
-    "bioinfomcp-qualimap": ('bamqc', 'rnaseq', 'multi_bamqc', 'counts', 'clustering', 'comp_counts'),
-    "bioinfomcp-quast": ('quast',),
-    "bioinfomcp-salmon": ('salmon_index', 'salmon_quant'),
-    "bioinfomcp-samtools": ('samtools_view', 'samtools_sort', 'samtools_index', 'samtools_flagstat', 'samtools_merge', 'samtools_faidx', 'samtools_fastq', 'samtools_flag_convert', 'samtools_quickcheck', 'samtools_stats', 'samtools_depth'),
-    "bioinfomcp-seqtk": ('seqtk_seq',),
-    "bioinfomcp-spades": ('spades',),
-    "bioinfomcp-star": ('star_genome_generate', 'star_align_reads'),
-    "bioinfomcp-stringtie": ('stringtie_assemble', 'stringtie_merge', 'stringtie_version'),
-    "bioinfomcp-trim-galore": ('trim_galore',),
-    "bioinfomcp-trimmomatic": ('trimmomatic_se', 'trimmomatic_pe'),
+    "bioinfomcp-bamcoverage": ("bamCoverage",),
+    "bioinfomcp-bcftools": (
+        "bcftools_annotate",
+        "bcftools_call",
+        "bcftools_view",
+        "bcftools_index",
+        "bcftools_concat",
+        "bcftools_query",
+        "bcftools_stats",
+        "bcftools_sort",
+        "bcftools_plugin",
+    ),
+    "bioinfomcp-bedtools-coverage": ("bedtools_coverage",),
+    "bioinfomcp-bedtools-intersect": ("bedtools_intersect",),
+    "bioinfomcp-bowtie2": ("bowtie2_align", "bowtie2_build", "bowtie2_inspect"),
+    "bioinfomcp-bwa": ("bwa_index", "bwa_mem", "bwa_aln", "bwa_samse", "bwa_sampe", "bwa_bwasw"),
+    "bioinfomcp-computegcbias": ("computeGCBias",),
+    "bioinfomcp-correctgcbias": ("correctGCBias",),
+    "bioinfomcp-cutadapt": ("cutadapt",),
+    "bioinfomcp-fatotwobit": ("faToTwoBit",),
+    "bioinfomcp-fastp": ("fastp",),
+    "bioinfomcp-flye": ("flye",),
+    "bioinfomcp-freebayes": ("freebayes",),
+    "bioinfomcp-gatk-applybqsr": ("gatk_ApplyBQSR",),
+    "bioinfomcp-gatk-baserecalibrator": ("gatk_BaseRecalibrator",),
+    "bioinfomcp-gatk-haplotypecaller": ("gatk_HaplotypeCaller",),
+    "bioinfomcp-gatk-selectvariants": ("gatk_SelectVariants",),
+    "bioinfomcp-gunzip": ("gunzip", "gzip", "zcat"),
+    "bioinfomcp-hisat2": ("hisat2_align",),
+    "bioinfomcp-kallisto": ("index", "quant", "quant_tcc", "bus", "h5dump", "inspect", "version", "cite"),
+    "bioinfomcp-macs3-callpeak": ("macs3_callpeak",),
+    "bioinfomcp-macs3-hmmratac": ("macs3_hmmratac",),
+    "bioinfomcp-mafft": ("mafft", "linsi", "ginsi", "einsi", "fftnsi", "fftns", "nwnsi", "nwns", "mafft_profile"),
+    "bioinfomcp-meme": ("meme",),
+    "bioinfomcp-minimap2": ("minimap_index", "minimap_map", "minimap_version"),
+    "bioinfomcp-multiqc": ("multiqc",),
+    "bioinfomcp-plotcorrelation": ("plotCorrelation",),
+    "bioinfomcp-qualimap": ("bamqc", "rnaseq", "multi_bamqc", "counts", "clustering", "comp_counts"),
+    "bioinfomcp-quast": ("quast",),
+    "bioinfomcp-salmon": ("salmon_index", "salmon_quant"),
+    "bioinfomcp-samtools": (
+        "samtools_view",
+        "samtools_sort",
+        "samtools_index",
+        "samtools_flagstat",
+        "samtools_merge",
+        "samtools_faidx",
+        "samtools_fastq",
+        "samtools_flag_convert",
+        "samtools_quickcheck",
+        "samtools_stats",
+        "samtools_depth",
+    ),
+    "bioinfomcp-seqtk": ("seqtk_seq",),
+    "bioinfomcp-spades": ("spades",),
+    "bioinfomcp-star": ("star_genome_generate", "star_align_reads"),
+    "bioinfomcp-stringtie": ("stringtie_assemble", "stringtie_merge", "stringtie_version"),
+    "bioinfomcp-trim-galore": ("trim_galore",),
+    "bioinfomcp-trimmomatic": ("trimmomatic_se", "trimmomatic_pe"),
 }
