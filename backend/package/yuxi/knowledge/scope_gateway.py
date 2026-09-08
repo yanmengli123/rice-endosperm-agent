@@ -11,6 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import aliased
 
 from yuxi.knowledge.base import KnowledgeBase
+from yuxi.knowledge.products.registry import is_derived_product
 from yuxi.knowledge.research_evidence import (
     build_evidence_semantics,
     candidate_explicitly_requested,
@@ -92,6 +93,20 @@ def _lexical_score(query_tokens: list[str], *parts: Any) -> float:
     return min(1.0, 0.2 + (matched / len(query_tokens)) * 0.8)
 
 
+def _member_kb_type(member: dict[str, Any], target: dict[str, Any] | None = None) -> str:
+    """Best-effort kb_type for a scope member (member dict wins, retriever metadata fallback)."""
+    kb_type = str(member.get("kb_type") or "").strip().casefold()
+    if kb_type:
+        return kb_type
+    metadata = target.get("metadata") if isinstance(target, dict) else None
+    return str((metadata or {}).get("kb_type") or "").strip().casefold()
+
+
+def _member_is_derived(member: dict[str, Any], target: dict[str, Any] | None = None) -> bool:
+    """派生知识产品（如 llmwiki）永远不能进入证据通道（Authority Gate）。"""
+    return is_derived_product(_member_kb_type(member, target))
+
+
 def _normalize_document_results(kb_id: str, kb_name: str, result: Any, priority: int) -> list[dict[str, Any]]:
     if isinstance(result, list):
         result = KnowledgeBase.build_search_output(kb_id, result)
@@ -141,6 +156,10 @@ async def _query_document_source(member: dict[str, Any], query_text: str) -> tup
     from yuxi.knowledge.runtime import knowledge_base
 
     kb_id = member["kb_id"]
+    if _member_is_derived(member):
+        # Authority Gate：派生产品无论资源是否可用都先被门禁拒绝，不属于可用性问题。
+        logger.warning(f"Scope member {kb_id} is a derived product; document channel denied")
+        return [], "DERIVED_PRODUCT_CHANNEL_DENIED"
     target = knowledge_base.get_retrievers().get(kb_id)
     if not target:
         return [], "DOCUMENT_RETRIEVER_UNAVAILABLE"
@@ -188,6 +207,11 @@ async def _query_source_with_timeout(
 async def _query_managed_graph_source(
     member: dict[str, Any], query_text: str, *, limit: int
 ) -> tuple[list[dict[str, Any]], str | None]:
+    if _member_is_derived(member):
+        # Authority Gate：派生知识产品没有 graph/structured 证据通道，
+        # 门禁优先于通道开关判断——策略拒绝不依赖成员策略字段。
+        logger.warning(f"Scope member {member['kb_id']} is a derived product; graph channel denied")
+        return [], "DERIVED_PRODUCT_CHANNEL_DENIED"
     if not member.get("graph_enabled") and not member.get("structured_enabled"):
         return [], None
     tokens = _query_tokens(query_text)
@@ -574,6 +598,11 @@ async def query_knowledge_scope_gateway(
     per_source_limit = max(top_k, 8)
     for member in members:
         kb_id = member["kb_id"]
+        if _member_is_derived(member):
+            # Authority Gate：派生知识产品不产生任何证据任务；未来由
+            # Wiki Navigator 单独供给 navigation_hits（P4）。
+            logger.warning(f"Scope member {kb_id} is a derived product; evidence channels skipped")
+            continue
         tasks.extend(
             [
                 _query_source_with_timeout(

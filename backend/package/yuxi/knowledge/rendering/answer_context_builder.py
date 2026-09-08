@@ -3,11 +3,36 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from yuxi.knowledge.products.authority_gate import AuthorityGate
+from yuxi.knowledge.products.registry import is_derived_product
 from yuxi.knowledge.validation.citation_validator import redact_narrative_citation_identifiers
+
+
+def _drop_derived_product_rows(rows: list[dict[str, Any]] | None) -> tuple[list[dict[str, Any]], int]:
+    """答案上下文绝不接收派生知识产品（llmwiki）的行。
+
+    返回 ``(kept_rows, dropped_count)``。行内 kb_type 缺失时视为权威源
+    （向后兼容既有数据），命中派生产品的行被丢弃并计数，便于观测。
+    """
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        kb_type = str(row.get("kb_type") or "").strip().casefold()
+        if kb_type and is_derived_product(kb_type):
+            dropped += 1
+            continue
+        kept.append(row)
+    return kept, dropped
 
 
 def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: int = 10) -> str:
     """Compress the complete backend Contract into the context permitted for LLM narration."""
+    # Authority Gate 第一层：WikiNavigationHit 等导航对象混入证据通道立即抛错。
+    AuthorityGate.reject_navigation_as_evidence(contract.get("evidence"))
+    # Authority Gate 第二层：按产品注册中心丢弃派生产品检索行。
+    evidence_rows, derived_rows_dropped = _drop_derived_product_rows(contract.get("evidence"))
     scope = contract.get("knowledge_scope_snapshot") or {}
     claims = contract.get("claims") or []
     unique_subjects: set[str] = set()
@@ -34,7 +59,7 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         for claim in claims
     ]
     narrative_evidence = []
-    for evidence in contract.get("evidence") or []:
+    for evidence in evidence_rows:
         if len(narrative_evidence) >= max(0, int(narrative_evidence_limit)):
             break
         narrative_evidence.append(
@@ -96,6 +121,10 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
             },
         },
         "completeness": contract.get("completeness") or {},
+        "authority_gate": {
+            "derived_rows_dropped": derived_rows_dropped,
+            "wiki_navigation_in_evidence": False,
+        },
         "claims": claim_summaries,
         "selected_evidence": narrative_evidence,
         "graph_expansion": {
