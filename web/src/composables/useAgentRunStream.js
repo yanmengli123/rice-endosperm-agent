@@ -101,7 +101,8 @@ export function useAgentRunStream({
   onScrollToBottom,
   streamSmoother,
   onInterruptDetected = null,
-  onTerminalDetected = null
+  onTerminalDetected = null,
+  onTraceEvent = null
 }) {
   const saveActiveRunSnapshot = (threadId, runId, lastSeq = '0-0') => {
     if (!threadId || !runId) return
@@ -138,6 +139,10 @@ export function useAgentRunStream({
     if (ts.runStreamAbortController) {
       ts.runStreamAbortController.abort()
       ts.runStreamAbortController = null
+    }
+    if (ts.traceStreamAbortController) {
+      ts.traceStreamAbortController.abort()
+      ts.traceStreamAbortController = null
     }
   }
 
@@ -250,7 +255,10 @@ export function useAgentRunStream({
       clearActiveRunSnapshot(threadId)
       return false
     }
-    const backoff = Math.min(RUN_RECONNECT_BASE_DELAY_MS * 2 ** (attempts - 1), RUN_RECONNECT_MAX_DELAY_MS)
+    const backoff = Math.min(
+      RUN_RECONNECT_BASE_DELAY_MS * 2 ** (attempts - 1),
+      RUN_RECONNECT_MAX_DELAY_MS
+    )
     setTimeout(
       () => {
         const latest = getThreadState(threadId)
@@ -270,7 +278,9 @@ export function useAgentRunStream({
 
     stopRunStreamSubscription(threadId)
     const runController = new AbortController()
+    const traceController = new AbortController()
     ts.runStreamAbortController = runController
+    ts.traceStreamAbortController = traceController
     ts.activeRunId = runId
     ts.runLastSeq = normalizeRunSeq(afterSeq)
     ts.lastRetryableJobTry = null
@@ -278,6 +288,31 @@ export function useAgentRunStream({
     saveActiveRunSnapshot(threadId, runId, ts.runLastSeq)
     const touchedThreadIds = new Set([threadId])
     let sawTerminalEvent = false
+
+    // Trace 使用独立的 PG-backed SSE，消息流的 Redis cursor 与 ledger sequence
+    // 从此互不混用。断线不弹业务错误，快照/补拉仍可完整恢复。
+    void (async () => {
+      try {
+        const afterTraceSequence = Number(ts.trace?.scannedThroughSequence) || 0
+        const response = await agentApi.streamAgentRunTrace(runId, afterTraceSequence, {
+          signal: traceController.signal
+        })
+        if (!response.ok) throw new Error(`Trace SSE response not ok: ${response.status}`)
+        await processRunSseResponse(response, (event, data) => {
+          if (event !== 'trace' || !data || ts.activeRunId !== runId) return
+          onTraceEvent?.({
+            threadId: getThreadIdFromObject(data) || threadId,
+            runId,
+            traceEvent: data
+          })
+        })
+      } catch (error) {
+        if (error?.name !== 'AbortError')
+          console.warn('Trace SSE stream unavailable:', runId, error)
+      } finally {
+        if (ts.traceStreamAbortController === traceController) ts.traceStreamAbortController = null
+      }
+    })()
 
     try {
       const response = await agentApi.streamAgentRunEvents(runId, ts.runLastSeq, {
@@ -301,6 +336,17 @@ export function useAgentRunStream({
         }
 
         const payload = data.payload || {}
+        // 执行轨迹帧（yuxi.run-trace.v1）：旁路给 trace 投影，不进消息通道
+        if (event === 'trace' && payload.trace && typeof payload.trace === 'object') {
+          const traceRouteThreadId =
+            getThreadIdFromObject(payload.trace) || getThreadIdFromObject(data) || threadId
+          onTraceEvent?.({
+            threadId: traceRouteThreadId,
+            runId,
+            traceEvent: payload.trace
+          })
+          return
+        }
         const terminalStatus = event === 'end' ? payload.status : data.status
         const isRetryableError =
           event === 'error' && (payload?.retryable === true || payload?.chunk?.retryable === true)

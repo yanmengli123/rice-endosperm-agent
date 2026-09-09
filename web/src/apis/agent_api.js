@@ -121,6 +121,34 @@ export const agentApi = {
   getAgentRunKnowledgeRetrievals: (runId) =>
     apiGet(`/api/agent/runs/${runId}/knowledge-retrievals`),
 
+  /** 获取 Run 执行轨迹快照（summary + spans + snapshot_sequence）。 */
+  getAgentRunTrace: (runId) => apiGet(`/api/agent/runs/${runId}/trace`),
+
+  /** 执行轨迹缺口补拉：返回 sequence 严格大于 afterSequence 的事件。 */
+  getAgentRunTraceEvents: (runId, { afterSequence = 0, limit = 500 } = {}) => {
+    const params = new URLSearchParams({
+      after_sequence: String(afterSequence),
+      limit: String(limit)
+    })
+    return apiGet(`/api/agent/runs/${runId}/trace/events?${params.toString()}`)
+  },
+
+  /** 获取 Run 执行轨迹 span 列表。 */
+  getAgentRunTraceSpans: (runId) => apiGet(`/api/agent/runs/${runId}/trace/spans`),
+
+  /** 独立 Trace SSE；Last-Event-ID 是 PostgreSQL ledger sequence。 */
+  streamAgentRunTrace: (runId, afterSequence = 0, options = {}) => {
+    const { signal } = options
+    const headers = { ...useUserStore().getAuthHeaders() }
+    const cursor = Math.max(0, Number(afterSequence) || 0)
+    if (cursor > 0) headers['Last-Event-ID'] = String(cursor)
+    return fetch(`/api/agent/runs/${runId}/trace/stream`, {
+      method: 'GET',
+      headers,
+      signal
+    })
+  },
+
   /**
    * 取消 Run
    * @param {string} runId - run ID

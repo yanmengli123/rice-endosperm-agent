@@ -115,45 +115,68 @@ async def record_mcp_call(
     status: str,
     duration_ms: int | None,
     provenance: dict[str, Any] | None = None,
-) -> None:
+) -> int | None:
     context = get_mcp_execution_context()
     if context is None:
-        return
+        return None
     from yuxi.storage.postgres.manager import pg_manager
 
     try:
         arguments_digest = stable_digest(arguments)
     except TypeError as error:
         logger.warning(f"Skipped MCP call audit for server={server_slug} capability={capability_name}: {error}")
-        return
+        return None
     try:
         result_digest = stable_digest(result)
     except TypeError as error:
         logger.warning(f"Skipped MCP call audit for server={server_slug} capability={capability_name}: {error}")
-        return
+        return None
     try:
         async with pg_manager.get_async_session_context() as session:
-            session.add(
-                MCPCallAudit(
-                    tenant_id=context.tenant_id,
-                    uid=context.uid,
-                    run_id=context.run_id,
-                    agent_slug=context.agent_slug,
-                    installation_id=context.installation_id,
-                    server_slug=server_slug,
-                    capability_type=capability_type,
-                    capability_name=capability_name,
-                    arguments_digest=arguments_digest,
-                    result_digest=result_digest,
-                    status=status,
-                    duration_ms=duration_ms,
-                    data_access_level=context.data_access_level,
-                    provenance=dict(provenance or {}),
-                )
+            audit = MCPCallAudit(
+                tenant_id=context.tenant_id,
+                uid=context.uid,
+                run_id=context.run_id,
+                agent_slug=context.agent_slug,
+                installation_id=context.installation_id,
+                server_slug=server_slug,
+                capability_type=capability_type,
+                capability_name=capability_name,
+                arguments_digest=arguments_digest,
+                result_digest=result_digest,
+                status=status,
+                duration_ms=duration_ms,
+                data_access_level=context.data_access_level,
+                provenance=dict(provenance or {}),
             )
+            session.add(audit)
+            await session.flush()
+            audit_id = int(audit.id)
             await session.commit()
+        from yuxi.trace import emit_trace
+        from yuxi.trace.recorder import current_recorder
+
+        recorder = current_recorder()
+        emit_trace(
+            category="MCP",
+            operation="audit",
+            event_type="mcp.audit.recorded",
+            span_id=recorder.latest_running_span_id("MCP") if recorder else None,
+            attributes={
+                "mcp_server": server_slug,
+                "mcp_tool": capability_name,
+                "mcp_audit_id": audit_id,
+                "audit_status": status,
+            },
+            resource_refs=[{"type": "mcp_call_audit", "id": audit_id}],
+            visibility="USER",
+        )
+        return audit_id
     except Exception as exc:  # auditing must be visible but must not duplicate the scientific operation
-        logger.error(f"Failed to persist MCP call audit server={server_slug} capability={capability_name}: {exc!r}")
+        logger.error(
+            f"Failed to persist MCP call audit server={server_slug} capability={capability_name}: {type(exc).__name__}"
+        )
+        return None
 
 
 __all__ = [

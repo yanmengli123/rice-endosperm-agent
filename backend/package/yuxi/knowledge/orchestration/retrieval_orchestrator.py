@@ -170,6 +170,64 @@ def _gateway_source_status(result: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _emit_knowledge_trace(
+    retrieval_id: str,
+    contract: dict[str, Any],
+    started_at,
+    *,
+    skipped: bool = False,
+) -> None:
+    """把一次知识检索的事实投影成 trace 事件（无活跃 recorder 时 no-op）。
+
+    详情（chunk/claim/evidence/DOI/页码）永远留在 KnowledgeRetrievalRun 审计表，
+    trace 只保存摘要计数与 resource_ref 引用。
+    """
+    from yuxi.trace import emit_trace
+
+    summary_obj = contract.get("retrieval_summary") or {}
+    completeness = contract.get("completeness") or {}
+    status = str(contract.get("status") or "COMPLETED")
+    suffix = "skipped" if skipped else ("failed" if status == "FAILED" else "completed")
+    duration_ms = int((utc_now_naive() - started_at).total_seconds() * 1000)
+    attributes = {
+        "claim_count": summary_obj.get("claim_count"),
+        "evidence_count": summary_obj.get("evidence_count"),
+        "wiki_navigation_hit_count": summary_obj.get("wiki_navigation_hit_count"),
+        "intent": (contract.get("retrieval_plan") or {}).get("intent"),
+        "contract_status": status,
+        "completeness_status": completeness.get("status"),
+        "warning_count": len(contract.get("warnings") or []),
+    }
+    error_code = contract.get("error_code")
+    if error_code:
+        attributes["error_code"] = str(error_code)
+    scope_snapshot = contract.get("knowledge_scope_snapshot") or {}
+    if scope_snapshot.get("scope_version") is not None:
+        attributes["knowledge_scope_version"] = scope_snapshot.get("scope_version")
+    if skipped:
+        summary_text = "判定无需知识检索（闲聊/通用问题），已跳过并留痕"
+    elif status == "FAILED":
+        summary_text = f"知识检索失败：{error_code or 'UNKNOWN'}"
+    else:
+        summary_text = (
+            f"召回 {summary_obj.get('evidence_count') or 0} 条证据、"
+            f"{summary_obj.get('claim_count') or 0} 条 Claim，"
+            f"Wiki 导航命中 {summary_obj.get('wiki_navigation_hit_count') or 0} 次"
+        )
+    emit_trace(
+        category="KNOWLEDGE",
+        operation="search",
+        event_type=f"knowledge.search.{suffix}",
+        span_id=None if skipped else retrieval_id,
+        title="知识检索",
+        summary=summary_text,
+        duration_ms=duration_ms,
+        attributes=attributes,
+        resource_refs=[{"type": "knowledge_retrieval", "id": retrieval_id}],
+        visibility="ADMIN" if skipped else "USER",
+    )
+
+
 async def _persist_audit(
     db: AsyncSession,
     *,
@@ -274,7 +332,22 @@ async def prepare_knowledge_context(
             contract=contract,
             started_at=started_at,
         )
+        _emit_knowledge_trace(retrieval_id, contract, started_at, skipped=True)
         return contract
+
+    from yuxi.trace import emit_trace
+
+    emit_trace(
+        category="KNOWLEDGE",
+        operation="search",
+        event_type="knowledge.search.started",
+        span_id=retrieval_id,
+        title="知识检索",
+        attributes={
+            "intent": plan.get("intent"),
+            "knowledge_scope_version": scope_snapshot.get("scope_version"),
+        },
+    )
 
     try:
         navigation_status: list[dict[str, Any]] = []
@@ -487,4 +560,5 @@ async def prepare_knowledge_context(
         contract=contract,
         started_at=started_at,
     )
+    _emit_knowledge_trace(retrieval_id, contract, started_at)
     return contract

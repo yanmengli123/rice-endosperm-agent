@@ -6,16 +6,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import filter_config_by_role
 from yuxi.repositories.agent_repository import (
     AgentRepository,
     is_builtin_agent,
+    resolve_creator_department,
     user_can_access_agent,
     user_can_manage_agent,
-    resolve_creator_department,
 )
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.knowledge_retrieval_repository import (
@@ -31,7 +29,15 @@ from yuxi.services.agent_run_service import (
     stream_agent_run_events,
 )
 from yuxi.services.input_message_service import build_chat_input_message
+from yuxi.services.trace_service import (
+    get_run_trace_snapshot,
+    list_run_trace_events,
+    list_run_trace_spans,
+    stream_run_trace_events,
+)
 from yuxi.storage.postgres.models_business import User
+
+from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -321,6 +327,66 @@ async def get_agent_run_knowledge_retrievals(
     return {"retrievals": [serialize_retrieval_run(record) for record in records]}
 
 
+@agent_router.get("/runs/{run_id}/trace")
+async def get_agent_run_trace(
+    run_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """轨迹快照：summary + span 列表 + snapshot_sequence（SSE 缺口补拉的起点）。"""
+    return await get_run_trace_snapshot(run_id=run_id, current_uid=str(current_user.uid), db=db, include_admin=False)
+
+
+@agent_router.get("/runs/{run_id}/trace/events")
+async def get_agent_run_trace_events(
+    run_id: str,
+    after_sequence: int = Query(default=0, ge=0, description="返回 sequence 严格大于该值的事件"),
+    limit: int = Query(default=500, ge=1, le=1000),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """轨迹缺口补拉：升序返回事件，配合客户端 last_applied_sequence 使用。"""
+    return await list_run_trace_events(
+        run_id=run_id,
+        current_uid=str(current_user.uid),
+        db=db,
+        after_sequence=after_sequence,
+        limit=limit,
+        include_admin=False,
+    )
+
+
+@agent_router.get("/runs/{run_id}/trace/spans")
+async def get_agent_run_trace_spans(
+    run_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await list_run_trace_spans(run_id=run_id, current_uid=str(current_user.uid), db=db)
+
+
+@agent_router.get("/runs/{run_id}/trace/stream")
+async def stream_agent_run_trace(
+    run_id: str,
+    after_sequence: int = Query(default=0, ge=0),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # 在 StreamingResponse 脱离请求 session 前完成归属校验。
+    run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_user.uid))
+    if not run:
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+    cursor = after_sequence
+    if last_event_id and last_event_id.isdigit():
+        cursor = int(last_event_id)
+    return StreamingResponse(
+        stream_run_trace_events(run_id=run_id, after_sequence=cursor),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @agent_router.post("/runs/{run_id}/cancel")
 async def cancel_agent_run(
     run_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
@@ -332,7 +398,13 @@ async def cancel_agent_run(
 async def stream_run_events(
     run_id: str,
     after_seq: str = "0-0",
-    verbose: bool = Query(default=True, description="是否返回完整事件载荷；false 时仅返回 UI/客户端消费所需字段"),
+    verbose: bool = Query(
+        default=False,
+        description=(
+            "是否返回完整事件载荷（含 LangGraph 内部事件）；默认 false 仅返回客户端所需字段。"
+            "执行轨迹不在本消息流中返回，请使用独立 /trace/stream 端点"
+        ),
+    ),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     current_user: User = Depends(get_required_user),
 ):

@@ -26,6 +26,7 @@ from yuxi.agents.middlewares import (
     save_attachments_to_fs,
 )
 from yuxi.agents.middlewares.skills import SkillsMiddleware
+from yuxi.agents.middlewares.trace import TraceMiddleware
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 
 _SUBAGENT_DISABLED_TOOLS = frozenset({"present_artifacts", "ask_user_question", "install_skill"})
@@ -78,6 +79,7 @@ async def _build_middlewares(context):
             context=context,
         ),
         save_attachments_to_fs,
+        TraceMiddleware(),
         SkillsMiddleware(),
         KnowledgeContextMiddleware(),
         summary_middleware,

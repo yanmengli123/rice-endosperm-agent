@@ -137,6 +137,16 @@ async def resolve_runtime_skills_for_context(context, *, db: AsyncSession | None
     selected = normalize_string_list(getattr(context, "skills", None))
     context_skills = [slug for slug in selected if slug in available]
     prompt_skills = expand_skill_closure(context_skills, dependency_map)
+    from yuxi.trace import emit_trace
+
+    if prompt_skills:
+        emit_trace(
+            category="SKILL",
+            operation="runtime",
+            event_type="skill.runtime.resolved",
+            title="Skill 依赖已解析",
+            attributes={"prompt_skills": prompt_skills, "skill_count": len(prompt_skills)},
+        )
     return {
         "context_skills": context_skills,
         "prompt_skills": prompt_skills,
@@ -390,6 +400,15 @@ class SkillsMiddleware(AgentMiddleware):
             return result
 
         logger.debug(f"SkillsMiddleware: activated skill by read_file: {slug}")
+        from yuxi.trace import emit_trace
+
+        emit_trace(
+            category="SKILL",
+            operation="runtime",
+            event_type="skill.runtime.activated",
+            title=f"Skill 已激活：{slug}",
+            attributes={"skill_slug": slug},
+        )
         return self._merge_activated_skill_update(result, slug)
 
     async def awrap_tool_call(

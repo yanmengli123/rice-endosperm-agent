@@ -19,7 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, validates
 from yuxi.storage.minio.client import normalize_public_minio_url
-from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
+from yuxi.utils.datetime_utils import format_utc_datetime, utc_now, utc_now_naive
 
 # SQLite 测试库不支持 BIGINT 自增主键，统一用带方言变体的整型主键
 BigIntPk = BigInteger().with_variant(Integer(), "sqlite")
@@ -1405,6 +1405,25 @@ class AgentRun(Base):
             "created_at": format_utc_datetime(self.created_at),
             "updated_at": format_utc_datetime(self.updated_at),
         }
+
+
+class AgentRunDispatchOutbox(Base):
+    """AgentRun 创建事务内的可靠队列投递意图；ARQ job_id 保证重复投递幂等。"""
+
+    __tablename__ = "agent_run_dispatch_outbox"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, unique=True)
+    status = Column(String(16), nullable=False, default="PENDING", index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    available_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    lease_id = Column(String(64), nullable=True)
+    leased_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(String(128), nullable=True)
+    dispatched_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
 
 Index(

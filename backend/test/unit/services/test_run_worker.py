@@ -47,6 +47,92 @@ class _NeverCancelledContext:
         await asyncio.Event().wait()
 
 
+@pytest.mark.asyncio
+async def test_terminal_trace_and_run_status_share_transaction(monkeypatch: pytest.MonkeyPatch):
+    order: list[tuple] = []
+    db_token = object()
+
+    class Recorder:
+        run_id = "run-1"
+
+        def close_running_spans(self, **kwargs):
+            order.append(("close", kwargs["suffix"], kwargs["error_type"]))
+
+        def record_run_terminal(self, status, **kwargs):
+            order.append(("record", status, kwargs.get("error_type")))
+
+        async def flush(self, *, transaction_action):
+            order.append(("trace-staged",))
+            await transaction_action(db_token)
+            order.append(("transaction-committed",))
+
+    async def mark(run_id, status, error_type=None, error_message=None, *, db=None):
+        del error_message
+        order.append(("run-terminal", run_id, status, error_type, db))
+
+    async def acknowledge(run_id):
+        order.append(("dispatch-ack", run_id))
+
+    monkeypatch.setattr(run_worker, "mark_run_terminal", mark)
+    monkeypatch.setattr(run_worker, "acknowledge_agent_run_dispatch", acknowledge)
+
+    committed = await run_worker._persist_terminal_trace(
+        Recorder(),
+        "failed",
+        error_type="safe_error",
+    )
+
+    assert committed is True
+    assert order == [
+        ("close", "interrupted", "safe_error"),
+        ("record", "failed", "safe_error"),
+        ("trace-staged",),
+        ("run-terminal", "run-1", "failed", "safe_error", db_token),
+        ("transaction-committed",),
+        ("dispatch-ack", "run-1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_trace_failure_falls_back_to_business_status(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple] = []
+
+    class Recorder:
+        run_id = "run-1"
+
+        def close_running_spans(self, **kwargs):
+            del kwargs
+
+        def record_run_terminal(self, status, **kwargs):
+            del status, kwargs
+
+        async def flush(self, *, transaction_action):
+            del transaction_action
+            raise RuntimeError("trace database unavailable")
+
+    async def mark(run_id, status, error_type=None, error_message=None, *, db=None):
+        del error_message
+        calls.append((run_id, status, error_type, db))
+
+    acknowledged: list[str] = []
+
+    async def acknowledge(run_id):
+        acknowledged.append(run_id)
+
+    monkeypatch.setattr(run_worker, "mark_run_terminal", mark)
+    monkeypatch.setattr(run_worker, "acknowledge_agent_run_dispatch", acknowledge)
+
+    committed = await run_worker._persist_terminal_trace(
+        Recorder(),
+        "failed",
+        error_type="safe_error",
+    )
+
+    assert committed is False
+    assert calls == [("run-1", "failed", "safe_error", None)]
+    assert acknowledged == ["run-1"]
+
+
 def _build_run() -> SimpleNamespace:
     return SimpleNamespace(
         id="run-1",
@@ -57,6 +143,7 @@ def _build_run() -> SimpleNamespace:
         run_type="chat",
         agent_slug="ChatbotAgent",
         uid="user-1",
+        tenant_id=None,
         conversation_thread_id="thread-1",
         created_by_run_id=None,
     )
@@ -70,6 +157,11 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
     async def fake_noop(*args, **kwargs):
         del args, kwargs
         return None
+
+    async def fake_trace_flush(self, *, transaction_action=None):
+        del self
+        if transaction_action is not None:
+            await transaction_action(object())
 
     async def fake_get_run(run_id: str):
         del run_id
@@ -89,6 +181,7 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
 
     monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
     monkeypatch.setattr(run_worker, "_get_run", fake_get_run)
+    monkeypatch.setattr(run_worker, "acknowledge_agent_run_dispatch", fake_noop)
     monkeypatch.setattr(run_worker, "_load_user", fake_load_user)
     monkeypatch.setattr(run_worker, "_load_input_message", fake_load_input_message)
     monkeypatch.setattr(run_worker, "mark_run_running", fake_noop)
@@ -97,6 +190,11 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
     monkeypatch.setattr(run_worker.RunContext, "start", fake_noop)
     monkeypatch.setattr(run_worker.RunContext, "close", fake_noop)
     monkeypatch.setattr(run_worker.RunContext, "is_cancelled", fake_not_cancelled)
+    # 轨迹记录器：单测无真实 PG/Redis，seed/flush/finalize 全部置空
+    # （emit 是纯内存缓冲，保留真实路径以覆盖事件组装逻辑）。
+    monkeypatch.setattr(run_worker.TraceRecorder, "seed", fake_noop)
+    monkeypatch.setattr(run_worker.TraceRecorder, "flush", fake_trace_flush)
+    monkeypatch.setattr(run_worker.TraceRecorder, "finalize", fake_noop)
 
 
 @pytest.mark.asyncio
@@ -125,8 +223,8 @@ async def test_process_agent_run_restores_invocation_meta(monkeypatch: pytest.Mo
         del kwargs
         events.append({"run_id": run_id, "event_type": event_type, "payload": payload})
 
-    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
-        del run_id, error_type, error_message
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del run_id, error_type, error_message, db
         terminal_statuses.append(status)
 
     def fake_stream_agent_chat(**kwargs):
@@ -166,8 +264,8 @@ async def test_process_agent_run_commits_output_before_marking_completed(monkeyp
         finally:
             stream_session_exited = True
 
-    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
-        del run_id, error_type, error_message
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del run_id, error_type, error_message, db
         assert status == "completed"
         assert stream_session_exited is True
 
@@ -194,8 +292,8 @@ async def test_process_agent_run_non_retryable_error_marks_failed(monkeypatch: p
         del run_id, payload, kwargs
         events.append(event_type)
 
-    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
-        del run_id, error_type, error_message
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del run_id, error_type, error_message, db
         terminal_statuses.append(status)
 
     monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
@@ -226,8 +324,8 @@ async def test_process_agent_run_retryable_error_fails_without_auto_retry(monkey
         del run_id, kwargs
         events.append({"event_type": event_type, "payload": payload})
 
-    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
-        del run_id, error_message
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del run_id, error_message, db
         terminal_statuses.append(status)
         terminal_error_types.append(error_type)
 
@@ -311,8 +409,8 @@ async def test_process_agent_run_idle_timeout_reaches_failed_terminal(monkeypatc
         del run_id, kwargs
         events.append({"event_type": event_type, "payload": payload})
 
-    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
-        del run_id, error_message
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del run_id, error_message, db
         terminal_updates.append((status, error_type))
 
     def fake_consume(stream, run_ctx):
@@ -327,8 +425,7 @@ async def test_process_agent_run_idle_timeout_reaches_failed_terminal(monkeypatc
 
     assert terminal_updates == [("failed", "run_idle_timeout")]
     assert any(
-        event["event_type"] == "error"
-        and event["payload"]["chunk"]["error_type"] == "run_idle_timeout"
+        event["event_type"] == "error" and event["payload"]["chunk"]["error_type"] == "run_idle_timeout"
         for event in events
     )
 
@@ -356,8 +453,8 @@ async def test_process_subagent_run_restores_runtime_context(monkeypatch: pytest
     async def fake_append_event(run_id: str, event_type: str, payload: dict, **kwargs):
         del run_id, event_type, payload, kwargs
 
-    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
-        del run_id, error_type, error_message
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del run_id, error_type, error_message, db
         terminal_statuses.append(status)
 
     def fake_stream_agent_chat(**kwargs):
@@ -390,8 +487,14 @@ async def test_process_agent_run_rejects_unknown_run_type(monkeypatch: pytest.Mo
     _patch_common(monkeypatch, run_obj)
 
     terminal_errors: list[dict] = []
+    events: list[tuple[str, dict]] = []
 
-    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
+    async def fake_append_event(run_id: str, event_type: str, payload: dict, **kwargs):
+        del run_id, kwargs
+        events.append((event_type, payload))
+
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del db
         terminal_errors.append(
             {
                 "run_id": run_id,
@@ -406,6 +509,7 @@ async def test_process_agent_run_rejects_unknown_run_type(monkeypatch: pytest.Mo
         raise AssertionError("unknown run_type must not enter chat stream")
 
     monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
+    monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
     monkeypatch.setattr(run_worker, "stream_agent_chat", fail_stream_agent_chat)
 
     await run_worker.process_agent_run({"job_try": 1}, "run-1")
@@ -418,6 +522,9 @@ async def test_process_agent_run_rejects_unknown_run_type(monkeypatch: pytest.Mo
             "error_message": "不支持的 run_type: unknown",
         }
     ]
+    assert [event_type for event_type, _ in events] == ["error", "end"]
+    assert events[-1][1]["trace_status"] == "COMMITTED"
+    assert "reason" not in events[-1][1]
 
 
 @pytest.mark.asyncio
@@ -426,6 +533,11 @@ async def test_process_agent_run_rejects_invalid_raw_input_message(monkeypatch: 
     _patch_common(monkeypatch, run_obj)
 
     terminal_errors: list[dict] = []
+    events: list[tuple[str, dict]] = []
+
+    async def fake_append_event(run_id: str, event_type: str, payload: dict, **kwargs):
+        del run_id, kwargs
+        events.append((event_type, payload))
 
     async def fake_load_input_message(message_id: int | None):
         assert message_id == 10
@@ -435,7 +547,8 @@ async def test_process_agent_run_rejects_invalid_raw_input_message(monkeypatch: 
             extra_metadata={"raw_message": {"type": "human", "content": object()}},
         )
 
-    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del db
         terminal_errors.append(
             {
                 "run_id": run_id,
@@ -451,6 +564,7 @@ async def test_process_agent_run_rejects_invalid_raw_input_message(monkeypatch: 
 
     monkeypatch.setattr(run_worker, "_load_input_message", fake_load_input_message)
     monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
+    monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
     monkeypatch.setattr(run_worker, "stream_agent_chat", fail_stream_agent_chat)
 
     await run_worker.process_agent_run({"job_try": 1}, "run-1")
@@ -463,6 +577,38 @@ async def test_process_agent_run_rejects_invalid_raw_input_message(monkeypatch: 
             "error_message": "invalid raw_message for chat input message",
         }
     ]
+    assert [event_type for event_type, _ in events] == ["error", "end"]
+    assert events[-1][1]["trace_status"] == "COMMITTED"
+
+
+@pytest.mark.asyncio
+async def test_process_agent_run_cancelled_before_start_has_terminal_trace_status(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    run_obj = _build_run()
+    run_obj.status = "cancel_requested"
+    _patch_common(monkeypatch, run_obj)
+    events: list[tuple[str, dict]] = []
+    terminal_statuses: list[str] = []
+
+    async def fake_append_event(run_id: str, event_type: str, payload: dict, **kwargs):
+        del run_id, kwargs
+        events.append((event_type, payload))
+
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None, *, db=None):
+        del run_id, error_type, error_message, db
+        terminal_statuses.append(status)
+
+    monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
+    monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
+
+    await run_worker.process_agent_run({"job_try": 1}, "run-1")
+
+    assert [event_type for event_type, _ in events] == ["interrupt", "end"]
+    assert events[-1][1]["status"] == "cancelled"
+    assert events[-1][1]["reason"] == "cancelled_before_start"
+    assert events[-1][1]["trace_status"] == "COMMITTED"
+    assert terminal_statuses == ["cancelled"]
 
 
 @pytest.mark.asyncio

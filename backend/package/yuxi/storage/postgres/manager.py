@@ -1034,6 +1034,9 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0020_scientific_pdf_locator_v2", "_migration_0020_scientific_pdf_locator_v2"),
         ("0021_dynamic_llmwiki", "_migration_0021_dynamic_llmwiki"),
         ("0022_dynamic_llmwiki_lifecycle", "_migration_0022_dynamic_llmwiki_lifecycle"),
+        ("0023_execution_trace", "_migration_0023_execution_trace"),
+        ("0024_execution_trace_hardening", "_migration_0024_execution_trace_hardening"),
+        ("0025_execution_trace_retention", "_migration_0025_execution_trace_retention"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -1542,6 +1545,247 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(
             text("CREATE INDEX IF NOT EXISTS ix_knowledge_wikis_deleted_at ON knowledge_wikis (deleted_at)")
         )
+
+    async def _migration_0023_execution_trace(self, conn) -> None:
+        """AgentRun 执行轨迹：事实账本 + Outbox + Span/Summary 投影。
+
+        - 表结构由 ORM metadata create（本迁移内补建，兼容未走 create_business_tables
+          的迁移测试路径）；
+        - 四表启用 RLS 并挂租户策略（与 0021 Wiki 相同的 yuxi.tenant_id 会话变量；
+          应用当前以 owner 连接运行，策略为纵深防御，主边界仍是 repository 过滤）；
+        - 账本表加 trigger 拒绝 UPDATE/DELETE——append-only 由数据库层保证；retention
+          只能走 0025 安装并从 PUBLIC 撤权的 SECURITY DEFINER 函数。
+        """
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_trace import (  # noqa: F401
+                AgentRunTraceEvent,
+                AgentRunTraceHead,
+                AgentRunTraceOutbox,
+                AgentRunTraceSpan,
+                AgentRunTraceSummary,
+            )
+
+            await conn.run_sync(BusinessBase.metadata.create_all)
+        await conn.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION yuxi_trace_events_append_only() RETURNS trigger AS $fn$ "
+                "BEGIN RAISE EXCEPTION 'agent_run_trace_events is append-only'; END; $fn$ LANGUAGE plpgsql"
+            )
+        )
+        await conn.execute(text("DROP TRIGGER IF EXISTS trg_trace_events_append_only ON agent_run_trace_events"))
+        await conn.execute(
+            text(
+                "CREATE TRIGGER trg_trace_events_append_only BEFORE UPDATE OR DELETE ON agent_run_trace_events "
+                "FOR EACH ROW EXECUTE FUNCTION yuxi_trace_events_append_only()"
+            )
+        )
+        for table in (
+            "agent_run_trace_events",
+            "agent_run_trace_outbox",
+            "agent_run_trace_spans",
+            "agent_run_trace_summaries",
+            "agent_run_trace_heads",
+        ):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            policy_name = f"p_{table}_tenant"
+            policy_exists = (
+                await conn.execute(
+                    text("SELECT 1 FROM pg_policies WHERE tablename = :table AND policyname = :policy"),
+                    {"table": table, "policy": policy_name},
+                )
+            ).scalar()
+            if not policy_exists:
+                await conn.execute(
+                    text(
+                        f"CREATE POLICY {policy_name} ON {table} "
+                        "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT) "
+                        "WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)"
+                    )
+                )
+
+    async def _migration_0024_execution_trace_hardening(self, conn) -> None:
+        """加固执行轨迹的一致性、租户归属、W3C 标识和 Outbox 租约。
+
+        0023 可能已在开发/生产库执行，故所有新增列与约束必须在新版本迁移内
+        显式演进，不能依赖 ``metadata.create_all`` 修改现有表。
+        """
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_trace import AgentRunTraceHead  # noqa: F401
+
+            await conn.run_sync(BusinessBase.metadata.create_all)
+
+        statements = (
+            "ALTER TABLE agent_run_trace_events ADD COLUMN IF NOT EXISTS message_key VARCHAR(128)",
+            "ALTER TABLE agent_run_trace_events ADD COLUMN IF NOT EXISTS display_args JSONB",
+            "ALTER TABLE agent_run_trace_outbox ADD COLUMN IF NOT EXISTS lease_id VARCHAR(64)",
+            "ALTER TABLE agent_run_trace_outbox ADD COLUMN IF NOT EXISTS leased_at TIMESTAMPTZ",
+            "ALTER TABLE agent_run_trace_outbox ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ",
+            "ALTER TABLE agent_run_trace_spans ADD COLUMN IF NOT EXISTS message_key VARCHAR(128)",
+            "ALTER TABLE agent_run_trace_spans ADD COLUMN IF NOT EXISTS display_args JSONB",
+            "ALTER TABLE agent_run_trace_spans ADD COLUMN IF NOT EXISTS visibility VARCHAR(16) NOT NULL DEFAULT 'USER'",
+            "ALTER TABLE agent_run_trace_summaries ADD COLUMN IF NOT EXISTS "
+            "projection_sequence BIGINT NOT NULL DEFAULT 0",
+            "CREATE INDEX IF NOT EXISTS ix_agent_run_trace_outbox_lease_id ON agent_run_trace_outbox(lease_id)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+
+        # 0023 installs the append-only trigger before this migration exists.  A
+        # production database may therefore contain legacy rows which require a
+        # one-time tenant/trace-id backfill.  PostgreSQL DDL is transactional, so
+        # a failed migration rolls this maintenance-only trigger change back.
+        # Runtime application code never disables the trigger.
+        await conn.execute(text("ALTER TABLE agent_run_trace_events DISABLE TRIGGER trg_trace_events_append_only"))
+
+        # 历史行以 AgentRun 为第一归属来源；仅对已失去 AgentRun 的旧审计行使用
+        # membership/default tenant 兜底。新写入路径不接受 tenant_id=NULL。
+        for table in (
+            "agent_run_trace_events",
+            "agent_run_trace_outbox",
+            "agent_run_trace_spans",
+            "agent_run_trace_summaries",
+        ):
+            await conn.execute(
+                text(
+                    f"UPDATE {table} t SET tenant_id = COALESCE("  # noqa: S608 - 固定表名元组
+                    "(SELECT r.tenant_id FROM agent_runs r WHERE r.id = t.run_id), "
+                    "(SELECT m.tenant_id FROM tenant_memberships m WHERE m.uid = "
+                    "(SELECT e.uid FROM agent_run_trace_events e WHERE e.run_id = t.run_id LIMIT 1) "
+                    "AND m.status = 'active' ORDER BY m.tenant_id LIMIT 1), 1) "
+                    "WHERE t.tenant_id IS NULL"
+                )
+            )
+            await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN tenant_id SET NOT NULL"))
+
+        await conn.execute(
+            text(
+                "INSERT INTO agent_run_trace_heads(run_id, tenant_id, trace_id, root_span_id, "
+                "last_sequence, projection_sequence) "
+                "SELECT r.id, r.tenant_id, md5('trace:' || r.id), substr(md5('root:' || r.id), 1, 16), "
+                "COALESCE((SELECT MAX(e.sequence) FROM agent_run_trace_events e WHERE e.run_id = r.id), 0), "
+                "COALESCE((SELECT MAX(s.last_sequence) FROM agent_run_trace_summaries s WHERE s.run_id = r.id), 0) "
+                "FROM agent_runs r WHERE EXISTS (SELECT 1 FROM agent_run_trace_events e WHERE e.run_id = r.id) "
+                "ON CONFLICT (run_id) DO NOTHING"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE agent_run_trace_events e SET trace_id = h.trace_id "
+                "FROM agent_run_trace_heads h WHERE h.run_id = e.run_id AND e.trace_id IS NULL"
+            )
+        )
+        await conn.execute(
+            text("UPDATE agent_run_trace_events SET trace_id = md5('trace:' || run_id) WHERE trace_id IS NULL")
+        )
+        await conn.execute(text("ALTER TABLE agent_run_trace_events ALTER COLUMN trace_id TYPE VARCHAR(32)"))
+        await conn.execute(text("ALTER TABLE agent_run_trace_events ALTER COLUMN trace_id SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE agent_run_trace_events ENABLE TRIGGER trg_trace_events_append_only"))
+        await conn.execute(
+            text(
+                "UPDATE agent_run_trace_summaries SET projection_sequence = last_sequence "
+                "WHERE projection_sequence < last_sequence"
+            )
+        )
+        await conn.execute(text("ALTER TABLE agent_run_trace_heads ENABLE ROW LEVEL SECURITY"))
+        policy_exists = (
+            await conn.execute(
+                text(
+                    "SELECT 1 FROM pg_policies WHERE tablename = 'agent_run_trace_heads' "
+                    "AND policyname = 'p_agent_run_trace_heads_tenant'"
+                )
+            )
+        ).scalar()
+        if not policy_exists:
+            await conn.execute(
+                text(
+                    "CREATE POLICY p_agent_run_trace_heads_tenant ON agent_run_trace_heads "
+                    "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT) "
+                    "WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)"
+                )
+            )
+        await conn.execute(text("ALTER TABLE agent_run_dispatch_outbox ENABLE ROW LEVEL SECURITY"))
+        dispatch_policy_exists = (
+            await conn.execute(
+                text(
+                    "SELECT 1 FROM pg_policies WHERE tablename = 'agent_run_dispatch_outbox' "
+                    "AND policyname = 'p_agent_run_dispatch_outbox_tenant'"
+                )
+            )
+        ).scalar()
+        if not dispatch_policy_exists:
+            await conn.execute(
+                text(
+                    "CREATE POLICY p_agent_run_dispatch_outbox_tenant ON agent_run_dispatch_outbox "
+                    "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT) "
+                    "WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)"
+                )
+            )
+
+    async def _migration_0025_execution_trace_retention(self, conn) -> None:
+        """受控、按完整 run 清理 STANDARD trace；不允许应用侧禁用触发器。"""
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_trace_events_retention "
+                "ON agent_run_trace_events(retention_class, occurred_at, run_id)"
+            )
+        )
+        # DELETE 只在下面的 SECURITY DEFINER 函数设置事务级 guard 时放行。
+        # 当前部署仍使用 owner 连接，真正的强隔离需按 ADR 拆分 migration/runtime/
+        # retention 角色；此入口先确保运行时代码无需、也不会 DISABLE TRIGGER。
+        await conn.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION yuxi_trace_events_append_only() RETURNS trigger AS $fn$ "
+                "BEGIN "
+                "IF TG_OP = 'DELETE' AND "
+                "current_setting('yuxi.trace_retention_active', true) = 'on' THEN "
+                "RETURN OLD; "
+                "END IF; "
+                "RAISE EXCEPTION 'agent_run_trace_events is append-only'; "
+                "END; $fn$ LANGUAGE plpgsql"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION yuxi_purge_trace_runs("
+                "p_before TIMESTAMPTZ, p_limit INTEGER DEFAULT 100) RETURNS BIGINT AS $fn$ "
+                "DECLARE deleted_events BIGINT := 0; safe_limit INTEGER; "
+                "BEGIN "
+                "IF p_before IS NULL OR p_before > NOW() - INTERVAL '24 hours' THEN "
+                "RAISE EXCEPTION 'trace retention cutoff must be at least 24 hours old'; "
+                "END IF; "
+                "safe_limit := GREATEST(1, LEAST(COALESCE(p_limit, 100), 1000)); "
+                "PERFORM pg_advisory_xact_lock(hashtext('yuxi-trace-retention')); "
+                "CREATE TEMP TABLE yuxi_trace_retention_candidates("
+                "run_id VARCHAR(64) PRIMARY KEY) ON COMMIT DROP; "
+                "INSERT INTO yuxi_trace_retention_candidates(run_id) "
+                "SELECT e.run_id FROM agent_run_trace_events e "
+                "LEFT JOIN agent_runs r ON r.id = e.run_id "
+                "GROUP BY e.run_id, r.status "
+                "HAVING MAX(e.occurred_at) < p_before "
+                "AND BOOL_AND(e.retention_class = 'STANDARD') "
+                "AND (r.status IS NULL OR r.status IN "
+                "('completed','failed','cancelled','interrupted')) "
+                "AND NOT EXISTS (SELECT 1 FROM agent_run_trace_outbox o "
+                "WHERE o.run_id = e.run_id AND o.status IN ('PENDING','PROCESSING')) "
+                "ORDER BY MAX(e.occurred_at) ASC LIMIT safe_limit; "
+                "DELETE FROM agent_run_trace_outbox WHERE run_id IN "
+                "(SELECT run_id FROM yuxi_trace_retention_candidates); "
+                "DELETE FROM agent_run_trace_spans WHERE run_id IN "
+                "(SELECT run_id FROM yuxi_trace_retention_candidates); "
+                "DELETE FROM agent_run_trace_summaries WHERE run_id IN "
+                "(SELECT run_id FROM yuxi_trace_retention_candidates); "
+                "DELETE FROM agent_run_trace_heads WHERE run_id IN "
+                "(SELECT run_id FROM yuxi_trace_retention_candidates); "
+                "PERFORM set_config('yuxi.trace_retention_active', 'on', true); "
+                "DELETE FROM agent_run_trace_events WHERE run_id IN "
+                "(SELECT run_id FROM yuxi_trace_retention_candidates); "
+                "GET DIAGNOSTICS deleted_events = ROW_COUNT; "
+                "RETURN deleted_events; "
+                "END; $fn$ LANGUAGE plpgsql SECURITY DEFINER "
+                "SET search_path = public, pg_temp"
+            )
+        )
+        await conn.execute(text("REVOKE ALL ON FUNCTION yuxi_purge_trace_runs(TIMESTAMPTZ, INTEGER) FROM PUBLIC"))
 
     async def _apply_versioned_migrations(self):
         self._check_initialized()

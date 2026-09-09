@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 import yuxi.services.agent_run_service as agent_run_service
 from yuxi.services.input_message_service import (
     build_chat_input_message,
@@ -346,14 +346,14 @@ class _CreateRunDb:
     async def execute(self, stmt):
         description = str(stmt)
         # 配额与用户级模型偏好查询在单测中视为无数据
-        if 'user_quotas' in description or 'user_model_preferences' in description:
+        if "user_quotas" in description or "user_model_preferences" in description:
             return _NoneResult()
         # P5：权益预检会解析成员关系（返回一行默认租户）、读权益与 BYOK（视为无数据）
-        if 'tenant_memberships' in description:
+        if "tenant_memberships" in description:
             return _RowsResult([SimpleNamespace(tenant_id=1)])
-        if 'tenant_user_entitlements' in description:
+        if "tenant_user_entitlements" in description:
             return _ScalarResult(self.entitlement)
-        if 'model_user_credentials' in description:
+        if "model_user_credentials" in description:
             return _NoneResult()
         return _UserResult()
 
@@ -429,6 +429,7 @@ class _CreateRunRepo:
             conversation_thread_id=kwargs["conversation_thread_id"],
             agent_slug=kwargs["agent_slug"],
             status="pending",
+            tenant_id=1,
             request_id=kwargs["request_id"],
             uid=kwargs["uid"],
             run_type=kwargs["run_type"],
@@ -793,7 +794,7 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
         db=db,
     )
 
-    assert db.order[-2:] == ["commit", "enqueue"]
+    assert db.order[-3:] == ["commit", "enqueue", "commit"]
     assert result["run_id"] == db.created_run.id
     assert result["request_id"] == "req-1"
     assert db.request_id_lookups == ["req-1"]
@@ -802,6 +803,12 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
     assert db.created_run_kwargs["input_message_id"] == 10
     assert db.added[0].run_id == db.created_run.id
     assert db.added[0].request_id == "req-1"
+    trace_head = next(item for item in db.added if item.__class__.__name__ == "AgentRunTraceHead")
+    assert trace_head.run_id == db.created_run.id
+    assert len(trace_head.trace_id) == 32
+    assert len(trace_head.root_span_id) == 16
+    dispatch = next(item for item in db.added if item.__class__.__name__ == "AgentRunDispatchOutbox")
+    assert dispatch.run_id == db.created_run.id
     assert db.enqueued == [("process_agent_run", db.created_run.id, f"run:{db.created_run.id}")]
     assert db.created_run_kwargs["input_payload"] == {
         "model_spec": "agent-default-model",
@@ -815,6 +822,76 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
     assert db.added[0].extra_metadata["raw_message"]["content"] == "hello"
     assert "run_id" not in db.added[0].extra_metadata
     assert "run_type" not in db.added[0].extra_metadata
+
+
+@pytest.mark.asyncio
+async def test_dispatch_created_agent_run_defers_without_overwriting_durable_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Db:
+        async def execute(self, stmt):
+            del stmt
+            raise AssertionError("outbox must stay PENDING when enqueue fails")
+
+        async def commit(self):
+            raise AssertionError("failed fast-path must not commit another state")
+
+    async def fail_enqueue(run_id: str):
+        assert run_id == "run-1"
+        raise ConnectionError("redis unavailable")
+
+    monkeypatch.setattr(agent_run_service, "enqueue_agent_run", fail_enqueue)
+
+    assert await agent_run_service.dispatch_created_agent_run(db=Db(), run_id="run-1") is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ack_timeout_never_blocks_worker(monkeypatch: pytest.MonkeyPatch):
+    @asynccontextmanager
+    async def blocked_session_context():
+        await asyncio.Event().wait()
+        yield object()
+
+    monkeypatch.setattr(agent_run_service.pg_manager, "get_async_session_context", blocked_session_context)
+    monkeypatch.setattr(agent_run_service, "DISPATCH_ACK_TIMEOUT_SECONDS", 0.001)
+
+    await asyncio.wait_for(agent_run_service.acknowledge_agent_run_dispatch("run-1"), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_relay_includes_cancel_requested_runs(monkeypatch: pytest.MonkeyPatch):
+    selects = []
+    updates = []
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class Db:
+        async def execute(self, statement):
+            if getattr(statement, "is_select", False):
+                selects.append(statement)
+            elif getattr(statement, "is_update", False):
+                updates.append(statement)
+            return Result()
+
+    @asynccontextmanager
+    async def session_context():
+        yield Db()
+
+    monkeypatch.setattr(agent_run_service.pg_manager, "get_async_session_context", session_context)
+
+    assert await agent_run_service.dispatch_pending_agent_runs() == 0
+    assert len(selects) == 1
+    parameter_sets = [
+        set(value) for value in selects[0].compile().params.values() if isinstance(value, (list, tuple, set, frozenset))
+    ]
+    assert agent_run_service.DISPATCHABLE_RUN_STATUSES in parameter_sets
+    update_parameter_sets = [statement.compile().params for statement in updates]
+    assert any("SETTLED" in params.values() for params in update_parameter_sets)
 
 
 @pytest.mark.asyncio
@@ -1297,7 +1374,7 @@ async def test_get_agent_run_result_exposes_authoritative_model_scope_and_retrie
     payload = await agent_run_service.get_agent_run_result(run_id="run-1", current_uid="user-1", db=object())
 
     context = payload["run_context"]
-    assert context["protocol_version"] == "1.2"
+    assert context["protocol_version"] == "1.4"  # 1.4：执行轨迹改用独立持久化 SSE 端点
     assert context["agent_slug"] == "default-chatbot"
     assert context["thread_id"] == "thread-1"
     assert context["request_id"] == "req-1"
@@ -1467,12 +1544,15 @@ def test_resolve_agent_run_model_spec_strips_explicit_chat_model(monkeypatch: py
 def test_resolve_agent_run_model_spec_accepts_owned_custom_model(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(agent_run_service.model_cache, "get_model_info", lambda spec: None)
     spec = "user-anthropic-compatible:glm-5.3-flash[1M]"
-    assert agent_run_service.resolve_agent_run_model_spec(
-        spec,
-        SimpleNamespace(config_json={}),
-        _FakeBackend(),
-        allowed_custom_model_specs={spec},
-    ) == spec
+    assert (
+        agent_run_service.resolve_agent_run_model_spec(
+            spec,
+            SimpleNamespace(config_json={}),
+            _FakeBackend(),
+            allowed_custom_model_specs={spec},
+        )
+        == spec
+    )
 
 
 def _patch_agent_run_creation(

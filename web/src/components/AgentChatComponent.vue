@@ -220,6 +220,37 @@
 
             <div class="state-panel-body">
               <section
+                v-if="currentTrace"
+                class="state-section"
+                :class="{ 'is-collapsed': !isStateSectionExpanded('trace') }"
+                aria-label="本轮执行轨迹"
+              >
+                <button
+                  type="button"
+                  class="state-section-header"
+                  :aria-expanded="isStateSectionExpanded('trace')"
+                  aria-controls="state-section-trace"
+                  @click="toggleStateSection('trace')"
+                >
+                  <span class="state-section-label">
+                    <span class="state-section-title">本轮执行</span>
+                    <ChevronDown
+                      :size="15"
+                      class="state-section-chevron"
+                      :class="{ 'is-collapsed': !isStateSectionExpanded('trace') }"
+                    />
+                  </span>
+                  <span class="state-section-meta">{{ traceSpanCount }}</span>
+                </button>
+                <div
+                  v-show="isStateSectionExpanded('trace')"
+                  id="state-section-trace"
+                  class="state-section-content"
+                >
+                  <TraceTimelinePanel :trace="currentTrace" />
+                </div>
+              </section>
+              <section
                 v-if="currentTokenUsage"
                 class="state-section"
                 :class="{ 'is-collapsed': !isStateSectionExpanded('tokenUsage') }"
@@ -609,6 +640,8 @@ import { useAgentRunStream } from '@/composables/useAgentRunStream'
 import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
+import { useRunTrace } from '@/composables/useRunTrace'
+import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import AttachmentTmpUploadModal from '@/components/AttachmentTmpUploadModal.vue'
@@ -617,6 +650,7 @@ import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCallingResult/toolRegistry'
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
 import { makeChildThreadId } from '@/utils/subagentThread'
+import { findLatestTraceRunId } from '@/utils/traceProjection'
 import RiceEndospermWelcome from '@/components/rice-endosperm/RiceEndospermWelcome.vue'
 
 // ==================== PROPS & EMITS ====================
@@ -688,6 +722,7 @@ const attachmentInitialFiles = ref([])
 const attachmentInitialFilesKey = ref(0)
 const isRefreshingState = ref(false)
 const collapsedStateSections = reactive({
+  trace: false,
   tokenUsage: false,
   todos: false,
   files: false,
@@ -1016,6 +1051,15 @@ const currentTokenUsage = computed(() => {
   const usage = currentAgentState.value?.token_usage
   return usage && typeof usage === 'object' && !Array.isArray(usage) ? usage : null
 })
+// 本轮执行轨迹：真实事件驱动，没有轨迹事件就不显示分区（安静原则）
+const currentTrace = computed(() => {
+  const threadId = currentChatId.value
+  const trace = threadId ? chatState.threadStates[threadId]?.trace : null
+  if (!trace || !trace.runId) return null
+  if (Object.keys(trace.spans || {}).length === 0 && !trace.summary) return null
+  return trace
+})
+const traceSpanCount = computed(() => Object.keys(currentTrace.value?.spans || {}).length)
 const tokenUsageSegments = computed(() => {
   const usage = currentTokenUsage.value
   if (!usage) return []
@@ -2126,6 +2170,12 @@ const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
     const response = await agentApi.getAgentHistory(threadId)
     const history = response.history || []
     threadMessages.value[threadId] = history
+    const latestRunId = findLatestTraceRunId(history)
+    if (latestRunId) {
+      const trace = getThreadState(threadId)?.trace
+      if (!trace || trace.runId !== latestRunId) resetRunTrace(threadId, latestRunId)
+      await loadRunTraceSnapshot(threadId, latestRunId)
+    }
   } catch (error) {
     handleChatError(error, 'load')
     throw error
@@ -2274,6 +2324,8 @@ const { handleStreamChunk } = useAgentStreamHandler({
   supportsFiles,
   streamSmoother
 })
+const { handleTraceEvent, loadRunTraceSnapshot, refreshRunTraceSnapshot, resetRunTrace } =
+  useRunTrace({ getThreadState })
 const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = useAgentRunStream({
   getThreadState,
   currentAgentId,
@@ -2283,12 +2335,18 @@ const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = 
   resetOnGoingConv,
   onScrollToBottom: () => scrollController.scrollToBottom(),
   streamSmoother,
+  onTraceEvent: ({ threadId, runId, traceEvent }) => {
+    handleTraceEvent({ threadId, runId, traceEvent })
+  },
   onInterruptDetected: ({ threadId }) => {
     restorePendingInterruptForThread(threadId)
   },
-  onTerminalDetected: ({ threadId, touchedThreadIds = [] }) => {
+  onTerminalDetected: ({ threadId, runId, touchedThreadIds = [] }) => {
     if (approvalState.threadId === threadId || touchedThreadIds.includes(approvalState.threadId)) {
       hideApprovalState()
+    }
+    if (runId) {
+      refreshRunTraceSnapshot(threadId, runId)
     }
   }
 })
@@ -2511,6 +2569,8 @@ const handleSendMessage = async ({ image } = {}) => {
     if (!runId) {
       throw new Error('创建 run 失败：缺少 run_id')
     }
+    resetRunTrace(threadId, runId)
+    await loadRunTraceSnapshot(threadId, runId)
     await startRunStream(threadId, runId, 0)
   } catch (error) {
     threadState.isStreaming = false
@@ -2591,6 +2651,8 @@ const handleApprovalWithStream = async (answer) => {
     if (!runId) {
       throw new Error('创建 resume run 失败：缺少 run_id')
     }
+    resetRunTrace(threadId, runId)
+    await loadRunTraceSnapshot(threadId, runId)
     await startRunStream(threadId, runId, '0-0')
   } catch (error) {
     if (pendingInterrupt) {

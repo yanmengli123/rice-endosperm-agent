@@ -4,6 +4,12 @@
 
 同一版本的多次功能更新时，应以功能为单位进行更新，比如之前添加了 A 功能的更新，在后续的更新中修复了因 A 功能引入的 bug，那么这个修复说明应该和 A 功能描述放在一起，而不是新增一条修复记录，功能更新同理。
 
+## v0.8.0 (2026-09-08)
+
+### 新增
+
+- 新增 AgentRun 事实型执行轨迹（`yuxi.run-trace.v1`，详见 [ADR-0002](../adr/adr-0002-agent-run-execution-trace.md)）：`agent_run_trace_events` 作为 append-only 事实账本（数据库 trigger 拒绝 UPDATE/DELETE，账本 `run_id` 不设外键以在 run 删除后保留审计），Span/Summary 为可完整 replay 重建的读模型；每 run 由 `agent_run_trace_heads` 行锁分配稠密 sequence，`trace_id`/`span_id` 遵循 W3C 32/16 位十六进制格式。所有 AgentRun 创建入口（含 SubAgent）在共享事务内同步创建 trace head 与可靠投递 Outbox，fast-path 失败由 relay 重试，worker 收件反向 ACK 自愈“Redis 已入队但数据库 ACK 失败”窗口。埋点覆盖 RUN 生命周期、启动前失败/取消、模型生成（含首可见 token 时间）、工具/MCP/Skill/子智能体与知识检索，事件协议为封闭注册表（事件类型 × 允许 attributes 显式登记），嵌套敏感键递归 DROP、原始异常文本与 reasoning 永不进账本，工具入参只存 sha256 摘要；token 计费权威仍是 `usage_ledger`，知识/MCP 详情仍由 `KnowledgeRetrievalRun`/`MCPCallAudit` 承载，Trace 只保存摘要计数与 `resource_refs`。传输侧采用 Transactional Outbox：账本、Outbox 与投影同事务写入，commit 后 fast-path 直发 Redis Stream，ARQ relay 按租约保序投递、显式 ACK、崩溃后回收过期租约并退避至死信；终态顺序固定为「最终 Message → 终态 Trace → AgentRun 终态 → Redis end」，Trace 降级时以 `end.trace_status=DEGRADED` 标记并由对账任务补偿（worker 失联收敛为新增 `span.interrupted` 事件，绝不改历史）。协议升级至 `1.4`：`/runs/{id}/events` 回归纯消息/控制流（默认 `verbose=false`），轨迹经独立 `/runs/{id}/trace/stream` 实时推送，配合 `/trace` 快照与 `/trace/events?after_sequence=` 补拉恢复——服务端在 trace head 共享锁下读取一致快照，客户端按 `scanned_through_sequence` 前进（ADMIN 事件会造成 USER 视图合法序号空洞），缺口先缓冲高序号事件再补拉对齐。Web 端状态侧栏新增「本轮执行」时间线（真实事件驱动、无事件不渲染），重载历史会话时从最后一条持久化消息的 `run_id` 恢复最新快照；桌面端 Rust 经独立帧转发并在 ChatWorkspace 渲染同语义时间线，两端终态后以服务端快照刷新权威投影；APISIX 白名单新增 `/trace` 与 `/trace/events`（stream 端点仅限直连，不暴露网关）。迁移 `0023_execution_trace` 建四表 + RLS（租户 GUC 策略，owner 连接下为纵深防御）+ append-only trigger，`0024_execution_trace_hardening` 兼容已执行 0023 的库增加 heads 表、W3C 标识列与租约列，`0025_execution_trace_retention` 增加 `STANDARD`/`EXTENDED`/`LEGAL_HOLD` 分级保留及受控多批清理函数，默认保留 90 天，每次定时任务最多清理 20×100 个 run（均可配置）。执行轨迹整体 BEST_EFFORT：任何 Trace 故障不阻断业务执行。
+
 ## v0.7.1 (2026-07-17)
 
 ### 新增

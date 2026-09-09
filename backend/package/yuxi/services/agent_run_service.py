@@ -17,13 +17,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Literal
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
@@ -54,13 +56,15 @@ from yuxi.services.run_queue_service import (
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     AgentRun,
+    AgentRunDispatchOutbox,
     Message,
     TenantUserEntitlement,
     UsageLedger,
     User,
     UserModelPreference,
 )
-from yuxi.utils.datetime_utils import utc_now_naive
+from yuxi.storage.postgres.models_trace import AgentRunTraceHead
+from yuxi.utils.datetime_utils import utc_now, utc_now_naive
 from yuxi.utils.hash_utils import hash_id
 from yuxi.utils.logging_config import logger
 from yuxi.utils.reasoning_visibility import sanitize_visible_text
@@ -71,7 +75,7 @@ SSE_POLL_INTERVAL_SECONDS = float(os.getenv("RUN_SSE_POLL_INTERVAL_SECONDS", "1.
 RUN_PROGRESS_RECENT_EVENT_SCAN_LIMIT = 100
 RUN_PROGRESS_MESSAGE_LIMIT = 3
 RUN_PROGRESS_CONTENT_MAX_CHARS = 800
-AGENT_RUN_PROTOCOL_VERSION = "1.2"
+AGENT_RUN_PROTOCOL_VERSION = "1.4"  # 1.4：执行轨迹改用独立、可补偿的持久化 SSE 端点
 
 
 def _public_knowledge_scope(snapshot: object) -> dict[str, Any]:
@@ -215,9 +219,7 @@ def resolve_agent_run_model_spec(
 
     if user_model_spec:
         user_info = model_cache.get_model_info(user_model_spec)
-        if (user_info and user_info.model_type == "chat") or user_model_spec in (
-            allowed_custom_model_specs or set()
-        ):
+        if (user_info and user_info.model_type == "chat") or user_model_spec in (allowed_custom_model_specs or set()):
             return user_model_spec
         # 用户偏好指向的模型可能已被管理员下线；此时回落智能体/系统默认并留痕
         logger.warning(f"用户级模型偏好已失效，回退默认解析: {user_model_spec}")
@@ -283,7 +285,7 @@ def _compact_semantic_stream_event(stream_event: dict) -> dict:
     if event_type in {"tool_call", "tool_call_delta"}:
         compact = {
             key: stream_event[key]
-            for key in ("type", "message_id", "tool_call_id", "name", "args", "args_delta")
+            for key in ("type", "message_id", "tool_call_id", "name")
             if stream_event.get(key) is not None and stream_event.get(key) != ""
         }
         if stream_event.get("index"):
@@ -299,9 +301,11 @@ def _compact_tool_stream_event(event: dict) -> dict:
     if isinstance(data, dict):
         compact_data = {
             key: data[key]
-            for key in ("event", "tool_call_id", "tool_name", "output", "error")
+            for key in ("event", "tool_call_id", "tool_name")
             if data.get(key) is not None and data.get(key) != ""
         }
+        if data.get("error") is not None:
+            compact_data["error_type"] = type(data["error"]).__name__
         if compact_data:
             compact["data"] = compact_data
     return compact
@@ -553,15 +557,19 @@ async def _enforce_platform_token_quota(
     # platform-funded top-level run closes the unbounded concurrency window.
     # A concurrent user-BYOK run does not reserve platform budget.
     active_payloads = (
-        await db.execute(
-            select(AgentRun.input_payload).where(
-                AgentRun.tenant_id == tenant_id,
-                AgentRun.uid == uid,
-                AgentRun.run_type.in_(("chat", "resume")),
-                AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
+        (
+            await db.execute(
+                select(AgentRun.input_payload).where(
+                    AgentRun.tenant_id == tenant_id,
+                    AgentRun.uid == uid,
+                    AgentRun.run_type.in_(("chat", "resume")),
+                    AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     has_active_platform_run = any(
         not isinstance(payload, dict) or not payload.get("user_credential") for payload in active_payloads
     )
@@ -724,9 +732,7 @@ async def create_agent_run_view(
     else:
         user_model_spec = await _get_user_model_pref(db=db, uid=current_uid)
         requested_model_spec = model_spec.strip() if isinstance(model_spec, str) else ""
-        if requested_model_spec.startswith(custom_prefixes) or (user_model_spec or "").startswith(
-            custom_prefixes
-        ):
+        if requested_model_spec.startswith(custom_prefixes) or (user_model_spec or "").startswith(custom_prefixes):
             custom_model_specs = await list_active_custom_model_specs(db, current_uid)
         resolved_model_spec = resolve_agent_run_model_spec(
             model_spec,
@@ -831,14 +837,7 @@ async def create_agent_run_view(
     )
     if created:
         await db.commit()
-        try:
-            await enqueue_agent_run(run.id)
-        except Exception:
-            # 入队失败必须立刻把 run 置为失败：幂等命中会让同 request_id 的重试
-            # 永远不再入队，线程随即被唯一活跃索引锁死（只能靠对账任务回收）。
-            logger.exception(f"Failed to enqueue agent run {run.id}")
-            await mark_run_enqueue_failed(run.id)
-            raise
+        await dispatch_created_agent_run(db=db, run_id=run.id)
 
     return _build_run_response(run)
 
@@ -973,6 +972,19 @@ async def persist_agent_run_record(
                 input_message_id=persisted_input_message.id,
             )
             persisted_input_message.run_id = run_id
+            # All run sources, including SubAgents, publish the same durable
+            # trace identity and dispatch intent with the business row.
+            db.add(
+                AgentRunTraceHead(
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    trace_id=secrets.token_hex(16),
+                    root_span_id=secrets.token_hex(8),
+                    last_sequence=0,
+                    projection_sequence=0,
+                )
+            )
+            db.add(AgentRunDispatchOutbox(tenant_id=run.tenant_id, run_id=run.id))
             await db.flush()
     except IntegrityError:
         run_repo = AgentRunRepository(db)
@@ -1095,21 +1107,178 @@ async def enqueue_agent_run(run_id: str) -> None:
     await queue.enqueue_job("process_agent_run", run_id, _job_id=f"run:{run_id}")
 
 
+async def dispatch_created_agent_run(*, db: AsyncSession, run_id: str) -> bool:
+    """Run 创建提交后的快速投递；失败时保留 Outbox 等待后台重试。"""
+    try:
+        await enqueue_agent_run(run_id)
+        await db.execute(
+            update(AgentRunDispatchOutbox)
+            .where(
+                AgentRunDispatchOutbox.run_id == run_id,
+                AgentRunDispatchOutbox.status == "PENDING",
+            )
+            .values(status="DISPATCHED", dispatched_at=utc_now(), last_error=None)
+        )
+        await db.commit()
+        return True
+    except Exception as error:  # noqa: BLE001
+        logger.warning(f"AgentRun enqueue deferred for {run_id}: {type(error).__name__}")
+        return False
+
+
+DISPATCH_LEASE_SECONDS = 120
+DISPATCH_MAX_ATTEMPTS = 20
+DISPATCH_ACK_TIMEOUT_SECONDS = 5.0
+DISPATCHABLE_RUN_STATUSES = frozenset({"pending", "cancel_requested"})
+DISPATCH_UNRESOLVED_STATUSES = ("PENDING", "PROCESSING")
+
+
+async def acknowledge_agent_run_dispatch(run_id: str) -> None:
+    """Worker receipt is a second, authoritative acknowledgement of dispatch.
+
+    The enqueue fast-path can succeed immediately before its database update
+    loses the connection.  In that window the durable intent remains PENDING
+    even though ARQ is already executing it.  A worker that actually receives
+    the job closes that state without affecting execution if storage is down.
+    """
+    try:
+        async with asyncio.timeout(DISPATCH_ACK_TIMEOUT_SECONDS):
+            async with pg_manager.get_async_session_context() as db:
+                await db.execute(
+                    update(AgentRunDispatchOutbox)
+                    .where(
+                        AgentRunDispatchOutbox.run_id == run_id,
+                        AgentRunDispatchOutbox.status.in_(DISPATCH_UNRESOLVED_STATUSES),
+                    )
+                    .values(
+                        status="DISPATCHED",
+                        dispatched_at=utc_now(),
+                        lease_id=None,
+                        leased_at=None,
+                        last_error=None,
+                    )
+                )
+    except Exception as error:  # noqa: BLE001 - receipt bookkeeping is best-effort
+        logger.warning(f"AgentRun dispatch acknowledgement deferred for {run_id}: {type(error).__name__}")
+
+
+async def dispatch_pending_agent_runs(ctx: Any = None, *, run_id: str | None = None, limit: int = 100) -> int:
+    """可靠投递 AgentRun 创建意图到 ARQ；崩溃重投由确定性 job_id 幂等吸收。"""
+    del ctx
+    claimed: list[tuple[int, str, str]] = []
+    now = utc_now()
+    stale_before = now - timedelta(seconds=DISPATCH_LEASE_SECONDS)
+    try:
+        async with pg_manager.get_async_session_context() as db:
+            # If a worker receipt ACK was lost after execution, or stale-run
+            # reconciliation terminalized a run that was never enqueued, the
+            # durable intent no longer needs delivery. Keep the row as an
+            # auditable neutral terminal state instead of leaking PENDING
+            # forever or falsely claiming that Redis accepted it.
+            terminal_run_ids = select(AgentRun.id).where(AgentRun.status.in_(TERMINAL_RUN_STATUSES))
+            settle_stmt = (
+                update(AgentRunDispatchOutbox)
+                .where(
+                    AgentRunDispatchOutbox.status.in_(DISPATCH_UNRESOLVED_STATUSES),
+                    AgentRunDispatchOutbox.run_id.in_(terminal_run_ids),
+                )
+                .values(
+                    status="SETTLED",
+                    lease_id=None,
+                    leased_at=None,
+                    last_error="run_already_terminal",
+                )
+            )
+            if run_id is not None:
+                settle_stmt = settle_stmt.where(AgentRunDispatchOutbox.run_id == run_id)
+            await db.execute(settle_stmt)
+            await db.execute(
+                update(AgentRunDispatchOutbox)
+                .where(
+                    AgentRunDispatchOutbox.status == "PROCESSING",
+                    AgentRunDispatchOutbox.leased_at < stale_before,
+                )
+                .values(status="PENDING", lease_id=None, leased_at=None, available_at=now)
+            )
+            stmt = (
+                select(AgentRunDispatchOutbox)
+                .join(AgentRun, AgentRun.id == AgentRunDispatchOutbox.run_id)
+                .where(
+                    AgentRunDispatchOutbox.status == "PENDING",
+                    AgentRunDispatchOutbox.available_at <= now,
+                    # A cancel can win the race after durable creation but
+                    # before the first enqueue. Dispatch it as well so the
+                    # worker records the auditable preflight-cancel terminal
+                    # path instead of waiting for stale-run reconciliation.
+                    AgentRun.status.in_(DISPATCHABLE_RUN_STATUSES),
+                )
+                .order_by(AgentRunDispatchOutbox.created_at.asc())
+                .limit(max(1, min(limit, 500)))
+                .with_for_update(skip_locked=True)
+            )
+            if run_id is not None:
+                stmt = stmt.where(AgentRunDispatchOutbox.run_id == run_id)
+            rows = list((await db.execute(stmt)).scalars().all())
+            for row in rows:
+                lease_id = secrets.token_hex(16)
+                row.status = "PROCESSING"
+                row.lease_id = lease_id
+                row.leased_at = now
+                claimed.append((int(row.id), row.run_id, lease_id))
+        delivered = 0
+        for outbox_id, claimed_run_id, lease_id in claimed:
+            try:
+                await enqueue_agent_run(claimed_run_id)
+                async with pg_manager.get_async_session_context() as db:
+                    row = (
+                        await db.execute(
+                            select(AgentRunDispatchOutbox)
+                            .where(
+                                AgentRunDispatchOutbox.id == outbox_id,
+                                AgentRunDispatchOutbox.lease_id == lease_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if row is not None:
+                        row.status = "DISPATCHED"
+                        row.dispatched_at = utc_now()
+                        row.lease_id = None
+                        row.leased_at = None
+                        row.last_error = None
+                delivered += 1
+            except Exception as error:  # noqa: BLE001
+                logger.warning(f"AgentRun dispatch deferred for {claimed_run_id}: {type(error).__name__}")
+                async with pg_manager.get_async_session_context() as db:
+                    row = (
+                        await db.execute(
+                            select(AgentRunDispatchOutbox)
+                            .where(
+                                AgentRunDispatchOutbox.id == outbox_id,
+                                AgentRunDispatchOutbox.lease_id == lease_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if row is None:
+                        continue
+                    row.attempts = int(row.attempts or 0) + 1
+                    row.status = "EXPIRED" if row.attempts >= DISPATCH_MAX_ATTEMPTS else "PENDING"
+                    row.available_at = utc_now() + timedelta(seconds=min(60, 2 ** min(row.attempts, 6)))
+                    row.lease_id = None
+                    row.leased_at = None
+                    row.last_error = "arq_enqueue_failed"
+        return delivered
+    except Exception as error:  # noqa: BLE001
+        logger.warning(f"AgentRun dispatch relay unavailable: {type(error).__name__}")
+        return 0
+
+
 # 孤儿 run 对账阈值：pending 超过入队正常耗时、cancel_requested 超过取消生效
 # 正常耗时即判定失联；running 需超过 job_timeout（3600s）留出余量。
 STALE_PENDING_CUTOFF_SECONDS = 600
 STALE_RUNNING_CUTOFF_SECONDS = 5400
 STALE_CANCEL_CUTOFF_SECONDS = 600
-
-
-async def mark_run_enqueue_failed(run_id: str) -> None:
-    async with pg_manager.get_async_session_context() as db:
-        await AgentRunRepository(db).set_terminal_status(
-            run_id,
-            status="failed",
-            error_type="enqueue_failed",
-            error_message="任务入队失败，请重新发送",
-        )
 
 
 async def reconcile_stale_agent_runs(ctx: Any = None) -> int:
@@ -1172,6 +1341,10 @@ async def reconcile_stale_agent_runs(ctx: Any = None) -> int:
             )
         except Exception:
             logger.exception(f"Failed to append reconcile end event for run {run_id}")
+        # 轨迹收敛：为孤儿 run 补发 run/span 终态事件（只新增，不改历史）
+        from yuxi.services.trace_service import record_run_lost
+
+        await record_run_lost(run_id=run_id)
     if reconciled:
         logger.warning(f"Reconciled {len(reconciled)} stale agent runs")
     return len(reconciled)
@@ -1351,6 +1524,10 @@ async def stream_agent_run_events(
                 last_seq = seq
                 event_type = event.get("event_type") or "message"
                 envelope = event.get("payload") or {}
+                # Trace 有独立 durable stream；旧 Redis 帧只保留为内部通知，不能再
+                # 混入消息/控制协议，也绝不能把 ADMIN trace 暴露给普通客户端。
+                if event_type == "trace":
+                    continue
                 if not verbose and isinstance(envelope, dict):
                     envelope = _compact_run_event_envelope(envelope)
                     if envelope is None:

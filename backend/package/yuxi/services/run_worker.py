@@ -14,7 +14,11 @@ from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.agents.skills.service import init_builtin_skills
 from yuxi.config import config as sys_config
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
-from yuxi.services.agent_run_service import reconcile_stale_agent_runs
+from yuxi.services.agent_run_service import (
+    acknowledge_agent_run_dispatch,
+    dispatch_pending_agent_runs,
+    reconcile_stale_agent_runs,
+)
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.run_queue_service import (
@@ -27,15 +31,18 @@ from yuxi.services.scientific_pdf_ingest_service import (
     process_scientific_pdf_ingest,
     recover_stale_scientific_pdf_ingests,
 )
+from yuxi.services.trace_service import purge_expired_trace_runs, relay_trace_outbox
 from yuxi.services.wiki_service import process_dynamic_wiki_build, reconcile_dynamic_wikis
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Message, User
+from yuxi.storage.postgres.models_business import AgentRun, Message, User
 from yuxi.storage.redis import get_arq_redis_settings
+from yuxi.trace import TraceRecorder
 from yuxi.utils.logging_config import logger
 from yuxi.utils.thread_utils import extract_thread_id
 
 LOADING_FLUSH_INTERVAL_MS = 100
 LOADING_FLUSH_MAX_CHARS = 512
+TRACE_FLUSH_TIMEOUT_SECONDS = 5.0
 RUN_CANCEL_POLL_SECONDS = 0.2
 RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS = 15.0
 RUN_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
@@ -162,7 +169,22 @@ async def mark_run_running(run_id: str):
         await repo.mark_running(run_id)
 
 
-async def mark_run_terminal(run_id: str, status: str, error_type: str | None = None, error_message: str | None = None):
+async def mark_run_terminal(
+    run_id: str,
+    status: str,
+    error_type: str | None = None,
+    error_message: str | None = None,
+    *,
+    db=None,
+):
+    if db is not None:
+        await AgentRunRepository(db).set_terminal_status(
+            run_id,
+            status=status,
+            error_type=error_type,
+            error_message=error_message,
+        )
+        return
     async with pg_manager.get_async_session_context() as db:
         repo = AgentRunRepository(db)
         await repo.set_terminal_status(run_id, status=status, error_type=error_type, error_message=error_message)
@@ -236,6 +258,15 @@ def _chunk_thread_id(chunk: dict, fallback: str | None) -> str | None:
     return extract_thread_id(chunk, fallback)
 
 
+def _is_first_message_delta_chunk(chunk: dict) -> bool:
+    stream_event = chunk.get("stream_event")
+    return (
+        isinstance(stream_event, dict)
+        and stream_event.get("type") == "message_delta"
+        and bool(stream_event.get("content"))
+    )
+
+
 def _map_chunk_to_run_event(chunk: dict) -> tuple[str, dict]:
     status = chunk.get("status") or "event"
     if status == "loading":
@@ -259,6 +290,128 @@ async def _append_end_event(run_id: str, status: str, *, thread_id: str | None, 
     if payload:
         end_payload.update(payload)
     await append_run_event(run_id, "end", end_payload, thread_id=thread_id)
+
+
+async def _persist_terminal_trace(
+    recorder: TraceRecorder,
+    status: str,
+    *,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> bool:
+    """先持久化终态轨迹，再允许 AgentRun/Redis end 对外可见。
+
+    Trace 默认是 BEST_EFFORT：故障不能翻转业务结果，但 ``end.trace_status`` 会
+    明确标记 DEGRADED，reconciler 可据此补偿，不制造“看似完整”的假象。
+    """
+    # asyncio cancellation bypasses middleware ``except Exception`` blocks.
+    # Close every child still observed as RUNNING before the root terminal fact
+    # so a completed/failed/cancelled run can never expose immortal child spans.
+    recorder.close_running_spans(
+        suffix="interrupted",
+        error_type=error_type or f"run_{status}_with_open_span",
+    )
+    recorder.record_run_terminal(status, error_type=error_type, error_message=error_message)
+
+    async def mark_terminal_in_transaction(db) -> None:
+        await mark_run_terminal(
+            recorder.run_id,
+            status,
+            error_type=error_type,
+            error_message=error_message,
+            db=db,
+        )
+
+    try:
+        await recorder.flush(transaction_action=mark_terminal_in_transaction)
+        # Receipt ACK is attempted when the worker starts and again after the
+        # durable terminal commit. The second attempt closes a transient DB
+        # failure window without coupling business completion to bookkeeping.
+        await acknowledge_agent_run_dispatch(recorder.run_id)
+        return True
+    except Exception as error:  # noqa: BLE001
+        logger.error(f"terminal trace persistence degraded for run {recorder.run_id}: {type(error).__name__}")
+        # BEST_EFFORT policy: preserve the business terminal state if trace
+        # storage is unavailable.  The end frame exposes DEGRADED explicitly.
+        await mark_run_terminal(
+            recorder.run_id,
+            status,
+            error_type=error_type,
+            error_message=error_message,
+        )
+        await acknowledge_agent_run_dispatch(recorder.run_id)
+        return False
+
+
+async def _finish_run_before_execution(
+    run: AgentRun,
+    status: str,
+    *,
+    error_type: str,
+    error_message: str,
+    end_reason: str | None = None,
+) -> None:
+    """Close a run rejected during worker preflight with an auditable terminal fact."""
+    recorder = TraceRecorder(
+        run_id=run.id,
+        thread_id=run.conversation_thread_id,
+        tenant_id=run.tenant_id,
+        uid=run.uid,
+        agent_slug=run.agent_slug,
+        run_type=run.run_type,
+        request_id=run.request_id,
+        created_by_run_id=run.created_by_run_id,
+    )
+    await recorder.seed()
+    recorder.activate()
+    try:
+        if status == "cancelled":
+            chunk = {
+                "status": "interrupted",
+                "message": error_message,
+                "request_id": run.request_id,
+            }
+            await append_run_event(
+                run.id,
+                "interrupt",
+                {"reason": end_reason or error_type, "chunk": chunk},
+                thread_id=run.conversation_thread_id,
+            )
+        else:
+            chunk = {
+                "status": "error",
+                "error_type": error_type,
+                "error_message": error_message,
+                "message": error_message,
+                "request_id": run.request_id,
+                "retryable": False,
+            }
+            await append_run_event(
+                run.id,
+                "error",
+                {"chunk": chunk, "retryable": False},
+                thread_id=run.conversation_thread_id,
+            )
+        trace_committed = await _persist_terminal_trace(
+            recorder,
+            status,
+            error_type=error_type,
+            error_message=error_message,
+        )
+        end_payload = {
+            "chunk": chunk,
+            "trace_status": "COMMITTED" if trace_committed else "DEGRADED",
+        }
+        if end_reason:
+            end_payload["reason"] = end_reason
+        await _append_end_event(
+            run.id,
+            status,
+            thread_id=run.conversation_thread_id,
+            payload=end_payload,
+        )
+    finally:
+        await recorder.finalize()
 
 
 async def _publish_run_progress(
@@ -368,34 +521,58 @@ async def process_agent_run(ctx, run_id: str):
         logger.warning(f"Run not found: {run_id}")
         return
 
+    # Receipt is the authoritative proof that the durable dispatch intent was
+    # fulfilled, including the enqueue-success/ack-commit failure window.
+    await acknowledge_agent_run_dispatch(run_id)
+
     if run.status in TERMINAL_RUN_STATUSES:
         logger.info(f"Run already terminal, skip: {run_id}, status={run.status}")
         return
     if run.status == "cancel_requested":
-        await mark_run_terminal(run_id, "cancelled", "cancelled", "账号停用或用户请求取消")
-        await _append_end_event(
-            run_id,
+        await _finish_run_before_execution(
+            run,
             "cancelled",
-            thread_id=run.conversation_thread_id,
-            payload={"reason": "cancelled_before_start"},
+            error_type="cancelled",
+            error_message="账号停用或用户请求取消",
+            end_reason="cancelled_before_start",
         )
         return
 
     if not isinstance(run.input_payload, dict):
-        await mark_run_terminal(run_id, "failed", "invalid_input_payload", "run input_payload 必须是对象")
+        await _finish_run_before_execution(
+            run,
+            "failed",
+            error_type="invalid_input_payload",
+            error_message="run input_payload 必须是对象",
+        )
         return
     payload = run.input_payload
     runtime = payload.get("runtime") or {}
     if not isinstance(runtime, dict):
-        await mark_run_terminal(run_id, "failed", "invalid_runtime_payload", "run input_payload.runtime 必须是对象")
+        await _finish_run_before_execution(
+            run,
+            "failed",
+            error_type="invalid_runtime_payload",
+            error_message="run input_payload.runtime 必须是对象",
+        )
         return
 
     input_message = await _load_input_message(run.input_message_id)
     if not input_message:
-        await mark_run_terminal(run_id, "failed", "input_message_not_found", "运行任务缺少输入消息")
+        await _finish_run_before_execution(
+            run,
+            "failed",
+            error_type="input_message_not_found",
+            error_message="运行任务缺少输入消息",
+        )
         return
     if not isinstance(input_message.extra_metadata, dict):
-        await mark_run_terminal(run_id, "failed", "invalid_input_metadata", "输入消息 metadata 必须是对象")
+        await _finish_run_before_execution(
+            run,
+            "failed",
+            error_type="invalid_input_metadata",
+            error_message="输入消息 metadata 必须是对象",
+        )
         return
 
     run_type = run.run_type
@@ -407,19 +584,34 @@ async def process_agent_run(ctx, run_id: str):
     image_content = input_message.image_content
 
     if run_type not in SUPPORTED_RUN_TYPES:
-        await mark_run_terminal(run_id, "failed", "invalid_run_type", f"不支持的 run_type: {run_type}")
+        await _finish_run_before_execution(
+            run,
+            "failed",
+            error_type="invalid_run_type",
+            error_message=f"不支持的 run_type: {run_type}",
+        )
         return
 
     user = await _load_user(uid)
     if not user:
-        await mark_run_terminal(run_id, "failed", "user_unavailable", f"user {uid} is unavailable")
+        await _finish_run_before_execution(
+            run,
+            "failed",
+            error_type="user_unavailable",
+            error_message=f"user {uid} is unavailable",
+        )
         return
 
     resume_input = None
     if run_type == "resume":
         resume_input = input_metadata.get("resume")
         if resume_input is None:
-            await mark_run_terminal(run_id, "failed", "resume_input_not_found", "resume run 缺少 resume 输入")
+            await _finish_run_before_execution(
+                run,
+                "failed",
+                error_type="resume_input_not_found",
+                error_message="resume run 缺少 resume 输入",
+            )
             return
     else:
         try:
@@ -429,7 +621,12 @@ async def process_agent_run(ctx, run_id: str):
                 metadata=input_metadata,
             )
         except ValueError as exc:
-            await mark_run_terminal(run_id, "failed", "invalid_input_message", str(exc))
+            await _finish_run_before_execution(
+                run,
+                "failed",
+                error_type="invalid_input_message",
+                error_message=str(exc),
+            )
             return
 
     meta = {
@@ -467,6 +664,27 @@ async def process_agent_run(ctx, run_id: str):
         max_chars=LOADING_FLUSH_MAX_CHARS,
     )
     await run_ctx.start()
+    # 执行轨迹：事实账本（agent_run_trace_events）+ Outbox + 投影，同事务落库；
+    # activate 后中间件/知识编排器经 emit_trace 无感埋点（API 进程内 no-op）。
+    recorder = TraceRecorder(
+        run_id=run_id,
+        thread_id=thread_id,
+        tenant_id=run.tenant_id,
+        uid=uid,
+        agent_slug=agent_slug,
+        run_type=run_type,
+        request_id=request_id,
+        created_by_run_id=run.created_by_run_id,
+    )
+    await recorder.seed()
+    recorder.activate()
+    recorder.start_span(
+        category="RUN",
+        operation="execution",
+        span_id="run",
+        title="本轮执行",
+        attributes={"agent_slug": agent_slug, "run_type": run_type, "request_id": request_id},
+    )
     metadata_event = {
         "request_id": request_id,
         "agent_slug": agent_slug,
@@ -486,6 +704,7 @@ async def process_agent_run(ctx, run_id: str):
         thread_id=thread_id,
     )
     terminal_outcome: tuple[str, str | None, str | None, dict] | None = None
+    model_first_token_emitted = False
     progress_done = asyncio.Event()
     progress_task = asyncio.create_task(
         _publish_run_progress(
@@ -535,6 +754,14 @@ async def process_agent_run(ctx, run_id: str):
                         continue
                     target_thread_id = _chunk_thread_id(chunk, thread_id)
                     if chunk.get("status") == "loading":
+                        if not model_first_token_emitted and _is_first_message_delta_chunk(chunk):
+                            model_first_token_emitted = True
+                            recorder.emit(
+                                category="MODEL",
+                                operation="generation",
+                                event_type="model.generation.first_visible_token",
+                                title="模型开始输出",
+                            )
                         await writer.append(chunk, thread_id=target_thread_id)
                         continue
 
@@ -590,6 +817,12 @@ async def process_agent_run(ctx, run_id: str):
                     # "完整回答 + 已取消"的自相矛盾终态）。
                     if terminal_outcome is None and await run_ctx.is_cancelled():
                         raise asyncio.CancelledError(f"run {run_id} cancelled")
+                # 循环内 flush 严禁阻塞业务生成器：即使未来出现意外锁等待，
+                # 也以超时放弃（flush 幂等，由下轮 flush / 终态事务兜底）。
+                try:
+                    await asyncio.wait_for(recorder.flush(), timeout=TRACE_FLUSH_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    logger.warning(f"trace mid-run flush timed out for run {run_id}; deferred")
                 if stop_stream:
                     draining_for_terminal = True
 
@@ -599,8 +832,8 @@ async def process_agent_run(ctx, run_id: str):
         await writer.flush()
         if terminal_outcome is not None:
             terminal_status, error_type, error_message, terminal_chunk = terminal_outcome
-            await mark_run_terminal(
-                run_id,
+            trace_committed = await _persist_terminal_trace(
+                recorder,
                 terminal_status,
                 error_type=error_type,
                 error_message=error_message,
@@ -609,12 +842,17 @@ async def process_agent_run(ctx, run_id: str):
                 run_id,
                 terminal_status,
                 thread_id=thread_id,
-                payload={"chunk": terminal_chunk},
+                payload={"chunk": terminal_chunk, "trace_status": "COMMITTED" if trace_committed else "DEGRADED"},
             )
         else:
             finished_chunk = {"status": "finished", "request_id": request_id}
-            await mark_run_terminal(run_id, "completed")
-            await _append_end_event(run_id, "completed", thread_id=thread_id, payload={"chunk": finished_chunk})
+            trace_committed = await _persist_terminal_trace(recorder, "completed")
+            await _append_end_event(
+                run_id,
+                "completed",
+                thread_id=thread_id,
+                payload={"chunk": finished_chunk, "trace_status": "COMMITTED" if trace_committed else "DEGRADED"},
+            )
 
     except (RunStreamIdleTimeout, RunStreamTotalTimeout) as e:
         await writer.flush()
@@ -634,13 +872,15 @@ async def process_agent_run(ctx, run_id: str):
             {"chunk": error_chunk, "retryable": True},
             thread_id=thread_id,
         )
-        await mark_run_terminal(
+        trace_committed = await _persist_terminal_trace(
+            recorder, "failed", error_type=error_type, error_message=error_message
+        )
+        await _append_end_event(
             run_id,
             "failed",
-            error_type=error_type,
-            error_message=error_message,
+            thread_id=thread_id,
+            payload={"chunk": error_chunk, "trace_status": "COMMITTED" if trace_committed else "DEGRADED"},
         )
-        await _append_end_event(run_id, "failed", thread_id=thread_id, payload={"chunk": error_chunk})
         logger.error(f"Run timeout {run_id}: {e}")
         return
     except asyncio.CancelledError:
@@ -652,8 +892,15 @@ async def process_agent_run(ctx, run_id: str):
             {"reason": "cancelled", "chunk": cancel_chunk},
             thread_id=thread_id,
         )
-        await mark_run_terminal(run_id, "cancelled", error_type="cancelled", error_message="对话已取消")
-        await _append_end_event(run_id, "cancelled", thread_id=thread_id, payload={"chunk": cancel_chunk})
+        trace_committed = await _persist_terminal_trace(
+            recorder, "cancelled", error_type="cancelled", error_message="对话已取消"
+        )
+        await _append_end_event(
+            run_id,
+            "cancelled",
+            thread_id=thread_id,
+            payload={"chunk": cancel_chunk, "trace_status": "COMMITTED" if trace_committed else "DEGRADED"},
+        )
         logger.info(f"Run cancelled: {run_id}")
     except Exception as e:
         await writer.flush()
@@ -677,17 +924,17 @@ async def process_agent_run(ctx, run_id: str):
             # 不做自动重跑：重跑会从 checkpoint 重复注入本轮 human 输入与合成检索
             # 消息（上下文污染 + 业务消息表出现重复轮次）。可重试错误同样以明确
             # 错误终止，由用户重新发送产生新的干净 run。
-            await mark_run_terminal(
-                run_id,
-                "failed",
-                error_type="retryable_worker_error",
-                error_message=str(e),
+            trace_committed = await _persist_terminal_trace(
+                recorder, "failed", error_type="retryable_worker_error", error_message=None
             )
             await _append_end_event(
                 run_id,
                 "failed",
                 thread_id=thread_id,
-                payload={"chunk": retryable_error_chunk},
+                payload={
+                    "chunk": retryable_error_chunk,
+                    "trace_status": "COMMITTED" if trace_committed else "DEGRADED",
+                },
             )
             logger.error(f"Run failed with retryable error, no auto-retry {run_id}: {e}")
             return
@@ -706,13 +953,21 @@ async def process_agent_run(ctx, run_id: str):
             {"chunk": error_chunk, "retryable": False},
             thread_id=thread_id,
         )
-        await mark_run_terminal(run_id, "failed", error_type="worker_error", error_message=str(e))
-        await _append_end_event(run_id, "failed", thread_id=thread_id, payload={"chunk": error_chunk})
+        trace_committed = await _persist_terminal_trace(
+            recorder, "failed", error_type="worker_error", error_message=None
+        )
+        await _append_end_event(
+            run_id,
+            "failed",
+            thread_id=thread_id,
+            payload={"chunk": error_chunk, "trace_status": "COMMITTED" if trace_committed else "DEGRADED"},
+        )
         return
     finally:
         progress_done.set()
         progress_task.cancel()
         await asyncio.gather(progress_task, return_exceptions=True)
+        await recorder.finalize()
         await run_ctx.close()
         await clear_cancel_signal(run_id)
 
@@ -737,8 +992,10 @@ async def _worker_startup(ctx):
     # 启动即清扫一次历史孤儿 run（进程崩溃/Redis 瞬断遗留的 pending/running），
     # 释放被唯一活跃索引锁住的线程。
     await reconcile_stale_agent_runs()
+    await dispatch_pending_agent_runs()
     await recover_stale_scientific_pdf_ingests()
     await reconcile_dynamic_wikis()
+    await relay_trace_outbox()
     await ensure_builtin_mcp_servers_in_db()
     async with pg_manager.get_async_session_context() as session:
         await init_builtin_skills(session)
@@ -761,8 +1018,13 @@ class WorkerSettings:
     # 每 5 分钟清扫一次孤儿 run；worker 启动时也会立即执行一次。
     cron_jobs = [
         cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5))),
+        cron(dispatch_pending_agent_runs, minute=set(range(0, 60))),
         cron(recover_stale_scientific_pdf_ingests, minute=set(range(0, 60, 5))),
         cron(reconcile_dynamic_wikis, minute=set(range(0, 60))),
+        # 轨迹 Outbox relay：fast-path 直发失败/worker 崩溃遗留的 PENDING 补发
+        cron(relay_trace_outbox, minute=set(range(0, 60))),
+        # 每日按有界多批追赶超过策略期限的 STANDARD 终态轨迹；数据库函数承担安全门。
+        cron(purge_expired_trace_runs, hour={3}, minute={17}),
     ]
     # 不做 ARQ 自动重试：重跑会从 checkpoint 重复注入本轮输入（见 process_agent_run
     # 的 except 分支说明）。max_tries 保留 1 仅作为兜底声明。

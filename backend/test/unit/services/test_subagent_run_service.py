@@ -323,6 +323,7 @@ def _patch_run_record_creation(
                 conversation_thread_id=kwargs["conversation_thread_id"],
                 agent_slug=kwargs["agent_slug"],
                 status="pending",
+                tenant_id=1,
                 request_id=kwargs["request_id"],
                 uid=kwargs["uid"],
                 run_type=kwargs["run_type"],
@@ -462,6 +463,35 @@ async def test_subagent_run_service_continues_existing_relation(monkeypatch: pyt
     assert captured["create_run_record"]["input_message"].raw_message()["type"] == "human"
     assert captured["create_run_record"]["input_message"].raw_message()["content"] == "continue"
     assert captured["enqueued"] == "child-run-2"
+
+
+@pytest.mark.asyncio
+async def test_subagent_run_service_keeps_created_run_pending_when_fast_dispatch_is_deferred(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db = _FakeDB()
+    captured: dict[str, object] = {}
+    _patch_repos(monkeypatch, captured=captured, created_relation=_relation(child_thread_id=""))
+
+    async def fake_dispatch(*, db, run_id: str):
+        captured["dispatch"] = (db, run_id)
+        return False
+
+    monkeypatch.setattr(SubagentRunService, "_create_run_record", _fake_create_run_record(captured))
+    monkeypatch.setattr(service_module.agent_run_service, "dispatch_created_agent_run", fake_dispatch)
+
+    result = await SubagentRunService(db).start(
+        uid="user-1",
+        created_by_run_id="parent-run",
+        agent_item=_agent(),
+        input_message=build_chat_input_message("run after retry"),
+        tool_call_id="tool-retry",
+    )
+
+    assert result.created is True
+    assert result.run.status == "pending"
+    assert db.committed is True
+    assert captured["dispatch"] == (db, "child-run")
 
 
 @pytest.mark.asyncio
@@ -658,6 +688,10 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
             "retrieval_mode": "KB_ONLY",
         },
     }
+    trace_head = next(item for item in db.added if item.__class__.__name__ == "AgentRunTraceHead")
+    dispatch = next(item for item in db.added if item.__class__.__name__ == "AgentRunDispatchOutbox")
+    assert trace_head.run_id == run.id
+    assert dispatch.run_id == run.id
     assert db.committed is False
 
 
