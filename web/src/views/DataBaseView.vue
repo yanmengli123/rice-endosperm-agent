@@ -1224,6 +1224,62 @@ defineExpose({
   gap: 18px;
 }
 
+// 表单通用规则：必须放 scoped 顶层。a-modal 内容会 teleport 到 body，
+// 嵌套在某个 modal 容器（如 .new-database-modal）内的规则无法命中
+// 其他 modal 的同类元素——「新建动态 Wiki」的下拉框曾因此宽度塌陷。
+.form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-section.compact-section {
+  gap: 6px;
+}
+
+.form-grid {
+  display: grid;
+  gap: 16px;
+
+  &.two-columns {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  &.three-columns {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  @media (max-width: 768px) {
+    &.two-columns,
+    &.three-columns {
+      grid-template-columns: 1fr;
+    }
+  }
+}
+
+.full-width {
+  width: 100%;
+}
+
+.section-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--gray-800);
+}
+
+.required-mark {
+  margin-left: 2px;
+  color: var(--color-error-500);
+}
+
+.field-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--gray-600);
+}
+
 .wiki-policy-row {
   display: flex;
   align-items: center;
@@ -1384,61 +1440,8 @@ defineExpose({
     gap: 16px;
   }
 
-  .form-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .form-section.compact-section {
-    gap: 6px;
-  }
-
-  .form-grid {
-    display: grid;
-    gap: 16px;
-
-    &.two-columns {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    &.three-columns {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    @media (max-width: 768px) {
-      &.two-columns,
-      &.three-columns {
-        grid-template-columns: 1fr;
-      }
-    }
-  }
-
-  .full-width {
-    width: 100%;
-  }
-
   .compact-model-selector {
     height: 40px;
-  }
-
-  .section-title {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--gray-800);
-  }
-
-  .required-mark {
-    margin-left: 2px;
-    color: var(--color-error-500);
-  }
-
-  .field-hint {
-    margin: 0;
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--gray-600);
   }
 
   .description-hint {
