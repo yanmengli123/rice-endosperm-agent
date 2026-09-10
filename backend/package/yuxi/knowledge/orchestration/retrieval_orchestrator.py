@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from typing import Any
 
@@ -436,6 +437,10 @@ async def prepare_knowledge_context(
 
             raw_scope_snapshot = {**scope_snapshot, "members": raw_members}
             top_k = int((scope_snapshot.get("retrieval_policy") or {}).get("bounded_top_k") or 12)
+            # 题型自适应召回（P2-12）：MULTI_HOP 需要跨章节/跨实体的证据并集，
+            # 扩召回后仍由 per-file/per-section 多样性与 rerank 收敛。
+            if "MULTI_HOP" in (plan.get("question_types") or []):
+                top_k = min(top_k + 8, 24)
             baseline = await query_knowledge_scope_gateway(
                 query_text=question,
                 scope_snapshot=raw_scope_snapshot,
@@ -502,6 +507,31 @@ async def prepare_knowledge_context(
             if claim_validation["status"] != "PASS" or citation_validation["status"] != "PASS":
                 contract["status"] = "DEGRADED"
                 contract["error_code"] = "SCIENTIFIC_CONTRACT_VALIDATION_FAILED"
+        else:
+            # 通用分支（P2-14）：context_evidence 同样过确定性验证——
+            # 唯一性/非空/非派生来源/问题标识符覆盖，结果进 contract 供审计与答案校验。
+            from yuxi.knowledge.validation.context_evidence_validator import validate_context_evidence
+
+            derived_kb_ids = {
+                str(member["kb_id"])
+                for member in members
+                if is_derived_product(str(member.get("kb_type") or ""))
+            }
+            required_identifiers = [
+                token
+                for token in re.findall(r"(?u)\b[\w.-]{3,}\b", question)
+                if any(char.isdigit() or char.isupper() for char in token)
+            ]
+            context_validation, context_warnings = validate_context_evidence(
+                contract["context_evidence"],
+                derived_kb_ids=derived_kb_ids,
+                required_identifiers=required_identifiers[:8],
+            )
+            contract["validation"] = {"context_evidence": context_validation}
+            contract["warnings"].extend(context_warnings)
+            if context_validation["status"] == "FAIL":
+                contract["status"] = "DEGRADED"
+                contract["error_code"] = "CONTEXT_EVIDENCE_VALIDATION_FAILED"
     except LookupError as exc:
         contract.update(
             {
@@ -549,6 +579,12 @@ async def prepare_knowledge_context(
         "结构化结果和引用由后端生成；模型只负责解释。completeness.status=PASS 仅允许称为"
         "‘全部可引用结果’；all_exact_relations_citable=true 时才可称为‘全部调控基因’。"
     )
+    # NUMERIC 题型：数字/区间/单位必须逐字来自证据原文，禁止换算或近似改写（P2-12）
+    if "NUMERIC" in (plan.get("question_types") or []):
+        contract["answer_instruction"] += (
+            "本题含数值事实：数字、区间与单位必须与证据原文逐字一致，不得换算、"
+            "四舍五入或改写表述；证据未给出的数值一律回答未提供。"
+        )
     contract["contract_hash"] = _hash_contract(contract)
     await _persist_audit(
         db,
