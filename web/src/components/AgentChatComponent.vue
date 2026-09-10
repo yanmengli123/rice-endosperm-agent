@@ -251,6 +251,42 @@
                 </div>
               </section>
               <section
+                v-if="hasCurrentEvidenceProjection"
+                class="state-section"
+                :class="{ 'is-collapsed': !isStateSectionExpanded('evidence') }"
+                aria-label="本轮科研检索证据候选"
+              >
+                <button
+                  type="button"
+                  class="state-section-header"
+                  :aria-expanded="isStateSectionExpanded('evidence')"
+                  aria-controls="state-section-evidence"
+                  @click="toggleStateSection('evidence')"
+                >
+                  <span class="state-section-label">
+                    <span class="state-section-title">检索证据</span>
+                    <ChevronDown
+                      :size="15"
+                      class="state-section-chevron"
+                      :class="{ 'is-collapsed': !isStateSectionExpanded('evidence') }"
+                    />
+                  </span>
+                  <span class="state-section-meta">{{ currentEvidenceSummary?.total || 0 }}</span>
+                </button>
+                <div
+                  v-show="isStateSectionExpanded('evidence')"
+                  id="state-section-evidence"
+                  class="state-section-content"
+                >
+                  <EvidenceList
+                    :evidence="currentEvidence"
+                    :summary="currentEvidenceSummary"
+                    :issues="currentEvidenceIssues"
+                    @open-source="openEvidenceSource"
+                  />
+                </div>
+              </section>
+              <section
                 v-if="currentTokenUsage"
                 class="state-section"
                 :class="{ 'is-collapsed': !isStateSectionExpanded('tokenUsage') }"
@@ -633,6 +669,7 @@ import { useConfigStore } from '@/stores/config'
 import { storeToRefs } from 'pinia'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import { agentApi, threadApi } from '@/apis'
+import { downloadWorkspaceKnowledgeFile } from '@/apis/workspace_api'
 import HumanApprovalModal from '@/components/HumanApprovalModal.vue'
 import { useApproval } from '@/composables/useApproval'
 import { useAgentThreadState } from '@/composables/useAgentThreadState'
@@ -641,6 +678,7 @@ import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
 import { useRunTrace } from '@/composables/useRunTrace'
+import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
@@ -723,6 +761,7 @@ const attachmentInitialFilesKey = ref(0)
 const isRefreshingState = ref(false)
 const collapsedStateSections = reactive({
   trace: false,
+  evidence: false,
   tokenUsage: false,
   todos: false,
   files: false,
@@ -1060,6 +1099,80 @@ const currentTrace = computed(() => {
   return trace
 })
 const traceSpanCount = computed(() => Object.keys(currentTrace.value?.spans || {}).length)
+// 本轮检索证据候选（yuxi.scientific-evidence.v1）：终态或历史恢复时拉取权威 DTO。
+const loadRunEvidence = async (threadId, runId) => {
+  const ts = getThreadState(threadId)
+  if (!ts || !runId) return
+  if (ts.evidenceRunId !== runId) resetRunEvidence(threadId, runId)
+  try {
+    const result = await agentApi.getAgentRunEvidence(runId)
+    const currentState = getThreadState(threadId)
+    // 同一线程的新 run 已开始时，丢弃较早请求的迟到响应，避免旧证据覆盖新一轮。
+    if (!currentState || currentState.evidenceRunId !== runId) return
+    currentState.evidence = Array.isArray(result?.evidence) ? result.evidence : []
+    currentState.evidenceSummary = result?.summary || null
+    currentState.evidenceRetrievals = Array.isArray(result?.retrievals) ? result.retrievals : []
+    currentState.evidenceIssues = Array.isArray(result?.issues) ? result.issues : []
+  } catch (error) {
+    console.warn('Failed to load run evidence:', runId, error)
+  }
+}
+const resetRunEvidence = (threadId, runId = null) => {
+  const ts = getThreadState(threadId)
+  if (!ts) return
+  ts.evidenceRunId = runId
+  ts.evidence = []
+  ts.evidenceSummary = null
+  ts.evidenceRetrievals = []
+  ts.evidenceIssues = []
+}
+const currentEvidence = computed(() => {
+  const threadId = currentChatId.value
+  const evidence = threadId ? chatState.threadStates[threadId]?.evidence : null
+  return Array.isArray(evidence) ? evidence : []
+})
+const currentEvidenceSummary = computed(
+  () => currentChatId.value && chatState.threadStates[currentChatId.value]?.evidenceSummary
+)
+const currentEvidenceIssues = computed(() => {
+  const issues = currentChatId.value
+    ? chatState.threadStates[currentChatId.value]?.evidenceIssues
+    : []
+  return Array.isArray(issues) ? issues : []
+})
+const hasCurrentEvidenceProjection = computed(() => {
+  const threadState = currentChatId.value ? chatState.threadStates[currentChatId.value] : null
+  if (!threadState?.evidenceRunId) return false
+  const summary = threadState.evidenceSummary || {}
+  return Boolean(
+    threadState.evidence?.length ||
+    threadState.evidenceRetrievals?.length ||
+    threadState.evidenceIssues?.length ||
+    summary.rejected
+  )
+})
+const openEvidenceSource = async (evidence) => {
+  const kbId = evidence?.source?.kb_id
+  const fileId = evidence?.source?.file_id
+  const fragment = evidence?.locator?.fragments?.[0]
+  if (!kbId || !fileId || !fragment) return
+  try {
+    const response = await downloadWorkspaceKnowledgeFile(kbId, fileId)
+    const objectUrl = URL.createObjectURL(await response.blob())
+    const bbox = Array.isArray(fragment.bbox) ? fragment.bbox : []
+    const left = Math.max(Math.round(Number(bbox[0]) || 0), 0)
+    const top = Math.max(Math.round(Number(bbox[1]) || 0), 0)
+    const page = Math.max(Number(fragment.page_number) || Number(fragment.page_index) + 1 || 1, 1)
+    const link = document.createElement('a')
+    link.href = `${objectUrl}#page=${page}&zoom=page-width,${left},${top}`
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 300000)
+  } catch (error) {
+    message.error(error?.message || '打开 PDF 原文页失败')
+  }
+}
 const tokenUsageSegments = computed(() => {
   const usage = currentTokenUsage.value
   if (!usage) return []
@@ -2174,7 +2287,12 @@ const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
     if (latestRunId) {
       const trace = getThreadState(threadId)?.trace
       if (!trace || trace.runId !== latestRunId) resetRunTrace(threadId, latestRunId)
-      await loadRunTraceSnapshot(threadId, latestRunId)
+      await Promise.all([
+        loadRunTraceSnapshot(threadId, latestRunId),
+        loadRunEvidence(threadId, latestRunId)
+      ])
+    } else {
+      resetRunEvidence(threadId)
     }
   } catch (error) {
     handleChatError(error, 'load')
@@ -2347,6 +2465,7 @@ const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = 
     }
     if (runId) {
       refreshRunTraceSnapshot(threadId, runId)
+      void loadRunEvidence(threadId, runId)
     }
   }
 })
@@ -2570,6 +2689,7 @@ const handleSendMessage = async ({ image } = {}) => {
       throw new Error('创建 run 失败：缺少 run_id')
     }
     resetRunTrace(threadId, runId)
+    resetRunEvidence(threadId, runId)
     await loadRunTraceSnapshot(threadId, runId)
     await startRunStream(threadId, runId, 0)
   } catch (error) {
@@ -2652,6 +2772,7 @@ const handleApprovalWithStream = async (answer) => {
       throw new Error('创建 resume run 失败：缺少 run_id')
     }
     resetRunTrace(threadId, runId)
+    resetRunEvidence(threadId, runId)
     await loadRunTraceSnapshot(threadId, runId)
     await startRunStream(threadId, runId, '0-0')
   } catch (error) {

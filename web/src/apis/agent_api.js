@@ -136,6 +136,9 @@ export const agentApi = {
   /** 获取 Run 执行轨迹 span 列表。 */
   getAgentRunTraceSpans: (runId) => apiGet(`/api/agent/runs/${runId}/trace/spans`),
 
+  /** 获取 Run 的科研检索证据候选 DTO（尚未等同于答案 Claim 引用）。 */
+  getAgentRunEvidence: (runId) => apiGet(`/api/agent/runs/${runId}/evidence`),
+
   /** 独立 Trace SSE；Last-Event-ID 是 PostgreSQL ledger sequence。 */
   streamAgentRunTrace: (runId, afterSequence = 0, options = {}) => {
     const { signal } = options

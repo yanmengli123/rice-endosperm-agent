@@ -34,7 +34,12 @@ export function useAgentThreadState({
         pendingInterrupt: null,
         onGoingConv: createOnGoingConvState(),
         agentState: null,
-        contextCompressing: false
+        contextCompressing: false,
+        evidenceRunId: null,
+        evidence: [],
+        evidenceSummary: null,
+        evidenceRetrievals: [],
+        evidenceIssues: []
       }
     }
     return chatState.threadStates[threadId]
