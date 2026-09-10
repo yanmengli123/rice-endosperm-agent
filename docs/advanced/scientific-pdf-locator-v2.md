@@ -18,6 +18,8 @@
 - 低置信或越界坐标不得开放 PDF 高亮。
 - `knowledge_chunks.source_provenance` 保存不可变科研来源，图谱抽取只写 `extraction_result`。
 - 每个解析版本保存 `evidence-map.json`，用于从 Chunk 追溯 alignment、anchor 和三引擎物理页。
+- AgentRun 通过 `yuxi.scientific-evidence.v1` 一次返回 quote selector、物理 fragment 和完整版本链；读取范围必须是“Run 冻结范围 ∩ 用户当前可见范围”，Anchor 以 `(parse_revision_id, anchor_id)` 复合定位。
+- P0 返回项是 `RETRIEVAL_CANDIDATE`，只证明候选原文与 PDF 定位有效；在建立 `claim_id -> evidence_id` 绑定前，界面和 API 都不得把整批检索候选宣称为答案引用。
 
 ## 表格契约
 
