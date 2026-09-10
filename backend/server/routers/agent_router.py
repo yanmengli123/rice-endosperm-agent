@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import filter_config_by_role
+from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.agent_repository import (
     AgentRepository,
     is_builtin_agent,
@@ -335,6 +336,48 @@ async def get_agent_run_trace(
 ):
     """轨迹快照：summary + span 列表 + snapshot_sequence（SSE 缺口补拉的起点）。"""
     return await get_run_trace_snapshot(run_id=run_id, current_uid=str(current_user.uid), db=db, include_admin=False)
+
+
+@agent_router.get("/runs/{run_id}/evidence")
+async def get_agent_run_evidence(
+    run_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """本次 Run 的科研检索证据候选（yuxi.scientific-evidence.v1）。
+
+    quote 三 selector（exact/prefix/suffix + 字符/词偏移）+ 物理定位
+    （page/bbox fragments）+ 版本链（source_sha256/parse_revision/index_revision）
+    + 服务端确定性验证结果。这里只投影冻结检索上下文，不冒充答案 Claim
+    已绑定的引用；前端一步消费，不自行拼装 provenance。
+    """
+    run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_user.uid))
+    if not run:
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+
+    input_payload = dict(run.input_payload or {})
+    scope_snapshot = dict(input_payload.get("knowledge_scope_snapshot") or {})
+    frozen_kb_ids = {
+        str(kb_id)
+        for kb_id in (
+            scope_snapshot.get("effective_kb_ids")
+            or [member.get("kb_id") for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
+        )
+        if kb_id
+    }
+    accessible = await knowledge_base.get_databases_by_user(current_user)
+    currently_accessible_kb_ids = {
+        str(item.get("kb_id"))
+        for item in accessible.get("databases") or []
+        if isinstance(item, dict) and item.get("kb_id")
+    }
+    from yuxi.knowledge.evidence import assemble_evidence_for_run
+
+    return await assemble_evidence_for_run(
+        db,
+        run_id,
+        allowed_kb_ids=frozen_kb_ids & currently_accessible_kb_ids,
+    )
 
 
 @agent_router.get("/runs/{run_id}/trace/events")

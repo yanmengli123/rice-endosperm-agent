@@ -1,0 +1,8 @@
+{"case_id": "prgate-001", "question": "OsbZIP58 在水稻胚乳中的功能及直接证据是什么？", "question_types": ["ENTITY", "FACT"], "required_identifiers": ["OsbZIP58"], "acceptable_answer_keywords": ["胚乳", "淀粉"], "answerable": true}
+{"case_id": "prgate-002", "question": "OsMYB73 含有几个 SANT 结构域？分别位于哪些氨基酸区间？", "question_types": ["ENTITY", "NUMERIC"], "required_identifiers": ["OsMYB73", "SANT"], "acceptable_answer_keywords": ["115", "164", "167", "215"], "answerable": true}
+{"case_id": "prgate-003", "question": "总结影响水稻胚乳垩白形成的关键基因和调控通路。", "question_types": ["SUMMARY"], "required_identifiers": [], "acceptable_answer_keywords": ["垩白"], "answerable": true}
+{"case_id": "prgate-004", "question": "梳理水稻胚乳灌浆过程中淀粉合成相关基因的表达变化。", "question_types": ["SUMMARY", "FACT"], "required_identifiers": [], "acceptable_answer_keywords": ["灌浆", "淀粉"], "answerable": true}
+{"case_id": "prgate-005", "question": "如何验证一个转录因子是否直接调控淀粉合成基因？", "question_types": ["METHOD"], "required_identifiers": [], "acceptable_answer_keywords": ["验证"], "answerable": true}
+{"case_id": "prgate-006", "question": "OsMYB73 突变体的灌浆速率与野生型相比如何变化？", "question_types": ["ENTITY", "NUMERIC", "FACT"], "required_identifiers": ["OsMYB73"], "acceptable_answer_keywords": ["灌浆"], "answerable": true}
+{"case_id": "prgate-007", "question": "水稻胚乳发育分为哪些关键阶段？", "question_types": ["SUMMARY", "FACT"], "required_identifiers": [], "acceptable_answer_keywords": ["胚乳"], "answerable": true}
+{"case_id": "prgate-008", "question": "今天是星期几？", "question_types": ["NEGATIVE"], "required_identifiers": [], "acceptable_answer_keywords": [], "answerable": false}
