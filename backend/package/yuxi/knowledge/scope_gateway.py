@@ -107,7 +107,14 @@ def _member_is_derived(member: dict[str, Any], target: dict[str, Any] | None = N
     return is_derived_product(_member_kb_type(member, target))
 
 
-def _normalize_document_results(kb_id: str, kb_name: str, result: Any, priority: int) -> list[dict[str, Any]]:
+def _normalize_document_results(
+    kb_id: str,
+    kb_name: str,
+    result: Any,
+    priority: int,
+    *,
+    query_text: str | None = None,
+) -> list[dict[str, Any]]:
     if isinstance(result, list):
         result = KnowledgeBase.build_search_output(kb_id, result)
     rows = result.get("results") if isinstance(result, dict) else None
@@ -119,11 +126,30 @@ def _normalize_document_results(kb_id: str, kb_name: str, result: Any, priority:
         if not isinstance(row, dict) or not str(row.get("content") or "").strip():
             continue
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        raw_score = metadata.get("rerank_score", metadata.get("score"))
+        raw_score = metadata.get("rerank_score")
+        if raw_score is None:
+            raw_score = row.get("rerank_score")
+        if raw_score is None:
+            raw_score = metadata.get("score")
+        if raw_score is None:
+            raw_score = row.get("score")
         try:
             score = float(raw_score) if raw_score is not None else 1.0 / (rank + 1)
         except (TypeError, ValueError):
             score = 1.0 / (rank + 1)
+        if query_text:
+            # Milvus hybrid scores and graph lexical scores use different scales.
+            # Calibrate document hits with the same lexical function used by the
+            # graph channel so exact scientific identifiers cannot be crowded out
+            # solely because their backend score has a smaller numeric range.
+            score = max(
+                score,
+                _lexical_score(
+                    _query_tokens(query_text),
+                    row.get("content"),
+                    metadata.get("source"),
+                ),
+            )
         chunk_id = str(row.get("id") or metadata.get("chunk_id") or "")
         file_id = str(row.get("file_id") or metadata.get("file_id") or "")
         evidence_id = _stable_id("evdoc", kb_id, file_id, chunk_id, row.get("content"))
@@ -165,7 +191,16 @@ async def _query_document_source(member: dict[str, Any], query_text: str) -> tup
         return [], "DOCUMENT_RETRIEVER_UNAVAILABLE"
     try:
         retriever = target["retriever"]
-        result = retriever(query_text)
+        retrieval_kwargs = {}
+        if _member_kb_type(member, target) == "milvus":
+            # The answer plane needs lexical recall for exact scientific symbols
+            # (for example SANT/OsMYB73) and vector recall for natural-language
+            # paraphrases. Raw PDF chunks remain the authoritative evidence source.
+            retrieval_kwargs = {
+                "search_mode": "hybrid",
+                "scientific_pdf_diversity": True,
+            }
+        result = retriever(query_text, **retrieval_kwargs)
         if inspect.isawaitable(result):
             result = await result
         rows = _normalize_document_results(
@@ -173,6 +208,7 @@ async def _query_document_source(member: dict[str, Any], query_text: str) -> tup
             member.get("kb_name") or target.get("name") or kb_id,
             result,
             int(member.get("priority") or 100),
+            query_text=query_text,
         )
         return [row for row in rows if _policy_allows(member, row["evidence_status"])], None
     except Exception as exc:  # noqa: BLE001
@@ -469,7 +505,17 @@ def _deduplicate_and_rerank(
         merged["evidence_records"] = [
             {
                 field: row.get(field)
-                for field in ("evidence_id", "pmid", "doi", "kb_id", "evidence_level", "condition")
+                for field in (
+                    "evidence_id",
+                    "source_type",
+                    "kb_id",
+                    "file_id",
+                    "chunk_id",
+                    "pmid",
+                    "doi",
+                    "evidence_level",
+                    "condition",
+                )
                 if row.get(field) not in (None, "", [], {})
             }
             for row in group
@@ -491,16 +537,31 @@ def _deduplicate_and_rerank(
         match = re.search(r"\d+", str(value or ""))
         return int(match.group(0)) if match else 99
 
-    merged_rows.sort(
-        key=lambda row: (
-            bool(row.get("conflict")),
-            evidence_category_rank(row.get("outcome_class")),
-            status_rank.get(str(row.get("evidence_status")), 9),
-            evidence_level_rank(row.get("evidence_level")),
-            -float(row.get("score") or 0.0),
-            int(row.get("priority") or 100),
+    if stratify_yield:
+        merged_rows.sort(
+            key=lambda row: (
+                bool(row.get("conflict")),
+                evidence_category_rank(row.get("outcome_class")),
+                status_rank.get(str(row.get("evidence_status")), 9),
+                evidence_level_rank(row.get("evidence_level")),
+                -float(row.get("score") or 0.0),
+                int(row.get("priority") or 100),
+            )
         )
-    )
+    else:
+        # Outcome strata are meaningful only for yield questions. Applying that
+        # ordering globally lets unrelated graph relations outrank an exact raw
+        # PDF passage, which both hides the authoritative quote and invites the
+        # answer model to invent details.
+        merged_rows.sort(
+            key=lambda row: (
+                bool(row.get("conflict")),
+                -float(row.get("score") or 0.0),
+                status_rank.get(str(row.get("evidence_status")), 9),
+                evidence_level_rank(row.get("evidence_level")),
+                int(row.get("priority") or 100),
+            )
+        )
     if not stratify_yield:
         return merged_rows[:top_k], warnings
 
@@ -543,14 +604,36 @@ def _deduplicate_and_rerank(
     return selected, warnings
 
 
-def _compact_evidence(row: dict[str, Any]) -> dict[str, Any]:
+def _compact_evidence(row: dict[str, Any], *, query_text: str | None = None) -> dict[str, Any]:
     """Return the claim/renderer contract without internal ranking baggage."""
 
     def clipped(value: Any, limit: int = 420) -> str | None:
         text = str(value or "").strip()
         if not text:
             return None
-        return text if len(text) <= limit else f"{text[: limit - 1].rstrip()}…"
+        if len(text) <= limit:
+            return text
+
+        if query_text:
+            folded = text.casefold()
+            anchors = []
+            for token in _query_tokens(query_text):
+                normalized_token = token.casefold()
+                index = folded.find(normalized_token)
+                if index >= 0:
+                    anchors.append((folded.count(normalized_token), -index, -len(normalized_token)))
+            if anchors:
+                _, negated_anchor, _ = min(anchors)
+                anchor = -negated_anchor
+                content_limit = max(limit - 2, 1)
+                start = max(0, anchor - content_limit // 3)
+                end = min(len(text), start + content_limit)
+                if end == len(text):
+                    start = max(0, end - content_limit)
+                excerpt = text[start:end].strip()
+                return f"{'…' if start else ''}{excerpt}{'…' if end < len(text) else ''}"
+
+        return f"{text[: limit - 1].rstrip()}…"
 
     observed_effect = row.get("observed_effect")
     if not observed_effect or str(observed_effect).upper() in {"UNKNOWN", "NONE"}:
@@ -562,6 +645,8 @@ def _compact_evidence(row: dict[str, Any]) -> dict[str, Any]:
         "evidence_status": row.get("evidence_status"),
         "kb_id": row.get("kb_id"),
         "kb_name": row.get("kb_name"),
+        "file_id": row.get("file_id"),
+        "chunk_id": row.get("chunk_id"),
         "subject": {"name": (row.get("subject") or {}).get("name")},
         "object": {"name": (row.get("object") or {}).get("name")},
         "pmid": row.get("pmid"),
@@ -679,7 +764,7 @@ async def query_knowledge_scope_gateway(
         for usage in sorted(source_usage.values(), key=lambda value: value["kb_id"])
     ]
 
-    evidence = [_compact_evidence(item) for item in ranked_evidence]
+    evidence = [_compact_evidence(item, query_text=query_text) for item in ranked_evidence]
     package: dict[str, list[str]] = {
         "direct_yield": [],
         "condition_specific_yield": [],

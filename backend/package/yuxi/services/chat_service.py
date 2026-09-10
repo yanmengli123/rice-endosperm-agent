@@ -55,6 +55,31 @@ from yuxi.utils.reasoning_visibility import (
 from yuxi.utils.markdown_tables import normalize_markdown_tables
 from yuxi.utils.thread_utils import extract_thread_id as _metadata_thread_id
 
+_RUN_TIMEOUT_ERROR_MESSAGE = "服务端长时间未收到检索或模型输出，已安全结束本次任务，请重试。"
+
+
+def _stream_abort_details(
+    exc: asyncio.CancelledError | ConnectionError,
+    *,
+    resume: bool = False,
+) -> tuple[str, str, str]:
+    """Map cancellation provenance to persisted/UI semantics.
+
+    The AgentRun worker cancels the pending ``__anext__`` task to enforce its
+    own timeout and user-cancel budgets. That cancellation is not a client
+    disconnect, so preserving the reason prevents a failed run from being
+    rendered later as the misleading generic ``对话已中断`` message.
+    """
+
+    reason = str(exc.args[0]) if isinstance(exc, asyncio.CancelledError) and exc.args else ""
+    if reason in {"run_idle_timeout", "run_total_timeout"}:
+        return "error", reason, _RUN_TIMEOUT_ERROR_MESSAGE
+    if reason == "cancel_requested":
+        return "interrupted", "cancelled", "对话已取消"
+    if resume:
+        return "interrupted", "resume_interrupted", "对话恢复已中断"
+    return "interrupted", "interrupted", "对话已中断"
+
 
 def _build_state_files(attachments: list[dict]) -> dict:
     """将附件列表转换为 StateBackend 格式的 files 字典
@@ -1374,7 +1399,11 @@ async def stream_agent_chat(
         yield make_chunk(status="finished", meta=meta)
 
     except (asyncio.CancelledError, ConnectionError) as e:
-        logger.warning(f"Client disconnected, cancelling stream: {e}")
+        abort_status, abort_error_type, abort_message = _stream_abort_details(e)
+        logger.warning(
+            f"Chat stream aborted: status={abort_status}, "
+            f"error_type={abort_error_type}, reason={e}"
+        )
 
         async def save_cleanup():
             nonlocal full_msg
@@ -1386,8 +1415,8 @@ async def stream_agent_chat(
                     new_conv_repo,
                     thread_id,
                     full_msg=full_msg,
-                    error_message="对话已中断" if not full_msg else None,
-                    error_type="interrupted",
+                    error_message=abort_message,
+                    error_type=abort_error_type,
                     trace_info=trace_info,
                     run_id=meta.get("run_id"),
                     request_id=meta.get("request_id"),
@@ -1401,7 +1430,15 @@ async def stream_agent_chat(
         except Exception as exc:
             logger.error(f"Error during cleanup save: {exc}")
 
-        yield make_chunk(status="interrupted", message="对话已中断", meta=meta)
+        abort_payload = {
+            "status": abort_status,
+            "message": abort_message,
+            "error_type": abort_error_type,
+            "meta": meta,
+        }
+        if abort_status == "error":
+            abort_payload["error_message"] = abort_message
+        yield make_chunk(**abort_payload)
 
     except Exception as e:
         logger.exception(f"Error streaming messages: {e}")
@@ -1692,21 +1729,33 @@ async def stream_agent_resume(
         yield make_resume_chunk(status="finished", meta=meta)
 
     except (asyncio.CancelledError, ConnectionError) as e:
-        logger.warning(f"Client disconnected during resume: {e}")
+        abort_status, abort_error_type, abort_message = _stream_abort_details(e, resume=True)
+        logger.warning(
+            f"Resume stream aborted: status={abort_status}, "
+            f"error_type={abort_error_type}, reason={e}"
+        )
 
         async with pg_manager.get_async_session_context() as new_db:
             new_conv_repo = ConversationRepository(new_db)
             await save_partial_message(
                 new_conv_repo,
                 thread_id,
-                error_message="对话恢复已中断",
-                error_type="resume_interrupted",
+                error_message=abort_message,
+                error_type=abort_error_type,
                 trace_info=trace_info,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
             )
 
-        yield make_resume_chunk(status="interrupted", message="对话恢复已中断", meta=meta)
+        abort_payload = {
+            "status": abort_status,
+            "message": abort_message,
+            "error_type": abort_error_type,
+            "meta": meta,
+        }
+        if abort_status == "error":
+            abort_payload["error_message"] = abort_message
+        yield make_resume_chunk(**abort_payload)
 
     except Exception as e:
         logger.exception(f"Error during resume: {e}")

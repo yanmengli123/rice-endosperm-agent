@@ -1071,6 +1071,37 @@ class MilvusKB(KnowledgeBase):
 
             output_fields = ["content", "chunk_id", "file_id", "chunk_index"]
             retrieved_chunks: list[dict] = []
+
+            async def search_bm25() -> list[dict]:
+                bm25_top_k = int(merged_kwargs.get("bm25_top_k", recall_top_k))
+                bm25_top_k = max(bm25_top_k, 1)
+                bm25_drop_ratio_search = float(merged_kwargs.get("bm25_drop_ratio_search", 0.0))
+                bm25_search_params = {
+                    "metric_type": "BM25",
+                    "params": {"drop_ratio_search": bm25_drop_ratio_search},
+                }
+                results = await _run_milvus_query_io(
+                    collection.search,
+                    data=[query_text],
+                    anns_field=CONTENT_SPARSE_FIELD,
+                    param=bm25_search_params,
+                    limit=bm25_top_k,
+                    expr=file_expr,
+                    output_fields=output_fields,
+                )
+                chunks: list[dict] = []
+                if results and len(results) > 0 and len(results[0]) > 0:
+                    for hit in results[0]:
+                        chunks.append(
+                            self._build_chunk_from_hit(
+                                hit,
+                                hit.distance,
+                                include_distances,
+                                score_field="bm25_score",
+                            )
+                        )
+                return chunks
+
             if search_mode == "vector":
                 embedding_model_spec = self.databases_meta[kb_id].get("embedding_model_spec")
                 # Embedding is network I/O and already exposes an async API. Running
@@ -1106,77 +1137,71 @@ class MilvusKB(KnowledgeBase):
                 )
 
             elif search_mode == "keyword":
-                bm25_top_k = int(merged_kwargs.get("bm25_top_k", recall_top_k))
-                bm25_top_k = max(bm25_top_k, 1)
-                bm25_drop_ratio_search = float(merged_kwargs.get("bm25_drop_ratio_search", 0.0))
-                bm25_search_params = {
-                    "metric_type": "BM25",
-                    "params": {"drop_ratio_search": bm25_drop_ratio_search},
-                }
-
-                results = await _run_milvus_query_io(
-                    collection.search,
-                    data=[query_text],
-                    anns_field=CONTENT_SPARSE_FIELD,
-                    param=bm25_search_params,
-                    limit=bm25_top_k,
-                    expr=file_expr,
-                    output_fields=output_fields,
-                )
-
-                if results and len(results) > 0 and len(results[0]) > 0:
-                    for hit in results[0]:
-                        retrieved_chunks.append(
-                            self._build_chunk_from_hit(hit, hit.distance, include_distances, score_field="bm25_score")
-                        )
-
+                retrieved_chunks = await search_bm25()
                 logger.debug(f"Milvus BM25 query response: {len(retrieved_chunks)} chunks found")
             else:
                 embedding_model_spec = self.databases_meta[kb_id].get("embedding_model_spec")
                 embedding_function = self._get_embedding_function(embedding_model_spec)
-                query_embedding = embedding_function([query_text])
-                if inspect.isawaitable(query_embedding):
-                    query_embedding = await query_embedding
+                try:
+                    query_embedding = embedding_function([query_text])
+                    if inspect.isawaitable(query_embedding):
+                        query_embedding = await query_embedding
+                except Exception as exc:  # noqa: BLE001 - lexical retrieval remains authoritative and available
+                    logger.warning(
+                        f"Milvus hybrid embedding unavailable for {kb_id}; "
+                        f"falling back to BM25: {exc}"
+                    )
+                    retrieved_chunks = await search_bm25()
+                    logger.debug(
+                        f"Milvus hybrid BM25 fallback response: {len(retrieved_chunks)} chunks found"
+                    )
+                    query_embedding = None
                 bm25_top_k = int(merged_kwargs.get("bm25_top_k", recall_top_k))
                 bm25_top_k = max(bm25_top_k, 1)
                 bm25_drop_ratio_search = float(merged_kwargs.get("bm25_drop_ratio_search", 0.0))
                 vector_weight = float(merged_kwargs.get("vector_weight", 0.7))
                 bm25_weight = float(merged_kwargs.get("bm25_weight", 0.3))
 
-                vector_request = AnnSearchRequest(
-                    data=query_embedding,
-                    anns_field="embedding",
-                    param={"metric_type": metric_type, "params": {"nprobe": 10}},
-                    limit=recall_top_k,
-                    expr=file_expr,
-                )
-                bm25_request = AnnSearchRequest(
-                    data=[query_text],
-                    anns_field=CONTENT_SPARSE_FIELD,
-                    param={
-                        "metric_type": "BM25",
-                        "params": {"drop_ratio_search": bm25_drop_ratio_search},
-                    },
-                    limit=bm25_top_k,
-                    expr=file_expr,
-                )
-                results = await _run_milvus_query_io(
-                    collection.hybrid_search,
-                    reqs=[vector_request, bm25_request],
-                    rerank=WeightedRanker(vector_weight, bm25_weight),
-                    limit=recall_top_k,
-                    output_fields=output_fields,
-                )
-                if results and len(results) > 0 and len(results[0]) > 0:
-                    for hit in results[0]:
-                        score = float(hit.distance or 0.0)
-                        if score < similarity_threshold:
-                            continue
-                        retrieved_chunks.append(
-                            self._build_chunk_from_hit(hit, score, include_distances, score_field="hybrid_score")
-                        )
+                if query_embedding is not None:
+                    vector_request = AnnSearchRequest(
+                        data=query_embedding,
+                        anns_field="embedding",
+                        param={"metric_type": metric_type, "params": {"nprobe": 10}},
+                        limit=recall_top_k,
+                        expr=file_expr,
+                    )
+                    bm25_request = AnnSearchRequest(
+                        data=[query_text],
+                        anns_field=CONTENT_SPARSE_FIELD,
+                        param={
+                            "metric_type": "BM25",
+                            "params": {"drop_ratio_search": bm25_drop_ratio_search},
+                        },
+                        limit=bm25_top_k,
+                        expr=file_expr,
+                    )
+                    results = await _run_milvus_query_io(
+                        collection.hybrid_search,
+                        reqs=[vector_request, bm25_request],
+                        rerank=WeightedRanker(vector_weight, bm25_weight),
+                        limit=recall_top_k,
+                        output_fields=output_fields,
+                    )
+                    if results and len(results) > 0 and len(results[0]) > 0:
+                        for hit in results[0]:
+                            score = float(hit.distance or 0.0)
+                            if score < similarity_threshold:
+                                continue
+                            retrieved_chunks.append(
+                                self._build_chunk_from_hit(
+                                    hit,
+                                    score,
+                                    include_distances,
+                                    score_field="hybrid_score",
+                                )
+                            )
 
-                logger.debug(f"Milvus hybrid query response: {len(retrieved_chunks)} chunks found")
+                    logger.debug(f"Milvus hybrid query response: {len(retrieved_chunks)} chunks found")
 
             if use_graph_retrieval:
                 graph_chunks = await self._retrieve_graph_chunks(query_text, kb_id, retrieved_chunks, merged_kwargs)

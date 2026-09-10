@@ -668,6 +668,29 @@ async def test_hybrid_mode_filters_scores_below_similarity_threshold():
     assert chunks == []
 
 
+async def test_hybrid_mode_falls_back_to_bm25_when_embedding_is_unavailable():
+    collection = FakeCollection()
+    kb = make_kb(collection)
+
+    def unavailable_embedding(_texts):
+        raise ConnectionError("embedding endpoint unavailable")
+
+    kb._get_embedding_function = lambda embedding_model_spec, **kwargs: unavailable_embedding
+
+    chunks = await kb.aquery(
+        "OsMYB73 SANT",
+        "db",
+        search_mode="hybrid",
+        bm25_top_k=7,
+    )
+
+    assert chunks[0]["content"] == "BM25 result"
+    assert chunks[0]["bm25_score"] == 0.8
+    assert collection.hybrid_calls == []
+    assert collection.search_calls[0]["anns_field"] == CONTENT_SPARSE_FIELD
+    assert collection.search_calls[0]["data"] == ["OsMYB73 SANT"]
+
+
 def test_query_params_config_uses_bm25_parameters():
     kb = MilvusKB.__new__(MilvusKB)
 

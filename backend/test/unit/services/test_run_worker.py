@@ -36,8 +36,15 @@ class _BytesAsyncIter:
 
 
 class _NeverAsyncIter:
+    def __init__(self):
+        self.cancel_reason = None
+
     async def __anext__(self):
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            self.cancel_reason = exc.args[0] if exc.args else None
+            raise
 
 
 class _NeverCancelledContext:
@@ -352,11 +359,13 @@ async def test_stream_wait_emits_progress_then_times_out(monkeypatch: pytest.Mon
     monkeypatch.setattr(run_worker, "RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS", 0.005)
     monkeypatch.setattr(run_worker, "RUN_STREAM_IDLE_TIMEOUT_SECONDS", 0.02)
 
-    stream = run_worker._consume_stream_with_cancel(_NeverAsyncIter(), _NeverCancelledContext())
+    source = _NeverAsyncIter()
+    stream = run_worker._consume_stream_with_cancel(source, _NeverCancelledContext())
     assert await stream.__anext__() is run_worker._STREAM_WAITING
     with pytest.raises(run_worker.RunStreamIdleTimeout):
         while True:
             await stream.__anext__()
+    assert source.cancel_reason == "run_idle_timeout"
 
 
 @pytest.mark.asyncio
@@ -365,9 +374,11 @@ async def test_stream_total_deadline_applies_even_when_idle_deadline_is_long(mon
     monkeypatch.setattr(run_worker, "RUN_STREAM_IDLE_TIMEOUT_SECONDS", 10.0)
     monkeypatch.setattr(run_worker, "RUN_STREAM_TOTAL_TIMEOUT_SECONDS", 0.01)
 
-    stream = run_worker._consume_stream_with_cancel(_NeverAsyncIter(), _NeverCancelledContext())
+    source = _NeverAsyncIter()
+    stream = run_worker._consume_stream_with_cancel(source, _NeverCancelledContext())
     with pytest.raises(run_worker.RunStreamTotalTimeout):
         await stream.__anext__()
+    assert source.cancel_reason == "run_total_timeout"
 
 
 @pytest.mark.asyncio

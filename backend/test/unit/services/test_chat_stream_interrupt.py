@@ -1,5 +1,6 @@
 """测试 chat_service 中的 interrupt 相关函数"""
 
+import asyncio
 import json
 import sys
 import os
@@ -15,6 +16,7 @@ from yuxi.services.chat_service import (
     _normalize_interrupt_questions,
     _build_ask_user_question_payload,
     _coerce_interrupt_payload,
+    _stream_abort_details,
     stream_agent_resume,
 )
 from yuxi.services import chat_service as svc
@@ -27,6 +29,45 @@ class _FakeSession:
 
     async def commit(self):
         self.commit_count += 1
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (
+            "run_idle_timeout",
+            (
+                "error",
+                "run_idle_timeout",
+                "服务端长时间未收到检索或模型输出，已安全结束本次任务，请重试。",
+            ),
+        ),
+        (
+            "run_total_timeout",
+            (
+                "error",
+                "run_total_timeout",
+                "服务端长时间未收到检索或模型输出，已安全结束本次任务，请重试。",
+            ),
+        ),
+        ("cancel_requested", ("interrupted", "cancelled", "对话已取消")),
+    ],
+)
+def test_stream_abort_details_preserves_worker_cancellation_reason(reason, expected):
+    assert _stream_abort_details(asyncio.CancelledError(reason)) == expected
+
+
+def test_stream_abort_details_keeps_true_disconnect_semantics():
+    assert _stream_abort_details(ConnectionError("closed")) == (
+        "interrupted",
+        "interrupted",
+        "对话已中断",
+    )
+    assert _stream_abort_details(asyncio.CancelledError(), resume=True) == (
+        "interrupted",
+        "resume_interrupted",
+        "对话恢复已中断",
+    )
 
 
 @pytest.fixture(autouse=True)

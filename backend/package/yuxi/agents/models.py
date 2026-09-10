@@ -10,6 +10,9 @@ from yuxi.utils import get_docker_safe_url
 from yuxi.utils.logging_config import logger
 from yuxi.utils.reasoning_visibility import ReasoningVisibilityBuffer, sanitize_visible_text
 
+CHAT_MODEL_REQUEST_TIMEOUT_SECONDS = 45.0
+CHAT_MODEL_STREAM_CHUNK_TIMEOUT_SECONDS = 45.0
+
 
 def resolve_chat_model_spec(model_spec: str | None, *, fallback: str | None = None) -> str:
     """解析空模型配置，不吞掉已经配置但无效的模型值。
@@ -135,6 +138,14 @@ def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel
             google_api_key=SecretStr(api_key),
             **kwargs,
         )
+
+    # Keep one retry authority. LangGraph's ModelRetryMiddleware owns the run-level
+    # retry budget; SDK retries here would multiply that budget and can outlive the
+    # AgentRun idle deadline without producing a stream event.
+    if "request_timeout" not in kwargs and "timeout" not in kwargs:
+        kwargs["request_timeout"] = CHAT_MODEL_REQUEST_TIMEOUT_SECONDS
+    kwargs.setdefault("stream_chunk_timeout", CHAT_MODEL_STREAM_CHUNK_TIMEOUT_SECONDS)
+    kwargs.setdefault("max_retries", 0)
 
     return _ToolCallChunkFixChatOpenAI(
         model=info.model_id,

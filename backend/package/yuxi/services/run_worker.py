@@ -481,7 +481,7 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
             )
 
             if cancel_task in done:
-                next_task.cancel()
+                next_task.cancel("cancel_requested")
                 await asyncio.gather(next_task, return_exceptions=True)
                 raise asyncio.CancelledError(f"run {run_ctx.run_id} cancelled")
 
@@ -496,14 +496,14 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
                 break
 
             if time.monotonic() - idle_started_at >= RUN_STREAM_IDLE_TIMEOUT_SECONDS:
-                next_task.cancel()
+                next_task.cancel("run_idle_timeout")
                 await asyncio.gather(next_task, return_exceptions=True)
                 raise RunStreamIdleTimeout(
                     f"agent stream produced no event for {RUN_STREAM_IDLE_TIMEOUT_SECONDS:.0f} seconds"
                 )
 
             if time.monotonic() - stream_started_at >= RUN_STREAM_TOTAL_TIMEOUT_SECONDS:
-                next_task.cancel()
+                next_task.cancel("run_total_timeout")
                 await asyncio.gather(next_task, return_exceptions=True)
                 raise RunStreamTotalTimeout(
                     f"agent stream exceeded {RUN_STREAM_TOTAL_TIMEOUT_SECONDS:.0f} seconds total runtime"

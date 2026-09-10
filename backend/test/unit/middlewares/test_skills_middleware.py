@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,7 @@ from langchain_core.messages import SystemMessage, ToolMessage
 from langgraph.types import Command
 
 import yuxi.agents.middlewares.skills as skills_middleware
+import yuxi.agents.toolkits.service as toolkit_service
 from yuxi.agents.middlewares.skills import (
     SkillsMiddleware,
     resolve_runtime_skills_for_context,
@@ -230,6 +232,77 @@ async def test_resolve_configured_runtime_tools_registers_skill_gated_tools():
     tools = await resolve_configured_runtime_tools(context)
 
     assert _KB_TOOL_NAMES <= {tool.name for tool in tools}
+
+
+@pytest.mark.asyncio
+async def test_resolve_configured_runtime_tools_loads_mcps_concurrently_in_configured_order(monkeypatch):
+    active = 0
+    max_active = 0
+
+    async def dependency_mode(server_name):
+        del server_name
+        return "OPTIONAL"
+
+    async def enabled_tools(server_name):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01 if server_name == "second" else 0.02)
+        active -= 1
+        return [SimpleNamespace(name=f"tool-{server_name}")]
+
+    monkeypatch.setattr("yuxi.agents.mcp.service.get_mcp_dependency_mode", dependency_mode)
+    monkeypatch.setattr("yuxi.agents.mcp.service.get_enabled_mcp_tools", enabled_tools)
+    monkeypatch.setattr(toolkit_service, "get_tool_instances_by_category", lambda category: [])
+    monkeypatch.setattr("yuxi.agents.middlewares.skills.resolve_skill_gated_tools", lambda context: [])
+
+    tools = await resolve_configured_runtime_tools(
+        SimpleNamespace(tools=None, mcps=["first", "second", "first"])
+    )
+
+    assert max_active == 2
+    assert [tool.name for tool in tools] == ["tool-first", "tool-second"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_configured_runtime_tools_skips_optional_mcp_timeout(monkeypatch):
+    async def dependency_mode(server_name):
+        del server_name
+        return "OPTIONAL"
+
+    async def enabled_tools(server_name):
+        del server_name
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr("yuxi.agents.mcp.service.get_mcp_dependency_mode", dependency_mode)
+    monkeypatch.setattr("yuxi.agents.mcp.service.get_enabled_mcp_tools", enabled_tools)
+    monkeypatch.setattr(toolkit_service, "MCP_RUNTIME_LOAD_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(toolkit_service, "get_tool_instances_by_category", lambda category: [])
+    monkeypatch.setattr("yuxi.agents.middlewares.skills.resolve_skill_gated_tools", lambda context: [])
+
+    tools = await resolve_configured_runtime_tools(SimpleNamespace(tools=None, mcps=["slow-optional"]))
+
+    assert tools == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_configured_runtime_tools_fails_closed_for_required_mcp_timeout(monkeypatch):
+    async def dependency_mode(server_name):
+        del server_name
+        return "REQUIRED"
+
+    async def enabled_tools(server_name):
+        del server_name
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr("yuxi.agents.mcp.service.get_mcp_dependency_mode", dependency_mode)
+    monkeypatch.setattr("yuxi.agents.mcp.service.get_enabled_mcp_tools", enabled_tools)
+    monkeypatch.setattr(toolkit_service, "MCP_RUNTIME_LOAD_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(toolkit_service, "get_tool_instances_by_category", lambda category: [])
+    monkeypatch.setattr("yuxi.agents.middlewares.skills.resolve_skill_gated_tools", lambda context: [])
+
+    with pytest.raises(RuntimeError, match="Required MCP 'slow-required' timed out"):
+        await resolve_configured_runtime_tools(SimpleNamespace(tools=None, mcps=["slow-required"]))
 
 
 def _make_gated_request(activated):

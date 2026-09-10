@@ -208,6 +208,32 @@ def test_load_chat_model_keeps_non_siliconflow_openai_streaming(monkeypatch):
     assert explicit.disable_streaming is True
 
 
+def test_load_chat_model_bounds_openai_compatible_requests_without_nested_retries(monkeypatch):
+    monkeypatch.setattr(
+        "yuxi.agents.models.model_cache.get_model_info",
+        lambda spec: (
+            _chat_model_info("openai-compatible", "namespace/chat-model")
+            if spec == "openai-compatible:namespace/chat-model"
+            else None
+        ),
+    )
+
+    model = load_chat_model("openai-compatible:namespace/chat-model")
+    explicit = load_chat_model(
+        "openai-compatible:namespace/chat-model",
+        request_timeout=12.0,
+        stream_chunk_timeout=13.0,
+        max_retries=1,
+    )
+
+    assert model.request_timeout == 45.0
+    assert model.stream_chunk_timeout == 45.0
+    assert model.max_retries == 0
+    assert explicit.request_timeout == 12.0
+    assert explicit.stream_chunk_timeout == 13.0
+    assert explicit.max_retries == 1
+
+
 @pytest.mark.asyncio
 async def test_langchain_chat_adapter_preserves_call_response_contract():
     from langchain_core.messages import AIMessage

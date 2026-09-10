@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -101,6 +102,151 @@ def test_compact_evidence_removes_internal_fields_and_duplicate_content():
     assert "metadata" not in compact
     assert "priority" not in compact
     assert "raw_score" not in compact
+
+
+def test_compact_evidence_extracts_query_relevant_window_and_keeps_chunk_provenance():
+    row = _evidence(kb_id="kb-a", status="SUPPORTING")
+    row.update(
+        {
+            "source_type": "DOCUMENT",
+            "file_id": "file-a",
+            "chunk_id": "chunk-a",
+            "content": (
+                "Background text about OsMYB73. "
+                + "x" * 700
+                + " The results revealed two typical SANT domains between "
+                "115–164 and 167–215 amino acids."
+            ),
+        }
+    )
+
+    compact = _compact_evidence(
+        row,
+        query_text="OsMYB73 有几个 SANT 保守结构域，氨基酸位置是多少？",
+    )
+
+    assert "115–164" in compact["evidence_quote"]
+    assert "167–215" in compact["evidence_quote"]
+    assert compact["file_id"] == "file-a"
+    assert compact["chunk_id"] == "chunk-a"
+
+
+def test_normalize_document_results_preserves_top_level_rerank_score():
+    rows = scope_gateway._normalize_document_results(
+        "kb-a",
+        "Rice PDF",
+        {
+            "results": [
+                {
+                    "id": "chunk-a",
+                    "file_id": "file-a",
+                    "content": "OsMYB73 contains two SANT domains.",
+                    "score": 0.4,
+                    "rerank_score": 0.91,
+                    "metadata": {},
+                }
+            ]
+        },
+        100,
+    )
+
+    assert rows[0]["raw_score"] == 0.91
+
+
+def test_normalize_document_results_calibrates_exact_identifiers_with_lexical_score():
+    rows = scope_gateway._normalize_document_results(
+        "kb-a",
+        "Rice PDF",
+        {
+            "results": [
+                {
+                    "id": "chunk-a",
+                    "content": "OsMYB73 has two typical SANT domains.",
+                    "score": 0.01,
+                    "metadata": {},
+                }
+            ]
+        },
+        100,
+        query_text="OsMYB73 SANT",
+    )
+
+    assert rows[0]["raw_score"] == 1.0
+
+
+def test_general_reranking_prefers_relevance_over_yield_category():
+    document = scope_gateway._normalize_document_results(
+        "kb-doc",
+        "Rice PDF",
+        [{"id": "chunk-a", "content": "OsMYB73 contains SANT domains.", "score": 0.9}],
+        100,
+    )[0]
+    graph = _evidence(kb_id="kb-graph", status="SUPPORTING")
+    graph.update(
+        {
+            "subject": {"name": "UnrelatedGene"},
+            "raw_score": 0.2,
+            "outcome_class": "DIRECT_YIELD",
+            "evidence_level": "E1",
+        }
+    )
+
+    evidence, _ = _deduplicate_and_rerank([graph, document], top_k=2)
+
+    assert evidence[0]["source_type"] == "DOCUMENT"
+
+
+@pytest.mark.asyncio
+async def test_document_source_uses_hybrid_scientific_retrieval_for_milvus(monkeypatch):
+    from yuxi.knowledge import runtime
+
+    captured = {}
+
+    async def retriever(query_text, **kwargs):
+        captured.update({"query_text": query_text, "kwargs": kwargs})
+        return {
+            "results": [
+                {
+                    "id": "chunk-a",
+                    "file_id": "file-a",
+                    "content": "OsMYB73 contains two SANT domains.",
+                    "score": 0.87,
+                    "metadata": {},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        runtime,
+        "knowledge_base",
+        SimpleNamespace(
+            get_retrievers=lambda: {
+                "kb-a": {
+                    "name": "Rice PDF",
+                    "metadata": {"kb_type": "milvus"},
+                    "retriever": retriever,
+                }
+            }
+        ),
+    )
+
+    rows, error = await scope_gateway._query_document_source(
+        {
+            "kb_id": "kb-a",
+            "kb_name": "Rice PDF",
+            "document_enabled": True,
+            "evidence_supporting": True,
+            "priority": 100,
+        },
+        "OsMYB73 SANT",
+    )
+
+    assert error is None
+    assert captured == {
+        "query_text": "OsMYB73 SANT",
+        "kwargs": {"search_mode": "hybrid", "scientific_pdf_diversity": True},
+    }
+    assert rows[0]["raw_score"] == 1.0
 
 
 @pytest.mark.asyncio
