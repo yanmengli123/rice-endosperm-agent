@@ -85,7 +85,7 @@ async def _run_milvus_query_io(func, /, *args, **kwargs):
 @dataclass(kw_only=True)
 class MilvusRetrievalConfig:
     search_mode: str = field(
-        default="vector",
+        default="hybrid",
         metadata={
             "label": "检索模式",
             "type": "select",
@@ -714,8 +714,10 @@ class MilvusKB(KnowledgeBase):
 
         selected: list[dict] = []
         selected_ids: set[str] = set()
+        deferred: list[dict] = []
         per_file: dict[str, int] = {}
         per_section: dict[tuple[str, tuple[str, ...]], int] = {}
+        per_page: dict[tuple[str, int], int] = {}
         for chunk in ranked:
             metadata = chunk.get("metadata") or {}
             provenance = metadata.get("scientific_provenance") or {}
@@ -724,12 +726,28 @@ class MilvusKB(KnowledgeBase):
             section_key = (file_id, section)
             if per_file.get(file_id, 0) >= 3 or per_section.get(section_key, 0) >= 2:
                 continue
+            # 约束式 MMR（P2-13）：章节首次入选奖励覆盖多样性；同文件同页
+            # ≥2 条后降权延后（页面聚集≈语义重复），保持确定性、无模型参与。
+            pages = provenance.get("page_numbers") or []
+            page_key = (file_id, int(pages[0])) if pages else None
+            if page_key is not None and per_page.get(page_key, 0) >= 2:
+                deferred.append(chunk)
+                continue
             selected.append(chunk)
             selected_ids.add(str(metadata.get("chunk_id") or id(chunk)))
             per_file[file_id] = per_file.get(file_id, 0) + 1
             per_section[section_key] = per_section.get(section_key, 0) + 1
+            if page_key is not None:
+                per_page[page_key] = per_page.get(page_key, 0) + 1
             if len(selected) >= final_top_k:
                 return selected
+        # 候选不足以填满 top_k 时，用被降权的候选兜底（原文证据优先于空缺）
+        for chunk in deferred:
+            chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or id(chunk))
+            if chunk_id not in selected_ids:
+                selected.append(chunk)
+            if len(selected) >= final_top_k:
+                break
         for chunk in ranked:
             chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or id(chunk))
             if chunk_id not in selected_ids:
@@ -1053,9 +1071,13 @@ class MilvusKB(KnowledgeBase):
             similarity_threshold = float(merged_kwargs.get("similarity_threshold", 0.2))
             metric_type = VECTOR_METRIC_TYPE
             include_distances = bool(merged_kwargs.get("include_distances", True))
-            search_mode = str(merged_kwargs.get("search_mode", "vector")).lower()
+            search_mode = str(merged_kwargs.get("search_mode", "")).lower()
             if search_mode not in {"vector", "keyword", "hybrid"}:
-                search_mode = "vector"
+                # 未显式指定时按 collection 能力自动选择：具备 BM25 稀疏索引的库
+                # 默认 hybrid（消灭「入口不传模式即 vector-only」的检索漂移——
+                # 问答网关强制 hybrid，评测/UI/默认路径必须语义一致），
+                # 旧库（无 sparse 字段）保持 vector 不变，零回归。
+                search_mode = "hybrid" if self._collection_supports_bm25(collection) else "vector"
 
             use_reranker = bool(merged_kwargs.get("use_reranker", False))
             use_graph_retrieval = bool(merged_kwargs.get("use_graph_retrieval", False))
