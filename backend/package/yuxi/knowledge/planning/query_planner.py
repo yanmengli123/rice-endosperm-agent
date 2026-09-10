@@ -3,9 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from yuxi.knowledge.planning.task_classifier import TASK_CLASSIFIER_VERSION, classify_task
+from yuxi.knowledge.planning.task_classifier import (
+    TASK_CLASSIFIER_VERSION,
+    classify_task,
+    detect_question_types,
+)
 
-PLANNER_VERSION = "1.1"
+PLANNER_VERSION = "1.2"
 
 _SOCIAL_PATTERNS = (
     r"^(?:hi|hello|hey|你好|您好|嗨|早上好|下午好|晚上好)[!！。.，,\s]*$",
@@ -85,10 +89,12 @@ def plan_knowledge_query(question: str, *, strategy: str, scope_nonempty: bool) 
         }
 
     intent = classify_task(text)
+    question_types = detect_question_types(text)
 
     return {
         **base,
         "intent": intent,
+        "question_types": question_types,
         "retrieval_required": effective_strategy == "KNOWLEDGE_FIRST",
         "answer_mode": "DETERMINISTIC_STRUCTURED" if intent == "ENTITY_LOOKUP" else base["answer_mode"],
         "reason": "KNOWLEDGE_FIRST_DEFAULT" if effective_strategy == "KNOWLEDGE_FIRST" else "MODEL_DECIDES",
