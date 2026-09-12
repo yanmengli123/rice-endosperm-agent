@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +41,22 @@ from yuxi.storage.postgres.models_business import User
 from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+class EvidenceFeedbackCreate(BaseModel):
+    """用户证据反馈（P4）。action ∈ helpful | misleading | wrong_location。
+
+    evidence_id 来自路径参数，body 不重复携带。
+    """
+
+    action: str = Field(min_length=4, max_length=16)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class EvidenceFeedbackAdjudication(BaseModel):
+    """管理员裁决（P4）。adjudication ∈ approved | rejected。"""
+
+    adjudication: str = Field(min_length=4, max_length=16)
 
 
 class AgentCreate(BaseModel):
@@ -338,6 +354,38 @@ async def get_agent_run_trace(
     return await get_run_trace_snapshot(run_id=run_id, current_uid=str(current_user.uid), db=db, include_admin=False)
 
 
+async def _evidence_scope_kb_ids(run, current_user: User) -> set[str]:
+    """冻结检索范围 ∩ 当前仍可见范围——证据投影与原文审计共用的权限语义。"""
+    input_payload = dict(run.input_payload or {})
+    scope_snapshot = dict(input_payload.get("knowledge_scope_snapshot") or {})
+    frozen_kb_ids = {
+        str(kb_id)
+        for kb_id in (
+            scope_snapshot.get("effective_kb_ids")
+            or [member.get("kb_id") for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
+        )
+        if kb_id
+    }
+    accessible = await knowledge_base.get_databases_by_user(current_user)
+    currently_accessible_kb_ids = {
+        str(item.get("kb_id"))
+        for item in accessible.get("databases") or []
+        if isinstance(item, dict) and item.get("kb_id")
+    }
+    return frozen_kb_ids & currently_accessible_kb_ids
+
+
+async def _run_question_text(db: AsyncSession, run) -> str | None:
+    """本次 run 的用户问题原文（用于句子级高亮精化）；缺失时返回 None 不影响投影。"""
+    if not getattr(run, "input_message_id", None):
+        return None
+    from sqlalchemy import select
+    from yuxi.storage.postgres.models_business import Message
+
+    content = (await db.execute(select(Message.content).where(Message.id == run.input_message_id))).scalar_one_or_none()
+    return str(content) if content else None
+
+
 @agent_router.get("/runs/{run_id}/evidence")
 async def get_agent_run_evidence(
     run_id: str,
@@ -355,29 +403,121 @@ async def get_agent_run_evidence(
     if not run:
         raise HTTPException(status_code=404, detail="运行任务不存在")
 
-    input_payload = dict(run.input_payload or {})
-    scope_snapshot = dict(input_payload.get("knowledge_scope_snapshot") or {})
-    frozen_kb_ids = {
-        str(kb_id)
-        for kb_id in (
-            scope_snapshot.get("effective_kb_ids")
-            or [member.get("kb_id") for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
-        )
-        if kb_id
-    }
-    accessible = await knowledge_base.get_databases_by_user(current_user)
-    currently_accessible_kb_ids = {
-        str(item.get("kb_id"))
-        for item in accessible.get("databases") or []
-        if isinstance(item, dict) and item.get("kb_id")
-    }
     from yuxi.knowledge.evidence import assemble_evidence_for_run
 
     return await assemble_evidence_for_run(
         db,
         run_id,
-        allowed_kb_ids=frozen_kb_ids & currently_accessible_kb_ids,
+        allowed_kb_ids=await _evidence_scope_kb_ids(run, current_user),
+        question_text=await _run_question_text(db, run),
     )
+
+
+@agent_router.post("/runs/{run_id}/evidence/{evidence_id}/feedback")
+async def submit_evidence_feedback_route(
+    run_id: str,
+    evidence_id: str,
+    payload: EvidenceFeedbackCreate,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """用户证据反馈（P4 飞轮入口）：helpful / misleading / wrong_location。
+
+    评论先脱敏再落库；同 (run, evidence, user) 幂等；negative 反馈经管理员
+    裁决 approved 后自动生成 benchmark candidate。
+    """
+    run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_user.uid))
+    if not run:
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+    from yuxi.knowledge.evidence.feedback_service import submit_evidence_feedback
+
+    try:
+        return await submit_evidence_feedback(
+            db,
+            run_id=run_id,
+            evidence_id=evidence_id.strip(),
+            uid=str(current_user.uid),
+            tenant_id=int(run.tenant_id),
+            action=payload.action,
+            comment=payload.comment,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@agent_router.get("/admin/evidence-feedback")
+async def list_evidence_feedback_route(
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """管理员反馈队列：含 benchmark candidate 状态，供裁决。"""
+    from yuxi.knowledge.evidence.feedback_service import list_feedback_for_admin
+
+    return {"feedback": await list_feedback_for_admin(db, limit=limit)}
+
+
+@agent_router.post("/admin/evidence-feedback/{feedback_id}/adjudication")
+async def adjudicate_evidence_feedback_route(
+    feedback_id: str,
+    payload: EvidenceFeedbackAdjudication,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """裁决 benchmark candidate：approved 进入正式基准集，rejected 淘汰。"""
+    from yuxi.knowledge.evidence.feedback_service import adjudicate_feedback
+
+    try:
+        return await adjudicate_feedback(
+            db,
+            feedback_id=feedback_id,
+            adjudication=payload.adjudication,
+            adjudicated_by=str(current_user.uid),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@agent_router.post("/runs/{run_id}/evidence/{evidence_id}/view")
+async def record_evidence_source_view(
+    run_id: str,
+    evidence_id: str,
+    request: Request,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """原文查看审计：记录「谁在何时查看了哪条证据的原文」。
+
+    校验 run 归属、且 evidence_id 确实属于该 run 的证据集合（与证据投影
+    同一套 allowed_kb_ids 权限交集）；不做任何内容返回。审计走
+    operation_logs（NAVIGATION 语义），与证据账本分离，满足科研合规的可追溯要求。
+    """
+    run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_user.uid))
+    if not run:
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+    from yuxi.knowledge.evidence import assemble_evidence_for_run
+    from yuxi.services.operation_log_service import log_operation
+
+    assembled = await assemble_evidence_for_run(
+        db,
+        run_id,
+        allowed_kb_ids=await _evidence_scope_kb_ids(run, current_user),
+    )
+    evidence_ids = {item.get("evidence_id") for item in assembled.get("evidence", [])}
+    evidence_ids.update(item.get("evidence_id") for item in assembled.get("rejected", []))
+    if evidence_id not in evidence_ids:
+        raise HTTPException(status_code=404, detail="证据不存在或不属于该运行任务")
+
+    await log_operation(
+        db,
+        current_user.id,
+        "查看证据原文",
+        f"run_id={run_id}, evidence_id={evidence_id}",
+        request=request,
+    )
+    return {"recorded": True}
 
 
 @agent_router.get("/runs/{run_id}/trace/events")

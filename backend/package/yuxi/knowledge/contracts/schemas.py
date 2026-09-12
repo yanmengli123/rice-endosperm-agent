@@ -4,7 +4,9 @@ import hashlib
 import re
 from typing import Any
 
-CONTRACT_SCHEMA_VERSION = "1.0"
+# 1.1（VERBATIM 通道）：evidence 行增量字段 retrieval_channel / span_id /
+# anchor_id / page_number / match_tier，retrieval_summary 增量 verbatim_hit_count。
+CONTRACT_SCHEMA_VERSION = "1.1"
 CLAIM_VALIDATOR_VERSION = "1.0"
 
 _PERTURBATION_MARKERS = (

@@ -327,6 +327,7 @@ def _compact_stream_chunk(chunk: dict) -> dict:
             "source",
             "agent_state",
             "compression",
+            "citation",
         )
         if chunk.get(key) is not None and chunk.get(key) != ""
     }

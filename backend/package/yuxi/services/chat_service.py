@@ -26,6 +26,7 @@ from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
 from yuxi.agents.state import AgentStatePayload
 from yuxi.knowledge.orchestration import prepare_knowledge_context
+from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -355,6 +356,29 @@ def _knowledge_contract_messages(
     return assistant_message, tool_message
 
 
+def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
+    """Render QUOTE_LOCATOR without giving an LLM any page-number authority."""
+    plan = contract.get("retrieval_plan") or {}
+    if plan.get("answer_mode") != "DETERMINISTIC_LOCATOR":
+        return None
+    locator = contract.get("locator_resolution") or {}
+    status = str(locator.get("status") or "")
+    if status == "VERIFIED":
+        return f"已可靠定位到原文：{render_locator_chip(locator)}"
+    if status == "MULTIPLE_MATCHES":
+        return "该原句在当前知识范围内存在多个物理位置，当前无法可靠定位唯一原文页码。"
+    return "当前无法可靠定位原文页码。"
+
+
+def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    return apply_citation_channel(
+        text,
+        contract.get("citations") or [],
+        locator=contract.get("locator_resolution"),
+        partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
+    )
+
+
 def _stream_message_key(metadata: dict | None, namespace: list[str], thread_id: str | None) -> tuple[str, str]:
     if not isinstance(metadata, dict):
         return thread_id or "", "/".join(namespace)
@@ -558,6 +582,7 @@ async def _save_ai_message(
     trace_info: dict[str, Any] | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
+    knowledge_contract: dict[str, Any] | None = None,
 ):
     content = msg_dict.get("content", "")
     tool_calls_data = msg_dict.get("tool_calls") or []
@@ -575,6 +600,17 @@ async def _save_ai_message(
         content = str(content)
     content = normalize_markdown_tables(sanitize_visible_text(content))
     extra_metadata = redact_reasoning_metadata(msg_dict)
+    additional_kwargs = msg_dict.get("additional_kwargs")
+    already_guarded = bool(isinstance(additional_kwargs, dict) and additional_kwargs.get("locator_validation"))
+    if knowledge_contract and knowledge_contract.get("status") != "SKIPPED" and not already_guarded:
+        content, citation_validation = apply_citation_channel(
+            content,
+            knowledge_contract.get("citations") or [],
+            locator=knowledge_contract.get("locator_resolution"),
+            partition_intent=(knowledge_contract.get("locator_intent") or {}).get("partition_intent"),
+        )
+        if citation_validation.get("changed"):
+            extra_metadata["locator_validation"] = citation_validation
     if trace_info:
         extra_metadata.update(trace_info)
 
@@ -629,6 +665,7 @@ async def save_partial_message(
     trace_info: dict[str, Any] | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
+    knowledge_contract: dict[str, Any] | None = None,
 ):
     try:
         extra_metadata = {
@@ -642,6 +679,15 @@ async def save_partial_message(
             content = normalize_markdown_tables(
                 sanitize_visible_text(content if isinstance(content, str) else str(content))
             )
+            if knowledge_contract and knowledge_contract.get("status") != "SKIPPED":
+                content, citation_validation = apply_citation_channel(
+                    content,
+                    knowledge_contract.get("citations") or [],
+                    locator=knowledge_contract.get("locator_resolution"),
+                    partition_intent=(knowledge_contract.get("locator_intent") or {}).get("partition_intent"),
+                )
+                if citation_validation.get("changed"):
+                    extra_metadata["locator_validation"] = citation_validation
             extra_metadata = redact_reasoning_metadata(msg_dict) | extra_metadata
         else:
             content = ""
@@ -765,6 +811,7 @@ async def save_messages_from_langgraph_state(
     trace_info: dict[str, Any] | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
+    knowledge_contract: dict[str, Any] | None = None,
 ) -> None:
     messages = await _get_langgraph_messages(agent_instance, config_dict, context=context)
     if messages is None:
@@ -809,6 +856,7 @@ async def save_messages_from_langgraph_state(
                 trace_info=trace_info,
                 run_id=run_id,
                 request_id=request_id,
+                knowledge_contract=knowledge_contract,
             )
         elif msg_type == "tool":
             await _save_tool_message(conv_repo, msg_dict)
@@ -1143,6 +1191,10 @@ async def stream_agent_chat(
     trace_info: dict[str, Any] = {}
     last_agent_state_signature = ""
     credential_context_token = None
+    knowledge_contract: dict[str, Any] | None = None
+    citation_sensitive_output = False
+    buffered_root_message_id: str | None = None
+    buffered_root_metadata: dict[str, Any] | None = None
 
     try:
         credential_context_token = await _activate_user_credential(db=db, uid=uid, meta=meta)
@@ -1203,6 +1255,7 @@ async def stream_agent_chat(
         )
         input_context["_knowledge_contract"] = knowledge_contract
         setattr(context, "_knowledge_contract", knowledge_contract)
+        citation_sensitive_output = knowledge_contract.get("status") != "SKIPPED"
         if knowledge_contract.get("status") != "SKIPPED":
             synthetic_message_id = f"msg_{uuid.uuid4().hex}"
             assistant_retrieval_message, tool_retrieval_message = _knowledge_contract_messages(
@@ -1237,6 +1290,63 @@ async def stream_agent_chat(
                 },
                 meta=meta,
             )
+
+        deterministic_locator_answer = _deterministic_locator_answer(knowledge_contract)
+        if deterministic_locator_answer is not None:
+            # Locator answers are emitted once, after deterministic binding. No
+            # unverified model token can transiently expose a wrong page.
+            if conf.enable_content_guard and await content_guard.check(deterministic_locator_answer):
+                yield make_chunk(
+                    status="error",
+                    error_type="content_guard_blocked",
+                    error_message="输出内容包含敏感词",
+                    meta=meta,
+                )
+                return
+            message_id = f"msg_{uuid.uuid4().hex}"
+            locator = knowledge_contract.get("locator_resolution") or {}
+            ai_message = await conv_repo.add_message_by_thread_id(
+                thread_id=thread_id,
+                role="assistant",
+                content=deterministic_locator_answer,
+                message_type="text",
+                extra_metadata={
+                    "id": message_id,
+                    "knowledge_retrieval_id": knowledge_contract.get("retrieval_id"),
+                    "citation_binding": locator,
+                    **get_trace_info(langfuse_run),
+                },
+                run_id=meta.get("run_id"),
+                request_id=meta.get("request_id"),
+            )
+            if ai_message is not None and meta.get("run_id"):
+                await AgentRunRepository(db).set_output_message(str(meta["run_id"]), ai_message.id)
+                await db.commit()
+            yield make_chunk(
+                content=deterministic_locator_answer,
+                stream_event={
+                    "type": "message_delta",
+                    "message_id": message_id,
+                    "content": deterministic_locator_answer,
+                    "thread_id": thread_id,
+                    "namespace": [],
+                },
+                metadata={"deterministic_locator": True},
+                status="loading",
+                thread_id=thread_id,
+            )
+            if locator.get("status") == "VERIFIED":
+                yield make_chunk(
+                    status="citation_ready",
+                    citation={
+                        key: locator.get(key)
+                        for key in ("status", "evidence_id", "file_id", "filename", "zone", "page", "anchor_id")
+                    },
+                    meta=meta,
+                )
+            meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+            yield make_chunk(status="finished", meta=meta)
+            return
 
         # 智能体流式执行期间不访问业务数据库，先结束预处理事务并归还连接池。
         await db.commit()
@@ -1303,6 +1413,8 @@ async def stream_agent_chat(
                 if not is_subagent_chunk and content:
                     trace_info = get_trace_info(langfuse_run)
                     accumulated_content.append(content)
+                    buffered_root_message_id = str(stream_event.get("message_id") or buffered_root_message_id or "")
+                    buffered_root_metadata = metadata
                     content_for_check = "".join(accumulated_content[-10:])
                     if conf.enable_content_guard and await content_guard.check_with_keywords(content_for_check):
                         full_msg = AIMessage(content="".join(accumulated_content))
@@ -1314,10 +1426,16 @@ async def stream_agent_chat(
                             trace_info=trace_info,
                             run_id=meta.get("run_id"),
                             request_id=meta.get("request_id"),
+                            knowledge_contract=knowledge_contract,
                         )
                         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
                         yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
                         return
+
+                if citation_sensitive_output and not is_subagent_chunk and stream_event.get("type") == "message_delta":
+                    # Citation-bearing text is released only after the complete
+                    # answer has passed the server-side binding gate.
+                    continue
 
                 yield make_chunk(
                     content=content,
@@ -1327,7 +1445,18 @@ async def stream_agent_chat(
                     thread_id=chunk_thread_id,
                 )
 
-        full_msg = _ensure_full_msg(full_msg, accumulated_content)
+        if citation_sensitive_output and knowledge_contract is not None and accumulated_content:
+            guarded_content, locator_validation = _guard_knowledge_answer(
+                "".join(accumulated_content), knowledge_contract
+            )
+            accumulated_content = [guarded_content]
+            full_msg = AIMessage(
+                id=buffered_root_message_id or f"msg_{uuid.uuid4().hex}",
+                content=guarded_content,
+                additional_kwargs={"locator_validation": locator_validation},
+            )
+        else:
+            full_msg = _ensure_full_msg(full_msg, accumulated_content)
         trace_info = get_trace_info(langfuse_run)
 
         if conf.enable_content_guard and hasattr(full_msg, "content") and await content_guard.check(full_msg.content):
@@ -1339,10 +1468,27 @@ async def stream_agent_chat(
                 trace_info=trace_info,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
+                knowledge_contract=knowledge_contract,
             )
             meta["time_cost"] = asyncio.get_event_loop().time() - start_time
             yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
             return
+
+        if citation_sensitive_output and full_msg is not None and str(full_msg.content or ""):
+            safe_message_id = str(getattr(full_msg, "id", None) or buffered_root_message_id or uuid.uuid4())
+            yield make_chunk(
+                content=str(full_msg.content),
+                stream_event={
+                    "type": "message_delta",
+                    "message_id": safe_message_id,
+                    "content": str(full_msg.content),
+                    "thread_id": thread_id,
+                    "namespace": [],
+                },
+                metadata=buffered_root_metadata or {},
+                status="loading",
+                thread_id=thread_id,
+            )
 
         interrupted = False
         async for chunk in check_and_handle_interrupts(agent, langgraph_config, make_chunk, meta, thread_id, context):
@@ -1366,16 +1512,19 @@ async def stream_agent_chat(
 
         # 先存储数据库，再返回 finished，避免前端查询时数据未落库
         try:
-            await save_messages_from_langgraph_state(
-                agent_instance=agent,
-                thread_id=thread_id,
-                conv_repo=conv_repo,
-                config_dict=langgraph_config,
-                context=context,
-                trace_info=trace_info,
-                run_id=meta.get("run_id"),
-                request_id=meta.get("request_id"),
-            )
+            save_kwargs = {
+                "agent_instance": agent,
+                "thread_id": thread_id,
+                "conv_repo": conv_repo,
+                "config_dict": langgraph_config,
+                "context": context,
+                "trace_info": trace_info,
+                "run_id": meta.get("run_id"),
+                "request_id": meta.get("request_id"),
+            }
+            if citation_sensitive_output:
+                save_kwargs["knowledge_contract"] = knowledge_contract
+            await save_messages_from_langgraph_state(**save_kwargs)
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")
             yield make_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
@@ -1400,10 +1549,7 @@ async def stream_agent_chat(
 
     except (asyncio.CancelledError, ConnectionError) as e:
         abort_status, abort_error_type, abort_message = _stream_abort_details(e)
-        logger.warning(
-            f"Chat stream aborted: status={abort_status}, "
-            f"error_type={abort_error_type}, reason={e}"
-        )
+        logger.warning(f"Chat stream aborted: status={abort_status}, error_type={abort_error_type}, reason={e}")
 
         async def save_cleanup():
             nonlocal full_msg
@@ -1420,6 +1566,7 @@ async def stream_agent_chat(
                     trace_info=trace_info,
                     run_id=meta.get("run_id"),
                     request_id=meta.get("request_id"),
+                    knowledge_contract=knowledge_contract,
                 )
 
         cleanup_task = asyncio.create_task(save_cleanup())
@@ -1459,6 +1606,7 @@ async def stream_agent_chat(
                 trace_info=trace_info,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
+                knowledge_contract=knowledge_contract,
             )
 
         yield make_chunk(status="error", error_type=error_type, error_message=error_msg, meta=meta)
@@ -1730,10 +1878,7 @@ async def stream_agent_resume(
 
     except (asyncio.CancelledError, ConnectionError) as e:
         abort_status, abort_error_type, abort_message = _stream_abort_details(e, resume=True)
-        logger.warning(
-            f"Resume stream aborted: status={abort_status}, "
-            f"error_type={abort_error_type}, reason={e}"
-        )
+        logger.warning(f"Resume stream aborted: status={abort_status}, error_type={abort_error_type}, reason={e}")
 
         async with pg_manager.get_async_session_context() as new_db:
             new_conv_repo = ConversationRepository(new_db)

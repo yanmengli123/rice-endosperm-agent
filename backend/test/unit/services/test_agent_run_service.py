@@ -1848,6 +1848,24 @@ def test_compact_stream_chunk_retains_compression_field():
     assert compact["compression"] == {"type": "yuxi.context_compression", "status": "started"}
 
 
+def test_compact_stream_chunk_retains_verified_citation_dto():
+    citation = {
+        "status": "VERIFIED",
+        "evidence_id": "ev_1",
+        "file_id": "file_1",
+        "filename": "paper.pdf",
+        "zone": "MAIN_TEXT",
+        "page": 3,
+        "anchor_id": "ea_1",
+    }
+
+    compact = agent_run_service._compact_stream_chunk(
+        {"status": "citation_ready", "citation": citation, "meta": {"internal": True}}
+    )
+
+    assert compact == {"status": "citation_ready", "citation": citation}
+
+
 @pytest.mark.asyncio
 async def test_reconcile_stale_agent_runs_marks_terminal_and_notifies(monkeypatch):
     runs = [

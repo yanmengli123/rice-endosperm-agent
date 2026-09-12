@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
+from typing import Any
 from dataclasses import replace
 
 from deepagents.middleware._utils import append_to_system_message
@@ -10,6 +11,10 @@ from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResp
 from langchain_core.messages import AIMessage, ToolMessage
 
 from yuxi.knowledge.rendering.answer_context_builder import build_answer_context
+from yuxi.knowledge.rendering.citation_channel import (
+    apply_citation_channel,
+    sanitize_history_text,
+)
 from yuxi.knowledge.validation.citation_validator import (
     NARRATIVE_CITATION_MARKER,
     sanitize_narrative_citations,
@@ -99,23 +104,50 @@ def _narrative_text(content) -> str:
     return "\n".join(parts)
 
 
-def _sanitize_message_content(content, *, contract: dict):
+def _apply_citation_guard(text: str, *, contract: dict | None) -> tuple[str, dict[str, Any] | None]:
+    """引用通道输出门禁：剥离自写页码、重写伪造芯片、验证展开 [E#] 提议。
+
+    locator_resolution（QUOTE_LOCATOR 确定性解析）已 VERIFIED 时，模型自写的
+    页码被纠正为后端定位芯片。未变更时返回 (原文, None)。
+    """
+    if not str(text or "").strip():
+        return text, None
+    contract = contract or {}
+    guarded, validation = apply_citation_channel(
+        text,
+        contract.get("citations") or [],
+        locator=contract.get("locator_resolution"),
+        partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
+    )
+    if not validation.get("changed"):
+        return text, None
+    return guarded, validation
+
+
+def _sanitize_message_content(content, *, contract: dict | None):
     if isinstance(content, str):
         sanitized, validation, warnings = sanitize_narrative_citations(content)
-        if validation.get("source_status") == "FAIL" and not _has_substantive_narrative(sanitized):
-            sanitized = _deterministic_claim_fallback(contract)
+        guarded, citation_validation = _apply_citation_guard(sanitized, contract=contract)
+        if validation.get("source_status") == "FAIL" and not _has_substantive_narrative(guarded):
+            guarded = _deterministic_claim_fallback(contract)
             validation["action"] = "DETERMINISTIC_CLAIM_FALLBACK"
-        return sanitized, validation, warnings
+            citation_validation = None  # 兜底文本由后端生成，无需再过引用通道
+        return guarded, validation, warnings, citation_validation
 
     _, aggregate_validation, aggregate_warnings = sanitize_narrative_citations(_narrative_text(content))
     sanitized_blocks = []
+    aggregate_citation_validation: dict[str, Any] | None = None
     for block in content:
         if isinstance(block, str):
             sanitized, _, _ = sanitize_narrative_citations(block)
-            sanitized_blocks.append(sanitized)
+            guarded, citation_validation = _apply_citation_guard(sanitized, contract=contract)
+            aggregate_citation_validation = citation_validation or aggregate_citation_validation
+            sanitized_blocks.append(guarded)
         elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
             sanitized, _, _ = sanitize_narrative_citations(str(block.get("text") or ""))
-            sanitized_blocks.append({**block, "text": sanitized})
+            guarded, citation_validation = _apply_citation_guard(sanitized, contract=contract)
+            aggregate_citation_validation = citation_validation or aggregate_citation_validation
+            sanitized_blocks.append({**block, "text": guarded})
         else:
             sanitized_blocks.append(block)
 
@@ -129,7 +161,8 @@ def _sanitize_message_content(content, *, contract: dict):
         ]
         sanitized_blocks = [{"type": "text", "text": _deterministic_claim_fallback(contract)}, *non_text_blocks]
         aggregate_validation["action"] = "DETERMINISTIC_CLAIM_FALLBACK"
-    return sanitized_blocks, aggregate_validation, aggregate_warnings
+        aggregate_citation_validation = None
+    return sanitized_blocks, aggregate_validation, aggregate_warnings, aggregate_citation_validation
 
 
 def _guard_model_response(response: ModelResponse, *, contract: dict | None) -> ModelResponse:
@@ -148,18 +181,25 @@ def _guard_model_response(response: ModelResponse, *, contract: dict | None) -> 
         if not narrative_text or getattr(message, "tool_calls", None):
             guarded_messages.append(message)
             continue
-        sanitized_content, validation, warnings = _sanitize_message_content(content, contract=contract)
-        if validation is None or validation.get("source_status") != "FAIL":
+        guarded_content, validation, warnings, citation_validation = _sanitize_message_content(
+            content, contract=contract
+        )
+        identifier_failed = bool(validation and validation.get("source_status") == "FAIL")
+        if not identifier_failed and citation_validation is None and guarded_content == content:
             guarded_messages.append(message)
             continue
         changed = True
         additional_kwargs = dict(message.additional_kwargs or {})
-        additional_kwargs["citation_validation"] = validation
-        additional_kwargs["citation_validation_warnings"] = warnings
+        if identifier_failed:
+            additional_kwargs["citation_validation"] = validation
+            additional_kwargs["citation_validation_warnings"] = warnings
+        if citation_validation is not None:
+            # 引用通道审计：模型自写页码被剥离 / [E#] 被展开的次数可观测
+            additional_kwargs["locator_validation"] = citation_validation
         guarded_messages.append(
             message.model_copy(
                 update={
-                    "content": sanitized_content,
+                    "content": guarded_content,
                     "additional_kwargs": additional_kwargs,
                 }
             )
@@ -170,9 +210,40 @@ def _guard_model_response(response: ModelResponse, *, contract: dict | None) -> 
     return replace(response, model_response=guarded_response) if nested is model_response else guarded_response
 
 
+def _sanitize_history_content(content, *, changed_flag: list[bool]):
+    """历史 AIMessage 投影净化：渲染产物（芯片/附录/失败关闭标记）不回流模型。
+
+    折叠为 ``[citation omitted]`` 而非 ``[E#]``——ref 是单次 retrieval run 的
+    局部编号，回流会让模型把它当稳定引用标识，制造下一轮错绑。
+    """
+    if isinstance(content, str):
+        cleaned = sanitize_history_text(content)
+        if cleaned != content:
+            changed_flag[0] = True
+        return cleaned
+    if isinstance(content, list):
+        blocks = []
+        for block in content:
+            if isinstance(block, str):
+                cleaned = sanitize_history_text(block)
+                if cleaned != block:
+                    changed_flag[0] = True
+                blocks.append(cleaned)
+            elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+                cleaned = sanitize_history_text(str(block.get("text") or ""))
+                if cleaned != str(block.get("text") or ""):
+                    changed_flag[0] = True
+                blocks.append({**block, "text": cleaned})
+            else:
+                blocks.append(block)
+        return blocks
+    return content
+
+
 def _sanitize_messages(messages, *, contract: dict | None = None):
     sanitized = []
     changed = False
+    changed_flag = [False]
     for message in messages or []:
         if (
             isinstance(message, ToolMessage)
@@ -183,20 +254,20 @@ def _sanitize_messages(messages, *, contract: dict | None = None):
             changed = True
             sanitized.append(message.model_copy(update={"content": _compact_tool_contract(contract)}))
             continue
-        if not isinstance(message, AIMessage) or not isinstance(message.content, str):
+        if isinstance(message, AIMessage):
+            cleaned_content = _sanitize_history_content(message.content, changed_flag=changed_flag)
+            content_changed = cleaned_content != message.content
+            if content_changed or _STALE_RUNTIME_STATE.search(_narrative_text(cleaned_content)):
+                changed = True
+                final_content = cleaned_content
+                if isinstance(final_content, str) and _STALE_RUNTIME_STATE.search(final_content):
+                    final_content = "[HISTORICAL_RUNTIME_STATE; NON_AUTHORITATIVE]\n" + final_content
+                sanitized.append(message.model_copy(update={"content": final_content}))
+                continue
             sanitized.append(message)
             continue
-        if not _STALE_RUNTIME_STATE.search(message.content):
-            sanitized.append(message)
-            continue
-        changed = True
-        sanitized.append(
-            message.model_copy(
-                update={
-                    "content": "[HISTORICAL_RUNTIME_STATE; NON_AUTHORITATIVE]\n" + message.content,
-                }
-            )
-        )
+        sanitized.append(message)
+    changed = changed or changed_flag[0]
     return sanitized if changed else messages
 
 

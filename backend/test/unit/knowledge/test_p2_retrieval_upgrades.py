@@ -28,7 +28,8 @@ def test_detect_question_types_figure_table_citation():
 
 def test_plan_carries_question_types_and_version():
     plan = plan_knowledge_query("OsMYB73 与 OsbZIP58 的调控关系？", strategy="KNOWLEDGE_FIRST", scope_nonempty=True)
-    assert PLANNER_VERSION == "1.2" and TASK_CLASSIFIER_VERSION == "1.2"
+    # 1.3：detect_question_types 新增 VERBATIM 题型（引号原文片段/逐字意图）
+    assert PLANNER_VERSION == "1.3" and TASK_CLASSIFIER_VERSION == "1.3"
     assert "question_types" in plan
     assert "MULTI_HOP" in plan["question_types"]
 
@@ -38,9 +39,7 @@ def test_validate_context_evidence_pass_and_failures():
         {"evidence_id": "ev_1", "content": "OsMYB73 regulates grain filling rate", "kb_id": "kb_a"},
         {"evidence_id": "ev_2", "content": "SANT domains located at 115-164", "kb_id": "kb_a"},
     ]
-    validation, warnings = validate_context_evidence(
-        evidence, required_identifiers=["OsMYB73", "SANT"]
-    )
+    validation, warnings = validate_context_evidence(evidence, required_identifiers=["OsMYB73", "SANT"])
     assert validation["status"] == "PASS"
     assert validation["identifier_coverage"] == 1.0
     assert not warnings

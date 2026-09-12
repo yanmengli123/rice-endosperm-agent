@@ -14,6 +14,7 @@ from yuxi.knowledge.contracts.schemas import (
     claim_id,
     relation_group,
 )
+from yuxi.knowledge.evidence.verbatim import extract_verbatim_patterns
 from yuxi.knowledge.planning.entity_resolver import ENTITY_RESOLVER_VERSION, resolve_entities
 from yuxi.knowledge.planning.query_planner import PLANNER_VERSION, plan_knowledge_query
 from yuxi.knowledge.products.registry import is_derived_product
@@ -144,6 +145,7 @@ def _gateway_source_status(result: dict[str, Any]) -> list[dict[str, Any]]:
             "DOCUMENT": int(item.get("hits") or 0) if "DOCUMENT" in source_types else 0,
             "GRAPH": int(item.get("hits") or 0) if "GRAPH" in source_types else 0,
             "STRUCTURED": int(item.get("hits") or 0) if "STRUCTURED" in source_types else 0,
+            "VERBATIM": int(item.get("hits") or 0) if "VERBATIM" in source_types else 0,
         }
     rows = []
     for status in result.get("knowledge_source_status") or []:
@@ -152,8 +154,12 @@ def _gateway_source_status(result: dict[str, Any]) -> list[dict[str, Any]]:
             ("DOCUMENT", "document_status"),
             ("GRAPH", "graph_status"),
             ("STRUCTURED", "structured_status"),
+            ("VERBATIM", "verbatim_status"),
         ):
             legacy_status = status.get(legacy_key)
+            if legacy_status is None:
+                # VERBATIM 只在通道实际运行的 Run 里携带该键，缺席即不产审计行。
+                continue
             available = legacy_status == "AVAILABLE"
             capability_status = (
                 "AVAILABLE" if available else ("DISABLED" if legacy_status == "DISABLED" else "UNAVAILABLE")
@@ -193,6 +199,7 @@ def _emit_knowledge_trace(
     attributes = {
         "claim_count": summary_obj.get("claim_count"),
         "evidence_count": summary_obj.get("evidence_count"),
+        "verbatim_hit_count": summary_obj.get("verbatim_hit_count"),
         "wiki_navigation_hit_count": summary_obj.get("wiki_navigation_hit_count"),
         "intent": (contract.get("retrieval_plan") or {}).get("intent"),
         "contract_status": status,
@@ -215,6 +222,9 @@ def _emit_knowledge_trace(
             f"{summary_obj.get('claim_count') or 0} 条 Claim，"
             f"Wiki 导航命中 {summary_obj.get('wiki_navigation_hit_count') or 0} 次"
         )
+        verbatim_hits = summary_obj.get("verbatim_hit_count") or 0
+        if verbatim_hits:
+            summary_text += f"，VERBATIM 精确命中 {verbatim_hits} 次"
     emit_trace(
         category="KNOWLEDGE",
         operation="search",
@@ -269,6 +279,7 @@ async def _persist_audit(
             claim_ids_json=[item.get("claim_id") for item in claims if item.get("claim_id")],
             evidence_ids_json=[item.get("evidence_id") for item in evidence if item.get("evidence_id")],
             chunk_ids_json=[item.get("chunk_id") for item in evidence if item.get("chunk_id")],
+            locator_resolution_json=contract.get("locator_resolution"),
             contract_hash=contract.get("contract_hash"),
             status=str(contract.get("status") or "COMPLETED"),
             warnings_json=contract.get("warnings") or [],
@@ -321,6 +332,113 @@ async def prepare_knowledge_context(
         },
         "warnings": [],
     }
+    # 原句定位是确定性查询，不进入生成式检索/回答链。解析修订、文件、分区、
+    # 锚点和页码由同一个 locator DTO 一次性裁决。
+    from yuxi.knowledge.evidence.quote_locator import (
+        LOCATOR_KIND_QUOTE,
+        LOCATOR_STATUS_MULTIPLE_MATCHES,
+        LOCATOR_STATUS_VERIFIED,
+        detect_locator_intent,
+        resolve_quote_locator,
+    )
+
+    locator_intent = detect_locator_intent(question)
+    contract["locator_intent"] = locator_intent
+    if locator_intent.get("kind") == LOCATOR_KIND_QUOTE and raw_members:
+        locator_resolution = await resolve_quote_locator(
+            db,
+            question=question,
+            kb_ids=[str(member["kb_id"]) for member in raw_members],
+        )
+        contract["locator_resolution"] = locator_resolution
+        if locator_intent.get("compound"):
+            # 复合意图（定位+解释等）：不短路 LLM。定位结果随合同下发，解释等
+            # 子意图走正常检索生成；定位行与引用芯片由输出门禁确定性保障。
+            contract["warnings"].append(
+                "复合意图：页码部分由确定性定位器解析（"
+                + (
+                    "已验证"
+                    if locator_resolution.get("status") == LOCATOR_STATUS_VERIFIED
+                    else "未通过验证，失败关闭不展示页码"
+                )
+                + "），其余子意图基于检索证据回答。"
+            )
+            # 解释子意图需要检索证据：无论知识策略如何都必须执行检索
+            # （MODEL_DECIDES 下纯定位本可不检索，复合不能跟着 SKIPPED）。
+            plan = {**plan, "retrieval_required": True}
+        else:
+            contract["retrieval_plan"] = {
+                **plan,
+                "intent": LOCATOR_KIND_QUOTE,
+                "answer_mode": "DETERMINISTIC_LOCATOR",
+                "retrieval_required": True,
+            }
+            if locator_resolution.get("status") == LOCATOR_STATUS_VERIFIED:
+                contract["status"] = "COMPLETED"
+                contract["evidence"] = [
+                    {
+                        "evidence_id": locator_resolution.get("evidence_id"),
+                        "source_type": "DOCUMENT",
+                        "retrieval_channel": "QUOTE_LOCATOR",
+                        "kb_id": locator_resolution.get("kb_id"),
+                        "file_id": locator_resolution.get("file_id"),
+                        "parse_revision_id": locator_resolution.get("parse_revision_id"),
+                        "span_id": locator_resolution.get("span_id"),
+                        "span_evidence_id": locator_resolution.get("span_evidence_id"),
+                        "anchor_id": locator_resolution.get("anchor_id"),
+                        "page_number": locator_resolution.get("page"),
+                        "document_partition": locator_resolution.get("zone"),
+                        "evidence_quote": locator_resolution.get("quote_head"),
+                        "claim_eligible": False,
+                    }
+                ]
+            else:
+                contract["status"] = "DEGRADED"
+                contract["error_code"] = (
+                    "QUOTE_LOCATOR_MULTIPLE_MATCHES"
+                    if locator_resolution.get("status") == LOCATOR_STATUS_MULTIPLE_MATCHES
+                    else "QUOTE_LOCATOR_NOT_FOUND"
+                )
+                contract["warnings"] = ["当前无法可靠定位原文页码；系统未展示任何候选页码。"]
+
+            from yuxi.knowledge.rendering.citation_channel import build_citations_for_contract
+
+            contract["citations"] = await build_citations_for_contract(db, contract.get("evidence") or [])
+            contract["knowledge_source_status"] = [
+                {
+                    "kb_id": member["kb_id"],
+                    "kb_name": member.get("kb_name") or member["kb_id"],
+                    "source": "POSTGRES_EVIDENCE_SPANS",
+                    "capability_status": "AVAILABLE",
+                    "query_status": locator_resolution.get("status"),
+                    "hit_count": 1 if locator_resolution.get("status") == LOCATOR_STATUS_VERIFIED else 0,
+                }
+                for member in raw_members
+            ]
+            contract["retrieval_summary"] = {
+                "query": question,
+                "claim_count": 0,
+                "evidence_count": len(contract["evidence"]),
+                "verbatim_hit_count": 0,
+                "wiki_navigation_hit_count": 0,
+                "web_call_count": 0,
+                "deterministic_locator": True,
+            }
+            contract["answer_instruction"] = "本题由后端确定性引文定位器直接回答，模型不得生成或修改页码。"
+            contract["contract_hash"] = _hash_contract(contract)
+            await _persist_audit(
+                db,
+                retrieval_id=retrieval_id,
+                run_id=run_id,
+                request_id=request_id,
+                snapshot=scope_snapshot,
+                plan=contract["retrieval_plan"],
+                contract=contract,
+                started_at=started_at,
+            )
+            _emit_knowledge_trace(retrieval_id, contract, started_at)
+            return contract
+
     if not plan.get("retrieval_required"):
         contract["contract_hash"] = _hash_contract(contract)
         await _persist_audit(
@@ -433,7 +551,7 @@ async def prepare_knowledge_context(
                     f"标识符 {', '.join(identifiers)} 已精确匹配到规范实体，但当前策略下没有可引用的一跳关系证据。"
                 )
         else:
-            from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway
+            from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway, query_verbatim_for_scope
 
             raw_scope_snapshot = {**scope_snapshot, "members": raw_members}
             top_k = int((scope_snapshot.get("retrieval_policy") or {}).get("bounded_top_k") or 12)
@@ -441,10 +559,25 @@ async def prepare_knowledge_context(
             # 扩召回后仍由 per-file/per-section 多样性与 rerank 收敛。
             if "MULTI_HOP" in (plan.get("question_types") or []):
                 top_k = min(top_k + 8, 24)
+            # VERBATIM 通道（P0-P2）：携带字面信号（模式/题型）且租户可解析时，
+            # 随 baseline 一次执行；guided 复跑会重复 PG 扫描，跳过（evidence_id 去重）。
+            verbatim_question_types = list(plan.get("question_types") or [])
+            verbatim_patterns = extract_verbatim_patterns(question)
+            verbatim_config = None
+            if scope_tenant_id is not None and (
+                verbatim_patterns
+                or {"NUMERIC", "CITATION", "FIGURE", "TABLE", "ENTITY", "VERBATIM"} & set(verbatim_question_types)
+            ):
+                verbatim_config = {
+                    "tenant_id": int(scope_tenant_id),
+                    "question_types": verbatim_question_types,
+                    "patterns": verbatim_patterns,
+                }
             baseline = await query_knowledge_scope_gateway(
                 query_text=question,
                 scope_snapshot=raw_scope_snapshot,
                 top_k=top_k,
+                verbatim=verbatim_config,
             )
             expansion_terms = list(
                 dict.fromkeys(
@@ -462,6 +595,26 @@ async def prepare_knowledge_context(
                     top_k=top_k,
                 )
             result = _merge_gateway_results(baseline, guided, limit=min(top_k * 2, 24))
+            # P2 低置信兜底：语义召回完全为空、且 VERBATIM 尚未随 baseline 执行时，
+            # 用问题里的字面信号补发一次精确检索（确定性、不扩范围、不产生 Claim）。
+            if not (result.get("evidence") or []) and verbatim_config is None and verbatim_patterns:
+                fallback = await query_verbatim_for_scope(
+                    query_text=question,
+                    scope_snapshot=raw_scope_snapshot,
+                    patterns=verbatim_patterns,
+                    question_types=verbatim_question_types,
+                    top_k=top_k,
+                )
+                if fallback.get("evidence"):
+                    result = {
+                        **result,
+                        "evidence": fallback["evidence"],
+                        "warnings": [
+                            *(result.get("warnings") or []),
+                            "语义召回为空，已启用 VERBATIM 字面精确检索兜底。",
+                            *(fallback.get("warnings") or []),
+                        ],
+                    }
             claims, context_evidence = _gateway_contract(result)
             contract.update(
                 {
@@ -513,9 +666,7 @@ async def prepare_knowledge_context(
             from yuxi.knowledge.validation.context_evidence_validator import validate_context_evidence
 
             derived_kb_ids = {
-                str(member["kb_id"])
-                for member in members
-                if is_derived_product(str(member.get("kb_type") or ""))
+                str(member["kb_id"]) for member in members if is_derived_product(str(member.get("kb_type") or ""))
             }
             required_identifiers = [
                 token
@@ -568,16 +719,73 @@ async def prepare_knowledge_context(
             }
         )
 
+    # 引用通道（citation channel）：页码/锚点的唯一权威来源。构建失败时返回空列表
+    # 走失败关闭——模型没有可引用页码，输出门禁仍会剥离其自写的裸页码。
+    from yuxi.knowledge.rendering.citation_channel import build_citations_for_contract
+
+    contract["citations"] = await build_citations_for_contract(db, contract.get("evidence") or [])
+    logger.info(
+        f"CITATION_CHANNEL_PROBE retrieval={retrieval_id} evidence={len(contract.get('evidence') or [])} "
+        f"citations={len(contract.get('citations') or [])}"
+    )
+
+    # 复合意图：把确定性定位结果（含图注反链）并入证据与引用池（不短路生成）。
+    # 定位锚点作为首位证据行，citations 追加定位/反链引用，解释部分的 [E#]
+    # 由此有据可引；answer_mode 标记为 LOCATOR_GROUNDED_ANSWER（非确定性短路）。
+    _tail_locator = contract.get("locator_resolution") or {}
+    if (
+        _tail_locator.get("status") == LOCATOR_STATUS_VERIFIED
+        and (contract.get("locator_intent") or {}).get("compound")
+    ):
+        from yuxi.knowledge.rendering.citation_channel import append_locator_citations
+
+        contract["evidence"] = [
+            {
+                "evidence_id": _tail_locator.get("evidence_id"),
+                "source_type": "DOCUMENT",
+                "retrieval_channel": "QUOTE_LOCATOR",
+                "kb_id": _tail_locator.get("kb_id"),
+                "file_id": _tail_locator.get("file_id"),
+                "parse_revision_id": _tail_locator.get("parse_revision_id"),
+                "span_id": _tail_locator.get("span_id"),
+                "anchor_id": _tail_locator.get("anchor_id"),
+                "page_number": _tail_locator.get("page"),
+                "document_partition": _tail_locator.get("zone"),
+                "evidence_quote": _tail_locator.get("quote_head"),
+                "claim_eligible": False,
+            },
+            *(contract.get("evidence") or []),
+        ]
+        contract["citations"] = append_locator_citations(contract.get("citations") or [], _tail_locator)
+        contract["retrieval_plan"] = {**contract["retrieval_plan"], "answer_mode": "LOCATOR_GROUNDED_ANSWER"}
+        # gateway/identifier 分支会整体覆写 warnings，复合提示在最终位置补挂
+        contract["warnings"] = [
+            *(contract.get("warnings") or []),
+            "复合意图：页码部分由确定性定位器解析（已验证），其余子意图基于检索证据回答。",
+        ]
+        contract["answer_instruction"] = (
+            str(contract.get("answer_instruction") or "")
+            + " 定位行由后端确定性渲染；解释部分每个关键结论必须带 [E#] 引用，"
+            "图注类问题优先引用正文讨论段（citations 中 zone=MAIN_TEXT 的反链条目）。"
+        )
+
     contract["retrieval_summary"] = {
         "query": question,
         "claim_count": len(contract.get("claims") or []),
         "evidence_count": len(contract.get("evidence") or []),
+        "verbatim_hit_count": sum(
+            1
+            for row in contract.get("evidence") or []
+            if row.get("retrieval_channel") == "VERBATIM" or row.get("verbatim_hit")
+        ),
         "wiki_navigation_hit_count": len(contract.get("wiki_navigation_hits") or []),
         "web_call_count": 0,
     }
     contract["answer_instruction"] = (
         "结构化结果和引用由后端生成；模型只负责解释。completeness.status=PASS 仅允许称为"
         "‘全部可引用结果’；all_exact_relations_citable=true 时才可称为‘全部调控基因’。"
+        "页码与锚点引用只写 [E1]/[E2] 占位符（对应 citations.ref），由后端渲染为权威"
+        "「文件·分区·页码」引用；不要自行书写页码。"
     )
     # NUMERIC 题型：数字/区间/单位必须逐字来自证据原文，禁止换算或近似改写（P2-12）
     if "NUMERIC" in (plan.get("question_types") or []):

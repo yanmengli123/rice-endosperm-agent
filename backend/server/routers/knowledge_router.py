@@ -1,11 +1,12 @@
 import asyncio
+import json
 import os
 import textwrap
 import time
 import traceback
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
@@ -15,6 +16,35 @@ from yuxi.knowledge.factory import KnowledgeBaseFactory
 from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_TASK_TYPE, MilvusGraphService
 from yuxi.knowledge.parser.unified import SUPPORTED_FILE_EXTENSIONS, Parser, is_supported_file_extension
 from yuxi.knowledge.runtime import knowledge_base
+from yuxi.knowledge.source_contracts import (
+    COMMAND_ARCHIVE,
+    COMMAND_DATASET_IMPORT,
+    COMMAND_DATASET_PREVIEW,
+    COMMAND_DOCUMENT_ADD,
+    COMMAND_DOCUMENT_DELETE,
+    COMMAND_DOCUMENT_INDEX,
+    COMMAND_DOCUMENT_MOVE,
+    COMMAND_DOCUMENT_PARSE,
+    COMMAND_DOCUMENT_UPLOAD,
+    COMMAND_FETCH_URL,
+    COMMAND_FOLDER_CREATE,
+    COMMAND_LLM_GRAPH_BUILD,
+    COMMAND_LLM_GRAPH_CONFIG,
+    COMMAND_LLM_GRAPH_RESET,
+    COMMAND_MINDMAP_GENERATE,
+    COMMAND_RELEASE_CREATE,
+    COMMAND_RELEASE_PUBLISH,
+    COMMAND_RELEASE_ROLLBACK,
+    COMMAND_RETRIEVAL_POLICY_CREATE,
+    COMMAND_SAMPLE_QUESTIONS,
+    COMMAND_SCIENTIFIC_PDF_RETRY,
+    COMMAND_STATS_REPAIR,
+    SourceContractError,
+    UnknownSourceContractError,
+    contract_registry_snapshot,
+    resolve_contract,
+    validate_contract_media,
+)
 from yuxi.knowledge.utils import calculate_content_hash, is_minio_url, parse_minio_url
 from yuxi.knowledge.utils.mindmap_utils import (
     batch_remove_files_from_mindmap,
@@ -73,6 +103,26 @@ class UpdateDatabaseRequest(BaseModel):
     llm_model_spec: str | None = None
     additional_params: dict | None = None
     share_config: dict | None = None
+    tool_description: str | None = None
+    content_domain: str | None = None
+
+
+class CreateSourceContractRequest(BaseModel):
+    key: str
+    version: str | None = None
+
+
+class CreateDatabaseRequest(BaseModel):
+    database_name: str
+    description: str
+    embedding_model_spec: str | None = None
+    kb_type: str = "milvus"
+    additional_params: dict | None = None
+    llm_model_spec: str | None = None
+    share_config: dict | None = None
+    source_contract: CreateSourceContractRequest | None = None
+    content_domain: str | None = None
+    tool_description: str | None = None
 
 
 class WorkspaceImportRequest(BaseModel):
@@ -146,7 +196,15 @@ async def _delete_document_storage_objects(kb_id: str, doc_id: str, file_path: s
         logger.warning(f"从MinIO删除预览 PDF 失败: {minio_error}")
 
 
-async def _ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+async def _ensure_database_supports_documents(
+    kb_id: str, operation: str, command: str | None = None
+):
+    """写入口统一门禁：适配器能力检查 + （可选）Source Contract 命令门禁。
+
+    command 为 None 时仅保留旧的 supports_documents 行为（读端点）；
+    修改型入口必须传入命令词表 token，由契约 fail closed 判定。
+    返回解析出的契约 spec（command 为 None 时返回 None）。
+    """
     db_info = await knowledge_base.get_database_info(kb_id)
     if not db_info:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
@@ -154,6 +212,62 @@ async def _ensure_database_supports_documents(kb_id: str, operation: str) -> Non
     kb_class = KnowledgeBaseFactory.get_kb_class(kb_type)
     if not kb_class.supports_documents:
         raise HTTPException(status_code=400, detail=f"{db_info.get('name') or kb_type} 只支持检索，不支持{operation}")
+    if command is None:
+        return None
+    try:
+        from yuxi.knowledge.source_contracts import require_contract_command
+
+        return await require_contract_command(kb_id, command)
+    except SourceContractError as exc:
+        raise _http_from_contract_error(exc) from exc
+
+
+def _http_from_contract_error(exc: SourceContractError) -> HTTPException:
+    return HTTPException(status_code=exc.http_status, detail=f"[{exc.error_code}] {exc}")
+
+
+async def _record_knowledge_audit(
+    kb_id: str,
+    event_type: str,
+    actor_uid: str | None,
+    payload: dict | None = None,
+) -> None:
+    """记录权威源知识库的契约/生命周期审计事件；失败只告警，不阻塞主流程。"""
+    try:
+        import uuid
+
+        from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+        from yuxi.storage.postgres.models_knowledge import KnowledgeAuditEvent
+        from yuxi.storage.postgres.manager import pg_manager
+
+        tenant_id = None
+        kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
+        if kb is not None:
+            tenant_id = kb.tenant_id
+        async with pg_manager.get_async_session_context() as session:
+            session.add(
+                KnowledgeAuditEvent(
+                    event_id=f"kae_{uuid.uuid4().hex[:24]}",
+                    kb_id=kb_id,
+                    tenant_id=tenant_id,
+                    event_type=event_type,
+                    actor_uid=actor_uid,
+                    payload_json=payload or {},
+                )
+            )
+    except Exception as audit_error:  # noqa: BLE001
+        logger.warning(f"[knowledge_audit] 写审计事件失败 kb_id={kb_id} type={event_type}: {audit_error}")
+
+
+def _validate_contract_media_or_415(kb_contract_key: str | None, filename: str | None) -> None:
+    """按契约校验上传文件媒体类型；legacy 契约不限制。"""
+    if not kb_contract_key:
+        return
+    try:
+        spec = resolve_contract(kb_contract_key)
+        validate_contract_media(spec, filename)
+    except SourceContractError as exc:
+        raise _http_from_contract_error(exc) from exc
 
 
 def _ensure_document_params(params: dict | None) -> dict:
@@ -164,7 +278,7 @@ def _ensure_document_params(params: dict | None) -> dict:
     return params
 
 
-def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
+def _validate_uploaded_document_items(items: list[str], params: dict, contract_spec=None) -> None:
     if not items:
         raise HTTPException(status_code=400, detail="items must not be empty")
 
@@ -200,6 +314,7 @@ def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
         if source_path is not None and (not isinstance(source_path, str) or not source_path.strip()):
             raise HTTPException(status_code=400, detail=f"Invalid source_path for file: {item}")
 
+        candidate_name = ""
         if params.get("pdf_evidence_pipeline"):
             preprocessed_name = ""
             if isinstance(preprocessed, dict):
@@ -213,6 +328,19 @@ def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
                     status_code=400,
                     detail=f"PDF 文献证据库只接受 .pdf 文件: {candidate_name}",
                 )
+        elif contract_spec is not None and contract_spec.accepted_media:
+            # 契约驱动的媒体校验：严格契约只接受契约允许的扩展名
+            _, object_name = parse_minio_url(item)
+            preprocessed_name = ""
+            if isinstance(preprocessed, dict):
+                preprocessed_name = str(
+                    preprocessed.get("original_filename") or preprocessed.get("filename") or ""
+                )
+            candidate_name = str(source_path or preprocessed_name or object_name).split("?", 1)[0]
+            try:
+                validate_contract_media(contract_spec, candidate_name)
+            except SourceContractError as exc:
+                raise _http_from_contract_error(exc) from exc
 
 
 def _params_for_uploaded_document_item(item: str, params: dict) -> dict:
@@ -261,20 +389,23 @@ async def get_databases(current_user: User = Depends(get_admin_user)):
 
 @knowledge.post("/databases")
 async def create_database(
-    database_name: str = Body(...),
-    description: str = Body(...),
-    embedding_model_spec: str | None = Body(None),
-    kb_type: str = Body("milvus"),
-    additional_params: dict | None = Body(None),
-    llm_model_spec: str | None = Body(None),
-    share_config: dict | None = Body(None),
+    data: CreateDatabaseRequest,
     current_user: User = Depends(get_admin_user),
 ):
-    """创建知识库"""
+    """创建知识库（Source Contract 治理版）。
+
+    - source_contract 显式给出时 fail-closed 解析，冻结 key/version/digest/snapshot；
+    - 未给出时映射显式 legacy_generic@0 并写弃用审计（绝不按上传内容推断升级）；
+    - 权限未指定时按租户默认策略，兜底 Private（仅创建者可见）。
+    """
+    database_name = data.database_name
+    kb_type = data.kb_type
+    additional_params = data.additional_params
     logger.debug(
         f"Create database {database_name} with kb_type {kb_type}, "
-        f"additional_params {additional_params}, llm_model_spec {llm_model_spec}, "
-        f"embedding_model_spec {embedding_model_spec}, share_config {share_config}"
+        f"additional_params {additional_params}, contract {data.source_contract}, "
+        f"llm_model_spec {data.llm_model_spec}, embedding_model_spec {data.embedding_model_spec}, "
+        f"share_config {data.share_config}"
     )
     try:
         # 先检查名称是否已存在
@@ -297,37 +428,73 @@ async def create_database(
                 status_code=400,
                 detail="reranker_config 已移除，请在查询参数中使用 reranker_model spec",
             )
+
+        # --- Source Contract：显式选择优先，未选择映射 legacy（写弃用审计） ---
+        legacy_fallback = False
+        if data.source_contract is not None:
+            try:
+                contract_spec = resolve_contract(data.source_contract.key, data.source_contract.version)
+            except UnknownSourceContractError as exc:
+                raise _http_from_contract_error(exc) from exc
+            # 严格契约目前只定义在 milvus 适配器上
+            if kb_type != "milvus":
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"知识源契约 {contract_spec.contract_ref} 仅支持 milvus 类型知识库",
+                )
+        else:
+            from yuxi.knowledge.source_contracts.definitions import LEGACY_GENERIC
+
+            contract_spec = LEGACY_GENERIC
+            legacy_fallback = True
+            if kb_type == "milvus":
+                logger.warning(
+                    f"[source_contract] 创建知识库未选择契约，映射 legacy_generic@0: {database_name}"
+                )
+
+        from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
+
+        contract_fields = {
+            "contract_key": contract_spec.contract_key,
+            "contract_version": contract_spec.version,
+            "contract_digest": contract_digest(contract_spec),
+            "contract_snapshot": spec_to_api_dict(contract_spec),
+            "content_domain": (data.content_domain or "").strip() or None,
+            "tool_description": (data.tool_description or "").strip() or None,
+            "governance_status": "DRAFT",
+        }
+
         additional_params = kb_class.normalize_additional_params(additional_params)
 
         if kb_class.requires_embedding_model:
-            if not embedding_model_spec:
+            if not data.embedding_model_spec:
                 raise HTTPException(status_code=400, detail="embedding_model_spec 不能为空")
 
-            info = model_cache.get_model_info(embedding_model_spec)
+            info = model_cache.get_model_info(data.embedding_model_spec)
             if not info or info.model_type != "embedding":
-                raise HTTPException(status_code=400, detail=f"不支持的 embedding 模型: {embedding_model_spec}")
+                raise HTTPException(
+                    status_code=400, detail=f"不支持的 embedding 模型: {data.embedding_model_spec}"
+                )
+            embedding_model_spec = data.embedding_model_spec
         else:
             embedding_model_spec = None
 
-        # P0 默认共享级别：未显式指定时按创建者部门共享，不再默认全局
-        if share_config is None:
-            share_config = {"access_level": "department", "department_ids": [], "user_uids": []}
-            if current_user.department_id is not None:
-                share_config["department_ids"] = [current_user.department_id]
+        share_config = await _resolve_default_share_config(current_user, data.share_config)
 
         database_info = await knowledge_base.create_database(
             database_name,
-            description,
+            data.description or "",
             kb_type=kb_type,
             embedding_model_spec=embedding_model_spec,
-            llm_model_spec=llm_model_spec,
+            llm_model_spec=data.llm_model_spec,
             share_config=share_config,
             created_by=current_user.uid,
             created_by_department_id=current_user.department_id,
+            contract_fields=contract_fields,
             **additional_params,
         )
 
-        if additional_params.get("pdf_evidence_pipeline"):
+        if contract_spec.contract_key == "pdf_evidence":
             from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
             reranker_model = getattr(config, "reranker", None)
@@ -349,6 +516,26 @@ async def create_database(
             )
             database_info["query_params"] = {"options": query_options}
 
+        if legacy_fallback:
+            await _record_knowledge_audit(
+                database_info["kb_id"],
+                "LEGACY_CONTRACT_FALLBACK",
+                current_user.uid,
+                {"kb_type": kb_type, "note": "创建入口未显式选择 Source Contract"},
+            )
+        else:
+            await _record_knowledge_audit(
+                database_info["kb_id"],
+                "KB_CREATED",
+                current_user.uid,
+                {
+                    "contract": contract_spec.contract_ref,
+                    "contract_digest": contract_fields["contract_digest"],
+                    "kb_type": kb_type,
+                    "share_config": share_config,
+                },
+            )
+
         # 需要重新加载所有智能体，因为工具刷新了
         from yuxi.agents.buildin import agent_manager
 
@@ -357,9 +544,336 @@ async def create_database(
         return database_info
     except HTTPException:
         raise
+    except SourceContractError as exc:
+        raise _http_from_contract_error(exc) from exc
     except Exception as e:
         logger.error(f"创建数据库失败 {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=f"创建数据库失败: {e}")
+
+
+async def _resolve_default_share_config(current_user: User, share_config: dict | None) -> dict:
+    """创建入口的权限默认值：显式指定优先；否则读租户默认策略；兜底 Private（仅创建者）。
+
+    修复事实不一致：此前 Web 前端总是发送 global，绕过后端更安全的默认值。
+    """
+    from yuxi.utils.share_config import normalize_share_config
+
+    if share_config is not None and (share_config.get("access_level") or "").strip():
+        return normalize_share_config(
+            share_config,
+            default_config=None,
+            default_access_level="user",
+            invalid_access_level_message="无效的知识库权限等级",
+            user_uid=current_user.uid,
+            department_id=current_user.department_id,
+        )
+
+    tenant_policy = None
+    try:
+        from sqlalchemy import select
+
+        from yuxi.services.principal import resolve_tenant_id
+        from yuxi.storage.postgres.manager import pg_manager
+        from yuxi.storage.postgres.models_business import Tenant
+
+        async with pg_manager.get_async_session_context() as session:
+            tenant_id = await resolve_tenant_id(session, str(current_user.uid))
+            if tenant_id is not None:
+                tenant = (
+                    await session.execute(select(Tenant).where(Tenant.id == int(tenant_id)))
+                ).scalar_one_or_none()
+                tenant_policy = (tenant.default_kb_share_policy or {}) if tenant else None
+    except Exception as policy_error:  # noqa: BLE001
+        logger.warning(f"[share_config] 读取租户默认策略失败，兜底 Private: {policy_error}")
+        tenant_policy = None
+
+    policy_level = str((tenant_policy or {}).get("access_level") or "").strip().lower()
+    if policy_level == "global":
+        return {"access_level": "global", "department_ids": [], "user_uids": []}
+    if policy_level == "department":
+        department_ids = list((tenant_policy or {}).get("department_ids") or [])
+        if current_user.department_id is not None:
+            department_ids.append(current_user.department_id)
+        return normalize_share_config(
+            {"access_level": "department", "department_ids": department_ids, "user_uids": []},
+            default_config=None,
+            default_access_level="department",
+            invalid_access_level_message="无效的知识库权限等级",
+            user_uid=current_user.uid,
+            department_id=current_user.department_id,
+        )
+    # 兜底 Private：user 级 + 仅创建者（normalize 会自动补上创建者 uid）
+    return normalize_share_config(
+        {"access_level": "user", "department_ids": [], "user_uids": []},
+        default_config=None,
+        default_access_level="user",
+        invalid_access_level_message="无效的知识库权限等级",
+        user_uid=current_user.uid,
+        department_id=None,
+    )
+
+
+# =============================================================================
+# === Source Contract 只读 API ===
+# =============================================================================
+
+
+@knowledge.get("/source-contracts")
+async def list_source_contracts(current_user: User = Depends(get_required_user)):
+    """已注册知识源契约的只读快照（前端选型卡与策略面板的数据源）。"""
+    return {"contracts": contract_registry_snapshot(), "message": "success"}
+
+
+@knowledge.get("/source-contracts/{contract_key}/versions/{version}")
+async def get_source_contract_version(contract_key: str, version: str, current_user: User = Depends(get_required_user)):
+    """单个契约版本的完整定义。"""
+    try:
+        spec = resolve_contract(contract_key, version)
+    except UnknownSourceContractError as exc:
+        raise _http_from_contract_error(exc) from exc
+    from yuxi.knowledge.source_contracts.specs import spec_to_api_dict
+
+    return {"contract": spec_to_api_dict(spec), "message": "success"}
+
+
+@knowledge.post("/source-contracts/{contract_key}/resolve")
+async def resolve_source_contract(
+    contract_key: str,
+    version: str | None = Body(None, embed=True),
+    current_user: User = Depends(get_required_user),
+):
+    """解析契约（供前端创建前预检意图）；未知契约 fail closed。"""
+    try:
+        spec = resolve_contract(contract_key, version)
+    except UnknownSourceContractError as exc:
+        raise _http_from_contract_error(exc) from exc
+    from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
+
+    payload = spec_to_api_dict(spec)
+    payload["digest"] = contract_digest(spec)
+    return {"resolved": payload, "message": "success"}
+
+
+class DatasetImportRequest(BaseModel):
+    minio_url: str
+    bucket_name: str | None = None
+    object_name: str | None = None
+    filename: str | None = None
+    mapping: dict = {}
+
+
+@knowledge.post("/databases/{kb_id}/dataset/preview")
+async def preview_dataset(
+    kb_id: str,
+    file: UploadFile = File(...),
+    mapping: str | None = Form(None),
+    current_user: User = Depends(get_admin_user),
+):
+    """CSV 数据集预检：列统计、编码/分隔符检测、映射建议与严格校验（不落库）。
+
+    仅 csv_record / csv_qa 契约允许；列映射只是建议，ingest 前必须显式确认。
+    """
+    contract_spec = await _ensure_database_supports_documents(kb_id, "数据集预检", COMMAND_DATASET_PREVIEW)
+    filename = _normalize_browser_upload_filename(file.filename)
+    if contract_spec is not None and contract_spec.accepted_media:
+        try:
+            validate_contract_media(contract_spec, filename)
+        except SourceContractError as exc:
+            raise _http_from_contract_error(exc) from exc
+    try:
+        raw = await read_upload_with_limit(
+            file,
+            max_size_bytes=MAX_UPLOAD_SIZE_BYTES,
+            too_large_message="文件过大，当前仅支持 100 MB 以内的文件",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from yuxi.services.csv_dataset_service import CsvDatasetValidationError, preview_csv_dataset
+
+    mapping_dict = {}
+    if mapping:
+        try:
+            mapping_dict = json.loads(mapping)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="mapping 必须是合法 JSON") from exc
+    try:
+        return await preview_csv_dataset(raw, filename, contract_spec.contract_key, mapping_dict)
+    except CsvDatasetValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"[SOURCE_CONTRACT_VIOLATION] {exc}") from exc
+
+
+@knowledge.post("/databases/{kb_id}/dataset/import")
+async def import_dataset(
+    kb_id: str,
+    payload: DatasetImportRequest,
+    current_user: User = Depends(get_admin_user),
+):
+    """CSV 数据集 Canonical Commit + 确定性检索投影 + 入索引。
+
+    前置：文件先经 /files/upload 上传；csv_qa 契约必须显式给出
+    question_col / answer_col 映射，空问答行不进入有效集。
+    """
+    contract_spec = await _ensure_database_supports_documents(kb_id, "数据集导入", COMMAND_DATASET_IMPORT)
+    if not is_minio_url(payload.minio_url):
+        raise HTTPException(status_code=400, detail="minio_url 必须是合法的 MinIO 地址")
+
+    bucket_name = payload.bucket_name
+    object_name = payload.object_name
+    if not bucket_name or not object_name:
+        parsed_bucket, parsed_object = parse_minio_url(payload.minio_url)
+        bucket_name = bucket_name or parsed_bucket
+        object_name = object_name or parsed_object
+
+    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.services.csv_dataset_service import CsvDatasetValidationError, import_csv_dataset, sha256_hex
+    from yuxi.storage.minio.client import get_minio_client
+    from yuxi.storage.postgres.manager import pg_manager
+
+    try:
+        raw = await get_minio_client().adownload_file(bucket_name, object_name)
+    except Exception as download_error:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"从对象存储读取文件失败: {download_error}")
+    if not raw:
+        raise HTTPException(status_code=400, detail="对象存储中的文件为空")
+
+    async with pg_manager.get_async_session_context() as session:
+        tenant_id = await resolve_tenant_id(session, str(current_user.uid))
+
+    try:
+        result = await import_csv_dataset(
+            kb_id=kb_id,
+            tenant_id=tenant_id,
+            contract_key=contract_spec.contract_key,
+            contract_version=contract_spec.version,
+            raw=raw,
+            filename=payload.filename or object_name.rsplit("/", 1)[-1],
+            minio_url=payload.minio_url,
+            mapping=payload.mapping or {},
+            operator_id=current_user.uid,
+        )
+    except CsvDatasetValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"[SOURCE_CONTRACT_VIOLATION] {exc}") from exc
+
+    await _record_knowledge_audit(
+        kb_id,
+        "DATASET_IMPORT",
+        current_user.uid,
+        {
+            "dataset_revision_id": result.get("dataset_revision_id"),
+            "contract": f"{contract_spec.contract_key}@{contract_spec.version}",
+            "row_count": result.get("row_count"),
+            "valid_record_count": result.get("valid_record_count"),
+            "source_sha256": sha256_hex(raw),
+        },
+    )
+    return result
+
+
+# =============================================================================
+# === 发布治理（P2）：Release / 检索策略修订 / 能力报告 / 归档 ===
+# =============================================================================
+
+
+def _http_from_release_state(exc: ValueError) -> HTTPException:
+    if type(exc).__name__ == "ReleaseStateError":
+        return HTTPException(status_code=409, detail=f"[INVALID_STATE_TRANSITION] {exc}")
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@knowledge.post("/databases/{kb_id}/releases")
+async def create_release(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """构建 STAGED 发布清单：逐文件冻结活跃解析修订 + 索引修订。"""
+    await _ensure_database_supports_documents(kb_id, "发布清单构建", COMMAND_RELEASE_CREATE)
+    from yuxi.services.knowledge_release_service import build_release
+
+    try:
+        result = await build_release(kb_id, current_user.uid)
+    except ValueError as exc:
+        raise _http_from_release_state(exc) from exc
+    await _record_knowledge_audit(kb_id, "RELEASE_STAGED", current_user.uid, result)
+    return result
+
+
+@knowledge.post("/databases/{kb_id}/releases/{release_id}/publish")
+async def publish_release(release_id: str, kb_id: str, current_user: User = Depends(get_admin_user)):
+    """原子发布：切换 active_release_id 指针，治理状态置 PUBLISHED。"""
+    await _ensure_database_supports_documents(kb_id, "发布", COMMAND_RELEASE_PUBLISH)
+    from yuxi.services.knowledge_release_service import publish_release
+
+    try:
+        result = await publish_release(kb_id, release_id, current_user.uid)
+    except ValueError as exc:
+        raise _http_from_release_state(exc) from exc
+    await _record_knowledge_audit(kb_id, "RELEASE_PUBLISHED", current_user.uid, result)
+    return result
+
+
+@knowledge.post("/databases/{kb_id}/releases/rollback")
+async def rollback_release(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """回滚到上一个发布清单（原子切换指针）。"""
+    await _ensure_database_supports_documents(kb_id, "发布回滚", COMMAND_RELEASE_ROLLBACK)
+    from yuxi.services.knowledge_release_service import rollback_release
+
+    try:
+        result = await rollback_release(kb_id, current_user.uid)
+    except ValueError as exc:
+        raise _http_from_release_state(exc) from exc
+    await _record_knowledge_audit(kb_id, "RELEASE_ROLLED_BACK", current_user.uid, result)
+    return result
+
+
+@knowledge.get("/databases/{kb_id}/releases")
+async def list_releases(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """发布清单历史与当前 ACTIVE 指针。"""
+    from yuxi.services.knowledge_release_service import list_releases
+
+    return await list_releases(kb_id)
+
+
+@knowledge.post("/databases/{kb_id}/retrieval-policies")
+async def create_retrieval_policy(kb_id: str, policy: dict = Body(...), current_user: User = Depends(get_admin_user)):
+    """新建检索策略修订（reranker/召回数/融合权重）；不重建索引。"""
+    await _ensure_database_supports_documents(kb_id, "检索策略修订", COMMAND_RETRIEVAL_POLICY_CREATE)
+    from yuxi.services.knowledge_release_service import create_retrieval_policy_revision
+
+    try:
+        return await create_retrieval_policy_revision(kb_id, policy, current_user.uid)
+    except ValueError as exc:
+        raise _http_from_release_state(exc) from exc
+
+
+@knowledge.get("/databases/{kb_id}/retrieval-policies")
+async def list_retrieval_policies(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """检索策略修订历史。"""
+    from yuxi.services.knowledge_release_service import list_retrieval_policy_revisions
+
+    return await list_retrieval_policy_revisions(kb_id)
+
+
+@knowledge.get("/databases/{kb_id}/capability-report")
+async def get_capability_report(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """KB 级能力报告：契约基线 × 文件级观测分布 → 有效能力。"""
+    from yuxi.services.knowledge_release_service import capability_report
+
+    try:
+        return await capability_report(kb_id)
+    except ValueError as exc:
+        raise _http_from_release_state(exc) from exc
+
+
+@knowledge.post("/databases/{kb_id}/archive")
+async def archive_database(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """治理状态归档。"""
+    await _ensure_database_supports_documents(kb_id, "归档", COMMAND_ARCHIVE)
+    from yuxi.services.knowledge_release_service import archive_kb
+
+    try:
+        result = await archive_kb(kb_id, current_user.uid)
+    except ValueError as exc:
+        raise _http_from_release_state(exc) from exc
+    await _record_knowledge_audit(kb_id, "KB_ARCHIVED", current_user.uid, result)
+    return result
 
 
 @knowledge.get("/databases/accessible")
@@ -421,6 +935,7 @@ async def generate_mindmap(
     current_user: User = Depends(get_admin_user),
 ):
     """使用 AI 分析知识库文件，生成思维导图结构。支持增量更新模式。"""
+    await _ensure_database_supports_documents(kb_id, "思维导图生成", COMMAND_MINDMAP_GENERATE)
     try:
         return await generate_database_mindmap(kb_id, file_ids, user_prompt, incremental)
     except HTTPException:
@@ -470,7 +985,7 @@ async def get_database_info(
 @knowledge.post("/databases/{kb_id}/stats/repair")
 async def repair_database_stats(kb_id: str, current_user: User = Depends(get_admin_user)):
     """修复知识库历史文件缺失的 Chunk/Token 统计。"""
-    await _ensure_database_supports_documents(kb_id, "统计修复")
+    await _ensure_database_supports_documents(kb_id, "统计修复", COMMAND_STATS_REPAIR)
     try:
         return await knowledge_base.repair_missing_file_stats(kb_id)
     except ValueError as e:
@@ -521,6 +1036,8 @@ async def update_database_info(
             share_config=data.share_config,
             operator_uid=current_user.uid,
             operator_department_id=current_user.department_id,
+            tool_description=data.tool_description,
+            content_domain=data.content_domain,
         )
         return {"message": "更新成功", "database": database}
     except HTTPException:
@@ -569,6 +1086,7 @@ async def configure_graph_build(
     data: dict = Body(...),
     current_user: User = Depends(get_admin_user),
 ):
+    await _ensure_database_supports_documents(kb_id, "图谱抽取配置", COMMAND_LLM_GRAPH_CONFIG)
     try:
         config = await MilvusGraphService().configure(
             kb_id,
@@ -592,6 +1110,7 @@ async def index_graph_build(
     current_user: User = Depends(get_admin_user),
 ):
     data = data or {}
+    await _ensure_database_supports_documents(kb_id, "图谱构建", COMMAND_LLM_GRAPH_BUILD)
     try:
         if await _has_running_graph_build_task(kb_id):
             raise HTTPException(status_code=409, detail="该知识库已有正在运行的图谱构建任务")
@@ -650,6 +1169,7 @@ async def reset_graph_build(
     current_user: User = Depends(get_admin_user),
 ):
     data = data or {}
+    await _ensure_database_supports_documents(kb_id, "图谱构建重置", COMMAND_LLM_GRAPH_RESET)
     try:
         if await _has_running_graph_build_task(kb_id):
             raise HTTPException(status_code=409, detail="该知识库存在正在运行的图谱构建任务，无法重置")
@@ -769,6 +1289,7 @@ async def retry_scientific_pdf_evidence(
         {"role": current_user.role, "uid": current_user.uid}, kb_id
     ):
         raise HTTPException(status_code=404, detail="Database not found")
+    await _ensure_database_supports_documents(kb_id, "科研 PDF 重试", COMMAND_SCIENTIFIC_PDF_RETRY)
     try:
         result = await create_or_reuse_scientific_pdf_ingest(
             kb_id=kb_id,
@@ -790,17 +1311,20 @@ async def add_documents(
         {"role": current_user.role, "uid": current_user.uid}, kb_id
     ):
         raise HTTPException(status_code=404, detail="Database not found")
-    await _ensure_database_supports_documents(kb_id, "文档添加/解析/入库")
-
-    database_info = await knowledge_base.get_database_info(kb_id)
-    database_params = (database_info or {}).get("metadata") or {}
-    scientific_pdf_pipeline = bool(
-        database_params.get("pdf_evidence_pipeline")
-        or database_params.get("format_template") == "pdf_literature"
-        or params.get("pdf_evidence_pipeline")
-    )
+    contract_spec = await _ensure_database_supports_documents(kb_id, "文档添加/解析/入库", COMMAND_DOCUMENT_UPLOAD)
 
     params = _ensure_document_params(params)
+    if contract_spec is not None and contract_spec.contract_key == "pdf_evidence":
+        # 契约驱动：请求级 pdf_evidence_pipeline 开关被忽略，处理参数由系统托管
+        scientific_pdf_pipeline = True
+    else:
+        database_info = await knowledge_base.get_database_info(kb_id)
+        database_params = (database_info or {}).get("metadata") or {}
+        scientific_pdf_pipeline = bool(
+            database_params.get("pdf_evidence_pipeline")
+            or database_params.get("format_template") == "pdf_literature"
+            or params.get("pdf_evidence_pipeline")
+        )
     if scientific_pdf_pipeline:
         params = {
             **params,
@@ -833,7 +1357,7 @@ async def add_documents(
     if content_type != "file":
         raise HTTPException(status_code=400, detail=f"Unsupported content_type: {content_type}")
 
-    _validate_uploaded_document_items(items, params)
+    _validate_uploaded_document_items(items, params, contract_spec=contract_spec)
 
     if scientific_pdf_pipeline:
         processed_items: list[dict] = []
@@ -1067,7 +1591,7 @@ async def add_uploaded_documents(
 ):
     """将已上传的 MinIO 文件同步添加为知识库文档记录，不解析、不入库。"""
     logger.debug(f"Add uploaded documents for kb_id {kb_id}: {payload.items} params={payload.params}")
-    await _ensure_database_supports_documents(kb_id, "文档添加")
+    await _ensure_database_supports_documents(kb_id, "文档添加", COMMAND_DOCUMENT_ADD)
 
     params = _ensure_document_params(payload.params)
     content_type = params.get("content_type", "file")
@@ -1368,7 +1892,7 @@ async def parse_documents(kb_id: str, file_ids: list[str] = Body(...), current_u
     """手动触发文档解析"""
     file_ids = _validate_direct_document_action_file_ids(file_ids)
     logger.debug(f"Parse documents for kb_id {kb_id}: {file_ids}")
-    await _ensure_database_supports_documents(kb_id, "文档解析")
+    await _ensure_database_supports_documents(kb_id, "文档解析", COMMAND_DOCUMENT_PARSE)
 
     async def run_parse(context: TaskContext):
         try:
@@ -1400,7 +1924,7 @@ async def parse_documents(kb_id: str, file_ids: list[str] = Body(...), current_u
 async def parse_pending_documents(kb_id: str, current_user: User = Depends(get_admin_user)):
     """按状态手动触发全部待解析文档解析。"""
     logger.debug(f"Parse pending documents for kb_id {kb_id}")
-    await _ensure_database_supports_documents(kb_id, "文档解析")
+    await _ensure_database_supports_documents(kb_id, "文档解析", COMMAND_DOCUMENT_PARSE)
 
     try:
         database = await knowledge_base.get_database_info(kb_id)
@@ -1457,7 +1981,7 @@ async def index_documents(
     file_ids = _validate_direct_document_action_file_ids(file_ids)
     params = params or {}
     logger.debug(f"Index documents for kb_id {kb_id}: {file_ids} {params=}")
-    await _ensure_database_supports_documents(kb_id, "文档入库")
+    await _ensure_database_supports_documents(kb_id, "文档入库", COMMAND_DOCUMENT_INDEX)
 
     operator_id = current_user.uid
 
@@ -1498,7 +2022,7 @@ async def index_pending_documents(
     params = payload.params if payload else None
     params = params or {}
     logger.debug(f"Index pending documents for kb_id {kb_id}: {params=}")
-    await _ensure_database_supports_documents(kb_id, "文档入库")
+    await _ensure_database_supports_documents(kb_id, "文档入库", COMMAND_DOCUMENT_INDEX)
 
     try:
         database = await knowledge_base.get_database_info(kb_id)
@@ -1633,7 +2157,7 @@ async def batch_delete_documents(
 ):
     """批量删除文档或文件夹"""
     logger.debug(f"BATCH DELETE documents {file_ids} in {kb_id}")
-    await _ensure_database_supports_documents(kb_id, "批量文档删除")
+    await _ensure_database_supports_documents(kb_id, "批量文档删除", COMMAND_DOCUMENT_DELETE)
 
     deleted_count = 0
     failed_items = []
@@ -1685,7 +2209,7 @@ async def batch_delete_documents(
 async def delete_document(kb_id: str, doc_id: str, current_user: User = Depends(get_admin_user)):
     """删除文档或文件夹"""
     logger.debug(f"DELETE document {doc_id} info in {kb_id}")
-    await _ensure_database_supports_documents(kb_id, "文档删除")
+    await _ensure_database_supports_documents(kb_id, "文档删除", COMMAND_DOCUMENT_DELETE)
     try:
         file_meta_info = await knowledge_base.get_file_basic_info(kb_id, doc_id)
 
@@ -1914,6 +2438,7 @@ async def generate_sample_questions(
     current_user: User = Depends(get_admin_user),
 ):
     """AI生成针对知识库的测试问题。"""
+    await _ensure_database_supports_documents(kb_id, "示例问题生成", COMMAND_SAMPLE_QUESTIONS)
     try:
         count = request_body.get("count", 10)
         return await generate_database_sample_questions(kb_id, count=count)
@@ -1950,7 +2475,7 @@ async def create_folder(
 ):
     """创建文件夹"""
     try:
-        await _ensure_database_supports_documents(kb_id, "文件夹创建")
+        await _ensure_database_supports_documents(kb_id, "文件夹创建", COMMAND_FOLDER_CREATE)
         return await knowledge_base.create_folder(kb_id, folder_name, parent_id)
     except HTTPException:
         raise
@@ -1969,7 +2494,7 @@ async def move_document(
     """移动文件或文件夹"""
     logger.debug(f"Move document {doc_id} to {new_parent_id} in {kb_id}")
     try:
-        await _ensure_database_supports_documents(kb_id, "文件移动")
+        await _ensure_database_supports_documents(kb_id, "文件移动", COMMAND_DOCUMENT_MOVE)
         return await knowledge_base.move_file(kb_id, doc_id, new_parent_id)
     except HTTPException:
         raise
@@ -1990,6 +2515,8 @@ async def fetch_url(
     抓取 URL 内容并上传到 MinIO
     """
     logger.debug(f"Fetching URL: {url} for kb_id: {kb_id}")
+    if kb_id:
+        await _ensure_database_supports_documents(kb_id, "URL 抓取", COMMAND_FETCH_URL)
     try:
         # 1. 下载内容 (包含白名单校验、大小限制、类型检查)
         content_bytes, final_url = await fetch_url_content(url)
@@ -2074,7 +2601,9 @@ async def import_workspace_files(
     if not paths:
         raise HTTPException(status_code=400, detail="请选择至少一个工作区文件")
 
-    await _ensure_database_supports_documents(kb_id, "文档添加/解析/入库")
+    contract_spec = await _ensure_database_supports_documents(
+        kb_id, "文档添加/解析/入库", COMMAND_DOCUMENT_UPLOAD
+    )
 
     bucket_name = MinIOClient.KB_BUCKETS["documents"]
     results = []
@@ -2085,6 +2614,11 @@ async def import_workspace_files(
         ext = os.path.splitext(filename)[1].lower()
         if not is_supported_file_extension(filename):
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+        if contract_spec is not None and contract_spec.accepted_media:
+            try:
+                validate_contract_media(contract_spec, filename)
+            except SourceContractError as exc:
+                raise _http_from_contract_error(exc) from exc
 
         size = target.stat().st_size
         if size > MAX_WORKSPACE_UPLOAD_SIZE_BYTES:
@@ -2136,8 +2670,11 @@ async def upload_file(
     """上传文件"""
     upload_filename = _normalize_browser_upload_filename(file.filename)
 
+    upload_contract_spec = None
     if kb_id:
-        await _ensure_database_supports_documents(kb_id, "文档上传")
+        upload_contract_spec = await _ensure_database_supports_documents(
+            kb_id, "文档上传", COMMAND_DOCUMENT_UPLOAD
+        )
 
     logger.debug(f"Received upload file with filename: {upload_filename}")
 
@@ -2145,6 +2682,11 @@ async def upload_file(
 
     if not is_supported_file_extension(upload_filename):
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+    if upload_contract_spec is not None and upload_contract_spec.accepted_media:
+        try:
+            validate_contract_media(upload_contract_spec, upload_filename)
+        except SourceContractError as exc:
+            raise _http_from_contract_error(exc) from exc
 
     basename, ext = os.path.splitext(upload_filename)
     # 直接使用原始文件名（小写）

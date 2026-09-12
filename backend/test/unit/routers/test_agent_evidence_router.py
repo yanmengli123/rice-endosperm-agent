@@ -63,7 +63,7 @@ def test_evidence_route_intersects_frozen_and_current_access(monkeypatch):
     )
     captured = {}
 
-    async def assemble(_db, run_id, *, allowed_kb_ids):
+    async def assemble(_db, run_id, *, allowed_kb_ids, question_text=None):
         captured.update({"run_id": run_id, "allowed_kb_ids": allowed_kb_ids})
         return {"run_id": run_id, "evidence": []}
 

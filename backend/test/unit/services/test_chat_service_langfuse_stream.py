@@ -97,6 +97,26 @@ def test_stream_boundary_redacts_tagged_reasoning_across_deltas() -> None:
     assert "private chain" not in json.dumps((first, second, third))
 
 
+def test_deterministic_locator_answer_uses_only_verified_locator_dto() -> None:
+    verified = {
+        "retrieval_plan": {"answer_mode": "DETERMINISTIC_LOCATOR"},
+        "locator_resolution": {
+            "status": "VERIFIED",
+            "page": 3,
+            "zone": "MAIN_TEXT",
+            "filename": "paper.pdf",
+        },
+    }
+    assert svc._deterministic_locator_answer(verified) == "已可靠定位到原文：〔引文定位｜正文·第3页｜paper.pdf〕"
+    ambiguous = {
+        "retrieval_plan": {"answer_mode": "DETERMINISTIC_LOCATOR"},
+        "locator_resolution": {"status": "MULTIPLE_MATCHES", "match_count": 2},
+    }
+    answer = svc._deterministic_locator_answer(ambiguous)
+    assert "无法可靠定位唯一原文页码" in answer
+    assert "第" not in answer
+
+
 @pytest.fixture(autouse=True)
 def mock_knowledge_scope_resolver(monkeypatch: pytest.MonkeyPatch):
     async def resolve_scope(**_kwargs):

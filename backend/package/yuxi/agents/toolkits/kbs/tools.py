@@ -243,6 +243,46 @@ async def deepen_evidence(
     return result
 
 
+class GrepEvidenceInput(BaseModel):
+    literal_text: str = Field(description="要在证据原文中逐字查找的字面量文本（标识符/数值/引文片段等，不是语义查询）")
+    top_k: int = Field(default=8, ge=1, le=12, description="最多返回的证据句数量")
+
+
+@tool(category="knowledge", tags=["知识库", "证据检索"], args_schema=GrepEvidenceInput)
+async def grep_evidence(
+    literal_text: str,
+    top_k: int = 8,
+    runtime: ToolRuntime = None,
+) -> Any:
+    """在本 Run 冻结知识范围的证据句库（evidence_spans）中做逐字精确检索。
+
+    语义检索（query_knowledge_scope）适合自然语言问题；本工具适合精确信号——
+    标识符、数值区间、DOI/PMID、图表编号、引号原文片段。返回的每条证据句带
+    anchor_id/页码，可回源到 PDF 物理位置。与 find_kb_document 的区别：
+    后者需要已知 kb_id+file_id 定位单个文件，本工具在整个冻结范围内检索。
+    """
+    literal = str(literal_text or "").strip()
+    if len(literal) < 3:
+        return {"error": "LITERAL_TOO_SHORT", "message": "字面量至少 3 个字符（短模式不做全库扫描）。"}
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    snapshot = getattr(context, "_effective_knowledge_scope", None) if context is not None else None
+    if not isinstance(snapshot, dict):
+        return {
+            "error": "KNOWLEDGE_SCOPE_NOT_BOUND",
+            "message": "当前运行没有绑定知识范围快照，为避免越权已拒绝检索。",
+        }
+    from yuxi.knowledge.scope_gateway import query_verbatim_for_scope
+
+    result = await query_verbatim_for_scope(
+        query_text=literal,
+        scope_snapshot=snapshot,
+        patterns=[literal],
+        top_k=top_k,
+    )
+    result["retrieval_kind"] = "VERBATIM_GREP"
+    return result
+
+
 async def _resolve_visible_knowledge_bases_for_query(runtime: ToolRuntime | None) -> list[dict[str, Any]]:
     if runtime is None:
         return []
@@ -555,7 +595,7 @@ async def search_file(
 def get_common_kb_tools() -> list:
     """获取通用知识库工具列表
 
-    返回 8 个通用工具：
+    返回 9 个通用工具：
     - list_kbs: 列出用户可访问的知识库
     - get_mindmap: 获取指定知识库的思维导图
     - query_kb: 在指定知识库中检索
@@ -564,12 +604,14 @@ def get_common_kb_tools() -> list:
     - search_file: 搜索知识库中的文件
     - query_knowledge_scope: 在冻结的问答范围内统一检索文档、图谱和结构化证据
     - deepen_evidence: 围绕首检索 Contract 在同一冻结范围内补充机制和原文上下文
+    - grep_evidence: 在冻结范围的证据句库中做逐字精确（verbatim）检索
     """
     return [
         list_kbs,
         get_mindmap,
         query_knowledge_scope,
         deepen_evidence,
+        grep_evidence,
         query_kb,
         find_kb_document,
         open_kb_document,

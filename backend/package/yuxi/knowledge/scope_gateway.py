@@ -38,6 +38,11 @@ _STRICT_MARKERS = {"strict", "high", "direct", "verified", "confirmed", "gold"}
 # embedding/reranker/provider must never hold the whole conversation open.
 KNOWLEDGE_DOCUMENT_SOURCE_TIMEOUT_SECONDS = 45.0
 KNOWLEDGE_GRAPH_SOURCE_TIMEOUT_SECONDS = 20.0
+# VERBATIM 通道是本地 PG 查询（无嵌入/外部服务），超时预算远小于文档通道。
+KNOWLEDGE_VERBATIM_SOURCE_TIMEOUT_SECONDS = 8.0
+# 精确字面命中加成，量级对齐 Milvus 侧 scientific identifier boost（+0.04）：
+# 只保证确定性信号进入候选池，不与语义分争夺排序。
+VERBATIM_EXACT_BONUS = 0.04
 
 
 def _stable_id(prefix: str, *parts: Any) -> str:
@@ -126,6 +131,9 @@ def _normalize_document_results(
         if not isinstance(row, dict) or not str(row.get("content") or "").strip():
             continue
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        scientific_provenance = (
+            metadata.get("scientific_provenance") if isinstance(metadata.get("scientific_provenance"), dict) else {}
+        )
         raw_score = metadata.get("rerank_score")
         if raw_score is None:
             raw_score = row.get("rerank_score")
@@ -163,6 +171,11 @@ def _normalize_document_results(
                 "found_in_kbs": [kb_id],
                 "file_id": file_id,
                 "chunk_id": chunk_id,
+                "parse_revision_id": scientific_provenance.get("parse_revision_id"),
+                "index_revision_id": scientific_provenance.get("index_revision_id"),
+                "anchor_ids": scientific_provenance.get("evidence_anchor_ids")
+                or scientific_provenance.get("anchor_ids")
+                or [],
                 "content": sanitize_scientific_identifier_notation(row.get("content")),
                 "metadata": metadata,
                 "claim_eligible": False,
@@ -228,10 +241,7 @@ async def _query_source_with_timeout(
     try:
         return await asyncio.wait_for(source_coro, timeout=timeout_seconds)
     except TimeoutError:
-        logger.warning(
-            "Scope source timed out: "
-            f"kb={kb_id}, source={source_type}, timeout={timeout_seconds:.1f}s"
-        )
+        logger.warning(f"Scope source timed out: kb={kb_id}, source={source_type}, timeout={timeout_seconds:.1f}s")
         return [], f"{source_type}_TIMEOUT"
     except asyncio.CancelledError:
         raise
@@ -474,6 +484,189 @@ async def _query_managed_graph_source(
     return evidence_rows, None
 
 
+def _normalize_verbatim_results(
+    member: dict[str, Any],
+    spans: list[dict[str, Any]],
+    *,
+    query_text: str,
+) -> list[dict[str, Any]]:
+    """把 evidence span 命中归一成与 DOCUMENT 通道同构的证据行。
+
+    分数纪律：确定性命中只给 ``TIER_BASE_SCORE`` 级基础分 + ``+0.04`` 精确
+    加成（与 Milvus 标识符 boost 同量级），跨通道 lexical 校准取 max，
+    不与语义分争夺排序；``claim_eligible`` 恒为 False（Claim 只出自 canonical 图）。
+    """
+    from yuxi.knowledge.evidence.verbatim import TIER_BASE_SCORE
+
+    kb_id = member["kb_id"]
+    kb_name = member.get("kb_name") or kb_id
+    tokens = _query_tokens(query_text)
+    rows = []
+    for span in spans:
+        quote = str(span.get("quote") or "")
+        if not quote.strip():
+            continue
+        base = TIER_BASE_SCORE.get(str(span.get("match_tier")), 0.68)
+        score = min(1.0, max(_lexical_score(tokens, quote), base) + VERBATIM_EXACT_BONUS)
+        rows.append(
+            {
+                "evidence_id": span.get("evidence_id") or _stable_id("evs", span.get("span_id"), quote),
+                "source_type": "VERBATIM",
+                "evidence_status": "SUPPORTING",
+                "kb_id": kb_id,
+                "kb_name": kb_name,
+                "found_in_kbs": [kb_id],
+                "file_id": span.get("file_id"),
+                "chunk_id": span.get("span_id"),
+                "span_id": span.get("span_id"),
+                "anchor_id": span.get("anchor_id"),
+                "page_number": span.get("page_number"),
+                "parse_revision_id": span.get("parse_revision_id"),
+                "document_partition": span.get("document_partition"),
+                "partition_confidence": span.get("partition_confidence"),
+                "evidence_type": span.get("evidence_type"),
+                "container_label": span.get("container_label"),
+                "row_key": span.get("row_key"),
+                "content": sanitize_scientific_identifier_notation(quote),
+                "metadata": {"match_tier": span.get("match_tier"), "matched_value": span.get("matched_value")},
+                "claim_eligible": False,
+                "identifier_status": "UNSTRUCTURED_DOCUMENT",
+                "outcome_class": "OTHER",
+                "raw_score": score,
+                "priority": int(member.get("priority") or 100),
+                "provenance": [
+                    {
+                        "kb_id": kb_id,
+                        "source_type": "VERBATIM",
+                        "file_id": span.get("file_id"),
+                        "span_id": span.get("span_id"),
+                        "anchor_id": span.get("anchor_id"),
+                        "parse_revision_id": span.get("parse_revision_id"),
+                    }
+                ],
+                "retrieval_channel": "VERBATIM",
+                "match_tier": span.get("match_tier"),
+                "matched_value": span.get("matched_value"),
+            }
+        )
+    return rows
+
+
+async def _query_verbatim_scope_source(
+    members: list[dict[str, Any]],
+    query_text: str,
+    *,
+    verbatim: dict[str, Any],
+    limit: int,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """对冻结成员库执行一次跨库 VERBATIM 查询（单次 PG 往返，不分成员 fan-out）。"""
+    from yuxi.knowledge.evidence.verbatim import MAX_VERBATIM_HITS, query_verbatim_evidence
+
+    tenant_id = verbatim.get("tenant_id")
+    if tenant_id is None:
+        return [], "VERBATIM_DISABLED: missing tenant"
+    kb_ids = [str(member["kb_id"]) for member in members]
+    try:
+        async with pg_manager.get_async_session_context() as db:
+            result = await query_verbatim_evidence(
+                db,
+                tenant_id=int(tenant_id),
+                kb_ids=kb_ids,
+                question=query_text,
+                patterns=verbatim.get("patterns") or None,
+                limit=max(1, min(int(limit or MAX_VERBATIM_HITS), MAX_VERBATIM_HITS)),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Scope verbatim retrieval failed: {exc}")
+        return [], f"VERBATIM_ERROR: {exc}"
+    member_by_kb = {str(member["kb_id"]): member for member in members}
+    rows: list[dict[str, Any]] = []
+    for span in result.get("spans") or []:
+        member = member_by_kb.get(str(span.get("kb_id")))
+        if member is None:
+            continue
+        rows.extend(_normalize_verbatim_results(member, [span], query_text=query_text))
+    return [row for row in rows if _policy_allows(member_by_kb[row["kb_id"]], row["evidence_status"])], None
+
+
+def _merge_verbatim_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """VERBATIM 命中若已被某个 DOCUMENT chunk 覆盖（quote 为其子串），合并进
+    该 chunk 行并继承 span 的稳定 evidence_id / 页码；独立命中保留为独立
+    VERBATIM 证据行。在去重/截断之前执行，保证强信号不被 top_k 挤掉。"""
+    verbatim_rows = [row for row in rows if row.get("retrieval_channel") == "VERBATIM"]
+    if not verbatim_rows:
+        return rows
+    document_rows = [row for row in rows if row.get("source_type") == "DOCUMENT"]
+    folded_contents = [re.sub(r"\s+", " ", str(row.get("content") or "")).casefold() for row in document_rows]
+    merged_rows = [row for row in rows if row.get("retrieval_channel") != "VERBATIM"]
+    for verbatim_row in verbatim_rows:
+        quote_folded = re.sub(r"\s+", " ", str(verbatim_row.get("content") or "")).casefold()
+        target = next(
+            (
+                document_row
+                for document_row, folded in zip(document_rows, folded_contents)
+                if quote_folded and quote_folded in folded
+            ),
+            None,
+        )
+        if target is not None:
+            target["verbatim_hit"] = True
+            target["verbatim_evidence_id"] = verbatim_row.get("evidence_id")
+            target.setdefault("page_number", verbatim_row.get("page_number"))
+            target.setdefault("span_id", verbatim_row.get("span_id"))
+            target.setdefault("parse_revision_id", verbatim_row.get("parse_revision_id"))
+            target.setdefault("document_partition", verbatim_row.get("document_partition"))
+            target.setdefault("partition_confidence", verbatim_row.get("partition_confidence"))
+            target.setdefault("match_tier", verbatim_row.get("match_tier"))
+            target["provenance"] = [*(target.get("provenance") or []), *(verbatim_row.get("provenance") or [])]
+        else:
+            merged_rows.append(verbatim_row)
+    return merged_rows
+
+
+async def query_verbatim_for_scope(
+    *,
+    query_text: str,
+    scope_snapshot: dict[str, Any],
+    patterns: list[str] | None = None,
+    question_types: list[str] | None = None,
+    top_k: int = 12,
+) -> dict[str, Any]:
+    """直接在冻结范围内执行 VERBATIM 通道（不跑 Milvus/图谱）。
+
+    供编排器低置信兜底与 ``grep_evidence`` 工具复用；租户缺失时失败关闭。
+    """
+    members = [
+        member
+        for member in scope_snapshot.get("members") or []
+        if isinstance(member, dict) and member.get("document_enabled") and not _member_is_derived(member)
+    ]
+    tenant_id = scope_snapshot.get("tenant_id")
+    if not members or tenant_id is None or not str(query_text or "").strip():
+        return {
+            "evidence": [],
+            "warnings": ["VERBATIM 检索未执行：缺少租户标识、成员库或查询文本。"],
+            "retrieval_summary": {"verbatim_hit_count": 0},
+        }
+    verbatim = {"tenant_id": int(tenant_id), "patterns": patterns or [], "question_types": question_types or []}
+    rows, error = await _query_verbatim_scope_source(members, query_text, verbatim=verbatim, limit=top_k)
+    if error:
+        return {
+            "evidence": [],
+            "warnings": [f"VERBATIM 检索失败（失败关闭，不影响其他通道）：{error}"],
+            "retrieval_summary": {"verbatim_hit_count": 0},
+        }
+    ranked, _ = _deduplicate_and_rerank(rows, top_k=top_k)
+    evidence = [_compact_evidence(item, query_text=query_text) for item in ranked]
+    return {
+        "evidence": evidence,
+        "warnings": [],
+        "retrieval_summary": {
+            "verbatim_hit_count": sum(1 for item in evidence if item.get("retrieval_channel") == "VERBATIM")
+        },
+    }
+
+
 def _canonical_key(row: dict[str, Any]) -> str:
     subject = str((row.get("subject") or {}).get("name") or "").strip().casefold()
     predicate = str(row.get("predicate") or "").strip().casefold()
@@ -647,6 +840,9 @@ def _compact_evidence(row: dict[str, Any], *, query_text: str | None = None) -> 
         "kb_name": row.get("kb_name"),
         "file_id": row.get("file_id"),
         "chunk_id": row.get("chunk_id"),
+        "parse_revision_id": row.get("parse_revision_id"),
+        "index_revision_id": row.get("index_revision_id"),
+        "anchor_ids": row.get("anchor_ids") or [],
         "subject": {"name": (row.get("subject") or {}).get("name")},
         "object": {"name": (row.get("object") or {}).get("name")},
         "pmid": row.get("pmid"),
@@ -669,18 +865,48 @@ def _compact_evidence(row: dict[str, Any], *, query_text: str | None = None) -> 
         "evidence_quote": clipped(row.get("evidence_quote") or row.get("content"), limit=300),
         "conflict": bool(row.get("conflict")),
         "evidence_records": row.get("evidence_records") or [],
+        # contract 1.1：通道归属（DOCUMENT/GRAPH/STRUCTURED/VERBATIM）与
+        # VERBATIM 命中细节（span/anchor/页码/match_tier）为增量字段。
+        "retrieval_channel": row.get("retrieval_channel") or row.get("source_type"),
+        "span_id": row.get("span_id"),
+        "anchor_id": row.get("anchor_id"),
+        "page_number": row.get("page_number"),
+        "document_partition": row.get("document_partition"),
+        "partition_confidence": row.get("partition_confidence"),
+        "span_evidence_type": row.get("evidence_type"),
+        "container_label": row.get("container_label"),
+        "row_key": row.get("row_key"),
+        "match_tier": row.get("match_tier"),
+        "matched_value": row.get("matched_value"),
+        "verbatim_hit": row.get("verbatim_hit"),
+        "verbatim_evidence_id": row.get("verbatim_evidence_id"),
     }
     return {key: value for key, value in compact.items() if value not in (None, "", [], {}) or isinstance(value, bool)}
 
 
 async def query_knowledge_scope_gateway(
-    *, query_text: str, scope_snapshot: dict[str, Any], top_k: int = 12
+    *,
+    query_text: str,
+    scope_snapshot: dict[str, Any],
+    top_k: int = 12,
+    verbatim: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     members = [member for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
     top_k = min(max(int(top_k), 1), 12)
     tasks = []
     task_labels = []
     per_source_limit = max(top_k, 8)
+    verbatim_members = [
+        member for member in members if member.get("document_enabled") and not _member_is_derived(member)
+    ]
+    # VERBATIM 通道只在调用方携带字面信号（patterns/题型）且租户可解析时启用；
+    # 单次跨库任务（本地 PG 查询），不随成员数放大往返。
+    verbatim_active = bool(
+        verbatim
+        and verbatim.get("tenant_id") is not None
+        and (verbatim.get("patterns") or verbatim.get("question_types"))
+        and verbatim_members
+    )
     for member in members:
         kb_id = member["kb_id"]
         if _member_is_derived(member):
@@ -705,10 +931,26 @@ async def query_knowledge_scope_gateway(
             ]
         )
         task_labels.extend([(kb_id, "DOCUMENT"), (kb_id, "GRAPH_STRUCTURED")])
+    if verbatim_active:
+        tasks.append(
+            _query_source_with_timeout(
+                _query_verbatim_scope_source(
+                    verbatim_members,
+                    query_text,
+                    verbatim=verbatim,
+                    limit=per_source_limit,
+                ),
+                kb_id="__scope__",
+                source_type="VERBATIM",
+                timeout_seconds=KNOWLEDGE_VERBATIM_SOURCE_TIMEOUT_SECONDS,
+            )
+        )
+        task_labels.append(("__scope__", "VERBATIM"))
 
     results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
     all_rows: list[dict[str, Any]] = []
     source_errors: list[str] = []
+    verbatim_error: str | None = None
     for (kb_id, source_type), result in zip(task_labels, results):
         if isinstance(result, BaseException):
             if isinstance(result, asyncio.CancelledError):
@@ -717,10 +959,14 @@ async def query_knowledge_scope_gateway(
             rows, error = [], f"{source_type}_ERROR: {result}"
         else:
             rows, error = result
+        if source_type == "VERBATIM":
+            # VERBATIM 任务跨成员；错误只记一次，命中行在 merge 阶段回填各 kb telemetry。
+            verbatim_error = error
         all_rows.extend(rows)
         if error:
             logger.warning(f"Scope source unavailable: kb={kb_id}, source={source_type}, error={error}")
             source_errors.append(f"{kb_id}/{source_type}: {error}")
+    all_rows = _merge_verbatim_rows(all_rows)
 
     yield_query = is_yield_gene_query(query_text)
     selection_rows = all_rows
@@ -805,8 +1051,10 @@ async def query_knowledge_scope_gateway(
             "structured": "NO_STRUCTURED_EVIDENCE",
         }[channel]
 
-    knowledge_source_status = [
-        {
+    verbatim_member_kb_ids = {member["kb_id"] for member in verbatim_members}
+    knowledge_source_status = []
+    for member in members:
+        status_row = {
             "kb_id": member["kb_id"],
             "kb_name": member.get("kb_name") or member["kb_id"],
             "document_status": channel_status(member, "document"),
@@ -814,8 +1062,13 @@ async def query_knowledge_scope_gateway(
             "structured_status": channel_status(member, "structured"),
             "health_status": member.get("health_status"),
         }
-        for member in members
-    ]
+        if verbatim_active and member["kb_id"] in verbatim_member_kb_ids:
+            # VERBATIM 状态只在通道实际运行的 Run 里出现（contract 1.1 增量字段）。
+            status_row["verbatim_status"] = "UNAVAILABLE" if verbatim_error else "AVAILABLE"
+        knowledge_source_status.append(status_row)
+    verbatim_hit_count = sum(
+        1 for item in evidence if item.get("retrieval_channel") == "VERBATIM" or item.get("verbatim_hit")
+    )
     return {
         "knowledge_scope_snapshot": {
             "scope_id": scope_snapshot.get("scope_id"),
@@ -846,6 +1099,7 @@ async def query_knowledge_scope_gateway(
             "query": query_text,
             "raw_hits": len(all_rows),
             "deduplicated_hits": len(evidence),
+            "verbatim_hit_count": verbatim_hit_count,
             "web_tool_available": bool(scope_snapshot.get("allow_web", False)),
             "web_call_count": 0,
         },

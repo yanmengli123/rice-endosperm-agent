@@ -35,7 +35,7 @@ async def test_upload_file_does_not_expose_legacy_allow_jsonl_query():
 async def test_document_file_exists_returns_boolean_for_relative_path(monkeypatch):
     captured = {}
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         captured["ensure"] = (kb_id, operation)
 
     async def fake_document_file_exists(kb_id: str, filename: str) -> bool:
@@ -70,7 +70,7 @@ async def test_document_file_exists_route_accepts_filename_with_slashes(monkeypa
     async def fake_admin_user():
         return SimpleNamespace(uid="user_1")
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     async def fake_document_file_exists(kb_id: str, filename: str) -> bool:
@@ -105,7 +105,7 @@ async def test_document_file_exists_route_accepts_filename_with_slashes(monkeypa
 
 
 async def test_document_file_exists_rejects_blank_filename(monkeypatch):
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     monkeypatch.setattr(
@@ -223,7 +223,7 @@ async def test_upload_file_rejects_jsonl_uploads():
 async def test_upload_file_rejects_oversized_file(monkeypatch):
     monkeypatch.setattr(knowledge_router, "MAX_UPLOAD_SIZE_BYTES", 5)
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     monkeypatch.setattr(
@@ -244,7 +244,7 @@ async def test_upload_file_rejects_oversized_file(monkeypatch):
 async def test_upload_file_uses_basename_for_browser_folder_upload(monkeypatch):
     captured = {}
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     async def fake_file_existed_in_db(kb_id: str, content_hash: str) -> bool:
@@ -284,7 +284,7 @@ async def test_upload_file_uses_basename_for_browser_folder_upload(monkeypatch):
 async def test_upload_file_invalid_kb_fails_before_read_or_minio(monkeypatch):
     calls = {"read": 0, "upload": 0}
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
 
     async def fake_read_upload_with_limit(*_args, **_kwargs) -> bytes:
@@ -315,7 +315,7 @@ async def test_upload_file_invalid_kb_fails_before_read_or_minio(monkeypatch):
 async def test_upload_file_read_only_kb_fails_before_read_or_minio(monkeypatch):
     calls = {"read": 0, "upload": 0}
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         raise HTTPException(status_code=400, detail="只支持检索，不支持文档上传")
 
     async def fake_read_upload_with_limit(*_args, **_kwargs) -> bytes:
@@ -357,7 +357,7 @@ async def test_markdown_endpoint_rejects_oversized_file(monkeypatch):
 async def test_index_documents_uses_uid_for_operator(monkeypatch):
     captured = {}
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     async def fake_get_database_info(kb_id: str) -> dict:
@@ -449,6 +449,11 @@ async def test_direct_index_task_fails_when_any_document_fails(monkeypatch):
 async def test_graph_index_task_snapshots_selected_model_in_payload(monkeypatch):
     captured = {}
 
+    async def fake_ensure_database_supports_documents(
+        kb_id: str, operation: str, command: str | None = None
+    ) -> None:
+        captured["ensure"] = (kb_id, operation)
+
     async def fake_has_running_graph_build_task(kb_id: str) -> bool:
         return False
 
@@ -477,6 +482,11 @@ async def test_graph_index_task_snapshots_selected_model_in_payload(monkeypatch)
         await kwargs["coroutine"](FakeTaskContext())
         return SimpleNamespace(id="task_graph"), True
 
+    monkeypatch.setattr(
+        knowledge_router,
+        "_ensure_database_supports_documents",
+        fake_ensure_database_supports_documents,
+    )
     monkeypatch.setattr(knowledge_router, "_has_running_graph_build_task", fake_has_running_graph_build_task)
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
     monkeypatch.setattr(knowledge_router, "MilvusGraphService", FakeGraphService)
@@ -504,7 +514,7 @@ async def test_graph_index_task_snapshots_selected_model_in_payload(monkeypatch)
 async def test_parse_pending_documents_enqueues_status_scoped_task(monkeypatch):
     captured = {"list_calls": [], "parsed": []}
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         captured["ensure"] = (kb_id, operation)
 
     async def fake_get_database_info(kb_id: str) -> dict:
@@ -575,7 +585,7 @@ async def test_parse_pending_documents_enqueues_status_scoped_task(monkeypatch):
 async def test_index_pending_documents_uses_pending_statuses_and_params(monkeypatch):
     captured = {"list_calls": [], "updated": [], "indexed": []}
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         captured["ensure"] = (kb_id, operation)
 
     async def fake_get_database_info(kb_id: str) -> dict:
@@ -646,7 +656,7 @@ async def test_add_documents_auto_index_returns_one_final_result_per_item(monkey
     async def fake_check_accessible(user, kb_id):
         return True
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     async def fake_get_database_info(kb_id: str) -> dict:
@@ -717,7 +727,7 @@ async def test_add_documents_auto_index_treats_error_none_as_success(monkeypatch
     async def fake_check_accessible(user, kb_id):
         return True
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     async def fake_get_database_info(kb_id: str) -> dict:
@@ -772,7 +782,7 @@ async def test_scientific_pdf_add_is_persisted_before_request_returns(monkeypatc
     async def fake_check_accessible(user, kb_id):
         return True
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     async def fake_get_database_info(kb_id: str) -> dict:
@@ -833,7 +843,7 @@ async def test_scientific_pdf_add_is_persisted_before_request_returns(monkeypatc
 
 
 async def test_add_uploaded_documents_rejects_empty_items(monkeypatch):
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     monkeypatch.setattr(
@@ -854,7 +864,7 @@ async def test_add_uploaded_documents_rejects_empty_items(monkeypatch):
 
 
 async def test_add_uploaded_documents_rejects_non_minio_url(monkeypatch):
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     monkeypatch.setattr(
@@ -880,7 +890,7 @@ async def test_add_uploaded_documents_rejects_non_minio_url(monkeypatch):
 async def test_add_uploaded_documents_rejects_missing_content_hash(monkeypatch):
     item = "minio://knowledgebases/kb_1/upload/demo.txt"
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     monkeypatch.setattr(
@@ -904,7 +914,7 @@ async def test_add_uploaded_documents_creates_records_without_task(monkeypatch):
     item = "minio://knowledgebases/kb_1/upload/demo.txt"
     captured = {}
 
-    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         return None
 
     async def fake_add_file_record(kb_id: str, item_path: str, params: dict, operator_id: str | None = None):
