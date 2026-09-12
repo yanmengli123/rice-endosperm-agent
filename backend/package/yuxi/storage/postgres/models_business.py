@@ -68,6 +68,8 @@ class Tenant(Base):
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     name = Column(String(128), nullable=False, unique=True)
     status = Column(String(32), nullable=False, default="active")  # active / suspended
+    # 租户级知识库默认共享策略（迁移 0029）；未配置时创建入口兜底 private
+    default_kb_share_policy = Column(JSON)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 

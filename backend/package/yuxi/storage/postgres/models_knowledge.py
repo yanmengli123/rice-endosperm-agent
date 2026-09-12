@@ -39,6 +39,17 @@ class KnowledgeBase(Base):
     llm_model_spec = Column(String(512))
     query_params = Column(JSON_VALUE)
     additional_params = Column(JSON_VALUE)
+    # --- Source Contract（迁移 0029）：契约在创建时冻结，之后不可经 API 修改 ---
+    contract_key = Column(String(64), index=True)
+    contract_version = Column(String(32))
+    contract_digest = Column(String(128))
+    contract_snapshot = Column(JSON_VALUE)
+    content_domain = Column(Text)
+    # Agent 工具描述与用途说明分离（此前 description 被直接当作工具描述）
+    tool_description = Column(Text)
+    # 治理状态与发布指针（运行健康不落列，由来源聚合计算）
+    governance_status = Column(String(32), nullable=False, default="DRAFT", index=True)
+    active_release_id = Column(String(64), index=True)
     graph_view_settings = Column(JSON_VALUE)
     share_config = Column(JSON_VALUE)
     mindmap = Column(JSON_VALUE)
@@ -375,7 +386,156 @@ class EvidenceAnchorRecord(Base):
     confidence = Column(Float, nullable=False, default=0.0)
     locatable = Column(Boolean, nullable=False, default=False)
     source = Column(String(32), nullable=False, default="pymupdf")
+    document_partition = Column(String(32), nullable=False, default="UNKNOWN")
+    partition_confidence = Column(Float, nullable=False, default=0.0)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class EvidenceSpanRecord(Base):
+    """解析平面不可变的句子级证据单元（P2-10）。
+
+    与 EvidenceAnchor（underlying PDF 物理定位）互补：span 是**规范解析正文**
+    里的可引用最小单元，按 parse_revision 级联；检索/嵌入升级不触碰。
+
+    - evidence_type: sentence | caption | table_row | formula
+    - container_label: 表格/图表的编号（如 "Table 1"、"Figure 2A"）
+    - row_key: table_row 时对应行的业务主键（首列），否则 None
+    """
+
+    __tablename__ = "evidence_spans"
+    __table_args__ = (
+        UniqueConstraint("parse_revision_id", "span_id", name="uq_evidence_span_revision_span"),
+        UniqueConstraint("parse_revision_id", "evidence_id", name="uq_evidence_span_revision_evid"),
+        UniqueConstraint("parse_revision_id", "sentence_index", "anchor_id", name="uq_evidence_span_anchor"),
+        Index("ix_evidence_spans_revision_type", "parse_revision_id", "evidence_type"),
+        Index("ix_evidence_spans_revision_anchor", "parse_revision_id", "anchor_id"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    parse_revision_id = Column(
+        String(64),
+        ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kb_id = Column(String(80), nullable=False, index=True)
+    file_id = Column(String(64), nullable=False, index=True)
+    span_id = Column(String(64), nullable=False, index=True)
+    anchor_id = Column(String(64))
+    sentence_index = Column(Integer, nullable=False, default=0)
+    quote = Column(Text, nullable=False)
+    quote_hash = Column(String(64), nullable=False)
+    start_char = Column(Integer)
+    end_char = Column(Integer)
+    start_word = Column(Integer)
+    end_word = Column(Integer)
+    page_number = Column(Integer)
+    evidence_type = Column(String(32), nullable=False, default="sentence")
+    document_partition = Column(String(32), nullable=False, default="UNKNOWN")
+    partition_confidence = Column(Float, nullable=False, default=0.0)
+    evidence_id = Column(String(64), nullable=False, index=True)
+    container_label = Column(String(128))
+    row_key = Column(String(128))
+    metadata_json = Column(JSON_VALUE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class ScientificLexicalIndexRecord(Base):
+    """多字段词法倒排（P2-11）。
+
+    由解析产物确定性构建，服务 NUMERIC/CITATION/FIGURE/TABLE 题型的
+    候选预筛与证据回源。owner_type=(anchor|span) + owner_id 回指证据单元。
+
+    - lex_type: identifier | numeric | citation | figure_table
+    - lex_value: 原文（保留大小写/区间原样）
+    - lex_value_folded: 检索键（大小写折叠；numeric 归一为区间上下界）
+    """
+
+    __tablename__ = "scientific_lexical_index"
+    __table_args__ = (
+        UniqueConstraint(
+            "parse_revision_id",
+            "lex_type",
+            "lex_value_folded",
+            "owner_id",
+            name="uq_scientific_lexical_rev_type_val_owner",
+        ),
+        Index("ix_scientific_lexical_lookup", "lex_type", "lex_value_folded", "kb_id"),
+        Index("ix_scientific_lexical_revision", "parse_revision_id"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    parse_revision_id = Column(
+        String(64),
+        ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kb_id = Column(String(80), nullable=False, index=True)
+    file_id = Column(String(64), nullable=False)
+    owner_type = Column(String(16), nullable=False, default="anchor")
+    owner_id = Column(String(64), nullable=False)
+    lex_type = Column(String(32), nullable=False)
+    lex_value = Column(String(256), nullable=False)
+    lex_value_folded = Column(String(256), nullable=False)
+    metadata_json = Column(JSON_VALUE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class EvidenceFeedbackRecord(Base):
+    """证据反馈（P4，append-only）。
+
+    用户对一条证据候选给出 helpful / misleading / wrong_location 反馈；
+    comment 在应用层脱敏后才入库。管理员裁决后进入 benchmark 飞轮。
+    """
+
+    __tablename__ = "evidence_feedback"
+    __table_args__ = (
+        UniqueConstraint("feedback_id", name="uq_evidence_feedback_id"),
+        Index("ix_evidence_feedback_run", "run_id", "evidence_id"),
+        Index("ix_evidence_feedback_status", "status", "created_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    feedback_id = Column(String(64), nullable=False, unique=True, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    run_id = Column(String(64), nullable=False, index=True)
+    evidence_id = Column(String(64), nullable=False, index=True)
+    uid = Column(String(64), nullable=False)
+    action = Column(String(16), nullable=False)
+    comment = Column(Text)
+    anonymized = Column(Boolean, nullable=False, default=True)
+    # status 查询由 __table_args__ 的复合索引覆盖；列级 index=True 会生成
+    # 同名 ix_evidence_feedback_status 导致 create_all 撞索引。
+    status = Column(String(16), nullable=False, default="PENDING")
+    adjudication = Column(String(16))
+    adjudicated_by = Column(String(64))
+    adjudicated_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class EvidenceBenchmarkCandidateRecord(Base):
+    """裁决通过后生成的 PR Gate 候选用例（P4 飞轮）。"""
+
+    __tablename__ = "evidence_benchmark_candidates"
+    __table_args__ = (UniqueConstraint("candidate_id", name="uq_evidence_benchmark_candidate_id"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    candidate_id = Column(String(64), nullable=False, unique=True, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    feedback_id = Column(
+        String(64), ForeignKey("evidence_feedback.feedback_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    case_id = Column(String(80), nullable=False)
+    question = Column(Text, nullable=False)
+    question_types = Column(JSON_VALUE, nullable=False, default=list)
+    required_identifiers = Column(JSON_VALUE, nullable=False, default=list)
+    answerable = Column(Boolean, nullable=False, default=True)
+    source_evidence_id = Column(String(64))
+    created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class ArticleReference(Base):
@@ -726,6 +886,9 @@ class KnowledgeRetrievalRun(Base):
     claim_ids_json = Column(JSON_VALUE)
     evidence_ids_json = Column(JSON_VALUE)
     chunk_ids_json = Column(JSON_VALUE)
+    # Immutable direct-locator audit fact. Retrieval candidate ids alone cannot
+    # reconstruct the exact parse-revision/anchor/page binding used in output.
+    locator_resolution_json = Column(JSON_VALUE)
     contract_hash = Column(String(64))
     status = Column(String(32), nullable=False, default="RUNNING")
     warnings_json = Column(JSON_VALUE)
@@ -762,6 +925,7 @@ class EvaluationDatasetItem(Base):
         UniqueConstraint("item_id", name="uq_evaluation_dataset_items_item_id"),
         UniqueConstraint("dataset_id", "item_index", name="uq_evaluation_dataset_items_dataset_index"),
         Index("ix_evaluation_dataset_items_dataset_index", "dataset_id", "item_index"),
+        Index("ix_evaluation_dataset_items_status", "dataset_id", "status"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -777,7 +941,16 @@ class EvaluationDatasetItem(Base):
     query_text = Column(Text, nullable=False)
     gold_chunk_ids = Column(JSON_VALUE)
     gold_answer = Column(Text)
+    # 业务编号：跨版本追踪同一题，数据集内唯一由服务层保证（历史行为 NULL）
+    external_id = Column(String(255))
+    # 治理字段（answer_type/tags/difficulty/must_include/evidence/source_version/notes/review），
+    # 不参与评估计算，导出 JSONL 时原样往返
+    item_metadata = Column(JSON_VALUE)
+    # draft/approved/rejected：仅对 draft 态数据集有意义，完成基准时按 review_required 门禁
+    status = Column(String(32), nullable=False, default="draft", server_default="draft")
+    created_by = Column(String(64))
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class EvaluationRun(Base):
@@ -832,6 +1005,8 @@ class EvaluationRunItem(Base):
     generated_answer = Column(Text)
     retrieved_chunks = Column(JSON_VALUE)
     metrics = Column(JSON_VALUE)
+    # 运行时从题目 item_metadata.tags 快照，供按标签切片聚合与导出透视
+    item_tags = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
@@ -1197,3 +1372,141 @@ class WikiOutboxEvent(Base):
     last_error = Column(Text)
     created_at = Column(DateTime(timezone=True), default=utc_now)
     processed_at = Column(DateTime(timezone=True))
+
+
+# =============================================================================
+# === Source Contract 治理：审计 / CSV 规范数据 / 发布清单（迁移 0029-0031） ===
+# =============================================================================
+
+
+class KnowledgeAuditEvent(Base):
+    """权威源知识库的契约与生命周期审计事件（append-only）。
+
+    kb_id 故意不设外键：知识库删除后审计历史必须保留。
+    """
+
+    __tablename__ = "knowledge_audit_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_knowledge_audit_events_event_id"),
+        Index("ix_knowledge_audit_events_kb_created", "kb_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(64), nullable=False, index=True)
+    kb_id = Column(String(80), nullable=False, index=True)
+    tenant_id = Column(BigInteger, index=True)
+    event_type = Column(String(64), nullable=False, index=True)
+    actor_uid = Column(String(64))
+    payload_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class KnowledgeDatasetRevision(Base):
+    """CSV 数据集的不可变 Canonical Revision（csv_record / csv_qa 契约）。
+
+    原始 CSV 原件在对象存储（KnowledgeFile.minio_url + source_sha256）；
+    规范记录在 KnowledgeCanonicalRecord；检索投影由规范记录确定性生成。
+    """
+
+    __tablename__ = "knowledge_dataset_revisions"
+    __table_args__ = (
+        UniqueConstraint("revision_id", name="uq_knowledge_dataset_revisions_revision_id"),
+        Index("ix_knowledge_dataset_revisions_kb_status", "kb_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    revision_id = Column(String(64), nullable=False, index=True)
+    tenant_id = Column(BigInteger, index=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False, index=True)
+    contract_key = Column(String(64), nullable=False)
+    contract_version = Column(String(32), nullable=False)
+    source_filename = Column(String(512))
+    source_sha256 = Column(String(64), nullable=False, index=True)
+    schema_hash = Column(String(64), nullable=False)
+    parser_version = Column(String(32), nullable=False)
+    encoding = Column(String(32))
+    delimiter = Column(String(8))
+    columns_json = Column(JSON_VALUE, nullable=False, default=list)
+    column_mapping = Column(JSON_VALUE, nullable=False, default=dict)
+    # business_key（跨版本稳定）| row_number（仅本修订内稳定）
+    identity_strategy = Column(String(32), nullable=False, default="row_number")
+    row_count = Column(Integer, nullable=False, default=0)
+    valid_record_count = Column(Integer, nullable=False, default=0)
+    status = Column(String(32), nullable=False, default="PENDING", index=True)
+    validation_report = Column(JSON_VALUE)
+    error_message = Column(Text)
+    created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    completed_at = Column(DateTime(timezone=True))
+
+
+class KnowledgeCanonicalRecord(Base):
+    """CSV 数据集的规范记录；行级 provenance 由 (revision_id, row_number, record_key) 承载。"""
+
+    __tablename__ = "knowledge_canonical_records"
+    __table_args__ = (
+        UniqueConstraint("revision_id", "record_id", name="uq_knowledge_canonical_records_revision_record"),
+        Index("ix_knowledge_canonical_records_revision_key", "revision_id", "record_key"),
+        Index("ix_knowledge_canonical_records_kb", "kb_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    record_id = Column(String(64), nullable=False)
+    revision_id = Column(
+        String(64), ForeignKey("knowledge_dataset_revisions.revision_id", ondelete="CASCADE"), nullable=False
+    )
+    kb_id = Column(String(80), nullable=False)
+    tenant_id = Column(BigInteger, index=True)
+    record_key = Column(String(512), nullable=False)
+    row_number = Column(Integer, nullable=False)
+    fields_json = Column(JSON_VALUE, nullable=False, default=dict)
+    projection_text = Column(Text, nullable=False)
+    projection_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class KnowledgeRelease(Base):
+    """多来源知识库的不可变发布清单；发布/回滚只原子切换 KnowledgeBase.active_release_id。"""
+
+    __tablename__ = "knowledge_releases"
+    __table_args__ = (
+        UniqueConstraint("release_id", name="uq_knowledge_releases_release_id"),
+        Index("ix_knowledge_releases_kb_status", "kb_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    release_id = Column(String(64), nullable=False, index=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, index=True)
+    contract_ref = Column(String(128), nullable=False)
+    retrieval_policy_revision_id = Column(String(64), index=True)
+    manifest_hash = Column(String(64), nullable=False)
+    manifest_json = Column(JSON_VALUE, nullable=False)
+    # STAGED → ACTIVE → SUPERSEDED；ARCHIVED 随知识库归档
+    status = Column(String(32), nullable=False, default="STAGED", index=True)
+    previous_release_id = Column(String(64))
+    source_count = Column(Integer, nullable=False, default=0)
+    created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    published_at = Column(DateTime(timezone=True))
+    superseded_at = Column(DateTime(timezone=True))
+
+
+class KnowledgeRetrievalPolicyRevision(Base):
+    """查询时策略（reranker/召回数/融合权重）的独立版本轴；变化不重建索引。"""
+
+    __tablename__ = "knowledge_retrieval_policy_revisions"
+    __table_args__ = (
+        UniqueConstraint("revision_id", name="uq_knowledge_retrieval_policy_revisions_id"),
+        Index("ix_knowledge_retrieval_policy_revisions_kb", "kb_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    revision_id = Column(String(64), nullable=False, index=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, index=True)
+    policy_json = Column(JSON_VALUE, nullable=False)
+    policy_hash = Column(String(64), nullable=False)
+    created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now)

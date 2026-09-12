@@ -293,3 +293,15 @@ async def test_identity_created_at_migration_backfills_before_enforcing_constrai
     assert "ALTER TABLE departments ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP" in statements
     assert statements.index(user_backfill) < statements.index(user_constraint)
     assert statements.index(department_backfill) < statements.index(department_constraint)
+
+
+@pytest.mark.asyncio
+async def test_locator_audit_migration_uses_dedicated_json_column():
+    manager = PostgresManager()
+    connection = _RecordingConnection()
+
+    await manager._migration_0034_retrieval_locator_audit(connection)
+
+    statements = "\n".join(connection.statements)
+    assert "knowledge_retrieval_runs" in statements
+    assert "ADD COLUMN IF NOT EXISTS locator_resolution_json JSON" in statements

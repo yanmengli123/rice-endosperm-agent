@@ -1037,6 +1037,18 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0023_execution_trace", "_migration_0023_execution_trace"),
         ("0024_execution_trace_hardening", "_migration_0024_execution_trace_hardening"),
         ("0025_execution_trace_retention", "_migration_0025_execution_trace_retention"),
+        ("0026_scientific_evidence_spans", "_migration_0026_scientific_evidence_spans"),
+        ("0027_evidence_feedback_flywheel", "_migration_0027_evidence_feedback_flywheel"),
+        ("0028_evaluation_benchmark_authoring", "_migration_0028_evaluation_benchmark_authoring"),
+        ("0029_kb_contract_drift_repair", "_migration_0029_kb_contract_drift_repair"),
+        ("0030_source_contract_backfill_audit", "_migration_0030_source_contract_backfill_audit"),
+        ("0031_dataset_release_governance", "_migration_0031_dataset_release_governance"),
+        ("0032_scientific_document_partitions", "_migration_0032_scientific_document_partitions"),
+        (
+            "0033_scientific_document_partition_backfill_repair",
+            "_migration_0033_scientific_document_partition_backfill_repair",
+        ),
+        ("0034_retrieval_locator_audit", "_migration_0034_retrieval_locator_audit"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -1787,6 +1799,586 @@ class PostgresManager(metaclass=SingletonMeta):
         )
         await conn.execute(text("REVOKE ALL ON FUNCTION yuxi_purge_trace_runs(TIMESTAMPTZ, INTEGER) FROM PUBLIC"))
 
+    async def _migration_0026_scientific_evidence_spans(self, conn) -> None:
+        """P2-10/P2-11：证据单元 span 与多字段词法索引。
+
+        - ``evidence_spans``：解析平面不可变的句子级证据单元，挂 parse_revision_id。
+          原始来源/Milvus 索引升级不影响证据身份；解析器升级重建后新旧 span
+          按 evidence_id 比对即得回归结论。
+        - ``scientific_lexical_index``：科研实体/数值区间/引文/图表引用的
+          确定性词法倒排（PG 侧），供 NUMERIC/CITATION/FIGURE/TABLE 题型的
+          候选预筛与证据回源；``owner_type`` 区分 ``anchor``/``span``。
+        两表都按 parse_revision_id 级联删除——revision 是不可变身份。
+        """
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS evidence_spans ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "parse_revision_id VARCHAR(64) NOT NULL "
+                "REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE, "
+                "kb_id VARCHAR(80) NOT NULL, "
+                "file_id VARCHAR(64) NOT NULL, "
+                "span_id VARCHAR(64) NOT NULL, "
+                "anchor_id VARCHAR(64), "
+                "sentence_index INTEGER NOT NULL DEFAULT 0, "
+                "quote TEXT NOT NULL, "
+                "quote_hash VARCHAR(64) NOT NULL, "
+                "start_char INTEGER, "
+                "end_char INTEGER, "
+                "start_word INTEGER, "
+                "end_word INTEGER, "
+                "page_number INTEGER, "
+                "evidence_type VARCHAR(32) NOT NULL DEFAULT 'sentence', "
+                "evidence_id VARCHAR(64) NOT NULL, "
+                "container_label VARCHAR(128), "
+                "row_key VARCHAR(128), "
+                "metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "UNIQUE (parse_revision_id, span_id), "
+                "UNIQUE (parse_revision_id, evidence_id), "
+                "UNIQUE (sentence_index, anchor_id)"
+                ")"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_evidence_spans_revision "
+                "ON evidence_spans(parse_revision_id, evidence_type)"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_evidence_spans_anchor ON evidence_spans(parse_revision_id, anchor_id)")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS scientific_lexical_index ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "parse_revision_id VARCHAR(64) NOT NULL "
+                "REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE, "
+                "kb_id VARCHAR(80) NOT NULL, "
+                "file_id VARCHAR(64) NOT NULL, "
+                "owner_type VARCHAR(16) NOT NULL DEFAULT 'anchor', "
+                "owner_id VARCHAR(64) NOT NULL, "
+                "lex_type VARCHAR(32) NOT NULL, "
+                "lex_value VARCHAR(256) NOT NULL, "
+                "lex_value_folded VARCHAR(256) NOT NULL, "
+                "metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "UNIQUE (parse_revision_id, lex_type, lex_value_folded, owner_id)"
+                ")"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_scientific_lexical_lookup "
+                "ON scientific_lexical_index(lex_type, lex_value_folded, kb_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_scientific_lexical_revision "
+                "ON scientific_lexical_index(parse_revision_id)"
+            )
+        )
+
+    async def _migration_0027_evidence_feedback_flywheel(self, conn) -> None:
+        """P4：证据反馈 → 脱敏 → 人工裁决 → benchmark candidate 飞轮。
+
+        - ``evidence_feedback``：append-only 用户反馈（comment 已在应用层脱敏）；
+        - ``evidence_benchmark_candidates``：裁决 approved 后生成的 PR Gate 候选用例
+          （evidence_pr_gate.jsonl 同构），导出后进入基准集。
+        """
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS evidence_feedback ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "feedback_id VARCHAR(64) NOT NULL UNIQUE, "
+                "tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "run_id VARCHAR(64) NOT NULL, "
+                "evidence_id VARCHAR(64) NOT NULL, "
+                "uid VARCHAR(64) NOT NULL, "
+                "action VARCHAR(16) NOT NULL, "
+                "comment TEXT, "
+                "anonymized BOOLEAN NOT NULL DEFAULT TRUE, "
+                "status VARCHAR(16) NOT NULL DEFAULT 'PENDING', "
+                "adjudication VARCHAR(16), "
+                "adjudicated_by VARCHAR(64), "
+                "adjudicated_at TIMESTAMPTZ, "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+                ")"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_evidence_feedback_run ON evidence_feedback(run_id, evidence_id)")
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_evidence_feedback_status ON evidence_feedback(status, created_at)")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS evidence_benchmark_candidates ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "candidate_id VARCHAR(64) NOT NULL UNIQUE, "
+                "tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "feedback_id VARCHAR(64) NOT NULL "
+                "REFERENCES evidence_feedback(feedback_id) ON DELETE CASCADE, "
+                "case_id VARCHAR(80) NOT NULL, "
+                "question TEXT NOT NULL, "
+                "question_types JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "required_identifiers JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "answerable BOOLEAN NOT NULL DEFAULT TRUE, "
+                "source_evidence_id VARCHAR(64), "
+                "created_by VARCHAR(64), "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+                ")"
+            )
+        )
+
+    async def _migration_0028_evaluation_benchmark_authoring(self, conn) -> None:
+        """评估基准逐条构建（P1/P2/P3）：题目治理字段 + 运行条目标签快照。
+
+        - evaluation_dataset_items 增补 external_id / item_metadata / status / 审计列；
+        - 存量行全部属于已完成数据集（upload/generated），统一回填 status='approved'；
+        - evaluation_run_items 增补 item_tags，运行时从题目 item_metadata.tags 快照，
+          支撑按标签切片聚合（run.metrics.by_tag）与导出透视。
+        """
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS evaluation_dataset_items ADD COLUMN IF NOT EXISTS external_id VARCHAR(255)")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS evaluation_dataset_items ADD COLUMN IF NOT EXISTS item_metadata JSONB")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS evaluation_dataset_items "
+                "ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'draft'"
+            )
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS evaluation_dataset_items ADD COLUMN IF NOT EXISTS created_by VARCHAR(64)")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS evaluation_dataset_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ")
+        )
+        await conn.execute(text("UPDATE evaluation_dataset_items SET status = 'approved' WHERE status = 'draft'"))
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_evaluation_dataset_items_status "
+                "ON evaluation_dataset_items(dataset_id, status)"
+            )
+        )
+        await conn.execute(text("ALTER TABLE IF EXISTS evaluation_run_items ADD COLUMN IF NOT EXISTS item_tags JSONB"))
+
+    async def _migration_0029_kb_contract_drift_repair(self, conn) -> None:
+        """漂移修复：feat 分支工作区已在 ORM 声明但缺少迁移的列（对照 information_schema 与 metadata）。
+
+        - knowledge_bases 的 contract_* / 治理列：Authority Gate 契约平面（ORM 声明为准，全部可空，
+          governance_status 按模型 default 补 'DRAFT'）；
+        - tenants.default_kb_share_policy：JSON 可空。
+        幂等 ADD COLUMN，存量行不动。
+        """
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS contract_key VARCHAR(64)")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS contract_version VARCHAR(32)")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS contract_digest VARCHAR(128)")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS contract_snapshot JSONB")
+        )
+        await conn.execute(text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS content_domain TEXT"))
+        await conn.execute(text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS tool_description TEXT"))
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS knowledge_bases "
+                "ADD COLUMN IF NOT EXISTS governance_status VARCHAR(32) NOT NULL DEFAULT 'DRAFT'"
+            )
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS active_release_id VARCHAR(64)")
+        )
+        for column in ("contract_key", "governance_status", "active_release_id"):
+            await conn.execute(
+                text(f"CREATE INDEX IF NOT EXISTS ix_knowledge_bases_{column} ON knowledge_bases({column})")
+            )
+        await conn.execute(text("ALTER TABLE IF EXISTS tenants ADD COLUMN IF NOT EXISTS default_kb_share_policy JSON"))
+
+    async def _migration_0030_source_contract_backfill_audit(self, conn) -> None:
+        """Source Contract 存量回填与审计事件表。
+
+        回填规则（宁多标 legacy_mixed 也不错升 managed_graph）：
+        - pdf_literature 模板或显式 pdf_evidence_pipeline → pdf_evidence@1.0.0；
+        - graph_csv 且存在普通文档、或不存在托管导入批次（LLM 抽图痕迹）→ legacy_mixed@0；
+        - graph_csv 纯净（有托管导入、无普通文档）→ managed_graph@1.0.0；
+        - 其余（含旧 csv_dataset 模板、外部连接器）→ legacy_generic@0。
+        存量库治理状态一律视为 PUBLISHED（迁移时点前不存在 DRAFT 概念）。
+        """
+        await conn.execute(
+            text(
+                "UPDATE knowledge_bases SET contract_key = CASE "
+                "WHEN COALESCE(additional_params->>'format_template','') = 'pdf_literature' "
+                "OR COALESCE(additional_params->>'pdf_evidence_pipeline','') IN ('true','True','TRUE','1') "
+                "THEN 'pdf_evidence' "
+                "WHEN COALESCE(additional_params->>'format_template','') = 'graph_csv' THEN CASE "
+                "WHEN EXISTS (SELECT 1 FROM knowledge_files f WHERE f.kb_id = knowledge_bases.kb_id "
+                "AND COALESCE(f.is_folder, FALSE) = FALSE) "
+                "OR NOT EXISTS (SELECT 1 FROM knowledge_graph_imports i WHERE i.kb_id = knowledge_bases.kb_id) "
+                "THEN 'legacy_mixed' ELSE 'managed_graph' END "
+                "ELSE 'legacy_generic' END "
+                "WHERE contract_key IS NULL"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE knowledge_bases SET contract_version = CASE contract_key "
+                "WHEN 'pdf_evidence' THEN '1.0.0' WHEN 'managed_graph' THEN '1.0.0' ELSE '0' END "
+                "WHERE contract_version IS NULL"
+            )
+        )
+        await conn.execute(
+            text("UPDATE knowledge_bases SET governance_status = 'PUBLISHED' WHERE governance_status = 'DRAFT'")
+        )
+        # 审计事件表（kb_id 不设外键：知识库删除后审计历史必须保留）
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_audit_events ("
+                "id SERIAL PRIMARY KEY, "
+                "event_id VARCHAR(64) NOT NULL, "
+                "kb_id VARCHAR(80) NOT NULL, "
+                "tenant_id BIGINT, "
+                "event_type VARCHAR(64) NOT NULL, "
+                "actor_uid VARCHAR(64), "
+                "payload_json JSONB, "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_audit_events_event_id "
+                "ON knowledge_audit_events(event_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_audit_events_kb_created "
+                "ON knowledge_audit_events(kb_id, created_at)"
+            )
+        )
+
+    async def _migration_0031_dataset_release_governance(self, conn) -> None:
+        """CSV 数据产品与发布治理平面。
+
+        - knowledge_dataset_revisions / knowledge_canonical_records：CSV 规范修订与行级记录；
+        - knowledge_releases / knowledge_retrieval_policy_revisions：不可变发布清单与查询策略版本轴。
+        ORM metadata 的 create_all 会建表；此处幂等补建保证任何迁移路径都完整。
+        """
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_dataset_revisions ("
+                "id SERIAL PRIMARY KEY, "
+                "revision_id VARCHAR(64) NOT NULL, "
+                "tenant_id BIGINT, "
+                "kb_id VARCHAR(80) NOT NULL REFERENCES knowledge_bases(kb_id) ON DELETE CASCADE, "
+                "file_id VARCHAR(64) NOT NULL REFERENCES knowledge_files(file_id) ON DELETE CASCADE, "
+                "contract_key VARCHAR(64) NOT NULL, "
+                "contract_version VARCHAR(32) NOT NULL, "
+                "source_filename VARCHAR(512), "
+                "source_sha256 VARCHAR(64) NOT NULL, "
+                "schema_hash VARCHAR(64) NOT NULL, "
+                "parser_version VARCHAR(32) NOT NULL, "
+                "encoding VARCHAR(32), "
+                "delimiter VARCHAR(8), "
+                "columns_json JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "column_mapping JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "identity_strategy VARCHAR(32) NOT NULL DEFAULT 'row_number', "
+                "row_count INTEGER NOT NULL DEFAULT 0, "
+                "valid_record_count INTEGER NOT NULL DEFAULT 0, "
+                "status VARCHAR(32) NOT NULL DEFAULT 'PENDING', "
+                "validation_report JSONB, "
+                "error_message TEXT, "
+                "created_by VARCHAR(64), "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "completed_at TIMESTAMPTZ)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_dataset_revisions_revision_id "
+                "ON knowledge_dataset_revisions(revision_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_dataset_revisions_kb_status "
+                "ON knowledge_dataset_revisions(kb_id, status)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_dataset_revisions_file_id "
+                "ON knowledge_dataset_revisions(file_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_canonical_records ("
+                "id SERIAL PRIMARY KEY, "
+                "record_id VARCHAR(64) NOT NULL, "
+                "revision_id VARCHAR(64) NOT NULL REFERENCES knowledge_dataset_revisions(revision_id) "
+                "ON DELETE CASCADE, "
+                "kb_id VARCHAR(80) NOT NULL, "
+                "tenant_id BIGINT, "
+                "record_key VARCHAR(512) NOT NULL, "
+                "row_number INTEGER NOT NULL, "
+                "fields_json JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "projection_text TEXT NOT NULL, "
+                "projection_hash VARCHAR(64) NOT NULL, "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_canonical_records_revision_record "
+                "ON knowledge_canonical_records(revision_id, record_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_canonical_records_revision_key "
+                "ON knowledge_canonical_records(revision_id, record_key)"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_knowledge_canonical_records_kb ON knowledge_canonical_records(kb_id)")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_releases ("
+                "id SERIAL PRIMARY KEY, "
+                "release_id VARCHAR(64) NOT NULL, "
+                "kb_id VARCHAR(80) NOT NULL REFERENCES knowledge_bases(kb_id) ON DELETE CASCADE, "
+                "tenant_id BIGINT, "
+                "contract_ref VARCHAR(128) NOT NULL, "
+                "retrieval_policy_revision_id VARCHAR(64), "
+                "manifest_hash VARCHAR(64) NOT NULL, "
+                "manifest_json JSONB NOT NULL, "
+                "status VARCHAR(32) NOT NULL DEFAULT 'STAGED', "
+                "previous_release_id VARCHAR(64), "
+                "source_count INTEGER NOT NULL DEFAULT 0, "
+                "created_by VARCHAR(64), "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "published_at TIMESTAMPTZ, "
+                "superseded_at TIMESTAMPTZ)"
+            )
+        )
+        await conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_releases_release_id ON knowledge_releases(release_id)")
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_knowledge_releases_kb_status ON knowledge_releases(kb_id, status)")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_retrieval_policy_revisions ("
+                "id SERIAL PRIMARY KEY, "
+                "revision_id VARCHAR(64) NOT NULL, "
+                "kb_id VARCHAR(80) NOT NULL REFERENCES knowledge_bases(kb_id) ON DELETE CASCADE, "
+                "tenant_id BIGINT, "
+                "policy_json JSONB NOT NULL, "
+                "policy_hash VARCHAR(64) NOT NULL, "
+                "created_by VARCHAR(64), "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_retrieval_policy_revisions_id "
+                "ON knowledge_retrieval_policy_revisions(revision_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_retrieval_policy_revisions_kb "
+                "ON knowledge_retrieval_policy_revisions(kb_id, created_at)"
+            )
+        )
+        # 新平面表启用 RLS（与 0021 Wiki 相同的 yuxi.tenant_id 会话变量模式）
+        for table in (
+            "knowledge_audit_events",
+            "knowledge_dataset_revisions",
+            "knowledge_canonical_records",
+            "knowledge_releases",
+            "knowledge_retrieval_policy_revisions",
+        ):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            policy_name = f"p_{table}_tenant"
+            policy_exists = (
+                await conn.execute(
+                    text("SELECT 1 FROM pg_policies WHERE tablename = :table AND policyname = :policy"),
+                    {"table": table, "policy": policy_name},
+                )
+            ).scalar()
+            if not policy_exists:
+                tenant_expr = "NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT"
+                await conn.execute(
+                    text(
+                        f"CREATE POLICY {policy_name} ON {table} "
+                        f"USING (tenant_id IS NULL OR tenant_id = {tenant_expr}) "
+                        f"WITH CHECK (tenant_id IS NULL OR tenant_id = {tenant_expr})"
+                    )
+                )
+
+    async def _migration_0032_scientific_document_partitions(self, conn) -> None:
+        """Persist PDF partitions on anchors and sentence-level evidence.
+
+        Existing rows use a deterministic migration heuristic. New parser
+        revisions are classified during ingestion and do not depend on page
+        thresholds at answer time.
+        """
+        await conn.execute(text("ALTER TABLE evidence_anchors ADD COLUMN IF NOT EXISTS document_partition VARCHAR(32)"))
+        await conn.execute(text("ALTER TABLE evidence_anchors ADD COLUMN IF NOT EXISTS partition_confidence REAL"))
+        await conn.execute(text("ALTER TABLE evidence_spans ADD COLUMN IF NOT EXISTS document_partition VARCHAR(32)"))
+        await conn.execute(text("ALTER TABLE evidence_spans ADD COLUMN IF NOT EXISTS partition_confidence REAL"))
+        await conn.execute(
+            text(
+                "UPDATE evidence_anchors SET document_partition = 'MAIN_TEXT', partition_confidence = 0.5 "
+                "WHERE document_partition IS NULL"
+            )
+        )
+        await conn.execute(
+            text(
+                "WITH si_start AS ("
+                " SELECT parse_revision_id, MIN(page) AS page"
+                " FROM evidence_anchors"
+                " WHERE quote ~* '^\\s*(support(ing)?|supplementary)\\s+(information|materials?|data)\\b'"
+                " GROUP BY parse_revision_id"
+                ") UPDATE evidence_anchors ea"
+                " SET document_partition = 'SUPPORTING_INFO', partition_confidence = 0.7"
+                " FROM si_start s"
+                " WHERE ea.parse_revision_id = s.parse_revision_id AND ea.page >= s.page"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE evidence_spans es"
+                " SET document_partition = ea.document_partition, partition_confidence = ea.partition_confidence"
+                " FROM evidence_anchors ea"
+                " WHERE es.parse_revision_id = ea.parse_revision_id AND es.anchor_id = ea.anchor_id"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE evidence_spans SET document_partition = 'MAIN_TEXT', partition_confidence = 0.25 "
+                "WHERE document_partition IS NULL"
+            )
+        )
+        await conn.execute(text("ALTER TABLE evidence_anchors ALTER COLUMN document_partition SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE evidence_anchors ALTER COLUMN partition_confidence SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE evidence_spans ALTER COLUMN document_partition SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE evidence_spans ALTER COLUMN partition_confidence SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE evidence_spans DROP CONSTRAINT IF EXISTS uq_evidence_span_anchor"))
+        await conn.execute(
+            text(
+                "ALTER TABLE evidence_spans ADD CONSTRAINT uq_evidence_span_anchor "
+                "UNIQUE (parse_revision_id, sentence_index, anchor_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_evidence_anchors_revision_partition "
+                "ON evidence_anchors(parse_revision_id, document_partition)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_evidence_spans_revision_partition "
+                "ON evidence_spans(parse_revision_id, document_partition)"
+            )
+        )
+
+    async def _migration_0033_scientific_document_partition_backfill_repair(self, conn) -> None:
+        """Repair legacy partition backfill using PostgreSQL-safe heading predicates.
+
+        Migration 0032 used a regex ``\\b`` suffix, which PostgreSQL does not
+        interpret as a word boundary. Fresh parser revisions were unaffected;
+        this repair deterministically fixes already ingested revisions.
+        """
+        await conn.execute(
+            text(
+                "WITH boundaries AS ("
+                " SELECT parse_revision_id,"
+                " MIN(page) FILTER (WHERE lower(trim(quote)) IN ('references', 'bibliography')) AS references_page,"
+                " MIN(page) FILTER (WHERE lower(ltrim(quote)) LIKE 'appendix%'"
+                "   AND length(trim(quote)) <= 40) AS appendix_page,"
+                " MIN(page) FILTER (WHERE (lower(ltrim(quote)) LIKE 'supporting information%'"
+                "   OR lower(ltrim(quote)) LIKE 'supplementary information%'"
+                "   OR lower(ltrim(quote)) LIKE 'supplementary material%'"
+                "   OR lower(ltrim(quote)) LIKE 'supplementary data%')"
+                "   AND length(trim(quote)) <= 120) AS si_page"
+                " FROM evidence_anchors GROUP BY parse_revision_id"
+                ") UPDATE evidence_anchors ea"
+                " SET document_partition = 'REFERENCES', partition_confidence = 0.7"
+                " FROM boundaries b"
+                " WHERE ea.parse_revision_id = b.parse_revision_id"
+                " AND b.references_page IS NOT NULL AND ea.page >= b.references_page"
+                " AND (b.appendix_page IS NULL OR ea.page < b.appendix_page)"
+                " AND (b.si_page IS NULL OR ea.page < b.si_page)"
+            )
+        )
+        await conn.execute(
+            text(
+                "WITH boundaries AS ("
+                " SELECT parse_revision_id, MIN(page) AS appendix_page"
+                " FROM evidence_anchors WHERE lower(ltrim(quote)) LIKE 'appendix%'"
+                " AND length(trim(quote)) <= 40"
+                " GROUP BY parse_revision_id"
+                ") UPDATE evidence_anchors ea"
+                " SET document_partition = 'APPENDIX', partition_confidence = 0.7"
+                " FROM boundaries b"
+                " WHERE ea.parse_revision_id = b.parse_revision_id AND ea.page >= b.appendix_page"
+            )
+        )
+        await conn.execute(
+            text(
+                "WITH boundaries AS ("
+                " SELECT parse_revision_id, MIN(page) AS si_page FROM evidence_anchors"
+                " WHERE (lower(ltrim(quote)) LIKE 'supporting information%'"
+                " OR lower(ltrim(quote)) LIKE 'supplementary information%'"
+                " OR lower(ltrim(quote)) LIKE 'supplementary material%'"
+                " OR lower(ltrim(quote)) LIKE 'supplementary data%')"
+                " AND length(trim(quote)) <= 120"
+                " GROUP BY parse_revision_id"
+                ") UPDATE evidence_anchors ea"
+                " SET document_partition = 'SUPPORTING_INFO', partition_confidence = 0.7"
+                " FROM boundaries b"
+                " WHERE ea.parse_revision_id = b.parse_revision_id AND ea.page >= b.si_page"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE evidence_spans es"
+                " SET document_partition = ea.document_partition, partition_confidence = ea.partition_confidence"
+                " FROM evidence_anchors ea"
+                " WHERE es.parse_revision_id = ea.parse_revision_id AND es.anchor_id = ea.anchor_id"
+            )
+        )
+
+    async def _migration_0034_retrieval_locator_audit(self, conn) -> None:
+        """Persist the exact deterministic locator used by an answer.
+
+        Candidate evidence/chunk ids cannot losslessly represent a direct
+        span-to-anchor hit. The dedicated audit fact lets the run evidence
+        projection replay the same binding without re-running retrieval.
+        """
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_retrieval_runs ADD COLUMN IF NOT EXISTS locator_resolution_json JSON")
+        )
+
     async def _apply_versioned_migrations(self):
         self._check_initialized()
         async with self.async_engine.begin() as conn:
@@ -2202,6 +2794,11 @@ class PostgresManager(metaclass=SingletonMeta):
             "DROP INDEX IF EXISTS ix_agent_runs_request_id",
             "CREATE INDEX IF NOT EXISTS ix_agent_runs_request_id ON agent_runs(request_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_uid_request_id ON agent_runs(uid, request_id)",
+            # VERBATIM 通道（GREP）：pg_trgm 支撑 evidence_spans.quote 上的
+            # ILIKE 子串检索（同时覆盖 LIKE/ILIKE/regex 三类走索引场景）；
+            # 纯幂等 DDL，无数据回填。
+            "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+            "CREATE INDEX IF NOT EXISTS ix_evidence_spans_quote_trgm ON evidence_spans USING gin (quote gin_trgm_ops)",
         ]
         async with self.async_engine.begin() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警
