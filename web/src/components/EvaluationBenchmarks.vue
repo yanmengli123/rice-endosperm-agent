@@ -11,6 +11,10 @@
           <template #icon><Bot :size="16" /></template>
           自动生成
         </a-button>
+        <a-button class="lucide-icon-btn" @click="createModalVisible = true">
+          <template #icon><FilePlus :size="16" /></template>
+          新建基准
+        </a-button>
         <span class="total-count">{{ benchmarks.length }} 个基准</span>
       </div>
       <div class="header-right">
@@ -51,8 +55,8 @@
           v-for="benchmark in benchmarks"
           :key="benchmark.dataset_id"
           class="benchmark-item"
-          :class="{ 'benchmark-item-disabled': !isDatasetCompleted(benchmark) }"
-          @click="isDatasetCompleted(benchmark) && previewDataset(benchmark)"
+          :class="{ 'benchmark-item-disabled': isDatasetBuilding(benchmark) }"
+          @click="openBenchmark(benchmark)"
         >
           <!-- 主要内容 -->
           <div class="benchmark-main">
@@ -71,9 +75,19 @@
                   <template #overlay>
                     <a-menu>
                       <a-menu-item
+                        key="open"
+                        v-if="!isDatasetBuilding(benchmark)"
+                        @click="openBenchmark(benchmark)"
+                      >
+                        <span class="benchmark-menu-item">
+                          <PencilRuler :size="14" />
+                          <span>{{ isDatasetDraft(benchmark) ? '编辑工作台' : '查看' }}</span>
+                        </span>
+                      </a-menu-item>
+                      <a-menu-item
                         key="download"
                         :disabled="
-                          !isDatasetCompleted(benchmark) ||
+                          isDatasetBuilding(benchmark) ||
                           !!downloadingDatasetMap[benchmark.dataset_id]
                         "
                         @click="downloadDataset(benchmark)"
@@ -81,6 +95,16 @@
                         <span class="benchmark-menu-item">
                           <Download :size="14" />
                           <span>下载</span>
+                        </span>
+                      </a-menu-item>
+                      <a-menu-item
+                        key="newversion"
+                        v-if="isDatasetCompleted(benchmark)"
+                        @click="deriveVersion(benchmark)"
+                      >
+                        <span class="benchmark-menu-item">
+                          <GitBranch :size="14" />
+                          <span>派生新版本</span>
                         </span>
                       </a-menu-item>
                       <a-menu-item
@@ -176,6 +200,52 @@
       v-model:visible="generateModalVisible"
       :kb-id="kbId"
       @success="onGenerateSuccess"
+    />
+
+    <!-- 新建空白基准 -->
+    <a-modal
+      v-model:open="createModalVisible"
+      title="新建空白基准"
+      :confirm-loading="creating"
+      ok-text="创建"
+      cancel-text="取消"
+      @ok="submitCreateDataset"
+    >
+      <a-form layout="vertical">
+        <a-form-item label="基准名称" required>
+          <a-input
+            v-model:value="createForm.name"
+            placeholder="如：expense-qa-regression-v1.0.0"
+            :maxlength="100"
+          />
+        </a-form-item>
+        <a-form-item label="描述">
+          <a-textarea
+            v-model:value="createForm.description"
+            :rows="3"
+            placeholder="文档版本 / tags 分布 / 作者与审核人（推荐固定模板）"
+          />
+        </a-form-item>
+        <a-form-item>
+          <template #label>
+            审核要求
+            <span class="form-label-hint">开启后，完成基准前每道题都须审核通过</span>
+          </template>
+          <a-switch
+            v-model:checked="createForm.reviewRequired"
+            checked-children="两人审核"
+            un-checked-children="免审核"
+          />
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
+    <!-- 逐条构建工作台 -->
+    <BenchmarkWorkbench
+      v-model:visible="workbenchVisible"
+      :kb-id="kbId"
+      :dataset="workbenchDataset"
+      @changed="onWorkbenchChanged"
     />
 
     <Teleport to="body">
@@ -289,7 +359,10 @@ import {
   Bot,
   ClipboardList,
   Download,
+  FilePlus,
+  GitBranch,
   MoreVertical,
+  PencilRuler,
   RefreshCw,
   Trash2,
   Upload,
@@ -300,6 +373,7 @@ import { useTaskerStore } from '@/stores/tasker'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
 import BenchmarkUploadModal from './modals/BenchmarkUploadModal.vue'
 import BenchmarkGenerateModal from './modals/BenchmarkGenerateModal.vue'
+import BenchmarkWorkbench from './BenchmarkWorkbench.vue'
 
 const props = defineProps({
   kbId: {
@@ -317,6 +391,11 @@ const loading = ref(false)
 const benchmarks = ref([])
 const uploadModalVisible = ref(false)
 const generateModalVisible = ref(false)
+const createModalVisible = ref(false)
+const creating = ref(false)
+const createForm = ref({ name: '', description: '', reviewRequired: true })
+const workbenchVisible = ref(false)
+const workbenchDataset = ref(null)
 const previewModalVisible = ref(false)
 const previewData = ref(null)
 const previewQuestions = ref([])
@@ -468,7 +547,9 @@ const getDatasetProgress = (benchmark) => {
 
 const getDatasetSourceText = (benchmark) => {
   const source = getBuildMetadata(benchmark).source
-  return source === 'generated' ? '自动生成' : '上传'
+  if (source === 'generated') return '自动生成'
+  if (source === 'manual') return '手动构建'
+  return '上传'
 }
 
 const getDatasetStatusText = (benchmark) => {
@@ -476,7 +557,8 @@ const getDatasetStatusText = (benchmark) => {
     pending: '等待生成',
     running: '生成中',
     completed: '已完成',
-    failed: '生成失败'
+    failed: '生成失败',
+    draft: '编辑中'
   }
   return statusTextMap[getDatasetBuildStatus(benchmark)] || getDatasetBuildStatus(benchmark)
 }
@@ -486,9 +568,65 @@ const getDatasetStatusClass = (benchmark) => {
     pending: 'tag-gold',
     running: 'tag-blue',
     completed: 'tag-green',
-    failed: 'tag-red'
+    failed: 'tag-red',
+    draft: 'tag-gold'
   }
   return statusClassMap[getDatasetBuildStatus(benchmark)] || ''
+}
+
+const isDatasetDraft = (benchmark) => getDatasetBuildStatus(benchmark) === 'draft'
+
+const openBenchmark = (benchmark) => {
+  if (isDatasetBuilding(benchmark)) {
+    message.warning('基准生成完成前暂不可打开')
+    return
+  }
+  if (isDatasetDraft(benchmark)) {
+    workbenchDataset.value = benchmark
+    workbenchVisible.value = true
+    return
+  }
+  previewDataset(benchmark)
+}
+
+const submitCreateDataset = async () => {
+  const name = createForm.value.name.trim()
+  if (!name) {
+    message.warning('请输入基准名称')
+    return
+  }
+  creating.value = true
+  try {
+    const response = await evaluationApi.createManualDataset(props.kbId, {
+      name,
+      description: createForm.value.description,
+      review_required: createForm.value.reviewRequired
+    })
+    if (response.message === 'success') {
+      message.success('基准已创建，开始逐条添加题目')
+      createModalVisible.value = false
+      createForm.value = { name: '', description: '', reviewRequired: true }
+      loadBenchmarks()
+      workbenchDataset.value = response.data
+      workbenchVisible.value = true
+    }
+  } catch (error) {
+    message.error(error?.response?.data?.detail || '创建基准失败')
+  } finally {
+    creating.value = false
+  }
+}
+
+const deriveVersion = (benchmark) => {
+  workbenchDataset.value = benchmark
+  workbenchVisible.value = true
+}
+
+const onWorkbenchChanged = (newDataset) => {
+  loadBenchmarks()
+  if (newDataset?.dataset_id) {
+    workbenchDataset.value = newDataset
+  }
 }
 
 const getDatasetBuildMessage = (benchmark) => {
@@ -606,7 +744,7 @@ const loadPreviewQuestions = async () => {
 
 // 预览基准
 const previewDataset = async (benchmark) => {
-  if (!isDatasetCompleted(benchmark)) {
+  if (isDatasetBuilding(benchmark)) {
     message.warning('评估基准生成完成后才能预览')
     return
   }
@@ -667,7 +805,7 @@ const parseDownloadFilename = (contentDisposition) => {
 const downloadDataset = async (benchmark) => {
   const benchmarkId = benchmark?.dataset_id
   if (!benchmarkId) return
-  if (!isDatasetCompleted(benchmark)) {
+  if (isDatasetBuilding(benchmark)) {
     message.warning('评估基准生成完成后才能下载')
     return
   }
@@ -942,6 +1080,13 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   height: 200px;
+}
+
+.form-label-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--gray-400);
+  margin-left: 6px;
 }
 
 :global(.evaluation-detail-overlay) {

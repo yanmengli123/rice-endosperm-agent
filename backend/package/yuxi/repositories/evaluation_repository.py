@@ -45,6 +45,91 @@ class EvaluationRepository:
         async with pg_manager.get_async_session_context() as session:
             session.add_all(items)
 
+    async def get_dataset_item(self, item_id: str) -> EvaluationDatasetItem | None:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(EvaluationDatasetItem).where(EvaluationDatasetItem.item_id == item_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def update_dataset_item(self, item_id: str, data: dict[str, Any]) -> EvaluationDatasetItem | None:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(EvaluationDatasetItem).where(EvaluationDatasetItem.item_id == item_id)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            for key, value in data.items():
+                setattr(record, key, value)
+            return record
+
+    async def update_dataset_items(self, updates: list[tuple[str, dict[str, Any]]]) -> int:
+        """同一事务内按 item_id 逐条更新（审核批处理用），返回实际更新行数。"""
+        if not updates:
+            return 0
+        item_ids = [item_id for item_id, _ in updates]
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(EvaluationDatasetItem).where(EvaluationDatasetItem.item_id.in_(item_ids))
+            )
+            records = {record.item_id: record for record in result.scalars().all()}
+            updated = 0
+            for item_id, data in updates:
+                record = records.get(item_id)
+                if record is None:
+                    continue
+                for key, value in data.items():
+                    setattr(record, key, value)
+                updated += 1
+            return updated
+
+    async def delete_dataset_item(self, item_id: str) -> bool:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(EvaluationDatasetItem).where(EvaluationDatasetItem.item_id == item_id)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return False
+            await session.delete(record)
+            return True
+
+    async def get_max_item_index(self, dataset_id: str) -> int:
+        """题目追加只增不复用序号：删题留空位，保证跨版本对比时行序稳定。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(func.max(EvaluationDatasetItem.item_index)).where(
+                    EvaluationDatasetItem.dataset_id == dataset_id
+                )
+            )
+            value = result.scalar()
+            return int(value) if value is not None else -1
+
+    async def list_external_ids(self, dataset_id: str) -> list[str]:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(EvaluationDatasetItem.external_id).where(
+                    (EvaluationDatasetItem.dataset_id == dataset_id)
+                    & (EvaluationDatasetItem.external_id.is_not(None))
+                )
+            )
+            return [str(value) for value in result.scalars().all() if value]
+
+    @staticmethod
+    def _item_filters(dataset_id: str, status: str | None, keyword: str | None) -> list[Any]:
+        conditions: list[Any] = [EvaluationDatasetItem.dataset_id == dataset_id]
+        if status:
+            conditions.append(EvaluationDatasetItem.status == status)
+        if keyword:
+            pattern = f"%{keyword}%"
+            conditions.append(
+                EvaluationDatasetItem.query_text.ilike(pattern)
+                | EvaluationDatasetItem.gold_answer.ilike(pattern)
+                | EvaluationDatasetItem.external_id.ilike(pattern)
+            )
+        return conditions
+
     async def get_dataset(self, dataset_id: str) -> EvaluationDataset | None:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id))
@@ -60,22 +145,30 @@ class EvaluationRepository:
             return list(result.scalars().all())
 
     async def list_dataset_items(
-        self, dataset_id: str, offset: int = 0, limit: int = 100
+        self,
+        dataset_id: str,
+        offset: int = 0,
+        limit: int = 100,
+        *,
+        status: str | None = None,
+        keyword: str | None = None,
     ) -> list[EvaluationDatasetItem]:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(EvaluationDatasetItem)
-                .where(EvaluationDatasetItem.dataset_id == dataset_id)
+                .where(*self._item_filters(dataset_id, status, keyword))
                 .order_by(EvaluationDatasetItem.item_index.asc())
                 .offset(offset)
                 .limit(limit)
             )
             return list(result.scalars().all())
 
-    async def count_dataset_items(self, dataset_id: str) -> int:
+    async def count_dataset_items(
+        self, dataset_id: str, *, status: str | None = None, keyword: str | None = None
+    ) -> int:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
-                select(func.count(EvaluationDatasetItem.id)).where(EvaluationDatasetItem.dataset_id == dataset_id)
+                select(func.count(EvaluationDatasetItem.id)).where(*self._item_filters(dataset_id, status, keyword))
             )
             return int(result.scalar() or 0)
 

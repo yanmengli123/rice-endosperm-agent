@@ -20,7 +20,14 @@ _FIXED_COLUMNS = [
     "生成答案 (answer)",
 ]
 # 固定列（指标动态列之后）
-_TAIL_COLUMNS = ["答案评判 (score)", "答案评判 (reasoning)", "命中标准块数", "是否错误", "标准块 ID (gold_chunk_ids)"]
+_TAIL_COLUMNS = [
+    "答案评判 (score)",
+    "答案评判 (reasoning)",
+    "命中标准块数",
+    "是否错误",
+    "标准块 ID (gold_chunk_ids)",
+    "标签 (tags)",
+]
 
 # 指标列排序：recall@k 升序 -> f1@k 升序 -> ragas_* 固定序 -> 其余字典序
 _RAGAS_ORDER = [
@@ -68,7 +75,7 @@ def format_contexts_cell(item: dict[str, Any]) -> str:
             continue
         meta_parts = [f"【{index}】", _chunk_id(chunk) or "无 chunk_id"]
         score = chunk.get("score")
-        if isinstance(score, (int, float)):
+        if isinstance(score, int | float):
             meta_parts.append(f"score={score:.4f}")
         if _chunk_id(chunk) and _chunk_id(chunk) in gold_ids:
             meta_parts.append("[命中标准块]")
@@ -88,7 +95,7 @@ def is_error_item(item: dict[str, Any]) -> bool:
     if any(metrics.get(key, 1.0) < 0.3 for key in metrics if key.startswith("recall@")):
         return True
     ragas_values = [
-        value for key, value in metrics.items() if key.startswith("ragas_") and isinstance(value, (int, float))
+        value for key, value in metrics.items() if key.startswith("ragas_") and isinstance(value, int | float)
     ]
     return bool(ragas_values) and any(value < 0.3 for value in ragas_values)
 
@@ -142,6 +149,15 @@ def build_run_results_workbook(*, run: dict[str, Any], items: list[dict[str, Any
                     ("RAGAS 用量", str(ragas_meta.get("usage") or {})),
                 ]
             )
+        by_tag = metrics_meta.get("by_tag") or {}
+        for tag, tag_data in sorted(by_tag.items()):
+            tag_metrics = tag_data.get("metrics") or {}
+            metric_text = ", ".join(
+                f"{key}={value:.3f}"
+                for key, value in sorted(tag_metrics.items(), key=lambda kv: _metric_sort_key(kv[0]))
+                if isinstance(value, int | float)
+            )
+            summary_rows.append((f"标签切片 [{tag}]（{tag_data.get('item_count', 0)}题）", metric_text))
     summary_sheet.append(["字段", "值"])
     for cell in summary_sheet[1]:
         cell.font = header_font
@@ -200,6 +216,7 @@ def build_run_results_workbook(*, run: dict[str, Any], items: list[dict[str, Any
                 hit_count,
                 "是" if is_error_item(item) else "否",
                 ", ".join(sorted(gold_ids)),
+                ", ".join(str(tag) for tag in (item.get("tags") or [])),
             ]
         )
         detail_sheet.append(row)

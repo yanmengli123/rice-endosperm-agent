@@ -105,7 +105,9 @@
                         v-model:model_spec="configForm.answer_llm"
                         size="small"
                         displayName="mini"
-                        :disabled="!selectedDataset || (!selectedDataset.has_gold_answers && !isRagasMode)"
+                        :disabled="
+                          !selectedDataset || (!selectedDataset.has_gold_answers && !isRagasMode)
+                        "
                         @select-model="(value) => (configForm.answer_llm = value)"
                         style="width: 100%"
                       />
@@ -210,7 +212,11 @@
               </div>
             </div>
             <div class="last-evaluation-metrics">
-              <div v-for="metric in getRagasRunMetrics(latestEvaluation)" :key="metric.key" class="metric-card">
+              <div
+                v-for="metric in getRagasRunMetrics(latestEvaluation)"
+                :key="metric.key"
+                class="metric-card"
+              >
                 <span class="metric-label">{{ getMetricTitle(metric.key) }}</span>
                 <strong :style="{ color: getMetricColor(metric.value) }">
                   {{ formatMetricValue(metric.value) }}
@@ -352,14 +358,26 @@
                 }}
               </span>
             </div>
-            <a-button
-              type="default"
-              size="small"
-              @click="toggleErrorOnly"
-              :class="{ 'error-only-active': showErrorsOnly }"
-            >
-              {{ showErrorsOnly ? '显示全部' : '仅查看错误' }}
-            </a-button>
+            <a-space>
+              <a-button
+                type="default"
+                size="small"
+                @click="toggleErrorOnly"
+                :class="{ 'error-only-active': showErrorsOnly }"
+              >
+                {{ showErrorsOnly ? '显示全部' : '仅查看错误' }}
+              </a-button>
+              <a-button
+                type="primary"
+                size="small"
+                :loading="exportingResults"
+                :disabled="selectedResult?.status !== 'completed'"
+                title="导出运行汇总与逐题明细（问题/标准答案/检索上下文/生成答案/指标/评判）"
+                @click="exportRunResults"
+              >
+                导出 Excel
+              </a-button>
+            </a-space>
           </div>
 
           <div class="result-metrics-bar">
@@ -403,6 +421,32 @@
             >
               {{ allRowsExpanded ? '收起全部' : '展开全部' }}
             </a-button>
+          </div>
+
+          <div v-if="tagSliceRows.length" class="tag-slices-panel">
+            <div class="tag-slices-title">标签切片（按题目 tags 聚合的均值）</div>
+            <table class="tag-slices-table">
+              <thead>
+                <tr>
+                  <th>标签</th>
+                  <th>题数</th>
+                  <th v-for="col in tagSliceMetricColumns" :key="col">
+                    {{ getMetricTitle(col) || col }}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in tagSliceRows" :key="row.tag">
+                  <td class="tag-name">{{ row.tag }}</td>
+                  <td>{{ row.count }}</td>
+                  <td v-for="col in tagSliceMetricColumns" :key="col">
+                    <strong :style="{ color: getScoreColor(row.metrics[col]) }">
+                      {{ formatMetricValue(row.metrics[col]) }}
+                    </strong>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
 
           <div
@@ -531,7 +575,9 @@
                   </div>
                 </div>
                 <div
-                  v-else-if="record.metrics && typeof record.metrics.ragas_answer_correctness === 'number'"
+                  v-else-if="
+                    record.metrics && typeof record.metrics.ragas_answer_correctness === 'number'
+                  "
                   class="answer-judgement"
                 >
                   <a-tag :color="getScoreTagColor(record.metrics.ragas_answer_correctness)">
@@ -858,6 +904,52 @@ const toggleErrorOnly = async () => {
 }
 
 // ---------------------------------------------------------------------------
+// 评估结果导出（xlsx：运行汇总 + 逐题明细）
+// ---------------------------------------------------------------------------
+const exportingResults = ref(false)
+
+const parseExportFilename = (contentDisposition) => {
+  if (!contentDisposition) return ''
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+  const asciiMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+  return asciiMatch ? asciiMatch[1] : ''
+}
+
+const exportRunResults = async () => {
+  const runId = selectedResult.value?.run_id
+  if (!runId || exportingResults.value) return
+  exportingResults.value = true
+  try {
+    const response = await evaluationApi.exportRunResults(props.kbId, runId)
+    const blob = await response.blob()
+    const contentDisposition =
+      response.headers.get('Content-Disposition') || response.headers.get('content-disposition')
+    const filename = parseExportFilename(contentDisposition) || `eval-results-${runId}.xlsx`
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+    message.success('评估结果导出成功')
+  } catch (error) {
+    console.error('导出评估结果失败:', error)
+    message.error(`导出失败: ${error.message || '未知错误'}`)
+  } finally {
+    exportingResults.value = false
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 展开行详情（question / ground truth / contexts / answer）
 // ---------------------------------------------------------------------------
 const expandedRowKeys = ref([])
@@ -901,7 +993,8 @@ const isGoldChunk = (chunk, record) => {
   return goldIds.some((goldId) => String(goldId) === chunkId)
 }
 
-const countGoldHits = (record) => getRecordContexts(record).filter((chunk) => isGoldChunk(chunk, record)).length
+const countGoldHits = (record) =>
+  getRecordContexts(record).filter((chunk) => isGoldChunk(chunk, record)).length
 
 // 处理分页变化
 const handlePageChange = (page, size) => {
@@ -1070,7 +1163,8 @@ const startEvaluation = async () => {
   // RAGAS 模式下即使无标准答案，答案生成模型也用于产出待评答案
   const answerModel =
     selectedDataset.value.has_gold_answers || isRagasMode.value ? configForm.answer_llm : ''
-  const judgeModel = selectedDataset.value.has_gold_answers && !isRagasModeOnly.value ? configForm.judge_llm : ''
+  const judgeModel =
+    selectedDataset.value.has_gold_answers && !isRagasModeOnly.value ? configForm.judge_llm : ''
   const hasAnswerModel = !!answerModel
   const hasJudgeModel = !!judgeModel
   const runName = configForm.name.trim()
@@ -1411,6 +1505,23 @@ const getRagasRunMetrics = (record) => {
     .filter(([key, value]) => key.startsWith('ragas_') && isFiniteNumber(value))
     .map(([key, value]) => ({ key, value }))
 }
+
+// 标签切片（run.metrics.metrics_meta.by_tag，逐题 tags 快照聚合）
+const tagSliceRows = computed(() => {
+  const byTag = selectedResult.value?.metrics?.metrics_meta?.by_tag
+  if (!byTag || typeof byTag !== 'object') return []
+  return Object.entries(byTag).map(([tag, data]) => ({
+    tag,
+    count: data.item_count,
+    metrics: data.metrics || {}
+  }))
+})
+
+const tagSliceMetricColumns = computed(() => {
+  const keys = new Set()
+  tagSliceRows.value.forEach((row) => Object.keys(row.metrics).forEach((key) => keys.add(key)))
+  return [...keys]
+})
 
 // RAGAS 雷达图（≥3 个指标时展示）
 const ragasRadarRef = ref(null)
@@ -2063,6 +2174,51 @@ onUnmounted(() => {
   border: 1px solid var(--gray-200);
   border-radius: 8px;
   background: var(--gray-25, #fafafa);
+}
+
+// 标签切片表（run.metrics.metrics_meta.by_tag）
+.tag-slices-panel {
+  flex-shrink: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  background: var(--gray-25, #fafafa);
+
+  .tag-slices-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--gray-800);
+    margin-bottom: 6px;
+  }
+
+  .tag-slices-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+
+    th,
+    td {
+      padding: 4px 10px;
+      border-bottom: 1px solid var(--gray-100);
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--gray-500);
+      font-weight: 600;
+      background: var(--gray-50);
+    }
+
+    td {
+      color: var(--gray-700);
+    }
+
+    .tag-name {
+      font-weight: 600;
+      color: var(--gray-800);
+    }
+  }
 }
 
 // 展开行详情卡（question / ground truth / contexts / answer）

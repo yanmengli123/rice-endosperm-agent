@@ -4,12 +4,30 @@ import re
 import uuid
 from typing import Any
 
+from yuxi.knowledge.eval.benchmark_authoring import (
+    DATASET_STATUS_COMPLETED,
+    DATASET_STATUS_DRAFT,
+    ITEM_STATUS_APPROVED,
+    ITEM_STATUS_DRAFT,
+    ITEM_STATUS_REJECTED,
+    MAX_QUERY_CHARS,
+    apply_review,
+    compute_dataset_stats,
+    dataset_flags,
+    dump_jsonl_line,
+    item_tags,
+    next_external_id,
+    normalize_query_for_dedup,
+    parse_item_payload,
+    parse_jsonl_items,
+    serialize_item_for_export,
+    validate_dataset_for_finalize,
+)
 from yuxi.knowledge.eval.benchmark_generation import (
-    dump_benchmark_item,
     iter_generated_benchmark_items,
     normalize_generation_concurrency_count,
 )
-from yuxi.knowledge.eval.evaluator import aggregate_metrics, evaluate_question
+from yuxi.knowledge.eval.evaluator import aggregate_metrics, evaluate_question, normalize_query_result
 from yuxi.knowledge.eval.ragas_metrics import (
     DEFAULT_RAGAS_WEIGHTS,
     RAGAS_METRIC_PREFIX,
@@ -26,10 +44,35 @@ from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepositor
 from yuxi.repositories.task_repository import TaskRepository
 from yuxi.services.task_service import TaskContext, tasker
 from yuxi.utils import logger
-from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
+from yuxi.utils.datetime_utils import format_utc_datetime, utc_now, utc_now_naive
 
 EVAL_MODES = {"simple", "ragas", "both"}
 MAX_RAGAS_CONCURRENCY = 8
+MAX_IMPORT_ITEMS = 5000
+MAX_DUPLICATE_CHECK_ITEMS = 1000
+MAX_DUPLICATE_PAIRS = 200
+CHUNK_PREVIEW_CHARS = 600
+VIEWABLE_DATASET_STATUSES = {DATASET_STATUS_COMPLETED, DATASET_STATUS_DRAFT, "failed"}
+
+
+class DatasetStateError(ValueError):
+    """数据集当前状态不允许该操作（路由层映射为 409）。"""
+
+
+class ItemValidationError(ValueError):
+    """条目字段校验失败，fields 为 {字段: 原因}（路由层映射为 400 并透传 fields）。"""
+
+    def __init__(self, fields: dict[str, str], message: str | None = None):
+        self.fields = fields
+        super().__init__(message or "；".join(f"{field}: {reason}" for field, reason in fields.items()))
+
+
+class FinalizeValidationError(ValueError):
+    """完成基准门禁未通过，report 为 validate_dataset_for_finalize 的完整报告。"""
+
+    def __init__(self, report: dict[str, Any]):
+        self.report = report
+        super().__init__("；".join(error["message"] for error in report.get("errors", [])) or "基准校验未通过")
 
 
 def _normalize_ragas_model_config(model_config: dict[str, Any] | None) -> dict[str, Any]:
@@ -72,7 +115,7 @@ def _normalize_ragas_model_config(model_config: dict[str, Any] | None) -> dict[s
         invalid = [
             key
             for key, value in weights.items()
-            if not key.startswith(RAGAS_METRIC_PREFIX) or not isinstance(value, (int, float)) or value <= 0
+            if not key.startswith(RAGAS_METRIC_PREFIX) or not isinstance(value, int | float) or value <= 0
         ]
         if invalid:
             raise ValueError(f"ragas_weights 键/值非法: {', '.join(invalid)}")
@@ -104,6 +147,7 @@ class EvaluationService:
         self.task_repo = TaskRepository()
 
     def _dataset_to_dict(self, row) -> dict[str, Any]:
+        build_metadata = row.build_metadata or {}
         return {
             "id": row.dataset_id,
             "dataset_id": row.dataset_id,
@@ -113,7 +157,8 @@ class EvaluationService:
             "item_count": row.item_count,
             "has_gold_chunks": row.has_gold_chunks,
             "has_gold_answers": row.has_gold_answers,
-            "build_metadata": row.build_metadata or {},
+            "build_metadata": build_metadata,
+            "status": build_metadata.get("status", DATASET_STATUS_COMPLETED),
             "created_by": row.created_by,
             "created_at": format_utc_datetime(row.created_at),
             "updated_at": format_utc_datetime(row.updated_at),
@@ -126,6 +171,11 @@ class EvaluationService:
             "query": item.query_text,
             "gold_chunk_ids": item.gold_chunk_ids or [],
             "gold_answer": item.gold_answer,
+            "external_id": getattr(item, "external_id", None),
+            "status": getattr(item, "status", None) or ITEM_STATUS_APPROVED,
+            "item_metadata": getattr(item, "item_metadata", None) or {},
+            "created_by": getattr(item, "created_by", None),
+            "updated_at": format_utc_datetime(getattr(item, "updated_at", None)),
         }
 
     def _run_item_to_dict(self, item) -> dict[str, Any]:
@@ -137,6 +187,7 @@ class EvaluationService:
             "generated_answer": item.generated_answer,
             "retrieved_chunks": item.retrieved_chunks,
             "metrics": item.metrics or {},
+            "tags": getattr(item, "item_tags", None) or [],
         }
 
     def _is_error_run_item(self, item) -> bool:
@@ -148,7 +199,7 @@ class EvaluationService:
         ragas_values = [
             value
             for key, value in metrics.items()
-            if key.startswith(RAGAS_METRIC_PREFIX) and isinstance(value, (int, float))
+            if key.startswith(RAGAS_METRIC_PREFIX) and isinstance(value, int | float)
         ]
         return bool(ragas_values) and any(value < 0.3 for value in ragas_values)
 
@@ -187,30 +238,34 @@ class EvaluationService:
             row.build_metadata = metadata
 
     def _build_dataset_items(
-        self, dataset_id: str, kb_id: str, questions: list[dict[str, Any]]
+        self,
+        dataset_id: str,
+        kb_id: str,
+        questions: list[dict[str, Any]],
+        *,
+        status: str = ITEM_STATUS_APPROVED,
+        created_by: str | None = None,
+        start_index: int = 0,
     ) -> list[dict[str, Any]]:
         return [
             {
                 "item_id": f"dataset_item_{uuid.uuid4().hex[:12]}",
                 "dataset_id": dataset_id,
                 "kb_id": kb_id,
-                "item_index": index,
+                "item_index": start_index + offset,
                 "query_text": item["query"],
                 "gold_chunk_ids": item.get("gold_chunk_ids") or [],
                 "gold_answer": item.get("gold_answer"),
+                "external_id": item.get("external_id"),
+                "item_metadata": item.get("item_metadata") or None,
+                "status": item.get("status") or status,
+                "created_by": created_by,
             }
-            for index, item in enumerate(questions)
+            for offset, item in enumerate(questions)
         ]
 
     def _build_jsonl_content(self, items: list[Any]) -> str:
-        lines = []
-        for item in items:
-            payload = {"query": item.query_text}
-            if item.gold_chunk_ids:
-                payload["gold_chunk_ids"] = item.gold_chunk_ids
-            if item.gold_answer:
-                payload["gold_answer"] = item.gold_answer
-            lines.append(dump_benchmark_item(payload).rstrip("\n"))
+        lines = [dump_jsonl_line(serialize_item_for_export(self._dataset_item_to_dict(item))) for item in items]
         return "\n".join(lines) + ("\n" if lines else "")
 
     def _safe_jsonl_filename(self, name: str | None, fallback: str) -> str:
@@ -221,29 +276,35 @@ class EvaluationService:
         return filename if filename.endswith(".jsonl") else f"{filename}.jsonl"
 
     def _parse_jsonl_questions(self, file_content: bytes) -> tuple[list[dict[str, Any]], bool, bool]:
-        questions = []
-        has_gold_chunks = False
-        has_gold_answers = False
-        content = file_content.decode("utf-8")
+        """整包上传：任一行不合法即整体拒绝（与逐条追加导入的"部分成功"语义不同）。"""
+        try:
+            content = file_content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"文件必须是 UTF-8 编码（无法解码第 {exc.start} 字节附近的内容）") from exc
 
-        for line_num, line in enumerate(content.strip().split("\n"), 1):
-            if not line.strip():
-                continue
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"第{line_num}行JSON格式错误: {str(e)}")
-            if "query" not in item:
-                raise ValueError(f"第{line_num}行缺少必需的'query'字段")
-            if item.get("gold_chunk_ids"):
-                has_gold_chunks = True
-            if item.get("gold_answer"):
-                has_gold_answers = True
-            questions.append(item)
-
+        questions, errors = parse_jsonl_items(content)
+        if errors:
+            preview = "；".join(f"第{error['line']}行 {error['message']}" for error in errors[:5])
+            suffix = f"（共 {len(errors)} 处错误）" if len(errors) > 5 else ""
+            raise ValueError(f"{preview}{suffix}")
         if not questions:
             raise ValueError("文件中没有有效的问题数据")
-        return questions, has_gold_chunks, has_gold_answers
+        if len(questions) > MAX_IMPORT_ITEMS:
+            raise ValueError(f"单个文件最多 {MAX_IMPORT_ITEMS} 条题目")
+
+        seen_external_ids: dict[str, int] = {}
+        for question in questions:
+            external_id = question.get("external_id")
+            if not external_id:
+                continue
+            if external_id in seen_external_ids:
+                raise ValueError(
+                    f"第{question['line']}行业务编号 {external_id} 与第{seen_external_ids[external_id]}行重复"
+                )
+            seen_external_ids[external_id] = question["line"]
+
+        flags = dataset_flags(questions)
+        return questions, flags["has_gold_chunks"], flags["has_gold_answers"]
 
     async def upload_dataset(
         self, kb_id: str, file_content: bytes, filename: str, name: str, description: str, created_by: str
@@ -264,13 +325,17 @@ class EvaluationService:
                     "has_gold_answers": has_gold_answers,
                     "build_metadata": {
                         "source": "upload",
-                        "status": "completed",
+                        "status": DATASET_STATUS_COMPLETED,
                         "progress": 100,
                         "filename": filename,
+                        "version": 1,
+                        "review_required": False,
                     },
                     "created_by": created_by,
                 },
-                self._build_dataset_items(dataset_id, kb_id, questions),
+                self._build_dataset_items(
+                    dataset_id, kb_id, questions, status=ITEM_STATUS_APPROVED, created_by=created_by
+                ),
             )
             return self._dataset_to_dict(row)
         except Exception as e:
@@ -288,17 +353,27 @@ class EvaluationService:
             raise
 
     async def get_dataset_detail(
-        self, kb_id: str, dataset_id: str, page: int = 1, page_size: int = 10
+        self,
+        kb_id: str,
+        dataset_id: str,
+        page: int = 1,
+        page_size: int = 10,
+        *,
+        status: str | None = None,
+        keyword: str | None = None,
     ) -> dict[str, Any]:
         try:
             row = await self.eval_repo.get_dataset(dataset_id)
             if row is None or row.kb_id != kb_id:
                 raise ValueError("Dataset not found")
-            if (row.build_metadata or {}).get("status", "completed") != "completed":
+            if (row.build_metadata or {}).get("status", DATASET_STATUS_COMPLETED) not in VIEWABLE_DATASET_STATUSES:
                 raise ValueError("Dataset is not ready")
 
-            total_items = await self.eval_repo.count_dataset_items(dataset_id)
-            items = await self.eval_repo.list_dataset_items(dataset_id, (page - 1) * page_size, page_size)
+            keyword = (keyword or "").strip() or None
+            total_items = await self.eval_repo.count_dataset_items(dataset_id, status=status, keyword=keyword)
+            items = await self.eval_repo.list_dataset_items(
+                dataset_id, (page - 1) * page_size, page_size, status=status, keyword=keyword
+            )
             total_pages = (total_items + page_size - 1) // page_size
             data = self._dataset_to_dict(row)
             data.update(
@@ -330,7 +405,10 @@ class EvaluationService:
         row = await self.eval_repo.get_dataset(dataset_id)
         if row is None:
             raise ValueError("Dataset not found")
-        if (row.build_metadata or {}).get("status", "completed") != "completed":
+        if (row.build_metadata or {}).get("status", DATASET_STATUS_COMPLETED) not in {
+            DATASET_STATUS_COMPLETED,
+            DATASET_STATUS_DRAFT,
+        }:
             raise ValueError("Dataset is not ready")
         items = await self.eval_repo.list_all_dataset_items(dataset_id)
         return {
@@ -348,6 +426,558 @@ class EvaluationService:
         except Exception as e:
             logger.error(f"删除评估数据集失败: {e}")
             raise
+
+    # ============================================================
+    # 基准逐条构建（authoring）：draft 态增删改题目 → 审核 → 完成锁定
+    # ============================================================
+
+    async def _get_dataset_or_raise(self, dataset_id: str, *, kb_id: str | None = None):
+        row = await self.eval_repo.get_dataset(dataset_id)
+        if row is None or (kb_id is not None and row.kb_id != kb_id):
+            raise ValueError("Dataset not found")
+        return row
+
+    def _require_draft(self, row) -> None:
+        status = (row.build_metadata or {}).get("status", DATASET_STATUS_COMPLETED)
+        if status != DATASET_STATUS_DRAFT:
+            raise DatasetStateError(f"仅编辑中（draft）的基准支持该操作，当前状态：{status}")
+
+    def _require_not_building(self, row) -> None:
+        status = (row.build_metadata or {}).get("status", DATASET_STATUS_COMPLETED)
+        if status in {"pending", "running"}:
+            raise DatasetStateError("基准正在生成中，暂不能执行该操作")
+
+    @staticmethod
+    def _item_signature(query: str, gold_answer: str | None, gold_chunk_ids: list | None, item_metadata) -> tuple:
+        meta = {key: value for key, value in (item_metadata or {}).items() if key != "review_history"}
+        return (query, gold_answer, tuple(gold_chunk_ids or []), json.dumps(meta, ensure_ascii=False, sort_keys=True))
+
+    async def _refresh_dataset_flags(self, dataset_id: str) -> dict[str, Any]:
+        items = await self.eval_repo.list_all_dataset_items(dataset_id)
+        flags = dataset_flags([self._dataset_item_to_dict(item) for item in items])
+        await self.eval_repo.update_dataset(dataset_id, flags)
+        return flags
+
+    async def _duplicate_query_label(self, dataset_id: str, query: str, *, exclude_item_id: str | None) -> str | None:
+        """返回与 query 归一化重复的既有题目标签（业务编号或 #行序），无重复返回 None。"""
+        normalized = normalize_query_for_dedup(query)
+        if not normalized:
+            return None
+        for item in await self.eval_repo.list_all_dataset_items(dataset_id):
+            if exclude_item_id and item.item_id == exclude_item_id:
+                continue
+            if normalize_query_for_dedup(item.query_text) == normalized:
+                return getattr(item, "external_id", None) or f"#{(item.item_index or 0) + 1}"
+        return None
+
+    async def create_manual_dataset(
+        self, *, kb_id: str, name: str, description: str = "", review_required: bool = True, created_by: str
+    ) -> dict[str, Any]:
+        dataset_name = (name or "").strip()
+        if not dataset_name:
+            raise ValueError("基准名称不能为空")
+        if len(dataset_name) > 100:
+            raise ValueError("基准名称不超过 100 个字符")
+        dataset_id = f"dataset_{uuid.uuid4().hex[:8]}"
+        row = await self.eval_repo.create_dataset(
+            {
+                "dataset_id": dataset_id,
+                "kb_id": kb_id,
+                "name": dataset_name,
+                "description": description or "",
+                "item_count": 0,
+                "has_gold_chunks": False,
+                "has_gold_answers": False,
+                "build_metadata": {
+                    "source": "manual",
+                    "status": DATASET_STATUS_DRAFT,
+                    "version": 1,
+                    "review_required": bool(review_required),
+                },
+                "created_by": created_by,
+            }
+        )
+        return self._dataset_to_dict(row)
+
+    async def update_dataset_settings(
+        self,
+        dataset_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        review_required: bool | None = None,
+    ) -> dict[str, Any]:
+        row = await self._get_dataset_or_raise(dataset_id)
+        self._require_draft(row)
+        data: dict[str, Any] = {}
+        if name is not None:
+            clean = name.strip()
+            if not clean:
+                raise ValueError("基准名称不能为空")
+            if len(clean) > 100:
+                raise ValueError("基准名称不超过 100 个字符")
+            data["name"] = clean
+        if description is not None:
+            data["description"] = description
+        if review_required is not None:
+            metadata = dict(row.build_metadata or {})
+            metadata["review_required"] = bool(review_required)
+            data["build_metadata"] = metadata
+        updated = await self.eval_repo.update_dataset(dataset_id, data)
+        return self._dataset_to_dict(updated)
+
+    async def add_dataset_item(
+        self, dataset_id: str, payload: dict[str, Any], *, operator: str
+    ) -> dict[str, Any]:
+        row = await self._get_dataset_or_raise(dataset_id)
+        self._require_draft(row)
+        item, field_errors = parse_item_payload(payload)
+        if field_errors:
+            raise ItemValidationError(field_errors)
+        external_ids = set(await self.eval_repo.list_external_ids(dataset_id))
+        if item["external_id"]:
+            if item["external_id"] in external_ids:
+                raise ItemValidationError({"external_id": "业务编号已存在"})
+        else:
+            item["external_id"] = next_external_id(external_ids)
+        duplicate = await self._duplicate_query_label(dataset_id, item["query"], exclude_item_id=None)
+        if duplicate:
+            raise ItemValidationError({"query": f"与题目 {duplicate} 重复"})
+        records = self._build_dataset_items(
+            dataset_id,
+            row.kb_id,
+            [item],
+            status=ITEM_STATUS_DRAFT,
+            created_by=operator,
+            start_index=await self.eval_repo.get_max_item_index(dataset_id) + 1,
+        )
+        await self.eval_repo.add_dataset_items(records)
+        await self._refresh_dataset_flags(dataset_id)
+        saved = await self.eval_repo.get_dataset_item(records[0]["item_id"])
+        return self._dataset_item_to_dict(saved)
+
+    async def update_dataset_item(
+        self, dataset_id: str, item_id: str, payload: dict[str, Any], *, operator: str
+    ) -> dict[str, Any]:
+        row = await self._get_dataset_or_raise(dataset_id)
+        self._require_draft(row)
+        record = await self.eval_repo.get_dataset_item(item_id)
+        if record is None or record.dataset_id != dataset_id:
+            raise ValueError("Item not found")
+        item, field_errors = parse_item_payload(payload)
+        if field_errors:
+            raise ItemValidationError(field_errors)
+        external_ids = set(await self.eval_repo.list_external_ids(dataset_id))
+        if item["external_id"]:
+            if item["external_id"] in external_ids and item["external_id"] != record.external_id:
+                raise ItemValidationError({"external_id": "业务编号已被其他题目使用"})
+            external_id = item["external_id"]
+        else:
+            external_id = record.external_id
+        duplicate = await self._duplicate_query_label(dataset_id, item["query"], exclude_item_id=item_id)
+        if duplicate:
+            raise ItemValidationError({"query": f"与题目 {duplicate} 重复"})
+        old_metadata = record.item_metadata or {}
+        new_metadata = dict(item["item_metadata"])
+        if old_metadata.get("review_history"):
+            new_metadata["review_history"] = old_metadata["review_history"]
+        data = {
+            "query_text": item["query"],
+            "gold_chunk_ids": item["gold_chunk_ids"],
+            "gold_answer": item["gold_answer"],
+            "external_id": external_id,
+            "item_metadata": new_metadata,
+        }
+        old_signature = self._item_signature(record.query_text, record.gold_answer, record.gold_chunk_ids, old_metadata)
+        new_signature = self._item_signature(item["query"], item["gold_answer"], item["gold_chunk_ids"], new_metadata)
+        if old_signature != new_signature:
+            # 内容变更使既有审核结论失效，回到草稿等待复审
+            data["status"] = ITEM_STATUS_DRAFT
+        updated = await self.eval_repo.update_dataset_item(item_id, data)
+        await self._refresh_dataset_flags(dataset_id)
+        return self._dataset_item_to_dict(updated)
+
+    async def delete_dataset_item(self, dataset_id: str, item_id: str) -> dict[str, Any]:
+        row = await self._get_dataset_or_raise(dataset_id)
+        self._require_draft(row)
+        record = await self.eval_repo.get_dataset_item(item_id)
+        if record is None or record.dataset_id != dataset_id:
+            raise ValueError("Item not found")
+        await self.eval_repo.delete_dataset_item(item_id)
+        flags = await self._refresh_dataset_flags(dataset_id)
+        return {"item_id": item_id, "deleted": True, **flags}
+
+    async def review_dataset_items(
+        self,
+        dataset_id: str,
+        *,
+        item_ids: list[str] | None = None,
+        action: str,
+        reason: str = "",
+        operator: str,
+    ) -> dict[str, Any]:
+        row = await self._get_dataset_or_raise(dataset_id)
+        self._require_draft(row)
+        if action not in {"approve", "reject", "reset"}:
+            raise ValueError("action 必须是 approve/reject/reset")
+        if action == "reject" and not (reason or "").strip():
+            raise ValueError("打回必须填写原因")
+        status_map = {"approve": ITEM_STATUS_APPROVED, "reject": ITEM_STATUS_REJECTED, "reset": ITEM_STATUS_DRAFT}
+        items = await self.eval_repo.list_all_dataset_items(dataset_id)
+        if item_ids is not None:
+            wanted = {str(value) for value in item_ids}
+            items = [item for item in items if item.item_id in wanted]
+            unknown = wanted - {item.item_id for item in items}
+            if unknown:
+                raise ValueError(f"题目不存在：{', '.join(sorted(unknown)[:5])}")
+        if not items:
+            raise ValueError("没有可审核的题目")
+        at = format_utc_datetime(utc_now())
+        updates = [
+            (
+                item.item_id,
+                {
+                    "status": status_map[action],
+                    "item_metadata": apply_review(
+                        item.item_metadata,
+                        action=action,
+                        reason=(reason or "").strip(),
+                        operator=operator,
+                        at=at,
+                    ),
+                },
+            )
+            for item in items
+        ]
+        updated = await self.eval_repo.update_dataset_items(updates)
+        return {"updated": updated, "status": status_map[action]}
+
+    async def import_dataset_items(self, dataset_id: str, content: str, *, operator: str) -> dict[str, Any]:
+        """向 draft 基准追加导入 JSONL：合法行入库（草稿态），非法行逐行报错，互不阻塞。"""
+        row = await self._get_dataset_or_raise(dataset_id)
+        self._require_draft(row)
+        items, errors = parse_jsonl_items(content or "")
+        total_lines = len(items) + len(errors)
+        if total_lines > MAX_IMPORT_ITEMS:
+            raise ValueError(f"单次导入最多 {MAX_IMPORT_ITEMS} 条题目")
+        existing_items = await self.eval_repo.list_all_dataset_items(dataset_id)
+        external_ids = {getattr(item, "external_id", None) for item in existing_items}
+        normalized_queries = {
+            normalize_query_for_dedup(item.query_text): (
+                getattr(item, "external_id", None) or f"#{(item.item_index or 0) + 1}"
+            )
+            for item in existing_items
+        }
+        index_cursor = await self.eval_repo.get_max_item_index(dataset_id) + 1
+        accepted: list[tuple[dict[str, Any], int]] = []
+        for item in items:
+            line_label = f"第{item['line']}行"
+            if item["external_id"]:
+                if item["external_id"] in external_ids:
+                    errors.append(
+                        {"line": item["line"], "message": f"{line_label}业务编号 {item['external_id']} 已存在"}
+                    )
+                    continue
+                external_id = item["external_id"]
+            else:
+                external_id = next_external_id(external_ids)
+            normalized = normalize_query_for_dedup(item["query"])
+            if normalized and normalized in normalized_queries:
+                errors.append(
+                    {"line": item["line"], "message": f"{line_label}与题目 {normalized_queries[normalized]} 重复"}
+                )
+                continue
+            external_ids.add(external_id)
+            normalized_queries[normalized] = external_id
+            item["external_id"] = external_id
+            accepted.append((item, index_cursor))
+            index_cursor += 1
+        records: list[dict[str, Any]] = []
+        for item, index in accepted:
+            records.extend(
+                self._build_dataset_items(
+                    dataset_id, row.kb_id, [item], status=ITEM_STATUS_DRAFT, created_by=operator, start_index=index
+                )
+            )
+        if records:
+            await self.eval_repo.add_dataset_items(records)
+            await self._refresh_dataset_flags(dataset_id)
+        errors.sort(key=lambda error: error["line"])
+        return {
+            "total": total_lines,
+            "added": len(records),
+            "rejected": len(errors),
+            "errors": errors[:100],
+        }
+
+    async def finalize_dataset(self, dataset_id: str, *, operator: str) -> dict[str, Any]:
+        row = await self._get_dataset_or_raise(dataset_id)
+        self._require_draft(row)
+        items = [self._dataset_item_to_dict(item) for item in await self.eval_repo.list_all_dataset_items(dataset_id)]
+        metadata = dict(row.build_metadata or {})
+        report = validate_dataset_for_finalize(items, review_required=bool(metadata.get("review_required", True)))
+        if not report["ok"]:
+            raise FinalizeValidationError(report)
+        metadata.update(
+            {
+                "status": DATASET_STATUS_COMPLETED,
+                "progress": 100,
+                "finalized_by": operator,
+                "finalized_at": format_utc_datetime(utc_now()),
+                "finalize_warnings": [warning["code"] for warning in report["warnings"]],
+            }
+        )
+        flags = dataset_flags(items)
+        await self.eval_repo.update_dataset(dataset_id, {**flags, "build_metadata": metadata})
+        updated = await self.eval_repo.get_dataset(dataset_id)
+        return {"dataset": self._dataset_to_dict(updated), "report": report}
+
+    async def create_dataset_version(
+        self, dataset_id: str, *, name: str | None = None, operator: str
+    ) -> dict[str, Any]:
+        row = await self._get_dataset_or_raise(dataset_id)
+        self._require_not_building(row)
+        items = await self.eval_repo.list_all_dataset_items(dataset_id)
+        parent_metadata = row.build_metadata or {}
+        version = int(parent_metadata.get("version", 1) or 1) + 1
+        new_dataset_id = f"dataset_{uuid.uuid4().hex[:8]}"
+        version_name = ((name or "").strip() or f"{row.name} v{version}")[:255]
+        build_metadata = {
+            "source": "manual",
+            "status": DATASET_STATUS_DRAFT,
+            "version": version,
+            "parent_dataset_id": dataset_id,
+            "review_required": bool(parent_metadata.get("review_required", True)),
+        }
+        flags = dataset_flags([self._dataset_item_to_dict(item) for item in items])
+        item_records = [
+            {
+                "item_id": f"dataset_item_{uuid.uuid4().hex[:12]}",
+                "dataset_id": new_dataset_id,
+                "kb_id": row.kb_id,
+                "item_index": item.item_index,
+                "query_text": item.query_text,
+                "gold_chunk_ids": item.gold_chunk_ids or [],
+                "gold_answer": item.gold_answer,
+                "external_id": getattr(item, "external_id", None),
+                "item_metadata": getattr(item, "item_metadata", None) or None,
+                "status": getattr(item, "status", None) or ITEM_STATUS_APPROVED,
+                "created_by": operator,
+            }
+            for item in items
+        ]
+        new_row = await self.eval_repo.create_dataset_with_items(
+            {
+                "dataset_id": new_dataset_id,
+                "kb_id": row.kb_id,
+                "name": version_name,
+                "description": row.description,
+                "item_count": flags["item_count"],
+                "has_gold_chunks": flags["has_gold_chunks"],
+                "has_gold_answers": flags["has_gold_answers"],
+                "build_metadata": build_metadata,
+                "created_by": operator,
+            },
+            item_records,
+        )
+        return self._dataset_to_dict(new_row)
+
+    async def get_dataset_stats(self, dataset_id: str) -> dict[str, Any]:
+        row = await self._get_dataset_or_raise(dataset_id)
+        items = [self._dataset_item_to_dict(item) for item in await self.eval_repo.list_all_dataset_items(dataset_id)]
+        stats = compute_dataset_stats(items)
+        metadata = row.build_metadata or {}
+        stats.update(
+            {
+                "dataset_id": row.dataset_id,
+                "status": metadata.get("status", DATASET_STATUS_COMPLETED),
+                "version": metadata.get("version", 1),
+                "review_required": bool(metadata.get("review_required", False)),
+                "parent_dataset_id": metadata.get("parent_dataset_id"),
+            }
+        )
+        return stats
+
+    async def list_kb_chunks(
+        self,
+        kb_id: str,
+        *,
+        file_id: str,
+        keyword: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        """选块器数据：指定文件的块列表（预览文本 + 关键词过滤 + 分页）。"""
+        if page < 1 or not 1 <= page_size <= 200:
+            raise ValueError("page 必须大于 0，page_size 须在 1-200 之间")
+        chunks = [chunk for chunk in await self.chunk_repo.list_by_file_id(file_id) if chunk.kb_id == kb_id]
+        keyword = (keyword or "").strip().lower()
+        if keyword:
+            chunks = [
+                chunk
+                for chunk in chunks
+                if keyword in (chunk.content or "").lower() or keyword in (chunk.chunk_id or "").lower()
+            ]
+        chunks.sort(key=lambda chunk: chunk.chunk_index or 0)
+        total = len(chunks)
+        start = (page - 1) * page_size
+        page_items = chunks[start : start + page_size]
+        total_pages = (total + page_size - 1) // page_size
+        return {
+            "file_id": file_id,
+            "items": [
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "chunk_index": chunk.chunk_index,
+                    "content": (chunk.content or "")[:CHUNK_PREVIEW_CHARS],
+                    "content_length": len(chunk.content or ""),
+                    "graph_indexed": bool(chunk.graph_indexed),
+                }
+                for chunk in page_items
+            ],
+            "pagination": {
+                "current_page": page,
+                "page_size": page_size,
+                "total_items": total,
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1,
+            },
+        }
+
+    async def check_dataset_gold_chunks(self, dataset_id: str) -> dict[str, Any]:
+        """失效参考块检测：gold_chunk_ids 引用的块已不存在（文档被重新解析/删除）时逐题报告。"""
+        row = await self._get_dataset_or_raise(dataset_id)
+        items = await self.eval_repo.list_all_dataset_items(dataset_id)
+        referenced = sorted({str(chunk_id) for item in items for chunk_id in (item.gold_chunk_ids or [])})
+        existing: set[str] = set()
+        for batch_start in range(0, len(referenced), 500):
+            batch = referenced[batch_start : batch_start + 500]
+            for chunk in await self.chunk_repo.list_by_chunk_ids(batch):
+                if chunk.kb_id == row.kb_id:
+                    existing.add(str(chunk.chunk_id))
+        stale_items = []
+        checked_items = 0
+        missing_total = 0
+        for item in items:
+            if not item.gold_chunk_ids:
+                continue
+            checked_items += 1
+            missing = [str(chunk_id) for chunk_id in item.gold_chunk_ids if str(chunk_id) not in existing]
+            if missing:
+                missing_total += len(missing)
+                stale_items.append(
+                    {
+                        "item_id": item.item_id,
+                        "external_id": getattr(item, "external_id", None),
+                        "item_index": item.item_index,
+                        "query": item.query_text,
+                        "missing_chunk_ids": missing,
+                    }
+                )
+        return {"checked_items": checked_items, "stale_items": stale_items, "missing_total": missing_total}
+
+    async def probe_question(
+        self, kb_id: str, *, query: str, gold_chunk_ids: list[str] | None = None, top_k: int = 5
+    ) -> dict[str, Any]:
+        """试答探测：按知识库当前检索配置取 top_k，标注是否命中 gold_chunk_ids。"""
+        query = (query or "").strip()
+        if not query:
+            raise ValueError("问题不能为空")
+        if len(query) > MAX_QUERY_CHARS:
+            raise ValueError(f"问题不超过 {MAX_QUERY_CHARS} 个字符")
+        top_k = min(max(int(top_k), 1), 10)
+        gold = [str(value) for value in (gold_chunk_ids or [])][:20]
+        kb_instance = await knowledge_base.aget_kb(kb_id)
+        if not kb_instance:
+            raise ValueError("Knowledge Base not found")
+        retrieval_config = await self._load_kb_retrieval_config(kb_id)
+        result = await kb_instance.aquery(query, kb_id, **retrieval_config)
+        _, chunks = normalize_query_result(result)
+        gold_set = set(gold)
+        results = []
+        hit_count = 0
+        for rank, chunk in enumerate(chunks[:top_k], start=1):
+            metadata = (chunk.get("metadata") or {}) if isinstance(chunk, dict) else {}
+            chunk_id = str(chunk.get("chunk_id") or metadata.get("chunk_id") or "") if isinstance(chunk, dict) else ""
+            hit = bool(chunk_id and chunk_id in gold_set)
+            if hit:
+                hit_count += 1
+            score = chunk.get("score") if isinstance(chunk, dict) else None
+            content = str(chunk.get("content") or "")[:CHUNK_PREVIEW_CHARS] if isinstance(chunk, dict) else ""
+            results.append(
+                {
+                    "rank": rank,
+                    "chunk_id": chunk_id,
+                    "file_id": metadata.get("file_id"),
+                    "score": score,
+                    "content": content,
+                    "hit": hit,
+                }
+            )
+        return {
+            "query": query,
+            "top_k": top_k,
+            "results": results,
+            "gold_hit_count": hit_count,
+            "gold_total": len(gold_set),
+            "recall_at_k": round(hit_count / len(gold_set), 4) if gold_set else None,
+        }
+
+    async def check_dataset_duplicates(self, dataset_id: str, *, threshold: float = 0.92) -> dict[str, Any]:
+        """语义近重复检测：用知识库向量模型把全部问题编码后做余弦配对，报告 ≥ 阈值的题对。"""
+        row = await self._get_dataset_or_raise(dataset_id)
+        items = await self.eval_repo.list_all_dataset_items(dataset_id)
+        if len(items) > MAX_DUPLICATE_CHECK_ITEMS:
+            raise ValueError(f"题目数超过 {MAX_DUPLICATE_CHECK_ITEMS}，暂不支持语义查重")
+        threshold = min(max(float(threshold), 0.5), 1.0)
+        if len(items) < 2:
+            return {"threshold": threshold, "total": len(items), "count": 0, "pairs": []}
+        kb_row = await self.kb_repo.get_by_kb_id(row.kb_id)
+        embedding_spec = getattr(kb_row, "embedding_model_spec", None) if kb_row else None
+        if not embedding_spec:
+            raise ValueError("知识库未配置向量模型，无法进行语义查重")
+        model = select_embedding_model(embedding_spec)
+        texts = [item.query_text for item in items]
+        vectors: list[list[float]] = []
+        try:
+            for batch_start in range(0, len(texts), 64):
+                vectors.extend(await model.aencode(texts[batch_start : batch_start + 64]))
+        except Exception as exc:
+            raise ValueError(f"向量模型调用失败：{exc}") from exc
+        import numpy as np
+
+        matrix = np.asarray(vectors, dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normalized_matrix = matrix / norms
+        similarity = normalized_matrix @ normalized_matrix.T
+        normalized_queries = [normalize_query_for_dedup(text) for text in texts]
+
+        def brief(item) -> dict[str, Any]:
+            return {
+                "item_id": item.item_id,
+                "external_id": getattr(item, "external_id", None),
+                "item_index": item.item_index,
+                "query": item.query_text[:80],
+            }
+
+        pairs = []
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                exact = bool(normalized_queries[i]) and normalized_queries[i] == normalized_queries[j]
+                similarity_value = float(similarity[i, j])
+                if exact or similarity_value >= threshold:
+                    pairs.append(
+                        {
+                            "a": brief(items[i]),
+                            "b": brief(items[j]),
+                            "similarity": round(similarity_value, 4),
+                            "exact": exact,
+                        }
+                    )
+        pairs.sort(key=lambda pair: (pair["exact"], pair["similarity"]), reverse=True)
+        return {"threshold": threshold, "total": len(items), "count": len(pairs), "pairs": pairs[:MAX_DUPLICATE_PAIRS]}
 
     async def generate_dataset(
         self,
@@ -498,7 +1128,17 @@ class EvaluationService:
             if not questions:
                 raise ValueError("未生成有效评估题目")
 
-            await self.eval_repo.add_dataset_items(self._build_dataset_items(dataset_id, kb_id, questions))
+            # 机器生成的题目以草稿身份入库：数据集本身仍按既有约定直接完成可评估，
+            # 但派生新版本时会继承草稿状态，强制人工审核后才能再次锁定
+            await self.eval_repo.add_dataset_items(
+                self._build_dataset_items(
+                    dataset_id,
+                    kb_id,
+                    questions,
+                    status=ITEM_STATUS_DRAFT,
+                    created_by=payload.get("created_by"),
+                )
+            )
             await self.eval_repo.update_dataset(dataset_id, {"item_count": len(questions)})
             await self._update_dataset_build_metadata(
                 dataset_id,
@@ -531,6 +1171,22 @@ class EvaluationService:
             )
             raise
 
+    async def _load_kb_retrieval_config(self, kb_id: str) -> dict[str, Any]:
+        """知识库当前的检索配置（评估与试答探测共用同一口径）。"""
+        retrieval_config: dict[str, Any] = {}
+        try:
+            kb_row = await self.kb_repo.get_by_kb_id(kb_id)
+            query_params = (kb_row.query_params if kb_row else None) or {}
+            retrieval_config = query_params.get("options", {}) if isinstance(query_params, dict) else {}
+            if not retrieval_config:
+                kb_instance = await knowledge_base.aget_kb(kb_id)
+                if kb_instance:
+                    retrieval_config = kb_instance._get_default_query_params(kb_id).get("options", {})
+            logger.info(f"从知识库 {kb_id} 加载检索配置: {list(retrieval_config.keys())}")
+        except Exception as e:
+            logger.error(f"获取知识库检索配置失败: {e}")
+        return dict(retrieval_config)
+
     async def run_evaluation(
         self,
         kb_id: str,
@@ -548,18 +1204,7 @@ class EvaluationService:
             if (dataset_row.build_metadata or {}).get("status", "completed") != "completed":
                 raise ValueError("Dataset is not ready")
 
-            retrieval_config = {}
-            try:
-                kb_row = await self.kb_repo.get_by_kb_id(kb_id)
-                query_params = (kb_row.query_params if kb_row else None) or {}
-                retrieval_config = query_params.get("options", {}) if isinstance(query_params, dict) else {}
-                if not retrieval_config:
-                    kb_instance = await knowledge_base.aget_kb(kb_id)
-                    if kb_instance:
-                        retrieval_config = kb_instance._get_default_query_params(kb_id).get("options", {})
-                logger.info(f"从知识库 {kb_id} 加载检索配置: {list(retrieval_config.keys())}")
-            except Exception as e:
-                logger.error(f"获取知识库检索配置失败: {e}")
+            retrieval_config = await self._load_kb_retrieval_config(kb_id)
 
             if model_config:
                 normalized_ragas_config = _normalize_ragas_model_config(model_config)
@@ -679,6 +1324,9 @@ class EvaluationService:
             all_retrieval_metrics = []
             all_answer_metrics = []
             all_ragas_metrics = []
+            # 按标签切片：tag -> (retrieval, answer, ragas) 三组逐题分数，最终各自求均值
+            tag_buckets: dict[str, tuple[list, list, list]] = {}
+            tag_item_counts: dict[str, int] = {}
             total_items = len(dataset_items)
 
             async def update_run_db(status=None, completed=None, metrics=None, final_score=None):
@@ -696,24 +1344,34 @@ class EvaluationService:
                 if data:
                     await self.eval_repo.update_run(run_id, data)
 
-            def accumulate_scores(question_data: dict[str, Any], question_result: dict[str, Any]) -> None:
-                if dataset_row.has_gold_chunks and question_data.get("gold_chunk_ids"):
-                    all_retrieval_metrics.append(question_result["retrieval_scores"])
-                if dataset_row.has_gold_answers and question_data.get("gold_answer") and judge_llm:
-                    all_answer_metrics.append(question_result["answer_scores"])
-                if ragas_engine is not None:
-                    all_ragas_metrics.append(question_result["ragas_scores"])
+            def accumulate_scores(
+                question_data: dict[str, Any], question_result: dict[str, Any], tags: list[str]
+            ) -> None:
+                targets = [(all_retrieval_metrics, all_answer_metrics, all_ragas_metrics)]
+                for tag in tags:
+                    bucket = tag_buckets.setdefault(tag, ([], [], []))
+                    tag_item_counts[tag] = tag_item_counts.get(tag, 0) + 1
+                    targets.append(bucket)
+                for retrieval_list, answer_list, ragas_list in targets:
+                    if dataset_row.has_gold_chunks and question_data.get("gold_chunk_ids"):
+                        retrieval_list.append(question_result["retrieval_scores"])
+                    if dataset_row.has_gold_answers and question_data.get("gold_answer") and judge_llm:
+                        answer_list.append(question_result["answer_scores"])
+                    if ragas_engine is not None:
+                        ragas_list.append(question_result["ragas_scores"])
 
-            async def evaluate_item(index: int, item) -> dict[str, Any]:
-                question_data = {
+            def question_data_of(item) -> dict[str, Any]:
+                return {
                     "query": item.query_text,
                     "gold_chunk_ids": item.gold_chunk_ids or [],
                     "gold_answer": item.gold_answer,
                 }
+
+            async def evaluate_item(index: int, item) -> dict[str, Any]:
                 return await evaluate_question(
                     kb_instance=kb_instance,
                     kb_id=kb_id,
-                    question_data=question_data,
+                    question_data=question_data_of(item),
                     retrieval_config=retrieval_config,
                     has_gold_chunks=dataset_row.has_gold_chunks,
                     has_gold_answers=dataset_row.has_gold_answers,
@@ -726,7 +1384,11 @@ class EvaluationService:
                 await self.eval_repo.upsert_run_item(
                     run_id=run_id,
                     item_index=index,
-                    data={"dataset_item_id": item.item_id, **question_result["detail"]},
+                    data={
+                        "dataset_item_id": item.item_id,
+                        "item_tags": item_tags(getattr(item, "item_metadata", None)),
+                        **question_result["detail"],
+                    },
                 )
 
             ragas_concurrency = (
@@ -747,12 +1409,7 @@ class EvaluationService:
                     results = await asyncio.gather(*(evaluate_item(index, item) for index, item in chunk))
                     for (index, item), question_result in zip(chunk, results):
                         accumulate_scores(
-                            {
-                                "query": item.query_text,
-                                "gold_chunk_ids": item.gold_chunk_ids or [],
-                                "gold_answer": item.gold_answer,
-                            },
-                            question_result,
+                            question_data_of(item), question_result, item_tags(getattr(item, "item_metadata", None))
                         )
                         await persist_item_result(index, item, question_result)
                     current_metrics, _ = aggregate_metrics(
@@ -772,13 +1429,10 @@ class EvaluationService:
                     progress = 10 + (index / total_items) * 80
                     await context.set_progress(progress, f"评估 {index + 1}/{total_items}")
 
-                    question_data = {
-                        "query": item.query_text,
-                        "gold_chunk_ids": item.gold_chunk_ids or [],
-                        "gold_answer": item.gold_answer,
-                    }
                     question_result = await evaluate_item(index, item)
-                    accumulate_scores(question_data, question_result)
+                    accumulate_scores(
+                        question_data_of(item), question_result, item_tags(getattr(item, "item_metadata", None))
+                    )
                     await persist_item_result(index, item, question_result)
 
                     if (index + 1) % 5 == 0 or (index + 1) == total_items:
@@ -803,6 +1457,16 @@ class EvaluationService:
                 include_overall_score=True,
             )
             metrics_meta = {"eval_mode": eval_mode}
+            if tag_buckets:
+                by_tag: dict[str, Any] = {}
+                for tag, (retrieval_list, answer_list, ragas_list) in sorted(tag_buckets.items()):
+                    tag_metrics, tag_overall = aggregate_metrics(
+                        retrieval_list, answer_list, ragas_list, ragas_weights, include_overall_score=True
+                    )
+                    by_tag[tag] = {"item_count": tag_item_counts.get(tag, 0), "metrics": tag_metrics}
+                    if tag_overall is not None:
+                        by_tag[tag]["overall_score"] = tag_overall
+                metrics_meta["by_tag"] = by_tag
             if ragas_engine is not None:
                 metrics_meta["ragas"] = {
                     "requested": retrieval_config.get("ragas_metrics") or [],
@@ -947,3 +1611,36 @@ class EvaluationService:
             raise ValueError("Run not found")
         await self.eval_repo.delete_run(run_id)
         logger.info(f"成功删除评估运行: {run_id}")
+
+    async def export_run_results(self, kb_id: str, run_id: str) -> dict[str, Any]:
+        """导出评估结果 xlsx（运行汇总 + 逐题明细）。仅 completed 状态可导出。"""
+        if not re.match(r"^run_[a-f0-9]{8}$", run_id):
+            raise ValueError("Invalid run_id format")
+        row = await self.eval_repo.get_run(run_id)
+        if row is None or row.kb_id != kb_id:
+            raise ValueError(f"Run not found for {run_id}")
+        if row.status != "completed":
+            raise ValueError("评估完成后的结果才能导出")
+        items = await self.eval_repo.list_all_run_items(run_id)
+        if not items:
+            raise ValueError("该评估没有明细数据，无法导出")
+        run_dict = {
+            "run_id": row.run_id,
+            "name": self._run_name_from_row(row),
+            "dataset_id": row.dataset_id,
+            "status": row.status,
+            "started_at": format_utc_datetime(row.started_at),
+            "completed_at": format_utc_datetime(row.completed_at),
+            "total_items": row.total_items or 0,
+            "completed_items": row.completed_items or 0,
+            "overall_score": row.overall_score,
+            "retrieval_config": row.retrieval_config or {},
+            "metrics": row.metrics or {},
+        }
+        from yuxi.knowledge.eval.result_export import build_run_results_workbook
+
+        package = build_run_results_workbook(
+            run=run_dict, items=[self._run_item_to_dict(item) for item in items]
+        )
+        logger.info(f"评估结果导出完成 run={run_id} items={len(items)}")
+        return package

@@ -99,6 +99,33 @@ export const databaseApi = {
 }
 
 // =============================================================================
+// === Source Contract 只读 API ===
+// =============================================================================
+
+export const sourceContractApi = {
+  /**
+   * 已注册知识源契约快照（前端选型卡与策略面板数据源）
+   */
+  getContracts: async () => {
+    return apiGet('/api/knowledge/source-contracts')
+  },
+
+  /**
+   * 单个契约版本的完整定义
+   */
+  getContract: async (key, version) => {
+    return apiGet(`/api/knowledge/source-contracts/${key}/versions/${version}`)
+  },
+
+  /**
+   * 解析契约（创建前预检）；未知契约返回 422
+   */
+  resolveContract: async (key, version = null) => {
+    return apiPost(`/api/knowledge/source-contracts/${key}/resolve`, { version })
+  }
+}
+
+// =============================================================================
 // === 默认问答范围（Knowledge Scope） ===
 // =============================================================================
 
@@ -693,11 +720,13 @@ export const evaluationApi = {
     return apiAdminGet(`/api/evaluation/databases/${kbId}/datasets`)
   },
 
-  getDataset: async (kbId, datasetId, page = 1, pageSize = 50) => {
+  getDataset: async (kbId, datasetId, page = 1, pageSize = 50, status = null, keyword = null) => {
     const params = new URLSearchParams({
       page: page.toString(),
       page_size: pageSize.toString()
     })
+    if (status) params.append('status', status)
+    if (keyword) params.append('keyword', keyword)
     return apiAdminGet(`/api/evaluation/databases/${kbId}/datasets/${datasetId}?${params}`)
   },
 
@@ -734,5 +763,72 @@ export const evaluationApi = {
 
   deleteRun: async (kbId, runId) => {
     return apiAdminDelete(`/api/evaluation/databases/${kbId}/runs/${runId}`)
+  },
+
+  exportRunResults: async (kbId, runId) => {
+    return apiAdminGet(`/api/evaluation/databases/${kbId}/runs/${runId}/export`, {}, 'blob')
+  },
+
+  // ---- 基准逐条构建（authoring）----
+
+  createManualDataset: async (kbId, payload) => {
+    return apiAdminPost(`/api/evaluation/databases/${kbId}/datasets`, payload)
+  },
+
+  updateDataset: async (datasetId, payload) => {
+    return apiAdminPut(`/api/evaluation/datasets/${datasetId}`, payload)
+  },
+
+  getDatasetStats: async (datasetId) => {
+    return apiAdminGet(`/api/evaluation/datasets/${datasetId}/stats`)
+  },
+
+  addDatasetItem: async (datasetId, payload) => {
+    return apiAdminPost(`/api/evaluation/datasets/${datasetId}/items`, payload)
+  },
+
+  updateDatasetItem: async (datasetId, itemId, payload) => {
+    return apiAdminPut(`/api/evaluation/datasets/${datasetId}/items/${itemId}`, payload)
+  },
+
+  deleteDatasetItem: async (datasetId, itemId) => {
+    return apiAdminDelete(`/api/evaluation/datasets/${datasetId}/items/${itemId}`)
+  },
+
+  batchImportItems: async (datasetId, content) => {
+    return apiAdminPost(`/api/evaluation/datasets/${datasetId}/items/batch`, { content })
+  },
+
+  reviewDatasetItems: async (datasetId, payload) => {
+    return apiAdminPost(`/api/evaluation/datasets/${datasetId}/items/review`, payload)
+  },
+
+  finalizeDataset: async (datasetId) => {
+    return apiAdminPost(`/api/evaluation/datasets/${datasetId}/finalize`, {})
+  },
+
+  createDatasetVersion: async (datasetId, payload = {}) => {
+    return apiAdminPost(`/api/evaluation/datasets/${datasetId}/new-version`, payload)
+  },
+
+  listKbChunks: async (kbId, params = {}) => {
+    const query = new URLSearchParams()
+    if (params.fileId) query.append('file_id', params.fileId)
+    if (params.keyword) query.append('keyword', params.keyword)
+    query.append('page', (params.page || 1).toString())
+    query.append('page_size', (params.pageSize || 50).toString())
+    return apiAdminGet(`/api/evaluation/databases/${kbId}/chunks?${query.toString()}`)
+  },
+
+  checkGoldChunks: async (datasetId) => {
+    return apiAdminPost(`/api/evaluation/datasets/${datasetId}/gold-chunks/check`, {})
+  },
+
+  probeQuestion: async (kbId, payload) => {
+    return apiAdminPost(`/api/evaluation/databases/${kbId}/probe`, payload)
+  },
+
+  checkDuplicates: async (datasetId, payload = {}) => {
+    return apiAdminPost(`/api/evaluation/datasets/${datasetId}/duplicates/check`, payload)
   }
 }
