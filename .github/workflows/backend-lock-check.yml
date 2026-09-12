@@ -1,0 +1,75 @@
+# 后端依赖锁文件一致性门禁
+#
+# 背景：docker/api.Dockerfile 用 `uv sync --locked` 安装依赖，uv.lock 与 pyproject 漂移时镜像构建
+# 会直接失败。这里把同样的校验前移到 PR / push 阶段：改了 backend/pyproject.toml 或
+# backend/package/pyproject.toml（含可选依赖组）却没有重新 `make lock` 并提交 uv.lock 的改动在此拦截。
+#
+# uv 版本从 docker/api.Dockerfile 读取、Python 版本从 backend/.python-version 读取，拼成 astral 官方
+# 带 Python 的 uv 镜像，保证校验锁文件的 uv 与构建镜像的 uv 完全一致，避免版本差异导致 lock 格式误判。
+# 注意不能用裸 ghcr.io/astral-sh/uv:<ver>——它是 distroless（无 sh/libc），uv lock 跑不起来。
+# 与 Makefile 的 lock / lock-check 目标使用同一镜像、同一命令。
+
+name: Backend Lock Check
+
+on:
+  pull_request:
+    paths:
+      - 'backend/pyproject.toml'
+      - 'backend/package/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'backend/.python-version'
+      - 'docker/api.Dockerfile'
+      - '.github/workflows/backend-lock-check.yml'
+  push:
+    paths:
+      - 'backend/pyproject.toml'
+      - 'backend/package/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'backend/.python-version'
+      - 'docker/api.Dockerfile'
+      - '.github/workflows/backend-lock-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lock-check:
+    name: uv lock --check (backend)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve uv image (version from docker/api.Dockerfile, Python from backend/.python-version)
+        id: uv
+        run: |
+          uv_version=$(grep -oE 'ghcr.io/astral-sh/uv:[0-9.]+' docker/api.Dockerfile | head -1 | cut -d: -f2)
+          py_version=$(tr -d '[:space:]' < backend/.python-version)
+          if [ -z "$uv_version" ] || [ -z "$py_version" ]; then
+            echo "::error::无法从 docker/api.Dockerfile 解析 uv 版本（得到 '$uv_version'）或从 backend/.python-version 解析 Python 版本（得到 '$py_version'）"
+            exit 1
+          fi
+          image="ghcr.io/astral-sh/uv:${uv_version}-python${py_version}-trixie-slim"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "使用 $image"
+
+      - name: uv lock --check
+        run: |
+          docker run --rm \
+            -v "$PWD/backend:/ws" -w /ws \
+            "${{ steps.uv.outputs.image }}" uv lock --check
+
+      - name: Explain failure
+        if: failure()
+        run: |
+          {
+            echo "## uv.lock 与 pyproject 不一致"
+            echo ""
+            echo "backend/uv.lock 没有跟上 pyproject 的依赖声明变更，镜像构建（\`uv sync --locked\`）会失败。"
+            echo ""
+            echo "本地修复后把 uv.lock 一起提交："
+            echo '```bash'
+            echo "make lock        # 重新生成锁文件（宿主机无需安装 uv）"
+            echo "make lock-check  # 本地复核，与本 CI 相同命令"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

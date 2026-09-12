@@ -51,7 +51,13 @@ COPY backend/uv.lock /app/uv.lock
 COPY backend/package /app/package
 
 # 如果网络还是不好，可以在后面添加 --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-RUN uv sync --no-cache --group test --no-dev --frozen
+# --locked 而非 --frozen：--frozen 不校验 uv.lock 与 pyproject 的漂移，改了依赖声明但忘记
+# uv lock 时会静默漏装（yuxi[ragas] 曾因此在运行期才报"ragas 未安装"）；--locked 让漂移直接构建失败。
+RUN uv sync --no-cache --group test --no-dev --locked
+
+# 依赖装配自检：走 ragas_adapter 的真实导入路径（含 langchain v1 兼容垫片），
+# 装了 ragas 但导不进来（如 langchain 升级破坏垫片）同样在构建期暴露，而不是留到用户点击 RAG 评估。
+RUN python -c "import yuxi.knowledge.eval.ragas_adapter as m; assert m.RAGAS_AVAILABLE, getattr(m, '_ragas_import_error', 'ragas 不可用')"
 
 # 复制 server 代码
 COPY backend/server /app/server

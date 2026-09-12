@@ -97,6 +97,8 @@ make down              # 停止服务
 make reset             # 清空 docker/volumes 重建，并写入种子用户
 make logs              # 查看 api-dev 最近日志
 make format            # ruff format + ruff check --fix + 前端 prettier/eslint
+make lock              # 改了 backend/pyproject.toml 或 backend/package/pyproject.toml 后必跑，uv.lock 随改动一起提交
+make lock-check        # 校验 uv.lock 与 pyproject 一致（与 CI backend-lock-check、镜像 uv sync --locked 同一标准）
 
 # 测试统一在 api-dev 容器内执行，分层规范见 docs/develop-guides/testing-guidelines.md
 bash backend/test/run_tests.sh unit                  # 单元测试（不依赖运行中的服务）
