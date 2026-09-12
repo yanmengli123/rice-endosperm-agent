@@ -406,6 +406,7 @@ class KnowledgeBaseManager:
         share_config: dict | None = None,
         created_by: str | None = None,
         created_by_department_id: int | str | None = None,
+        contract_fields: dict | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -420,6 +421,8 @@ class KnowledgeBaseManager:
             share_config: 共享配置
             created_by: 创建者 uid
             created_by_department_id: 创建者部门 ID
+            contract_fields: Source Contract 冻结字段
+                （contract_key/version/digest/snapshot、content_domain、tool_description、governance_status）
             **kwargs: 其他配置参数
 
         Returns:
@@ -442,6 +445,8 @@ class KnowledgeBaseManager:
         kb_instance = self._get_or_create_kb_instance(kb_type)
         kwargs = kb_instance.normalize_additional_params(kwargs)
         record_fields = {"share_config": share_config, "created_by": created_by}
+        if contract_fields:
+            record_fields.update(contract_fields)
         db_info = await kb_instance.create_database(
             database_name,
             description,
@@ -471,6 +476,8 @@ class KnowledgeBaseManager:
 
         logger.info(f"Created {kb_type} database: {database_name} ({kb_id}) with {kwargs}")
         db_info["share_config"] = share_config
+        if contract_fields:
+            db_info.update(contract_fields)
         return db_info
 
     async def delete_database(self, kb_id: str) -> dict:
@@ -503,7 +510,24 @@ class KnowledgeBaseManager:
 
         record = await KnowledgeFileRepository().get_by_file_id(file_id)
         processing_params = dict(getattr(record, "processing_params", None) or {}) if record else {}
-        if record and record.kb_id == kb_id and processing_params.get("pdf_evidence_pipeline"):
+        scientific_pipeline = bool(processing_params.get("pdf_evidence_pipeline"))
+        if not scientific_pipeline:
+            # 契约驱动：pdf_evidence 契约库的解析一律走科研 PDF 流水线，
+            # 不再依赖请求或文件参数中的 pdf_evidence_pipeline 开关。
+            try:
+                from yuxi.knowledge.source_contracts import load_kb_contract
+
+                spec = await load_kb_contract(kb_id)
+                scientific_pipeline = spec.contract_key == "pdf_evidence"
+            except Exception as contract_error:  # noqa: BLE001
+                from yuxi.knowledge.source_contracts import SourceContractError
+
+                if isinstance(contract_error, SourceContractError):
+                    raise
+                from yuxi.utils import logger as _logger
+
+                _logger.warning(f"[parse_file] 契约检查失败，按旧参数判断: {contract_error}")
+        if record and record.kb_id == kb_id and scientific_pipeline:
             from yuxi.services.scientific_pdf_ingest_service import (
                 create_or_reuse_scientific_pdf_ingest,
             )
@@ -615,6 +639,15 @@ class KnowledgeBaseManager:
             "metadata": normalized_additional_params,
             "created_at": utc_isoformat(kb.created_at) if kb.created_at else None,
             "status": "已连接",
+            # Source Contract 冻结信息（0029 起新建库必有；存量库由迁移回填）
+            "contract_key": kb.contract_key,
+            "contract_version": kb.contract_version,
+            "contract_digest": kb.contract_digest,
+            "contract_snapshot": kb.contract_snapshot,
+            "content_domain": kb.content_domain,
+            "tool_description": kb.tool_description,
+            "governance_status": kb.governance_status or "DRAFT",
+            "active_release_id": kb.active_release_id,
         }
 
         if include_files:
@@ -888,6 +921,8 @@ class KnowledgeBaseManager:
         share_config: dict | None = None,
         operator_uid: str | None = None,
         operator_department_id: int | str | None = None,
+        tool_description: str | None = None,
+        content_domain: str | None = None,
     ) -> dict:
         """更新数据库"""
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
@@ -906,6 +941,11 @@ class KnowledgeBaseManager:
         }
         if update_llm_model_spec:
             update_data["llm_model_spec"] = llm_model_spec
+        # 契约身份（key/version/digest/snapshot）创建后冻结，永不走本入口修改
+        if tool_description is not None:
+            update_data["tool_description"] = tool_description
+        if content_domain is not None:
+            update_data["content_domain"] = content_domain
 
         if additional_params is not None:
             current_additional_params = kb.additional_params or {}

@@ -16,6 +16,26 @@ from yuxi.knowledge.graphs.milvus_graph_service import (
     MilvusGraphService,
 )
 
+@pytest.fixture(autouse=True)
+def _legacy_kb_contract(monkeypatch):
+    """_get_milvus_kb 的源契约门禁：单测默认 legacy_generic（等价旧行为）。
+
+    契约隔离（managed_graph/pdf_evidence 拒绝 LLM 自动抽图）由独立契约测试覆盖。
+    """
+
+    class _LegacySpec(SimpleNamespace):
+        contract_key = "legacy_generic"
+        contract_version = "0"
+        contract_ref = "legacy_generic@0"
+
+    async def _fake_load(kb_id):
+        return _LegacySpec()
+
+    import yuxi.knowledge.source_contracts as _contracts
+
+    # _get_milvus_kb 在函数体内 from-import，桩必须落在包属性上
+    monkeypatch.setattr(_contracts, "load_kb_contract", _fake_load)
+
 
 def _raw_graph_node(node_id: str, *, labels: list[str] | None = None, name: str | None = None) -> dict:
     return {

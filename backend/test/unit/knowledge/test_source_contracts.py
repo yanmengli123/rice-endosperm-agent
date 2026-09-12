@@ -1,0 +1,224 @@
+"""Source Contract 注册中心与命令门禁的确定性单测。"""
+
+from __future__ import annotations
+
+import pytest
+
+from yuxi.knowledge.source_contracts import (
+    COMMAND_DOCUMENT_UPLOAD,
+    COMMAND_GRAPH_IMPORT_EXECUTE,
+    COMMAND_LLM_GRAPH_BUILD,
+    ContractCommandForbidden,
+    ContractMediaRejected,
+    SourceContractError,
+    UnknownSourceContractError,
+    classify_legacy_kb,
+    contract_digest,
+    contract_registry_snapshot,
+    resolve_contract,
+    validate_contract_media,
+)
+from yuxi.knowledge.source_contracts.specs import (
+    SourceContractDisplay,
+    SourceContractSpec,
+)
+
+
+class TestFailClosed:
+    def test_unknown_contract_key_rejected(self):
+        with pytest.raises(UnknownSourceContractError):
+            resolve_contract("no_such_contract")
+
+    def test_unknown_version_rejected(self):
+        with pytest.raises(UnknownSourceContractError):
+            resolve_contract("pdf_evidence", "9.9.9")
+
+    def test_empty_key_rejected(self):
+        with pytest.raises(UnknownSourceContractError):
+            resolve_contract("")
+        with pytest.raises(UnknownSourceContractError):
+            resolve_contract(None)
+
+    def test_resolve_latest_without_version(self):
+        spec = resolve_contract("pdf_evidence")
+        assert spec.version == "1.0.0"
+
+    def test_legacy_contract_resolvable(self):
+        assert resolve_contract("legacy_generic", "0").contract_key == "legacy_generic"
+        assert resolve_contract("legacy_mixed", "0").contract_key == "legacy_mixed"
+
+
+class TestRegistry:
+    def test_snapshot_excludes_hidden_by_default(self):
+        snapshot = contract_registry_snapshot()
+        keys = {item["contract_key"] for item in snapshot}
+        assert {"pdf_evidence", "csv_record", "csv_qa", "managed_graph"} <= keys
+        assert "legacy_generic" not in keys
+
+    def test_snapshot_includes_hidden_when_requested(self):
+        snapshot = contract_registry_snapshot(include_hidden=True)
+        keys = {item["contract_key"] for item in snapshot}
+        assert {"legacy_generic", "legacy_mixed"} <= keys
+
+    def test_managed_graph_forbids_llm_and_documents(self):
+        spec = resolve_contract("managed_graph")
+        assert COMMAND_LLM_GRAPH_BUILD not in spec.allowed_commands
+        assert COMMAND_DOCUMENT_UPLOAD not in spec.allowed_commands
+        assert COMMAND_GRAPH_IMPORT_EXECUTE in spec.allowed_commands
+
+    def test_pdf_evidence_authority_policy(self):
+        spec = resolve_contract("pdf_evidence")
+        assert spec.authority_policy["canonical_store"] == "postgresql_parse_revisions"
+        assert spec.authority_policy["model_summary"] == "non_authoritative_citation_only"
+
+    def test_csv_qa_requires_mapping_semantics(self):
+        spec = resolve_contract("csv_qa")
+        assert "上传" in spec.processing_policy["ingest"]
+        assert "必须确认" in spec.processing_policy["ingest"]
+
+
+class TestDigest:
+    def test_digest_stable(self):
+        spec = resolve_contract("csv_record")
+        assert contract_digest(spec) == contract_digest(resolve_contract("csv_record"))
+
+    def test_digest_changes_with_semantics(self):
+        base = resolve_contract("csv_record")
+        changed = SourceContractSpec(
+            contract_key=base.contract_key,
+            version=base.version,
+            product_category=base.product_category,
+            display=base.display,
+            allowed_commands=tuple(base.allowed_commands) + ("some_new_command",),
+        )
+        assert contract_digest(base) != contract_digest(changed)
+
+    def test_digest_format(self):
+        assert contract_digest(resolve_contract("managed_graph")).startswith("sha256:")
+
+
+class TestMediaValidation:
+    def test_pdf_contract_rejects_csv(self):
+        spec = resolve_contract("pdf_evidence")
+        with pytest.raises(ContractMediaRejected) as exc_info:
+            validate_contract_media(spec, "dataset.csv")
+        assert exc_info.value.http_status == 415
+
+    def test_pdf_contract_accepts_pdf(self):
+        spec = resolve_contract("pdf_evidence")
+        validate_contract_media(spec, "paper.PDF")
+        validate_contract_media(spec, "paper.pdf", "application/pdf")
+
+    def test_csv_contract_rejects_pdf(self):
+        spec = resolve_contract("csv_record")
+        with pytest.raises(ContractMediaRejected):
+            validate_contract_media(spec, "paper.pdf")
+
+    def test_csv_contract_accepts_tsv(self):
+        spec = resolve_contract("csv_qa")
+        validate_contract_media(spec, "data.tsv")
+
+    def test_legacy_unrestricted(self):
+        spec = resolve_contract("legacy_generic")
+        validate_contract_media(spec, "anything.bin")
+
+
+class TestClassifyLegacyKb:
+    def test_pdf_template(self):
+        result = classify_legacy_kb(
+            format_template="pdf_literature", pdf_evidence_pipeline=False,
+            has_documents=True, has_llm_extraction=False,
+        )
+        assert result[:2] == ("pdf_evidence", "1.0.0")
+
+    def test_explicit_pipeline_flag(self):
+        result = classify_legacy_kb(
+            format_template=None, pdf_evidence_pipeline=True,
+            has_documents=True, has_llm_extraction=False,
+        )
+        assert result[0] == "pdf_evidence"
+
+    def test_pure_graph(self):
+        result = classify_legacy_kb(
+            format_template="graph_csv", pdf_evidence_pipeline=False,
+            has_documents=False, has_llm_extraction=False,
+        )
+        assert result[:2] == ("managed_graph", "1.0.0")
+
+    def test_mixed_graph(self):
+        result = classify_legacy_kb(
+            format_template="graph_csv", pdf_evidence_pipeline=False,
+            has_documents=True, has_llm_extraction=False,
+        )
+        assert result[0] == "legacy_mixed"
+        result2 = classify_legacy_kb(
+            format_template="graph_csv", pdf_evidence_pipeline=False,
+            has_documents=False, has_llm_extraction=True,
+        )
+        assert result2[0] == "legacy_mixed"
+
+    def test_old_csv_template_stays_legacy(self):
+        result = classify_legacy_kb(
+            format_template="csv_dataset", pdf_evidence_pipeline=False,
+            has_documents=True, has_llm_extraction=False,
+        )
+        assert result[:2] == ("legacy_generic", "0")
+
+    def test_unknown_template(self):
+        result = classify_legacy_kb(
+            format_template=None, pdf_evidence_pipeline=False,
+            has_documents=True, has_llm_extraction=False,
+        )
+        assert result[:2] == ("legacy_generic", "0")
+
+
+@pytest.mark.asyncio
+async def test_command_gate_allows_and_forbids(monkeypatch):
+    from yuxi.knowledge.source_contracts import gate
+
+    spec = resolve_contract("managed_graph")
+
+    async def fake_load(kb_id):
+        return spec
+
+    monkeypatch.setattr(gate, "load_kb_contract", fake_load)
+    assert (await gate.require_contract_command("kb_1", COMMAND_GRAPH_IMPORT_EXECUTE)) is spec
+    with pytest.raises(ContractCommandForbidden) as exc_info:
+        await gate.require_contract_command("kb_1", COMMAND_DOCUMENT_UPLOAD)
+    assert exc_info.value.error_code == "SOURCE_CONTRACT_VIOLATION"
+    assert exc_info.value.http_status == 422
+
+
+@pytest.mark.asyncio
+async def test_command_gate_legacy_allows_all(monkeypatch):
+    from yuxi.knowledge.source_contracts import gate
+
+    spec = resolve_contract("legacy_generic")
+
+    async def fake_load(kb_id):
+        return spec
+
+    monkeypatch.setattr(gate, "load_kb_contract", fake_load)
+    for command in (
+        COMMAND_DOCUMENT_UPLOAD,
+        COMMAND_LLM_GRAPH_BUILD,
+        COMMAND_GRAPH_IMPORT_EXECUTE,
+    ):
+        await gate.require_contract_command("kb_legacy", command)
+
+
+def test_error_hierarchy():
+    assert issubclass(UnknownSourceContractError, SourceContractError)
+    assert issubclass(ContractCommandForbidden, SourceContractError)
+    assert issubclass(ContractMediaRejected, SourceContractError)
+
+
+def test_display_spec_defaults():
+    spec = SourceContractSpec(
+        contract_key="x",
+        version="1.0.0",
+        product_category="authority_source",
+        display=SourceContractDisplay(label="X"),
+    )
+    assert not spec.hidden
+    assert spec.contract_ref == "x@1.0.0"

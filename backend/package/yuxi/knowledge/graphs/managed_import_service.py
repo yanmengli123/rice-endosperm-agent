@@ -460,11 +460,35 @@ class ManagedGraphImportService:
         return record
 
     async def _require_milvus_kb(self, kb_id: str):
+        """托管图谱导入的知识库门禁。
+
+        目标状态：仅 managed_graph@1.0.0 契约接受图导入命令；
+        legacy_* 契约在迁移期放行（记录告警），严格契约（pdf_evidence/csv_*）
+        一律拒绝。源类型校验（kb_type=milvus）保留。
+        """
         kb = await self.kb_repository.get_by_kb_id(kb_id)
         if kb is None:
             raise ValueError("知识库不存在")
         if (kb.kb_type or "").lower() != "milvus":
             raise ValueError("托管图谱导入仅支持 Milvus 知识库")
+        from yuxi.knowledge.source_contracts import SourceContractError, load_kb_contract
+
+        try:
+            spec = await load_kb_contract(kb_id)
+        except SourceContractError as exc:
+            raise ValueError(f"[{exc.error_code}] {exc}") from exc
+        if spec.contract_key != "managed_graph":
+            if spec.contract_key.startswith("legacy_"):
+                from yuxi.utils import logger as _logger
+
+                _logger.warning(
+                    f"[managed_import] KB {kb_id} 契约 {spec.contract_ref} 为 legacy 兼容，"
+                    "允许图导入但应尽快升级为 managed_graph@1.0.0"
+                )
+            else:
+                raise ValueError(
+                    f"托管图谱导入要求 managed_graph@1.0.0 契约，当前知识库契约 {spec.contract_ref} 不接受该命令"
+                )
         return kb
 
 

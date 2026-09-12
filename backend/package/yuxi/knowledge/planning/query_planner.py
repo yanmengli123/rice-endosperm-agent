@@ -9,7 +9,7 @@ from yuxi.knowledge.planning.task_classifier import (
     detect_question_types,
 )
 
-PLANNER_VERSION = "1.2"
+PLANNER_VERSION = "1.3"
 
 _SOCIAL_PATTERNS = (
     r"^(?:hi|hello|hey|你好|您好|嗨|早上好|下午好|晚上好)[!！。.，,\s]*$",

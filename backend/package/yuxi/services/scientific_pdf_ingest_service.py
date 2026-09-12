@@ -33,6 +33,7 @@ from yuxi.storage.postgres.models_knowledge import (
     ArticleReference,
     CitationMention,
     EvidenceAnchorRecord,
+    EvidenceSpanRecord,
     KnowledgeBase,
     KnowledgeDocumentIdentityCache,
     KnowledgeFile,
@@ -896,7 +897,7 @@ async def _store_artifacts(revision: KnowledgeParseRevision, artifacts: list[Par
     return uris
 
 
-async def _persist_article_records(revision_id: str, article: dict[str, Any]) -> None:
+async def _persist_article_records(revision_id: str, article: dict[str, Any], *, markdown_body: str = "") -> None:
     async with pg_manager.get_async_session_context() as session:
         # A retry rebuilds the exact same immutable revision; replace partial rows left by a process crash.
         await session.execute(delete(EvidenceAnchorRecord).where(EvidenceAnchorRecord.parse_revision_id == revision_id))
@@ -928,6 +929,8 @@ async def _persist_article_records(revision_id: str, article: dict[str, Any]) ->
                     confidence=float(anchor.get("confidence") or 0.0),
                     locatable=bool(anchor.get("locatable", False)),
                     source=str(anchor.get("source") or "pymupdf"),
+                    document_partition=str(anchor.get("document_partition") or "UNKNOWN"),
+                    partition_confidence=float(anchor.get("partition_confidence") or 0.0),
                 )
                 for anchor in article.get("anchors") or []
             ]
@@ -958,6 +961,60 @@ async def _persist_article_records(revision_id: str, article: dict[str, Any]) ->
                 for index, mention in enumerate(article.get("citation_mentions") or [])
             ]
         )
+        # P2-10/P2-11：在同事务内确定性生成证据单元 span 与多字段词法索引。
+        # 挂 parse_revision_id 级联；解析器升级重建 revision 后按 evidence_id 回归。
+        anchor_rows = (
+            (
+                await session.execute(
+                    select(EvidenceAnchorRecord).where(EvidenceAnchorRecord.parse_revision_id == revision_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        revision = (
+            await session.execute(
+                select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == revision_id)
+            )
+        ).scalar_one_or_none()
+        if revision is not None and anchor_rows:
+            from yuxi.knowledge.evidence.span_builder import (
+                build_evidence_spans,
+                build_lexical_index,
+            )
+
+            spans_summary = await build_evidence_spans(
+                session,
+                revision=revision,
+                anchors=list(anchor_rows),
+                markdown_body=markdown_body,
+            )
+            spans = (
+                (
+                    await session.execute(
+                        select(EvidenceSpanRecord).where(EvidenceSpanRecord.parse_revision_id == revision_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            lexical_summary = await build_lexical_index(
+                session,
+                revision=revision,
+                anchors=list(anchor_rows),
+                spans=list(spans),
+            )
+            await session.execute(
+                update(KnowledgeParseRevision)
+                .where(KnowledgeParseRevision.revision_id == revision_id)
+                .values(
+                    qa_report={
+                        **(revision.qa_report or {}),
+                        "evidence_spans": spans_summary,
+                        "lexical_index": lexical_summary,
+                    }
+                )
+            )
 
 
 async def _link_stage_artifacts(revision_id: str) -> None:
@@ -1171,7 +1228,11 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             return {"revision_id": revision_id, "status": "REJECTED"}
 
         article = pipeline_result.unified_article.to_dict()
-        await _persist_article_records(revision_id, article)
+        await _persist_article_records(
+            revision_id,
+            article,
+            markdown_body=pipeline_result.annotated_markdown or "",
+        )
         markdown_uri = artifact_uris["indexed_markdown"]
         chunking = _scientific_chunking_contract()
         chunker_fingerprint = _chunker_fingerprint(revision_id, chunking)
@@ -1649,9 +1710,7 @@ def _pipeline_stage_progress(stage_rows: list[Any]) -> tuple[float, str | None]:
     return progress, message
 
 
-async def list_scientific_pdf_pipeline_tasks(
-    *, status: str | None = None, limit: int = 100
-) -> dict[str, Any]:
+async def list_scientific_pdf_pipeline_tasks(*, status: str | None = None, limit: int = 100) -> dict[str, Any]:
     """Project durable scientific PDF ingest state into task-center entries.
 
     The pipeline executes in the ARQ worker process, so its live state lives in

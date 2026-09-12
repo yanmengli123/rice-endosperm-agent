@@ -165,6 +165,8 @@ def test_build_dto_contains_three_selectors_and_version_chain():
     fragment = dto["locator"]["fragments"][0]
     assert fragment["page_index"] == 2 and fragment["page_number"] == 3
     assert fragment["bbox"] == [40.48, 586.55, 281.57, 752.85]
+    # bbox 是 MinerU/PyMuPDF 的左上原点坐标，DTO 必须显式声明供渲染端换算
+    assert fragment["origin"] == "top_left" and fragment["coordinate_space"] == "pdf_points"
     # 版本链
     assert dto["source"]["parse_revision_id"] == "spr_1"
     assert dto["source"]["index_revision_id"] == "sir_1"

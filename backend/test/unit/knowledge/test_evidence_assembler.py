@@ -9,10 +9,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.knowledge.evidence import assembler as evidence_assembler
 from yuxi.knowledge.evidence.assembler import assemble_evidence_for_run
+from yuxi.knowledge.evidence.protocol import derive_evidence_id
 from yuxi.repositories.knowledge_retrieval_repository import KnowledgeRetrievalRepository
 from yuxi.storage.postgres.models_knowledge import (
     EvidenceAnchorRecord,
+    EvidenceSpanRecord,
     KnowledgeChunk,
+    KnowledgeFile,
     KnowledgeParseRevision,
 )
 
@@ -27,9 +30,11 @@ def _digest(value: str) -> str:
 async def evidence_session(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
+        await connection.run_sync(KnowledgeFile.__table__.create)
         await connection.run_sync(KnowledgeParseRevision.__table__.create)
         await connection.run_sync(KnowledgeChunk.__table__.create)
         await connection.run_sync(EvidenceAnchorRecord.__table__.create)
+        await connection.run_sync(EvidenceSpanRecord.__table__.create)
 
     records: list[SimpleNamespace] = []
 
@@ -261,3 +266,130 @@ async def test_assembler_reports_evidence_limit_instead_of_silent_truncation(
         "processed": 1,
         "omitted": 1,
     } in result["issues"]
+
+
+async def test_assembler_attaches_sentence_highlight_without_changing_identity(evidence_session):
+    session, records = evidence_session
+    paragraph = (
+        "To study OsMYB73 we first analysed its phylogenetic relationship with other MYB proteins. "
+        "The structure of OsMYB73 protein was also predicted and the results revealed two SANT domains."
+    )
+    _add_source(
+        session,
+        row_id=1,
+        revision_id="spr_1",
+        kb_id="kb_allowed",
+        file_id="file_1",
+        chunk_id="chunk_1",
+        anchor_id="ea_1",
+        quote=paragraph,
+        page=3,
+    )
+    await session.commit()
+    records.append(_retrieval("chunk_1"))
+
+    plain = await assemble_evidence_for_run(session, "run_1", allowed_kb_ids={"kb_allowed"})
+    refined = await assemble_evidence_for_run(
+        session,
+        "run_1",
+        allowed_kb_ids={"kb_allowed"},
+        question_text="The structure of OsMYB73 protein was also predicted and the results revealed?",
+    )
+
+    assert "highlight" not in plain["evidence"][0]["locator"]
+    highlight = refined["evidence"][0]["locator"]["highlight"]
+    assert highlight["quote"] == (
+        "The structure of OsMYB73 protein was also predicted and the results revealed two SANT domains."
+    )
+    assert highlight["page_number"] == 3
+    assert highlight["algorithm"] == "sentence_lexical_overlap_v1"
+    # 精化只是附加的读取信息：身份、块级 fragments、验证结果均不变
+    assert refined["evidence"][0]["evidence_id"] == plain["evidence"][0]["evidence_id"]
+    assert refined["evidence"][0]["locator"]["fragments"] == plain["evidence"][0]["locator"]["fragments"]
+    assert refined["evidence"][0]["verification"] == plain["evidence"][0]["verification"]
+
+
+async def test_locator_projection_replays_exact_audited_anchor(evidence_session):
+    session, records = evidence_session
+    quote = "The structure of OsMYB73 protein was also predicted and revealed two SANT domains."
+    bbox = [40.0, 300.0, 280.0, 380.0]
+    source_sha = "1" * 64
+    _add_source(
+        session,
+        row_id=1,
+        revision_id="spr_locator",
+        kb_id="kb_allowed",
+        file_id="file_locator",
+        chunk_id="chunk_candidate",
+        anchor_id="ea_locator",
+        quote=quote,
+        page=3,
+    )
+    session.add(
+        KnowledgeFile(
+            id=1,
+            file_id="file_locator",
+            kb_id="kb_allowed",
+            filename="paper.pdf",
+            active_parse_revision_id="spr_locator",
+            active_index_revision_id="sir_locator",
+        )
+    )
+    session.add(
+        EvidenceSpanRecord(
+            id=1,
+            tenant_id=1,
+            parse_revision_id="spr_locator",
+            kb_id="kb_allowed",
+            file_id="file_locator",
+            span_id="es_locator",
+            anchor_id="ea_locator",
+            sentence_index=0,
+            quote=quote,
+            quote_hash=_digest(quote),
+            page_number=3,
+            evidence_type="sentence",
+            document_partition="MAIN_TEXT",
+            partition_confidence=1.0,
+            evidence_id="evs_locator",
+        )
+    )
+    physical_evidence_id = derive_evidence_id(
+        source_sha256=source_sha,
+        page_number=3,
+        bbox=bbox,
+        word_start=1,
+        word_end=4,
+        quote_hash=_digest(quote),
+        anchor_id="ea_locator",
+    )
+    records.append(
+        SimpleNamespace(
+            retrieval_id="kr_locator",
+            status="COMPLETED",
+            intent="QUOTE_LOCATOR",
+            chunk_ids_json=[],
+            evidence_ids_json=[physical_evidence_id],
+            locator_resolution_json={
+                "status": "VERIFIED",
+                "evidence_id": physical_evidence_id,
+                "span_evidence_id": "evs_locator",
+                "parse_revision_id": "spr_locator",
+                "kb_id": "kb_allowed",
+                "file_id": "file_locator",
+                "span_id": "es_locator",
+                "anchor_id": "ea_locator",
+                "page": 3,
+                "source_sha256": source_sha,
+            },
+        )
+    )
+    await session.commit()
+
+    result = await assemble_evidence_for_run(session, "run_locator", allowed_kb_ids={"kb_allowed"})
+
+    assert result["claim_binding_status"] == "DETERMINISTIC_LOCATOR"
+    assert len(result["evidence"]) == 1
+    assert result["evidence"][0]["evidence_id"] == physical_evidence_id
+    assert result["evidence"][0]["locator"]["fragments"][0]["page_number"] == 3
+    assert result["evidence"][0]["retrieval"]["role"] == "ANSWER_CITATION"

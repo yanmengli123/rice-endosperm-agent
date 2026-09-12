@@ -9,6 +9,10 @@
 - 三种定位 selector（对齐 W3C Web Annotation 多 selector 思想）：
   精确原文（exact/prefix/suffix）、文本位置（word/char 偏移）、
   物理位置（page + bbox fragments, pdf_points）；
+- ``pdf_points`` 的约定：单位为 PDF 页面点（pt），**原点在页面左上、y 向下**
+  （MinerU 0..1000 网格与 PyMuPDF 的共同约定，``geometry.mineru_bbox_to_pdf_points``
+  仅按页宽高等比缩放、不翻转）。fragments 用 ``origin="top_left"`` 显式携带该
+  约定，渲染端据此换算到 pdf.js 视口，避免与 PDF user space（y 向上）混淆；
 - 组装后的证据必须通过 :mod:`validator` 的确定性验证；验证失败如实返回
   错误码，绝不生成近似位置。
 """
@@ -22,6 +26,9 @@ SCIENTIFIC_EVIDENCE_SCHEMA_VERSION = "yuxi.scientific-evidence.v1"
 
 # evidence_id 派生算法版本：v2 增加页码与物理矩形，消除同文重复句碰撞。
 EVIDENCE_ID_ALGO_VERSION = 2
+
+# fragments.bbox 的坐标原点：页面左上、y 向下（MinerU/PyMuPDF 约定）
+FRAGMENT_ORIGIN_TOP_LEFT = "top_left"
 
 # 确定性验证错误码（validator 产出，DTO 原样携带）
 VERIFICATION_OK = "OK"
@@ -105,6 +112,7 @@ def _normalize_fragments(fragments: Any) -> list[dict[str, Any]]:
                 "page_number": page_index + 1,
                 "bbox": bbox,
                 "coordinate_space": str(fragment.get("coordinate_space") or "pdf_points"),
+                "origin": FRAGMENT_ORIGIN_TOP_LEFT,
                 "rotation": int(fragment.get("rotation") or 0),
             }
         )
@@ -119,12 +127,15 @@ def build_evidence_dto(
     verification: dict[str, Any],
     retrieval: dict[str, Any] | None = None,
     semantic_location: dict[str, Any] | None = None,
+    span: Any = None,
 ) -> dict[str, Any]:
     """组装单条证据 DTO（验证结果由 validator 给出，此处只做归一化）。
 
     anchor/chunk 为 ORM 记录（EvidenceAnchorRecord / KnowledgeChunk）；
     prefix/suffix 尽力从载体 chunk 正文派生，无法对齐时置空并在验证结果中
-    体现 AMBIGUOUS_ALIGNMENT。
+    体现 AMBIGUOUS_ALIGNMENT。P2-10 起可传入匹配的 EvidenceSpanRecord，把
+    证据单元类型（sentence/caption/table_row/formula）、容器标签与行主键
+    并入 semantic_location。
     """
     quote_text = str(anchor.quote or "")
     word_start = int(anchor.word_start or 0)
@@ -149,6 +160,7 @@ def build_evidence_dto(
                 "page_number": fallback_page_number,
                 "bbox": normalized_bbox,
                 "coordinate_space": "pdf_points",
+                "origin": FRAGMENT_ORIGIN_TOP_LEFT,
                 "rotation": 0,
             }
         ]
@@ -181,12 +193,10 @@ def build_evidence_dto(
             "parse_revision_id": provenance.get("parse_revision_id") or getattr(anchor, "parse_revision_id", None),
             "index_revision_id": provenance.get("index_revision_id"),
             "anchor_id": getattr(anchor, "anchor_id", None),
+            "span_id": getattr(span, "span_id", None) if span is not None else None,
         },
         "semantic_location": semantic_location
-        or {
-            "evidence_type": str(getattr(anchor, "anchor_type", "") or "paragraph"),
-            "section_path": provenance.get("section_path") or [],
-        },
+        or _build_semantic_location(anchor=anchor, provenance=provenance, span=span),
         "quote": {
             "exact": quote_text,
             "prefix": prefix,
@@ -209,3 +219,20 @@ def build_evidence_dto(
     if retrieval:
         dto["retrieval"] = retrieval
     return dto
+
+
+def _build_semantic_location(*, anchor: Any, provenance: dict[str, Any], span: Any = None) -> dict[str, Any]:
+    """evidence_type 优先取 span 的细化类型；容器标签/行主键仅 span 有。"""
+    location: dict[str, Any] = {
+        "evidence_type": str(getattr(anchor, "anchor_type", "") or "paragraph"),
+        "document_partition": str(getattr(anchor, "document_partition", "") or "UNKNOWN"),
+        "partition_confidence": float(getattr(anchor, "partition_confidence", 0.0) or 0.0),
+        "section_path": provenance.get("section_path") or [],
+    }
+    if span is not None:
+        location["evidence_type"] = str(getattr(span, "evidence_type", "") or location["evidence_type"])
+        if getattr(span, "container_label", None):
+            location["container_label"] = span.container_label
+        if getattr(span, "row_key", None):
+            location["row_key"] = span.row_key
+    return location

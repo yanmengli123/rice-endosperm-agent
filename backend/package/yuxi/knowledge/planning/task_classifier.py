@@ -4,7 +4,7 @@ import re
 
 from yuxi.knowledge.research_evidence import extract_gene_identifiers
 
-TASK_CLASSIFIER_VERSION = "1.2"
+TASK_CLASSIFIER_VERSION = "1.3"
 
 _NUMERIC_PATTERN = re.compile(
     r"\d+(?:[.,]\d+)?\s*(?:[-–~至到]\s*\d+(?:[.,]\d+)?\s*)?"
@@ -18,6 +18,10 @@ _MULTI_HOP_PATTERN = re.compile(
     r"(?:与.{0,12}(?:的)?(?:关系|区别|比较|异同)|both .{0,24}and)",
     flags=re.IGNORECASE,
 )
+# VERBATIM 信号：引号包裹的原文片段 / 逐字引用意图（驱动 scope_gateway 的
+# VERBATIM 字面量通道；标识符样 token 不在此触发，避免扰动 ENTITY/CITATION 题型）
+_VERBATIM_QUOTED_PATTERN = re.compile(r"[“\"]([^“”\"]{3,120})[”\"]")
+_VERBATIM_INTENT_PATTERN = re.compile(r"(?:原文|原句|逐字|精确匹配|verbatim|exact\s+match)", flags=re.IGNORECASE)
 
 
 def classify_task(question: str) -> str:
@@ -62,6 +66,8 @@ def detect_question_types(question: str) -> list[str]:
         types.append("TABLE")
     if _CITATION_PATTERN.search(text):
         types.append("CITATION")
+    if _VERBATIM_QUOTED_PATTERN.search(text) or _VERBATIM_INTENT_PATTERN.search(text):
+        types.append("VERBATIM")
     distinct_entities = {*(identifiers or []), *(gene_like or [])}
     if _MULTI_HOP_PATTERN.search(text) or len(distinct_entities) >= 2:
         types.append("MULTI_HOP")

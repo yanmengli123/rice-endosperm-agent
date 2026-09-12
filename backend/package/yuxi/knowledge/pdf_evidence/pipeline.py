@@ -11,6 +11,7 @@ from typing import Any
 
 from yuxi.knowledge.chunking.ragflow_like.parsers.academic import ACADEMIC_CHUNKER_VERSION
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
+from yuxi.knowledge.evidence.document_partition import classify_anchor_partitions
 from yuxi.knowledge.pdf_evidence.aligner import ALIGNER_VERSION, align_texts_to_anchors
 from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact, PipelineResult, UnifiedArticle
 from yuxi.knowledge.pdf_evidence.grobid import GrobidClient
@@ -25,7 +26,7 @@ from yuxi.utils import logger
 
 # v1.1: 图片引用由 MinIO URL 改为 kbasset:// 逻辑 URI（鉴权 Asset API 渲染），
 # canonical Markdown 内容变化，重新解析需生成新 parse revision。
-PIPELINE_VERSION = "scientific_pdf_v2.8"
+PIPELINE_VERSION = "scientific_pdf_v2.9"
 QUALITY_PROFILE_VERSION = "pdf_evidence_v2"
 ANCHOR_MARKER = "<!-- yuxi-evidence-anchor:{anchor_id};page={page} -->"
 
@@ -271,7 +272,7 @@ class ScientificPdfPipeline:
         # PyMuPDF remains a medium-confidence fallback for old/parser-lite
         # output, never a reason to claim full highlight capability.
         canonical_anchors = mineru_anchors or native.anchors
-        anchor_dicts = [anchor.to_dict() for anchor in canonical_anchors]
+        anchor_dicts = classify_anchor_partitions([anchor.to_dict() for anchor in canonical_anchors])
         annotated_markdown, alignments = await asyncio.to_thread(
             annotate_markdown_with_anchors,
             markdown,

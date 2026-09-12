@@ -957,11 +957,28 @@ class MilvusGraphService:
             }
 
     async def _get_milvus_kb(self, kb_id: str):
+        """LLM 自动图谱构建的知识库门禁。
+
+        managed_graph 契约禁止普通 LLM graph-build（设计第七节：规范图谱
+        与自动抽取图必须隔离）；pdf_evidence / csv_* 严格契约同样拒绝；
+        legacy 契约保留旧行为。
+        """
         kb = await self.kb_repo.get_by_kb_id(kb_id)
         if kb is None:
             raise ValueError(f"知识库 {kb_id} 不存在")
         if (kb.kb_type or "").lower() != "milvus":
             raise ValueError("仅 Milvus 知识库支持独立图谱构建")
+        from yuxi.knowledge.source_contracts import SourceContractError, load_kb_contract
+
+        try:
+            spec = await load_kb_contract(kb_id)
+        except SourceContractError as exc:
+            raise ValueError(f"[{exc.error_code}] {exc}") from exc
+        if spec.contract_key not in ("legacy_generic", "legacy_mixed"):
+            raise ValueError(
+                f"知识源契约 {spec.contract_ref} 不接受 LLM 自动图谱构建；"
+                "规范图谱请使用托管 CSV 导入，自动抽图能力即将以独立投影形式提供"
+            )
         return kb
 
     def _get_locked_config(self, additional_params: dict[str, Any]) -> dict[str, Any]:

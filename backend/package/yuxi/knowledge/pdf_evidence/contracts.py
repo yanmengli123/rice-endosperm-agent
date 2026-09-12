@@ -56,6 +56,8 @@ class EvidenceAnchor:
     confidence: float = 1.0
     locatable: bool = True
     source: str = "pymupdf"
+    document_partition: str = "UNKNOWN"
+    partition_confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
