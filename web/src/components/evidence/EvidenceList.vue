@@ -78,7 +78,8 @@ const statusLabel = (item) => {
 const pageNumber = (item) => item.locator?.fragments?.[0]?.page_number ?? item.locator?.page ?? '?'
 
 const quoteText = (item) => {
-  const quote = item.quote?.exact || ''
+  // 有句子级精化时优先展示回应问题的那一句，而不是段落开头
+  const quote = item.locator?.highlight?.quote || item.quote?.exact || ''
   return quote.length > 160 ? `${quote.slice(0, 160)}…` : quote || '（无可引用原文）'
 }
 
@@ -92,6 +93,7 @@ const canOpenSource = (item) =>
 
 const metaLine = (item) => {
   const parts = ['检索候选，尚未绑定回答 Claim']
+  if (item.locator?.highlight?.quote) parts.push('已定位回应句')
   if (item.source?.parse_revision_id) parts.push('解析版本已绑定')
   if (item.quote?.prefix !== undefined && item.quote?.start_char !== null)
     parts.push('文本位置已对齐')

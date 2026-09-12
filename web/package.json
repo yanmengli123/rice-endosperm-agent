@@ -24,6 +24,7 @@
     "d3": "^7.9.0",
     "dayjs": "^1.11.20",
     "dompurify": "^3.4.13",
+    "pdfjs-dist": "4.10.38",
     "echarts": "^6.0.0",
     "graphology": "^0.26.0",
     "graphology-generators": "^0.11.2",

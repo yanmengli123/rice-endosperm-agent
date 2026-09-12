@@ -1281,6 +1281,14 @@ defineExpose({
   focus: () => inputRef.value?.focus(),
   closeOptions: () => {
     optionsExpanded.value = false
+  },
+  // 在草稿开头插入一段文本（如划词追问的引用块），光标落在插入文本之后
+  prependText: (text) => {
+    const value = String(text || '')
+    if (!value) return
+    const current = getEditorRawValue()
+    const nextValue = current ? `${value}\n\n${current}` : value
+    updateRawValue(nextValue, value.length + (current ? 2 : 0))
   }
 })
 </script>

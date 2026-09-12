@@ -267,6 +267,12 @@ export function useAgentStreamHandler({
         }
         return false
 
+      case 'citation_ready':
+        // Binding is already final and server-verified. Keep the structured
+        // fact for diagnostics/UI consumers; never re-resolve it in-browser.
+        threadState.verifiedCitation = chunk.citation || null
+        return false
+
       case 'finished':
         streamSmoother?.flushThread(threadId)
         // 先标记流式结束，但保持消息显示直到历史记录加载完成

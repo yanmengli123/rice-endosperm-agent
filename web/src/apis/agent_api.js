@@ -139,6 +139,10 @@ export const agentApi = {
   /** 获取 Run 的科研检索证据候选 DTO（尚未等同于答案 Claim 引用）。 */
   getAgentRunEvidence: (runId) => apiGet(`/api/agent/runs/${runId}/evidence`),
 
+  /** 原文查看审计：记录谁在何时查看了哪条证据的原文。 */
+  recordEvidenceSourceView: (runId, evidenceId) =>
+    apiPost(`/api/agent/runs/${runId}/evidence/${evidenceId}/view`, {}),
+
   /** 独立 Trace SSE；Last-Event-ID 是 PostgreSQL ledger sequence。 */
   streamAgentRunTrace: (runId, afterSequence = 0, options = {}) => {
     const { signal } = options

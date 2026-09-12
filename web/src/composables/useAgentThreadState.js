@@ -39,7 +39,8 @@ export function useAgentThreadState({
         evidence: [],
         evidenceSummary: null,
         evidenceRetrievals: [],
-        evidenceIssues: []
+        evidenceIssues: [],
+        verifiedCitation: null
       }
     }
     return chatState.threadStates[threadId]

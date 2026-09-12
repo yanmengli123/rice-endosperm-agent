@@ -55,173 +55,253 @@
       destroyOnClose
     >
       <div class="new-database-form">
-        <!-- 按文件格式快速创建（可选模板）：权威知识源专用 -->
-        <div class="form-section">
-          <h3 class="section-title">
-            权威知识源模板<span class="template-optional-mark">（选填，自动配置分块与解析）</span>
-          </h3>
+        <a-steps :current="state.wizardStep - 1" size="small" class="wizard-steps">
+          <a-step title="选择知识源" />
+          <a-step title="业务信息" />
+          <a-step title="数据处理策略" />
+          <a-step title="确认创建" />
+        </a-steps>
+
+        <!-- Step 1：选择知识源（必选，不允许空模板） -->
+        <div v-if="state.wizardStep === 1" class="form-section">
+          <h3 class="section-title">知识源契约<span class="required-mark">*</span></h3>
           <a-alert
             class="derived-product-hint"
             type="info"
             show-icon
-            message="以上均为权威知识源（可建立事实权威）。派生知识产品（动态 LLM-Wiki）只增强导航与召回，将使用独立向导创建，不会出现在这里。"
+            message="知识源契约决定知识库接受什么数据、如何处理以及权威边界在哪里；创建后不可更改。动态 LLM-Wiki 是派生知识产品，使用独立入口创建。"
           />
           <div class="format-template-cards">
             <div
-              v-for="template in formatTemplates"
-              :key="template.key"
+              v-for="parent in contractParents"
+              :key="parent.key"
               class="format-template-card"
-              :class="{ active: state.formatTemplate === template.key }"
-              @click="applyFormatTemplate(template.key)"
+              :class="{ active: isContractParentActive(parent.key) }"
+              @click="selectContractParent(parent.key)"
             >
               <div class="card-header">
-                <span class="type-title">{{ template.label }}</span>
+                <span class="type-title">{{ parent.label }}</span>
               </div>
-              <div class="card-description">{{ template.description }}</div>
+              <div class="card-description">{{ contractParentDescription(parent) }}</div>
               <div
-                v-if="state.formatTemplate === template.key && template.key === 'csv_dataset'"
+                v-if="isContractParentActive(parent.key) && parent.key === 'csv'"
                 class="template-sub-option"
                 @click.stop
               >
                 <a-radio-group
-                  :value="state.formatCsvMode"
+                  :value="state.selectedContractKey"
                   size="small"
-                  @change="handleFormatCsvModeChange"
+                  @change="handleCsvContractChange"
                 >
-                  <a-radio-button value="record">记录型（一行一块）</a-radio-button>
-                  <a-radio-button value="qa">问答型（Q/A 两列）</a-radio-button>
+                  <a-radio-button value="csv_record">结构化记录</a-radio-button>
+                  <a-radio-button value="csv_qa">标准问答</a-radio-button>
                 </a-radio-group>
               </div>
             </div>
           </div>
-        </div>
-
-        <!-- 知识库类型选择 -->
-        <div class="form-section">
-          <h3 class="section-title">知识库类型<span class="required-mark">*</span></h3>
-          <div class="kb-type-cards">
-            <div
-              v-for="(typeInfo, typeKey) in orderedKbTypes"
-              :key="typeKey"
-              class="kb-type-card"
-              :class="{ active: newDatabase.kb_type === typeKey }"
-              :data-type="typeKey"
-              @click="handleKbTypeChange(typeKey)"
-            >
-              <div class="card-header">
-                <component :is="getKbTypeIcon(typeKey)" class="type-icon" />
-                <span class="type-title">{{ getKbTypeLabel(typeKey) }}</span>
+          <a-collapse v-if="advancedKbTypes.length" class="advanced-kb-collapse">
+            <a-collapse-panel key="advanced" header="高级：连接外部知识源（无严格契约，兼容模式）">
+              <div class="kb-type-cards">
+                <div
+                  v-for="typeKey in advancedKbTypes"
+                  :key="typeKey"
+                  class="kb-type-card"
+                  :class="{ active: !state.selectedContractKey && newDatabase.kb_type === typeKey }"
+                  @click="selectAdvancedKbType(typeKey)"
+                >
+                  <div class="card-header">
+                    <component :is="getKbTypeIcon(typeKey)" class="type-icon" />
+                    <span class="type-title">{{ getKbTypeLabel(typeKey) }}</span>
+                  </div>
+                  <div class="card-description">
+                    {{ getKbTypeDescription(supportedKbTypes[typeKey]) }}
+                  </div>
+                </div>
               </div>
-              <div class="card-description">{{ getKbTypeDescription(typeInfo) }}</div>
+            </a-collapse-panel>
+          </a-collapse>
+        </div>
+
+        <!-- Step 2：业务信息 -->
+        <div v-else-if="state.wizardStep === 2">
+          <div class="form-section">
+            <h3 class="section-title">知识库名称<span class="required-mark">*</span></h3>
+            <a-input v-model:value="newDatabase.name" :placeholder="nameSuggestion" />
+            <p class="field-hint">建议格式：研究领域｜知识库定位（如「{{ nameSuggestion }}」）</p>
+          </div>
+
+          <div class="form-grid two-columns">
+            <div class="form-section compact-section">
+              <h3 class="section-title">内容领域</h3>
+              <a-input v-model:value="newDatabase.content_domain" placeholder="如：水稻胚乳发育" />
+            </div>
+            <div v-if="requiresEmbeddingModel" class="form-section compact-section">
+              <h3 class="section-title">嵌入模型</h3>
+              <EmbeddingModelSelector
+                v-model:value="newDatabase.embedding_model_spec"
+                class="full-width"
+                placeholder="请选择嵌入模型"
+              />
             </div>
           </div>
-        </div>
 
-        <div class="form-section">
-          <h3 class="section-title">知识库名称<span class="required-mark">*</span></h3>
-          <a-input v-model:value="newDatabase.name" placeholder="新建知识库名称" />
-        </div>
-
-        <div v-if="selectedKbTypeInfo?.requires_embedding_model" class="form-grid two-columns">
-          <div class="form-section compact-section">
-            <h3 class="section-title">嵌入模型</h3>
-            <EmbeddingModelSelector
-              v-model:value="newDatabase.embedding_model_spec"
-              class="full-width"
-              placeholder="请选择嵌入模型"
+          <div class="form-section">
+            <h3 class="section-title">用途说明</h3>
+            <p class="field-hint description-hint">面向人阅读：说明这个知识库供谁查询什么内容。</p>
+            <AiTextarea
+              v-model="newDatabase.description"
+              :name="newDatabase.name"
+              placeholder="如：供课题组查询论文实验结论和出处"
+              :auto-size="{ minRows: 2, maxRows: 6 }"
             />
           </div>
 
-          <div class="form-section compact-section">
-            <div class="chunk-preset-title-row">
-              <h3 class="section-title">分块策略</h3>
-              <a-tooltip :title="selectedPresetDescription">
-                <QuestionCircleOutlined class="chunk-preset-help-icon" />
-              </a-tooltip>
-            </div>
-            <a-select
-              v-model:value="newDatabase.chunk_preset_id"
-              :options="chunkPresetOptions"
-              :loading="chunkPresetLoading"
-              class="full-width"
+          <div class="form-section">
+            <h3 class="section-title">Agent 工具说明</h3>
+            <p class="field-hint description-hint">
+              面向智能体：智能体根据这段说明决定何时调用该知识库。留空时后端沿用用途说明。
+            </p>
+            <a-textarea
+              v-model:value="newDatabase.tool_description"
+              placeholder="如：用于检索水稻胚乳发育相关论文的实验结论、数值与出处"
+              :auto-size="{ minRows: 2, maxRows: 6 }"
             />
           </div>
-        </div>
 
-        <div v-if="createParamOptions.length" class="form-grid three-columns">
           <div
-            v-for="field in createParamOptions"
-            :key="field.key"
-            class="form-section compact-section"
+            v-if="createParamOptions.length && !state.selectedContractKey"
+            class="form-grid three-columns"
           >
-            <h3 class="section-title">
-              {{ field.label || field.key
-              }}<span v-if="field.required" class="required-mark">*</span>
-            </h3>
-            <a-input-password
-              v-if="field.type === 'password'"
-              v-model:value="newDatabase.additional_params[field.key]"
-              :placeholder="field.placeholder"
+            <div
+              v-for="field in createParamOptions"
+              :key="field.key"
+              class="form-section compact-section"
+            >
+              <h3 class="section-title">
+                {{ field.label || field.key
+                }}<span v-if="field.required" class="required-mark">*</span>
+              </h3>
+              <a-input-password
+                v-if="field.type === 'password'"
+                v-model:value="newDatabase.additional_params[field.key]"
+                :placeholder="field.placeholder"
+              />
+              <a-input-number
+                v-else-if="field.type === 'number'"
+                v-model:value="newDatabase.additional_params[field.key]"
+                :min="field.min"
+                :max="field.max"
+                :step="field.step"
+                class="full-width"
+              />
+              <a-switch
+                v-else-if="field.type === 'boolean'"
+                v-model:checked="newDatabase.additional_params[field.key]"
+              />
+              <a-select
+                v-else-if="field.type === 'select'"
+                v-model:value="newDatabase.additional_params[field.key]"
+                :options="field.options || []"
+                class="full-width"
+              />
+              <a-input
+                v-else
+                v-model:value="newDatabase.additional_params[field.key]"
+                :placeholder="field.placeholder"
+              />
+              <p v-if="field.description" class="field-hint">{{ field.description }}</p>
+            </div>
+          </div>
+
+          <div class="form-section compact-section">
+            <h3 class="section-title">共享设置</h3>
+            <p class="field-hint description-hint">
+              默认私有（仅创建者可见）；团队/部门/全局共享需在此显式选择。
+            </p>
+            <ShareConfigForm
+              ref="shareConfigFormRef"
+              v-model="shareConfig"
+              :auto-select-user-dept="true"
             />
-            <a-input-number
-              v-else-if="field.type === 'number'"
-              v-model:value="newDatabase.additional_params[field.key]"
-              :min="field.min"
-              :max="field.max"
-              :step="field.step"
-              class="full-width"
-            />
-            <a-switch
-              v-else-if="field.type === 'boolean'"
-              v-model:checked="newDatabase.additional_params[field.key]"
-            />
-            <a-select
-              v-else-if="field.type === 'select'"
-              v-model:value="newDatabase.additional_params[field.key]"
-              :options="field.options || []"
-              class="full-width"
-            />
-            <a-input
-              v-else
-              v-model:value="newDatabase.additional_params[field.key]"
-              :placeholder="field.placeholder"
-            />
-            <p v-if="field.description" class="field-hint">{{ field.description }}</p>
           </div>
         </div>
 
-        <div class="form-section">
-          <h3 class="section-title">知识库描述</h3>
-          <p class="field-hint description-hint">
-            在智能体流程中，这里的描述会作为工具的描述。智能体会根据知识库的标题和描述来选择合适的工具。所以这里描述的越详细，智能体越容易选择到合适的工具。
-          </p>
-          <AiTextarea
-            v-model="newDatabase.description"
-            :name="newDatabase.name"
-            placeholder="新建知识库描述"
-            :auto-size="{ minRows: 3, maxRows: 10 }"
+        <!-- Step 3：数据处理、权威与检索策略（只读） -->
+        <div v-else-if="state.wizardStep === 3" class="form-section">
+          <h3 class="section-title">数据处理、权威与检索策略</h3>
+          <a-alert
+            type="info"
+            show-icon
+            message="以下策略由知识源契约决定并由系统托管，创建后由后端强制执行，不可在知识库级别修改。"
           />
+          <div v-if="selectedContract" class="policy-panel">
+            <div
+              class="policy-row"
+              v-for="(text, key) in selectedContract.processing_policy"
+              :key="key"
+            >
+              <span class="policy-key">{{ policyKeyLabel(key) }}</span>
+              <span class="policy-value">{{ text }}</span>
+            </div>
+          </div>
+          <div v-else class="policy-panel">
+            <p class="field-hint">
+              外部知识源（{{
+                getKbTypeLabel(newDatabase.kb_type)
+              }}）不做本地解析与索引，数据留在远端系统。
+            </p>
+          </div>
         </div>
 
-        <!-- 共享配置 -->
-        <div class="form-section compact-section">
-          <h3 class="section-title">共享设置</h3>
-          <ShareConfigForm
-            ref="shareConfigFormRef"
-            v-model="shareConfig"
-            :auto-select-user-dept="true"
+        <!-- Step 4：创建确认（Contract Preview） -->
+        <div v-else class="form-section">
+          <h3 class="section-title">确认创建</h3>
+          <a-descriptions bordered :column="1" size="small" class="contract-preview">
+            <a-descriptions-item label="知识源契约">
+              <template v-if="selectedContract">
+                {{
+                  selectedContract.contract_ref || `${state.selectedContractKey}@${contractVersion}`
+                }}
+                <span v-if="selectedContract.digest" class="contract-digest"
+                  >{{ selectedContract.digest.slice(0, 19) }}…</span
+                >
+              </template>
+              <template v-else>legacy 兼容（{{ getKbTypeLabel(newDatabase.kb_type) }}）</template>
+            </a-descriptions-item>
+            <a-descriptions-item label="名称">{{ newDatabase.name || '—' }}</a-descriptions-item>
+            <a-descriptions-item v-if="newDatabase.content_domain" label="内容领域">
+              {{ newDatabase.content_domain }}
+            </a-descriptions-item>
+            <a-descriptions-item v-if="selectedContract?.authority_policy" label="权威来源">
+              {{ authoritySummary }}
+            </a-descriptions-item>
+            <a-descriptions-item v-if="selectedContract?.accepted_media?.length" label="允许的数据">
+              {{ acceptedMediaSummary }}
+            </a-descriptions-item>
+            <a-descriptions-item label="权限范围">{{ shareSummary }}</a-descriptions-item>
+            <a-descriptions-item label="创建后的下一步">{{ nextStepHint }}</a-descriptions-item>
+          </a-descriptions>
+          <a-alert
+            class="derived-product-hint"
+            type="warning"
+            show-icon
+            message="点击创建后仅生成 DRAFT 知识库（不含数据）；随后在知识库详情页完成数据导入、校验与发布。"
           />
         </div>
       </div>
       <template #footer>
         <a-button key="back" @click="cancelCreateDatabase">取消</a-button>
+        <a-button v-if="state.wizardStep > 1" @click="state.wizardStep -= 1">上一步</a-button>
+        <a-button v-if="state.wizardStep < 4" key="next" type="primary" @click="goNextStep"
+          >下一步</a-button
+        >
         <a-button
+          v-else
           key="submit"
           type="primary"
           :loading="dbState.creating"
-          :disabled="!selectedKbTypeInfo"
           @click="handleCreateDatabase"
-          >创建</a-button
+          >创建知识库</a-button
         >
       </template>
     </a-modal>
@@ -501,7 +581,6 @@ import { useRouter, useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
-import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import {
   BookOpenCheck,
   Compass,
@@ -515,7 +594,13 @@ import {
   Trash2
 } from '@lucide/vue'
 import { message, Modal } from 'ant-design-vue'
-import { databaseApi, knowledgeScopeApi, typeApi, wikiApi } from '@/apis/knowledge_api'
+import {
+  databaseApi,
+  knowledgeScopeApi,
+  sourceContractApi,
+  typeApi,
+  wikiApi
+} from '@/apis/knowledge_api'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
@@ -525,21 +610,12 @@ import ExtensionCardGrid from '@/components/extensions/ExtensionCardGrid.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 import dayjs, { parseToShanghai } from '@/utils/time'
 import AiTextarea from '@/components/AiTextarea.vue'
-import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
 import { getKbTypeLabel, getKbTypeIcon, getKbTypeColor, kbUtils } from '@/utils/kb_utils'
-import { DEFAULT_CHUNK_PRESET_ID } from '@/utils/chunkUtils'
 
 const route = useRoute()
 const router = useRouter()
 const configStore = useConfigStore()
 const databaseStore = useDatabaseStore()
-const {
-  chunkPresetSelectOptions: chunkPresetOptions,
-  chunkPresetLoading,
-  loadChunkPresetOptions,
-  getChunkPresetDescription
-} = useChunkPresetOptions()
-
 const props = defineProps({
   embedded: { type: Boolean, default: false }
 })
@@ -749,8 +825,10 @@ const saveScopeMember = async () => {
 
 const state = reactive({
   openNewDatabaseModel: false,
-  formatTemplate: '',
-  formatCsvMode: 'record'
+  wizardStep: 1,
+  selectedContractKey: '',
+  sourceContracts: [],
+  contractsLoading: false
 })
 
 const openWikiCreateModal = () => {
@@ -793,78 +871,179 @@ const handleCreateWiki = async () => {
   }
 }
 
-// 按文件格式快速创建模板：只做表单预填与创建后引导，kb_type 恒为 milvus
-const FORMAT_TEMPLATES = [
+// 知识源契约选型卡：三张主卡；CSV 卡内 radio 切换 csv_record / csv_qa 两个契约
+const CONTRACT_PARENTS = [
   {
-    key: 'pdf_literature',
-    label: '📄 PDF 文献证据库',
-    description:
-      '全自动科研证据链：PyMuPDF 原生锚点 + MinerU 正文/版面 + 条件式 GROBID 题录与引用；质量门禁、学术分块、混合检索和版本化索引均自动完成。',
-    nameSuffix: '文献证据库',
-    apply: {
-      chunk_preset_id: 'academic',
-      chunk_parser_config: {
-        chunk_token_num: 600,
-        hard_token_limit: 900,
-        overlap_token_num: 64,
-        include_references: false
-      },
-      format_template: 'pdf_literature',
-      pdf_evidence_pipeline: true,
-      grobid_enabled: true
-    }
+    key: 'pdf_evidence',
+    label: '📄 PDF 科研文献证据库',
+    fallbackDescription:
+      '权威原件为对象存储中的 PDF；规范解析落在 PostgreSQL（证据锚点/题录/能力报告），Milvus 仅作检索投影。上传、解析、学术分块与混合检索全部由系统托管。',
+    nameHint: '水稻胚乳发育｜文献证据库',
+    nextStep: '上传 PDF → 系统解析与能力报告 → 预览发布'
   },
   {
-    key: 'csv_dataset',
+    key: 'csv',
     label: '📊 CSV 结构化数据集',
-    description:
-      '一行一条记录独立成块，保留行级来源；问答型 CSV（question,answer 两列）自动抽取问答对。',
-    nameSuffix: '结构化数据集',
-    apply: {
-      chunk_preset_id: 'separator',
-      chunk_parser_config: { chunk_token_num: 384, delimiter: '\n\n', overlapped_percent: 0 },
-      format_template: 'csv_dataset'
-    }
+    fallbackDescription:
+      '结构化记录：一行一条记录独立成块，保留行级来源；标准问答：question/answer 两列必须显式确认映射，空问答行不进入有效集。',
+    nameHint: '水稻胚乳发育｜结构化数据集',
+    nextStep: '上传 CSV → Schema/列映射预检 → Canonical Commit → 建索引'
   },
   {
-    key: 'graph_csv',
-    label: '🕸 科研知识图谱',
-    description:
-      '节点 CSV + 关系 CSV + 审计 cypher；PostgreSQL 规范源、Neo4j/Milvus 双投影，创建后前往图谱页执行导入。',
-    nameSuffix: '科研知识图谱',
-    apply: { format_template: 'graph_csv' }
+    key: 'managed_graph',
+    label: '🕸 规范科研知识图谱',
+    fallbackDescription:
+      '节点 CSV + 关系 CSV；PostgreSQL 为规范事实源，Neo4j/Milvus 仅作遍历与语义投影。禁止普通文档上传与 LLM 自动抽图。',
+    nameHint: '水稻胚乳发育｜科研知识图谱',
+    nextStep: '导入节点 CSV 与关系 CSV → 完整性验证 → 双投影 → 发布'
   }
 ]
 
-const getFormatTemplate = (key) => FORMAT_TEMPLATES.find((item) => item.key === key) || null
+const contractParents = CONTRACT_PARENTS
 
-const applyFormatTemplate = (key) => {
-  if (state.formatTemplate === key) {
-    state.formatTemplate = ''
-    state.formatCsvMode = 'record'
+const contractByKey = (key) =>
+  state.sourceContracts.find((contract) => contract.contract_key === key) || null
+
+const selectedContract = computed(() => contractByKey(state.selectedContractKey))
+
+const contractVersion = computed(() => selectedContract.value?.version || '1.0.0')
+
+const contractParentDescription = (parent) => {
+  if (parent.key === 'csv') {
+    const record = contractByKey('csv_record')
+    const qa = contractByKey('csv_qa')
+    if (record?.display?.card_description || qa?.display?.card_description) {
+      return state.selectedContractKey === 'csv_qa'
+        ? qa.display.card_description
+        : record.display.card_description
+    }
+    return parent.fallbackDescription
+  }
+  return contractByKey(parent.key)?.display?.card_description || parent.fallbackDescription
+}
+
+const isContractParentActive = (parentKey) => {
+  if (parentKey === 'csv') {
+    return state.selectedContractKey === 'csv_record' || state.selectedContractKey === 'csv_qa'
+  }
+  return state.selectedContractKey === parentKey
+}
+
+const selectContractParent = (parentKey) => {
+  if (isContractParentActive(parentKey)) return
+  state.selectedContractKey = parentKey === 'csv' ? 'csv_record' : parentKey
+  newDatabase.kb_type = 'milvus'
+}
+
+const handleCsvContractChange = (event) => {
+  state.selectedContractKey = event.target.value
+  newDatabase.kb_type = 'milvus'
+}
+
+const selectAdvancedKbType = (typeKey) => {
+  state.selectedContractKey = ''
+  newDatabase.kb_type = typeKey
+  resetCreateParamValues()
+}
+
+const nameSuggestion = computed(() => {
+  if (state.selectedContractKey === 'csv_record' || state.selectedContractKey === 'csv_qa') {
+    return CONTRACT_PARENTS[1].nameHint
+  }
+  const parent = CONTRACT_PARENTS.find((item) => item.key === state.selectedContractKey)
+  return parent?.nameHint || '新建知识库名称'
+})
+
+const requiresEmbeddingModel = computed(() =>
+  Boolean(selectedKbTypeInfo.value?.requires_embedding_model)
+)
+
+const policyKeyLabel = (key) => {
+  const labels = {
+    chunking: '分块策略',
+    parsing: '解析',
+    retrieval: '检索',
+    quality_gate: '质量门禁',
+    ingest: '数据接入',
+    identity: '记录识别',
+    strict_validation: '严格校验',
+    rollback: '回滚'
+  }
+  return labels[key] || key
+}
+
+const authoritySummary = computed(() => {
+  const policy = selectedContract.value?.authority_policy || {}
+  return Object.values(policy)
+    .filter(Boolean)
+    .map((value) => String(value).replace(/_/g, ' '))
+    .join('；')
+})
+
+const acceptedMediaSummary = computed(() => {
+  const media = selectedContract.value?.accepted_media || []
+  return media.map((rule) => `${rule.role}：${(rule.extensions || []).join(' / ')}`).join('；')
+})
+
+const shareSummary = computed(() => {
+  const labels = {
+    global: '全局共享（租户内）',
+    department: '部门共享',
+    user: '私有（仅指定成员）'
+  }
+  return labels[shareConfig.value.access_level] || shareConfig.value.access_level
+})
+
+const nextStepHint = computed(() => {
+  if (!state.selectedContractKey) return '在远端系统中管理数据，本平台仅代理检索'
+  if (state.selectedContractKey === 'managed_graph') return CONTRACT_PARENTS[2].nextStep
+  if (state.selectedContractKey.startsWith('csv_')) return CONTRACT_PARENTS[1].nextStep
+  return CONTRACT_PARENTS[0].nextStep
+})
+
+const loadSourceContracts = async () => {
+  state.contractsLoading = true
+  try {
+    const data = await sourceContractApi.getContracts()
+    state.sourceContracts = data.contracts || []
+  } catch (error) {
+    console.error('加载知识源契约失败:', error)
+    state.sourceContracts = []
+  } finally {
+    state.contractsLoading = false
+  }
+}
+
+const goNextStep = () => {
+  if (state.wizardStep === 1) {
+    if (!state.selectedContractKey && !newDatabase.kb_type) {
+      message.warning('请选择一个知识源契约（或展开高级区域连接外部知识源）')
+      return
+    }
+    state.wizardStep = 2
     return
   }
-  const template = getFormatTemplate(key)
-  if (!template) return
-  state.formatTemplate = key
-  state.formatCsvMode = 'record'
-  newDatabase.kb_type = 'milvus'
-  newDatabase.chunk_preset_id = template.apply.chunk_preset_id || DEFAULT_CHUNK_PRESET_ID
-  if (!newDatabase.name.trim()) {
-    newDatabase.name = template.nameSuffix
+  if (state.wizardStep === 2) {
+    if (!newDatabase.name.trim()) {
+      message.warning('请输入知识库名称')
+      return
+    }
+    if (requiresEmbeddingModel.value && !newDatabase.embedding_model_spec) {
+      message.warning('请选择嵌入模型')
+      return
+    }
+    state.wizardStep = 3
+    return
   }
-  if (!newDatabase.description.trim()) {
-    newDatabase.description = `${template.label.replace(/^\S+\s/, '')}：${template.description}`
+  if (state.wizardStep === 3) {
+    state.wizardStep = 4
   }
 }
 
-const handleFormatCsvModeChange = () => {
-  if (state.formatTemplate !== 'csv_dataset') return
-  newDatabase.chunk_preset_id = state.formatCsvMode === 'qa' ? 'qa' : 'separator'
-}
-
+// 权限默认值：Private（仅创建者可见）；团队/部门/全局共享必须显式选择。
+// 此前默认 global 且总是发送，导致绕过后端更安全的默认值——已修复。
 const createDefaultShareConfig = () => ({
-  access_level: 'global',
+  access_level: 'user',
   department_ids: [],
   user_uids: []
 })
@@ -872,29 +1051,26 @@ const createDefaultShareConfig = () => ({
 const shareConfig = ref(createDefaultShareConfig())
 const shareConfigFormRef = ref(null)
 
-const formatTemplates = FORMAT_TEMPLATES
-
 const createEmptyDatabaseForm = () => ({
   name: '',
   description: '',
+  content_domain: '',
+  tool_description: '',
   embedding_model_spec: configStore.config?.embed_model,
   kb_type: '',
   storage: '',
-  chunk_preset_id: DEFAULT_CHUNK_PRESET_ID,
   additional_params: {}
 })
 
 const newDatabase = reactive(createEmptyDatabaseForm())
 
-const selectedPresetDescription = computed(() =>
-  getChunkPresetDescription(newDatabase.chunk_preset_id)
-)
-
 // 支持的知识库类型
 const supportedKbTypes = ref({})
 
-// 有序的知识库类型
-const orderedKbTypes = computed(() => supportedKbTypes.value)
+// 高级区：外部知识源类型（milvus 只能通过知识源契约进入）
+const advancedKbTypes = computed(() =>
+  Object.keys(supportedKbTypes.value).filter((type) => type !== 'milvus')
+)
 
 const selectedKbTypeInfo = computed(() => supportedKbTypes.value[newDatabase.kb_type] || null)
 
@@ -920,12 +1096,10 @@ const loadSupportedKbTypes = async () => {
   try {
     const data = await typeApi.getKnowledgeBaseTypes()
     supportedKbTypes.value = data.kb_types || {}
-    newDatabase.kb_type = kbTypes.value[0] || ''
     resetCreateParamValues()
   } catch (error) {
     console.error('加载知识库类型失败:', error)
     supportedKbTypes.value = {}
-    newDatabase.kb_type = ''
     resetCreateParamValues()
     message.error('加载知识库类型失败，请稍后重试')
   }
@@ -933,10 +1107,10 @@ const loadSupportedKbTypes = async () => {
 
 const resetNewDatabase = () => {
   Object.assign(newDatabase, createEmptyDatabaseForm())
-  newDatabase.kb_type = kbTypes.value[0] || ''
+  newDatabase.kb_type = ''
+  state.wizardStep = 1
+  state.selectedContractKey = ''
   resetCreateParamValues()
-  state.formatTemplate = ''
-  state.formatCsvMode = 'record'
   shareConfig.value = createDefaultShareConfig()
 }
 
@@ -977,14 +1151,7 @@ const formatCreatedTime = (createdAt) => {
 }
 
 // 处理知识库类型改变
-const handleKbTypeChange = (type) => {
-  console.log('知识库类型改变:', type)
-  resetNewDatabase()
-  newDatabase.kb_type = type
-  resetCreateParamValues()
-}
-
-// 构建请求数据（只负责表单数据转换）
+// 构建请求数据：契约路径携带 source_contract；高级路径走 legacy 兼容
 const buildRequestData = () => {
   const requestData = {
     database_name: newDatabase.name.trim(),
@@ -993,11 +1160,9 @@ const buildRequestData = () => {
     additional_params: {}
   }
 
-  if (selectedKbTypeInfo.value?.requires_embedding_model) {
+  if (requiresEmbeddingModel.value) {
     requestData.embedding_model_spec =
       newDatabase.embedding_model_spec || configStore.config.embed_model
-    requestData.additional_params.chunk_preset_id =
-      newDatabase.chunk_preset_id || DEFAULT_CHUNK_PRESET_ID
   }
 
   requestData.share_config = {
@@ -1007,35 +1172,21 @@ const buildRequestData = () => {
     user_uids: shareConfig.value.access_level === 'user' ? shareConfig.value.user_uids || [] : []
   }
 
-  // 根据类型添加特定配置
-  if (['milvus'].includes(newDatabase.kb_type)) {
-    if (newDatabase.storage) {
-      requestData.additional_params.storage = newDatabase.storage
+  if (state.selectedContractKey) {
+    // 契约路径：分块/解析/检索参数由系统托管，前端不传处理参数
+    requestData.source_contract = {
+      key: state.selectedContractKey,
+      version: contractVersion.value
     }
+    requestData.content_domain = newDatabase.content_domain?.trim() || ''
+    requestData.tool_description = newDatabase.tool_description?.trim() || ''
+    return requestData
   }
 
-  // 按格式模板合并分块参数与模板标记
-  const template = getFormatTemplate(state.formatTemplate)
-  if (template && newDatabase.kb_type === 'milvus') {
-    requestData.additional_params.format_template = template.apply.format_template
-    if (template.apply.pdf_evidence_pipeline) {
-      requestData.additional_params.pdf_evidence_pipeline = true
-      requestData.additional_params.grobid_enabled = template.apply.grobid_enabled !== false
-    }
-    if (template.key === 'csv_dataset') {
-      requestData.additional_params.chunk_preset_id =
-        state.formatCsvMode === 'qa' ? 'qa' : 'separator'
-      requestData.additional_params.chunk_parser_config = {
-        ...(template.apply.chunk_parser_config || {}),
-        ...(state.formatCsvMode === 'qa'
-          ? { chunk_token_num: 512, delimiter: '\n', overlapped_percent: 0 }
-          : {})
-      }
-    } else if (template.apply.chunk_parser_config) {
-      requestData.additional_params.chunk_parser_config = { ...template.apply.chunk_parser_config }
-    }
+  // 高级路径：外部知识源类型自己的动态参数
+  if (['milvus'].includes(newDatabase.kb_type) && newDatabase.storage) {
+    requestData.additional_params.storage = newDatabase.storage
   }
-
   for (const field of createParamOptions.value) {
     const value = newDatabase.additional_params[field.key]
     requestData.additional_params[field.key] = typeof value === 'string' ? value.trim() : value
@@ -1046,20 +1197,6 @@ const buildRequestData = () => {
 
 // 创建按钮处理
 const handleCreateDatabase = async () => {
-  if (!selectedKbTypeInfo.value) {
-    message.error('知识库类型加载失败，无法创建知识库')
-    return
-  }
-
-  for (const field of createParamOptions.value) {
-    if (!field.required) continue
-    const value = newDatabase.additional_params[field.key]
-    if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
-      message.error(`请填写${field.label || field.key}`)
-      return
-    }
-  }
-
   if (shareConfigFormRef.value) {
     const validation = shareConfigFormRef.value.validate()
     if (!validation.valid) {
@@ -1070,17 +1207,17 @@ const handleCreateDatabase = async () => {
 
   const requestData = buildRequestData()
   try {
-    const templateKey = state.formatTemplate
+    const selectedKey = state.selectedContractKey
     const data = await databaseStore.createDatabase(requestData)
     resetNewDatabase()
     state.openNewDatabaseModel = false
-    // 图谱模板创建成功后直接引导到图谱页执行 CSV 导入
-    if (templateKey === 'graph_csv') {
+    // 规范图谱创建成功后直接引导到图谱页执行 CSV 导入
+    if (selectedKey === 'managed_graph') {
       const createdKbId =
         data?.kb_id || data?.database?.kb_id || databaseStore.databases?.[0]?.kb_id || ''
       if (createdKbId) {
         router.push(`/extensions/knowledgebase/${createdKbId}?tab=graph`)
-        message.info('知识库已创建，请在图谱页导入节点 CSV 与关系 CSV')
+        message.info('知识库已创建（DRAFT），请在图谱页导入节点 CSV 与关系 CSV')
       }
     }
   } catch {
@@ -1200,7 +1337,7 @@ watch(
 )
 
 onMounted(() => {
-  loadChunkPresetOptions()
+  loadSourceContracts()
   loadSupportedKbTypes()
   databaseStore.loadDatabases()
   loadDefaultScope()
@@ -1529,6 +1666,65 @@ defineExpose({
       font-weight: 400;
       color: var(--gray-400);
       margin-left: 6px;
+    }
+
+    .wizard-steps {
+      margin-bottom: 16px;
+    }
+
+    .advanced-kb-collapse {
+      margin-top: 12px;
+
+      :deep(.ant-collapse-header) {
+        font-size: 13px;
+        color: var(--gray-500);
+      }
+
+      .kb-type-cards {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+    }
+
+    .policy-panel {
+      margin-top: 12px;
+      border: 1px solid var(--gray-150);
+      border-radius: 12px;
+      padding: 12px 16px;
+      background: var(--gray-0);
+
+      .policy-row {
+        display: flex;
+        gap: 12px;
+        padding: 6px 0;
+        font-size: 13px;
+        line-height: 1.6;
+
+        & + .policy-row {
+          border-top: 1px dashed var(--gray-150);
+        }
+
+        .policy-key {
+          flex: 0 0 88px;
+          color: var(--gray-500);
+        }
+
+        .policy-value {
+          color: var(--gray-800);
+        }
+      }
+    }
+
+    .contract-preview {
+      margin-bottom: 12px;
+
+      .contract-digest {
+        margin-left: 8px;
+        font-size: 11px;
+        color: var(--gray-400);
+        font-family: monospace;
+      }
     }
 
     .kb-type-card {

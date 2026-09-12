@@ -144,6 +144,7 @@
               />
 
               <AgentInputArea
+                ref="agentInputAreaRef"
                 v-model="userInput"
                 :is-loading="isProcessing"
                 :disabled="!currentAgent"
@@ -626,6 +627,19 @@
       :ongoing-messages="activeSubagentThreadOngoingMessages"
       :is-streaming="activeSubagentThreadIsStreaming"
     />
+
+    <EvidencePdfDrawer
+      :visible="evidenceViewer.visible"
+      :evidence="evidenceViewer.evidence"
+      :evidence-list="evidenceViewer.evidenceList"
+      :kb-id="evidenceViewer.kbId"
+      :file-id="evidenceViewer.fileId"
+      @close="evidenceViewer.visible = false"
+      @select-evidence="openEvidenceSource"
+      @fallback="openEvidenceSourceFallback"
+    />
+
+    <MessageSelectionToolbar :root-el="() => chatMainRef" @follow-up="handleSelectionFollowUp" />
   </div>
 </template>
 
@@ -647,6 +661,7 @@ import { ChevronDown, FolderKanban, LayoutList, RefreshCw } from '@lucide/vue'
 import { formatFileSize } from '@/utils/file_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
+import { buildFollowUpQuote } from '@/utils/selectionPopup'
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
@@ -655,6 +670,7 @@ import {
   SyncOutlined
 } from '@ant-design/icons-vue'
 import AgentInputArea from '@/components/AgentInputArea.vue'
+import MessageSelectionToolbar from '@/components/MessageSelectionToolbar.vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
 import RefsComponent from '@/components/RefsComponent.vue'
@@ -679,6 +695,7 @@ import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
 import { useRunTrace } from '@/composables/useRunTrace'
 import EvidenceList from '@/components/evidence/EvidenceList.vue'
+import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
@@ -719,6 +736,14 @@ const sendCooldownActive = ref(false)
 let sendCooldownTimer = null
 const handleWelcomeQuestionSelect = (question) => {
   userInput.value = question
+}
+
+const agentInputAreaRef = ref(null)
+// 划词追问：选中文本规范成引用块插入草稿开头，编辑器自动聚焦且光标落在引用块之后
+const handleSelectionFollowUp = (selectedText) => {
+  const quote = buildFollowUpQuote(selectedText)
+  if (!quote) return
+  agentInputAreaRef.value?.prependText(quote)
 }
 
 // 业务状态（保留在组件本地）
@@ -1125,6 +1150,7 @@ const resetRunEvidence = (threadId, runId = null) => {
   ts.evidenceSummary = null
   ts.evidenceRetrievals = []
   ts.evidenceIssues = []
+  ts.verifiedCitation = null
 }
 const currentEvidence = computed(() => {
   const threadId = currentChatId.value
@@ -1151,7 +1177,9 @@ const hasCurrentEvidenceProjection = computed(() => {
     summary.rejected
   )
 })
-const openEvidenceSource = async (evidence) => {
+const openEvidenceSourceFallback = async (evidence) => {
+  // 降级路径(pdf.js 渲染失败时使用):blob + #page= 仅保证 Chromium 跳页、
+  // 无法高亮。zoom=page-width,left,top 不是合法 PDF Open Parameter,已移除。
   const kbId = evidence?.source?.kb_id
   const fileId = evidence?.source?.file_id
   const fragment = evidence?.locator?.fragments?.[0]
@@ -1159,12 +1187,9 @@ const openEvidenceSource = async (evidence) => {
   try {
     const response = await downloadWorkspaceKnowledgeFile(kbId, fileId)
     const objectUrl = URL.createObjectURL(await response.blob())
-    const bbox = Array.isArray(fragment.bbox) ? fragment.bbox : []
-    const left = Math.max(Math.round(Number(bbox[0]) || 0), 0)
-    const top = Math.max(Math.round(Number(bbox[1]) || 0), 0)
     const page = Math.max(Number(fragment.page_number) || Number(fragment.page_index) + 1 || 1, 1)
     const link = document.createElement('a')
-    link.href = `${objectUrl}#page=${page}&zoom=page-width,${left},${top}`
+    link.href = `${objectUrl}#page=${page}`
     link.target = '_blank'
     link.rel = 'noopener noreferrer'
     link.click()
@@ -1172,6 +1197,37 @@ const openEvidenceSource = async (evidence) => {
   } catch (error) {
     message.error(error?.message || '打开 PDF 原文页失败')
   }
+}
+
+const evidenceViewer = reactive({
+  visible: false,
+  error: '',
+  evidence: null,
+  evidenceList: [],
+  kbId: null,
+  fileId: null
+})
+
+const openEvidenceSource = (evidence) => {
+  const kbId = evidence?.source?.kb_id
+  const fileId = evidence?.source?.file_id
+  const fragment = evidence?.locator?.fragments?.[0]
+  if (!kbId || !fileId || !fragment) return
+  const runId = evidence?.source?.run_id || evidence?.retrieval?.run_id || currentTrace.value?.runId
+  if (runId && evidence?.evidence_id) {
+    // 原文查看审计:谁在何时查看了哪条证据的原文(失败仅告警,不打断阅读)
+    agentApi
+      .recordEvidenceSourceView(runId, evidence.evidence_id)
+      .catch((error) => console.warn('Failed to record evidence view:', error))
+  }
+  evidenceViewer.visible = true
+  evidenceViewer.error = ''
+  evidenceViewer.evidence = evidence
+  evidenceViewer.evidenceList = currentEvidence.value.filter(
+    (item) => item?.source?.file_id === fileId
+  )
+  evidenceViewer.kbId = kbId
+  evidenceViewer.fileId = fileId
 }
 const tokenUsageSegments = computed(() => {
   const usage = currentTokenUsage.value

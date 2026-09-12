@@ -26,6 +26,15 @@ validator（八项确定性验证）+ assembler（run → chunk → anchor → r
   为解析升级后的引用迁移提供依据。
 - 三 selector（对齐 W3C Web Annotation 思想）：精确原文（exact/prefix/suffix）、
   文本位置（char/word 偏移）、物理位置（page + bbox fragments, pdf_points）。
+- `pdf_points` 的坐标约定：单位 pt，**原点页面左上、y 向下**（MinerU 0..1000 网格与
+  PyMuPDF 的共同约定，`mineru_bbox_to_pdf_points` 只等比缩放不翻转）。fragments 以
+  `origin="top_left"` 显式声明，渲染端先转 PDF user space 再套 pdf.js 视口矩阵；
+  曾因把它当作 y 向上的 user space 直接翻转，导致块级高亮上下镜像错位。
+- 句子级高亮精化（`locator.highlight`，只读附加）：MinerU 锚点是块粒度，整段 bbox
+  会把回答句淹没。组装期用本次 run 的问题与 `sentence_splitter` 切出的句子做确定性
+  词法重叠（命中 ≥ 40% 问题内容词，下限 2 上限 4），选出的句必须是 anchor quote 的
+  逐字子串；查看器在 pdf.js 文本层内定位该句得到逐行矩形，块级 bbox 退为虚线上下文，
+  匹配失败回退块级实心高亮。不改变 evidence_id / fragments / 验证结果。
 - 端点 `GET /api/agent/runs/{run_id}/evidence`：归属校验后一步返回完整 DTO。
 
 ### 2. 检索入口统一与默认 hybrid（P1-6，已实施）

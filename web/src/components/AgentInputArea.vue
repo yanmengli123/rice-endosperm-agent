@@ -173,7 +173,8 @@ const handleKeyDown = (e) => {
 
 defineExpose({
   focus: () => inputRef.value?.focus(),
-  closeOptions: () => inputRef.value?.closeOptions()
+  closeOptions: () => inputRef.value?.closeOptions(),
+  prependText: (text) => inputRef.value?.prependText(text)
 })
 </script>
 
