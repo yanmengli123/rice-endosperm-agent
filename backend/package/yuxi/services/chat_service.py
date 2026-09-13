@@ -393,7 +393,13 @@ def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
 
 
 def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    rendered, draft_validation = render_answer_draft(text)
+    locator_resolution = contract.get("locator_resolution") or {}
+    binding = locator_resolution.get("binding") or {}
+    # locator block → binding → 权威芯片；缺失绑定渲染为失败关闭文案（无 Binding 就没有页码）
+    locator_bindings = (
+        {str(binding["binding_id"]): locator_resolution} if binding.get("binding_id") else None
+    )
+    rendered, draft_validation = render_answer_draft(text, locator_bindings=locator_bindings)
     guarded, citation_validation = apply_citation_channel(
         rendered,
         contract.get("citations") or [],
@@ -1793,6 +1799,22 @@ async def stream_agent_chat(
 
         if interrupted:
             return
+
+        # 复合意图流的 citation_ready：定位行已验证并随守卫渲染进答案后发出，
+        # 前端据此展示结构化引用（不重新在浏览器侧解析页码）。
+        if (
+            knowledge_contract is not None
+            and (knowledge_contract.get("locator_resolution") or {}).get("status") == "VERIFIED"
+        ):
+            locator_terminal = knowledge_contract.get("locator_resolution") or {}
+            yield make_chunk(
+                status="citation_ready",
+                citation={
+                    key: locator_terminal.get(key)
+                    for key in ("status", "evidence_id", "file_id", "filename", "zone", "page", "anchor_id")
+                },
+                meta=meta,
+            )
 
         yield make_chunk(status="finished", meta=meta)
 

@@ -57,3 +57,75 @@ def test_plain_json_code_block_without_signature_not_touched():
     out, meta = render_answer_draft(text)
     assert meta["status"] == "LEGACY_MARKDOWN"
     assert out == text
+
+
+# ---- v2：locator block 只引用 binding_id，页码由后端从绑定渲染 ----
+
+
+def _verified_binding() -> dict:
+    return {
+        "status": "VERIFIED",
+        "page": 4,
+        "zone": "MAIN_TEXT",
+        "filename": "osmyb73-paper.pdf",
+        "binding": {"binding_id": "vlb_1", "page_number": 4, "status": "VERIFIED"},
+    }
+
+
+def test_v2_locator_block_renders_authoritative_chip_from_binding():
+    rendered, validation = render_answer_draft(
+        '<YUXI_ANSWER_DRAFT>{"schema_version":"answer-draft.v2","blocks":['
+        '{"type":"locator","text":"定位行","binding_id":"vlb_1"},'
+        '{"type":"paragraph","text":"该图展示 OsMYB73 表达谱。","evidence_refs":["E1"]}'
+        ']}</YUXI_ANSWER_DRAFT>',
+        locator_bindings={"vlb_1": _verified_binding()},
+    )
+    assert validation["status"] == "RENDERED_V2"
+    assert validation["locator_blocks"] == "1"
+    assert "已可靠定位到原文：〔引文定位｜正文·第4页｜osmyb73-paper.pdf〕" in rendered
+    assert "该图展示 OsMYB73 表达谱。 [E1]" in rendered
+    # 模型文本里不存在任何能变成页码的自由文本
+    assert "4" not in rendered.replace("第4页", "").replace("[E1]", "")
+
+
+def test_v2_locator_block_without_binding_renders_fail_closed():
+    """没有 Binding 就没有页码：缺失绑定 → 失败关闭文案，绝不猜测。"""
+    rendered, validation = render_answer_draft(
+        '<YUXI_ANSWER_DRAFT>{"schema_version":"answer-draft.v2","blocks":['
+        '{"type":"locator","text":"定位行","binding_id":"vlb_missing"}'
+        ']}</YUXI_ANSWER_DRAFT>',
+        locator_bindings={"vlb_1": _verified_binding()},
+    )
+    assert validation["status"] == "RENDERED_V2"
+    assert "〔当前无法可靠定位原文页码〕" in rendered
+    assert "第4页" not in rendered
+
+
+def test_v2_locator_block_with_unverified_binding_renders_fail_closed():
+    binding = {**_verified_binding(), "status": "NOT_FOUND"}
+    binding.pop("page")
+    rendered, _ = render_answer_draft(
+        '{"schema_version":"answer-draft.v2","blocks":[{"type":"locator","text":"定位","binding_id":"vlb_1"}]}',
+        locator_bindings={"vlb_1": binding},
+    )
+    assert "〔当前无法可靠定位原文页码〕" in rendered
+
+
+def test_v2_draft_rejects_extra_fields_on_block():
+    source = (
+        '<YUXI_ANSWER_DRAFT>{"schema_version":"answer-draft.v2","blocks":['
+        '{"type":"locator","text":"定位","binding_id":"vlb_1","page_number":4}'
+        "]}</YUXI_ANSWER_DRAFT>"
+    )
+    rendered, validation = render_answer_draft(source, locator_bindings={"vlb_1": _verified_binding()})
+    # 块级 extra=forbid：模型夹带 page_number → 整份草案回退，不部分采信
+    assert validation["status"] == "INVALID_DRAFT_FALLBACK"
+    assert rendered == source
+
+
+def test_v1_drafts_remain_compatible():
+    rendered, validation = render_answer_draft(
+        '{"schema_version":"answer-draft.v1","blocks":[{"type":"paragraph","text":"v1 兼容","evidence_refs":[]}]}'
+    )
+    assert validation["status"] == "RENDERED"
+    assert rendered == "v1 兼容"

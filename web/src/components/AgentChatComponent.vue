@@ -280,6 +280,14 @@
                   <TraceTimelinePanel :trace="displayedTrace" />
                 </div>
               </section>
+              <div v-if="currentVerifiedCitation" class="state-locator-chip" aria-label="答案定位证据">
+                <span class="state-locator-chip__status">定位已验证</span>
+                <span class="state-locator-chip__meta">
+                  {{ currentVerifiedCitation.filename || currentVerifiedCitation.file_id }}
+                  · 第{{ currentVerifiedCitation.page }}页
+                  <template v-if="currentVerifiedCitation.zone === 'SUPPORTING_INFO'">· 补充材料</template>
+                </span>
+              </div>
               <section
                 v-if="hasDisplayedEvidenceProjection"
                 class="state-section"
@@ -1224,6 +1232,10 @@ const currentClaimBindingStatus = computed(
 const currentEvidenceProjectionStatus = computed(
   () => currentChatId.value && chatState.threadStates[currentChatId.value]?.evidenceProjectionStatus
 )
+const currentVerifiedCitation = computed(() => {
+  const citation = currentChatId.value ? chatState.threadStates[currentChatId.value]?.verifiedCitation : null
+  return citation && citation.status === 'VERIFIED' ? citation : null
+})
 const hasCurrentEvidenceProjection = computed(() => {
   const threadState = currentChatId.value ? chatState.threadStates[currentChatId.value] : null
   if (!threadState?.evidenceRunId) return false
@@ -4115,6 +4127,32 @@ watch(currentChatId, (threadId, oldThreadId) => {
   flex-direction: column;
   gap: 12px;
   overflow: auto;
+}
+
+.state-locator-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  border: 1px solid var(--color-success-100);
+  background: var(--color-success-50);
+}
+
+.state-locator-chip__status {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--color-success-700);
+}
+
+.state-locator-chip__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
 }
 
 .state-section {
