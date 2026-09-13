@@ -40,6 +40,10 @@ export function useAgentThreadState({
         evidenceSummary: null,
         evidenceRetrievals: [],
         evidenceIssues: [],
+        evidenceRole: null,
+        claimBindingStatus: null,
+        evidenceProjectionStatus: null,
+        sourceManifest: null,
         verifiedCitation: null
       }
     }

@@ -2,7 +2,7 @@
   <div class="evidence-list">
     <div v-if="summaryLine" class="evidence-summary">{{ summaryLine }}</div>
     <div v-if="issueLine" class="evidence-warning">{{ issueLine }}</div>
-    <div v-if="evidence.length === 0" class="evidence-empty">本轮检索未产生可出境的定位证据。</div>
+    <div v-if="evidence.length === 0" class="evidence-empty">{{ emptyLine }}</div>
     <div class="evidence-items">
       <div
         v-for="item in evidence"
@@ -43,17 +43,29 @@ defineEmits(['open-source'])
 const props = defineProps({
   evidence: { type: Array, default: () => [] },
   summary: { type: Object, default: null },
-  issues: { type: Array, default: () => [] }
+  issues: { type: Array, default: () => [] },
+  evidenceRole: { type: String, default: 'RETRIEVAL_CANDIDATE' },
+  claimBindingStatus: { type: String, default: 'NOT_AVAILABLE' },
+  projectionStatus: { type: String, default: null }
 })
 
 const summaryLine = computed(() => {
   const s = props.summary
   if (!s) return ''
-  const parts = [`共 ${s.total || 0} 条检索证据候选`]
+  const noun = props.evidenceRole === 'ANSWER_CITATION' ? '回答引用证据' : '检索证据候选'
+  const parts = [`共 ${s.total || 0} 条${noun}`]
   if (s.verified) parts.push(`${s.verified} 条可精确定位`)
   if (s.degraded) parts.push(`${s.degraded} 条仅供核验`)
   if (s.rejected) parts.push(`${s.rejected} 条拒绝`)
   return parts.join(' · ')
+})
+
+const emptyLine = computed(() => {
+  if (props.projectionStatus === 'LOCATOR_FAILED')
+    return '已执行原文定位，但没有形成唯一且可验证的物理页码；候选页码未展示。'
+  if (props.projectionStatus === 'EVIDENCE_UNAVAILABLE')
+    return '本轮要求了文献证据，但没有产生可出境的已验证证据。'
+  return '本轮检索未产生可出境的定位证据。'
 })
 
 const issueLine = computed(() => {
@@ -92,7 +104,11 @@ const canOpenSource = (item) =>
   )
 
 const metaLine = (item) => {
-  const parts = ['检索候选，尚未绑定回答 Claim']
+  const parts = [
+    props.evidenceRole === 'ANSWER_CITATION' || item.evidence_role === 'ANSWER_CITATION'
+      ? '已绑定本轮回答'
+      : '检索候选，尚未绑定回答 Claim'
+  ]
   if (item.locator?.highlight?.quote) parts.push('已定位回应句')
   if (item.source?.parse_revision_id) parts.push('解析版本已绑定')
   if (item.quote?.prefix !== undefined && item.quote?.start_char !== null)

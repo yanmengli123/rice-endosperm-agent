@@ -283,6 +283,9 @@
                     :evidence="currentEvidence"
                     :summary="currentEvidenceSummary"
                     :issues="currentEvidenceIssues"
+                    :evidence-role="currentEvidenceRole"
+                    :claim-binding-status="currentClaimBindingStatus"
+                    :projection-status="currentEvidenceProjectionStatus"
                     @open-source="openEvidenceSource"
                   />
                 </div>
@@ -1138,6 +1141,10 @@ const loadRunEvidence = async (threadId, runId) => {
     currentState.evidenceSummary = result?.summary || null
     currentState.evidenceRetrievals = Array.isArray(result?.retrievals) ? result.retrievals : []
     currentState.evidenceIssues = Array.isArray(result?.issues) ? result.issues : []
+    currentState.evidenceRole = result?.evidence_role || null
+    currentState.claimBindingStatus = result?.claim_binding_status || null
+    currentState.evidenceProjectionStatus = result?.projection_status || null
+    currentState.sourceManifest = result?.source_manifest || null
   } catch (error) {
     console.warn('Failed to load run evidence:', runId, error)
   }
@@ -1150,6 +1157,10 @@ const resetRunEvidence = (threadId, runId = null) => {
   ts.evidenceSummary = null
   ts.evidenceRetrievals = []
   ts.evidenceIssues = []
+  ts.evidenceRole = null
+  ts.claimBindingStatus = null
+  ts.evidenceProjectionStatus = null
+  ts.sourceManifest = null
   ts.verifiedCitation = null
 }
 const currentEvidence = computed(() => {
@@ -1166,9 +1177,20 @@ const currentEvidenceIssues = computed(() => {
     : []
   return Array.isArray(issues) ? issues : []
 })
+const currentEvidenceRole = computed(
+  () => currentChatId.value && chatState.threadStates[currentChatId.value]?.evidenceRole
+)
+const currentClaimBindingStatus = computed(
+  () => currentChatId.value && chatState.threadStates[currentChatId.value]?.claimBindingStatus
+)
+const currentEvidenceProjectionStatus = computed(
+  () => currentChatId.value && chatState.threadStates[currentChatId.value]?.evidenceProjectionStatus
+)
 const hasCurrentEvidenceProjection = computed(() => {
   const threadState = currentChatId.value ? chatState.threadStates[currentChatId.value] : null
   if (!threadState?.evidenceRunId) return false
+  if (threadState.sourceManifest)
+    return Boolean(threadState.sourceManifest.document_evidence_requested)
   const summary = threadState.evidenceSummary || {}
   return Boolean(
     threadState.evidence?.length ||
