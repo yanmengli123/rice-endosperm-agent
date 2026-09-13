@@ -11,7 +11,7 @@ import {
   PanelLeftOpen,
   MessageCirclePlus,
   Search,
-  Users,
+  Users
 } from '@lucide/vue'
 
 import { useConfigStore } from '@/stores/config'
@@ -28,6 +28,7 @@ import DebugComponent from '@/components/DebugComponent.vue'
 import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
+import { TITLE_SOURCE_USER } from '@/utils/threadTitle'
 
 const configStore = useConfigStore()
 const agentStore = useAgentStore()
@@ -222,7 +223,10 @@ const handleDeleteChat = async (threadId) => {
 
 const handleRenameChat = async ({ chatId, title }) => {
   try {
-    await chatThreadsStore.updateThread(chatId, title)
+    // 用户改名写入 USER 来源，服务端据此拒绝后续任何自动命名覆盖
+    await chatThreadsStore.updateThread(chatId, title, undefined, {
+      title_source: TITLE_SOURCE_USER
+    })
   } catch (error) {
     console.warn('重命名对话失败:', error)
   }
@@ -251,7 +255,6 @@ watch(
   },
   { immediate: true }
 )
-
 </script>
 
 <template>

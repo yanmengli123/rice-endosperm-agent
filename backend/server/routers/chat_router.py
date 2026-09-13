@@ -59,6 +59,22 @@ class ImageUploadResponse(BaseModel):
 chat = APIRouter(prefix="/chat", tags=["chat"])
 
 
+def _extract_generation_params(meta: dict) -> dict:
+    """白名单透传采样参数（temperature / max_tokens），越界收敛、类型非法直接 422。"""
+    params: dict = {}
+    temperature = meta.get("temperature")
+    if temperature is not None:
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+            raise HTTPException(status_code=422, detail="temperature 必须是数值")
+        params["temperature"] = min(max(float(temperature), 0.0), 2.0)
+    max_tokens = meta.get("max_tokens")
+    if max_tokens is not None:
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+            raise HTTPException(status_code=422, detail="max_tokens 必须是整数")
+        params["max_tokens"] = min(max(max_tokens, 1), 4096)
+    return params
+
+
 @chat.post("/call")
 async def call(query: str = Body(...), meta: dict = Body(None), current_user: User = Depends(get_required_user)):
     """调用模型进行简单问答（需要登录）"""
@@ -68,7 +84,10 @@ async def call(query: str = Body(...), meta: dict = Body(None), current_user: Us
     if "request_id" not in meta or not meta.get("request_id"):
         meta["request_id"] = str(uuid.uuid4())
 
-    model = select_model(model_spec=meta.get("model_spec") or meta.get("model") or conf.default_model)
+    model = select_model(
+        model_spec=meta.get("model_spec") or meta.get("model") or conf.default_model,
+        **_extract_generation_params(meta),
+    )
 
     response = await model.call(query)
     logger.debug({"query": query, "response": response.content})
@@ -336,6 +355,7 @@ async def delete_thread(
 class ThreadUpdate(BaseModel):
     title: str | None = None
     is_pinned: bool | None = None
+    metadata: dict | None = None
 
 
 @chat.put("/thread/{thread_id}", response_model=ThreadResponse)
@@ -350,6 +370,7 @@ async def update_thread(
         thread_id=thread_id,
         title=thread_update.title,
         is_pinned=thread_update.is_pinned,
+        metadata=thread_update.metadata,
         db=db,
         current_uid=str(current_user.uid),
     )

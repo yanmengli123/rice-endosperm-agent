@@ -35,6 +35,16 @@ TMP_ATTACHMENT_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".t
 TMP_ATTACHMENT_OCR_METHODS = tuple(DocumentProcessorFactory.get_available_processors())
 TMP_ATTACHMENT_PARSE_METHODS = ("disable", *TMP_ATTACHMENT_OCR_METHODS)
 
+# 会话标题来源，存于 conversations.extra_metadata.title_source：
+# USER 为用户显式命名（终态，自动命名不可覆盖）；FALLBACK/AUTO 为自动命名
+# （确定性原文截断 / 受限 LLM 编目）。与 web 端 utils/threadTitle.js 的约定保持一致。
+TITLE_SOURCE_USER = "USER"
+TITLE_SOURCE_FALLBACK = "FALLBACK"
+TITLE_SOURCE_AUTO = "AUTO"
+AUTO_TITLE_SOURCES = frozenset({TITLE_SOURCE_FALLBACK, TITLE_SOURCE_AUTO})
+KNOWN_TITLE_SOURCES = frozenset({TITLE_SOURCE_USER, TITLE_SOURCE_FALLBACK, TITLE_SOURCE_AUTO})
+INITIAL_THREAD_TITLE = "新的对话"
+
 
 @dataclass(slots=True)
 class ConversionResult:
@@ -585,16 +595,27 @@ async def update_thread_view(
     thread_id: str,
     title: str | None = None,
     is_pinned: bool | None = None,
+    metadata: dict | None = None,
     db: AsyncSession,
     current_uid: str,
 ) -> dict:
     conv_repo = ConversationRepository(db)
-    await require_user_conversation(conv_repo, thread_id, str(current_uid))
+    conversation = await require_user_conversation(conv_repo, thread_id, str(current_uid))
+    new_title, merge_metadata = _resolve_title_update(conversation, title, metadata)
     updated_conv = await conv_repo.update_conversation(
-        thread_id, title=title, is_pinned=is_pinned, uid=str(current_uid)
+        thread_id, title=new_title, is_pinned=is_pinned, metadata=merge_metadata, uid=str(current_uid)
     )
     if not updated_conv:
         raise HTTPException(status_code=500, detail="更新失败")
+    if new_title is not None:
+        # 结构化日志是「用户重命名率 / FALLBACK 现存率」运营 KPI 的数据源，字段名勿随意改动
+        logger.info(
+            {
+                "event": "thread_title_updated",
+                "thread_id": thread_id,
+                "title_source": (updated_conv.extra_metadata or {}).get("title_source"),
+            }
+        )
     return {
         "id": updated_conv.thread_id,
         "uid": updated_conv.uid,
@@ -605,6 +626,46 @@ async def update_thread_view(
         "updated_at": updated_conv.updated_at.isoformat(),
         "metadata": updated_conv.extra_metadata or {},
     }
+
+
+def _resolve_title_update(conversation, title: str | None, metadata: dict | None) -> tuple[str | None, dict | None]:
+    """按 title_source 仲裁一次标题写入，返回允许落库的 (title, metadata)。
+
+    用户命名（USER）是终态，自动命名（FALLBACK/AUTO）不得覆盖；自动命名只允许写
+    初始标题或已有自动标题。未声明来源的裸 title 一律视为用户改名，写入 USER 保护。
+    """
+    merged_metadata = dict(metadata) if metadata else None
+    if (
+        merged_metadata
+        and "title_source" in merged_metadata
+        and merged_metadata["title_source"] not in KNOWN_TITLE_SOURCES
+    ):
+        raise HTTPException(status_code=422, detail=f"非法的 title_source: {merged_metadata['title_source']}")
+
+    if title is None:
+        return None, merged_metadata
+
+    if merged_metadata and merged_metadata.get("title_source") in AUTO_TITLE_SOURCES:
+        current_source = (conversation.extra_metadata or {}).get("title_source")
+        if current_source == TITLE_SOURCE_USER or (
+            current_source not in AUTO_TITLE_SOURCES and (conversation.title or "") != INITIAL_THREAD_TITLE
+        ):
+            logger.info(
+                {
+                    "event": "thread_title_auto_write_rejected",
+                    "thread_id": conversation.thread_id,
+                    "incoming_source": merged_metadata.get("title_source"),
+                    "current_source": current_source,
+                }
+            )
+            merged_metadata.pop("title_source", None)
+            return None, merged_metadata or None
+        return title, merged_metadata
+
+    if merged_metadata is None:
+        merged_metadata = {}
+    merged_metadata["title_source"] = TITLE_SOURCE_USER
+    return title, merged_metadata
 
 
 async def upload_tmp_attachment_view(*, file: UploadFile, current_uid: str) -> dict:

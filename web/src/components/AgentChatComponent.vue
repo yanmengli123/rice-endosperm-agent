@@ -709,6 +709,14 @@ import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCalling
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
 import { makeChildThreadId } from '@/utils/subagentThread'
 import { findLatestTraceRunId } from '@/utils/traceProjection'
+import {
+  MAX_TITLE_CHARS,
+  TITLE_SOURCE_AUTO,
+  TITLE_SOURCE_FALLBACK,
+  TITLE_SOURCE_USER,
+  deriveThreadTitle,
+  validateCatalogTitle
+} from '@/utils/threadTitle'
 import RiceEndospermWelcome from '@/components/rice-endosperm/RiceEndospermWelcome.vue'
 
 // ==================== PROPS & EMITS ====================
@@ -2522,6 +2530,52 @@ const { handleStreamChunk } = useAgentStreamHandler({
 })
 const { handleTraceEvent, loadRunTraceSnapshot, refreshRunTraceSnapshot, resetRunTrace } =
   useRunTrace({ getThreadState })
+// ==================== 会话命名 ====================
+// 首条消息触发：确定性标题立即落库（与桌面端同规则，无 LLM 即无幻觉）；
+// 受限 LLM 编目延迟到首回合结束（onTerminalDetected），必须通过符号保留性
+// 门禁才采用，否则保留确定性结果。用户改名（title_source=USER）后服务端
+// 守卫会拒绝一切自动写入，这里的前置检查只是省掉一次注定失败的请求。
+const pendingTitleEnhancement = new Map()
+
+const setThreadTitle = (threadId, title, source) =>
+  chatThreadsStore
+    .updateThread(threadId, title, undefined, { title_source: source })
+    .catch(() => {})
+
+const enhanceThreadTitle = async (threadId, { rawMessage, fallbackWrite }) => {
+  const thread = chatThreadsStore.threads.find((item) => item.id === threadId)
+  if (!thread || thread.metadata?.title_source === TITLE_SOURCE_USER) return
+
+  // 确保确定性标题先落库，避免并发的 FALLBACK 写入反过来覆盖 AUTO 结果
+  await fallbackWrite
+  const startedAt = performance.now()
+  try {
+    const response = await agentApi.generateTitle(rawMessage, configStore.config?.fast_model)
+    const title = validateCatalogTitle(response, rawMessage, MAX_TITLE_CHARS)
+    if (!title) {
+      console.warn('[threadTitle] LLM 编目未通过门禁，保留确定性标题', { threadId })
+      return
+    }
+    await setThreadTitle(threadId, title, TITLE_SOURCE_AUTO)
+    console.debug('[threadTitle] enhanced', {
+      threadId,
+      latencyMs: Math.round(performance.now() - startedAt)
+    })
+  } catch (error) {
+    // 命名增强是尽力而为：失败只保留确定性标题，不影响会话主链路
+    console.warn('[threadTitle] 标题增强失败，保留确定性标题', error)
+  }
+}
+
+const scheduleThreadNaming = (threadId, firstMessage) => {
+  const fallbackTitle = deriveThreadTitle(firstMessage)
+  if (!fallbackTitle) return
+  pendingTitleEnhancement.set(threadId, {
+    rawMessage: firstMessage,
+    fallbackWrite: setThreadTitle(threadId, fallbackTitle, TITLE_SOURCE_FALLBACK)
+  })
+}
+
 const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = useAgentRunStream({
   getThreadState,
   currentAgentId,
@@ -2544,6 +2598,11 @@ const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = 
     if (runId) {
       refreshRunTraceSnapshot(threadId, runId)
       void loadRunEvidence(threadId, runId)
+    }
+    const pendingEnhancement = pendingTitleEnhancement.get(threadId)
+    if (pendingEnhancement) {
+      pendingTitleEnhancement.delete(threadId)
+      void enhanceThreadTitle(threadId, pendingEnhancement)
     }
   }
 })
@@ -2687,7 +2746,8 @@ const handleSendMessage = async ({ image } = {}) => {
 
   let threadId = currentChatId.value
   if (!threadId) {
-    threadId = await ensureActiveThread(text)
+    // 新线程用默认标题创建；首条消息的确定性命名由 scheduleThreadNaming 统一写入
+    threadId = await ensureActiveThread()
     if (!threadId) {
       message.error('创建对话失败，请重试')
       return
@@ -2714,26 +2774,7 @@ const handleSendMessage = async ({ image } = {}) => {
     .filter(Boolean)
 
   if ((threadMessages.value[threadId] || []).length === 0) {
-    const autoTitle = text.replace(/\s+/g, ' ').trim().slice(0, 2000)
-    if (autoTitle) {
-      void (async () => {
-        try {
-          const generatedTitle = await agentApi.generateTitle(
-            autoTitle,
-            configStore.config?.fast_model
-          )
-          if (generatedTitle) {
-            const finalTitle = generatedTitle.slice(0, 30).replace(/\s+/g, ' ').trim()
-            if (finalTitle) {
-              void chatThreadsStore.updateThread(threadId, finalTitle).catch(() => {})
-            }
-          }
-        } catch (e) {
-          console.error('Title generation failed:', e)
-          void chatThreadsStore.updateThread(threadId, autoTitle.slice(0, 30)).catch(() => {})
-        }
-      })()
-    }
+    scheduleThreadNaming(threadId, text)
   }
 
   resetOnGoingConv(threadId)

@@ -104,7 +104,7 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     }
   }
 
-  const updateThread = async (threadId, title, isPinned) => {
+  const updateThread = async (threadId, title, isPinned, metadata) => {
     if (!threadId) return
 
     if (title) {
@@ -112,12 +112,18 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
       if (!normalizedTitle) return
 
       try {
-        await threadApi.updateThread(threadId, normalizedTitle, isPinned)
+        const updated = await threadApi.updateThread(threadId, normalizedTitle, isPinned, metadata)
         const thread = threads.value.find((item) => item.id === threadId)
-        if (thread) {
-          thread.title = normalizedTitle
+        if (thread && updated) {
+          // 以服务端返回为准：title_source 守卫可能拒绝自动标题，本地不能抢先展示被拒结果
+          if (typeof updated.title === 'string') {
+            thread.title = updated.title
+          }
+          if (updated.metadata) {
+            thread.metadata = updated.metadata
+          }
           if (isPinned !== undefined) {
-            thread.is_pinned = isPinned
+            thread.is_pinned = updated.is_pinned
           }
         }
       } catch (error) {

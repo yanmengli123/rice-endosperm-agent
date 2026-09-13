@@ -1,5 +1,6 @@
 import { apiGet, apiPost, apiDelete, apiPut, apiRequest } from './base'
 import { useUserStore } from '@/stores/user'
+import { buildCatalogPrompt } from '@/utils/threadTitle'
 
 /**
  * 智能体API模块
@@ -20,15 +21,20 @@ export const agentApi = {
   simpleCall: (query) => apiPost('/api/chat/call', { query }),
 
   /**
-   * 生成对话标题
-   * @param {string} query - 查询内容
+   * 受限编目调用：为对话标题发起一次裸模型调用（低温度、限制输出 tokens）。
+   * 返回模型原始输出（应为 {"title":"..."}），由调用方经 threadTitle 门禁校验后采用。
+   * @param {string} query - 对话首条用户消息
    * @param {Object} modelSpec - 模型配置
-   * @returns {Promise<string>} - 生成的标题
+   * @returns {Promise<string>} - 模型原始输出
    */
   generateTitle: async (query, modelSpec) => {
     const response = await apiPost('/api/chat/call', {
-      query: `根据以下对话内容生成一个简短的标题（最多30个字符，中英文均可），不要包含 markdown 标记：\n\n${query.slice(0, 2000)}`,
-      meta: { model_spec: modelSpec }
+      query: buildCatalogPrompt(query),
+      meta: {
+        model_spec: modelSpec,
+        temperature: 0,
+        max_tokens: 64
+      }
     })
     return response.response
   },
@@ -284,12 +290,14 @@ export const threadApi = {
    * @param {string} threadId - 对话线程ID
    * @param {string} title - 对话标题
    * @param {boolean} is_pinned - 是否置顶
+   * @param {Object} metadata - 增量合并到 extra_metadata 的元数据（如 title_source）
    * @returns {Promise} - 更新结果
    */
-  updateThread: (threadId, title, is_pinned) =>
+  updateThread: (threadId, title, is_pinned, metadata) =>
     apiPut(`/api/chat/thread/${threadId}`, {
       title,
-      is_pinned
+      is_pinned,
+      metadata: metadata || {}
     }),
 
   /**
