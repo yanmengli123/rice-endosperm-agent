@@ -77,17 +77,27 @@
               :key="parent.key"
               class="format-template-card"
               :class="{ active: isContractParentActive(parent.key) }"
-              @click="selectContractParent(parent.key)"
             >
-              <div class="card-header">
-                <span class="type-title">{{ parent.label }}</span>
-              </div>
-              <div class="card-description">{{ contractParentDescription(parent) }}</div>
+              <button
+                type="button"
+                class="template-card-select"
+                :aria-pressed="isContractParentActive(parent.key)"
+                @click="selectContractParent(parent.key)"
+              >
+                <span class="card-header">
+                  <span class="type-title">{{ parent.label }}</span>
+                </span>
+                <span class="card-description">{{ contractParentDescription(parent) }}</span>
+                <span class="template-select-control">
+                  <CheckCircle2 v-if="isContractParentActive(parent.key)" :size="16" />
+                  {{ isContractParentActive(parent.key) ? '已选择' : '选择此类型' }}
+                </span>
+              </button>
               <div
                 v-if="isContractParentActive(parent.key) && parent.key === 'csv'"
                 class="template-sub-option"
-                @click.stop
               >
+                <span class="sub-option-label">CSV 数据用途</span>
                 <a-radio-group
                   :value="state.selectedContractKey"
                   size="small"
@@ -99,22 +109,62 @@
               </div>
             </div>
           </div>
-          <a-collapse v-if="advancedKbTypes.length" class="advanced-kb-collapse">
-            <a-collapse-panel key="advanced" header="高级：连接外部知识源（无严格契约，兼容模式）">
-              <div class="kb-type-cards">
+          <a-collapse
+            v-if="genericDocumentParent || advancedKbTypes.length"
+            class="advanced-kb-collapse"
+          >
+            <a-collapse-panel key="advanced" header="高级：通用文档与外部知识源">
+              <div v-if="genericDocumentParent" class="advanced-source-section">
+                <h4 class="advanced-source-title">本地通用知识库</h4>
                 <div
-                  v-for="typeKey in advancedKbTypes"
-                  :key="typeKey"
-                  class="kb-type-card"
-                  :class="{ active: !state.selectedContractKey && newDatabase.kb_type === typeKey }"
-                  @click="selectAdvancedKbType(typeKey)"
+                  class="format-template-card generic-document-card"
+                  :class="{ active: isContractParentActive(genericDocumentParent.key) }"
                 >
-                  <div class="card-header">
-                    <component :is="getKbTypeIcon(typeKey)" class="type-icon" />
-                    <span class="type-title">{{ getKbTypeLabel(typeKey) }}</span>
-                  </div>
-                  <div class="card-description">
-                    {{ getKbTypeDescription(supportedKbTypes[typeKey]) }}
+                  <button
+                    type="button"
+                    class="template-card-select"
+                    :aria-pressed="isContractParentActive(genericDocumentParent.key)"
+                    @click="selectContractParent(genericDocumentParent.key)"
+                  >
+                    <span class="card-header">
+                      <span class="type-title">{{ genericDocumentParent.label }}</span>
+                    </span>
+                    <span class="card-description">
+                      {{ contractParentDescription(genericDocumentParent) }}
+                    </span>
+                    <span class="template-select-control">
+                      <CheckCircle2
+                        v-if="isContractParentActive(genericDocumentParent.key)"
+                        :size="16"
+                      />
+                      {{
+                        isContractParentActive(genericDocumentParent.key)
+                          ? '已选择'
+                          : '选择通用文档知识库'
+                      }}
+                    </span>
+                  </button>
+                </div>
+              </div>
+              <div v-if="advancedKbTypes.length" class="advanced-source-section">
+                <h4 class="advanced-source-title">外部知识源连接器</h4>
+                <div class="kb-type-cards">
+                  <div
+                    v-for="typeKey in advancedKbTypes"
+                    :key="typeKey"
+                    class="kb-type-card"
+                    :class="{
+                      active: !state.selectedContractKey && newDatabase.kb_type === typeKey
+                    }"
+                    @click="selectAdvancedKbType(typeKey)"
+                  >
+                    <div class="card-header">
+                      <component :is="getKbTypeIcon(typeKey)" class="type-icon" />
+                      <span class="type-title">{{ getKbTypeLabel(typeKey) }}</span>
+                    </div>
+                    <div class="card-description">
+                      {{ getKbTypeDescription(supportedKbTypes[typeKey]) }}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -583,6 +633,7 @@ import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
 import {
   BookOpenCheck,
+  CheckCircle2,
   Compass,
   Copy,
   FileText,
@@ -871,7 +922,7 @@ const handleCreateWiki = async () => {
   }
 }
 
-// 知识源契约选型卡：三张主卡；CSV 卡内 radio 切换 csv_record / csv_qa 两个契约
+// 知识源契约选型卡：三张科研主卡；通用文档在高级区显式选择。
 const CONTRACT_PARENTS = [
   {
     key: 'pdf_evidence',
@@ -901,10 +952,23 @@ const CONTRACT_PARENTS = [
 
 const contractParents = CONTRACT_PARENTS
 
+const GENERIC_DOCUMENT_PARENT = {
+  key: 'generic_document',
+  label: '📚 通用文档知识库',
+  fallbackDescription:
+    '面向 Word、Markdown、文本、网页、表格、演示文稿、图片和普通 PDF 的通用检索库；保留默认解析、分块与向量检索能力，不启用科研 PDF 的强证据链语义。',
+  nameHint: '水稻胚乳发育｜通用文档库',
+  nextStep: '上传通用文档 → 解析与质量校验 → 建立检索索引'
+}
+
 const contractByKey = (key) =>
   state.sourceContracts.find((contract) => contract.contract_key === key) || null
 
 const selectedContract = computed(() => contractByKey(state.selectedContractKey))
+
+const genericDocumentParent = computed(() =>
+  contractByKey(GENERIC_DOCUMENT_PARENT.key) ? GENERIC_DOCUMENT_PARENT : null
+)
 
 const contractVersion = computed(() => selectedContract.value?.version || '1.0.0')
 
@@ -950,7 +1014,9 @@ const nameSuggestion = computed(() => {
   if (state.selectedContractKey === 'csv_record' || state.selectedContractKey === 'csv_qa') {
     return CONTRACT_PARENTS[1].nameHint
   }
-  const parent = CONTRACT_PARENTS.find((item) => item.key === state.selectedContractKey)
+  const parent = [...CONTRACT_PARENTS, GENERIC_DOCUMENT_PARENT].find(
+    (item) => item.key === state.selectedContractKey
+  )
   return parent?.nameHint || '新建知识库名称'
 })
 
@@ -996,6 +1062,9 @@ const shareSummary = computed(() => {
 
 const nextStepHint = computed(() => {
   if (!state.selectedContractKey) return '在远端系统中管理数据，本平台仅代理检索'
+  if (state.selectedContractKey === 'generic_document') {
+    return GENERIC_DOCUMENT_PARENT.nextStep
+  }
   if (state.selectedContractKey === 'managed_graph') return CONTRACT_PARENTS[2].nextStep
   if (state.selectedContractKey.startsWith('csv_')) return CONTRACT_PARENTS[1].nextStep
   return CONTRACT_PARENTS[0].nextStep
@@ -1617,185 +1686,233 @@ defineExpose({
       grid-template-columns: 1fr;
       gap: 10px;
     }
+  }
 
-    .format-template-cards {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 12px;
+  .format-template-cards {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 12px;
 
-      .format-template-card {
-        border: 1px solid var(--gray-150);
-        border-radius: 12px;
-        padding: 12px;
-        cursor: pointer;
-        transition: all 0.2s ease;
-        background: var(--gray-0);
+    @media (max-width: 768px) {
+      grid-template-columns: 1fr;
+    }
+  }
 
-        &:hover {
-          border-color: var(--main-color);
-        }
+  .format-template-card {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    border: 1px solid var(--gray-150);
+    border-radius: 8px;
+    background: var(--gray-0);
+    overflow: hidden;
+    transition:
+      border-color 0.2s ease,
+      background 0.2s ease;
 
-        &.active {
-          border-color: var(--main-color);
-          background: color-mix(in srgb, var(--main-color) 6%, transparent);
-        }
+    &:hover {
+      border-color: var(--main-color);
+    }
 
-        .card-header {
-          margin-bottom: 6px;
+    &.active {
+      border-color: var(--main-color);
+      background: var(--main-10);
+    }
 
-          .type-title {
-            font-weight: 600;
-            font-size: 13px;
-          }
-        }
+    .template-card-select {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      width: 100%;
+      padding: 16px;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
 
-        .card-description {
-          font-size: 12px;
-          color: var(--gray-500);
-          line-height: 1.5;
-        }
-
-        .template-sub-option {
-          margin-top: 8px;
-        }
+      &:focus-visible {
+        box-shadow: inset 0 0 0 2px var(--main-color);
       }
     }
 
-    .template-optional-mark {
+    .card-header {
+      display: flex;
+      align-items: center;
+      min-height: 24px;
+
+      .type-title {
+        color: var(--gray-800);
+        font-size: 14px;
+        font-weight: 600;
+      }
+    }
+
+    .card-description {
+      flex: 1;
+      color: var(--gray-600);
       font-size: 12px;
-      font-weight: 400;
-      color: var(--gray-400);
-      margin-left: 6px;
+      line-height: 1.55;
     }
 
-    .wizard-steps {
-      margin-bottom: 16px;
+    .template-select-control {
+      display: inline-flex;
+      align-items: center;
+      align-self: flex-start;
+      gap: 6px;
+      min-height: 30px;
+      padding: 4px 10px;
+      border: 1px solid var(--gray-200);
+      border-radius: 6px;
+      color: var(--gray-700);
+      font-size: 12px;
+      font-weight: 500;
     }
 
-    .advanced-kb-collapse {
-      margin-top: 12px;
+    &.active .template-select-control {
+      border-color: var(--main-color);
+      background: var(--main-color);
+      color: var(--gray-0);
+    }
 
-      :deep(.ant-collapse-header) {
-        font-size: 13px;
+    .template-sub-option {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 16px 16px;
+      border-top: 1px solid var(--gray-150);
+    }
+
+    .sub-option-label {
+      color: var(--gray-600);
+      font-size: 12px;
+      font-weight: 500;
+    }
+  }
+
+  .wizard-steps {
+    margin-bottom: 16px;
+  }
+
+  .advanced-kb-collapse {
+    margin-top: 12px;
+
+    :deep(.ant-collapse-header) {
+      color: var(--gray-600);
+      font-size: 13px;
+    }
+
+    .advanced-source-section + .advanced-source-section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--gray-150);
+    }
+
+    .advanced-source-title {
+      margin: 0 0 8px;
+      color: var(--gray-700);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .generic-document-card {
+      max-width: none;
+    }
+  }
+
+  .policy-panel {
+    margin-top: 12px;
+    padding: 12px 16px;
+    border: 1px solid var(--gray-150);
+    border-radius: 8px;
+    background: var(--gray-0);
+
+    .policy-row {
+      display: flex;
+      gap: 12px;
+      padding: 6px 0;
+      font-size: 13px;
+      line-height: 1.6;
+
+      & + .policy-row {
+        border-top: 1px dashed var(--gray-150);
+      }
+
+      .policy-key {
+        flex: 0 0 88px;
         color: var(--gray-500);
       }
 
-      .kb-type-cards {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 12px;
+      .policy-value {
+        color: var(--gray-800);
+      }
+    }
+  }
+
+  .contract-preview {
+    margin-bottom: 12px;
+
+    .contract-digest {
+      margin-left: 8px;
+      color: var(--gray-400);
+      font-family: monospace;
+      font-size: 11px;
+    }
+  }
+
+  .kb-type-card {
+    position: relative;
+    padding: 14px;
+    border: 1px solid var(--gray-150);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--gray-0);
+    cursor: pointer;
+    transition: all 0.2s ease;
+
+    &:hover {
+      border-color: var(--main-color);
+    }
+
+    &.active {
+      border-color: var(--main-color);
+      background: var(--main-10);
+      box-shadow: 0 0 0 1px var(--main-20);
+
+      .type-icon {
+        color: var(--main-color);
       }
     }
 
-    .policy-panel {
-      margin-top: 12px;
-      border: 1px solid var(--gray-150);
-      border-radius: 12px;
-      padding: 12px 16px;
-      background: var(--gray-0);
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
 
-      .policy-row {
-        display: flex;
-        gap: 12px;
-        padding: 6px 0;
-        font-size: 13px;
-        line-height: 1.6;
-
-        & + .policy-row {
-          border-top: 1px dashed var(--gray-150);
-        }
-
-        .policy-key {
-          flex: 0 0 88px;
-          color: var(--gray-500);
-        }
-
-        .policy-value {
-          color: var(--gray-800);
-        }
-      }
-    }
-
-    .contract-preview {
-      margin-bottom: 12px;
-
-      .contract-digest {
-        margin-left: 8px;
-        font-size: 11px;
-        color: var(--gray-400);
-        font-family: monospace;
-      }
-    }
-
-    .kb-type-card {
-      border: 1px solid var(--gray-150);
-      border-radius: 12px;
-      padding: 14px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      background: var(--gray-0);
-      position: relative;
-      overflow: hidden;
-
-      &:hover {
-        border-color: var(--main-color);
+      .type-icon {
+        width: 20px;
+        height: 20px;
+        color: var(--main-color);
+        flex-shrink: 0;
       }
 
-      &.active {
-        border-color: var(--main-color);
-        background: var(--main-10);
-        box-shadow: 0 0 0 1px var(--main-20);
-
-        .type-icon {
-          color: var(--main-color);
-        }
-      }
-
-      .card-header {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-bottom: 10px;
-
-        .type-icon {
-          width: 20px;
-          height: 20px;
-          color: var(--main-color);
-          flex-shrink: 0;
-        }
-
-        .type-title {
-          font-size: 15px;
-          font-weight: 600;
-          color: var(--gray-800);
-        }
-      }
-
-      .card-description {
-        font-size: 13px;
-        color: var(--gray-600);
-        line-height: 1.5;
-        margin-bottom: 0;
-      }
-
-      .deprecated-badge {
-        background: var(--color-error-100);
-        color: var(--color-error-600);
-        font-size: 10px;
+      .type-title {
+        color: var(--gray-800);
+        font-size: 15px;
         font-weight: 600;
-        padding: 2px 6px;
-        border-radius: 4px;
-        margin-left: auto;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        cursor: help;
-        transition: all 0.2s ease;
-
-        &:hover {
-          background: var(--color-error-200);
-          color: var(--color-error-700);
-        }
       }
+    }
+
+    .card-description {
+      margin-bottom: 0;
+      color: var(--gray-600);
+      font-size: 13px;
+      line-height: 1.5;
     }
   }
 
