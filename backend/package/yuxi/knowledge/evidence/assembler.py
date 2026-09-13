@@ -54,11 +54,17 @@ async def _assemble_locator_projection(
     traverse a retrieval chunk. The run evidence panel must therefore consume
     the immutable audit binding used by the answer, not broaden it back into
     every anchor carried by a nearby chunk.
+
+    Lineage-degraded replay: 文档重解析/修订切换后物理行可能不可回放，但
+    「答案芯片已上屏 ⇒ 状态面板同源」是硬不变量——此时直接投影审计绑定的
+    冻结行（页码与答案一致），verification 标记 DEGRADED，bbox 高亮不可用；
+    绝不静默清零证据数量。
     """
     evidence_items: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
     seen_evidence_ids: set[str] = set()
+    degraded_lineage_count = 0
 
     for record in records:
         locator = dict(getattr(record, "locator_resolution_json", None) or {})
@@ -87,6 +93,15 @@ async def _assemble_locator_projection(
         if str(locator["kb_id"]) not in permitted_kb_ids:
             _append_issue(issues, "LOCATOR_OUTSIDE_AUTHORIZED_SCOPE", retrieval_id=str(record.retrieval_id))
             continue
+
+        def _project_degraded_binding(code: str) -> None:
+            nonlocal degraded_lineage_count
+            dto = _binding_projection_dto(record, locator, degraded_code=code)
+            if dto["evidence_id"] in seen_evidence_ids:
+                return
+            seen_evidence_ids.add(dto["evidence_id"])
+            evidence_items.append(dto)
+            degraded_lineage_count += 1
 
         rows = (
             await db.execute(
@@ -123,6 +138,7 @@ async def _assemble_locator_projection(
                 retrieval_id=str(record.retrieval_id),
                 match_count=len(rows),
             )
+            _project_degraded_binding("LOCATOR_LINEAGE_UNAVAILABLE")
             continue
 
         span, anchor, knowledge_file, revision = rows[0]
@@ -133,6 +149,7 @@ async def _assemble_locator_projection(
         )
         if not lineage_matches:
             _append_issue(issues, "LOCATOR_AUDIT_MISMATCH", retrieval_id=str(record.retrieval_id))
+            _project_degraded_binding("LOCATOR_AUDIT_MISMATCH")
             continue
 
         # The exact anchor quote is a deterministic carrier for DTO selector
@@ -167,6 +184,7 @@ async def _assemble_locator_projection(
         )
         if dto["evidence_id"] != str(locator["evidence_id"]):
             _append_issue(issues, "LOCATOR_EVIDENCE_ID_MISMATCH", retrieval_id=str(record.retrieval_id))
+            _project_degraded_binding("LOCATOR_EVIDENCE_ID_MISMATCH")
             continue
         dto["evidence_role"] = "ANSWER_CITATION"
         _attach_highlight(dto, anchor_quote=str(anchor.quote or ""), question_text=question_text)
@@ -176,13 +194,14 @@ async def _assemble_locator_projection(
             seen_evidence_ids.add(dto["evidence_id"])
             evidence_items.append(dto)
 
-    projection_status = (
-        "LOCATOR_VERIFIED"
-        if evidence_items
-        else "LOCATOR_FAILED"
-        if any(item.get("code") == "LOCATOR_NOT_VERIFIED" for item in issues)
-        else "EVIDENCE_UNAVAILABLE"
-    )
+    if evidence_items and not degraded_lineage_count:
+        projection_status = "LOCATOR_VERIFIED"
+    elif evidence_items:
+        projection_status = "LOCATOR_DEGRADED"
+    elif any(item.get("code") == "LOCATOR_NOT_VERIFIED" for item in issues):
+        projection_status = "LOCATOR_FAILED"
+    else:
+        projection_status = "EVIDENCE_UNAVAILABLE"
     return {
         "schema_version": SCIENTIFIC_EVIDENCE_SCHEMA_VERSION,
         "run_id": run_id,
@@ -204,6 +223,79 @@ async def _assemble_locator_projection(
         "conflicts": [],
         "figures": [],
         "summary": _summary(evidence_items, rejected),
+    }
+
+
+def _binding_projection_dto(record: Any, locator: dict[str, Any], *, degraded_code: str) -> dict[str, Any]:
+    """从持久化定位绑定直接投影的降级证据行（血统不可回放路径）。
+
+    页码与答案芯片同源（都来自审计绑定），满足 binding.page ==
+    state_projection.page；verification 标记 DEGRADED 并携带降级原因，
+    locator.fragments 为空（bbox 高亮不可用，前端只展示页码芯片）。
+    """
+    page = locator.get("page")
+    page_number = int(page) if isinstance(page, int) and int(page) >= 1 else None
+    return {
+        "schema_version": SCIENTIFIC_EVIDENCE_SCHEMA_VERSION,
+        "evidence_role": "ANSWER_CITATION",
+        "citable": False,
+        "evidence_id": str(locator.get("evidence_id") or ""),
+        "source": {
+            "kb_id": locator.get("kb_id"),
+            "file_id": locator.get("file_id"),
+            "chunk_id": None,
+            "source_sha256": locator.get("source_sha256"),
+            "parse_revision_id": locator.get("parse_revision_id"),
+            "index_revision_id": locator.get("index_revision_id"),
+            "anchor_id": locator.get("anchor_id"),
+            "span_id": locator.get("span_id"),
+        },
+        "semantic_location": {
+            "evidence_type": str(locator.get("evidence_type") or "sentence"),
+            "document_partition": str(locator.get("zone") or "MAIN_TEXT"),
+        },
+        "quote": {
+            "exact": str(locator.get("quote") or locator.get("quote_head") or ""),
+            "prefix": None,
+            "suffix": None,
+            "quote_hash": None,
+            "start_char": None,
+            "end_char": None,
+            "start_word": None,
+            "end_word": None,
+        },
+        "locator": {
+            "anchor_id": locator.get("anchor_id"),
+            "quality": "UNKNOWN",
+            "confidence": 0.0,
+            "locatable": False,
+            "fragments": (
+                [
+                    {
+                        "page_index": page_number - 1,
+                        "page_number": page_number,
+                        "bbox": None,
+                        "coordinate_space": "pdf_points",
+                        "origin": "top_left",
+                        "rotation": 0,
+                    }
+                ]
+                if page_number is not None
+                else []
+            ),
+        },
+        "verification": {
+            "status": "DEGRADED",
+            "error_code": degraded_code,
+            "note": "答案定位绑定的物理行已不可回放（源文档重解析或修订切换）；页码与答案芯片同源保留，bbox 高亮不可用。",
+        },
+        "retrieval": {
+            "retrieval_id": str(record.retrieval_id),
+            "status": str(record.status),
+            "intent": "QUOTE_LOCATOR",
+            "role": "ANSWER_CITATION",
+            "binding_method": "DETERMINISTIC_LOCATOR",
+        },
     }
 
 

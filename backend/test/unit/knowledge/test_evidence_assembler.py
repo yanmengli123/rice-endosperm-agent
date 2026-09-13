@@ -393,3 +393,48 @@ async def test_locator_projection_replays_exact_audited_anchor(evidence_session)
     assert result["evidence"][0]["evidence_id"] == physical_evidence_id
     assert result["evidence"][0]["locator"]["fragments"][0]["page_number"] == 3
     assert result["evidence"][0]["retrieval"]["role"] == "ANSWER_CITATION"
+
+
+async def test_locator_projection_degrades_from_binding_when_lineage_unavailable(evidence_session):
+    """血统不可回放（文档重解析）→ 从审计绑定直接投影：页码与答案芯片同源，绝不清零。"""
+    session, records = evidence_session
+    records.append(
+        SimpleNamespace(
+            retrieval_id="kr_stale",
+            status="COMPLETED",
+            intent="QUOTE_LOCATOR",
+            chunk_ids_json=[],
+            evidence_ids_json=["ev_stale_page10"],
+            locator_resolution_json={
+                "status": "VERIFIED",
+                "evidence_id": "ev_stale_page10",
+                "span_evidence_id": "evs_stale",
+                "parse_revision_id": "spr_reparsed_away",
+                "kb_id": "kb_allowed",
+                "file_id": "file_stale",
+                "span_id": "es_stale",
+                "anchor_id": "ea_stale",
+                "page": 10,
+                "source_sha256": "9" * 64,
+                "zone": "MAIN_TEXT",
+                "quote": "Figure 5 CRISPR/Cas9 knockout of OsMYB73 in rice callus.",
+                "filename": "paper.pdf",
+            },
+        )
+    )
+    await session.commit()
+
+    result = await assemble_evidence_for_run(session, "run_stale", allowed_kb_ids={"kb_allowed"})
+
+    # 答案芯片已宣称第 10 页 ⇒ 状态面板必须同源展示第 10 页（降级而非清零）
+    assert result["projection_status"] == "LOCATOR_DEGRADED"
+    assert len(result["evidence"]) == 1
+    degraded = result["evidence"][0]
+    assert degraded["evidence_id"] == "ev_stale_page10"
+    assert degraded["verification"]["status"] == "DEGRADED"
+    assert degraded["verification"]["error_code"] == "LOCATOR_LINEAGE_UNAVAILABLE"
+    assert degraded["locator"]["fragments"][0]["page_number"] == 10
+    assert degraded["quote"]["exact"] == "Figure 5 CRISPR/Cas9 knockout of OsMYB73 in rice callus."
+    assert degraded["retrieval"]["role"] == "ANSWER_CITATION"
+    assert any(issue["code"] == "LOCATOR_LINEAGE_UNAVAILABLE" for issue in result["issues"])
+    assert result["summary"]["degraded"] == 1

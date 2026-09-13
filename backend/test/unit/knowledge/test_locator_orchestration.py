@@ -54,6 +54,8 @@ def _patch_pipeline(
     direct_locator: dict | None = None,
 ):
     async def fake_gateway(*, query_text, scope_snapshot, top_k=12, verbatim=None):
+        # 引用池由冻结证据行构建：每条 citation 的物理证据 id 必须能回指一条
+        # 已冻结的 gateway 证据行（Locator Authority 出口不变量的前提）。
         return {
             "evidence": [
                 {
@@ -63,6 +65,16 @@ def _patch_pipeline(
                     "file_id": "file-a",
                     "content": "The structure of OsMYB73 protein was also predicted.",
                 }
+            ]
+            + [
+                {
+                    "evidence_id": str(citation.get("_physical_evidence_id") or citation.get("evidence_id")),
+                    "source_type": "DOCUMENT",
+                    "kb_id": citation.get("kb_id") or "kb-a",
+                    "file_id": citation.get("file_id") or "file-a",
+                    "content": str(citation.get("_quote") or ""),
+                }
+                for citation in citations
             ],
             "warnings": [],
         }
@@ -238,6 +250,62 @@ async def test_compound_locator_does_not_short_circuit(monkeypatch: pytest.Monke
     assert refs == ["E1", "E2", "E3"]
     assert contract["citations"][2]["page_numbers"] == [17]
     assert "复合意图" in "".join(contract.get("warnings") or [])
+
+
+@pytest.mark.asyncio
+async def test_locator_authority_gate_fails_closed_when_binding_evidence_not_frozen(monkeypatch):
+    """出口门禁回归：引用池裁决 VERIFIED 但物理证据未冻结 → ANSWER_VALIDATION_FAILED，不上屏页码。"""
+    rogue = _citation("E1", 9, "The structure of OsMYB73 protein was also predicted SANT domains.")
+    rogue["_physical_evidence_id"] = "ev_rogue_unfrozen"  # 不在冻结证据集内
+    rogue["evidence_id"] = "ev_rogue_unfrozen"
+    _patch_pipeline(monkeypatch, citations=[])
+    from yuxi.knowledge.rendering import citation_channel
+
+    monkeypatch.setattr(
+        citation_channel,
+        "build_citations_for_contract",
+        lambda *_args, **_kwargs: _async_return([rogue]),
+    )
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question="The structure of OsMYB73 protein was also predicted 这句原文在正文第几页？",
+        scope_snapshot=_SCOPE,
+        run_id="run-gate",
+        request_id="req-gate",
+    )
+    assert contract["locator_resolution"]["status"] == "NOT_FOUND"
+    assert contract["locator_resolution"]["_authority_gate_audit"]["original_status"] == "VERIFIED"
+    assert contract["status"] == "DEGRADED"
+    assert contract["error_code"] == "ANSWER_VALIDATION_FAILED"
+    assert contract["retrieval_plan"]["answer_mode"] != "LOCATOR_GROUNDED_ANSWER"
+
+
+async def _async_return(value):
+    return value
+
+
+@pytest.mark.asyncio
+async def test_verified_binding_is_persisted_with_locator_resolution(monkeypatch):
+    """门禁通过时绑定对象随 locator_resolution 持久化（投影/渲染统一消费该对象）。"""
+    _patch_pipeline(
+        monkeypatch,
+        citations=[
+            _citation("E1", 3, "The structure of OsMYB73 protein was also predicted SANT domains."),
+        ],
+    )
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question="The structure of OsMYB73 protein was also predicted 这句原文在正文第几页？",
+        scope_snapshot=_SCOPE,
+        run_id="run-binding",
+        request_id="req-binding",
+    )
+    binding = contract["locator_resolution"]["binding"]
+    assert binding["binding_id"].startswith("vlb_")
+    assert binding["status"] == "VERIFIED"
+    assert binding["page_number"] == 3
+    assert binding["physical_evidence_id"] == "ev-physical-E1"
+    assert binding["locator_kind"] == "QUOTE_LOCATOR"
 
 
 @pytest.mark.asyncio

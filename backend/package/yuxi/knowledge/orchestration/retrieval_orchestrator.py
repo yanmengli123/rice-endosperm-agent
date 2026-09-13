@@ -763,6 +763,13 @@ async def prepare_knowledge_context(
             ):
                 locator_resolution["backlinks"] = direct_locator.get("backlinks") or []
         contract["locator_resolution"] = locator_resolution
+        # Locator Authority 出口门禁：VERIFIED ⇒ 物理证据必须已在冻结证据契约
+        # 中（binding 随 locator_resolution_json 持久化，状态投影/渲染器只消费
+        # 该对象）。违例 → ANSWER_VALIDATION_FAILED，失败关闭不展示页码。
+        from yuxi.knowledge.contracts.locator_binding import enforce_locator_authority
+
+        enforce_locator_authority(contract, retrieval_id=retrieval_id)
+        locator_resolution = contract["locator_resolution"]
         if locator_intent.get("compound"):
             contract["retrieval_plan"] = {
                 **contract["retrieval_plan"],
@@ -785,11 +792,13 @@ async def prepare_knowledge_context(
             ]
             if locator_resolution.get("status") != "VERIFIED":
                 contract["status"] = "DEGRADED"
-                contract["error_code"] = (
-                    "QUOTE_LOCATOR_MULTIPLE_MATCHES"
-                    if locator_resolution.get("status") == "MULTIPLE_MATCHES"
-                    else "QUOTE_LOCATOR_NOT_FOUND"
-                )
+                # 权威门禁结论（ANSWER_VALIDATION_FAILED）不被常规失败码覆盖
+                if contract.get("error_code") != "ANSWER_VALIDATION_FAILED":
+                    contract["error_code"] = (
+                        "QUOTE_LOCATOR_MULTIPLE_MATCHES"
+                        if locator_resolution.get("status") == "MULTIPLE_MATCHES"
+                        else "QUOTE_LOCATOR_NOT_FOUND"
+                    )
         else:
             contract["retrieval_plan"] = {
                 **contract["retrieval_plan"],
@@ -798,11 +807,13 @@ async def prepare_knowledge_context(
             }
             if locator_resolution.get("status") != "VERIFIED":
                 contract["status"] = "DEGRADED"
-                contract["error_code"] = (
-                    "QUOTE_LOCATOR_MULTIPLE_MATCHES"
-                    if locator_resolution.get("status") == "MULTIPLE_MATCHES"
-                    else "QUOTE_LOCATOR_NOT_FOUND"
-                )
+                # 权威门禁结论（ANSWER_VALIDATION_FAILED）不被常规失败码覆盖
+                if contract.get("error_code") != "ANSWER_VALIDATION_FAILED":
+                    contract["error_code"] = (
+                        "QUOTE_LOCATOR_MULTIPLE_MATCHES"
+                        if locator_resolution.get("status") == "MULTIPLE_MATCHES"
+                        else "QUOTE_LOCATOR_NOT_FOUND"
+                    )
                 contract["warnings"] = [
                     *(contract.get("warnings") or []),
                     "当前无法可靠定位原文页码；系统未展示任何候选页码。",
