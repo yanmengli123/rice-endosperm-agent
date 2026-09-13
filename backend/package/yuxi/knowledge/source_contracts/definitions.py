@@ -342,6 +342,92 @@ MANAGED_GRAPH = SourceContractSpec(
 )
 
 # =============================================================================
+# === generic_document@1.0.0：通用文档知识库（高级入口） ===
+# =============================================================================
+
+GENERIC_DOCUMENT = SourceContractSpec(
+    contract_key="generic_document",
+    version="1.0.0",
+    product_category="authority_source",
+    display=SourceContractDisplay(
+        label="通用文档知识库",
+        card_description=(
+            "面向 Word、Markdown、文本、网页、表格、演示文稿、图片和普通 PDF 的通用检索库；"
+            "保留默认解析、分块与向量检索能力，不启用科研 PDF 的强证据链语义。"
+        ),
+        operator_description="供检索未采用科研专属契约的通用文档内容。",
+        entry_mode="advanced",
+    ),
+    allowed_commands=(
+        COMMAND_DOCUMENT_UPLOAD,
+        COMMAND_DOCUMENT_ADD,
+        COMMAND_DOCUMENT_PARSE,
+        COMMAND_DOCUMENT_INDEX,
+        COMMAND_DOCUMENT_DELETE,
+        COMMAND_DOCUMENT_MOVE,
+        COMMAND_FOLDER_CREATE,
+        COMMAND_FETCH_URL,
+        *_LLM_GRAPH,
+        COMMAND_MINDMAP_GENERATE,
+        COMMAND_STATS_REPAIR,
+        COMMAND_SAMPLE_QUESTIONS,
+        *_RELEASE,
+        COMMAND_ARCHIVE,
+    ),
+    forbidden_commands=(
+        COMMAND_SCIENTIFIC_PDF_RETRY,
+        *_GRAPH_IMPORT,
+        *_DATASET,
+    ),
+    accepted_media=(
+        SourceContractMediaRule(
+            role="document",
+            extensions=(
+                ".txt",
+                ".md",
+                ".docx",
+                ".html",
+                ".htm",
+                ".json",
+                ".csv",
+                ".xls",
+                ".xlsx",
+                ".pdf",
+                ".pptx",
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".bmp",
+                ".tiff",
+                ".tif",
+                ".zip",
+            ),
+        ),
+    ),
+    authority_policy={
+        "artifact_store": "object_storage_source_sha256",
+        "canonical_store": "postgresql_document_metadata",
+        "retrieval_projection": "milvus",
+        "llm_graph": "navigation_projection_non_authoritative",
+    },
+    required_provenance=("source_sha256", "file_id"),
+    base_capabilities={
+        "fulltext_search": "FULL",
+        "document_parsing": "FULL",
+        "llm_graph_navigation": "PARTIAL",
+        "citation_navigation": "UNSUPPORTED",
+        "row_level_provenance": "UNSUPPORTED",
+        "relation_enumeration": "UNSUPPORTED",
+    },
+    processing_policy={
+        "chunking": "通用文档分块 · 可按文件处理参数配置",
+        "parsing": "按文件类型选择系统解析器，并经过统一文本质量门禁",
+        "retrieval": "Milvus 向量检索；查询参数在检索策略中独立管理",
+        "quality_gate": "validate_markdown_quality 拒绝空白/乱码，不可绕过",
+    },
+)
+
+# =============================================================================
 # === legacy 兼容契约（hidden，开放全部命令以保住存量行为） ===
 # =============================================================================
 
@@ -360,12 +446,12 @@ LEGACY_GENERIC = SourceContractSpec(
     accepted_media=(),
     authority_policy={
         "canonical_store": "legacy_unclassified",
-        "note": "存量库兼容契约；目标路线是显式升级为 generic_document@1.0.0 或拆分到严格契约",
+        "note": "存量库兼容契约；可显式升级为 generic_document@1.0.0 或拆分到严格契约",
     },
     required_provenance=("content_hash",),
     base_capabilities={},
     processing_policy={},
-    upgrade_path="generic_document@1.0.0（规划中）",
+    upgrade_path="generic_document@1.0.0",
 )
 
 LEGACY_MIXED = SourceContractSpec(

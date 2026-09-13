@@ -27,6 +27,7 @@ def _legacy_kb_contract(monkeypatch):
         contract_key = "legacy_generic"
         contract_version = "0"
         contract_ref = "legacy_generic@0"
+        allowed_commands = ("llm_graph_build",)
 
     async def _fake_load(kb_id):
         return _LegacySpec()
@@ -644,3 +645,52 @@ async def test_milvus_graph_service_get_stats_empty_kb_id():
     service = MilvusGraphService()
     result = await service.get_stats(kb_id=None)
     assert result == {"total_nodes": 0, "total_edges": 0, "entity_types": []}
+
+
+@pytest.mark.asyncio
+async def test_contract_gate_blocks_writes_but_not_status(monkeypatch):
+    """2026-09 索引管理面板事故回归：只读 get_status/reset 永远可用，
+    产生 LLM 抽图的写入口（configure/build）仍被源契约拦截。"""
+    from types import SimpleNamespace
+
+    service = MilvusGraphService(
+        kb_repo=SimpleNamespace(get_by_kb_id=AsyncMock(return_value=SimpleNamespace(
+            kb_type="milvus", additional_params={"graph_build_config": {"locked": True, "extractor_type": "llm"}})))
+    )
+
+    class _StrictSpec(SimpleNamespace):
+        contract_key = "pdf_evidence"
+        contract_version = "1.0.0"
+        contract_ref = "pdf_evidence@1.0.0"
+        allowed_commands = ()
+
+    async def _strict_contract(kb_id):
+        return _StrictSpec()
+
+    import yuxi.knowledge.source_contracts as _contracts
+    monkeypatch.setattr(_contracts, "load_kb_contract", _strict_contract)
+
+    # 写入口：configure 被契约拒绝（在抽取器校验之前）
+    with pytest.raises(ValueError, match="不接受 LLM 自动图谱构建"):
+        await service.configure("kb_t", "llm", {}, created_by="u")
+
+    # 写入口：build_pending_chunks 被契约拒绝（在锁定配置读取之前）
+    with pytest.raises(ValueError, match="不接受 LLM 自动图谱构建"):
+        await service.build_pending_chunks("kb_t", batch_size=10, context=None, model_spec=None)
+
+    # 只读门禁不再调契约：_get_milvus_kb 直接返回 KB
+    kb = await service._get_milvus_kb("kb_t")
+    assert kb.kb_type == "milvus"
+
+    # 通用文档契约按注册命令能力放行，不在服务层重复维护契约 key 白名单
+    class _GenericSpec(SimpleNamespace):
+        contract_key = "generic_document"
+        contract_version = "1.0.0"
+        contract_ref = "generic_document@1.0.0"
+        allowed_commands = ("llm_graph_build",)
+
+    async def _generic_contract(kb_id):
+        return _GenericSpec()
+
+    monkeypatch.setattr(_contracts, "load_kb_contract", _generic_contract)
+    await service._require_graph_contract("kb_t")

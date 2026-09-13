@@ -6,6 +6,7 @@ import pytest
 
 from yuxi.knowledge.source_contracts import (
     COMMAND_DOCUMENT_UPLOAD,
+    COMMAND_FETCH_URL,
     COMMAND_GRAPH_IMPORT_EXECUTE,
     COMMAND_LLM_GRAPH_BUILD,
     ContractCommandForbidden,
@@ -52,7 +53,13 @@ class TestRegistry:
     def test_snapshot_excludes_hidden_by_default(self):
         snapshot = contract_registry_snapshot()
         keys = {item["contract_key"] for item in snapshot}
-        assert {"pdf_evidence", "csv_record", "csv_qa", "managed_graph"} <= keys
+        assert {
+            "pdf_evidence",
+            "csv_record",
+            "csv_qa",
+            "managed_graph",
+            "generic_document",
+        } <= keys
         assert "legacy_generic" not in keys
 
     def test_snapshot_includes_hidden_when_requested(self):
@@ -75,6 +82,14 @@ class TestRegistry:
         spec = resolve_contract("csv_qa")
         assert "上传" in spec.processing_policy["ingest"]
         assert "必须确认" in spec.processing_policy["ingest"]
+
+    def test_generic_document_is_explicit_advanced_contract(self):
+        spec = resolve_contract("generic_document")
+        assert spec.display.entry_mode == "advanced"
+        assert COMMAND_DOCUMENT_UPLOAD in spec.allowed_commands
+        assert COMMAND_FETCH_URL in spec.allowed_commands
+        assert COMMAND_LLM_GRAPH_BUILD in spec.allowed_commands
+        assert COMMAND_GRAPH_IMPORT_EXECUTE not in spec.allowed_commands
 
 
 class TestDigest:
@@ -121,6 +136,17 @@ class TestMediaValidation:
     def test_legacy_unrestricted(self):
         spec = resolve_contract("legacy_generic")
         validate_contract_media(spec, "anything.bin")
+
+    @pytest.mark.parametrize(
+        "filename",
+        ["notes.md", "report.docx", "slides.pptx", "table.xlsx", "scan.png", "paper.pdf"],
+    )
+    def test_generic_document_accepts_supported_documents(self, filename):
+        validate_contract_media(resolve_contract("generic_document"), filename)
+
+    def test_generic_document_rejects_unsupported_media(self):
+        with pytest.raises(ContractMediaRejected):
+            validate_contract_media(resolve_contract("generic_document"), "payload.exe")
 
 
 class TestClassifyLegacyKb:

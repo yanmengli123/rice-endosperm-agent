@@ -10,6 +10,7 @@ from __future__ import annotations
 from yuxi.knowledge.source_contracts.definitions import (
     CSV_QA,
     CSV_RECORD,
+    GENERIC_DOCUMENT,
     LEGACY_GENERIC,
     LEGACY_MIXED,
     MANAGED_GRAPH,
@@ -34,7 +35,15 @@ class UnknownSourceContractError(SourceContractError):
 
 _REGISTRY: dict[tuple[str, str], SourceContractSpec] = {
     (spec.contract_key, spec.version): spec
-    for spec in (PDF_EVIDENCE, CSV_RECORD, CSV_QA, MANAGED_GRAPH, LEGACY_GENERIC, LEGACY_MIXED)
+    for spec in (
+        PDF_EVIDENCE,
+        CSV_RECORD,
+        CSV_QA,
+        MANAGED_GRAPH,
+        GENERIC_DOCUMENT,
+        LEGACY_GENERIC,
+        LEGACY_MIXED,
+    )
 }
 
 

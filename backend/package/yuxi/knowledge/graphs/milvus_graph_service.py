@@ -224,6 +224,7 @@ class MilvusGraphService:
         created_by: str,
     ) -> dict:
         kb = await self._get_milvus_kb(kb_id)
+        await self._require_graph_contract(kb_id)
         additional_params = dict(kb.additional_params or {})
         existing_config = additional_params.get(GRAPH_CONFIG_KEY) or {}
         normalized_extractor_type = (extractor_type or "").lower()
@@ -265,6 +266,7 @@ class MilvusGraphService:
         model_spec: str | None = None,
     ) -> dict[str, Any]:
         kb = await self._get_milvus_kb(kb_id)
+        await self._require_graph_contract(kb_id)
         config = self._get_locked_config(kb.additional_params or {})
         extractor_options = self._runtime_extractor_options(config)
         if model_spec:
@@ -957,29 +959,43 @@ class MilvusGraphService:
             }
 
     async def _get_milvus_kb(self, kb_id: str):
-        """LLM 自动图谱构建的知识库门禁。
+        """知识库存在性/类型门禁（只读，get_status/reset 同样经过此处）。
 
-        managed_graph 契约禁止普通 LLM graph-build（设计第七节：规范图谱
-        与自动抽取图必须隔离）；pdf_evidence / csv_* 严格契约同样拒绝；
-        legacy 契约保留旧行为。
+        契约门禁在 :meth:`_require_graph_contract`——只拦截「产生 LLM 自动
+        抽图」的写入口（configure/build_pending_chunks）；状态查询与重置
+        清理永远可用（2026-09 事故：门禁误放此处导致 pdf_evidence 库的
+        索引管理面板 get_status 直接 500）。
         """
         kb = await self.kb_repo.get_by_kb_id(kb_id)
         if kb is None:
             raise ValueError(f"知识库 {kb_id} 不存在")
         if (kb.kb_type or "").lower() != "milvus":
             raise ValueError("仅 Milvus 知识库支持独立图谱构建")
-        from yuxi.knowledge.source_contracts import SourceContractError, load_kb_contract
+        return kb
+
+    async def _require_graph_contract(self, kb_id: str) -> None:
+        """LLM 自动图谱构建的源契约写门禁。
+
+        managed_graph 契约禁止普通 LLM graph-build（设计第七节：规范图谱
+        与自动抽取图必须隔离）；pdf_evidence / csv_* 严格契约同样拒绝；
+        generic_document 只生成非权威导航投影，legacy 契约保留旧行为。
+        仅在产生新抽取内容的写入口调用。
+        """
+        from yuxi.knowledge.source_contracts import (
+            COMMAND_LLM_GRAPH_BUILD,
+            SourceContractError,
+            load_kb_contract,
+        )
 
         try:
             spec = await load_kb_contract(kb_id)
         except SourceContractError as exc:
             raise ValueError(f"[{exc.error_code}] {exc}") from exc
-        if spec.contract_key not in ("legacy_generic", "legacy_mixed"):
+        if COMMAND_LLM_GRAPH_BUILD not in spec.allowed_commands:
             raise ValueError(
                 f"知识源契约 {spec.contract_ref} 不接受 LLM 自动图谱构建；"
                 "规范图谱请使用托管 CSV 导入，自动抽图能力即将以独立投影形式提供"
             )
-        return kb
 
     def _get_locked_config(self, additional_params: dict[str, Any]) -> dict[str, Any]:
         config = additional_params.get(GRAPH_CONFIG_KEY) or {}
