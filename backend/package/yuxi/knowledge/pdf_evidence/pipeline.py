@@ -26,7 +26,9 @@ from yuxi.utils import logger
 
 # v1.1: 图片引用由 MinIO URL 改为 kbasset:// 逻辑 URI（鉴权 Asset API 渲染），
 # canonical Markdown 内容变化，重新解析需生成新 parse revision。
-PIPELINE_VERSION = "scientific_pdf_v2.9"
+# v3.0: chart/chart_caption 纳入视觉块（Figure 5 事故），assets 携带视觉块
+# 记录供 Figure Ingestor 建资产指纹索引——重解析生成新 parse revision。
+PIPELINE_VERSION = "scientific_pdf_v3.0"
 QUALITY_PROFILE_VERSION = "pdf_evidence_v2"
 ANCHOR_MARKER = "<!-- yuxi-evidence-anchor:{anchor_id};page={page} -->"
 
@@ -289,6 +291,23 @@ class ScientificPdfPipeline:
                 mention["anchor_id"] = match["anchor_id"]
                 mention["anchor_confidence"] = match["score"]
         physical_page_map = build_physical_page_map(native, mineru_blocks, grobid_data)
+        # 视觉块记录（R-P2）：image/figure/chart 块的 img_path + 页码 + bbox +
+        # 题注文本随 article.assets 持久化，供 Figure Ingestor 下载图片字节、
+        # 计算 sha256/pHash/panel 指纹并落 figure_assets 索引。
+        visual_assets = [
+            {
+                "kind": "figure",
+                "block_type": str(block["block_type"]),
+                "img_path": str(block.get("source_path") or ""),
+                "page_index": int(block["page_index"]),
+                "page": int(block["page"]),
+                "bbox": list(block["bbox"]),
+                "caption": str(block["text"] or ""),
+                "block_id": str(block.get("block_id") or ""),
+            }
+            for block in mineru_blocks
+            if block["block_type"] in {"image", "figure", "chart"}
+        ]
         grobid_metadata = grobid_data.get("metadata") or {}
         article = UnifiedArticle(
             schema_version="2.0",
@@ -305,6 +324,7 @@ class ScientificPdfPipeline:
             references=list(grobid_data.get("references") or []),
             citation_mentions=citation_mentions,
             anchors=anchor_dicts,
+            assets=visual_assets,
             parser_provenance={
                 "pipeline_version": PIPELINE_VERSION,
                 "parser_fingerprint": fingerprint,
@@ -367,13 +387,14 @@ class ScientificPdfPipeline:
         structured_figures = [
             anchor
             for anchor in mineru_anchors
-            if anchor.anchor_type in {"image", "figure"}
+            if anchor.anchor_type in {"image", "figure", "chart"}
             and re.search(
                 r"(?:^|\s)(?:fig(?:ure)?\.?|图)\s*[\dA-Za-z]",
                 anchor.quote,
                 re.IGNORECASE,
             )
         ]
+        visual_figure_assets = [asset for asset in visual_assets if asset["img_path"]]
         invalid_geometry_count = int(physical_page_map["validation"].get("invalid_mineru_block_count") or 0)
         full_locator_ready = bool(mineru_anchors and locator_coverage >= 0.75 and invalid_geometry_count == 0)
         if mineru_ok and grobid_ok and full_locator_ready:
@@ -401,6 +422,7 @@ class ScientificPdfPipeline:
                 "eligible_markdown_blocks": eligible_blocks,
                 "structured_tables": len(structured_tables),
                 "structured_figures": len(structured_figures),
+                "figure_assets": len(visual_figure_assets),
             },
             "locator_profile": {
                 "schema_version": "evidence_anchor_v2",

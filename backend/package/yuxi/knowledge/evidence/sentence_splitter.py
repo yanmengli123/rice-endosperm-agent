@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-SPLITTER_VERSION = "1.1"
+SPLITTER_VERSION = "1.2"
 
 # 句边界：全角 。！？ 无歧义直接切；ASCII .!? 需后随空白/闭合引号括号或文末
 # （小数 "7.0"、URL 因后随非空白不会被切）。1.1 起纳入 ASCII 句号。
@@ -97,9 +97,15 @@ def split_evidence_units(
 
 
 def _classify_quote(quote: str) -> tuple[str, str | None, str | None]:
-    """返回 (evidence_type, container_label, row_key)。"""
+    """返回 (evidence_type, container_label, row_key)。
+
+    题注判定只看编号形态（句首 Figure/Table/图/表 + 编号），不看长度：
+    2026-09 Figure 5 事故中含基因名/统计方法/比例尺的长题注（>300 字符）
+    被长度上限降级为普通句子，caption span 因此拿不到 container_label，
+    题注定位通道整条失效。
+    """
     caption_match = _CAPTION_START.match(quote)
-    if caption_match and len(quote) <= 300:
+    if caption_match:
         return "caption", caption_match.group(0), None
     if _TABLE_ROW.match(quote):
         cells = [cell.strip() for cell in quote.strip(" |").split("|")]

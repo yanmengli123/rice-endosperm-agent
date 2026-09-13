@@ -18,6 +18,8 @@ class EvidenceFragment:
     ``page_index`` is deliberately zero based because that is the coordinate
     convention used by MinerU and PDF.js.  ``page`` remains available on the
     parent anchor as the one-based, human-facing compatibility field.
+    ``source_path`` carries the MinerU ``img_path`` for visual blocks so the
+    Figure Ingestor can recover the MinIO asset object (content-addressed).
     """
 
     page_index: int
@@ -25,6 +27,7 @@ class EvidenceFragment:
     coordinate_space: str = "pdf_points"
     text: str = ""
     source_block_id: str = ""
+    source_path: str = ""
 
 
 @dataclass(frozen=True)

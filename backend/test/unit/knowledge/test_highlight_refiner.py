@@ -23,7 +23,7 @@ QUESTION = "The structure of OsMYB73 protein was also predicted and the results 
 
 
 def test_split_sentences_handles_english_periods_and_protects_abbreviations():
-    assert SPLITTER_VERSION == "1.1"
+    assert SPLITTER_VERSION == "1.2"
     sentences = split_sentences(PARAGRAPH)
     assert len(sentences) == 4
     # "et al." / "7.0" / "(Figure 1a)." 不产生伪边界

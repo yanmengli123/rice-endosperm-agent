@@ -8,7 +8,7 @@ from typing import Any
 from yuxi.knowledge.pdf_evidence.contracts import EvidenceAnchor, EvidenceFragment, ParserArtifact
 from yuxi.knowledge.pdf_evidence.geometry import geometry_by_page, mineru_bbox_to_pdf_points
 
-MINERU_LAYOUT_ADAPTER_VERSION = "mineru_layout_v2"
+MINERU_LAYOUT_ADAPTER_VERSION = "mineru_layout_v3"
 
 
 def _digest(value: str) -> str:
@@ -62,11 +62,22 @@ def _bbox(value: Any) -> tuple[float, float, float, float] | None:
     return (left, top, right, bottom)
 
 
+# 视觉块类型：MinerU 对 image/figure/chart 的产物形状不同（chart 携带
+# chart_caption），但它们都是"有物理 bbox 的视觉证据"，即使文本为空也不能丢弃
+# （图片字节与指纹由 Figure Ingestor 经 img_path 回收，见 fragments.source_path）。
+_VISUAL_BLOCK_TYPES = {"image", "figure", "chart"}
+
+
 def _block_text(block: dict[str, Any]) -> str:
     block_type = str(block.get("type") or block.get("block_type") or "text").lower()
     candidates: list[Any] = []
     if block_type == "table":
         candidates.extend((block.get("table_caption"), block.get("table_body"), block.get("text")))
+    elif block_type == "chart":
+        # 2026-09 Figure 5 事故：真实 MinerU 输出中图表常为 type="chart" 且
+        # 题注在 chart_caption 字段——此前适配器不认识该形态，整块被丢弃，
+        # Figure 5 永远无法生成物理锚点。
+        candidates.extend((block.get("chart_caption"), block.get("caption"), block.get("text")))
     elif block_type in {"image", "figure"}:
         candidates.extend((block.get("image_caption"), block.get("text")))
     else:
@@ -114,7 +125,7 @@ def extract_mineru_blocks(
         source_bbox = _bbox(raw.get("bbox"))
         text = _block_text(raw)
         block_type = str(raw.get("type") or raw.get("block_type") or "text").lower()
-        if page_index < 0 or source_bbox is None or (not text and block_type not in {"image", "figure", "table"}):
+        if page_index < 0 or source_bbox is None or (not text and block_type not in _VISUAL_BLOCK_TYPES | {"table"}):
             continue
         bbox = source_bbox
         coordinate_space = "mineru_1000"
@@ -164,6 +175,7 @@ def build_mineru_anchors(
             coordinate_space=str(block.get("coordinate_space") or "mineru_1000"),
             text=quote,
             source_block_id=str(block.get("block_id") or ""),
+            source_path=str(block.get("source_path") or ""),
         )
         if not quote and block["block_type"] == "table":
             continuation_index = next(

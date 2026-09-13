@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 import unicodedata
 from typing import Any
@@ -41,7 +42,7 @@ METHOD_EXACT_QUOTE = "EXACT_QUOTE_CONTAINMENT"
 METHOD_HARD_CONSTRAINTS = "IDENTIFIER_NUMERIC_EXACT"
 METHOD_LEXICAL_OVERLAP = "NORMALIZED_LEXICAL_OVERLAP"
 
-RESOLVER_VERSION = "claim_evidence_resolver_v1"
+RESOLVER_VERSION = "claim_evidence_resolver_v2"
 
 # 引文句判定阈值：归一化后 ≥40 字符的连续文本才足以做包含判定
 EXACT_QUOTE_MIN_CHARS = 40
@@ -51,6 +52,8 @@ LEXICAL_LEAD_MARGIN = 0.10
 
 _DASH_CLASS = "‐‑‒–—―−"
 _NON_ALNUM_TAIL = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
+# 小数空格修复：数字 空格* 句点 空格* 数字 → 数字.数字（"1 . 0"→"1.0"、"0. 05"→"0.05"）
+_DECIMAL_SPACE_PATTERN = re.compile(r"(\d)\s*\.\s*(?=\d)")
 # 基因/转录本样式：OsMYB73、ZmMYB14、T1 代（字母+数字混合，≥3 字符）
 _GENE_LIKE = re.compile(r"\b(?=[A-Za-z]{2,}\d)[A-Za-z][A-Za-z0-9]{2,}\b")
 # 大写缩写：SANT、CRISPR、GUS、GFP（≥3 个连续大写字母）
@@ -60,10 +63,24 @@ _FIGURE_LABEL = re.compile(r"\b(?:fig(?:ure)?|table)\s*S?\d+[a-z]?\b", flags=re.
 
 
 def normalize_for_match(text: str) -> str:
-    """科研文本匹配归一化：连字/破折号/全半角/大小写/空白。纯函数。"""
-    value = unicodedata.normalize("NFKC", str(text or ""))
+    """科研文本匹配归一化（v2）：HTML 实体、连字/破折号/全半角/大小写/空白/小数空格。
+
+    v2 起的处理顺序（2026-09 Figure 5 事故：用户粘贴文本含 ``&#x20;`` 实体与
+    ``1 . 0 cm`` 小数空格，旧归一化把实体残骸折叠成额外 token 破坏精确匹配）：
+
+    1. ``html.unescape``——HTML 实体（``&#x20;`` → 空格、``&amp;`` → &）先于
+       一切处理，否则 NFKC/字符折叠会把实体残骸变成假 token；
+    2. NFKC——连字 ﬁ/ﬂ → fi/fl、全半角、上标数字；
+    3. 破折号族统一为 ``-``；
+    4. 小数空格修复——``1 . 0`` → ``1.0``、``0. 05`` → ``0.05``（仅数字两侧
+       的句点，不影响句边界与缩写）；
+    5. casefold + 非字母数字折叠 + 空白归一。
+    """
+    value = html.unescape(str(text or ""))
+    value = unicodedata.normalize("NFKC", value)
     for dash in _DASH_CLASS:
         value = value.replace(dash, "-")
+    value = _DECIMAL_SPACE_PATTERN.sub(r"\1.", value)
     value = value.casefold()
     value = _NON_ALNUM_TAIL.sub(" ", value)
     return re.sub(r"\s+", " ", value).strip()
@@ -81,11 +98,15 @@ def extract_hard_constraints(text: str) -> dict[str, list[str]]:
 
 
 def _constraints_satisfied(hard: dict[str, list[str]], quote_norm: str) -> bool:
-    """硬约束必须全部出现在候选引文中（数字原样、标识符归一化后包含）。"""
+    """硬约束必须全部出现在候选引文中（数字原样、标识符归一化后包含）。
+
+    数字按归一化形态比对（``0.05`` 与载体归一化后的 ``0 05`` 等价），
+    否则 ``P < 0.05`` 类约束永远判失败。
+    """
     if not hard["numbers"] and not hard["identifiers"]:
         return False  # 没有约束时不启用该层（由词面重叠层裁决）
     for number in hard["numbers"]:
-        if number not in quote_norm:
+        if normalize_for_match(number) not in quote_norm:
             return False
     for identifier in hard["identifiers"]:
         if normalize_for_match(identifier) not in quote_norm:
