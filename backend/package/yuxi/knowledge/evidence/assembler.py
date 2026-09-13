@@ -202,12 +202,51 @@ async def _assemble_locator_projection(
         projection_status = "LOCATOR_FAILED"
     else:
         projection_status = "EVIDENCE_UNAVAILABLE"
+
+    # 状态契约（四集合）：定位 run 也必须展示检索候选——「检索到 17 条候选，
+    # 但未形成可靠页码绑定」不能被投影成「0 检索证据」。未验证候选永不
+    # 进入 answer_evidence，页码也不发布给模型。
+    retrieval_projection = await assemble_evidence_for_run(
+        db,
+        run_id,
+        allowed_kb_ids=permitted_kb_ids,
+        question_text=question_text,
+        _retrieval_only=True,
+    )
+    locator_candidate_count = 0
+    locator_status: str | None = None
+    locator_status_reason: str | None = None
+    for record in records:
+        resolution = dict(getattr(record, "locator_resolution_json", None) or {})
+        status = str(resolution.get("status") or "")
+        if status:
+            locator_status = locator_status or status
+            if locator_status_reason is None and resolution.get("reason"):
+                locator_status_reason = str(resolution.get("reason"))
+        if status == "VERIFIED":
+            locator_candidate_count += 1
+        elif isinstance(resolution.get("match_count"), int):
+            locator_candidate_count += int(resolution["match_count"])
+    retrieval_candidates = retrieval_projection.get("evidence") or []
+    summary = _summary(evidence_items, rejected)
+    summary.update(
+        {
+            "retrieval_candidate_count": len(retrieval_candidates),
+            "locator_candidate_count": locator_candidate_count,
+            "verified_binding_count": sum(
+                1 for item in evidence_items if item.get("evidence_role") == "ANSWER_CITATION"
+            ),
+            "answer_evidence_count": len(evidence_items),
+        }
+    )
     return {
         "schema_version": SCIENTIFIC_EVIDENCE_SCHEMA_VERSION,
         "run_id": run_id,
         "projection_status": projection_status,
         "evidence_role": "ANSWER_CITATION",
         "claim_binding_status": "DETERMINISTIC_LOCATOR",
+        "locator_status": locator_status,
+        "locator_status_reason": locator_status_reason,
         "retrievals": [
             {
                 "retrieval_id": record.retrieval_id,
@@ -218,11 +257,14 @@ async def _assemble_locator_projection(
             for record in records
         ],
         "evidence": evidence_items,
+        "answer_evidence": evidence_items,
+        "retrieval_candidates": retrieval_candidates,
         "rejected": rejected,
-        "issues": issues,
-        "conflicts": [],
-        "figures": [],
-        "summary": _summary(evidence_items, rejected),
+        "rejected_candidates": rejected,
+        "issues": [*issues, *(retrieval_projection.get("issues") or [])],
+        "conflicts": retrieval_projection.get("conflicts") or [],
+        "figures": retrieval_projection.get("figures") or [],
+        "summary": summary,
     }
 
 
@@ -307,12 +349,16 @@ async def assemble_evidence_for_run(
     *,
     allowed_kb_ids: Collection[str],
     question_text: str | None = None,
+    _retrieval_only: bool = False,
 ) -> dict[str, Any]:
     """组装一个 run 的检索证据候选；调用方必须给出当前仍可见的冻结范围。
 
     传入 ``question_text``（本次 run 的用户问题）时，为每条证据附加句子级
     ``locator.highlight``：段落级锚点里与问题词法重叠最高的那一句，供查看器
     在 bbox 内做文本层精确高亮。不传则只保留块级定位。
+
+    ``_retrieval_only`` 供 locator 投影复用检索候选投影（跳过 locator 分支，
+    防递归）——状态契约要求定位失败的 run 同时展示检索候选与已验证绑定。
     """
     from yuxi.repositories.knowledge_retrieval_repository import KnowledgeRetrievalRepository
 
@@ -326,12 +372,16 @@ async def assemble_evidence_for_run(
         result["issues"].append({"code": "NO_AUTHORIZED_KNOWLEDGE_SCOPE"})
         return result
 
-    locator_records = [
-        record
-        for record in records
-        if str(getattr(record, "intent", "") or "") == "QUOTE_LOCATOR"
-        and getattr(record, "locator_resolution_json", None) is not None
-    ]
+    locator_records = (
+        []
+        if _retrieval_only
+        else [
+            record
+            for record in records
+            if str(getattr(record, "intent", "") or "") == "QUOTE_LOCATOR"
+            and getattr(record, "locator_resolution_json", None) is not None
+        ]
+    )
     if locator_records:
         # A locator run is an answer binding, not a bag of retrieval
         # candidates. Project only its persisted, verified physical location.

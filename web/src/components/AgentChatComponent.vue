@@ -323,6 +323,8 @@
                     :evidence-role="displayedEvidenceRole"
                     :claim-binding-status="displayedClaimBindingStatus"
                     :projection-status="displayedEvidenceProjectionStatus"
+                    :retrieval-candidates="displayedRetrievalCandidates"
+                    :locator-status-reason="displayedLocatorStatusReason"
                     @open-source="openEvidenceSource"
                   />
                 </div>
@@ -1190,6 +1192,10 @@ const loadRunEvidence = async (threadId, runId) => {
     currentState.evidenceRole = result?.evidence_role || null
     currentState.claimBindingStatus = result?.claim_binding_status || null
     currentState.evidenceProjectionStatus = result?.projection_status || null
+    currentState.retrievalCandidates = Array.isArray(result?.retrieval_candidates)
+      ? result.retrieval_candidates
+      : []
+    currentState.locatorStatusReason = result?.locator_status_reason || null
     currentState.sourceManifest = result?.source_manifest || null
   } catch (error) {
     console.warn('Failed to load run evidence:', runId, error)
@@ -1206,6 +1212,8 @@ const resetRunEvidence = (threadId, runId = null) => {
   ts.evidenceRole = null
   ts.claimBindingStatus = null
   ts.evidenceProjectionStatus = null
+  ts.retrievalCandidates = []
+  ts.locatorStatusReason = null
   ts.sourceManifest = null
   ts.verifiedCitation = null
 }
@@ -1244,6 +1252,7 @@ const hasCurrentEvidenceProjection = computed(() => {
   const summary = threadState.evidenceSummary || {}
   return Boolean(
     threadState.evidence?.length ||
+    threadState.retrievalCandidates?.length ||
     threadState.evidenceRetrievals?.length ||
     threadState.evidenceIssues?.length ||
     summary.rejected
@@ -1280,6 +1289,7 @@ const hasDisplayedEvidenceProjection = computed(() => {
   const summary = entry.evidenceSummary || {}
   return Boolean(
     entry.evidence?.length ||
+    entry.retrievalCandidates?.length ||
     entry.evidenceRetrievals?.length ||
     entry.evidenceIssues?.length ||
     summary.rejected
@@ -1311,6 +1321,21 @@ const displayedEvidenceProjectionStatus = computed(() =>
   focusedRunId.value
     ? focusedArchiveEntry.value?.evidenceProjectionStatus
     : currentEvidenceProjectionStatus.value
+)
+const currentRetrievalCandidates = computed(() => {
+  const candidates = currentChatId.value ? chatState.threadStates[currentChatId.value]?.retrievalCandidates : null
+  return Array.isArray(candidates) ? candidates : []
+})
+const displayedRetrievalCandidates = computed(() => {
+  if (!focusedRunId.value) return currentRetrievalCandidates.value
+  const candidates = focusedArchiveEntry.value?.retrievalCandidates
+  return Array.isArray(candidates) ? candidates : []
+})
+const currentLocatorStatusReason = computed(
+  () => currentChatId.value && chatState.threadStates[currentChatId.value]?.locatorStatusReason
+)
+const displayedLocatorStatusReason = computed(() =>
+  focusedRunId.value ? focusedArchiveEntry.value?.locatorStatusReason : currentLocatorStatusReason.value
 )
 
 // 焦点上下文条文案：加载中 / 轨迹过保留期 / 历史轮短码

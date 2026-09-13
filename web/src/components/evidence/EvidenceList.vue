@@ -31,6 +31,25 @@
         <div v-if="metaLine(item)" class="evidence-meta">{{ metaLine(item) }}</div>
       </div>
     </div>
+    <div v-if="retrievalCandidates.length" class="evidence-retrieval">
+      <div class="evidence-retrieval-head">
+        <span class="evidence-retrieval-title">检索候选</span>
+        <span class="evidence-retrieval-count">{{ retrievalCandidates.length }} 条未绑定定位</span>
+      </div>
+      <p class="evidence-retrieval-note">
+        以下内容已检索到，但未形成可靠页码绑定；候选页码不发布给回答。
+      </p>
+      <div class="evidence-items">
+        <div v-for="item in retrievalCandidates" :key="`rc-${item.evidence_id}`" class="evidence-item">
+          <div class="evidence-item-head">
+            <span class="evidence-page">第 {{ pageNumber(item) }} 页</span>
+            <span class="evidence-quality">{{ item.locator?.quality || 'UNKNOWN' }}</span>
+            <span class="evidence-status is-degraded">检索候选</span>
+          </div>
+          <p class="evidence-quote">{{ quoteText(item) }}</p>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -46,7 +65,9 @@ const props = defineProps({
   issues: { type: Array, default: () => [] },
   evidenceRole: { type: String, default: 'RETRIEVAL_CANDIDATE' },
   claimBindingStatus: { type: String, default: 'NOT_AVAILABLE' },
-  projectionStatus: { type: String, default: null }
+  projectionStatus: { type: String, default: null },
+  retrievalCandidates: { type: Array, default: () => [] },
+  locatorStatusReason: { type: String, default: null }
 })
 
 const summaryLine = computed(() => {
@@ -54,6 +75,8 @@ const summaryLine = computed(() => {
   if (!s) return ''
   const noun = props.evidenceRole === 'ANSWER_CITATION' ? '回答引用证据' : '检索证据候选'
   const parts = [`共 ${s.total || 0} 条${noun}`]
+  if (s.retrieval_candidate_count != null && s.retrieval_candidate_count !== s.total)
+    parts.push(`${s.retrieval_candidate_count} 条检索候选`)
   if (s.verified) parts.push(`${s.verified} 条可精确定位`)
   if (s.degraded) parts.push(`${s.degraded} 条仅供核验`)
   if (s.rejected) parts.push(`${s.rejected} 条拒绝`)
@@ -61,8 +84,13 @@ const summaryLine = computed(() => {
 })
 
 const emptyLine = computed(() => {
-  if (props.projectionStatus === 'LOCATOR_FAILED')
+  if (props.retrievalCandidates.length)
+    return `检索到 ${props.retrievalCandidates.length} 条相关候选，但未形成可靠页码绑定；候选页码未展示。`
+  if (props.projectionStatus === 'LOCATOR_FAILED') {
+    if (props.locatorStatusReason === 'VISION_PROVIDER_UNAVAILABLE')
+      return '图片定位需要视觉模型（当前未配置），且确定性指纹未命中；未输出任何页码。'
     return '已执行原文定位，但没有形成唯一且可验证的物理页码；候选页码未展示。'
+  }
   if (props.projectionStatus === 'EVIDENCE_UNAVAILABLE')
     return '本轮要求了文献证据，但没有产生可出境的已验证证据。'
   return '本轮检索未产生可出境的定位证据。'
@@ -218,6 +246,38 @@ const metaLine = (item) => {
     color: var(--text-primary, #d7dade);
     background: var(--bg-hover, rgba(255, 255, 255, 0.06));
   }
+}
+
+.evidence-retrieval {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color, rgba(255, 255, 255, 0.12));
+}
+
+.evidence-retrieval-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.evidence-retrieval-title {
+  color: var(--text-secondary, #8a8f99);
+  font-weight: 600;
+}
+
+.evidence-retrieval-count {
+  color: var(--warning, #e0a03a);
+}
+
+.evidence-retrieval-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary, #6f747e);
 }
 
 .evidence-quote {

@@ -68,6 +68,8 @@ export const assembleEvidenceFields = (result) => {
     evidenceRole: source.evidence_role || null,
     claimBindingStatus: source.claim_binding_status || null,
     evidenceProjectionStatus: source.projection_status || null,
+    retrievalCandidates: Array.isArray(source.retrieval_candidates) ? source.retrieval_candidates : [],
+    locatorStatusReason: source.locator_status_reason || null,
     sourceManifest: source.source_manifest || null
   }
 }
