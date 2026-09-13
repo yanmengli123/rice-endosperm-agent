@@ -424,6 +424,13 @@ async def prepare_knowledge_context(
                 )
                 if retried.get("reason") != "VISION_PROVIDER_UNAVAILABLE":
                     image_locator = retried
+            else:
+                # 原因保真：确定性指纹已比对未命中 + 视觉通道不可用是两个独立事实，
+                # 排查时不把「指纹未命中」误判成「只是没配视觉模型」。
+                image_locator["detail"] = {
+                    "deterministic_match": "missed",
+                    "vision": "not_configured" if not provider.available else "observation_invalid",
+                }
         if image_locator.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
             # 图片裁决优先且终局：MULTIPLE_MATCHES 不允许文本路径收缩成唯一页码；
             # 观察不可用等失败关闭结论同样终局。

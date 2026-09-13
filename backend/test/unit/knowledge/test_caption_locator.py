@@ -38,7 +38,9 @@ from yuxi.storage.postgres.models_knowledge import (
 
 pytestmark = [pytest.mark.unit]
 
-_STATS_TEMPLATE = "Bar, 1.0 cm. Lowercase letters indicate significant difference (P < 0.05, ANOVA with Tukey correction)."
+_STATS_TEMPLATE = (
+    "Bar, 1.0 cm. Lowercase letters indicate significant difference (P < 0.05, ANOVA with Tukey correction)."
+)
 _GENE_SENTENCE = "CRISPR/Cas9 knockout of OsMYB73 and OsNF-YB1 in rice callus"
 
 
@@ -199,9 +201,7 @@ def test_decompose_extracts_figure_label_only_question():
 
 
 def test_decompose_extracts_quote_and_label():
-    decomposed = decompose_question_intents(
-        f"Figure 5 {_GENE_SENTENCE} 这句话在哪一页，是什么意思？"
-    )
+    decomposed = decompose_question_intents(f"Figure 5 {_GENE_SENTENCE} 这句话在哪一页，是什么意思？")
     assert decomposed["kind"] == LOCATOR_KIND_QUOTE
     assert decomposed["figure_label"] == "Figure 5"
     assert decomposed["quote_text"]
@@ -236,9 +236,7 @@ def _digest(value: str) -> str:
 
 
 async def _ensure_source(session, *, row_id: int, revision_id: str, file_id: str):
-    existing = (
-        await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == file_id))
-    ).scalars().first()
+    existing = (await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == file_id))).scalars().first()
     if existing is not None:
         return
     # SQLite 方言：BIGINT 自增主键需显式 id（见 CLAUDE.md 测试注意事项）
@@ -412,10 +410,7 @@ async def test_caption_channel_returns_none_when_label_absent(caption_session):
     )
     await caption_session.commit()
 
-    assert (
-        await resolve_figure_caption_locator(caption_session, figure_label="Figure 5", kb_ids=["kb-a"])
-        is None
-    )
+    assert await resolve_figure_caption_locator(caption_session, figure_label="Figure 5", kb_ids=["kb-a"]) is None
 
 
 @pytest.mark.asyncio
@@ -464,10 +459,7 @@ async def test_caption_channel_ignores_toc_captions(caption_session):
     )
     await caption_session.commit()
 
-    assert (
-        await resolve_figure_caption_locator(caption_session, figure_label="Figure S8", kb_ids=["kb-a"])
-        is None
-    )
+    assert await resolve_figure_caption_locator(caption_session, figure_label="Figure S8", kb_ids=["kb-a"]) is None
     # 确认数据确实写入了（排除「空库导致 None」的假阳性）
     count = len((await caption_session.execute(select(EvidenceSpanRecord.span_id))).all())
     assert count == 1
@@ -487,3 +479,177 @@ def test_simple_namespace_span_shape_matches_registry_duck_typing():
 
     registry = build_figure_registry([span])
     assert "Figure 5" in registry
+
+
+# ---- Figure 3 事故回归（2026-09：讨论段复述短语被发布为题注页 → 错页第 5 页）----
+
+_FIG3_CAPTION = (
+    "Figure 3 Grain starch physicochemical characteristics comparison of ZH11 and cr-myb73 in T1 generation. "
+    "(a) Total starch content; (b) amylose content; (c) total protein content; (d) total soluble sugar content; "
+    "(e) total lipid content; (f) gel consistency; (g) starch solubility in 1 . 7% KOH solution, scale bars are "
+    "1. 0 cm; (h) chain length distributions of amylopectin in ZH11 and cr-myb73; (i) pasting properties rapid "
+    "visco analyser (RVA) of endosperm starch of ZH11 and cr-myb73 . FV, ﬁnal viscosity; HV, hold through "
+    "viscosity; PV, peak viscosity. The viscosity value at each temperature is the average of three replicates. "
+    "Asterisks indicate statistical signiﬁcance, as determined by a Student's t-test (*P < 0. 05, **P < 0 . 01) ."
+)
+_FIG3_DISCUSSION_P5 = (
+    "Figure 3 showed that grain starch physicochemical characteristics of ZH11 and cr-myb73 differed "
+    "significantly: total starch and amylose content, gel consistency, starch solubility in KOH solution, and "
+    "chain length distributions of amylopectin in ZH11 and cr-myb73 were all altered, and the viscosity value at "
+    "each temperature is the average of three replicates across biological samples."
+)
+_FIG3_QUESTION = f"{_FIG3_CAPTION} 在哪篇文献哪一页，是什么意思？"
+
+
+def test_figure_label_pool_requires_caption_carrier_full_containment():
+    """池内规则：编号问题只认题注载体 + 全包含——讨论段复述短语不发布页码。"""
+    caption_cit = _pool_citation("E1", 7, _FIG3_CAPTION)
+    discussion_cit = _pool_citation("E2", 5, _FIG3_DISCUSSION_P5)
+
+    # 只有讨论段（复述了大量题注短语，含 ≥40 字符逐字段）：失败关闭，不发布第 5 页
+    only_discussion = resolve_quote_locator_from_citations(
+        quote_text=_FIG3_CAPTION, citations=[discussion_cit], figure_label="Figure 3"
+    )
+    assert only_discussion["status"] == "NOT_FOUND"
+    assert "page" not in only_discussion
+
+    # 题注载体在场：正确第 7 页
+    with_caption = resolve_quote_locator_from_citations(
+        quote_text=_FIG3_CAPTION, citations=[caption_cit, discussion_cit], figure_label="Figure 3"
+    )
+    assert with_caption["status"] == "VERIFIED"
+    assert with_caption["page"] == 7
+    assert with_caption["evidence_id"] == "ev-E1"
+
+
+async def test_figure_label_quote_falls_back_to_caption_channel_golden_page(caption_session):
+    """金标路径：新 revision 形态（chart 锚点 + caption span 第 7 页）→ 正确第 7 页。"""
+    from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator
+
+    await _add_caption(
+        caption_session,
+        row_id=1,
+        revision_id="spr_a",
+        file_id="file_a",
+        container_label="Figure 3",
+        quote=_FIG3_CAPTION,
+        page=7,
+        anchor_type="chart",
+    )
+    await caption_session.commit()
+
+    resolution = await resolve_quote_locator(caption_session, question=_FIG3_QUESTION, kb_ids=["kb-a"])
+    assert resolution["status"] == "VERIFIED"
+    assert resolution["page"] == 7
+    assert resolution["locator_kind"] == "FIGURE_CAPTION"
+
+
+@pytest.mark.asyncio
+async def test_figure3_incident_old_revision_fails_closed(caption_session):
+    """事故复现（旧 revision 形态）：caption span 无锚点 + 第 5 页讨论段复述短语 → 失败关闭。
+
+    旧解析中 chart 块被丢弃，caption span anchor_id=NULL；第 5/6 页正文讨论段
+    复述题注短语。修复前：讨论段通过部分包含被 VERIFIED → 错页第 5 页发布。
+    修复后：编号问题只认题注载体 → NOT_FOUND，不展示任何页码。
+    """
+    from yuxi.storage.postgres.models_knowledge import EvidenceAnchorRecord, EvidenceSpanRecord
+
+    from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator
+
+    await _ensure_source(caption_session, row_id=1, revision_id="spr_a", file_id="file_a")
+    import hashlib as _hashlib
+
+    quote_hash = _hashlib.sha256(_FIG3_DISCUSSION_P5.encode()).hexdigest()
+    caption_session.add(
+        EvidenceAnchorRecord(
+            id=1,
+            anchor_id="ea_discuss_p5",
+            parse_revision_id="spr_a",
+            page=5,
+            bbox=[40.0, 500.0, 280.0, 580.0],
+            word_start=0,
+            word_end=20,
+            quote_hash=quote_hash,
+            prefix_hash="p",
+            suffix_hash="s",
+            quote=_FIG3_DISCUSSION_P5,
+            fragments=[{"page_index": 4, "bbox": [40.0, 500.0, 280.0, 580.0], "coordinate_space": "pdf_points"}],
+            anchor_type="paragraph",
+            locator_quality="HIGH",
+            confidence=1.0,
+            locatable=True,
+            source="mineru",
+            document_partition="MAIN_TEXT",
+        )
+    )
+    caption_session.add(
+        EvidenceSpanRecord(
+            id=2,
+            tenant_id=1,
+            parse_revision_id="spr_a",
+            kb_id="kb-a",
+            file_id="file_a",
+            span_id="es_discuss_p5",
+            anchor_id="ea_discuss_p5",
+            sentence_index=0,
+            quote=_FIG3_DISCUSSION_P5,
+            quote_hash=quote_hash,
+            page_number=5,
+            evidence_type="sentence",
+            document_partition="MAIN_TEXT",
+            partition_confidence=1.0,
+            evidence_id="evs_discuss_p5",
+        )
+    )
+    caption_session.add(
+        EvidenceSpanRecord(
+            id=3,
+            tenant_id=1,
+            parse_revision_id="spr_a",
+            kb_id="kb-a",
+            file_id="file_a",
+            span_id="es_fig3_orphan",
+            anchor_id=None,  # 旧解析：caption span 无物理锚点
+            sentence_index=1,
+            quote=_FIG3_CAPTION,
+            quote_hash=_hashlib.sha256(_FIG3_CAPTION.encode()).hexdigest(),
+            page_number=None,
+            evidence_type="caption",
+            document_partition="MAIN_TEXT",
+            partition_confidence=1.0,
+            evidence_id="evs_fig3_orphan",
+            container_label="Figure 3",
+        )
+    )
+    await caption_session.commit()
+
+    resolution = await resolve_quote_locator(caption_session, question=_FIG3_QUESTION, kb_ids=["kb-a"])
+    assert resolution["status"] == "NOT_FOUND"
+    assert "page" not in resolution
+
+
+@pytest.mark.asyncio
+async def test_caption_channel_rejects_span_anchor_page_mismatch(caption_session):
+    """跨源页码守卫：caption span 页与锚点页不一致（MinerU 误归属）→ 不发布。"""
+    from sqlalchemy import update
+
+    _add_caption(
+        caption_session,
+        row_id=1,
+        revision_id="spr_a",
+        file_id="file_a",
+        container_label="Figure 3",
+        quote=_FIG3_CAPTION,
+        page=7,
+    )
+    await caption_session.execute(
+        update(EvidenceSpanRecord).where(EvidenceSpanRecord.span_id == "es_1").values(page_number=6)
+    )
+    await caption_session.commit()
+
+    resolution = await resolve_figure_caption_locator(
+        caption_session,
+        figure_label="Figure 3",
+        kb_ids=["kb-a"],
+    )
+    assert resolution is None

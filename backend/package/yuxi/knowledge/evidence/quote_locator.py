@@ -18,6 +18,7 @@ LLM 在该链路中**没有页码决定权**；解析结果（含 partition/anch
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import and_, or_, select
@@ -105,6 +106,23 @@ _QUOTE_MIN_NORMALIZED_CHARS = 25
 _MAX_CANDIDATE_SPANS = 500
 # 图注标签：句首的 "Figure S8" / "Table 2" 等，用于图注反链（caption → 正文引用处）
 _CAPTION_LABEL_PATTERN = re.compile(r"^\s*((?:fig(?:ure)?|table)\s*s?\s*\d+[a-z]?)\b", flags=re.IGNORECASE)
+# 讨论段句式：句首编号后接报告动词（"Figure 3 showed/presented that ..."），
+# 是正文对图表的讨论，不是题注本身
+_DISCUSSION_LEAD_PATTERN = re.compile(
+    r"^\s*(?:fig(?:ure)?|table)\s*s?\s*\d+\s+(?:"
+    r"show(?:s|ed|ing)?|present(?:s|ed|ing)?|demonstrat\w+|display(?:s|ed)?|"
+    r"indicat\w+|reveal(?:s|ed)?|summariz\w+|illustrat\w+|depict(?:s|ed)?)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_caption_carrier(span: Any, anchor_quote: str) -> bool:
+    """编号问题回退路径的载体资格：caption span（权威分类）或题注形态锚点。"""
+    if str(getattr(span, "evidence_type", "") or "") == "caption":
+        return True
+    return bool(_CAPTION_LABEL_PATTERN.match(anchor_quote)) and not _DISCUSSION_LEAD_PATTERN.match(anchor_quote)
+
+
 _MAX_BACKLINKS = 3
 _BACKLINK_QUOTE_CHARS = 1600
 _PREFILTER_TOKEN_LIMIT = 5
@@ -266,7 +284,15 @@ def resolve_quote_locator_from_citations(
         carrier_norm = str(citation.get("_quote_norm") or "")
         if not carrier_norm:
             continue
-        contained = quote_norm in carrier_norm or _best_partial_containment(quote_norm, carrier_norm)
+        if figure_label:
+            # 编号问题只认题注载体的全包含：讨论段复述短语不发布页码
+            # （Figure 3 事故：讨论段含题注短语被部分包含误判为题注所在页）
+            carrier_quote = str(citation.get("_quote") or citation.get("quote_head") or "")
+            if not _is_caption_carrier(SimpleNamespace(evidence_type=citation.get("_evidence_type")), carrier_quote):
+                continue
+            contained = quote_norm in carrier_norm
+        else:
+            contained = quote_norm in carrier_norm or _best_partial_containment(quote_norm, carrier_norm)
         if not contained:
             continue
         if citation.get("toc_line"):
@@ -477,9 +503,17 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
         carrier_norm = normalize_for_match(carrier)
         if not carrier_norm:
             continue
-        containment = quote_norm in carrier_norm or (
-            len(quote_norm) >= 40 and _best_partial_containment(quote_norm, carrier_norm)
-        )
+        if figure_label:
+            # 「这段题注在哪页」的合法载体只有题注本身：讨论段（span=sentence，
+            # 如 "Figure 3 showed ..."）即使复述题注短语也不得作为答案发布
+            # （2026-09 Figure 3 事故：讨论段复述短语 → 错发第 5 页）。
+            if not _is_caption_carrier(span, anchor_quote):
+                continue
+            containment = quote_norm in carrier_norm  # 全包含，不允许单短语部分包含
+        else:
+            containment = quote_norm in carrier_norm or (
+                len(quote_norm) >= 40 and _best_partial_containment(quote_norm, carrier_norm)
+            )
         if not containment:
             continue
         # label 硬约束：用户编号与锚点句首编号冲突（Figure 4 ≠ Figure 5）→ 剔除

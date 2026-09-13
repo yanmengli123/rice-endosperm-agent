@@ -291,6 +291,10 @@ _MAX_UNCOVERED_NOTICES = 3
 # 句末紧随的 fail-closed 标记并入同一片段：模型写标记 = 明确的引用意图
 _SENTENCE_TAIL_MARKER = r"(?:[ \t]*" + re.escape(NARRATIVE_LOCATOR_MARKER) + ")?"
 _SENTENCE_SPLIT_PATTERN = re.compile(r"[^.!?。！？\n]+[.!?。！？]?" + _SENTENCE_TAIL_MARKER)
+# PDF 伪影中的小数（"1 . 0 cm"/"0. 05"）：点两侧带空格，句切分会把数字劈开，
+# 芯片被插进数字中间（2026-09 Figure 3 事故可见）。切分前用哨兵保护，输出时还原。
+_DECIMAL_DOT_PATTERN = re.compile(r"(?<=\d)[ \t]*\.[ \t]*(?=\d)")
+_DECIMAL_DOT_TOKEN = "\x00YUXI_DECIMAL_DOT\x00"
 
 
 # ---- Markdown 结构感知（P1）----
@@ -448,20 +452,23 @@ def reverse_bind_citations(
             if "〔证据E" in body or "〔引文定位" in body:
                 output_lines.append(line)
                 continue
+            # PDF 伪影小数（"1 . 0"）内的点不是句界：切分前哨兵保护，绑定用还原文本
+            protected_body = _DECIMAL_DOT_PATTERN.sub(_DECIMAL_DOT_TOKEN, body)
             rebuilt = []
-            for sentence_match in _SENTENCE_SPLIT_PATTERN.finditer(body):
+            for sentence_match in _SENTENCE_SPLIT_PATTERN.finditer(protected_body):
                 sentence = sentence_match.group(0)
                 if not sentence.strip():
                     rebuilt.append(sentence)
                     continue
-                chip = _bind(sentence)
+                chip = _bind(sentence.replace(_DECIMAL_DOT_TOKEN, "."))
                 if chip:
                     bound_count += 1
                     rebuilt.append(sentence.rstrip() + " " + chip)
                 else:
                     rebuilt.append(sentence)
             output_lines.append("".join(rebuilt) + trailing)
-    return "\n".join(output_lines), bound_count, uncovered[:_MAX_UNCOVERED_NOTICES]
+    joined = "\n".join(output_lines).replace(_DECIMAL_DOT_TOKEN, ".")
+    return joined, bound_count, uncovered[:_MAX_UNCOVERED_NOTICES]
 
 
 _LOCATOR_LINE_INLINE_PATTERN = re.compile(r"已可靠定位到原文：〔引文定位｜[^〕]*〕")
@@ -942,6 +949,7 @@ def build_citation_rows(
                     file_id=file_id,
                     filename=filename_by_file.get(file_id, ""),
                     zone=zone,
+                    evidence_type=row_evidence_type,
                     page_numbers=[page],
                     quote_head=primary_quote[:80],
                     anchor_id=str(anchor.anchor_id),

@@ -25,6 +25,7 @@ class CitationBindingCandidate(BaseModel):
     file_id: str | None = None
     filename: str = ""
     zone: str = "MAIN_TEXT"
+    evidence_type: str | None = None
     page_numbers: list[int] = Field(default_factory=list)
     quote_head: str = ""
     anchor_id: str | None = None
@@ -89,6 +90,7 @@ class CitationBindingCandidate(BaseModel):
             "_retrieval_channel": self.retrieval_channel,
             "_quote": self.quote,
             "_quote_norm": self.quote_norm,
+            "_evidence_type": self.evidence_type,
             "_lineage_dropped": self.lineage_dropped,
         }
 
@@ -105,6 +107,7 @@ class CitationBindingCandidate(BaseModel):
             file_id=row.get("file_id"),
             filename=str(row.get("filename") or ""),
             zone=str(row.get("zone") or "MAIN_TEXT"),
+            evidence_type=row.get("_evidence_type"),
             page_numbers=pages,
             quote_head=str(row.get("quote_head") or ""),
             anchor_id=row.get("_anchor_id") or (anchors[0] if anchors else None),

@@ -13,6 +13,7 @@ from yuxi.knowledge.rendering.citation_channel import (
     format_pages,
     is_toc_line,
     render_citation_chip,
+    reverse_bind_citations,
     sanitize_history_text,
     strip_bare_locators,
     zone_of_page,
@@ -366,3 +367,56 @@ def test_strip_bare_locators_collapses_adjacent_markers():
     stripped, validation = strip_bare_locators("见第 3 页、第 4 页与 p. 5")
     assert stripped.count(NARRATIVE_LOCATOR_MARKER) == 1
     assert validation["status"] == "SANITIZED"
+
+
+# ---------- 小数伪影保护（Figure 3 事故：芯片插进 "1 . 0 cm" 中间） ----------
+
+
+def test_reverse_bind_never_inserts_chip_inside_decimal_numbers():
+    """PDF 伪影小数（点两侧带空格）不是句界：芯片不得插进数字中间。"""
+    import re as _re
+    import unicodedata as _ud
+
+    def _norm(text: str) -> str:
+        value = _ud.normalize("NFKC", text)
+        return _re.sub(r"\s+", " ", _re.sub(r"[^0-9a-z一-鿿]+", " ", value.casefold())).strip()
+
+    sentence = "Starch solubility was measured in 1 . 7% KOH solution with scale bars of 1. 0 cm for OsMYB73 panels."
+    carrier_quote = (
+        "Starch solubility was measured in 1 . 7% KOH solution with scale bars of 1. 0 cm for OsMYB73 panels. "
+        "Additional methods context follows here."
+    )
+    citations = [
+        {
+            "ref": "E1",
+            "evidence_id": "ev-E1",
+            "kb_id": "kb-a",
+            "file_id": "file-a",
+            "filename": "paper.pdf",
+            "zone": "MAIN_TEXT",
+            "page_numbers": [7],
+            "primary_page": 7,
+            "quote_head": carrier_quote[:80],
+            "anchor_ids": ["ea-E1"],
+            "locatable": True,
+            "toc_line": False,
+            "secondary_of": None,
+            "_anchor_id": "ea-E1",
+            "_physical_evidence_id": "ev-E1",
+            "_quote": carrier_quote,
+            "_quote_norm": _norm(carrier_quote),
+        }
+    ]
+    out, bound, _uncovered = reverse_bind_citations(
+        sentence + " Unrelated trailing sentence without citations.", citations
+    )
+
+    assert "\x00" not in out
+    # 伪影小数被切分保护并规范化（"1 . 7" → "1.7"），芯片绝不落在数字内部
+    assert "1.7% KOH" in out
+    assert "1.0 cm" in out
+    decimal_zone = out[out.index("1.7%") : out.index("cm for OsMYB73 panels.") + len("cm for OsMYB73 panels.")]
+    assert "〔" not in decimal_zone
+    # 绑定成功：芯片在真实句末（panels. 之后），不在句中
+    assert bound == 1
+    assert "panels. 〔证据E1｜正文·第7页｜paper.pdf〕" in out

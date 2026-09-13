@@ -282,6 +282,10 @@ async def resolve_figure_caption_locator(
             continue
         if not anchor.page or int(anchor.page) < 1:
             continue
+        # 跨源页码一致性守卫：caption span 页（Markdown 层）与锚点页（MinerU 物理层）
+        # 不一致说明页归属可疑（MinerU 误归属），不发布该候选
+        if span.page_number is not None and int(span.page_number) >= 1 and int(span.page_number) != int(anchor.page):
+            continue
         anchor_key = (str(anchor.parse_revision_id), str(anchor.anchor_id))
         if anchor_key in seen_anchors:
             continue
