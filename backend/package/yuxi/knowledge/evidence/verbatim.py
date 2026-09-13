@@ -190,6 +190,28 @@ async def query_verbatim_evidence(
 
     collected: dict[str, dict[str, Any]] = {}
 
+    # L0：整模式子串预收集（字面精确优先，占据前排配额；L2 仍跑完整逻辑并
+    # 回填 matched_patterns）。泛词法命中不得挤掉字面精确命中（定位引文场景）。
+    for pattern in literal_patterns:
+        stmt = (
+            select(EvidenceSpanRecord)
+            .join(KnowledgeFile, KnowledgeFile.file_id == EvidenceSpanRecord.file_id)
+            .where(
+                EvidenceSpanRecord.quote.ilike(f"%{escape_like(pattern)}%", escape="/"),
+                *_scope_filters(tenant_id, kb_ids),
+            )
+            .order_by(EvidenceSpanRecord.sentence_index)
+            .limit(limit)
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        if rows:
+            matched_patterns_l0 = pattern
+            _collect(
+                collected,
+                [_span_row(span, match_tier="EXACT_SUBSTRING", matched_value=matched_patterns_l0) for span in rows],
+                limit=limit,
+            )
+
     # L1：类型化等值（词法倒排；owner_id==span_id 修复原 lexical_hints 的
     # 仅按 revision join 导致返回同 revision 任意 span 的缺陷）
     for lex_type, folded in keywords:

@@ -24,6 +24,7 @@ from typing import Any
 
 from sqlalchemy import select, tuple_
 
+from yuxi.knowledge.contracts.citation_binding import CitationBindingCandidate
 from yuxi.knowledge.evidence.document_partition import (
     PARTITION_APPENDIX,
     PARTITION_MAIN_TEXT,
@@ -45,7 +46,7 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils import logger
 
-CITATION_CHANNEL_VERSION = "citation_channel_v2"
+CITATION_CHANNEL_VERSION = "citation_channel_v3"
 
 MAX_CITATIONS = 12
 MAX_ANCHORS_PER_CITATION = 4
@@ -119,8 +120,24 @@ def parse_chunk_pages(content: Any) -> list[int] | None:
     return [int(raw)] if int(raw) >= 1 else None
 
 
-def is_toc_line(quote: Any) -> bool:
-    return bool(_TOC_LINE_PATTERN.match(str(quote or "")))
+def is_toc_line(
+    quote: Any,
+    *,
+    evidence_type: str | None = None,
+    partition: str | None = None,
+) -> bool:
+    """Distinguish a real Figure/Table caption from a list-of-figures row."""
+    if str(evidence_type or "").casefold() == "toc_line":
+        return True
+    if str(partition or "").upper() in {"TOC", "FIGURE_LIST", "TABLE_LIST"}:
+        return True
+    return bool(
+        re.match(
+            r"^\s*(?:fig(?:ure)?\.?|table)\s*s?\s*\d+.*\.{2,}\s*\d+\s*$",
+            str(quote or ""),
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def zone_of_page(page: int | None, si_start_page: int | None) -> str:
@@ -218,11 +235,25 @@ def append_locator_citations(
 
     纯定位流不经过本函数（无生成通道）；复合意图流在编排器尾部调用，
     定位锚点与反链作为追加引用行（ref 续号），页码同样来自锚点权威值。
+    幂等去重：引用池已含同一物理证据（evidence_id 或 anchor_id 相同）时不
+    重复追加——冻结定位行进入证据集后，citations 构建已覆盖该锚点。
     """
     rows = list(citations or [])
     if not isinstance(locator, dict) or locator.get("status") != "VERIFIED":
         return rows
-    if locator.get("page"):
+    known_evidence_ids = {str(row.get("evidence_id")) for row in rows if row.get("evidence_id")}
+    known_anchor_ids = {
+        str(anchor_id) for row in rows for anchor_id in (row.get("anchor_ids") or []) if anchor_id
+    }
+
+    def _already_covered(*, evidence_id: Any, anchor_id: Any) -> bool:
+        if evidence_id and str(evidence_id) in known_evidence_ids:
+            return True
+        return bool(anchor_id and str(anchor_id) in known_anchor_ids)
+
+    if locator.get("page") and not _already_covered(
+        evidence_id=locator.get("evidence_id"), anchor_id=locator.get("anchor_id")
+    ):
         rows.append(
             _locator_citation_row(
                 f"E{len(rows) + 1}",
@@ -239,6 +270,8 @@ def append_locator_citations(
         )
     for backlink in locator.get("backlinks") or []:
         if not isinstance(backlink, dict) or not backlink.get("page"):
+            continue
+        if _already_covered(evidence_id=backlink.get("evidence_id"), anchor_id=backlink.get("anchor_id")):
             continue
         rows.append(
             _locator_citation_row(
@@ -264,65 +297,180 @@ _SENTENCE_TAIL_MARKER = r"(?:[ \t]*" + re.escape(NARRATIVE_LOCATOR_MARKER) + ")?
 _SENTENCE_SPLIT_PATTERN = re.compile(r"[^.!?。！？\n]+[.!?。！？]?" + _SENTENCE_TAIL_MARKER)
 
 
+# ---- Markdown 结构感知（P1）----
+_CODE_FENCE_PATTERN = re.compile(r"^\s*(```|~~~)")
+_TABLE_ROW_PATTERN = re.compile(r"^\s*\|")
+_HEADING_PATTERN = re.compile(r"^\s*#{1,6}\s")
+# 后端保留区块头（P4：引用平面模板化，模型不得自建）
+_REFERENCES_SECTION_HEADER = "【证据引用】"
+_UNCOVERED_NOTICE_PREFIX = "（注：以下结论未在原文中定位到对应依据"
+
+
+def _iter_markdown_blocks(text: str) -> tuple[list[str], list[tuple[str, int, int]]]:
+    """按行把文本切成 (kind, 起行, 止行) 块：codefence/table/heading/paragraph。
+
+    只读不改写：调用方据此决定哪些块可插入芯片、哪些整块跳过。
+    codefence 从开栏行到闭栏行（含）整块；未闭合围栏按代码块处理到文末。
+    """
+    lines = text.split("\n")
+    blocks: list[tuple[str, int, int]] = []
+    current_kind: str | None = None
+    start = 0
+    in_fence = False
+    for index, line in enumerate(lines):
+        if in_fence:
+            if _CODE_FENCE_PATTERN.match(line):
+                in_fence = False
+                blocks.append(("codefence", start, index))
+                current_kind = None
+            continue
+        if _CODE_FENCE_PATTERN.match(line):
+            if current_kind is not None:
+                blocks.append((current_kind, start, index - 1))
+            in_fence = True
+            start = index
+            continue
+        if _TABLE_ROW_PATTERN.match(line):
+            kind = "table"
+        elif _HEADING_PATTERN.match(line):
+            kind = "heading"
+        elif line.strip().startswith(_REFERENCES_SECTION_HEADER):
+            kind = "references"
+        else:
+            kind = "paragraph"
+        if current_kind == "references" and kind == "paragraph":
+            stripped_line = line.strip()
+            if not stripped_line or stripped_line.startswith(("-", "---")):
+                kind = "references"  # 区块数据行/分隔线延续
+        if kind != current_kind:
+            if current_kind is not None:
+                blocks.append((current_kind, start, index - 1))
+            current_kind = kind
+            start = index
+    if in_fence:
+        blocks.append(("codefence", start, len(lines) - 1))
+    elif current_kind is not None:
+        blocks.append((current_kind, start, len(lines) - 1))
+    return lines, blocks
+
+
+def _normalize_snippet(sentence: str) -> str:
+    """未定位片段归一化：去 Markdown 符号与列表标记、按词边界截断（P3）。"""
+    value = re.sub(r"[*_#>`|]+", " ", str(sentence or ""))
+    value = re.sub(r"^\s*(?:[-*+]|\d+\.)\s+", "", value.strip())
+    value = re.sub(r"\s+", " ", value).strip()
+    if len(value) <= _UNCOVERED_SNIPPET_CHARS:
+        return value
+    cut = value[:_UNCOVERED_SNIPPET_CHARS]
+    boundary = cut.rfind(" ")
+    if boundary >= _UNCOVERED_SNIPPET_CHARS // 2:
+        cut = cut[:boundary]
+    return cut.rstrip("，。、；,.;") + "…"
+
+
 def reverse_bind_citations(
     text: str, citations: list[dict[str, Any]], *, partition_intent: str | None = None
 ) -> tuple[str, int, list[str]]:
-    """反向绑定（引用完备性兜底，零 LLM）：
+    """反向绑定（引用完备性兜底，零 LLM，Markdown 结构感知）。
 
-    答案中**未带芯片但含科研硬约束**（数字/基因符号/缩写）的陈述句，经
-    resolver 四层验证后句末自动补权威芯片；验证不过的记入"未定位依据"清单。
-    已带芯片/标记的句子不重复处理。
+    P1 插入点规则：代码围栏整块不改写；表格行不内插芯片（绑定命中改为
+    表格后的脚注行）；标题行不绑定；段落句末插芯片且**尾随空白（含换行）
+    原位保留**——芯片在句号后、换行前，永不粘连下一段标题。
+    模型模仿的 fail-closed 标记视为引用意图：绑定成功换芯片；失败的句子
+    原样保留（标记由展示层终点规则统一剥除并计入文末提示）。
     """
     pool = _citation_pool(citations)
     if not pool:
         return str(text or ""), 0, []
     by_ref = {str(item.get("ref")): item for item in citations or []}
+    lines, blocks = _iter_markdown_blocks(str(text or ""))
 
-    pieces: list[str] = []
     bound_count = 0
     uncovered: list[str] = []
     processed = 0
-    for match in _SENTENCE_SPLIT_PATTERN.finditer(str(text or "")):
-        original_sentence = match.group(0)
-        sentence = original_sentence
-        stripped_sentence = sentence.strip()
-        if not stripped_sentence:
-            pieces.append(sentence)
-            continue
-        already_cited = "证据E" in sentence or "引文定位" in sentence
-        # 模型从历史/上下文模仿的 fail-closed 标记：视为明确的引用意图，
-        # 剥掉标记后走 resolver——VERIFIED 则替换为真芯片；其余一切非成功
-        # 出口（无硬约束/超上限/绑定失败）都恢复原句，保持失败关闭语义。
-        marker_mimicked = NARRATIVE_LOCATOR_MARKER in sentence
-        if marker_mimicked:
-            sentence = sentence.replace(f" {NARRATIVE_LOCATOR_MARKER}", "").replace(NARRATIVE_LOCATOR_MARKER, "")
-            stripped_sentence = sentence.strip()
-        hard = extract_hard_constraints(stripped_sentence)
-        if already_cited or not (hard["numbers"] or hard["identifiers"]):
-            pieces.append(original_sentence)
-            continue
+
+    def _bind(sentence: str) -> str | None:
+        """返回芯片文本；None = 保持原句（必要时记入 uncovered）。"""
+        nonlocal processed
+        clean = (
+            sentence.replace(" " + NARRATIVE_LOCATOR_MARKER, "")
+            .replace(NARRATIVE_LOCATOR_MARKER, "")
+            .strip()
+        )
+        if not clean or "证据E" in sentence or "引文定位" in sentence:
+            return None
+        hard = extract_hard_constraints(clean)
+        if not (hard["numbers"] or hard["identifiers"]):
+            return None
         processed += 1
         if processed > _MAX_REVERSE_BIND_SENTENCES:
-            pieces.append(original_sentence)
-            continue
+            return None
         binding = resolve_binding(
-            claim_context=stripped_sentence, proposed_ref=None, citations=pool, partition_intent=partition_intent
+            claim_context=clean, proposed_ref=None, citations=pool, partition_intent=partition_intent
         )
         if binding.get("status") == BINDING_VERIFIED:
             resolved = by_ref.get(str(binding.get("ref")))
             if resolved:
-                bound_count += 1
-                pieces.append(sentence.rstrip() + " " + render_citation_chip(resolved))
-                continue
-        if marker_mimicked:
-            # 绑定失败：该句保持失败关闭标记
-            pieces.append(original_sentence)
-            continue
-        snippet = re.sub(r"\s+", " ", stripped_sentence)[:_UNCOVERED_SNIPPET_CHARS]
+                return render_citation_chip(resolved)
+        snippet = _normalize_snippet(clean)
         if snippet and snippet not in uncovered:
             uncovered.append(snippet)
-        pieces.append(sentence)
-    return "".join(pieces), bound_count, uncovered[:_MAX_UNCOVERED_NOTICES]
+        return None
+
+    output_lines: list[str] = []
+    for kind, start, end in blocks:
+        if kind in ("codefence", "heading", "references"):
+            output_lines.extend(lines[start : end + 1])
+            continue
+        if kind == "table":
+            # 幂等防重：紧随本表的脚注行（上一轮绑定产物）存在时整表跳过，
+            # 避免守卫+落库双重应用给同一表追加第二组脚注。
+            already_annotated = any(
+                lines[peek].strip().startswith("> 表格依据：")
+                for peek in range(end + 1, min(end + 3, len(lines)))
+            )
+            footnotes: list[str] = []
+            for row_index in range(start, end + 1):
+                row = lines[row_index]
+                if already_annotated:
+                    output_lines.append(row)
+                    continue
+                chip = _bind(row.replace("|", " "))
+                if chip:
+                    footnotes.append("> 表格依据：" + chip)
+                output_lines.append(row)
+            if footnotes:
+                output_lines.extend(footnotes)
+                bound_count += len(footnotes)
+            continue
+        # 段落：逐行、句内绑定，尾随空白原位保留。
+        # 行级芯片防重（幂等）：本行已含后端芯片（上一轮绑定产物）时整行
+        # 跳过，避免守卫+落库双重应用时给同一句追加第二枚芯片。
+        for line_index in range(start, end + 1):
+            line = lines[line_index]
+            trailing = ""
+            body = line
+            tail = re.search(r"(\s*)$", line)
+            if tail and tail.group(1):
+                trailing = tail.group(1)
+                body = line[: tail.start()]
+            if "〔证据E" in body or "〔引文定位" in body:
+                output_lines.append(line)
+                continue
+            rebuilt = []
+            for sentence_match in _SENTENCE_SPLIT_PATTERN.finditer(body):
+                sentence = sentence_match.group(0)
+                if not sentence.strip():
+                    rebuilt.append(sentence)
+                    continue
+                chip = _bind(sentence)
+                if chip:
+                    bound_count += 1
+                    rebuilt.append(sentence.rstrip() + " " + chip)
+                else:
+                    rebuilt.append(sentence)
+            output_lines.append("".join(rebuilt) + trailing)
+    return "\n".join(output_lines), bound_count, uncovered[:_MAX_UNCOVERED_NOTICES]
 
 
 _LOCATOR_LINE_INLINE_PATTERN = re.compile(r"已可靠定位到原文：〔引文定位｜[^〕]*〕")
@@ -349,6 +497,78 @@ def _ensure_locator_line(text: str, locator_chip: str) -> str:
     replaced = replaced.replace(_LOCATOR_KEEP_TOKEN, line)
     replaced = re.sub(r"[ \t]*\n[ \t]*\n[ \t]*\n+", "\n\n", replaced)
     return replaced
+
+
+def _strip_display_placeholders(text: str) -> tuple[str, int, int]:
+    """展示层占位符终点规则（P3）：模型通道专用占位符绝不上屏。
+
+    - ``[citation omitted]``（历史净化占位符）一律剥除；
+    - 模型仿写的【证据引用】区块头剥除（该区块由后端确定性重渲染）；
+    - 行内 fail-closed 标记全部剥除（≤1 次语义由文末统一提示承担）；
+    返回 (文本, 剥除的标记数, 剥除的占位符数)。
+    """
+    result = str(text or "")
+    placeholder_count = result.count(HISTORY_CITATION_PLACEHOLDER)
+    result = result.replace(HISTORY_CITATION_PLACEHOLDER, "")
+    # 整块剥除模型仿写/上一轮渲染的引用区块（头行 + 连续数据行/分隔线/空行）
+    stripped_lines: list[str] = []
+    skipping_references = False
+    header_count = 0
+    for line in result.split("\n"):
+        if line.strip().startswith(_REFERENCES_SECTION_HEADER):
+            skipping_references = True
+            header_count += 1
+            continue
+        if skipping_references:
+            stripped_line = line.strip()
+            if not stripped_line or stripped_line.startswith(("-", "---")):
+                continue
+            skipping_references = False
+        stripped_lines.append(line)
+    result = "\n".join(stripped_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    marker_count = result.count(NARRATIVE_LOCATOR_MARKER)
+    result = result.replace(NARRATIVE_LOCATOR_MARKER, "")
+    # 剥离残留清理：标点前多余空格、纯空白行收敛（不动表格对齐空白）
+    result = re.sub(r"[ \t]+([,，.。;；、])", r"\1", result)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result, marker_count, placeholder_count + header_count
+
+
+def _render_references_section(text: str, citations: list[dict[str, Any]]) -> tuple[str, bool]:
+    """P4：引用平面模板化——【证据引用】区块完全由后端从已验证引用数据渲染。
+
+    模型不得也不需要自建参考文献章节；区块含页码与锚点 ID（可查询可解释），
+    幂等（已存在区块头则不重复渲染）。
+    """
+    if _REFERENCES_SECTION_HEADER in text:
+        return text, False
+    seen_refs: list[str] = []
+    for match in re.finditer(r"〔证据E(\d{1,3})｜[^〕]*〕", text):
+        ref = "E" + match.group(1)  # citations 键形如 E1（捕获组不含 E 前缀）
+        if ref not in seen_refs:
+            seen_refs.append(ref)
+    if not seen_refs:
+        return text, False
+    by_ref = {str(item.get("ref")): item for item in citations or []}
+    rows = []
+    for ref in seen_refs:
+        citation = by_ref.get(ref)
+        if not citation:
+            continue
+        zone_label = ZONE_LABELS.get(str(citation.get("zone")), str(citation.get("zone") or "正文"))
+        pages = format_pages(citation.get("page_numbers") or [])
+        anchor_id = (citation.get("anchor_ids") or ["—"])[0]
+        rows.append(
+            "- " + ref + "｜" + zone_label + "·第" + pages + "页｜"
+            + _shorten_filename(citation.get("filename")) + "｜" + str(anchor_id)
+        )
+    if not rows:
+        return text, False
+    block = (
+        "\n" + _REFERENCES_SECTION_HEADER + "（后端渲染，页码来自证据锚点）\n" + "\n".join(rows)
+    )
+    return text.rstrip() + block, True
 
 
 def _claim_context_around(text: str, start: int, end: int) -> str:
@@ -440,14 +660,23 @@ def _rewrite_fabricated_chips(
 
     绝不"ref 存在就信 ref"——先进入 resolver 验证该证据是否真的支持附近文本；
     VERIFIED → 重写为真芯片；否则整块剥离（locator 已验证时替换为定位芯片）。
+    幂等防线：与当前引用池渲染产物**完全一致**的芯片是后端上一轮生成的合法
+    芯片（守卫+落库双重应用场景），原样保留，不进入伪造判定。
     """
     fallback = locator_chip or ""
     rewritten = 0
     removed = 0
+    legitimate_chips = {
+        render_citation_chip(citation) for citation in _citation_pool(citations)
+    }
+    if locator_chip:
+        legitimate_chips.add(locator_chip)
 
     def _substitute(match: re.Match) -> str:
         nonlocal rewritten, removed
         chip = match.group(0)
+        if chip in legitimate_chips:
+            return chip
         ref_match = re.search(r"E\d{1,3}", chip)
         binding = resolve_binding(
             claim_context=_claim_context_around(text, match.start(), match.end()),
@@ -536,16 +765,32 @@ def apply_citation_channel(
             expanded, citations or [], partition_intent=partition_intent
         )
 
-    # 5) 未定位依据明示（有理有据：有据带芯片，无据要声明）
-    if uncovered:
+    # 5) 展示层占位符终点（P3）：模型通道占位符/仿写区块头/行内标记剥除。
+    #    必须先于文末提示——被剥除的标记语义由提示统一承担，且提示本身幂等。
+    expanded, markers_stripped, placeholders_stripped = _strip_display_placeholders(expanded)
+
+    # 6) 未定位依据明示（P2 幂等：提示前缀已存在则不重复追加）
+    uncovered = uncovered[:_MAX_UNCOVERED_NOTICES]
+    notice_needed = bool(uncovered) or markers_stripped > 0
+    if notice_needed and _UNCOVERED_NOTICE_PREFIX not in expanded:
+        if uncovered:
+            detail = "、" + "、".join(uncovered)
+        else:
+            detail = ""
         expanded = (
             expanded.rstrip()
-            + "\n\n（注：以下结论未在原文中定位到对应依据，请谨慎采信："
-            + "、".join(uncovered)
+            + "\n\n"
+            + _UNCOVERED_NOTICE_PREFIX
+            + "，请谨慎采信"
+            + ("以下结论" if uncovered else "个别结论")
+            + detail
             + "）"
         )
 
-    # 6) 定位行保障：复合意图流中模型可能漏写定位行，后端确定性补齐并去重
+    # 7) P4 引用平面模板化：已验证引用渲染为后端拥有的【证据引用】区块
+    expanded, references_rendered = _render_references_section(expanded, citations or [])
+
+    # 8) 定位行保障：复合意图流中模型可能漏写定位行，后端确定性补齐并去重
     locator_line_prepended = False
     if locator_chip and f"已可靠定位到原文：{locator_chip}" not in expanded:
         locator_line_prepended = True
@@ -558,6 +803,9 @@ def apply_citation_channel(
         "placeholder_expanded": expanded_count,
         "reverse_bound": reverse_bound,
         "uncovered_claims": uncovered,
+        "markers_stripped": markers_stripped,
+        "display_placeholders_stripped": placeholders_stripped,
+        "references_rendered": references_rendered,
         "locator_line_prepended": locator_line_prepended,
         "bindings": bindings[:8],
         "citation_count": len(citations or []),
@@ -650,7 +898,17 @@ def build_citation_rows(
             )
             continue
 
-        non_toc_anchors = [anchor for anchor in anchors if not is_toc_line(anchor.quote)]
+        row_evidence_type = row.get("evidence_type") or row.get("span_evidence_type")
+        row_partition = row.get("document_partition")
+        non_toc_anchors = [
+            anchor
+            for anchor in anchors
+            if not is_toc_line(
+                anchor.quote,
+                evidence_type=row_evidence_type,
+                partition=row_partition,
+            )
+        ]
         if non_toc_anchors:
             anchors = non_toc_anchors
         for anchor in anchors:
@@ -666,7 +924,11 @@ def build_citation_rows(
                 page=page,
                 si_start_page=si_start,
             )
-            toc_line = is_toc_line(anchor.quote)
+            toc_line = is_toc_line(
+                anchor.quote,
+                evidence_type=row_evidence_type,
+                partition=row_partition,
+            )
             fingerprint = _quote_fingerprint(anchor.quote)
             ref = f"E{len(citations) + 1}"
             secondary_of = None
@@ -676,44 +938,37 @@ def build_citation_rows(
                 fingerprints.setdefault(fingerprint, ref)
             primary_quote = re.sub(r"\s+", " ", str(anchor.quote or "").strip())
             citations.append(
-                {
-                    "ref": ref,
-                    "evidence_id": row.get("evidence_id"),
-                    "kb_id": row.get("kb_id"),
-                    "file_id": file_id,
-                    "filename": filename_by_file.get(file_id, ""),
-                    "zone": zone,
-                    "page_numbers": [page],
-                    "quote_head": primary_quote[:80],
-                    "locatable": not toc_line,
-                    "toc_line": toc_line,
-                    "secondary_of": secondary_of,
-                    "_anchor_id": str(anchor.anchor_id),
-                    "_parse_revision_id": parse_revision_id,
-                    "_index_revision_id": row.get("_active_index_revision_id"),
-                    "_source_sha256": row.get("_source_sha256"),
-                    "_quote_norm": normalize_for_match(anchor.quote)[:_QUOTE_NORM_CHARS],
-                    "_lineage_dropped": dropped_by_lineage,
-                }
+                CitationBindingCandidate(
+                    ref=ref,
+                    retrieval_evidence_id=row.get("evidence_id"),
+                    physical_evidence_id=row.get("physical_evidence_id") or row.get("evidence_id"),
+                    span_evidence_id=row.get("span_evidence_id") or row.get("verbatim_evidence_id"),
+                    kb_id=row.get("kb_id"),
+                    file_id=file_id,
+                    filename=filename_by_file.get(file_id, ""),
+                    zone=zone,
+                    page_numbers=[page],
+                    quote_head=primary_quote[:80],
+                    anchor_id=str(anchor.anchor_id),
+                    span_id=row.get("span_id"),
+                    parse_revision_id=parse_revision_id,
+                    index_revision_id=row.get("_active_index_revision_id"),
+                    source_sha256=row.get("_source_sha256"),
+                    retrieval_channel=row.get("retrieval_channel") or row.get("source_type"),
+                    quote=primary_quote,
+                    quote_norm=normalize_for_match(anchor.quote)[:_QUOTE_NORM_CHARS],
+                    locatable=not toc_line,
+                    toc_line=toc_line,
+                    secondary_of=secondary_of,
+                    lineage_dropped=dropped_by_lineage,
+                ).to_legacy_dict()
             )
     return citations
 
 
 def public_citations(citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """模型可见白名单：绝不携带页码、锚点或解析版本。"""
-    allowed = {
-        "ref",
-        "evidence_id",
-        "kb_id",
-        "file_id",
-        "filename",
-        "zone",
-        "quote_head",
-        "locatable",
-        "toc_line",
-        "secondary_of",
-    }
-    return [{key: value for key, value in citation.items() if key in allowed} for citation in citations or []]
+    return [CitationBindingCandidate.from_legacy_dict(citation).public_view() for citation in citations or []]
 
 
 async def build_citations_for_contract(db, evidence_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

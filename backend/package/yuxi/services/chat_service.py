@@ -21,12 +21,23 @@ from typing import Any, Literal
 
 from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.types import Command
+from sqlalchemy import select
+
 from yuxi import config as conf
+from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
 from yuxi.agents.state import AgentStatePayload
 from yuxi.knowledge.orchestration import prepare_knowledge_context
+from yuxi.knowledge.planning.turn_execution_plan import (
+    Capability,
+    RunSourceManifest,
+    TurnExecutionPlan,
+    plan_turn,
+)
 from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
+from yuxi.knowledge.rendering.answer_draft import render_answer_draft
+from yuxi.knowledge.rendering.source_output_guard import guard_non_document_source_answer
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -42,7 +53,7 @@ from yuxi.services.langfuse_service import (
 )
 from yuxi.services.subagent_run_service import serialize_subagent_run_state
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Agent, User
+from yuxi.storage.postgres.models_business import Agent, MCPCallAudit, User
 from yuxi.utils.guard import content_guard
 from yuxi.utils.logging_config import logger
 from yuxi.utils.question_utils import (
@@ -371,12 +382,103 @@ def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
 
 
 def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    return apply_citation_channel(
-        text,
+    rendered, draft_validation = render_answer_draft(text)
+    guarded, citation_validation = apply_citation_channel(
+        rendered,
         contract.get("citations") or [],
         locator=contract.get("locator_resolution"),
         partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
     )
+    citation_validation["answer_draft"] = draft_validation
+    return guarded, citation_validation
+
+
+def _initial_source_manifest(plan: TurnExecutionPlan) -> RunSourceManifest:
+    return RunSourceManifest(
+        plan_id=plan.plan_id,
+        source_policy=plan.source.policy,
+        document_evidence_requested=plan.evidence.required,
+        mcp_requested=plan.requires_mcp,
+        status="PLANNED" if plan.requires_document_retrieval or plan.requires_mcp else "COMPLETED",
+    )
+
+
+def _plan_failure_answer(plan: TurnExecutionPlan) -> str:
+    if plan.error_code == "PLAN_UNSATISFIABLE":
+        return (
+            "本轮指定的 MCP 来源不具备经过服务端信任登记的 PDF 原文页码定位能力，"
+            "因此执行计划不可满足；系统没有改用知识库或猜测页码。"
+        )
+    if plan.source.policy.value == "BIBLIOGRAPHY_ONLY":
+        return "本轮所需的受信文献检索来源当前不可用；系统没有改用模型记忆或本地知识库补写文献。"
+    if plan.requires_mcp:
+        return "本轮指定的 MCP 来源当前不可用；系统没有静默改用知识库或网络来源。"
+    return "本轮要求的文献来源当前不可用，无法在不扩大来源范围的前提下完成回答。"
+
+
+async def _persist_turn_runtime(
+    db,
+    run_id: str | None,
+    *,
+    plan: TurnExecutionPlan,
+    manifest: RunSourceManifest,
+) -> None:
+    if not run_id:
+        return
+    run = await AgentRunRepository(db).get_run(str(run_id))
+    if run is None:
+        return
+    run.input_payload = {
+        **dict(run.input_payload or {}),
+        "turn_execution_plan": plan.public_dict(),
+        "run_source_manifest": manifest.model_dump(mode="json"),
+    }
+    await db.flush()
+
+
+async def _finalize_mcp_manifest(
+    db,
+    *,
+    run_id: str | None,
+    plan: TurnExecutionPlan,
+    manifest: RunSourceManifest,
+) -> bool:
+    """Return True only when a successful, capability-matched MCP call exists."""
+    if not plan.requires_mcp or not run_id:
+        return True
+    audits = list(
+        (
+            await db.execute(
+                select(MCPCallAudit).where(MCPCallAudit.run_id == str(run_id)).order_by(MCPCallAudit.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    required = set(plan.required_capabilities)
+    matched = []
+    for audit in audits:
+        if str(audit.status).lower() != "success":
+            continue
+        profile = profile_for_protocol_name(str(audit.capability_name or ""))
+        if Capability.GENERIC_MCP in required or (profile and not required.isdisjoint(profile.capabilities)):
+            matched.append(audit)
+    manifest.mcp_call_count = len(audits)
+    manifest.successful_mcp_call_count = len(matched)
+    manifest.mcp_servers = list(dict.fromkeys(str(audit.server_slug) for audit in matched))
+    if matched:
+        matched_planes = [
+            "BIBLIOGRAPHY"
+            if (profile := profile_for_protocol_name(str(audit.capability_name or "")))
+            and profile.source_class == "BIBLIOGRAPHY"
+            else "MCP_DATA"
+            for audit in matched
+        ]
+        manifest.used_planes = list(dict.fromkeys([*manifest.used_planes, *matched_planes]))
+        return True
+    manifest.status = "SOURCE_UNAVAILABLE"
+    manifest.error_code = "SOURCE_UNAVAILABLE"
+    return False
 
 
 def _stream_message_key(metadata: dict | None, namespace: list[str], thread_id: str | None) -> tuple[str, str]:
@@ -812,6 +914,8 @@ async def save_messages_from_langgraph_state(
     run_id: str | None = None,
     request_id: str | None = None,
     knowledge_contract: dict[str, Any] | None = None,
+    final_content_override: str | None = None,
+    run_metadata: dict[str, Any] | None = None,
 ) -> None:
     messages = await _get_langgraph_messages(agent_instance, config_dict, context=context)
     if messages is None:
@@ -860,6 +964,15 @@ async def save_messages_from_langgraph_state(
             )
         elif msg_type == "tool":
             await _save_tool_message(conv_repo, msg_dict)
+
+    if last_ai_message and final_content_override is not None:
+        last_ai_message.content = normalize_markdown_tables(sanitize_visible_text(final_content_override))
+    if last_ai_message and run_metadata:
+        last_ai_message.extra_metadata = {
+            **dict(last_ai_message.extra_metadata or {}),
+            **dict(run_metadata),
+        }
+        await conv_repo.db.flush()
 
     if run_id and last_ai_message:
         run_repo = AgentRunRepository(conv_repo.db)
@@ -1174,6 +1287,17 @@ async def stream_agent_chat(
     _apply_model_override(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
+    turn_plan = plan_turn(
+        query,
+        has_knowledge_scope=bool(knowledge_scope_snapshot.get("effective_kb_ids") or []),
+        configured_mcps=list(input_context.get("mcps") or []),
+        knowledge_strategy=str(knowledge_scope_snapshot.get("knowledge_strategy") or "MODEL_DECIDES"),
+    )
+    source_manifest = _initial_source_manifest(turn_plan)
+    input_context["_turn_execution_plan"] = turn_plan.public_dict()
+    input_context["_run_source_manifest"] = source_manifest.model_dump(mode="json")
+    meta["turn_plan_id"] = turn_plan.plan_id
+    meta["source_policy"] = turn_plan.source.policy.value
     context = _build_agent_context(agent, input_context)
     _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
     langfuse_run = _build_langfuse_run_context(
@@ -1193,8 +1317,10 @@ async def stream_agent_chat(
     credential_context_token = None
     knowledge_contract: dict[str, Any] | None = None
     citation_sensitive_output = False
+    protected_output = turn_plan.buffers_output
     buffered_root_message_id: str | None = None
     buffered_root_metadata: dict[str, Any] | None = None
+    source_output_validation: dict[str, int | str] | None = None
 
     try:
         credential_context_token = await _activate_user_credential(db=db, uid=uid, meta=meta)
@@ -1204,6 +1330,12 @@ async def stream_agent_chat(
             thread_id=thread_id,
             uid=uid,
             agent_item=agent_item,
+        )
+        await _persist_turn_runtime(
+            db,
+            meta.get("run_id"),
+            plan=turn_plan,
+            manifest=source_manifest,
         )
 
         request_attachments = await _bind_request_attachments(
@@ -1220,8 +1352,9 @@ async def stream_agent_chat(
             "message_type": message_type,
             "extra_metadata": {
                 "request_id": meta.get("request_id"),
-                "attachments": request_attachments,
-            },
+                    "attachments": request_attachments,
+                    "turn_execution_plan": turn_plan.public_dict(),
+                },
         }
         if image_content:
             init_msg["image_content"] = image_content
@@ -1239,24 +1372,84 @@ async def stream_agent_chat(
                         "raw_message": human_message.model_dump(),
                         "request_id": meta.get("request_id"),
                         "attachments": request_attachments,
+                        "turn_execution_plan": turn_plan.public_dict(),
                     },
                 )
             except Exception as e:
                 logger.error(f"Error saving user message: {e}")
 
-        retrieval_id = f"kr_{uuid.uuid4().hex}"
-        knowledge_contract = await prepare_knowledge_context(
-            db,
-            question=query,
-            scope_snapshot=knowledge_scope_snapshot,
-            run_id=meta.get("run_id"),
-            request_id=meta.get("request_id"),
-            retrieval_id=retrieval_id,
-        )
-        input_context["_knowledge_contract"] = knowledge_contract
-        setattr(context, "_knowledge_contract", knowledge_contract)
-        citation_sensitive_output = knowledge_contract.get("status") != "SKIPPED"
-        if knowledge_contract.get("status") != "SKIPPED":
+        if not turn_plan.satisfiable:
+            failure_answer = _plan_failure_answer(turn_plan)
+            source_manifest.status = "PLAN_REJECTED"
+            source_manifest.error_code = turn_plan.error_code
+            await _persist_turn_runtime(
+                db,
+                meta.get("run_id"),
+                plan=turn_plan,
+                manifest=source_manifest,
+            )
+            message_id = f"msg_{uuid.uuid4().hex}"
+            ai_message = await conv_repo.add_message_by_thread_id(
+                thread_id=thread_id,
+                role="assistant",
+                content=failure_answer,
+                message_type="text",
+                extra_metadata={
+                    "id": message_id,
+                    "turn_execution_plan": turn_plan.public_dict(),
+                    "run_source_manifest": source_manifest.model_dump(mode="json"),
+                    **get_trace_info(langfuse_run),
+                },
+                run_id=meta.get("run_id"),
+                request_id=meta.get("request_id"),
+            )
+            if ai_message is not None and meta.get("run_id"):
+                await AgentRunRepository(db).set_output_message(str(meta["run_id"]), ai_message.id)
+            await db.commit()
+            yield make_chunk(
+                content=failure_answer,
+                stream_event={
+                    "type": "message_delta",
+                    "message_id": message_id,
+                    "content": failure_answer,
+                    "thread_id": thread_id,
+                    "namespace": [],
+                },
+                metadata={"turn_execution_plan": turn_plan.public_dict()},
+                status="loading",
+                thread_id=thread_id,
+            )
+            meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+            yield make_chunk(status="finished", meta=meta)
+            return
+
+        if turn_plan.requires_document_retrieval:
+            retrieval_id = f"kr_{uuid.uuid4().hex}"
+            knowledge_contract = await prepare_knowledge_context(
+                db,
+                question=query,
+                scope_snapshot=knowledge_scope_snapshot,
+                run_id=meta.get("run_id"),
+                request_id=meta.get("request_id"),
+                retrieval_id=retrieval_id,
+            )
+            input_context["_knowledge_contract"] = knowledge_contract
+            setattr(context, "_knowledge_contract", knowledge_contract)
+            citation_sensitive_output = knowledge_contract.get("status") != "SKIPPED"
+            if citation_sensitive_output:
+                source_manifest.knowledge_retrieval_count = 1
+                source_manifest.used_planes = ["DOCUMENT_EVIDENCE"]
+                source_manifest.status = (
+                    "COMPLETED" if knowledge_contract.get("status") == "COMPLETED" else "DEGRADED"
+                )
+                source_manifest.error_code = knowledge_contract.get("error_code")
+            await _persist_turn_runtime(
+                db,
+                meta.get("run_id"),
+                plan=turn_plan,
+                manifest=source_manifest,
+            )
+        if knowledge_contract and knowledge_contract.get("status") != "SKIPPED":
             synthetic_message_id = f"msg_{uuid.uuid4().hex}"
             assistant_retrieval_message, tool_retrieval_message = _knowledge_contract_messages(
                 knowledge_contract,
@@ -1291,7 +1484,9 @@ async def stream_agent_chat(
                 meta=meta,
             )
 
-        deterministic_locator_answer = _deterministic_locator_answer(knowledge_contract)
+        deterministic_locator_answer = (
+            _deterministic_locator_answer(knowledge_contract) if knowledge_contract is not None else None
+        )
         if deterministic_locator_answer is not None:
             # Locator answers are emitted once, after deterministic binding. No
             # unverified model token can transiently expose a wrong page.
@@ -1314,6 +1509,8 @@ async def stream_agent_chat(
                     "id": message_id,
                     "knowledge_retrieval_id": knowledge_contract.get("retrieval_id"),
                     "citation_binding": locator,
+                    "turn_execution_plan": turn_plan.public_dict(),
+                    "run_source_manifest": source_manifest.model_dump(mode="json"),
                     **get_trace_info(langfuse_run),
                 },
                 run_id=meta.get("run_id"),
@@ -1432,9 +1629,9 @@ async def stream_agent_chat(
                         yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
                         return
 
-                if citation_sensitive_output and not is_subagent_chunk and stream_event.get("type") == "message_delta":
-                    # Citation-bearing text is released only after the complete
-                    # answer has passed the server-side binding gate.
+                if protected_output and not is_subagent_chunk and stream_event.get("type") == "message_delta":
+                    # Source-constrained/citation-bearing text is released only
+                    # after the complete answer has passed server-side gates.
                     continue
 
                 yield make_chunk(
@@ -1444,6 +1641,37 @@ async def stream_agent_chat(
                     status="loading",
                     thread_id=chunk_thread_id,
                 )
+
+        mcp_source_valid = await _finalize_mcp_manifest(
+            db,
+            run_id=meta.get("run_id"),
+            plan=turn_plan,
+            manifest=source_manifest,
+        )
+        if turn_plan.requires_mcp and not mcp_source_valid:
+            accumulated_content = [_plan_failure_answer(turn_plan)]
+        elif turn_plan.requires_mcp:
+            source_manifest.status = "COMPLETED"
+        if (
+            not turn_plan.requires_document_retrieval
+            and turn_plan.source.policy.value in {"MCP_ONLY", "WEB_ONLY", "BIBLIOGRAPHY_ONLY"}
+            and accumulated_content
+        ):
+            guarded_source_text, source_output_validation = guard_non_document_source_answer(
+                "".join(accumulated_content)
+            )
+            accumulated_content = [guarded_source_text]
+            buffered_root_metadata = {
+                **dict(buffered_root_metadata or {}),
+                "source_output_guard": source_output_validation,
+            }
+        if turn_plan.requires_mcp:
+            await _persist_turn_runtime(
+                db,
+                meta.get("run_id"),
+                plan=turn_plan,
+                manifest=source_manifest,
+            )
 
         if citation_sensitive_output and knowledge_contract is not None and accumulated_content:
             guarded_content, locator_validation = _guard_knowledge_answer(
@@ -1474,7 +1702,7 @@ async def stream_agent_chat(
             yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
             return
 
-        if citation_sensitive_output and full_msg is not None and str(full_msg.content or ""):
+        if protected_output and full_msg is not None and str(full_msg.content or ""):
             safe_message_id = str(getattr(full_msg, "id", None) or buffered_root_message_id or uuid.uuid4())
             yield make_chunk(
                 content=str(full_msg.content),
@@ -1522,6 +1750,14 @@ async def stream_agent_chat(
                 "run_id": meta.get("run_id"),
                 "request_id": meta.get("request_id"),
             }
+            if protected_output:
+                save_kwargs["final_content_override"] = str(full_msg.content or "") if full_msg else None
+                save_kwargs["run_metadata"] = {
+                    "turn_execution_plan": turn_plan.public_dict(),
+                    "run_source_manifest": source_manifest.model_dump(mode="json"),
+                }
+                if source_output_validation is not None:
+                    save_kwargs["run_metadata"]["source_output_guard"] = source_output_validation
             if citation_sensitive_output:
                 save_kwargs["knowledge_contract"] = knowledge_contract
             await save_messages_from_langgraph_state(**save_kwargs)

@@ -185,8 +185,7 @@ def test_answer_context_drops_derived_rows_and_reports_gate():
         "completeness": {},
     }
     context = build_answer_context(contract)
-    assert '"derived_rows_dropped":1' in context.replace(" ", "")
-    assert "wiki body" not in context
+    assert "wiki body" not in context  # 派生行被 Authority Gate 丢弃（v3 起丢弃计数不再进 LLM payload）
 
 
 def test_answer_context_rejects_navigation_hit_in_evidence():

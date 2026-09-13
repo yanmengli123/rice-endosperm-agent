@@ -14,7 +14,9 @@ from __future__ import annotations
 from typing import Any
 
 from yuxi.agents.mcp.host import McpHost, McpHostError, McpToolDescriptor
+from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
 from yuxi.agents.mcp.spec import to_camel_case
+from yuxi.knowledge.contracts.source_envelopes import BibliographicEnvelope, McpDataEnvelope
 from yuxi.utils import logger
 
 
@@ -37,6 +39,7 @@ def build_mcp_base_tool(
     from pydantic import Field, create_model
 
     host = _resolve_host()
+    trusted_profile = profile_for_protocol_name(descriptor.name)
 
     args_schema = descriptor.args_model
     # args_schema 兼容三种形态：
@@ -55,7 +58,28 @@ def build_mcp_base_tool(
 
     async def _arun(**kwargs: Any) -> tuple[str, dict[str, Any]]:
         result = await host.call_tool(descriptor.server_slug, config, descriptor.name, kwargs)
-        return result.text, result.to_dict()
+        profile = trusted_profile
+        payload = result.to_dict()
+        if profile and profile.source_class == "BIBLIOGRAPHY":
+            envelope = BibliographicEnvelope(
+                stable_tool_id=descriptor.stable_id,
+                server=descriptor.server_slug,
+                records=[payload],
+            )
+        else:
+            envelope = McpDataEnvelope(
+                stable_tool_id=descriptor.stable_id,
+                server=descriptor.server_slug,
+                capability=(
+                    sorted(capability.value for capability in profile.capabilities)[0]
+                    if profile
+                    else "UNCLASSIFIED"
+                ),
+                source_class=profile.source_class if profile else "UNCLASSIFIED",
+                citation_semantics=profile.citation_semantics if profile else "DATA_PROVENANCE",
+                payload=payload,
+            )
+        return result.text, envelope.model_dump(mode="json")
 
     def _run(**kwargs: Any) -> str:  # 同步路径：不主动支持，防误用给出明确报错
         raise McpHostError(
@@ -80,6 +104,13 @@ def build_mcp_base_tool(
             "aliased": bool(model_facing_name and model_facing_name != descriptor.name),
             "mcp_annotations_untrusted": descriptor.annotations,
             "mcp_output_schema": descriptor.output_schema,
+            "trusted_capabilities": sorted(
+                capability.value for capability in (trusted_profile.capabilities if trusted_profile else ())
+            ),
+            "trusted_source_class": trusted_profile.source_class if trusted_profile else "UNCLASSIFIED",
+            "produces_document_evidence": bool(
+                trusted_profile and trusted_profile.produces_document_evidence
+            ),
         },
     )
     return structured

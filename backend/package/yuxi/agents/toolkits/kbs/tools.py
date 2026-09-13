@@ -184,13 +184,62 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
             "error": "KNOWLEDGE_SCOPE_NOT_BOUND",
             "message": "当前运行没有绑定知识范围快照，为避免越权已拒绝检索。",
         }
-    from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway
+    # MODEL_DECIDES is an audited plan amendment: once the model selects the
+    # unified source tool, execute the same orchestrator used by knowledge-first
+    # runs, persist a KnowledgeRetrievalRun, then freeze the contract onto the
+    # runtime. Returning raw gateway rows here would create hidden evidence that
+    # the answer could use but the run status panel could not replay.
+    from sqlalchemy import select
 
-    return await query_knowledge_scope_gateway(
-        query_text=str(query_text).strip(),
-        scope_snapshot=snapshot,
-        top_k=top_k,
-    )
+    from yuxi.knowledge.orchestration import prepare_knowledge_context
+    from yuxi.knowledge.planning.turn_execution_plan import RunSourceManifest
+    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.storage.postgres.models_business import AgentRun
+
+    run_id = str(getattr(context, "run_id", "") or "") or None
+    request_id = str(getattr(context, "request_id", "") or "") or None
+    async with pg_manager.get_async_session_context() as db:
+        frozen_contract = await prepare_knowledge_context(
+            db,
+            question=str(query_text).strip(),
+            scope_snapshot={**snapshot, "knowledge_strategy": "KNOWLEDGE_FIRST", "allow_web": False},
+            run_id=run_id,
+            request_id=request_id,
+        )
+        setattr(context, "_knowledge_contract", frozen_contract)
+
+        raw_manifest = getattr(context, "_run_source_manifest", None)
+        if isinstance(raw_manifest, dict):
+            manifest = RunSourceManifest.model_validate(raw_manifest)
+            manifest.document_evidence_requested = True
+            manifest.knowledge_retrieval_count += int(frozen_contract.get("status") != "SKIPPED")
+            manifest.used_planes = list(dict.fromkeys([*manifest.used_planes, "DOCUMENT_EVIDENCE"]))
+            manifest.status = "COMPLETED" if frozen_contract.get("status") != "FAILED" else "FAILED"
+            manifest.amendments.append(
+                {
+                    "type": "MODEL_SELECTED_KNOWLEDGE_SOURCE",
+                    "tool": "query_knowledge_scope",
+                    "reason": "MODEL_DECIDES_POLICY",
+                }
+            )
+            manifest_payload = manifest.model_dump(mode="json")
+            setattr(context, "_run_source_manifest", manifest_payload)
+            if run_id:
+                run = (await db.execute(select(AgentRun).where(AgentRun.id == run_id))).scalar_one_or_none()
+                if run is not None:
+                    run.input_payload = {
+                        **dict(run.input_payload or {}),
+                        "run_source_manifest": manifest_payload,
+                    }
+        await db.commit()
+
+    return {
+        "retrieval_id": frozen_contract.get("retrieval_id"),
+        "status": frozen_contract.get("status"),
+        "claim_count": len(frozen_contract.get("claims") or []),
+        "evidence_count": len(frozen_contract.get("evidence") or []),
+        "message": "统一知识检索已完成并冻结；完整证据契约将在下一次模型调用中注入。",
+    }
 
 
 class DeepenEvidenceInput(BaseModel):

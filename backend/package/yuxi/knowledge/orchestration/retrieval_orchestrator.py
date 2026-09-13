@@ -291,6 +291,47 @@ async def _persist_audit(
     await db.flush()
 
 
+def _locator_verbatim_windows(quote_text: str) -> list[str]:
+    """把定位引文切成 ≤128 字符的 ILIKE 窗口（取标识符密集的句段，上限 2 个）。
+
+    长引文不能整段做 ILIKE（上限 128），也不能只取开头（方法句开头套路化）；
+    按句切分后优先含数字/连字符标识符的句段，归一化空白后交给 VERBATIM 通道。
+    """
+    import re as _re
+
+    from yuxi.knowledge.evidence.verbatim import MAX_VERBATIM_PATTERN_CHARS
+
+    sentences = [s.strip() for s in _re.split(r"[.。]", str(quote_text or "")) if s.strip()]
+    windows: list[str] = []
+    for sentence in sentences:
+        if len(sentence) <= MAX_VERBATIM_PATTERN_CHARS:
+            candidate = _re.sub(r"\s+", " ", sentence)
+        else:
+            # 长句取中段 120 字符窗口
+            start = (len(sentence) - 120) // 2
+            candidate = _re.sub(r"\s+", " ", sentence[start : start + 120].strip())
+        if len(candidate) >= 16 and candidate not in windows:
+            windows.append(candidate)
+        if len(windows) >= 2:
+            break
+    return windows
+
+
+def _freeze_locator_evidence(contract: dict[str, Any], row: dict[str, Any] | None) -> None:
+    """Prepend one verified locator row to both answer and validation evidence."""
+    if not row or not row.get("evidence_id"):
+        return
+    for key in ("evidence", "context_evidence"):
+        existing = [item for item in contract.get(key) or [] if isinstance(item, dict)]
+        if not any(item.get("evidence_id") == row["evidence_id"] for item in existing):
+            contract[key] = [row, *existing]
+    contract["warnings"] = [
+        warning
+        for warning in contract.get("warnings") or []
+        if warning != "范围内未检索到足以回答该问题的证据。"
+    ]
+
+
 async def prepare_knowledge_context(
     db: AsyncSession,
     *,
@@ -332,112 +373,51 @@ async def prepare_knowledge_context(
         },
         "warnings": [],
     }
-    # 原句定位是确定性查询，不进入生成式检索/回答链。解析修订、文件、分区、
-    # 锚点和页码由同一个 locator DTO 一次性裁决。
+    # 原句定位（单一证据集原则）：常规召回负责解释上下文，确定性定位器负责
+    # 把精确 ``span + anchor`` 补成一条正式 evidence row；随后统一冻结引用池，
+    # 页码裁决和状态模块投影都只读取该集合。定位器不能绕开集合直接回答。
     from yuxi.knowledge.evidence.quote_locator import (
         LOCATOR_KIND_QUOTE,
-        LOCATOR_STATUS_MULTIPLE_MATCHES,
-        LOCATOR_STATUS_VERIFIED,
         detect_locator_intent,
-        resolve_quote_locator,
     )
 
     locator_intent = detect_locator_intent(question)
     contract["locator_intent"] = locator_intent
-    if locator_intent.get("kind") == LOCATOR_KIND_QUOTE and raw_members:
-        locator_resolution = await resolve_quote_locator(
+    locator_pending = locator_intent.get("kind") == LOCATOR_KIND_QUOTE and bool(raw_members)
+    direct_locator: dict[str, Any] | None = None
+    locator_evidence: dict[str, Any] | None = None
+    if locator_pending:
+        # 定位/复合解释都需要检索证据集：无论知识策略如何都必须执行检索
+        # （MODEL_DECIDES 下本可不检索，定位问题不能跟着 SKIPPED）。
+        plan = {**plan, "retrieval_required": True}
+        from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator
+
+        direct_locator = await resolve_quote_locator(
             db,
             question=question,
             kb_ids=[str(member["kb_id"]) for member in raw_members],
         )
-        contract["locator_resolution"] = locator_resolution
-        if locator_intent.get("compound"):
-            # 复合意图（定位+解释等）：不短路 LLM。定位结果随合同下发，解释等
-            # 子意图走正常检索生成；定位行与引用芯片由输出门禁确定性保障。
-            contract["warnings"].append(
-                "复合意图：页码部分由确定性定位器解析（"
-                + (
-                    "已验证"
-                    if locator_resolution.get("status") == LOCATOR_STATUS_VERIFIED
-                    else "未通过验证，失败关闭不展示页码"
-                )
-                + "），其余子意图基于检索证据回答。"
-            )
-            # 解释子意图需要检索证据：无论知识策略如何都必须执行检索
-            # （MODEL_DECIDES 下纯定位本可不检索，复合不能跟着 SKIPPED）。
-            plan = {**plan, "retrieval_required": True}
-        else:
-            contract["retrieval_plan"] = {
-                **plan,
-                "intent": LOCATOR_KIND_QUOTE,
-                "answer_mode": "DETERMINISTIC_LOCATOR",
-                "retrieval_required": True,
+        if direct_locator.get("status") == "VERIFIED":
+            locator_evidence = {
+                "evidence_id": direct_locator.get("evidence_id"),
+                "span_evidence_id": direct_locator.get("span_evidence_id"),
+                "source_type": "DOCUMENT",
+                "evidence_status": "SUPPORTING",
+                "retrieval_channel": "QUOTE_LOCATOR",
+                "kb_id": direct_locator.get("kb_id"),
+                "file_id": direct_locator.get("file_id"),
+                "parse_revision_id": direct_locator.get("parse_revision_id"),
+                "index_revision_id": direct_locator.get("index_revision_id"),
+                "source_sha256": direct_locator.get("source_sha256"),
+                "span_id": direct_locator.get("span_id"),
+                "evidence_type": direct_locator.get("evidence_type"),
+                "anchor_id": direct_locator.get("anchor_id"),
+                "page_number": direct_locator.get("page"),
+                "document_partition": direct_locator.get("zone"),
+                "evidence_quote": direct_locator.get("quote") or direct_locator.get("quote_head"),
+                "claim_eligible": False,
+                "match_tier": "DETERMINISTIC_QUOTE_LOCATOR",
             }
-            if locator_resolution.get("status") == LOCATOR_STATUS_VERIFIED:
-                contract["status"] = "COMPLETED"
-                contract["evidence"] = [
-                    {
-                        "evidence_id": locator_resolution.get("evidence_id"),
-                        "source_type": "DOCUMENT",
-                        "retrieval_channel": "QUOTE_LOCATOR",
-                        "kb_id": locator_resolution.get("kb_id"),
-                        "file_id": locator_resolution.get("file_id"),
-                        "parse_revision_id": locator_resolution.get("parse_revision_id"),
-                        "span_id": locator_resolution.get("span_id"),
-                        "span_evidence_id": locator_resolution.get("span_evidence_id"),
-                        "anchor_id": locator_resolution.get("anchor_id"),
-                        "page_number": locator_resolution.get("page"),
-                        "document_partition": locator_resolution.get("zone"),
-                        "evidence_quote": locator_resolution.get("quote_head"),
-                        "claim_eligible": False,
-                    }
-                ]
-            else:
-                contract["status"] = "DEGRADED"
-                contract["error_code"] = (
-                    "QUOTE_LOCATOR_MULTIPLE_MATCHES"
-                    if locator_resolution.get("status") == LOCATOR_STATUS_MULTIPLE_MATCHES
-                    else "QUOTE_LOCATOR_NOT_FOUND"
-                )
-                contract["warnings"] = ["当前无法可靠定位原文页码；系统未展示任何候选页码。"]
-
-            from yuxi.knowledge.rendering.citation_channel import build_citations_for_contract
-
-            contract["citations"] = await build_citations_for_contract(db, contract.get("evidence") or [])
-            contract["knowledge_source_status"] = [
-                {
-                    "kb_id": member["kb_id"],
-                    "kb_name": member.get("kb_name") or member["kb_id"],
-                    "source": "POSTGRES_EVIDENCE_SPANS",
-                    "capability_status": "AVAILABLE",
-                    "query_status": locator_resolution.get("status"),
-                    "hit_count": 1 if locator_resolution.get("status") == LOCATOR_STATUS_VERIFIED else 0,
-                }
-                for member in raw_members
-            ]
-            contract["retrieval_summary"] = {
-                "query": question,
-                "claim_count": 0,
-                "evidence_count": len(contract["evidence"]),
-                "verbatim_hit_count": 0,
-                "wiki_navigation_hit_count": 0,
-                "web_call_count": 0,
-                "deterministic_locator": True,
-            }
-            contract["answer_instruction"] = "本题由后端确定性引文定位器直接回答，模型不得生成或修改页码。"
-            contract["contract_hash"] = _hash_contract(contract)
-            await _persist_audit(
-                db,
-                retrieval_id=retrieval_id,
-                run_id=run_id,
-                request_id=request_id,
-                snapshot=scope_snapshot,
-                plan=contract["retrieval_plan"],
-                contract=contract,
-                started_at=started_at,
-            )
-            _emit_knowledge_trace(retrieval_id, contract, started_at)
-            return contract
 
     if not plan.get("retrieval_required"):
         contract["contract_hash"] = _hash_contract(contract)
@@ -484,6 +464,11 @@ async def prepare_knowledge_context(
             contract["wiki_navigation_hits"] = [item.to_dict() for item in navigation_hits]
         elif wiki_members:
             contract["warnings"].append("当前运行快照缺少租户标识，Wiki 导航已失败关闭；原始证据检索不受影响。")
+        # 定位意图优先于枚举/实体查询分支：引文里出现基因名是常态（2026-09
+        # BiFC 事故：含 OsMYB73 的定位问句被 ENTITY_LOOKUP 劫持，检索证据集
+        # 为空导致定位失败关闭）；定位必须走 gateway 检索并注入 VERBATIM 窗口。
+        if locator_pending:
+            plan = {**plan, "intent": "GENERAL_KNOWLEDGE_QUERY"}
         if plan.get("intent") == "PHENOTYPE_REGULATOR_ENUMERATION" and plan.get("target_mention"):
             async with db.begin_nested():
                 resolution = await resolve_entities(
@@ -563,6 +548,14 @@ async def prepare_knowledge_context(
             # 随 baseline 一次执行；guided 复跑会重复 PG 扫描，跳过（evidence_id 去重）。
             verbatim_question_types = list(plan.get("question_types") or [])
             verbatim_patterns = extract_verbatim_patterns(question)
+            # 定位意图：引文本身就是最强字面信号，注入 VERBATIM 通道保证目标句
+            # 进入检索证据集（单一证据集原则下，池里没有就答不了页码）。
+            # ILIKE 模式上限 128 字符，取引文的稳定中段窗口（避开句首套路化开头）。
+            locator_quote = (locator_intent or {}).get("quote_text")
+            if locator_pending and locator_quote:
+                for pattern in _locator_verbatim_windows(locator_quote):
+                    if pattern not in verbatim_patterns:
+                        verbatim_patterns.append(pattern)
             verbatim_config = None
             if scope_tenant_id is not None and (
                 verbatim_patterns
@@ -636,6 +629,10 @@ async def prepare_knowledge_context(
                     "edges": graph_expansion["edges"],
                 }
                 contract["knowledge_source_status"].extend(graph_expansion["source_status"])
+        # The exact physical row is part of the frozen evidence set before
+        # context validation, so the model sees the same evidence later replayed
+        # by the run status panel.
+        _freeze_locator_evidence(contract, locator_evidence)
         existing_status_keys = {
             (str(item.get("kb_id") or ""), str(item.get("source") or ""))
             for item in contract.get("knowledge_source_status") or []
@@ -719,6 +716,11 @@ async def prepare_knowledge_context(
             }
         )
 
+    # Catastrophic failure in a secondary source must not discard an already
+    # verified physical row. Its answer/status projection remains auditable,
+    # while the overall contract keeps the retrieval failure status.
+    _freeze_locator_evidence(contract, locator_evidence)
+
     # 引用通道（citation channel）：页码/锚点的唯一权威来源。构建失败时返回空列表
     # 走失败关闭——模型没有可引用页码，输出门禁仍会剥离其自写的裸页码。
     from yuxi.knowledge.rendering.citation_channel import build_citations_for_contract
@@ -729,45 +731,96 @@ async def prepare_knowledge_context(
         f"citations={len(contract.get('citations') or [])}"
     )
 
-    # 复合意图：把确定性定位结果（含图注反链）并入证据与引用池（不短路生成）。
-    # 定位锚点作为首位证据行，citations 追加定位/反链引用，解释部分的 [E#]
-    # 由此有据可引；answer_mode 标记为 LOCATOR_GROUNDED_ANSWER（非确定性短路）。
+    # 单一证据集定位：在与状态模块同一行的引用池上解析（含图注反链由
+    # 命中锚点是否 caption 触发的审计兜底跳过——引用池定位不反查正文，
+    # 反链解释依据仍来自检索证据本身）。
+    if locator_pending and (locator_intent.get("quote_text") or not locator_intent.get("compound")):
+        from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator_from_citations
+
+        if direct_locator and direct_locator.get("status") == "MULTIPLE_MATCHES":
+            # 全冻结范围已确认跨物理位置重复；Top-K 即使只召回其中一条也不得
+            # 把歧义错误收缩成唯一页码。
+            locator_resolution = direct_locator
+        else:
+            locator_resolution = resolve_quote_locator_from_citations(
+                quote_text=locator_intent.get("quote_text") or "",
+                citations=contract.get("citations") or [],
+                partition_intent=locator_intent.get("partition_intent"),
+            )
+            if (
+                locator_resolution.get("status") == "VERIFIED"
+                and direct_locator
+                and direct_locator.get("status") == "VERIFIED"
+                and (
+                    locator_resolution.get("evidence_id") == direct_locator.get("evidence_id")
+                    or (
+                        locator_resolution.get("parse_revision_id") == direct_locator.get("parse_revision_id")
+                        and locator_resolution.get("file_id") == direct_locator.get("file_id")
+                        and locator_resolution.get("anchor_id") == direct_locator.get("anchor_id")
+                        and locator_resolution.get("page") == direct_locator.get("page")
+                    )
+                )
+            ):
+                locator_resolution["backlinks"] = direct_locator.get("backlinks") or []
+        contract["locator_resolution"] = locator_resolution
+        if locator_intent.get("compound"):
+            contract["retrieval_plan"] = {
+                **contract["retrieval_plan"],
+                "intent": "QUOTE_LOCATOR",
+                "answer_mode": (
+                    "LOCATOR_GROUNDED_ANSWER"
+                    if locator_resolution.get("status") == "VERIFIED"
+                    else "LOCATOR_UNRESOLVED_ANSWER"
+                ),
+            }
+            contract["warnings"] = [
+                *(contract.get("warnings") or []),
+                "复合意图：页码部分由确定性定位器在检索证据集内解析（"
+                + (
+                    "已验证"
+                    if locator_resolution.get("status") == "VERIFIED"
+                    else "未通过验证，失败关闭不展示页码"
+                )
+                + "），其余子意图基于检索证据回答。",
+            ]
+            if locator_resolution.get("status") != "VERIFIED":
+                contract["status"] = "DEGRADED"
+                contract["error_code"] = (
+                    "QUOTE_LOCATOR_MULTIPLE_MATCHES"
+                    if locator_resolution.get("status") == "MULTIPLE_MATCHES"
+                    else "QUOTE_LOCATOR_NOT_FOUND"
+                )
+        else:
+            contract["retrieval_plan"] = {
+                **contract["retrieval_plan"],
+                "intent": "QUOTE_LOCATOR",
+                "answer_mode": "DETERMINISTIC_LOCATOR",
+            }
+            if locator_resolution.get("status") != "VERIFIED":
+                contract["status"] = "DEGRADED"
+                contract["error_code"] = (
+                    "QUOTE_LOCATOR_MULTIPLE_MATCHES"
+                    if locator_resolution.get("status") == "MULTIPLE_MATCHES"
+                    else "QUOTE_LOCATOR_NOT_FOUND"
+                )
+                contract["warnings"] = [
+                    *(contract.get("warnings") or []),
+                    "当前无法可靠定位原文页码；系统未展示任何候选页码。",
+                ]
+            else:
+                contract["status"] = "COMPLETED"
+                contract["answer_instruction"] = "本题由后端确定性引文定位器直接回答，模型不得生成或修改页码。"
+
+    # 复合意图不短路生成。定位锚点已是首位冻结证据；这里只补充可能存在的
+    # 图注正文反链引用，解释部分的 [E#] 因而仍可绑定到权威锚点。
     _tail_locator = contract.get("locator_resolution") or {}
     if (
-        _tail_locator.get("status") == LOCATOR_STATUS_VERIFIED
+        _tail_locator.get("status") == "VERIFIED"
         and (contract.get("locator_intent") or {}).get("compound")
     ):
         from yuxi.knowledge.rendering.citation_channel import append_locator_citations
 
-        contract["evidence"] = [
-            {
-                "evidence_id": _tail_locator.get("evidence_id"),
-                "source_type": "DOCUMENT",
-                "retrieval_channel": "QUOTE_LOCATOR",
-                "kb_id": _tail_locator.get("kb_id"),
-                "file_id": _tail_locator.get("file_id"),
-                "parse_revision_id": _tail_locator.get("parse_revision_id"),
-                "span_id": _tail_locator.get("span_id"),
-                "anchor_id": _tail_locator.get("anchor_id"),
-                "page_number": _tail_locator.get("page"),
-                "document_partition": _tail_locator.get("zone"),
-                "evidence_quote": _tail_locator.get("quote_head"),
-                "claim_eligible": False,
-            },
-            *(contract.get("evidence") or []),
-        ]
         contract["citations"] = append_locator_citations(contract.get("citations") or [], _tail_locator)
-        contract["retrieval_plan"] = {**contract["retrieval_plan"], "answer_mode": "LOCATOR_GROUNDED_ANSWER"}
-        # gateway/identifier 分支会整体覆写 warnings，复合提示在最终位置补挂
-        contract["warnings"] = [
-            *(contract.get("warnings") or []),
-            "复合意图：页码部分由确定性定位器解析（已验证），其余子意图基于检索证据回答。",
-        ]
-        contract["answer_instruction"] = (
-            str(contract.get("answer_instruction") or "")
-            + " 定位行由后端确定性渲染；解释部分每个关键结论必须带 [E#] 引用，"
-            "图注类问题优先引用正文讨论段（citations 中 zone=MAIN_TEXT 的反链条目）。"
-        )
 
     contract["retrieval_summary"] = {
         "query": question,
@@ -787,6 +840,11 @@ async def prepare_knowledge_context(
         "页码与锚点引用只写 [E1]/[E2] 占位符（对应 citations.ref），由后端渲染为权威"
         "「文件·分区·页码」引用；不要自行书写页码。"
     )
+    if locator_intent.get("compound"):
+        contract["answer_instruction"] += (
+            " 定位行由后端确定性渲染；解释部分每个关键结论必须带 [E#] 引用，"
+            "图注类问题优先引用正文讨论段（citations 中 zone=MAIN_TEXT 的反链条目）。"
+        )
     # NUMERIC 题型：数字/区间/单位必须逐字来自证据原文，禁止换算或近似改写（P2-12）
     if "NUMERIC" in (plan.get("question_types") or []):
         contract["answer_instruction"] += (
@@ -800,7 +858,7 @@ async def prepare_knowledge_context(
         run_id=run_id,
         request_id=request_id,
         snapshot=scope_snapshot,
-        plan=plan,
+        plan=contract.get("retrieval_plan") or plan,
         contract=contract,
         started_at=started_at,
     )

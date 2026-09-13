@@ -10,6 +10,11 @@ from dataclasses import dataclass, field
 from arq import cron
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
+from yuxi.agents.mcp.execution import (
+    McpExecutionContext,
+    reset_mcp_execution_context,
+    set_mcp_execution_context,
+)
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.agents.skills.service import init_builtin_skills
 from yuxi.config import config as sys_config
@@ -715,6 +720,28 @@ async def process_agent_run(ctx, run_id: str):
         )
     )
 
+    # MCP 执行身份必须设置在消费 Task（本协程）上：_consume_stream_with_cancel
+    # 用 create_task(agen.__anext__()) 分步消费生成器，chat_service 在生成器首次
+    # 激活里 set 的上下文只存在于那一个 Task 的 Context；后续每次 __anext__ 恢复
+    # 都运行在新 Task 的全新 Context 里，工具节点读到的执行身份为 None，
+    # record_mcp_call 静默丢弃审计 → MCP_ONLY 轮次被终态校验门误判来源不可用。
+    # 在 worker Task 上 set 后，之后创建的每个子 Task 都会拷贝继承该值。
+    mcp_execution_token = None
+    if run.tenant_id is None:
+        # 历史/测试 Run 可能没有租户快照。不能从请求体或用户对象猜租户；
+        # 这类轮次仍可执行，但 MCP 审计会显式报告上下文缺口并由来源门失败关闭。
+        logger.warning(f"AgentRun {run_id} has no authoritative tenant_id; MCP audit context was not activated")
+    else:
+        mcp_execution_token = set_mcp_execution_context(
+            McpExecutionContext(
+                tenant_id=int(run.tenant_id),
+                uid=str(user.uid),
+                thread_id=thread_id,
+                run_id=run_id,
+                agent_slug=agent_slug,
+            )
+        )
+
     try:
         async with pg_manager.get_async_session_context() as db:
             if run_type == "resume":
@@ -964,6 +991,8 @@ async def process_agent_run(ctx, run_id: str):
         )
         return
     finally:
+        # 与上方 set_mcp_execution_context 配对；跨 Context 时安全降级为 no-op。
+        reset_mcp_execution_context(mcp_execution_token)
         progress_done.set()
         progress_task.cancel()
         await asyncio.gather(progress_task, return_exceptions=True)

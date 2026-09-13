@@ -73,3 +73,31 @@ def test_assembled_tool_uses_dict_schema_not_fallback():
     schema = tool.args_schema if isinstance(tool.args_schema, dict) else tool.args_schema.model_json_schema()
     assert "symbol" in schema.get("properties", {})
     assert schema.get("required") == ["symbol"]
+
+
+async def test_literature_tool_emits_bibliography_plane_envelope():
+    raw = SimpleNamespace(
+        name="search_literature",
+        description="search literature",
+        args_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        metadata={"annotations": {}},
+    )
+    descriptor = LegacyLangChainHost()._descriptor_from_raw("literature-mcp", raw)
+    import yuxi.agents.mcp.langchain_adapter as adapter
+
+    original = adapter._host_resolver
+    adapter.set_host_resolver(_fake_host())
+    try:
+        tool = build_mcp_base_tool(descriptor, {"transport": "stdio"})
+        content, artifact = await tool.coroutine(query="Wx")
+    finally:
+        adapter.set_host_resolver(original)
+
+    assert content == "ok"
+    assert artifact["plane"] == "BIBLIOGRAPHY"
+    assert artifact["produces_page_locator"] is False
+    assert artifact["server"] == "literature-mcp"

@@ -22,6 +22,7 @@ from typing import Any
 
 from sqlalchemy import and_, or_, select
 
+from yuxi.knowledge.contracts.citation_binding import CitationBindingCandidate
 from yuxi.knowledge.evidence.document_partition import (
     LOCATOR_ELIGIBLE_PARTITIONS,
     PARTITION_MAIN_TEXT,
@@ -60,7 +61,8 @@ ZONE_SUPPORTING_INFO = PARTITION_SUPPORTING_INFO
 
 # 意图触发词：命中即认为用户在做定位询问
 _LOCATOR_KEYWORDS = re.compile(
-    r"哪一页|第几页|哪个页|在哪页|出处在哪|原文在哪|位于哪|页码是多少|"
+    r"哪一页|那一页|第几页|几页|哪个页|哪页|在哪页|出处在哪|原文在哪|位于哪|页码是多少|"
+    r"哪一句|第几句|哪一段|第几段|哪个段落|原文.{0,8}(?:什么位置|哪里|何处)|"
     r"which\s+page|what\s+page|where\s+in\s+the\s+(paper|article|manuscript|pdf)",
     flags=re.IGNORECASE,
 )
@@ -81,7 +83,10 @@ _SCAFFOLDING_PATTERN = re.compile(
     r"原文出现在?论文的?正文第几页[?？]?|"
     r"这句话在哪个?文献的?哪一页[?？]?|"
     r"在原文哪一页[?？]?|出现在论文的?正文第几页[?？]?|"
-    r"请给出页码[。？?]?|哪一页[?？]?|第几页[?？]?|"
+    r"请给出页码[。？?]?|在哪个?文献那一页[?？]?|文献那一页[?？]?|"
+    r"哪一页[?？]?|那一页[?？]?|几页[?？]?|第几页[?？]?|"
+    r"哪一句[?？]?|第几句[?？]?|哪一段[?？]?|第几段[?？]?|哪个段落[?？]?|"
+    r"原文.{0,8}(?:什么位置|哪里|何处)[?？]?|"
     r"(?:which|what)\s+page(?:\s+[^?？]*)?[?？]?|"
     r"where\s+in\s+the\s+(?:paper|article|manuscript|pdf)(?:\s+[^?？]*)?[?？]?",
     flags=re.IGNORECASE,
@@ -189,6 +194,150 @@ def is_toc_like(text: str, *, evidence_type: str | None = None, partition: str |
     )
 
 
+def resolve_quote_locator_from_citations(
+    *,
+    quote_text: str,
+    citations: list[dict[str, Any]],
+    partition_intent: str | None = None,
+    kb_id: str | None = None,
+) -> dict[str, Any]:
+    """在引用池（锚点权威行，与状态模块同一行数据）内做确定性引文定位。
+
+    单一证据集原则：答案页码与状态模块投影读同一行 citation 记录，
+    结构性一致；引用池之外的相似句（如方法模板句）不可能被选中。
+    失败关闭：池内无命中/多个物理位置且分区无法消歧 → 不产出页码。
+    """
+    locator_version = f"{LOCATOR_VERSION}+evidence_set"
+    if not quote_text:
+        return {
+            "status": LOCATOR_STATUS_NOT_APPLICABLE,
+            "locator_version": locator_version,
+            "reason": "no_extractable_quote",
+        }
+    quote_norm = normalize_for_match(quote_text)
+    if len(quote_norm) < _QUOTE_MIN_NORMALIZED_CHARS:
+        return {
+            "status": LOCATOR_STATUS_NOT_APPLICABLE,
+            "locator_version": locator_version,
+            "reason": "quote_too_short",
+        }
+
+    typed_pool = [
+        CitationBindingCandidate.from_legacy_dict(citation)
+        for citation in citations or []
+        if isinstance(citation, dict)
+    ]
+    pool = [
+        candidate.to_legacy_dict()
+        for candidate in typed_pool
+        if candidate.locator_eligible and (not kb_id or str(candidate.kb_id) == kb_id)
+    ]
+    if partition_intent:
+        filtered = [citation for citation in pool if str(citation.get("zone")) == partition_intent]
+        if not filtered:
+            return {
+                "status": LOCATOR_STATUS_NOT_FOUND,
+                "locator_version": locator_version,
+                "partition_intent": partition_intent,
+                "reason": "no_match_in_requested_partition",
+            }
+        pool = filtered
+
+    matched: list[dict[str, Any]] = []
+    for citation in pool:
+        carrier_norm = str(citation.get("_quote_norm") or "")
+        if not carrier_norm:
+            continue
+        contained = quote_norm in carrier_norm or _best_partial_containment(quote_norm, carrier_norm)
+        if not contained:
+            continue
+        if citation.get("toc_line"):
+            continue
+        matched.append(citation)
+
+    if not matched:
+        return {
+            "status": LOCATOR_STATUS_NOT_FOUND,
+            "locator_version": locator_version,
+            "partition_intent": partition_intent,
+            "reason": "no_match_in_evidence_set",
+        }
+
+    # Deterministic locator rows were added to the same frozen evidence set
+    # specifically to close a Top-K recall gap. When present, they outrank
+    # semantically similar retrieval rows; full-scope duplicate detection has
+    # already happened before such a row can be injected.
+    seeded = [
+        citation
+        for citation in matched
+        if str(citation.get("_retrieval_channel") or "") == "QUOTE_LOCATOR"
+    ]
+    if seeded:
+        matched = seeded
+
+    # A page number is not a physical identity: two papers can both match on
+    # page 15. Collapse only duplicates that resolve to the same active parse,
+    # file and page; otherwise fail closed without leaking candidate pages.
+    physical_locations = {
+        (
+            str(citation.get("_parse_revision_id") or ""),
+            str(citation.get("file_id") or ""),
+            int(citation["page_numbers"][0]),
+        )
+        for citation in matched
+        if citation.get("page_numbers")
+    }
+    if not physical_locations:
+        return {
+            "status": LOCATOR_STATUS_NOT_FOUND,
+            "locator_version": locator_version,
+            "partition_intent": partition_intent,
+            "reason": "matched_evidence_has_no_physical_location",
+        }
+    if len(physical_locations) != 1:
+        return {
+            "status": LOCATOR_STATUS_MULTIPLE_MATCHES,
+            "locator_version": locator_version,
+            "partition_intent": partition_intent,
+            "match_count": len(physical_locations),
+            "reason": "quote_hits_multiple_physical_locations_in_evidence_set",
+        }
+
+    best = sorted(
+        matched,
+        key=lambda citation: (
+            0 if str(citation.get("_retrieval_channel") or "") == "QUOTE_LOCATOR" else 1,
+            str(citation.get("_parse_revision_id") or ""),
+            str(citation.get("file_id") or ""),
+            int((citation.get("page_numbers") or [0])[0]),
+            str(citation.get("_anchor_id") or ""),
+            str(citation.get("ref") or ""),
+        ),
+    )[0]
+    return {
+        "status": LOCATOR_STATUS_VERIFIED,
+        "locator_version": locator_version,
+        "partition_intent": partition_intent,
+        "page": best["page_numbers"][0],
+        "zone": best.get("zone") or ZONE_MAIN_TEXT,
+        "anchor_id": best.get("_anchor_id") or (best.get("anchor_ids") or [None])[0],
+        "evidence_id": best.get("_physical_evidence_id") or best.get("evidence_id"),
+        "retrieval_evidence_id": best.get("evidence_id"),
+        "span_evidence_id": best.get("_span_evidence_id"),
+        "span_id": best.get("_span_id"),
+        "parse_revision_id": best.get("_parse_revision_id"),
+        "index_revision_id": best.get("_index_revision_id"),
+        "source_sha256": best.get("_source_sha256"),
+        "kb_id": best.get("kb_id"),
+        "file_id": best.get("file_id"),
+        "quote_head": best.get("quote_head"),
+        "quote": str(best.get("_quote") or best.get("quote_head") or "")[:800],
+        "filename": best.get("filename"),
+        "citation_ref": best.get("ref"),
+        "backlinks": [],
+    }
+
+
 def _prefilter_tokens(quote_norm: str) -> list[str]:
     """Bounded literal SQL prefilter; full normalization is always checked in Python."""
     values = {token for token in re.findall(r"[a-z0-9][a-z0-9-]{4,}", quote_norm) if token not in _PREFILTER_STOPWORDS}
@@ -196,7 +345,12 @@ def _prefilter_tokens(quote_norm: str) -> list[str]:
 
 
 async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict[str, Any]:
-    """确定性引文定位：原句 → 证据句/锚点 → 分区 → 唯一页码。失败关闭。"""
+    """独立全库定位（也用于补齐冻结证据集的精确召回）。
+
+    运行时页码最终仍由 :func:`resolve_quote_locator_from_citations` 从冻结证据
+    集裁决。本函数在常规/VERBATIM 召回漏掉精确原句时，把确定性命中作为一条
+    正式 evidence row 注入同一集合；它不能绕开集合直接把页码写进答案。
+    """
     intent = detect_locator_intent(question)
     partition_intent = intent.get("partition_intent")
     if not intent.get("kind"):
@@ -308,10 +462,12 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
                     anchor_id=str(anchor.anchor_id),
                 ),
                 "span_evidence_id": str(span.evidence_id),
+                "evidence_type": str(span.evidence_type or ""),
                 "parse_revision_id": str(anchor.parse_revision_id),
                 "kb_id": str(span.kb_id),
                 "file_id": str(span.file_id),
                 "source_sha256": str(revision.source_sha256),
+                "index_revision_id": str(knowledge_file.active_index_revision_id or ""),
                 "filename": str(knowledge_file.filename or ""),
                 "page": int(anchor.page),
                 "quote_head": re.sub(r"\s+", " ", anchor_quote.strip())[:80],
@@ -365,10 +521,12 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
         "span_id": anchor["span_id"],
         "evidence_id": anchor["evidence_id"],
         "span_evidence_id": anchor["span_evidence_id"],
+        "evidence_type": anchor.get("evidence_type"),
         "parse_revision_id": anchor["parse_revision_id"],
         "kb_id": anchor["kb_id"],
         "file_id": anchor["file_id"],
         "source_sha256": anchor["source_sha256"],
+        "index_revision_id": anchor["index_revision_id"],
         "quote_head": anchor["quote_head"],
         "quote": anchor.get("quote") or anchor["quote_head"],
         "filename": anchor["filename"],

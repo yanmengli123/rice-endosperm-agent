@@ -125,10 +125,10 @@ def test_llm_context_distinguishes_claims_from_unique_genes():
         }
     )
 
-    assert '"claim_count":3' in context
-    assert '"unique_subject_count":2' in context
-    assert '"FUNCTIONAL_REGULATION":{"claim_count":2,"unique_subject_count":2}' in context
-    assert '"PERTURBATION_EVIDENCE":{"claim_count":1,"unique_subject_count":1}' in context
-    assert "回答基因数量只能使用 unique_subject_count" in context
-    assert "不得暴露 result_counts、unique_subject_count 等内部字段名" in context
+    assert '"citable_claims":3' in context
+    assert '"distinct_subjects":2' in context
+    assert '"FUNCTIONAL_REGULATION":{"citable_claims":2,"distinct_subjects":2}' in context
+    assert '"PERTURBATION_EVIDENCE":{"citable_claims":1,"distinct_subjects":1}' in context
+    assert "回答基因数量只能使用 distinct_subjects" in context
+    assert "不得暴露 JSON 字段名" in context
     assert "不得称为知识库收录总数" in context

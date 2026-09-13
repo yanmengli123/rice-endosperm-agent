@@ -172,6 +172,34 @@ def test_apply_does_not_duplicate_locator_line():
     assert guarded.count("已可靠定位到原文") == 1
 
 
+def test_bifc_wrong_model_page_is_replaced_by_frozen_page15():
+    """事故回归：模型写第 9 页时，最终答案只能保留冻结锚点的第 15 页。"""
+    locator = {
+        "status": "VERIFIED",
+        "page": 15,
+        "zone": "MAIN_TEXT",
+        "filename": "Plant Biotechnology Journal - 2024 - Liu - OsMYB73.pdf",
+    }
+    citations = [
+        _citation(
+            "E1",
+            15,
+            "Two pairs of constructs, OsMYB73-VN173 and OsNF-YB1-VC155, were transformed into tobacco leaf cells.",
+        )
+    ]
+    guarded, validation = apply_citation_channel(
+        "已可靠定位到原文：〔引文定位｜正文·第9页｜paper.pdf〕\n\n"
+        "这是一段 BiFC 实验方法描述。",
+        citations,
+        locator=locator,
+    )
+
+    assert "第9页" not in guarded
+    assert guarded.startswith("已可靠定位到原文：〔引文定位｜正文·第15页｜")
+    assert guarded.count("已可靠定位到原文") == 1
+    assert validation["changed"] is True
+
+
 def test_apply_appends_uncovered_notice():
     citations = [_citation("E1", 3, SANT_QUOTE)]
     guarded, validation = apply_citation_channel(
@@ -191,13 +219,13 @@ def test_reverse_binding_converts_mimicked_marker_to_chip():
     assert uncovered == []
 
 
-def test_reverse_binding_keeps_marker_when_unresolvable():
+def test_reverse_binding_records_unresolvable_marker_sentence():
+    """v3：绑定失败的标记句不再保留行内标记——记入未定位清单，由文末提示统一披露。"""
     citations = [_citation("E1", 3, SANT_QUOTE)]
     text = f"OsMYB73 具有激酶活性 9999 位点。 {NARRATIVE_LOCATOR_MARKER}"
     bound, count, uncovered = reverse_bind_citations(text, citations)
     assert count == 0
-    assert NARRATIVE_LOCATOR_MARKER in bound  # 保持失败关闭语义
-    assert uncovered == []  # 标记句不重复计入未定位清单
+    assert uncovered and "9999" in uncovered[0]  # 进文末提示，不静默
 
 
 def test_ensure_locator_line_dedupes_with_minor_variance():

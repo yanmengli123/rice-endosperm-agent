@@ -88,7 +88,9 @@ async def test_contract_hides_repeated_unified_retrieval_tool():
         captured["messages"] = prepared.messages
         return [tool.name for tool in prepared.tools]
 
-    assert await KnowledgeContextMiddleware().awrap_model_call(request, handler) == ["deepen_evidence"]
+    # Evidence-producing follow-up tools are hidden after the contract freezes;
+    # otherwise their rows would bypass the persisted EvidenceEnvelope.
+    assert await KnowledgeContextMiddleware().awrap_model_call(request, handler) == []
     assert "full raw quote" not in captured["messages"][1].content
 
 

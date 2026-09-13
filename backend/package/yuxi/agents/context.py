@@ -176,6 +176,18 @@ class BaseContext:
         repr=False,
     )
 
+    _turn_execution_plan: dict[str, Any] | None = field(
+        default=None,
+        metadata={"name": "本轮意图与来源执行计划", "configurable": False, "hide": True},
+        repr=False,
+    )
+
+    _run_source_manifest: dict[str, Any] | None = field(
+        default=None,
+        metadata={"name": "本轮来源使用清单", "configurable": False, "hide": True},
+        repr=False,
+    )
+
     system_prompt: str = field(
         default="You are a helpful assistant.",
         metadata={"name": "系统提示词", "description": "用来描述智能体的角色和行为", "kind": "prompt"},

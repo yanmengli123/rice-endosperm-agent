@@ -118,6 +118,15 @@ async def record_mcp_call(
 ) -> int | None:
     context = get_mcp_execution_context()
     if context is None:
+        # 审计缺失不可静默：工具已真实执行但审计被丢弃时，MCP_ONLY 轮次会被
+        # 终态校验门判成「来源不可用」并把已生成的正确答案替换成失败文案。
+        # 这里曾经静默 return None，是「工具芯片显示已调用、审计表却为 0」
+        # 这类缺陷长期隐蔽的直接原因。
+        logger.warning(
+            "Skipped MCP call audit: no McpExecutionContext in current task "
+            f"(server={server_slug} capability={capability_name}); "
+            "MCP source-gate will observe an audit gap for this run"
+        )
         return None
     from yuxi.storage.postgres.manager import pg_manager
 
@@ -154,14 +163,15 @@ async def record_mcp_call(
             audit_id = int(audit.id)
             await session.commit()
         from yuxi.trace import emit_trace
-        from yuxi.trace.recorder import current_recorder
 
-        recorder = current_recorder()
+        # 审计落库是 point event，不属于正在运行的 MCP execution span。
+        # 若复用 execution span_id，projector 会把该 span 的 operation 从
+        # ``execution`` 改写成 ``audit``，随后自动收尾会生成未注册的
+        # ``mcp.audit.completed/interrupted`` 并反向打断成功工具调用。
         emit_trace(
             category="MCP",
             operation="audit",
             event_type="mcp.audit.recorded",
-            span_id=recorder.latest_running_span_id("MCP") if recorder else None,
             attributes={
                 "mcp_server": server_slug,
                 "mcp_tool": capability_name,

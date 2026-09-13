@@ -17,6 +17,7 @@ from yuxi.knowledge.rendering.citation_channel import (
     strip_bare_locators,
     zone_of_page,
 )
+from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator_from_citations
 
 MAIN_ANCHOR_ID = "ea_8eac914e8f48cd1bd307f9cb6df7f35978e240c1"
 SI_TOC_ANCHOR_ID = "ea_d82d0245a08d70c653cc5d4426d5688439a9fbf4"
@@ -56,6 +57,7 @@ def _evidence_rows():
             "kb_id": "kb_1",
             "file_id": "file_main",
             "parse_revision_id": "pr_active",
+            "evidence_type": "toc_line",
             "content": f"【章节】论文标题\n【页码】17\n【证据锚点】{SI_TOC_ANCHOR_ID}\n{SI_TOC_QUOTE}",
         },
     ]
@@ -86,7 +88,7 @@ def test_extract_anchor_ids_from_footer():
 
 
 def test_toc_line_and_zone_detection():
-    assert is_toc_line(SI_TOC_QUOTE)
+    assert is_toc_line(SI_TOC_QUOTE, evidence_type="toc_line")
     assert not is_toc_line(MAIN_PARAGRAPH_QUOTE)
     assert zone_of_page(16, 17) == ZONE_MAIN_TEXT
     assert zone_of_page(17, 17) == ZONE_SUPPORTING_INFO
@@ -135,6 +137,53 @@ def test_missing_anchor_fails_closed_as_unlocatable():
     assert chip == "〔证据E1｜无法定位页码〕"
 
 
+def test_quote_locator_row_preserves_complete_typed_lineage():
+    quote = (
+        "Figure S8 Rice grain starch physicochemical characteristics comparison of wild-type "
+        "ZH11 and mutants cr-myb73-35 and cr-myb73-46 in T1 generation."
+    )
+    anchor_id = "ea_figure_s8"
+    citations = build_citation_rows(
+        [
+            {
+                "evidence_id": "ev_physical_s8",
+                "span_evidence_id": "evs_span_s8",
+                "span_id": "es_span_s8",
+                "retrieval_channel": "QUOTE_LOCATOR",
+                "kb_id": "kb_1",
+                "file_id": "file_main",
+                "parse_revision_id": "pr_active",
+                "_active_index_revision_id": "ir_active",
+                "_source_sha256": "sha256:source",
+                "anchor_id": anchor_id,
+                "page_number": 17,
+                "evidence_quote": quote,
+            }
+        ],
+        anchor_index={
+            ("pr_active", anchor_id): _anchor(
+                anchor_id,
+                17,
+                quote,
+                partition="SUPPORTING_INFO",
+            )
+        },
+        si_start_by_file={},
+        filename_by_file={"file_main": "supporting-information.pdf"},
+    )
+
+    citation = citations[0]
+    assert citation["anchor_ids"] == [anchor_id]
+    assert citation["_span_id"] == "es_span_s8"
+    assert citation["_span_evidence_id"] == "evs_span_s8"
+    assert citation["_physical_evidence_id"] == "ev_physical_s8"
+    assert citation["_retrieval_channel"] == "QUOTE_LOCATOR"
+    resolved = resolve_quote_locator_from_citations(quote_text=quote, citations=citations)
+    assert resolved["status"] == "VERIFIED"
+    assert resolved["page"] == 17
+    assert resolved["anchor_id"] == anchor_id
+
+
 def test_same_sentence_si_reference_points_to_main_text():
     """同句在正文与 SI 各有锚点：SI 引用标 secondary_of 指向正文引用（正文优先）。"""
     si_anchor = _anchor("ea_si_same", 17, MAIN_PARAGRAPH_QUOTE)
@@ -178,7 +227,8 @@ def test_guard_strips_model_written_bare_page_and_anchor():
     guarded, validation = _guard("该句位于正文 p. 4，锚点 ea_8eac914e8f48cd1bd307f9cb6df7f35978e240c1。")
     assert "p. 4" not in guarded
     assert "ea_8eac" not in guarded
-    assert NARRATIVE_LOCATOR_MARKER in guarded
+    assert NARRATIVE_LOCATOR_MARKER not in guarded  # v3：行内标记不上屏
+    assert "未在原文中定位到对应依据" in guarded  # 文末统一提示
     assert validation["changed"] is True
     assert validation["locator"]["status"] == "SANITIZED"
 
@@ -187,7 +237,7 @@ def test_guard_strips_si_page_claim():
     # 事故形态 2：Supporting Information 第 17 页
     guarded, _ = _guard("该句出现在 Supporting Information 第 17 页。")
     assert "第 17 页" not in guarded
-    assert NARRATIVE_LOCATOR_MARKER in guarded
+    assert "未在原文中定位到对应依据" in guarded
 
 
 def test_guard_expands_placeholder_to_authoritative_chip():
@@ -204,13 +254,13 @@ def test_placeholder_without_claim_context_fails_closed():
     """合法 ref 但没有可验证 Claim 上下文时也不能产生页码。"""
     guarded, _ = _guard("见 [E1]。")
     assert "正文·第3页" not in guarded
-    assert NARRATIVE_LOCATOR_MARKER in guarded
+    assert "未在原文中定位到对应依据" in guarded
 
 
 def test_guard_unknown_placeholder_degrades_to_marker():
     guarded, _ = _guard("参见 [E99]。")
     assert "[E99]" not in guarded
-    assert NARRATIVE_LOCATOR_MARKER in guarded
+    assert "未在原文中定位到对应依据" in guarded
 
 
 def test_guard_passes_soft_text_unchanged():
@@ -241,7 +291,7 @@ def test_guard_never_appends_retrieval_candidate_pages():
     guarded, validation = _guard("该句位于 Supporting Information 第 17 页。")
     assert "第 17 页" not in guarded
     assert "证据定位（后端权威渲染）：" not in guarded
-    assert NARRATIVE_LOCATOR_MARKER in guarded
+    assert "未在原文中定位到对应依据" in guarded
     assert validation["placeholder_expanded"] == 0
 
 

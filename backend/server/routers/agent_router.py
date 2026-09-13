@@ -405,12 +405,25 @@ async def get_agent_run_evidence(
 
     from yuxi.knowledge.evidence import assemble_evidence_for_run
 
-    return await assemble_evidence_for_run(
+    assembled = await assemble_evidence_for_run(
         db,
         run_id,
         allowed_kb_ids=await _evidence_scope_kb_ids(run, current_user),
         question_text=await _run_question_text(db, run),
     )
+    run_payload = run.input_payload if isinstance(run.input_payload, dict) else {}
+    source_manifest = run_payload.get("run_source_manifest")
+    assembled["turn_execution_plan"] = run_payload.get("turn_execution_plan")
+    assembled["source_manifest"] = source_manifest
+    if isinstance(source_manifest, dict):
+        if not source_manifest.get("document_evidence_requested"):
+            assembled["projection_status"] = "NOT_REQUESTED"
+        elif (
+            assembled.get("projection_status") == "NO_RETRIEVAL"
+            and source_manifest.get("status") in {"PLAN_REJECTED", "SOURCE_UNAVAILABLE", "DEGRADED"}
+        ):
+            assembled["projection_status"] = "EVIDENCE_UNAVAILABLE"
+    return assembled
 
 
 @agent_router.post("/runs/{run_id}/evidence/{evidence_id}/feedback")

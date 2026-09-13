@@ -80,3 +80,57 @@ def test_evidence_route_hides_foreign_run(monkeypatch):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "运行任务不存在"
+
+
+def test_mcp_only_run_reports_document_evidence_not_requested(monkeypatch):
+    _RunRepository.run = SimpleNamespace(
+        id="run-mcp",
+        uid="user-1",
+        input_message_id=None,
+        input_payload={
+            "knowledge_scope_snapshot": {"effective_kb_ids": ["kb_current"]},
+            "turn_execution_plan": {"plan_id": "tp-mcp", "source": {"policy": "MCP_ONLY"}},
+            "run_source_manifest": {
+                "plan_id": "tp-mcp",
+                "source_policy": "MCP_ONLY",
+                "document_evidence_requested": False,
+                "used_planes": ["MCP_DATA"],
+            },
+        },
+    )
+
+    async def assemble(_db, run_id, *, allowed_kb_ids, question_text=None):
+        del allowed_kb_ids, question_text
+        return {"run_id": run_id, "evidence": [], "projection_status": "NO_RETRIEVAL"}
+
+    monkeypatch.setattr(evidence_module, "assemble_evidence_for_run", assemble)
+    payload = _client(monkeypatch).get("/api/agent/runs/run-mcp/evidence").json()
+
+    assert payload["projection_status"] == "NOT_REQUESTED"
+    assert payload["turn_execution_plan"]["source"]["policy"] == "MCP_ONLY"
+    assert payload["source_manifest"]["used_planes"] == ["MCP_DATA"]
+
+
+def test_required_document_evidence_failure_is_not_reported_as_no_retrieval(monkeypatch):
+    _RunRepository.run = SimpleNamespace(
+        id="run-no-scope",
+        uid="user-1",
+        input_message_id=None,
+        input_payload={
+            "knowledge_scope_snapshot": {"effective_kb_ids": []},
+            "run_source_manifest": {
+                "document_evidence_requested": True,
+                "status": "PLAN_REJECTED",
+                "error_code": "SOURCE_UNAVAILABLE",
+            },
+        },
+    )
+
+    async def assemble(_db, run_id, *, allowed_kb_ids, question_text=None):
+        del allowed_kb_ids, question_text
+        return {"run_id": run_id, "evidence": [], "projection_status": "NO_RETRIEVAL"}
+
+    monkeypatch.setattr(evidence_module, "assemble_evidence_for_run", assemble)
+    payload = _client(monkeypatch).get("/api/agent/runs/run-no-scope/evidence").json()
+
+    assert payload["projection_status"] == "EVIDENCE_UNAVAILABLE"

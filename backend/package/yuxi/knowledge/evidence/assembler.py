@@ -176,9 +176,17 @@ async def _assemble_locator_projection(
             seen_evidence_ids.add(dto["evidence_id"])
             evidence_items.append(dto)
 
+    projection_status = (
+        "LOCATOR_VERIFIED"
+        if evidence_items
+        else "LOCATOR_FAILED"
+        if any(item.get("code") == "LOCATOR_NOT_VERIFIED" for item in issues)
+        else "EVIDENCE_UNAVAILABLE"
+    )
     return {
         "schema_version": SCIENTIFIC_EVIDENCE_SCHEMA_VERSION,
         "run_id": run_id,
+        "projection_status": projection_status,
         "evidence_role": "ANSWER_CITATION",
         "claim_binding_status": "DETERMINISTIC_LOCATOR",
         "retrievals": [
@@ -443,6 +451,7 @@ async def assemble_evidence_for_run(
     return {
         "schema_version": SCIENTIFIC_EVIDENCE_SCHEMA_VERSION,
         "run_id": run_id,
+        "projection_status": "EVIDENCE_AVAILABLE" if evidence_items else "EVIDENCE_UNAVAILABLE",
         "evidence_role": "RETRIEVAL_CANDIDATE",
         "claim_binding_status": "NOT_AVAILABLE",
         "retrievals": [
@@ -468,6 +477,7 @@ def _empty_result(run_id: str, *, records: list[Any] | None = None) -> dict[str,
     return {
         "schema_version": SCIENTIFIC_EVIDENCE_SCHEMA_VERSION,
         "run_id": run_id,
+        "projection_status": "NO_RETRIEVAL",
         "evidence_role": "RETRIEVAL_CANDIDATE",
         "claim_binding_status": "NOT_AVAILABLE",
         "retrievals": [

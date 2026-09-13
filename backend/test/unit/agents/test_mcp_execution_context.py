@@ -12,11 +12,16 @@ invalid_agent 在主流式 try/finally 之前返回，必须由该分支显式�
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
+from contextlib import asynccontextmanager
+
+import pytest
 
 from yuxi.agents.mcp.execution import (
     McpExecutionContext,
     get_mcp_execution_context,
+    record_mcp_call,
     reset_mcp_execution_context,
     set_mcp_execution_context,
 )
@@ -76,6 +81,67 @@ def test_context_keeps_thread_scope_for_workspace_mcp_runtime():
         reset_mcp_execution_context(token)
 
 
+async def test_worker_context_is_inherited_by_each_stream_consumer_task():
+    token = set_mcp_execution_context(
+        McpExecutionContext(tenant_id=5, uid="u-worker", thread_id="thread-5", run_id="run-5")
+    )
+    try:
+        async def _read_context():
+            return get_mcp_execution_context()
+
+        first = await asyncio.create_task(_read_context())
+        second = await asyncio.create_task(_read_context())
+        assert first is not None and first.run_id == "run-5"
+        assert second is not None and second.tenant_id == 5
+    finally:
+        reset_mcp_execution_context(token)
+
+
+async def test_mcp_audit_trace_is_point_event_and_does_not_rebind_execution_span(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from yuxi.storage.postgres.manager import pg_manager
+    import yuxi.trace as trace_module
+
+    class _Session:
+        def add(self, audit):
+            audit.id = 101
+
+        async def flush(self):
+            return None
+
+        async def commit(self):
+            return None
+
+    @asynccontextmanager
+    async def _session_context():
+        yield _Session()
+
+    emitted: dict = {}
+    monkeypatch.setattr(pg_manager, "get_async_session_context", _session_context)
+    monkeypatch.setattr(trace_module, "emit_trace", lambda **kwargs: emitted.update(kwargs))
+
+    token = set_mcp_execution_context(
+        McpExecutionContext(tenant_id=5, uid="u-worker", run_id="run-5", agent_slug="chatbot")
+    )
+    try:
+        audit_id = await record_mcp_call(
+            server_slug="bio-mcp",
+            capability_type="tool",
+            capability_name="plant_gene_lookup",
+            arguments={"symbol": "Wx"},
+            result={"found": True},
+            status="success",
+            duration_ms=10,
+        )
+    finally:
+        reset_mcp_execution_context(token)
+
+    assert audit_id == 101
+    assert emitted["event_type"] == "mcp.audit.recorded"
+    assert "span_id" not in emitted
+
+
 def test_reset_does_not_resurrect_stale_value_in_current_context():
     """当前 Context 已被外层设置为另一租户时，跨 Context reset 不得覆盖当前值。"""
     outer_token = set_mcp_execution_context(_context(tenant_id=1, uid="u-outer"))
@@ -120,8 +186,6 @@ async def test_generator_aclose_from_another_task_does_not_leak_token():
         assert first == "part-1"
         close_task = asyncio.create_task(ag.aclose())
         await asyncio.wait_for(close_task, timeout=2)
-
-    import asyncio
 
     await _drive()
     assert not captured, f"reset leaked error: {captured}"

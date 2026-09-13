@@ -10,17 +10,16 @@ from yuxi.knowledge.validation.citation_validator import redact_narrative_citati
 
 
 def _locator_payload(contract: dict[str, Any]) -> dict[str, Any] | None:
-    """确定性定位结果投影（复合意图时模型可见；页码只读，由后端渲染）。"""
+    """确定性定位结果投影；物理页码仅留在后端渲染通道。"""
     locator = contract.get("locator_resolution")
     if not isinstance(locator, dict) or not locator.get("page"):
         return None
     return {
         "status": locator.get("status"),
-        "page": locator.get("page"),
         "zone": locator.get("zone"),
         "quote_head": locator.get("quote_head"),
         "backlinks": [
-            {"page": item.get("page"), "zone": item.get("zone"), "quote_head": item.get("quote_head")}
+            {"zone": item.get("zone"), "quote_head": item.get("quote_head")}
             for item in (locator.get("backlinks") or [])[:3]
             if isinstance(item, dict)
         ],
@@ -51,8 +50,7 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
     # Authority Gate 第一层：WikiNavigationHit 等导航对象混入证据通道立即抛错。
     AuthorityGate.reject_navigation_as_evidence(contract.get("evidence"))
     # Authority Gate 第二层：按产品注册中心丢弃派生产品检索行。
-    evidence_rows, derived_rows_dropped = _drop_derived_product_rows(contract.get("evidence"))
-    scope = contract.get("knowledge_scope_snapshot") or {}
+    evidence_rows, _derived_rows_dropped = _drop_derived_product_rows(contract.get("evidence"))
     claims = contract.get("claims") or []
     unique_subjects: set[str] = set()
     relation_group_counts: dict[str, dict[str, Any]] = {}
@@ -134,24 +132,18 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "intent": (contract.get("retrieval_plan") or {}).get("intent"),
         "query_mode": (contract.get("retrieval_plan") or {}).get("query_mode"),
         "answer_mode": (contract.get("retrieval_plan") or {}).get("answer_mode"),
-        "scope_id": scope.get("scope_id"),
-        "scope_version": scope.get("scope_version"),
-        "result_counts": {
-            "claim_count": len(claims),
-            "unique_subject_count": len(unique_subjects),
+        "count_facts": {
+            "citable_claims": len(claims),
+            "distinct_subjects": len(unique_subjects),
             "relation_groups": {
                 group: {
-                    "claim_count": counts["claim_count"],
-                    "unique_subject_count": len(counts["subjects"]),
+                    "citable_claims": counts["claim_count"],
+                    "distinct_subjects": len(counts["subjects"]),
                 }
                 for group, counts in relation_group_counts.items()
             },
         },
         "completeness": contract.get("completeness") or {},
-        "authority_gate": {
-            "derived_rows_dropped": derived_rows_dropped,
-            "wiki_navigation_in_evidence": False,
-        },
         "claims": claim_summaries,
         "selected_evidence": narrative_evidence,
         "citations": [
@@ -185,9 +177,10 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "科研解读，不得改为拒答或只返回计数。FUNCTIONAL_REGULATION 可表述为功能调控；"
         "PERTURBATION_EVIDENCE 只能表述为遗传/实验扰动证据；ASSOCIATION_OR_CONTEXT 不得升级为因果。"
         "Neo4j graph_expansion 只用于机制和路径上下文，不能替代 PostgreSQL canonical Claim。"
-        "统计时必须区分 result_counts.claim_count 与 unique_subject_count：回答基因数量只能使用 "
-        "unique_subject_count；关系分组数量只能使用各组的 unique_subject_count，并明确同一基因可跨组重复。"
-        "正文只用自然语言表达统计，不得暴露 result_counts、unique_subject_count 等内部字段名，也不得把 Claim 称为预测。"
+        "统计时必须区分 count_facts.citable_claims 与 distinct_subjects：回答基因数量只能使用 "
+        "distinct_subjects；关系分组数量只能使用各组的 distinct_subjects，并明确同一基因可跨组重复。"
+        "正文只用自然语言表达统计，不得暴露 JSON 字段名、scope/version/contract 等内部运行信息，"
+        "也不得把 Claim 称为预测。"
         "completeness.status=PASS 只表示完整返回了当前证据策略允许的 Claim；"
         "可表述为‘全部可引用结果’。只有 all_exact_relations_citable=true 时才可进一步称为‘全部调控基因’；"
         "否则数量必须表述为‘当前证据策略下返回的可引用基因’，不得称为知识库收录总数。"
@@ -206,4 +199,9 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "图注类引文（quote_head 以 Figure/Table 开头）的含义解释必须优先依据 locator.backlinks 中"
         "正文分区（MAIN_TEXT）的讨论段，并引用其 [E#]；backlinks 为空时明示‘原文未在正文展开讨论该图’，"
         "只解释图注字面内容，不得编造实验结论。"
+        "输出协议：只输出 <YUXI_ANSWER_DRAFT> 与 </YUXI_ANSWER_DRAFT> 包裹的严格 JSON。"
+        "JSON 形状为 {\"schema_version\":\"answer-draft.v1\",\"blocks\":[{\"type\":"
+        "\"heading|paragraph|bullet\",\"text\":\"自然语言\",\"evidence_refs\":[\"E1\"]}]}。"
+        "不要自建‘参考文献/证据引用/资料来源’章节；后端会根据 evidence_refs 完成验证、渲染 Markdown 和"
+        "【证据引用】区块。不要在 text 中复制 [E#]、[citation omitted] 或任何〔…〕引用标记。"
     )

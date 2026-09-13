@@ -10,7 +10,10 @@ from deepagents.middleware._utils import append_to_system_message
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, ToolMessage
 
+from yuxi.agents.mcp.capability_registry import is_mcp_tool, profile_for_tool
+from yuxi.knowledge.planning.turn_execution_plan import SourceClass, SourcePolicy, TurnExecutionPlan
 from yuxi.knowledge.rendering.answer_context_builder import build_answer_context
+from yuxi.knowledge.rendering.answer_draft import render_answer_draft
 from yuxi.knowledge.rendering.citation_channel import (
     apply_citation_channel,
     sanitize_history_text,
@@ -25,6 +28,75 @@ _STALE_RUNTIME_STATE = re.compile(
     r"no knowledge base|knowledge base.{0,12}(?:empty|unavailable|not mounted)",
     flags=re.IGNORECASE,
 )
+
+_KNOWLEDGE_SOURCE_TOOLS = {
+    "list_kbs",
+    "get_mindmap",
+    "query_knowledge_scope",
+    "query_kb",
+    "deepen_evidence",
+    "grep_evidence",
+    "open_kb_document",
+    "find_kb_document",
+}
+_WEB_SOURCE_TOOLS = {"tavily_search", "web_search", "search_web"}
+
+
+def _turn_plan_prompt(plan: TurnExecutionPlan) -> str:
+    return (
+        "<AUTHORITATIVE_TURN_EXECUTION_PLAN>\n"
+        + json.dumps(plan.public_dict(), ensure_ascii=False, separators=(",", ":"))
+        + "\n</AUTHORITATIVE_TURN_EXECUTION_PLAN>\n"
+        "本计划是本轮来源权限与证据要求的唯一权威。只能使用已暴露且满足 required_capabilities 的工具；"
+        "禁止静默切换到 forbidden_sources。MCP 数据只能描述其数据来源，不能伪造 PDF 页码或文献证据引用。"
+    )
+
+
+def _filter_tools_by_turn_plan(tools: list[Any], plan: TurnExecutionPlan) -> list[Any]:
+    policy = plan.source.policy
+    required = set(plan.required_capabilities)
+    filtered: list[Any] = []
+    for tool in tools:
+        name = str(getattr(tool, "name", "") or "")
+        mcp_tool = is_mcp_tool(tool)
+        if policy == SourcePolicy.MCP_ONLY:
+            if not mcp_tool:
+                continue
+            profile = profile_for_tool(tool)
+            if required and not profile:
+                continue
+            if profile and required.isdisjoint(profile.capabilities):
+                continue
+            filtered.append(tool)
+            continue
+        if mcp_tool:
+            profile = profile_for_tool(tool)
+            profile_source = (
+                SourceClass.BIBLIOGRAPHY
+                if profile and profile.source_class == "BIBLIOGRAPHY"
+                else SourceClass.STRUCTURED_DATABASE
+            )
+            if profile_source not in plan.source.allowed_sources:
+                continue
+            if policy == SourcePolicy.HYBRID_EXPLICIT and required and (
+                not profile or required.isdisjoint(profile.capabilities)
+            ):
+                continue
+            filtered.append(tool)
+            continue
+        if name in _KNOWLEDGE_SOURCE_TOOLS:
+            # Retrieval/GREP is orchestrator-owned once a frozen evidence plan
+            # exists. This prevents hidden post-freeze evidence.
+            if (
+                name != "query_knowledge_scope"
+                or plan.evidence.required
+                or SourceClass.LOCAL_DOCUMENT not in plan.source.allowed_sources
+            ):
+                continue
+        if name in _WEB_SOURCE_TOOLS and SourceClass.WEB not in plan.source.allowed_sources:
+            continue
+        filtered.append(tool)
+    return filtered
 
 
 def _authoritative_scope_prompt(scope: dict) -> str:
@@ -113,13 +185,15 @@ def _apply_citation_guard(text: str, *, contract: dict | None) -> tuple[str, dic
     if not str(text or "").strip():
         return text, None
     contract = contract or {}
+    rendered, draft_validation = render_answer_draft(text)
     guarded, validation = apply_citation_channel(
-        text,
+        rendered,
         contract.get("citations") or [],
         locator=contract.get("locator_resolution"),
         partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
     )
-    if not validation.get("changed"):
+    validation["answer_draft"] = draft_validation
+    if not validation.get("changed") and rendered == text:
         return text, None
     return guarded, validation
 
@@ -278,8 +352,16 @@ class KnowledgeContextMiddleware(AgentMiddleware):
         context = request.runtime.context
         scope = getattr(context, "_effective_knowledge_scope", None)
         contract = getattr(context, "_knowledge_contract", None)
+        raw_plan = getattr(context, "_turn_execution_plan", None)
+        plan = TurnExecutionPlan.model_validate(raw_plan) if isinstance(raw_plan, dict) else None
         system_message = request.system_message
-        if isinstance(scope, dict):
+        if plan is not None:
+            system_message = append_to_system_message(system_message, _turn_plan_prompt(plan))
+        if isinstance(scope, dict) and (
+            plan is None
+            or SourceClass.LOCAL_DOCUMENT in plan.source.allowed_sources
+            or SourceClass.KNOWLEDGE_GRAPH in plan.source.allowed_sources
+        ):
             system_message = append_to_system_message(system_message, _authoritative_scope_prompt(scope))
         if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
             limit = int((scope.get("retrieval_policy") or {}).get("narrative_evidence_limit") or 10)
@@ -289,8 +371,10 @@ class KnowledgeContextMiddleware(AgentMiddleware):
             )
         messages = _sanitize_messages(request.messages, contract=contract)
         tools = list(request.tools or [])
+        if plan is not None:
+            tools = _filter_tools_by_turn_plan(tools, plan)
         if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
-            tools = [tool for tool in tools if getattr(tool, "name", "") not in {"query_knowledge_scope", "query_kb"}]
+            tools = [tool for tool in tools if getattr(tool, "name", "") not in _KNOWLEDGE_SOURCE_TOOLS]
         return request.override(system_message=system_message, messages=messages, tools=tools)
 
     def wrap_model_call(
