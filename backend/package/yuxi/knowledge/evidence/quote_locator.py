@@ -288,11 +288,7 @@ def resolve_quote_locator_from_citations(
     # specifically to close a Top-K recall gap. When present, they outrank
     # semantically similar retrieval rows; full-scope duplicate detection has
     # already happened before such a row can be injected.
-    seeded = [
-        citation
-        for citation in matched
-        if str(citation.get("_retrieval_channel") or "") == "QUOTE_LOCATOR"
-    ]
+    seeded = [citation for citation in matched if str(citation.get("_retrieval_channel") or "") == "QUOTE_LOCATOR"]
     if seeded:
         matched = seeded
 
@@ -394,7 +390,7 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
         )
         if caption_resolution is not None:
             if caption_resolution.get("status") == "VERIFIED":
-                await _attach_caption_backlinks(db, kb_ids=kb_ids, resolution=caption_resolution)
+                await attach_caption_backlinks(db, kb_ids=kb_ids, resolution=caption_resolution)
             return caption_resolution
         if intent["kind"] == LOCATOR_KIND_FIGURE:
             # 编号定位但题注通道无命中：失败关闭（不回退到无编号的泛匹配）
@@ -584,12 +580,15 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
         "filename": anchor["filename"],
     }
     # 图注反链：定位命中图注时，反查正文引用该图表的段落，为"解释"子意图提供依据
-    await _attach_caption_backlinks(db, kb_ids=kb_ids, resolution=resolution)
+    await attach_caption_backlinks(db, kb_ids=kb_ids, resolution=resolution)
     return resolution
 
 
-async def _attach_caption_backlinks(db, *, kb_ids: list[str], resolution: dict[str, Any]) -> None:
-    """命中图注/题注时反查正文引用段（非致命，失败仅记录）。"""
+async def attach_caption_backlinks(db, *, kb_ids: list[str], resolution: dict[str, Any]) -> None:
+    """命中图注/题注时反查正文引用段（P4 解释绑定：Figure→Caption→mentioned_by）。
+
+    非致命：反查失败仅记录，不影响定位结论。
+    """
     if _CAPTION_LABEL_PATTERN.match(resolution.get("quote") or ""):
         try:
             backlinks = await resolve_caption_backlinks(
@@ -621,25 +620,22 @@ async def resolve_caption_backlinks(
         return []
     label = re.sub(r"\s+", " ", label_match.group(1)).strip()
     rows = (
-        (
-            await db.execute(
-                select(EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
-                .join(
-                    KnowledgeParseRevision,
-                    KnowledgeParseRevision.revision_id == EvidenceAnchorRecord.parse_revision_id,
-                )
-                .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
-                .where(
-                    KnowledgeParseRevision.kb_id.in_(list(kb_ids)[:20]),
-                    KnowledgeFile.active_parse_revision_id == EvidenceAnchorRecord.parse_revision_id,
-                    EvidenceAnchorRecord.quote.ilike(f"%{escape_like(label)}%", escape="/"),
-                )
-                .order_by(EvidenceAnchorRecord.page.asc())
-                .limit(50)
+        await db.execute(
+            select(EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
+            .join(
+                KnowledgeParseRevision,
+                KnowledgeParseRevision.revision_id == EvidenceAnchorRecord.parse_revision_id,
             )
+            .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
+            .where(
+                KnowledgeParseRevision.kb_id.in_(list(kb_ids)[:20]),
+                KnowledgeFile.active_parse_revision_id == EvidenceAnchorRecord.parse_revision_id,
+                EvidenceAnchorRecord.quote.ilike(f"%{escape_like(label)}%", escape="/"),
+            )
+            .order_by(EvidenceAnchorRecord.page.asc())
+            .limit(50)
         )
-        .all()
-    )
+    ).all()
     backlinks: list[dict[str, Any]] = []
     for anchor, knowledge_file, revision in rows:
         quote = str(anchor.quote or "")

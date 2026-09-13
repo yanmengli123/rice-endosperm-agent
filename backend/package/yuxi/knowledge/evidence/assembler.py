@@ -287,7 +287,9 @@ def _binding_projection_dto(record: Any, locator: dict[str, Any], *, degraded_co
         "verification": {
             "status": "DEGRADED",
             "error_code": degraded_code,
-            "note": "答案定位绑定的物理行已不可回放（源文档重解析或修订切换）；页码与答案芯片同源保留，bbox 高亮不可用。",
+            "note": (
+                "答案定位绑定的物理行已不可回放（源文档重解析或修订切换）；页码与答案芯片同源保留，bbox 高亮不可用。"
+            ),
         },
         "retrieval": {
             "retrieval_id": str(record.retrieval_id),

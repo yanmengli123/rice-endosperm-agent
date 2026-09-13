@@ -19,7 +19,8 @@ from yuxi.utils import logger
 
 VISION_PROVIDER_VERSION = "vision_provider_v1"
 
-OBSERVATION_PROMPT = """你是科研图像观察器。观察这张来自生物学论文的图片，只输出一个 JSON 对象（不要任何其他文字、不要 Markdown 围栏），schema 如下：
+OBSERVATION_PROMPT = """你是科研图像观察器。观察这张来自生物学论文的图片，只输出一个 JSON 对象
+（不要任何其他文字、不要 Markdown 围栏），schema 如下：
 
 {
   "schema_version": "visual-observation.v1",
@@ -28,7 +29,14 @@ OBSERVATION_PROMPT = """你是科研图像观察器。观察这张来自生物�
   "visible_entities": ["图中可见的基因名/蛋白名/标记，如 'OsMYB73-GFP'"],
   "visible_text": ["图中可见的坐标轴标题/图例文字/短标签"],
   "caption_fragments": ["这张图对应的题注可能包含的关键短语"],
-  "visual_structure": {"bar_chart": false, "microscopy": false, "tissue_images": false, "gel": false, "phylogenetic_tree": false, "line_chart": false},
+  "visual_structure": {
+    "bar_chart": false,
+    "microscopy": false,
+    "tissue_images": false,
+    "gel": false,
+    "phylogenetic_tree": false,
+    "line_chart": false
+  },
   "confidence": 0.0
 }
 

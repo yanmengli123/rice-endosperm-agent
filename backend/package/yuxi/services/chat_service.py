@@ -23,11 +23,10 @@ from typing import Any, Literal
 from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.types import Command
 from sqlalchemy import select
-
 from yuxi import config as conf
-from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
+from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
 from yuxi.agents.state import AgentStatePayload
 from yuxi.knowledge.orchestration import prepare_knowledge_context
 from yuxi.knowledge.planning.turn_execution_plan import (
@@ -36,8 +35,8 @@ from yuxi.knowledge.planning.turn_execution_plan import (
     TurnExecutionPlan,
     plan_turn,
 )
-from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
 from yuxi.knowledge.rendering.answer_draft import render_answer_draft
+from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
 from yuxi.knowledge.rendering.source_output_guard import guard_non_document_source_answer
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
@@ -57,6 +56,7 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Agent, MCPCallAudit, User
 from yuxi.utils.guard import content_guard
 from yuxi.utils.logging_config import logger
+from yuxi.utils.markdown_tables import normalize_markdown_tables
 from yuxi.utils.question_utils import (
     normalize_questions as _normalize_interrupt_questions,
 )
@@ -65,7 +65,6 @@ from yuxi.utils.reasoning_visibility import (
     redact_reasoning_metadata,
     sanitize_visible_text,
 )
-from yuxi.utils.markdown_tables import normalize_markdown_tables
 from yuxi.utils.thread_utils import extract_thread_id as _metadata_thread_id
 
 _RUN_TIMEOUT_ERROR_MESSAGE = "服务端长时间未收到检索或模型输出，已安全结束本次任务，请重试。"
@@ -396,9 +395,7 @@ def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, d
     locator_resolution = contract.get("locator_resolution") or {}
     binding = locator_resolution.get("binding") or {}
     # locator block → binding → 权威芯片；缺失绑定渲染为失败关闭文案（无 Binding 就没有页码）
-    locator_bindings = (
-        {str(binding["binding_id"]): locator_resolution} if binding.get("binding_id") else None
-    )
+    locator_bindings = {str(binding["binding_id"]): locator_resolution} if binding.get("binding_id") else None
     rendered, draft_validation = render_answer_draft(text, locator_bindings=locator_bindings)
     guarded, citation_validation = apply_citation_channel(
         rendered,
@@ -407,6 +404,18 @@ def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, d
         partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
     )
     citation_validation["answer_draft"] = draft_validation
+    # P4 解释绑定：复合意图流按 Claim 分类验证（CAPTION_FACT/TEXT_SUPPORTED_
+    # INTERPRETATION 必须绑定对应载体；UNSUPPORTED 明示，不静默输出）
+    if (contract.get("locator_intent") or {}).get("compound") and locator_resolution.get("status") == "VERIFIED":
+        from yuxi.knowledge.rendering.explanation_claims import classify_explanation_claims
+
+        observation = contract.get("figure_image_observation")
+        citation_validation["explanation_claims"] = classify_explanation_claims(
+            guarded,
+            citations=contract.get("citations") or [],
+            locator=locator_resolution,
+            observation=observation if isinstance(observation, dict) and "figure_label" in observation else None,
+        )
     return guarded, citation_validation
 
 
@@ -464,11 +473,7 @@ async def _finalize_mcp_manifest(
     if not plan.requires_mcp or not run_id:
         return True
     audits = list(
-        (
-            await db.execute(
-                select(MCPCallAudit).where(MCPCallAudit.run_id == str(run_id)).order_by(MCPCallAudit.id)
-            )
-        )
+        (await db.execute(select(MCPCallAudit).where(MCPCallAudit.run_id == str(run_id)).order_by(MCPCallAudit.id)))
         .scalars()
         .all()
     )
@@ -1370,9 +1375,9 @@ async def stream_agent_chat(
             "message_type": message_type,
             "extra_metadata": {
                 "request_id": meta.get("request_id"),
-                    "attachments": request_attachments,
-                    "turn_execution_plan": turn_plan.public_dict(),
-                },
+                "attachments": request_attachments,
+                "turn_execution_plan": turn_plan.public_dict(),
+            },
         }
         if image_content:
             init_msg["image_content"] = image_content
@@ -1458,9 +1463,7 @@ async def stream_agent_chat(
             if citation_sensitive_output:
                 source_manifest.knowledge_retrieval_count = 1
                 source_manifest.used_planes = ["DOCUMENT_EVIDENCE"]
-                source_manifest.status = (
-                    "COMPLETED" if knowledge_contract.get("status") == "COMPLETED" else "DEGRADED"
-                )
+                source_manifest.status = "COMPLETED" if knowledge_contract.get("status") == "COMPLETED" else "DEGRADED"
                 source_manifest.error_code = knowledge_contract.get("error_code")
             await _persist_turn_runtime(
                 db,

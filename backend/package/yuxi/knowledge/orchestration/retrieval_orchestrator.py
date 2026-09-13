@@ -326,9 +326,7 @@ def _freeze_locator_evidence(contract: dict[str, Any], row: dict[str, Any] | Non
         if not any(item.get("evidence_id") == row["evidence_id"] for item in existing):
             contract[key] = [row, *existing]
     contract["warnings"] = [
-        warning
-        for warning in contract.get("warnings") or []
-        if warning != "范围内未检索到足以回答该问题的证据。"
+        warning for warning in contract.get("warnings") or [] if warning != "范围内未检索到足以回答该问题的证据。"
     ]
 
 
@@ -402,9 +400,9 @@ async def prepare_knowledge_context(
     if locator_pending and image_bytes:
         # 图片附件入口（FIGURE_IMAGE）：视觉观察（Observation）→ 确定性裁决。
         # provider 不可用/观察非法/信号不足 → 失败关闭，绝不自由回答页码。
+        from yuxi.knowledge.vision.figure_image_locator import resolve_figure_image_locator
         from yuxi.knowledge.vision.phash import compute_asset_digest, compute_phash
         from yuxi.knowledge.vision.provider import get_vision_provider
-        from yuxi.knowledge.vision.figure_image_locator import resolve_figure_image_locator
 
         provider = get_vision_provider()
         observation = await provider.describe(image_bytes) if provider.available else None
@@ -424,6 +422,14 @@ async def prepare_knowledge_context(
             direct_locator = image_locator
         elif image_locator.get("reason") in {"vision_observation_unavailable", "figure_adjudication_error"}:
             direct_locator = image_locator
+        if direct_locator and direct_locator.get("status") == "VERIFIED":
+            # P4 解释绑定：Figure → Caption → mentioned_by（正文反链），
+            # 解释阶段的 [E#] 优先绑定正文讨论段
+            from yuxi.knowledge.evidence.quote_locator import attach_caption_backlinks
+
+            await attach_caption_backlinks(
+                db, kb_ids=[str(member["kb_id"]) for member in raw_members], resolution=direct_locator
+            )
     if locator_pending and (direct_locator is None or direct_locator.get("status") == "NOT_FOUND"):
         # 文本入口（QUOTE/FIGURE 编号）：caption/引文通道；图片 NOT_FOUND 时
         # 问题文本本身可能携带题注片段（quote 兜底）。
@@ -773,9 +779,7 @@ async def prepare_knowledge_context(
     # 反链解释依据仍来自检索证据本身）。图片附件流的裁决已在 FIGURE_IMAGE
     # 通道完成且终局，同样经此写回 locator_resolution 供门禁与渲染消费。
     if locator_pending and (
-        locator_intent.get("quote_text")
-        or not locator_intent.get("compound")
-        or (image_bytes and direct_locator)
+        locator_intent.get("quote_text") or not locator_intent.get("compound") or (image_bytes and direct_locator)
     ):
         from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator_from_citations
 
@@ -839,11 +843,7 @@ async def prepare_knowledge_context(
             contract["warnings"] = [
                 *(contract.get("warnings") or []),
                 "复合意图：页码部分由确定性定位器在检索证据集内解析（"
-                + (
-                    "已验证"
-                    if locator_resolution.get("status") == "VERIFIED"
-                    else "未通过验证，失败关闭不展示页码"
-                )
+                + ("已验证" if locator_resolution.get("status") == "VERIFIED" else "未通过验证，失败关闭不展示页码")
                 + "），其余子意图基于检索证据回答。",
             ]
             if locator_resolution.get("status") != "VERIFIED":
@@ -881,10 +881,7 @@ async def prepare_knowledge_context(
     # 复合意图不短路生成。定位锚点已是首位冻结证据；这里只补充可能存在的
     # 图注正文反链引用，解释部分的 [E#] 因而仍可绑定到权威锚点。
     _tail_locator = contract.get("locator_resolution") or {}
-    if (
-        _tail_locator.get("status") == "VERIFIED"
-        and (contract.get("locator_intent") or {}).get("compound")
-    ):
+    if _tail_locator.get("status") == "VERIFIED" and (contract.get("locator_intent") or {}).get("compound"):
         from yuxi.knowledge.rendering.citation_channel import append_locator_citations
 
         contract["citations"] = append_locator_citations(contract.get("citations") or [], _tail_locator)
@@ -911,6 +908,10 @@ async def prepare_knowledge_context(
         contract["answer_instruction"] += (
             " 定位行由后端确定性渲染；解释部分每个关键结论必须带 [E#] 引用，"
             "图注类问题优先引用正文讨论段（citations 中 zone=MAIN_TEXT 的反链条目）。"
+            " 解释纪律：对图面的观察（panel/坐标轴/染色）可直接描述；题注载明的"
+            "事实（实验内容）必须引用题注条目；作者的推断结论（功能/机制）必须"
+            "引用正文讨论段——找不到对应 [E#] 时明示「原文未提供该结论的依据」，"
+            "不得给出无依据推断。"
         )
     # NUMERIC 题型：数字/区间/单位必须逐字来自证据原文，禁止换算或近似改写（P2-12）
     if "NUMERIC" in (plan.get("question_types") or []):

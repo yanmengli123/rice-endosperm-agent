@@ -4,6 +4,12 @@
 
 同一版本的多次功能更新时，应以功能为单位进行更新，比如之前添加了 A 功能的更新，在后续的更新中修复了因 A 功能引入的 bug，那么这个修复说明应该和 A 功能描述放在一起，而不是新增一条修复记录，功能更新同理。
 
+## 未发布
+
+### 新增
+
+- 新增多模态科研定位权威层（Multimodal Scientific Locator Authority，P0–P4 五阶段）：原句、图注与上传原图统一收敛到同一条定位权威链——不同定位入口经各自确定性通道裁决后产生同一个 `VerifiedLocatorBinding`，再由该绑定同时驱动冻结证据契约、状态面板投影、引用芯片渲染与 PDF 查看器跳转。P0 正确性屏障：编排器出口门禁强制「VERIFIED ⇒ 物理证据已冻结进证据契约」，违例降级 `ANSWER_VALIDATION_FAILED` 并失败关闭（binding 随 `locator_resolution_json` 持久化供投影/渲染统一消费）；状态面板血统重放在源文档重解析后不再静默清零，而是从审计绑定降级投影（页码与答案芯片同源、bbox 不可回放显式标记，`projection_status` 新增 `LOCATOR_DEGRADED`）。P1 Caption Locator v3：引文抽取 `max(len)` 退役为多候选区分度评分（基因符号/编号组合加分、跨图重复的统计模板句重罚），图表编号升级为硬约束（用户问 Figure 5 时 Figure 4 候选无论文本多匹配直接剔除），科研归一化升级为 T0–T3 四级（NFKC 连字/破折号、词集+硬约束、去空白压缩兜底 MinerU 词内空格伪影），新增 caption span 定位通道——Figure 5 共享统计模板题注不再串页到 Figure 4；顺手修复 `entity_resolver` 词法降级路径 `ilike(autoescape=True)` 在容器 SQLAlchemy 2.0.50 下的必崩缺陷。P2 原图定位一等公民 `FIGURE_IMAGE`：新增 `knowledge/vision` 子系统——`VisualObservationEnvelope` 观察契约（`extra="forbid"` 且 schema 物理上没有 page_number/file_id/anchor 字段，模型越权输出整份拒绝）、纯 Python 32×32 DCT 感知哈希、figure index 读取投影（image/figure 锚点 + caption span 关联）与 V0–V4 裁决阶梯（资产 SHA / pHash+编号双信号 / 多信号约束，语义相似永不发布页码，双信号最低，多物理位置 `MULTIPLE_MATCHES` 失败关闭）；`plan_turn` 支持图片附件感知路由（LOCATE_AND_EXPLAIN，图片裁决终局不被文本路径收缩），视觉模型经 `vision_model_spec` 配置（未配置即失败关闭，绝不回退自由回答页码）。P3 输出权威：`answer-draft.v2` 新增 locator block——模型只能引用 `binding_id`，页码由后端从绑定确定性渲染，缺失/非 VERIFIED 绑定渲染失败关闭文案，块级 `extra=forbid` 使模型夹带 `page_number` 整份草案回退（没有 Binding 就没有页码）；复合意图流在守卫渲染后同样发出 `citation_ready`，前端状态面板新增定位芯片消费 `verifiedCitation`（浏览器侧永不重新解析页码）。P4 科研解释绑定：解释答案的实质句按三类 Claim 确定性分类验证——`VISUAL_OBSERVATION`（观察契约支持）、`CAPTION_FACT`（题注载体）、`TEXT_SUPPORTED_INTERPRETATION`（正文反链 mentioned_by），有硬约束但绑定不到任何证据的推断句记 `UNSUPPORTED_INTERPRETATION` 明示，不再事后免责；图片/图注定位命中后自动反查正文讨论段供解释引用，answer_instruction 声明「作者推断必须引用正文、找不到依据必须明示」的解释纪律。
+
 ## v0.8.0 (2026-09-08)
 
 ### 新增
