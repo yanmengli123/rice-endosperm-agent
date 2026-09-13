@@ -89,15 +89,18 @@ async def resolve_entities(
         tier = "EXACT_ALIAS"
 
     if not exact and allow_lexical_fallback:
+        from yuxi.knowledge.evidence.verbatim import escape_like
+
         exact = list(
             (
                 await db.execute(
                     select(KnowledgeGraphEntity)
                     .where(
                         KnowledgeGraphEntity.kb_id.in_(kb_ids),
-                        # autoescape 把用户原词里的 %/_ 当字面量，避免通配符放大
-                        # 命中面把可回答的枚举问句误判成 AMBIGUOUS。
-                        KnowledgeGraphEntity.normalized_name.ilike(f"%{normalized}%", autoescape=True),
+                        # escape_like 把用户原词里的 %/_ 当字面量（手写 escape 子句；
+                        # 容器 SQLAlchemy 2.0.50 的 ilike 无 autoescape 参数），
+                        # 避免通配符放大命中面把可回答的枚举问句误判成 AMBIGUOUS。
+                        KnowledgeGraphEntity.normalized_name.ilike(f"%{escape_like(normalized)}%", escape="/"),
                     )
                     .limit(20)
                 )

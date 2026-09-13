@@ -23,6 +23,11 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 
 from yuxi.knowledge.contracts.citation_binding import CitationBindingCandidate
+from yuxi.knowledge.evidence.caption_locator import (
+    carrier_label_conflicts,
+    extract_figure_label,
+    select_quote_candidates,
+)
 from yuxi.knowledge.evidence.document_partition import (
     LOCATOR_ELIGIBLE_PARTITIONS,
     PARTITION_MAIN_TEXT,
@@ -50,6 +55,9 @@ LOCATOR_STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
 LOCATOR_INTENT_NONE = None
 LOCATOR_KIND_QUOTE = "QUOTE_LOCATOR"
 LOCATOR_KIND_PAGE = "PAGE_LOCATOR"
+# 图表编号定位：用户给出 Figure 5 / 图S8 等编号（可无引文片段），
+# 走 caption span 通道 + label 硬约束（caption_locator v3）
+LOCATOR_KIND_FIGURE = "FIGURE_LOCATOR"
 
 # 子意图（复合问题分解）：定位 + 解释等并行执行，答案必须覆盖全部子意图
 SUB_INTENT_LOCATOR = "LOCATOR"
@@ -91,8 +99,8 @@ _SCAFFOLDING_PATTERN = re.compile(
     r"where\s+in\s+the\s+(?:paper|article|manuscript|pdf)(?:\s+[^?？]*)?[?？]?",
     flags=re.IGNORECASE,
 )
-# 引文候选：≥4 个连续拉丁词（原文句段）
-_LATIN_RUN = re.compile(r"[A-Za-z][A-Za-z0-9,'’\-–—()./%\s]{24,}")
+# 引文候选：≥4 个连续拉丁词（原文句段）——科研字符集升级与多候选评分
+# 见 caption_locator.select_quote_candidates（v3，替代 max(len)）
 _QUOTE_MIN_NORMALIZED_CHARS = 25
 _MAX_CANDIDATE_SPANS = 500
 # 图注标签：句首的 "Figure S8" / "Table 2" 等，用于图注反链（caption → 正文引用处）
@@ -133,6 +141,7 @@ def decompose_question_intents(question: str) -> dict[str, Any]:
         return {
             "kind": LOCATOR_INTENT_NONE,
             "quote_text": None,
+            "figure_label": None,
             "partition_intent": None,
             "sub_intents": [],
             "compound": False,
@@ -147,10 +156,16 @@ def decompose_question_intents(question: str) -> dict[str, Any]:
         partition_intent = ZONE_SUPPORTING_INFO
 
     remainder = _SCAFFOLDING_PATTERN.sub(" ", source)
-    candidates = [match.group(0).strip() for match in _LATIN_RUN.finditer(remainder)]
-    quote_text = max(candidates, key=len) if candidates else None
+    figure_label = extract_figure_label(remainder)
+    # Caption Locator v3：多候选区分度评分替代 max(len)——统计模板段
+    # （Bar, 1.0 cm / ANOVA / Tukey）即使更长也排在含基因符号的段之后。
+    candidates = select_quote_candidates(remainder)
+    quote_text = candidates[0] if candidates else None
     if quote_text and len(normalize_for_match(quote_text)) >= _QUOTE_MIN_NORMALIZED_CHARS:
         kind = LOCATOR_KIND_QUOTE
+    elif figure_label:
+        kind = LOCATOR_KIND_FIGURE
+        quote_text = None
     else:
         kind = LOCATOR_KIND_PAGE
         quote_text = None
@@ -161,6 +176,7 @@ def decompose_question_intents(question: str) -> dict[str, Any]:
     return {
         "kind": kind,
         "quote_text": quote_text,
+        "figure_label": figure_label,
         "partition_intent": partition_intent,
         "sub_intents": sub_intents,
         "compound": len(sub_intents) > 1,
@@ -168,11 +184,12 @@ def decompose_question_intents(question: str) -> dict[str, Any]:
 
 
 def detect_locator_intent(question: str) -> dict[str, Any]:
-    """检测定位意图：kind（QUOTE/PAGE/NONE）、引文候选、分区意图。纯函数（兼容入口）。"""
+    """检测定位意图：kind（QUOTE/FIGURE/PAGE/NONE）、引文候选、图表编号、分区意图。纯函数（兼容入口）。"""
     decomposed = decompose_question_intents(question)
     return {
         "kind": decomposed.get("kind"),
         "quote_text": decomposed.get("quote_text"),
+        "figure_label": decomposed.get("figure_label"),
         "partition_intent": decomposed.get("partition_intent"),
         "sub_intents": decomposed.get("sub_intents") or [],
         "compound": bool(decomposed.get("compound")),
@@ -200,6 +217,7 @@ def resolve_quote_locator_from_citations(
     citations: list[dict[str, Any]],
     partition_intent: str | None = None,
     kb_id: str | None = None,
+    figure_label: str | None = None,
 ) -> dict[str, Any]:
     """在引用池（锚点权威行，与状态模块同一行数据）内做确定性引文定位。
 
@@ -252,6 +270,9 @@ def resolve_quote_locator_from_citations(
         if not contained:
             continue
         if citation.get("toc_line"):
+            continue
+        # label 硬约束：引用载体句首编号与用户编号冲突（Figure 4 ≠ Figure 5）→ 剔除
+        if carrier_label_conflicts(figure_label, citation.get("_quote") or citation.get("quote_head")):
             continue
         matched.append(citation)
 
@@ -350,12 +371,40 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
     运行时页码最终仍由 :func:`resolve_quote_locator_from_citations` 从冻结证据
     集裁决。本函数在常规/VERBATIM 召回漏掉精确原句时，把确定性命中作为一条
     正式 evidence row 注入同一集合；它不能绕开集合直接把页码写进答案。
+
+    图表编号问题（Figure 5 / 图S8）优先走 caption span 通道（label 硬约束，
+    caption_locator v3）；通道无命中时回退常规引文路径，并在候选过滤中保留
+    label 硬约束——编号冲突的锚点（Figure 4 的统计模板题注）直接剔除。
     """
     intent = detect_locator_intent(question)
     partition_intent = intent.get("partition_intent")
+    figure_label = intent.get("figure_label")
     if not intent.get("kind"):
         return {"status": LOCATOR_STATUS_NOT_APPLICABLE, "locator_version": LOCATOR_VERSION}
     quote_text = intent.get("quote_text")
+
+    if figure_label:
+        from yuxi.knowledge.evidence.caption_locator import resolve_figure_caption_locator
+
+        caption_resolution = await resolve_figure_caption_locator(
+            db,
+            figure_label=figure_label,
+            quote_text=quote_text,
+            kb_ids=kb_ids,
+        )
+        if caption_resolution is not None:
+            if caption_resolution.get("status") == "VERIFIED":
+                await _attach_caption_backlinks(db, kb_ids=kb_ids, resolution=caption_resolution)
+            return caption_resolution
+        if intent["kind"] == LOCATOR_KIND_FIGURE:
+            # 编号定位但题注通道无命中：失败关闭（不回退到无编号的泛匹配）
+            return {
+                "status": LOCATOR_STATUS_NOT_FOUND,
+                "locator_version": LOCATOR_VERSION,
+                "partition_intent": partition_intent,
+                "reason": "figure_label_caption_not_found_in_scope",
+            }
+
     if intent["kind"] != LOCATOR_KIND_QUOTE or not quote_text:
         return {
             "status": LOCATOR_STATUS_NOT_APPLICABLE,
@@ -436,6 +485,9 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
             len(quote_norm) >= 40 and _best_partial_containment(quote_norm, carrier_norm)
         )
         if not containment:
+            continue
+        # label 硬约束：用户编号与锚点句首编号冲突（Figure 4 ≠ Figure 5）→ 剔除
+        if carrier_label_conflicts(figure_label, anchor_quote):
             continue
         partition = effective_partition(anchor.document_partition, page=int(anchor.page))
         if partition not in LOCATOR_ELIGIBLE_PARTITIONS:
@@ -532,19 +584,24 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
         "filename": anchor["filename"],
     }
     # 图注反链：定位命中图注时，反查正文引用该图表的段落，为"解释"子意图提供依据
-    if _CAPTION_LABEL_PATTERN.match(anchor.get("quote") or ""):
+    await _attach_caption_backlinks(db, kb_ids=kb_ids, resolution=resolution)
+    return resolution
+
+
+async def _attach_caption_backlinks(db, *, kb_ids: list[str], resolution: dict[str, Any]) -> None:
+    """命中图注/题注时反查正文引用段（非致命，失败仅记录）。"""
+    if _CAPTION_LABEL_PATTERN.match(resolution.get("quote") or ""):
         try:
             backlinks = await resolve_caption_backlinks(
                 db,
                 kb_ids=kb_ids,
-                caption_quote=anchor.get("quote") or "",
-                exclude_anchor_id=anchor["anchor_id"],
+                caption_quote=resolution.get("quote") or "",
+                exclude_anchor_id=resolution.get("anchor_id"),
             )
             if backlinks:
                 resolution["backlinks"] = backlinks
         except Exception as exc:  # noqa: BLE001
             logger.error(f"caption backlink resolution failed (non-fatal): {exc}")
-    return resolution
 
 
 async def resolve_caption_backlinks(
@@ -615,9 +672,15 @@ async def resolve_caption_backlinks(
 
 
 def _best_partial_containment(quote_norm: str, carrier_norm: str) -> bool:
-    """近似兜底：引文归一化后任一 ≥40 字符句段被载体包含。"""
+    """近似兜底：引文归一化后任一 ≥40 字符句段被载体包含（T3 压缩包含兜底）。
+
+    T3 解决 MinerU 存量伪影（词内被插入空格，如 ``Ye ast o f y one``）：
+    句段去空白压缩后被载体压缩形式包含即视为命中。
+    """
     for sentence in re.split(r"[.!?。！？;；]", quote_norm):
         sentence = sentence.strip()
         if len(sentence) >= 40 and sentence in carrier_norm:
+            return True
+        if len(sentence) >= 40 and sentence.replace(" ", "") in carrier_norm.replace(" ", ""):
             return True
     return False

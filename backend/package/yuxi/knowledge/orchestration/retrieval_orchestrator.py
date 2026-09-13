@@ -377,13 +377,16 @@ async def prepare_knowledge_context(
     # 把精确 ``span + anchor`` 补成一条正式 evidence row；随后统一冻结引用池，
     # 页码裁决和状态模块投影都只读取该集合。定位器不能绕开集合直接回答。
     from yuxi.knowledge.evidence.quote_locator import (
+        LOCATOR_KIND_FIGURE,
         LOCATOR_KIND_QUOTE,
         detect_locator_intent,
     )
 
     locator_intent = detect_locator_intent(question)
     contract["locator_intent"] = locator_intent
-    locator_pending = locator_intent.get("kind") == LOCATOR_KIND_QUOTE and bool(raw_members)
+    # FIGURE_LOCATOR（图表编号问题）与 QUOTE_LOCATOR 同为精确定位意图：
+    # 编号走 caption 通道 + label 硬约束（caption_locator v3）
+    locator_pending = locator_intent.get("kind") in {LOCATOR_KIND_QUOTE, LOCATOR_KIND_FIGURE} and bool(raw_members)
     direct_locator: dict[str, Any] | None = None
     locator_evidence: dict[str, Any] | None = None
     if locator_pending:
@@ -416,7 +419,7 @@ async def prepare_knowledge_context(
                 "document_partition": direct_locator.get("zone"),
                 "evidence_quote": direct_locator.get("quote") or direct_locator.get("quote_head"),
                 "claim_eligible": False,
-                "match_tier": "DETERMINISTIC_QUOTE_LOCATOR",
+                "match_tier": direct_locator.get("match_tier") or "DETERMINISTIC_QUOTE_LOCATOR",
             }
 
     if not plan.get("retrieval_required"):
@@ -741,11 +744,20 @@ async def prepare_knowledge_context(
             # 全冻结范围已确认跨物理位置重复；Top-K 即使只召回其中一条也不得
             # 把歧义错误收缩成唯一页码。
             locator_resolution = direct_locator
+        elif not locator_intent.get("quote_text"):
+            # 编号定位（无引文片段）：caption 通道裁决即终局——label 硬约束
+            # 已在通道内完成，引用池无引文可比对。
+            locator_resolution = direct_locator or {
+                "status": "NOT_FOUND",
+                "locator_version": "quote_locator_v2",
+                "reason": "no_extractable_quote",
+            }
         else:
             locator_resolution = resolve_quote_locator_from_citations(
                 quote_text=locator_intent.get("quote_text") or "",
                 citations=contract.get("citations") or [],
                 partition_intent=locator_intent.get("partition_intent"),
+                figure_label=locator_intent.get("figure_label"),
             )
             if (
                 locator_resolution.get("status") == "VERIFIED"
@@ -768,7 +780,12 @@ async def prepare_knowledge_context(
         # 该对象）。违例 → ANSWER_VALIDATION_FAILED，失败关闭不展示页码。
         from yuxi.knowledge.contracts.locator_binding import enforce_locator_authority
 
-        enforce_locator_authority(contract, retrieval_id=retrieval_id)
+        enforce_locator_authority(
+            contract,
+            retrieval_id=retrieval_id,
+            locator_kind=str(locator_resolution.get("locator_kind") or "QUOTE_LOCATOR"),
+            hard_constraints=["figure_label"] if locator_intent.get("figure_label") else None,
+        )
         locator_resolution = contract["locator_resolution"]
         if locator_intent.get("compound"):
             contract["retrieval_plan"] = {
