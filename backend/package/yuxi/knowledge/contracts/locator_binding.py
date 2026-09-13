@@ -63,7 +63,19 @@ class VerifiedLocatorBinding(BaseModel):
     index_revision_id: str | None = None
     kb_id: str | None = None
     partition: str | None = None
+    # 页码语义（v2，跨页图表必须显式携带两个页码，不静默合并）：
+    # - asset_pdf_page_number：图片本体所在 PDF 物理页（1 基）
+    # - caption_pdf_page_number：题注所在 PDF 物理页（1 基）
+    # - printed_page_label：期刊印刷页码，仅作展示（可空）
+    # - source_page_index：内部 0 基页索引
+    # - page_number/display_page_number：按用户意图确定的最终展示页
+    #   （「图片在哪页」→ asset 页；「题注在哪页」→ caption 页）
     page_number: int | None = None
+    asset_pdf_page_number: int | None = None
+    caption_pdf_page_number: int | None = None
+    printed_page_label: str | None = None
+    source_page_index: int | None = None
+    panel_match: str | None = None
     hard_constraints_passed: list[str] = Field(default_factory=list)
     physical_unique: bool = False
     quote_head: str | None = None
@@ -91,6 +103,12 @@ def binding_from_locator_resolution(
     resolution = dict(resolution or {})
     status = str(resolution.get("status") or BINDING_NOT_APPLICABLE)
     page = resolution.get("page")
+    page_number = int(page) if isinstance(page, int) and int(page) >= 1 else None
+    asset_page = resolution.get("asset_page")
+    caption_page = resolution.get("caption_page")
+    source_index = resolution.get("source_page_index")
+    # 展示页规则：显式携带 asset/caption 页时按入口意图选择（图片入口的
+    # resolution.page 已是 asset 页），否则回落单一 page 语义
     return VerifiedLocatorBinding(
         binding_id=make_binding_id(
             retrieval_id=retrieval_id,
@@ -111,7 +129,14 @@ def binding_from_locator_resolution(
         index_revision_id=resolution.get("index_revision_id"),
         kb_id=resolution.get("kb_id"),
         partition=resolution.get("zone"),
-        page_number=int(page) if isinstance(page, int) and int(page) >= 1 else None,
+        page_number=page_number,
+        asset_pdf_page_number=int(asset_page) if isinstance(asset_page, int) and asset_page >= 1 else None,
+        caption_pdf_page_number=int(caption_page) if isinstance(caption_page, int) and caption_page >= 1 else None,
+        printed_page_label=resolution.get("printed_page_label"),
+        source_page_index=int(source_index)
+        if isinstance(source_index, int) and source_index >= 0
+        else (page_number - 1 if page_number else None),
+        panel_match=resolution.get("panel_match"),
         hard_constraints_passed=list(hard_constraints or []),
         physical_unique=status == BINDING_VERIFIED,
         quote_head=resolution.get("quote_head"),

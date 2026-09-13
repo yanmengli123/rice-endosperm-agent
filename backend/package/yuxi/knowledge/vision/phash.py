@@ -34,26 +34,85 @@ def compute_asset_digest(image_bytes: bytes) -> str:
     return hashlib.sha256(image_bytes).hexdigest()
 
 
+def compute_phash_from_image(image: _PILImage.Image) -> str:
+    """对已解码 PIL 图像计算 pHash（panel 裁剪变体复用同一 DCT 路径）。"""
+    if not _HAS_IMAGE_STACK:
+        return ""
+    grayscale = image.convert("L").resize((32, 32), _PILImage.Resampling.LANCZOS)
+    pixels = _np.asarray(grayscale, dtype=_np.float64)
+    n = pixels.shape[0]
+    indices = _np.arange(n)
+    basis = _np.cos((_np.pi / n) * (indices[None, :] + 0.5) * indices[:, None])
+    dct = basis @ pixels @ basis.T
+    low = dct[:8, :8].copy()
+    low[0, 0] = 0.0
+    median = float(_np.median(low))
+    bits = "".join("1" if value > median else "0" for value in low.flatten())
+    return format(int(bits, 2), "016x")
+
+
+# panel 变体：覆盖常见多 panel 版式的确定性裁剪（无视觉模型参与）
+_PANEL_CROPS: dict[str, tuple[float, float, float, float]] = {
+    "whole": (0.0, 0.0, 1.0, 1.0),
+    "q1": (0.0, 0.0, 0.5, 0.5),
+    "q2": (0.5, 0.0, 1.0, 0.5),
+    "q3": (0.0, 0.5, 0.5, 1.0),
+    "q4": (0.5, 0.5, 1.0, 1.0),
+    "left_half": (0.0, 0.0, 0.5, 1.0),
+    "right_half": (0.5, 0.0, 1.0, 1.0),
+    "top_half": (0.0, 0.0, 1.0, 0.5),
+    "bottom_half": (0.0, 0.5, 1.0, 1.0),
+}
+
+
+def compute_panel_phashes(image_bytes: bytes) -> dict[str, str]:
+    """整图 + panel 裁剪变体的 pHash 集合（用户只上传 (c) 子图时仍可命中父图）。
+
+    纯确定性裁剪，不猜测 panel 边界；空指纹（解码失败/依赖缺失）时仅返回
+    可计算的部分，绝不编造。
+    """
+    if not _HAS_IMAGE_STACK or not image_bytes:
+        return {}
+    try:
+        with _PILImage.open(io.BytesIO(image_bytes)) as image:
+            width, height = image.size
+            result: dict[str, str] = {}
+            for panel_key, (x0, y0, x1, y1) in _PANEL_CROPS.items():
+                box = (
+                    int(x0 * width),
+                    int(y0 * height),
+                    max(int(x1 * width), int(x0 * width) + 1),
+                    max(int(y1 * height), int(y0 * height) + 1),
+                )
+                cropped = image.crop(box)
+                value = compute_phash_from_image(cropped)
+                if value:
+                    result[panel_key] = value
+            return result
+    except Exception:  # noqa: BLE001 - 解码失败按无指纹处理，不猜
+        return {}
+
+
 def compute_phash(image_bytes: bytes) -> str | None:
     """计算 64bit 感知哈希（十六进制 16 位）；解码失败或依赖缺失 → None。"""
     if not _HAS_IMAGE_STACK or not image_bytes:
         return None
     try:
         with _PILImage.open(io.BytesIO(image_bytes)) as image:
-            grayscale = image.convert("L").resize((32, 32), _PILImage.Resampling.LANCZOS)
-            pixels = _np.asarray(grayscale, dtype=_np.float64)
+            return compute_phash_from_image(image)
     except Exception:  # noqa: BLE001 - 解码失败按无指纹处理，不猜
         return None
-    # 行/列一维 DCT-II（32 点，等价二维 DCT 的可分离实现）
-    n = pixels.shape[0]
-    indices = _np.arange(n)
-    basis = _np.cos((_np.pi / n) * (indices[None, :] + 0.5) * indices[:, None])
-    dct = basis @ pixels @ basis.T
-    low = dct[:8, :8].copy()
-    low[0, 0] = 0.0  # 直流分量不参与阈值判定
-    median = float(_np.median(low))
-    bits = "".join("1" if value > median else "0" for value in low.flatten())
-    return format(int(bits, 2), "016x")
+
+
+def image_dimensions(image_bytes: bytes) -> tuple[int, int, str]:
+    """(宽, 高, MIME)；解码失败 → (0, 0, '')。"""
+    if not _HAS_IMAGE_STACK or not image_bytes:
+        return (0, 0, "")
+    try:
+        with _PILImage.open(io.BytesIO(image_bytes)) as image:
+            return (int(image.width), int(image.height), str(image.format or "").lower())
+    except Exception:  # noqa: BLE001
+        return (0, 0, "")
 
 
 def phash_hamming_distance(first: str | None, second: str | None) -> int | None:
@@ -70,6 +129,9 @@ __all__ = [
     "PHASH_STRONG_DISTANCE",
     "PHASH_VERSION",
     "compute_asset_digest",
+    "compute_panel_phashes",
     "compute_phash",
+    "compute_phash_from_image",
+    "image_dimensions",
     "phash_hamming_distance",
 ]

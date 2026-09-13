@@ -15,7 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from yuxi.storage.postgres.models_business import Base
+from yuxi.storage.postgres.models_business import Base, BigIntPk
 from yuxi.utils.datetime_utils import utc_now, utc_now_naive
 
 JSON_VALUE = JSON().with_variant(JSONB, "postgresql")
@@ -1509,4 +1509,97 @@ class KnowledgeRetrievalPolicyRevision(Base):
     policy_json = Column(JSON_VALUE, nullable=False)
     policy_hash = Column(String(64), nullable=False)
     created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class FigureEntityRecord(Base):
+    """Figure/Table 实体（R-P2 图表证据模型，版本化随 parse_revision 重建）。
+
+    一个实体 = 同一图表编号在一个解析版本中的聚合（caption 血统 + 关联的
+    图片资产）。caption 信息在实体上（FigureCaption 折叠），资产关联方式以
+    ``association_method`` 记录（FigureAssociation 折叠）；资产本体（指纹/
+    尺寸/对象地址/panel 指纹）在 :class:`FigureAssetRecord`。
+    """
+
+    __tablename__ = "figure_entities"
+    __table_args__ = (
+        UniqueConstraint("parse_revision_id", "entity_key", name="uq_figure_entity_revision_key"),
+        Index("ix_figure_entities_kb", "kb_id", "parse_revision_id"),
+        Index("ix_figure_entities_file", "file_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    parse_revision_id = Column(
+        String(64),
+        ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kb_id = Column(String(80), nullable=False)
+    file_id = Column(String(64), nullable=False)
+    source_sha256 = Column(String(64), nullable=False)
+    index_revision_id = Column(String(64), nullable=False, default="")
+    pipeline_version = Column(String(64), nullable=False, default="")
+    # 实体键：规范图表编号（figure 5）或无编号资产的稳定回退键
+    entity_key = Column(String(160), nullable=False)
+    container_label = Column(String(128))
+    caption = Column(Text)
+    caption_page = Column(Integer)
+    caption_anchor_id = Column(String(64))
+    caption_span_id = Column(String(64))
+    caption_span_evidence_id = Column(String(64))
+    document_partition = Column(String(32), nullable=False, default="UNKNOWN")
+    association_method = Column(String(32), nullable=False, default="block_pairing")
+    asset_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class FigureAssetRecord(Base):
+    """图片资产指纹索引（R-P2）：上传图片与库内图片物理比对的唯一依据。
+
+    对象名为内容寻址（``{prefix}/{sha256[:24]}-{name}``，解析器上传时生成）；
+    入库时下载字节计算完整 SHA256、感知哈希、尺寸与 panel 变体指纹（整图 +
+    四象限 + 四半图，覆盖常见多 panel 版式），供 V0/V1/V2 确定性匹配——
+    视觉模型只在这些层未决时才被调用，且永不决定页码。
+    """
+
+    __tablename__ = "figure_assets"
+    __table_args__ = (
+        UniqueConstraint("parse_revision_id", "asset_key", name="uq_figure_asset_revision_key"),
+        Index("ix_figure_assets_kb", "kb_id", "parse_revision_id"),
+        Index("ix_figure_assets_entity", "entity_id"),
+        Index("ix_figure_assets_sha", "asset_sha256"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    entity_id = Column(
+        BigInteger,
+        ForeignKey("figure_entities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    parse_revision_id = Column(
+        String(64),
+        ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kb_id = Column(String(80), nullable=False)
+    asset_key = Column(String(256), nullable=False)
+    img_path = Column(String(256), nullable=False, default="")
+    # 视觉块锚点（evidence_anchors.anchor_id）：确定性命中后由该行构建
+    # VerifiedLocatorBinding 的物理血统，满足出口冻结不变量
+    anchor_id = Column(String(64), nullable=False, default="")
+    object_bucket = Column(String(128), nullable=False, default="")
+    object_name = Column(String(512), nullable=False, default="")
+    asset_sha256 = Column(String(64), nullable=False, default="")
+    asset_phash = Column(String(16), nullable=False, default="")
+    panel_phashes = Column(JSON_VALUE, nullable=False, default=dict)
+    mime = Column(String(64), nullable=False, default="")
+    width = Column(Integer, nullable=False, default=0)
+    height = Column(Integer, nullable=False, default=0)
+    bbox = Column(JSON_VALUE)
+    page = Column(Integer, nullable=False)
+    ocr_text = Column(Text)
     created_at = Column(DateTime(timezone=True), default=utc_now)

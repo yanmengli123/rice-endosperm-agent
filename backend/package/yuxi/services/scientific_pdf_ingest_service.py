@@ -1003,6 +1003,17 @@ async def _persist_article_records(revision_id: str, article: dict[str, Any], *,
                 anchors=list(anchor_rows),
                 spans=list(spans),
             )
+            # R-P2：图表资产指纹索引（实体 + 资产：sha256/pHash/尺寸/panel 变体）。
+            # 失败不阻断入库（summary 如实计数），重解析随 revision 级联重建。
+            from yuxi.knowledge.vision.figure_ingestor import persist_figure_index
+
+            figure_summary = await persist_figure_index(
+                session,
+                revision=revision,
+                article_assets=list(article.get("assets") or []),
+                spans=list(spans),
+                anchors=list(anchor_rows),
+            )
             await session.execute(
                 update(KnowledgeParseRevision)
                 .where(KnowledgeParseRevision.revision_id == revision_id)
@@ -1011,6 +1022,7 @@ async def _persist_article_records(revision_id: str, article: dict[str, Any], *,
                         **(revision.qa_report or {}),
                         "evidence_spans": spans_summary,
                         "lexical_index": lexical_summary,
+                        "figure_index": figure_summary,
                     }
                 )
             )

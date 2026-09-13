@@ -1,21 +1,21 @@
-"""Figure Image Locator：上传原图 → FigureEntity → VerifiedLocatorBinding（P2）。
+"""Figure Image Locator：上传原图 → FigureEntity → VerifiedLocatorBinding。
 
-定位入口 ``FIGURE_IMAGE``：用户上传图片问「这个图片在哪篇论文哪一页」。
-执行分两段——Stage A 定位（本模块，确定性裁决）与 Stage B 解释（检索证据，
-不得反向修改 Stage A 的定位）。
+R-P2 起图片索引是**持久化的资产指纹索引**（figure_entities + figure_assets，
+入库时由 Figure Ingestor 计算 SHA256/pHash/尺寸/panel 变体指纹），旧解析
+版本无持久化行时回退锚点读取投影。
 
-裁决阶梯（Candidate recall 可以宽，page publication 必须极严）：
+裁决顺序（确定性优先，VLM 最后——视觉模型只描述图片，永不决定页码）：
 
-- V0_EXACT_ASSET_SHA：资产字节摘要完全一致（需 figure_index 持久化资产指纹；
-  当前锚点库尚未携带资产摘要，该层预留，指纹入库后自动启用）。
-- V1_STRONG_PHASH_LABEL：pHash 强匹配（距离 ≤ 8）**且**图表编号一致（双信号）。
-- V2_VISUAL_CONSTRAINTS：编号 + 可见文本/实体/题注片段约束 ≥2 个独立信号。
-- V3_MULTI_SIGNAL_HARD_CONSTRAINTS：无编号但可见文本+实体多信号且物理唯一。
-- V4_SEMANTIC_ONLY：仅语义相似 → Candidate only，**永不发布页码**。
+1. **V0_EXACT_ASSET_SHA**：上传字节 SHA256 与库内资产完全一致 → 直接物理
+   绑定，不需要视觉模型。
+2. **V1_STRONG_PHASH**：感知哈希强匹配（距离 ≤ 8，整图或 panel 变体）且
+   范围内物理唯一 → 绑定并报告 panel_key（用户只上传 (c) 子图仍绑定父图）。
+3. **V2_VISUAL_CONSTRAINTS**：观察编号 + 可见文本/实体/题注片段 ≥2 信号。
+4. **V3_MULTI_SIGNAL_HARD_CONSTRAINTS**：无编号但文本+实体多信号且物理唯一。
+5. **V4_SEMANTIC_ONLY**：仅语义相似 → Candidate only，永不发布页码。
 
-硬不变量：视觉模型只产出 VisualObservationEnvelope（schema 无 page 字段）；
-provider 不可用 / 观察缺失 / 信号不足 / 物理不唯一 → 一律失败关闭
-（FIGURE_MATCH_AMBIGUOUS / NOT_FOUND），绝不回退到「模型自由回答页码」。
+失败语义：确定性层未决且观察不可用 → ``VISION_PROVIDER_UNAVAILABLE``（显式
+暴露，不静默退化为普通问答）；多物理位置 → ``MULTIPLE_MATCHES`` 不发布候选页码。
 """
 
 from __future__ import annotations
@@ -31,15 +31,17 @@ from yuxi.knowledge.vision.visual_observation import VisualObservationEnvelope
 from yuxi.storage.postgres.models_knowledge import (
     EvidenceAnchorRecord,
     EvidenceSpanRecord,
+    FigureAssetRecord,
+    FigureEntityRecord,
     KnowledgeFile,
     KnowledgeParseRevision,
 )
 from yuxi.utils import logger
 
-FIGURE_IMAGE_LOCATOR_VERSION = "figure_image_locator_v1"
+FIGURE_IMAGE_LOCATOR_VERSION = "figure_image_locator_v2"
 
 TIER_V0_EXACT_ASSET_SHA = "V0_EXACT_ASSET_SHA"
-TIER_V1_STRONG_PHASH_LABEL = "V1_STRONG_PHASH_LABEL"
+TIER_V1_STRONG_PHASH_LABEL = "V1_STRONG_PHASH"
 TIER_V2_VISUAL_CONSTRAINTS = "V2_VISUAL_CONSTRAINTS"
 TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS = "V3_MULTI_SIGNAL_HARD_CONSTRAINTS"
 TIER_V4_SEMANTIC_ONLY = "V4_SEMANTIC_ONLY"
@@ -47,92 +49,8 @@ TIER_V4_SEMANTIC_ONLY = "V4_SEMANTIC_ONLY"
 # 可见文本片段命中题注的最小归一化长度（防止 2-3 字符子串误命中）
 _VISIBLE_TEXT_MIN_CHARS = 6
 
-# MinerU image block 的锚点类型（mineru_layout anchor_type = block_type）
-_IMAGE_ANCHOR_TYPES = ("image", "figure")
-
-
-async def build_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]:
-    """从持久化证据行构建 FigureEntity 投影（读取投影，不落新表）。
-
-    实体 = image/figure 锚点（物理 bbox + 页码）+ 同锚 caption span
-    （container_label 细化）。资产摘要/pHash 字段在 figure_index artifact
-    持久化指纹后自动参与 V0/V1 层（当前为 None → 阶梯从 V2 起步）。
-    """
-    rows = (
-        await db.execute(
-            select(EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
-            .join(
-                KnowledgeParseRevision,
-                KnowledgeParseRevision.revision_id == EvidenceAnchorRecord.parse_revision_id,
-            )
-            .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
-            .where(
-                KnowledgeParseRevision.kb_id.in_(list(kb_ids)[:20]),
-                KnowledgeFile.active_parse_revision_id == EvidenceAnchorRecord.parse_revision_id,
-                EvidenceAnchorRecord.anchor_type.in_(_IMAGE_ANCHOR_TYPES),
-                EvidenceAnchorRecord.page >= 1,
-            )
-            .order_by(
-                EvidenceAnchorRecord.parse_revision_id,
-                EvidenceAnchorRecord.page,
-            )
-            .limit(500)
-        )
-    ).all()
-    anchor_keys = [(str(anchor.parse_revision_id), str(anchor.anchor_id)) for anchor, _, _ in rows]
-    spans = (
-        (
-            await db.execute(
-                select(EvidenceSpanRecord).where(
-                    EvidenceSpanRecord.parse_revision_id.in_({key[0] for key in anchor_keys}),
-                    EvidenceSpanRecord.evidence_type == "caption",
-                )
-            )
-        )
-        .scalars()
-        .all()
-        if anchor_keys
-        else []
-    )
-    caption_span_by_anchor: dict[tuple[str, str], Any] = {}
-    for span in spans:
-        caption_span_by_anchor.setdefault((str(span.parse_revision_id), str(span.anchor_id)), span)
-
-    entities: list[dict[str, Any]] = []
-    for anchor, knowledge_file, revision in rows:
-        quote = str(anchor.quote or "")
-        page = int(anchor.page)
-        span = caption_span_by_anchor.get((str(anchor.parse_revision_id), str(anchor.anchor_id)))
-        entities.append(
-            {
-                "anchor_id": str(anchor.anchor_id),
-                "span_id": str(span.span_id) if span is not None else None,
-                "span_evidence_id": str(span.evidence_id) if span is not None else None,
-                "evidence_id": derive_evidence_id(
-                    source_sha256=str(revision.source_sha256),
-                    page_number=page,
-                    bbox=anchor.bbox,
-                    word_start=int(anchor.word_start or 0),
-                    word_end=int(anchor.word_end or anchor.word_start or 0),
-                    quote_hash=str(anchor.quote_hash or ""),
-                    anchor_id=str(anchor.anchor_id),
-                ),
-                "parse_revision_id": str(anchor.parse_revision_id),
-                "index_revision_id": str(knowledge_file.active_index_revision_id or ""),
-                "kb_id": str(revision.kb_id),
-                "file_id": str(revision.file_id),
-                "source_sha256": str(revision.source_sha256),
-                "filename": str(knowledge_file.filename or ""),
-                "page": page,
-                "zone": str(span.document_partition if span is not None else anchor.document_partition or "MAIN_TEXT"),
-                "container_label": str(span.container_label) if span is not None and span.container_label else None,
-                "caption": quote,
-                "caption_norm": _norm(quote),
-                "asset_digest": None,  # figure_index artifact 持久化后启用 V0
-                "asset_phash": None,  # figure_index artifact 持久化后启用 V1
-            }
-        )
-    return entities
+# MinerU 视觉块锚点类型（v3 起含 chart）
+_IMAGE_ANCHOR_TYPES = ("image", "figure", "chart")
 
 
 def _norm(text: str) -> str:
@@ -147,8 +65,240 @@ def _label_key(label: str | None) -> str | None:
     return canonical_figure_label(label)
 
 
+async def build_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]:
+    """查询期 figure index：持久化资产索引优先，旧版本回退锚点读取投影。"""
+    entities = await _persisted_figure_index(db, kb_ids=kb_ids)
+    if entities:
+        return entities
+    return await _anchor_figure_index(db, kb_ids=kb_ids)
+
+
+async def _persisted_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]:
+    rows = (
+        await db.execute(
+            select(FigureEntityRecord, FigureAssetRecord, KnowledgeFile)
+            .join(FigureAssetRecord, FigureAssetRecord.entity_id == FigureEntityRecord.id)
+            .join(KnowledgeFile, KnowledgeFile.file_id == FigureEntityRecord.file_id)
+            .where(
+                FigureEntityRecord.kb_id.in_(list(kb_ids)[:20]),
+                KnowledgeFile.kb_id == FigureEntityRecord.kb_id,
+                KnowledgeFile.active_parse_revision_id == FigureEntityRecord.parse_revision_id,
+            )
+            .order_by(FigureEntityRecord.parse_revision_id, FigureEntityRecord.entity_key)
+            .limit(600)
+        )
+    ).all()
+    grouped: dict[int, dict[str, Any]] = {}
+    for entity, asset, knowledge_file in rows:
+        projection = grouped.setdefault(
+            entity.id,
+            {
+                "entity_key": entity.entity_key,
+                "container_label": entity.container_label,
+                "caption": entity.caption or "",
+                "caption_norm": _norm(entity.caption or ""),
+                "caption_page": entity.caption_page,
+                "kb_id": entity.kb_id,
+                "file_id": entity.file_id,
+                "filename": str(knowledge_file.filename or ""),
+                "source_sha256": entity.source_sha256,
+                "parse_revision_id": entity.parse_revision_id,
+                "index_revision_id": str(knowledge_file.active_index_revision_id or ""),
+                "span_id": entity.caption_span_id,
+                "span_evidence_id": entity.caption_span_evidence_id,
+                "zone": entity.document_partition or "MAIN_TEXT",
+                "assets": [],
+            },
+        )
+        projection["assets"].append(
+            {
+                "anchor_id": asset.anchor_id or None,
+                "page": int(asset.page),
+                "bbox": asset.bbox,
+                "asset_digest": asset.asset_sha256 or None,
+                "asset_phash": asset.asset_phash or None,
+                "panel_phashes": dict(asset.panel_phashes or {}),
+                "img_path": asset.img_path,
+                "width": asset.width,
+                "height": asset.height,
+            }
+        )
+    return list(grouped.values())
+
+
+async def _anchor_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]:
+    """旧解析版本回退：视觉锚点 + caption span 的读取投影（无资产指纹）。"""
+    rows = (
+        await db.execute(
+            select(EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
+            .join(
+                KnowledgeParseRevision,
+                KnowledgeParseRevision.revision_id == EvidenceAnchorRecord.parse_revision_id,
+            )
+            .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
+            .where(
+                KnowledgeParseRevision.kb_id.in_(list(kb_ids)[:20]),
+                KnowledgeFile.active_parse_revision_id == EvidenceAnchorRecord.parse_revision_id,
+                KnowledgeFile.kb_id == KnowledgeParseRevision.kb_id,
+                EvidenceAnchorRecord.anchor_type.in_(_IMAGE_ANCHOR_TYPES),
+                EvidenceAnchorRecord.page >= 1,
+            )
+            .order_by(
+                EvidenceAnchorRecord.parse_revision_id,
+                EvidenceAnchorRecord.page,
+            )
+            .limit(500)
+        )
+    ).all()
+    if not rows:
+        return []
+    revision_ids = {str(anchor.parse_revision_id) for anchor, _, _ in rows}
+    spans = (
+        (
+            await db.execute(
+                select(EvidenceSpanRecord).where(
+                    EvidenceSpanRecord.parse_revision_id.in_(revision_ids),
+                    EvidenceSpanRecord.evidence_type == "caption",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    caption_span_by_anchor: dict[tuple[str, str], Any] = {}
+    for span in spans:
+        caption_span_by_anchor.setdefault((str(span.parse_revision_id), str(span.anchor_id)), span)
+
+    entities: list[dict[str, Any]] = []
+    seen_anchors: set[tuple[str, str]] = set()
+    for anchor, knowledge_file, _revision in rows:
+        anchor_key = (str(anchor.parse_revision_id), str(anchor.anchor_id))
+        if anchor_key in seen_anchors or not anchor.page or int(anchor.page) < 1:
+            continue
+        seen_anchors.add(anchor_key)
+        quote = str(anchor.quote or "")
+        span = caption_span_by_anchor.get(anchor_key)
+        entities.append(
+            {
+                "entity_key": _label_key(span.container_label if span is not None else quote)
+                or f"asset:{anchor.anchor_id}",
+                "container_label": (span.container_label if span is not None else None),
+                "caption": quote,
+                "caption_norm": _norm(quote),
+                "caption_page": int(span.page_number) if span is not None and span.page_number else int(anchor.page),
+                "kb_id": None,
+                "file_id": str(knowledge_file.file_id),
+                "filename": str(knowledge_file.filename or ""),
+                "source_sha256": "",
+                "parse_revision_id": str(anchor.parse_revision_id),
+                "index_revision_id": str(knowledge_file.active_index_revision_id or ""),
+                "span_id": str(span.span_id) if span is not None else None,
+                "span_evidence_id": str(span.evidence_id) if span is not None else None,
+                "zone": str(span.document_partition if span is not None else anchor.document_partition or "MAIN_TEXT"),
+                "assets": [
+                    {
+                        "anchor_id": str(anchor.anchor_id),
+                        "page": int(anchor.page),
+                        "bbox": anchor.bbox,
+                        "asset_digest": None,
+                        "asset_phash": None,
+                        "panel_phashes": {},
+                        "img_path": "",
+                        "width": 0,
+                        "height": 0,
+                    }
+                ],
+            }
+        )
+    return entities
+
+
+def _physical_location(entity: dict[str, Any], asset: dict[str, Any]) -> tuple[str, str, int]:
+    return (str(entity["parse_revision_id"]), str(entity["file_id"]), int(asset["page"]))
+
+
+def _best_phash_match(uploaded_phash: str | None, asset: dict[str, Any]) -> tuple[str | None, int]:
+    """整图 + panel 变体的最强感知哈希匹配；返回 (panel_key, 距离) 或 (None, -1)。"""
+    if not uploaded_phash:
+        return (None, -1)
+    best_key: str | None = None
+    best_distance = PHASH_STRONG_DISTANCE + 1
+    whole = asset.get("asset_phash")
+    if whole:
+        distance = phash_hamming_distance(uploaded_phash, whole)
+        if distance is not None and distance < best_distance:
+            best_key, best_distance = "whole", distance
+    for panel_key, panel_hash in (asset.get("panel_phashes") or {}).items():
+        distance = phash_hamming_distance(uploaded_phash, panel_hash)
+        if distance is not None and distance < best_distance:
+            best_key, best_distance = panel_key, distance
+    return (best_key, best_distance)
+
+
+def adjudicate_deterministic_match(
+    candidates: list[dict[str, Any]],
+    *,
+    image_asset_digest: str | None = None,
+    image_phash: str | None = None,
+) -> dict[str, Any]:
+    """确定性裁决（V0/V1，零 LLM、零观察）：唯一 → VERIFIED，多位置 → 歧义。
+
+    V0 字节一致是最强信号，单独即可发布；V1 感知哈希强匹配要求范围内物理
+    唯一（缩放/压缩/裁剪 panel 均可命中，但同图多处出现时失败关闭）。
+    """
+    sha_hits: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    if image_asset_digest:
+        for entity in candidates:
+            for asset in entity.get("assets") or []:
+                if asset.get("asset_digest") == image_asset_digest:
+                    sha_hits.append((entity, asset))
+    if sha_hits:
+        locations = {_physical_location(entity, asset) for entity, asset in sha_hits}
+        if len(locations) != 1:
+            return {
+                "status": "MULTIPLE_MATCHES",
+                "locator_kind": "FIGURE_IMAGE",
+                "match_count": len(locations),
+                "reason": "exact_asset_hits_multiple_physical_locations",
+            }
+        entity, asset = sha_hits[0]
+        return {
+            "status": "VERIFIED",
+            "tier": TIER_V0_EXACT_ASSET_SHA,
+            "entity": entity,
+            "asset": asset,
+            "panel_key": "whole",
+            "signals": {"asset_sha_exact": True, "phash_distance": None, "panel_key": "whole"},
+        }
+
+    phash_hits: list[tuple[dict[str, Any], dict[str, Any], str, int]] = []
+    for entity in candidates:
+        for asset in entity.get("assets") or []:
+            panel_key, distance = _best_phash_match(image_phash, asset)
+            if panel_key is not None and distance <= PHASH_STRONG_DISTANCE:
+                phash_hits.append((entity, asset, panel_key, distance))
+    if phash_hits:
+        locations = {_physical_location(entity, asset) for entity, asset, _panel, _distance in phash_hits}
+        if len(locations) != 1:
+            return {
+                "status": "MULTIPLE_MATCHES",
+                "locator_kind": "FIGURE_IMAGE",
+                "match_count": len(locations),
+                "reason": "phash_hits_multiple_physical_locations",
+            }
+        entity, asset, panel_key, distance = phash_hits[0]
+        return {
+            "status": "VERIFIED",
+            "tier": TIER_V1_STRONG_PHASH_LABEL,
+            "entity": entity,
+            "asset": asset,
+            "panel_key": panel_key,
+            "signals": {"asset_sha_exact": False, "phash_distance": distance, "panel_key": panel_key},
+        }
+    return {"status": "DETERMINISTIC_UNRESOLVED", "locator_kind": "FIGURE_IMAGE"}
+
+
 def _text_signal(fragments: list[str], caption_norm: str) -> int:
-    """可见文本片段命中题注的信号计数（每个 ≥6 归一化字符的独立片段算一档）。"""
     hits = 0
     for fragment in fragments or []:
         fragment_norm = _norm(str(fragment))
@@ -160,14 +310,12 @@ def _text_signal(fragments: list[str], caption_norm: str) -> int:
 def adjudicate_figure_candidates(
     observation: VisualObservationEnvelope,
     candidates: list[dict[str, Any]],
-    *,
-    image_asset_digest: str | None = None,
-    image_phash: str | None = None,
 ) -> dict[str, Any]:
-    """确定性裁决：观察信号 × 候选 FigureEntity → 唯一绑定或失败关闭。纯函数。
+    """观察信号裁决（V2/V3）：编号硬约束 + 双信号最低。纯函数。
 
-    返回与 quote locator 同形的 resolution dict（match_tier=Vx）。V4 语义相似
-    候选永远不出页码；任何层级都要求物理唯一，否则 MULTIPLE_MATCHES。
+    V0/V1（资产指纹）只存在于确定性层（adjudicate_deterministic_match）；
+    观察层的编号是模型读图所得，本身不构成资产级确定性，必须叠加文本/
+    实体信号且物理唯一才可发布页码。
     """
     observed_label_key = _label_key(observation.figure_label)
     text_fragments = [str(item) for item in observation.visible_text or []]
@@ -175,28 +323,21 @@ def adjudicate_figure_candidates(
     caption_fragments = [str(item) for item in observation.caption_fragments or []]
 
     scored: list[dict[str, Any]] = []
-    for candidate in candidates:
-        candidate_label_key = _label_key(candidate.get("container_label"))
-        # 编号硬约束：观察编号与候选编号都明确且不同 → REJECT（同 P1 不变量）
+    for entity in candidates:
+        candidate_label_key = _label_key(entity.get("container_label"))
+        # 编号硬约束：观察编号与候选编号都明确且不同 → REJECT
         if observed_label_key and candidate_label_key and observed_label_key != candidate_label_key:
             continue
-        caption_norm = str(candidate.get("caption_norm") or "")
-        if not caption_norm:
+        caption_norm = str(entity.get("caption_norm") or "")
+        assets = entity.get("assets") or []
+        if not caption_norm or not assets:
             continue
-
         label_match = bool(observed_label_key and candidate_label_key == observed_label_key)
         visible_text_hits = _text_signal(text_fragments, caption_norm)
         entity_hits = _text_signal(entity_fragments, caption_norm)
         caption_hits = _text_signal(caption_fragments, caption_norm)
-        phash_distance = phash_hamming_distance(image_phash, candidate.get("asset_phash"))
-        asset_exact = bool(image_asset_digest and candidate.get("asset_digest") == image_asset_digest)
 
-        # 阶梯判定（宽召回、严发布）
-        if asset_exact:
-            tier = TIER_V0_EXACT_ASSET_SHA
-        elif phash_distance is not None and phash_distance <= PHASH_STRONG_DISTANCE and label_match:
-            tier = TIER_V1_STRONG_PHASH_LABEL
-        elif label_match and (visible_text_hits + entity_hits + caption_hits) >= 2:
+        if label_match and (visible_text_hits + entity_hits + caption_hits) >= 2:
             tier = TIER_V2_VISUAL_CONSTRAINTS
         elif not observed_label_key and visible_text_hits >= 1 and entity_hits >= 1:
             tier = TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS
@@ -205,15 +346,17 @@ def adjudicate_figure_candidates(
 
         scored.append(
             {
-                "candidate": candidate,
+                "entity": entity,
+                "asset": assets[0],
                 "tier": tier,
+                "panel_key": "whole",
                 "signals": {
                     "label_match": label_match,
                     "visible_text_hits": visible_text_hits,
                     "entity_hits": entity_hits,
                     "caption_hits": caption_hits,
-                    "phash_distance": phash_distance,
-                    "asset_exact": asset_exact,
+                    "phash_distance": None,
+                    "panel_key": "whole",
                 },
             }
         )
@@ -221,68 +364,121 @@ def adjudicate_figure_candidates(
     if not scored:
         return {
             "status": "NOT_FOUND",
-            "locator_version": FIGURE_IMAGE_LOCATOR_VERSION,
             "locator_kind": "FIGURE_IMAGE",
             "reason": "no_figure_candidate_satisfies_two_signal_minimum",
         }
-    physical_locations = {
-        (
-            str(item["candidate"]["parse_revision_id"]),
-            str(item["candidate"]["file_id"]),
-            int(item["candidate"]["page"]),
-        )
-        for item in scored
-    }
-    if len(physical_locations) != 1:
+    locations = {_physical_location(item["entity"], item["asset"]) for item in scored}
+    if len(locations) != 1:
         return {
             "status": "MULTIPLE_MATCHES",
-            "locator_version": FIGURE_IMAGE_LOCATOR_VERSION,
             "locator_kind": "FIGURE_IMAGE",
-            "match_count": len(physical_locations),
+            "match_count": len(locations),
             "reason": "figure_match_ambiguous",
         }
-    tier_rank = {
-        TIER_V0_EXACT_ASSET_SHA: 0,
-        TIER_V1_STRONG_PHASH_LABEL: 1,
-        TIER_V2_VISUAL_CONSTRAINTS: 2,
-        TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS: 3,
-    }
-    best = sorted(scored, key=lambda item: (tier_rank[item["tier"]], str(item["candidate"]["anchor_id"])))[0]
-    candidate = best["candidate"]
+    tier_rank = {TIER_V2_VISUAL_CONSTRAINTS: 0, TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS: 1}
+    best = sorted(scored, key=lambda item: (tier_rank[item["tier"]], str(item["entity"]["entity_key"])))[0]
+    return {"status": "VERIFIED", **best}
+
+
+async def _materialize_resolution(db, adjudication: dict[str, Any]) -> dict[str, Any]:
+    """把裁决结果落成 locator_resolution：锚点行提供物理血统（evidence_id 等）。"""
+    entity = adjudication["entity"]
+    asset = adjudication["asset"]
+    anchor = (
+        (
+            (
+                await db.execute(
+                    select(EvidenceAnchorRecord).where(
+                        EvidenceAnchorRecord.parse_revision_id == entity["parse_revision_id"],
+                        EvidenceAnchorRecord.anchor_id == str(asset.get("anchor_id") or ""),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if asset.get("anchor_id")
+        else None
+    )
+    if anchor is None:
+        return {
+            "status": "NOT_FOUND",
+            "locator_version": FIGURE_IMAGE_LOCATOR_VERSION,
+            "locator_kind": "FIGURE_IMAGE",
+            "reason": "figure_asset_anchor_unavailable",
+        }
+    span_evidence_id = entity.get("span_evidence_id")
+    span_id = entity.get("span_id")
+    if not span_evidence_id:
+        span = (
+            (
+                await db.execute(
+                    select(EvidenceSpanRecord).where(
+                        EvidenceSpanRecord.parse_revision_id == entity["parse_revision_id"],
+                        EvidenceSpanRecord.anchor_id == str(anchor.anchor_id),
+                        EvidenceSpanRecord.evidence_type == "caption",
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        span_evidence_id = str(span.evidence_id) if span is not None else None
+        span_id = str(span.span_id) if span is not None else None
+    asset_page = int(anchor.page)
+    caption_page = int(entity.get("caption_page") or asset_page)
+    quote = str(anchor.quote or "")
     return {
         "status": "VERIFIED",
         "locator_version": FIGURE_IMAGE_LOCATOR_VERSION,
         "locator_kind": "FIGURE_IMAGE",
-        "match_tier": best["tier"],
-        "page": int(candidate["page"]),
-        "zone": candidate.get("zone") or "MAIN_TEXT",
-        "anchor_id": candidate["anchor_id"],
-        "span_id": candidate.get("span_id"),
-        "evidence_id": candidate["evidence_id"],
-        "span_evidence_id": candidate.get("span_evidence_id"),
-        "evidence_type": "caption" if candidate.get("span_evidence_id") else "image",
-        "container_label": candidate.get("container_label") or observation.figure_label,
-        "parse_revision_id": candidate["parse_revision_id"],
-        "kb_id": candidate["kb_id"],
-        "file_id": candidate["file_id"],
-        "source_sha256": candidate["source_sha256"],
-        "index_revision_id": candidate["index_revision_id"],
-        "quote_head": re.sub(r"\s+", " ", str(candidate.get("caption") or "").strip())[:80],
-        "quote": str(candidate.get("caption") or "")[:1600],
-        "filename": candidate["filename"],
-        "visual_signals": best["signals"],
+        "match_tier": adjudication["tier"],
+        # 页码语义（v2）：图片问页 → asset 页；题注问页 → caption 页；跨页时
+        # 两个页码都携带，display 由入口意图决定（本入口 display = asset 页）
+        "page": asset_page,
+        "asset_page": asset_page,
+        "caption_page": caption_page,
+        "source_page_index": asset_page - 1,
+        "zone": entity.get("zone") or "MAIN_TEXT",
+        "anchor_id": str(anchor.anchor_id),
+        "span_id": span_id,
+        "evidence_id": derive_evidence_id(
+            source_sha256=str(entity.get("source_sha256") or ""),
+            page_number=asset_page,
+            bbox=anchor.bbox,
+            word_start=int(anchor.word_start or 0),
+            word_end=int(anchor.word_end or anchor.word_start or 0),
+            quote_hash=str(anchor.quote_hash or ""),
+            anchor_id=str(anchor.anchor_id),
+        ),
+        "span_evidence_id": span_evidence_id,
+        "evidence_type": "caption" if span_evidence_id else "image",
+        "container_label": entity.get("container_label"),
+        "parse_revision_id": entity["parse_revision_id"],
+        "kb_id": entity.get("kb_id"),
+        "file_id": entity["file_id"],
+        "source_sha256": entity.get("source_sha256") or None,
+        "index_revision_id": entity.get("index_revision_id"),
+        "quote_head": re.sub(r"\s+", " ", quote.strip())[:80],
+        "quote": quote[:1600],
+        "filename": entity.get("filename"),
+        "visual_signals": adjudication.get("signals") or {},
+        "panel_match": adjudication.get("panel_key") or None,
     }
 
 
 async def resolve_figure_image_locator(
     db,
     *,
-    observation: VisualObservationEnvelope | None,
     kb_ids: list[str],
-    image_asset_digest: str | None = None,
-    image_phash: str | None = None,
+    image_bytes: bytes | None = None,
+    observation: VisualObservationEnvelope | None = None,
 ) -> dict[str, Any]:
-    """图片定位入口：构建 figure index → 确定性裁决（观察缺失即失败关闭）。"""
+    """图片定位入口：确定性指纹（V0/V1）优先，视觉观察（V2/V3）最后。
+
+    确定性层命中即返回（未配置视觉模型也能完成 SHA/pHash 定位）；两层都
+    未决时按观察可用性返回显式失败原因——绝不静默退化为自由回答页码。
+    """
     candidates = await build_figure_index(db, kb_ids=kb_ids)
     if not candidates:
         return {
@@ -291,21 +487,31 @@ async def resolve_figure_image_locator(
             "locator_kind": "FIGURE_IMAGE",
             "reason": "figure_index_empty_in_scope",
         }
-    if observation is None:
-        # 视觉 provider 不可用 / 观察非法：绝不回退到自由回答页码
-        return {
-            "status": "NOT_FOUND",
-            "locator_version": FIGURE_IMAGE_LOCATOR_VERSION,
-            "locator_kind": "FIGURE_IMAGE",
-            "reason": "vision_observation_unavailable",
-        }
     try:
-        return adjudicate_figure_candidates(
-            observation,
-            candidates,
-            image_asset_digest=image_asset_digest,
-            image_phash=image_phash,
-        )
+        if image_bytes:
+            from yuxi.knowledge.vision.phash import compute_asset_digest, compute_phash
+
+            deterministic = adjudicate_deterministic_match(
+                candidates,
+                image_asset_digest=compute_asset_digest(image_bytes),
+                image_phash=compute_phash(image_bytes),
+            )
+            if deterministic.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
+                if deterministic.get("status") == "MULTIPLE_MATCHES":
+                    return {**deterministic, "locator_version": FIGURE_IMAGE_LOCATOR_VERSION}
+                return await _materialize_resolution(db, deterministic)
+        if observation is None:
+            # 显式暴露视觉通道不可用（不静默退化、不冒充定位）
+            return {
+                "status": "NOT_FOUND",
+                "locator_version": FIGURE_IMAGE_LOCATOR_VERSION,
+                "locator_kind": "FIGURE_IMAGE",
+                "reason": "VISION_PROVIDER_UNAVAILABLE",
+            }
+        adjudication = adjudicate_figure_candidates(observation, candidates)
+        if adjudication.get("status") != "VERIFIED":
+            return {**adjudication, "locator_version": FIGURE_IMAGE_LOCATOR_VERSION}
+        return await _materialize_resolution(db, adjudication)
     except Exception as exc:  # noqa: BLE001
         logger.error(f"figure image locator failed (fail-closed): {exc}")
         return {
@@ -323,6 +529,7 @@ __all__ = [
     "TIER_V2_VISUAL_CONSTRAINTS",
     "TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS",
     "TIER_V4_SEMANTIC_ONLY",
+    "adjudicate_deterministic_match",
     "adjudicate_figure_candidates",
     "build_figure_index",
     "resolve_figure_image_locator",

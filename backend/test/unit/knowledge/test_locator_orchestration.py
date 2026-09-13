@@ -332,15 +332,18 @@ async def test_image_attachment_flow_resolves_and_freezes_figure_binding(monkeyp
                 }
             )
 
-    async def fake_image_locator(_db, *, observation, kb_ids, image_asset_digest=None, image_phash=None):
-        assert observation is not None
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
         assert kb_ids == ["kb-a"]
+        assert image_bytes
         return {
             "status": "VERIFIED",
-            "locator_version": "figure_image_locator_v1",
+            "locator_version": "figure_image_locator_v2",
             "locator_kind": "FIGURE_IMAGE",
-            "match_tier": "V2_VISUAL_CONSTRAINTS",
+            "match_tier": "V0_EXACT_ASSET_SHA",
             "page": 4,
+            "asset_page": 4,
+            "caption_page": 4,
+            "source_page_index": 3,
             "zone": "MAIN_TEXT",
             "anchor_id": "ea_fig1",
             "span_id": "es_fig1",
@@ -390,7 +393,9 @@ async def test_image_attachment_flow_resolves_and_freezes_figure_binding(monkeyp
     assert contract["locator_resolution"]["locator_kind"] == "FIGURE_IMAGE"
     assert contract["locator_resolution"]["binding"]["page_number"] == 4
     assert contract["locator_resolution"]["binding"]["locator_kind"] == "FIGURE_IMAGE"
-    assert contract["figure_image_observation"]["figure_label"] == "Figure 1"
+    assert contract["locator_resolution"]["binding"]["asset_pdf_page_number"] == 4
+    # V0 确定性命中：视觉观察未被调用（确定性层先行，VLM 最后）
+    assert "figure_image_observation" not in contract
     # 图片锚点已冻结进证据契约（门禁通过的前提）
     assert any(row.get("evidence_id") == "ev_fig1_page4" for row in contract["evidence"])
 
@@ -403,13 +408,13 @@ async def test_image_flow_fails_closed_when_vision_provider_unavailable(monkeypa
 
     monkeypatch.setattr(provider_module, "get_vision_provider", lambda: provider_module.NullVisionProvider())
 
-    async def fake_image_locator(_db, *, observation, kb_ids, image_asset_digest=None, image_phash=None):
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
         assert observation is None
         return {
             "status": "NOT_FOUND",
-            "locator_version": "figure_image_locator_v1",
+            "locator_version": "figure_image_locator_v2",
             "locator_kind": "FIGURE_IMAGE",
-            "reason": "vision_observation_unavailable",
+            "reason": "VISION_PROVIDER_UNAVAILABLE",
         }
 
     monkeypatch.setattr(figure_module, "resolve_figure_image_locator", fake_image_locator)

@@ -398,29 +398,41 @@ async def prepare_knowledge_context(
     direct_locator: dict[str, Any] | None = None
     locator_evidence: dict[str, Any] | None = None
     if locator_pending and image_bytes:
-        # 图片附件入口（FIGURE_IMAGE）：视觉观察（Observation）→ 确定性裁决。
-        # provider 不可用/观察非法/信号不足 → 失败关闭，绝不自由回答页码。
+        # 图片附件入口（FIGURE_IMAGE）：确定性指纹（V0 SHA / V1 pHash）先行，
+        # 未决且视觉 provider 可用时才调用观察（VLM 最后，永不决定页码）。
         from yuxi.knowledge.vision.figure_image_locator import resolve_figure_image_locator
-        from yuxi.knowledge.vision.phash import compute_asset_digest, compute_phash
-        from yuxi.knowledge.vision.provider import get_vision_provider
 
-        provider = get_vision_provider()
-        observation = await provider.describe(image_bytes) if provider.available else None
-        contract["figure_image_observation"] = (
-            observation.model_dump(mode="json") if observation is not None else {"available": False}
-        )
         image_locator = await resolve_figure_image_locator(
             db,
-            observation=observation,
             kb_ids=[str(member["kb_id"]) for member in raw_members],
-            image_asset_digest=compute_asset_digest(image_bytes),
-            image_phash=compute_phash(image_bytes),
+            image_bytes=image_bytes,
         )
+        if image_locator.get("reason") == "VISION_PROVIDER_UNAVAILABLE":
+            from yuxi.knowledge.vision.provider import get_vision_provider
+
+            provider = get_vision_provider()
+            observation = await provider.describe(image_bytes) if provider.available else None
+            contract["figure_image_observation"] = (
+                observation.model_dump(mode="json") if observation is not None else {"available": False}
+            )
+            if observation is not None:
+                retried = await resolve_figure_image_locator(
+                    db,
+                    kb_ids=[str(member["kb_id"]) for member in raw_members],
+                    image_bytes=image_bytes,
+                    observation=observation,
+                )
+                if retried.get("reason") != "VISION_PROVIDER_UNAVAILABLE":
+                    image_locator = retried
         if image_locator.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
             # 图片裁决优先且终局：MULTIPLE_MATCHES 不允许文本路径收缩成唯一页码；
             # 观察不可用等失败关闭结论同样终局。
             direct_locator = image_locator
-        elif image_locator.get("reason") in {"vision_observation_unavailable", "figure_adjudication_error"}:
+        elif image_locator.get("reason") in {
+            "VISION_PROVIDER_UNAVAILABLE",
+            "figure_adjudication_error",
+            "figure_index_empty_in_scope",
+        }:
             direct_locator = image_locator
         if direct_locator and direct_locator.get("status") == "VERIFIED":
             # P4 解释绑定：Figure → Caption → mentioned_by（正文反链），

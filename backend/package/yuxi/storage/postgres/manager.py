@@ -1049,6 +1049,7 @@ class PostgresManager(metaclass=SingletonMeta):
             "_migration_0033_scientific_document_partition_backfill_repair",
         ),
         ("0034_retrieval_locator_audit", "_migration_0034_retrieval_locator_audit"),
+        ("0035_figure_asset_index", "_migration_0035_figure_asset_index"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2378,6 +2379,83 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(
             text("ALTER TABLE IF EXISTS knowledge_retrieval_runs ADD COLUMN IF NOT EXISTS locator_resolution_json JSON")
         )
+
+    async def _migration_0035_figure_asset_index(self, conn) -> None:
+        """Versioned figure evidence model (R-P2 图表资产索引).
+
+        ``figure_entities`` 聚合一个解析版本内的图表实体（caption 血统），
+        ``figure_assets`` 持久化图片资产指纹（sha256/pHash/尺寸/panel 变体），
+        使上传图片可通过 V0（字节一致）/V1（感知哈希）确定性定位——不依赖
+        视觉模型，且重解析自然重建（随 parse_revision 级联删除）。
+        """
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS figure_entities (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                    parse_revision_id VARCHAR(64) NOT NULL
+                        REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE,
+                    kb_id VARCHAR(80) NOT NULL,
+                    file_id VARCHAR(64) NOT NULL,
+                    source_sha256 VARCHAR(64) NOT NULL,
+                    index_revision_id VARCHAR(64) NOT NULL DEFAULT '',
+                    pipeline_version VARCHAR(64) NOT NULL DEFAULT '',
+                    entity_key VARCHAR(160) NOT NULL,
+                    container_label VARCHAR(128),
+                    caption TEXT,
+                    caption_page INTEGER,
+                    caption_anchor_id VARCHAR(64),
+                    caption_span_id VARCHAR(64),
+                    caption_span_evidence_id VARCHAR(64),
+                    document_partition VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN',
+                    association_method VARCHAR(32) NOT NULL DEFAULT 'block_pairing',
+                    asset_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT uq_figure_entity_revision_key UNIQUE (parse_revision_id, entity_key)
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_figure_entities_kb ON figure_entities (kb_id, parse_revision_id)")
+        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_figure_entities_file ON figure_entities (file_id)"))
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS figure_assets (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                    entity_id BIGINT NOT NULL REFERENCES figure_entities(id) ON DELETE CASCADE,
+                    parse_revision_id VARCHAR(64) NOT NULL
+                        REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE,
+                    kb_id VARCHAR(80) NOT NULL,
+                    asset_key VARCHAR(256) NOT NULL,
+                    img_path VARCHAR(256) NOT NULL DEFAULT '',
+                    anchor_id VARCHAR(64) NOT NULL DEFAULT '',
+                    object_bucket VARCHAR(128) NOT NULL DEFAULT '',
+                    object_name VARCHAR(512) NOT NULL DEFAULT '',
+                    asset_sha256 VARCHAR(64) NOT NULL DEFAULT '',
+                    asset_phash VARCHAR(16) NOT NULL DEFAULT '',
+                    panel_phashes JSON NOT NULL DEFAULT '{}'::json,
+                    mime VARCHAR(64) NOT NULL DEFAULT '',
+                    width INTEGER NOT NULL DEFAULT 0,
+                    height INTEGER NOT NULL DEFAULT 0,
+                    bbox JSON,
+                    page INTEGER NOT NULL,
+                    ocr_text TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT uq_figure_asset_revision_key UNIQUE (parse_revision_id, asset_key)
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_figure_assets_kb ON figure_assets (kb_id, parse_revision_id)")
+        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_figure_assets_entity ON figure_assets (entity_id)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_figure_assets_sha ON figure_assets (asset_sha256)"))
 
     async def _apply_versioned_migrations(self):
         self._check_initialized()
