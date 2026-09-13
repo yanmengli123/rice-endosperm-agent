@@ -13,6 +13,7 @@ share the same runtime behavior once they reach the worker.
 """
 
 import asyncio
+import base64
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -365,6 +366,16 @@ def _knowledge_contract_messages(
         additional_kwargs={"knowledge_first": True},
     )
     return assistant_message, tool_message
+
+
+def _decode_image_bytes(image_content: str | None) -> bytes | None:
+    """解码图片附件（裸 base64）供视觉观察通道使用；非法编码返回 None。"""
+    if not image_content:
+        return None
+    try:
+        return base64.b64decode(image_content, validate=False)
+    except (ValueError, TypeError):
+        return None
 
 
 def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
@@ -1292,6 +1303,7 @@ async def stream_agent_chat(
         has_knowledge_scope=bool(knowledge_scope_snapshot.get("effective_kb_ids") or []),
         configured_mcps=list(input_context.get("mcps") or []),
         knowledge_strategy=str(knowledge_scope_snapshot.get("knowledge_strategy") or "MODEL_DECIDES"),
+        has_image=bool(image_content),
     )
     source_manifest = _initial_source_manifest(turn_plan)
     input_context["_turn_execution_plan"] = turn_plan.public_dict()
@@ -1432,6 +1444,7 @@ async def stream_agent_chat(
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
                 retrieval_id=retrieval_id,
+                image_bytes=_decode_image_bytes(image_content),
             )
             input_context["_knowledge_contract"] = knowledge_contract
             setattr(context, "_knowledge_contract", knowledge_contract)

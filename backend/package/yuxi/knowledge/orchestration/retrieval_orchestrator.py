@@ -340,6 +340,7 @@ async def prepare_knowledge_context(
     run_id: str | None,
     request_id: str | None,
     retrieval_id: str | None = None,
+    image_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     retrieval_id = retrieval_id or f"kr_{uuid.uuid4().hex}"
     started_at = utc_now_naive()
@@ -385,14 +386,47 @@ async def prepare_knowledge_context(
     locator_intent = detect_locator_intent(question)
     contract["locator_intent"] = locator_intent
     # FIGURE_LOCATOR（图表编号问题）与 QUOTE_LOCATOR 同为精确定位意图：
-    # 编号走 caption 通道 + label 硬约束（caption_locator v3）
-    locator_pending = locator_intent.get("kind") in {LOCATOR_KIND_QUOTE, LOCATOR_KIND_FIGURE} and bool(raw_members)
-    direct_locator: dict[str, Any] | None = None
-    locator_evidence: dict[str, Any] | None = None
+    # 编号走 caption 通道 + label 硬约束（caption_locator v3）。图片附件在场时
+    # 任何定位意图（含 PAGE_LOCATOR——「这个图在哪一页」无引文无编号）都
+    # 先走 FIGURE_IMAGE 通道。
+    locator_pending = (
+        locator_intent.get("kind") in {LOCATOR_KIND_QUOTE, LOCATOR_KIND_FIGURE}
+        or (image_bytes and locator_intent.get("kind"))
+    ) and bool(raw_members)
     if locator_pending:
         # 定位/复合解释都需要检索证据集：无论知识策略如何都必须执行检索
         # （MODEL_DECIDES 下本可不检索，定位问题不能跟着 SKIPPED）。
         plan = {**plan, "retrieval_required": True}
+    direct_locator: dict[str, Any] | None = None
+    locator_evidence: dict[str, Any] | None = None
+    if locator_pending and image_bytes:
+        # 图片附件入口（FIGURE_IMAGE）：视觉观察（Observation）→ 确定性裁决。
+        # provider 不可用/观察非法/信号不足 → 失败关闭，绝不自由回答页码。
+        from yuxi.knowledge.vision.phash import compute_asset_digest, compute_phash
+        from yuxi.knowledge.vision.provider import get_vision_provider
+        from yuxi.knowledge.vision.figure_image_locator import resolve_figure_image_locator
+
+        provider = get_vision_provider()
+        observation = await provider.describe(image_bytes) if provider.available else None
+        contract["figure_image_observation"] = (
+            observation.model_dump(mode="json") if observation is not None else {"available": False}
+        )
+        image_locator = await resolve_figure_image_locator(
+            db,
+            observation=observation,
+            kb_ids=[str(member["kb_id"]) for member in raw_members],
+            image_asset_digest=compute_asset_digest(image_bytes),
+            image_phash=compute_phash(image_bytes),
+        )
+        if image_locator.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
+            # 图片裁决优先且终局：MULTIPLE_MATCHES 不允许文本路径收缩成唯一页码；
+            # 观察不可用等失败关闭结论同样终局。
+            direct_locator = image_locator
+        elif image_locator.get("reason") in {"vision_observation_unavailable", "figure_adjudication_error"}:
+            direct_locator = image_locator
+    if locator_pending and (direct_locator is None or direct_locator.get("status") == "NOT_FOUND"):
+        # 文本入口（QUOTE/FIGURE 编号）：caption/引文通道；图片 NOT_FOUND 时
+        # 问题文本本身可能携带题注片段（quote 兜底）。
         from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator
 
         direct_locator = await resolve_quote_locator(
@@ -400,27 +434,27 @@ async def prepare_knowledge_context(
             question=question,
             kb_ids=[str(member["kb_id"]) for member in raw_members],
         )
-        if direct_locator.get("status") == "VERIFIED":
-            locator_evidence = {
-                "evidence_id": direct_locator.get("evidence_id"),
-                "span_evidence_id": direct_locator.get("span_evidence_id"),
-                "source_type": "DOCUMENT",
-                "evidence_status": "SUPPORTING",
-                "retrieval_channel": "QUOTE_LOCATOR",
-                "kb_id": direct_locator.get("kb_id"),
-                "file_id": direct_locator.get("file_id"),
-                "parse_revision_id": direct_locator.get("parse_revision_id"),
-                "index_revision_id": direct_locator.get("index_revision_id"),
-                "source_sha256": direct_locator.get("source_sha256"),
-                "span_id": direct_locator.get("span_id"),
-                "evidence_type": direct_locator.get("evidence_type"),
-                "anchor_id": direct_locator.get("anchor_id"),
-                "page_number": direct_locator.get("page"),
-                "document_partition": direct_locator.get("zone"),
-                "evidence_quote": direct_locator.get("quote") or direct_locator.get("quote_head"),
-                "claim_eligible": False,
-                "match_tier": direct_locator.get("match_tier") or "DETERMINISTIC_QUOTE_LOCATOR",
-            }
+    if direct_locator and direct_locator.get("status") == "VERIFIED":
+        locator_evidence = {
+            "evidence_id": direct_locator.get("evidence_id"),
+            "span_evidence_id": direct_locator.get("span_evidence_id"),
+            "source_type": "DOCUMENT",
+            "evidence_status": "SUPPORTING",
+            "retrieval_channel": "QUOTE_LOCATOR",
+            "kb_id": direct_locator.get("kb_id"),
+            "file_id": direct_locator.get("file_id"),
+            "parse_revision_id": direct_locator.get("parse_revision_id"),
+            "index_revision_id": direct_locator.get("index_revision_id"),
+            "source_sha256": direct_locator.get("source_sha256"),
+            "span_id": direct_locator.get("span_id"),
+            "evidence_type": direct_locator.get("evidence_type"),
+            "anchor_id": direct_locator.get("anchor_id"),
+            "page_number": direct_locator.get("page"),
+            "document_partition": direct_locator.get("zone"),
+            "evidence_quote": direct_locator.get("quote") or direct_locator.get("quote_head"),
+            "claim_eligible": False,
+            "match_tier": direct_locator.get("match_tier") or "DETERMINISTIC_QUOTE_LOCATOR",
+        }
 
     if not plan.get("retrieval_required"):
         contract["contract_hash"] = _hash_contract(contract)
@@ -736,8 +770,13 @@ async def prepare_knowledge_context(
 
     # 单一证据集定位：在与状态模块同一行的引用池上解析（含图注反链由
     # 命中锚点是否 caption 触发的审计兜底跳过——引用池定位不反查正文，
-    # 反链解释依据仍来自检索证据本身）。
-    if locator_pending and (locator_intent.get("quote_text") or not locator_intent.get("compound")):
+    # 反链解释依据仍来自检索证据本身）。图片附件流的裁决已在 FIGURE_IMAGE
+    # 通道完成且终局，同样经此写回 locator_resolution 供门禁与渲染消费。
+    if locator_pending and (
+        locator_intent.get("quote_text")
+        or not locator_intent.get("compound")
+        or (image_bytes and direct_locator)
+    ):
         from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator_from_citations
 
         if direct_locator and direct_locator.get("status") == "MULTIPLE_MATCHES":

@@ -196,11 +196,14 @@ def plan_turn(
     has_knowledge_scope: bool,
     configured_mcps: list[str] | None = None,
     knowledge_strategy: str = "MODEL_DECIDES",
+    has_image: bool = False,
 ) -> TurnExecutionPlan:
     """Build and validate a deterministic turn plan.
 
     Semantic classification is deliberately last.  Rules that encode explicit
     source constraints and high-determinism locator intent always win.
+    ``has_image``（本轮携带图片附件）启用 FIGURE_IMAGE 路由：图片是定位入口
+    （LOCATE_AND_EXPLAIN），不进普通 Top-K 自由问答。
     """
     text = re.sub(r"\s+", " ", str(question or "")).strip()
     knowledge_enabled = str(knowledge_strategy or "MODEL_DECIDES").upper() != "DISABLED"
@@ -281,7 +284,19 @@ def plan_turn(
         else "UNKNOWN"
     )
 
-    if locator.get("kind"):
+    if has_image and (locator.get("kind") or "FIGURE" in question_types):
+        # 图片附件 + 定位/图表意图 → FIGURE_IMAGE 入口：先确定性定位，再解释。
+        # 不走普通 Top-K 自由回答（2026-09 设计基线：Stage A 定位不得被 Stage B 改写）。
+        exact_locator = True
+        evidence_required = True
+        capabilities = [Capability.VERBATIM_SEARCH, Capability.PDF_LOCATOR, Capability.DOCUMENT_QA]
+        intent = TaskIntent.FIGURE_LOCATOR
+        target_type = "FIGURE_IMAGE"
+        reason_codes.append("ATTACHMENT_FIGURE_IMAGE_ROUTING")
+        if source_policy == SourcePolicy.AUTO:
+            source_policy = SourcePolicy.LOCAL_DOCUMENT_ONLY
+            allowed = [SourceClass.LOCAL_DOCUMENT]
+    elif locator.get("kind"):
         exact_locator = True
         evidence_required = True
         capabilities = [Capability.VERBATIM_SEARCH, Capability.PDF_LOCATOR]

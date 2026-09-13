@@ -59,6 +59,10 @@ class Config(BaseModel):
         default="siliconflow-cn:Pro/MiniMaxAI/MiniMax-M2.5",
         description="内容审查LLM模型",
     )
+    vision_model_spec: str = Field(
+        default="",
+        description="科研图像观察视觉模型（多模态 chat spec；留空=视觉通道失败关闭，不做图片定位）",
+    )
     default_ocr_engine: str = Field(default=DEFAULT_OCR_ENGINE, description="默认 OCR 解析引擎")
 
     _config_file: Path | None = PrivateAttr(default=None)

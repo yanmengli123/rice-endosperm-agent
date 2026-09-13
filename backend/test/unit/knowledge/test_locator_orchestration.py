@@ -309,6 +309,132 @@ async def test_verified_binding_is_persisted_with_locator_resolution(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_image_attachment_flow_resolves_and_freezes_figure_binding(monkeypatch: pytest.MonkeyPatch):
+    """图片附件入口端到端：观察 → 确定性裁决 → 冻结 + 门禁 + binding（第 4 页）。"""
+    from yuxi.knowledge.vision import figure_image_locator as figure_module
+    from yuxi.knowledge.vision import provider as provider_module
+    from yuxi.knowledge.vision.visual_observation import VisualObservationEnvelope
+
+    class _StubProvider:
+        available = True
+
+        async def describe(self, _image_bytes):
+            return VisualObservationEnvelope.model_validate(
+                {
+                    "schema_version": "visual-observation.v1",
+                    "figure_label": "Figure 1",
+                    "panel_labels": ["a", "b", "c"],
+                    "visible_entities": ["OsMYB73-GFP"],
+                    "visible_text": ["Relative expression levels"],
+                    "caption_fragments": ["Rice OsMYB73 gene expression"],
+                    "visual_structure": {"bar_chart": True},
+                    "confidence": 0.9,
+                }
+            )
+
+    async def fake_image_locator(_db, *, observation, kb_ids, image_asset_digest=None, image_phash=None):
+        assert observation is not None
+        assert kb_ids == ["kb-a"]
+        return {
+            "status": "VERIFIED",
+            "locator_version": "figure_image_locator_v1",
+            "locator_kind": "FIGURE_IMAGE",
+            "match_tier": "V2_VISUAL_CONSTRAINTS",
+            "page": 4,
+            "zone": "MAIN_TEXT",
+            "anchor_id": "ea_fig1",
+            "span_id": "es_fig1",
+            "evidence_id": "ev_fig1_page4",
+            "span_evidence_id": "evs_fig1",
+            "evidence_type": "caption",
+            "parse_revision_id": "pr-active",
+            "kb_id": "kb-a",
+            "file_id": "file-a",
+            "source_sha256": "a" * 64,
+            "index_revision_id": "ir-active",
+            "quote": "Figure 1. Expression patterns of OsMYB73 in rice seeds.",
+            "quote_head": "Figure 1. Expression patterns of OsMYB73 in rice seeds.",
+            "filename": "paper.pdf",
+        }
+
+    monkeypatch.setattr(provider_module, "get_vision_provider", lambda: _StubProvider())
+    monkeypatch.setattr(figure_module, "resolve_figure_image_locator", fake_image_locator)
+
+    figure_citation = _citation(
+        "E1", 4, "Figure 1. Expression patterns of OsMYB73 in rice seeds measured by qRT-PCR."
+    )
+    figure_citation.update(
+        {
+            "evidence_id": "ev_fig1_page4",
+            "_physical_evidence_id": "ev_fig1_page4",
+            "_anchor_id": "ea_fig1",
+        }
+    )
+    _patch_pipeline(monkeypatch, citations=[figure_citation])
+
+    async def fake_quote_locator(_db, *, question, kb_ids):  # 图片裁决已终局，不应回退文本通道
+        raise AssertionError("image flow must not fall back to quote locator")
+
+    monkeypatch.setattr(quote_locator, "resolve_quote_locator", fake_quote_locator)
+
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question="这个图片在哪篇论文哪一页，是什么意思？",
+        scope_snapshot=_SCOPE,
+        run_id="run-image",
+        request_id="req-image",
+        image_bytes=b"fake-image-bytes",
+    )
+    assert contract["locator_resolution"]["status"] == "VERIFIED"
+    assert contract["locator_resolution"]["page"] == 4
+    assert contract["locator_resolution"]["locator_kind"] == "FIGURE_IMAGE"
+    assert contract["locator_resolution"]["binding"]["page_number"] == 4
+    assert contract["locator_resolution"]["binding"]["locator_kind"] == "FIGURE_IMAGE"
+    assert contract["figure_image_observation"]["figure_label"] == "Figure 1"
+    # 图片锚点已冻结进证据契约（门禁通过的前提）
+    assert any(row.get("evidence_id") == "ev_fig1_page4" for row in contract["evidence"])
+
+
+@pytest.mark.asyncio
+async def test_image_flow_fails_closed_when_vision_provider_unavailable(monkeypatch: pytest.MonkeyPatch):
+    """视觉 provider 不可用 → 失败关闭；绝不回退到自由回答页码。"""
+    from yuxi.knowledge.vision import figure_image_locator as figure_module
+    from yuxi.knowledge.vision import provider as provider_module
+
+    monkeypatch.setattr(provider_module, "get_vision_provider", lambda: provider_module.NullVisionProvider())
+
+    async def fake_image_locator(_db, *, observation, kb_ids, image_asset_digest=None, image_phash=None):
+        assert observation is None
+        return {
+            "status": "NOT_FOUND",
+            "locator_version": "figure_image_locator_v1",
+            "locator_kind": "FIGURE_IMAGE",
+            "reason": "vision_observation_unavailable",
+        }
+
+    monkeypatch.setattr(figure_module, "resolve_figure_image_locator", fake_image_locator)
+
+    async def fake_quote_locator(_db, *, question, kb_ids):
+        return {"status": "NOT_FOUND", "locator_version": "test", "reason": "no_text_quote"}
+
+    _patch_pipeline(monkeypatch, citations=[])
+    monkeypatch.setattr(quote_locator, "resolve_quote_locator", fake_quote_locator)
+
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question="这个图片在哪篇论文哪一页？",
+        scope_snapshot=_SCOPE,
+        run_id="run-novision",
+        request_id="req-novision",
+        image_bytes=b"fake-image-bytes",
+    )
+    assert contract["locator_resolution"]["status"] == "NOT_FOUND"
+    assert "page" not in contract["locator_resolution"]
+    assert contract["status"] == "DEGRADED"
+    assert contract["figure_image_observation"] == {"available": False}
+
+
+@pytest.mark.asyncio
 async def test_bifc_exact_anchor_is_frozen_into_answer_evidence(monkeypatch: pytest.MonkeyPatch):
     """第 15 页状态证据必须进入同一 Contract，供模型解释与状态投影共同消费。"""
     quote = (
