@@ -62,19 +62,13 @@ def resolve_contract(contract_key: str | None, contract_version: str | None = No
     spec = _REGISTRY.get((key, version))
     if spec is None:
         known = sorted({f"{k}@{v}" for (k, v) in _REGISTRY})
-        raise UnknownSourceContractError(
-            f"unknown source contract: {key}@{version} (known: {', '.join(known)})"
-        )
+        raise UnknownSourceContractError(f"unknown source contract: {key}@{version} (known: {', '.join(known)})")
     return spec
 
 
 def contract_registry_snapshot(include_hidden: bool = False) -> list[dict]:
     """给前端/路由使用的注册中心只读快照。"""
-    return [
-        spec_to_api_dict(spec)
-        for spec in _REGISTRY.values()
-        if include_hidden or not spec.hidden
-    ]
+    return [spec_to_api_dict(spec) for spec in _REGISTRY.values() if include_hidden or not spec.hidden]
 
 
 def registered_contracts() -> tuple[SourceContractSpec, ...]:

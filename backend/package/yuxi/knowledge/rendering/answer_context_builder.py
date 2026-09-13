@@ -200,8 +200,8 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "正文分区（MAIN_TEXT）的讨论段，并引用其 [E#]；backlinks 为空时明示‘原文未在正文展开讨论该图’，"
         "只解释图注字面内容，不得编造实验结论。"
         "输出协议：只输出 <YUXI_ANSWER_DRAFT> 与 </YUXI_ANSWER_DRAFT> 包裹的严格 JSON。"
-        "JSON 形状为 {\"schema_version\":\"answer-draft.v1\",\"blocks\":[{\"type\":"
-        "\"heading|paragraph|bullet\",\"text\":\"自然语言\",\"evidence_refs\":[\"E1\"]}]}。"
+        'JSON 形状为 {"schema_version":"answer-draft.v1","blocks":[{"type":'
+        '"heading|paragraph|bullet","text":"自然语言","evidence_refs":["E1"]}]}。'
         "不要自建‘参考文献/证据引用/资料来源’章节；后端会根据 evidence_refs 完成验证、渲染 Markdown 和"
         "【证据引用】区块。不要在 text 中复制 [E#]、[citation omitted] 或任何〔…〕引用标记。"
     )

@@ -15,17 +15,17 @@ stage 枚举刻意保持最小集：install/capabilities 等阶段等对应能�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from typing import Any
 
 # =============================================================================
 # === Stage & Code 常量 ===
 # =============================================================================
 
-STAGE_CONFIG = "config"          # 数据库里找不到 / 已禁用 / 配置非法
-STAGE_RUNTIME = "runtime"        # runtime provider 不可用（uvx/npx 不在镜像内、command 缺失）
-STAGE_TRANSPORT = "transport"    # 连接建立失败（进程 spawn 失败 / DNS / TCP / TLS）
-STAGE_DISCOVERY = "discovery"    # 协议协商成功但 tools/list 阶段失败
+STAGE_CONFIG = "config"  # 数据库里找不到 / 已禁用 / 配置非法
+STAGE_RUNTIME = "runtime"  # runtime provider 不可用（uvx/npx 不在镜像内、command 缺失）
+STAGE_TRANSPORT = "transport"  # 连接建立失败（进程 spawn 失败 / DNS / TCP / TLS）
+STAGE_DISCOVERY = "discovery"  # 协议协商成功但 tools/list 阶段失败
 
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
@@ -67,14 +67,14 @@ _RETRYABLE_DEFAULT = frozenset(
 class McpHealthResult:
     """一次探测的结构化结果。"""
 
-    status: str                                  # ok | error
-    stage: str                                   # config | runtime | transport | discovery
+    status: str  # ok | error
+    stage: str  # config | runtime | transport | discovery
     message: str = ""
-    code: str | None = None                      # 见上方 CODE_* 常量
+    code: str | None = None  # 见上方 CODE_* 常量
     retryable: bool = True
     duration_ms: int | None = None
     tool_count: int | None = None
-    protocol_note: str | None = None             # 协商出的协议栈说明（legacy-client 等）
+    protocol_note: str | None = None  # 协商出的协议栈说明（legacy-client 等）
     extra: dict[str, Any] = field(default_factory=dict)
     checked_at: str = field(default_factory=lambda: _utc_now_iso())
 
@@ -137,9 +137,7 @@ def failure_from_exception(exc: BaseException, *, fallback_stage: str) -> McpHea
         stage = STAGE_RUNTIME
     elif stage_hint == STAGE_TRANSPORT:
         stage = (
-            STAGE_TRANSPORT
-            if fallback_stage in (STAGE_RUNTIME, STAGE_TRANSPORT, STAGE_DISCOVERY)
-            else fallback_stage
+            STAGE_TRANSPORT if fallback_stage in (STAGE_RUNTIME, STAGE_TRANSPORT, STAGE_DISCOVERY) else fallback_stage
         )
     return error_result(stage, code, f"{type(exc).__name__}: {exc}")
 

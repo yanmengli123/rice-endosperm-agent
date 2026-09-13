@@ -59,29 +59,26 @@ async def build_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]:
     持久化指纹后自动参与 V0/V1 层（当前为 None → 阶梯从 V2 起步）。
     """
     rows = (
-        (
-            await db.execute(
-                select(EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
-                .join(
-                    KnowledgeParseRevision,
-                    KnowledgeParseRevision.revision_id == EvidenceAnchorRecord.parse_revision_id,
-                )
-                .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
-                .where(
-                    KnowledgeParseRevision.kb_id.in_(list(kb_ids)[:20]),
-                    KnowledgeFile.active_parse_revision_id == EvidenceAnchorRecord.parse_revision_id,
-                    EvidenceAnchorRecord.anchor_type.in_(_IMAGE_ANCHOR_TYPES),
-                    EvidenceAnchorRecord.page >= 1,
-                )
-                .order_by(
-                    EvidenceAnchorRecord.parse_revision_id,
-                    EvidenceAnchorRecord.page,
-                )
-                .limit(500)
+        await db.execute(
+            select(EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
+            .join(
+                KnowledgeParseRevision,
+                KnowledgeParseRevision.revision_id == EvidenceAnchorRecord.parse_revision_id,
             )
+            .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
+            .where(
+                KnowledgeParseRevision.kb_id.in_(list(kb_ids)[:20]),
+                KnowledgeFile.active_parse_revision_id == EvidenceAnchorRecord.parse_revision_id,
+                EvidenceAnchorRecord.anchor_type.in_(_IMAGE_ANCHOR_TYPES),
+                EvidenceAnchorRecord.page >= 1,
+            )
+            .order_by(
+                EvidenceAnchorRecord.parse_revision_id,
+                EvidenceAnchorRecord.page,
+            )
+            .limit(500)
         )
-        .all()
-    )
+    ).all()
     anchor_keys = [(str(anchor.parse_revision_id), str(anchor.anchor_id)) for anchor, _, _ in rows]
     spans = (
         (

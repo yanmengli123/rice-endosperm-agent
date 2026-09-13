@@ -239,43 +239,40 @@ async def resolve_figure_caption_locator(
     if not label_key:
         return None
     rows = (
-        (
-            await db.execute(
-                select(EvidenceSpanRecord, EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
-                .join(
-                    EvidenceAnchorRecord,
-                    and_(
-                        EvidenceAnchorRecord.parse_revision_id == EvidenceSpanRecord.parse_revision_id,
-                        EvidenceAnchorRecord.anchor_id == EvidenceSpanRecord.anchor_id,
-                    ),
-                )
-                .join(KnowledgeFile, KnowledgeFile.file_id == EvidenceSpanRecord.file_id)
-                .join(
-                    KnowledgeParseRevision,
-                    KnowledgeParseRevision.revision_id == EvidenceSpanRecord.parse_revision_id,
-                )
-                .where(
-                    EvidenceSpanRecord.kb_id.in_(list(kb_ids)[:20]),
-                    EvidenceSpanRecord.evidence_type == "caption",
-                    EvidenceSpanRecord.container_label.isnot(None),
-                    KnowledgeFile.active_parse_revision_id == EvidenceSpanRecord.parse_revision_id,
-                    KnowledgeParseRevision.file_id == EvidenceSpanRecord.file_id,
-                    KnowledgeParseRevision.kb_id == EvidenceSpanRecord.kb_id,
-                    or_(
-                        EvidenceSpanRecord.container_label.ilike(f"%{escape_like(figure_label)}%", escape="/"),
-                        EvidenceSpanRecord.quote.ilike(f"%{escape_like(figure_label)}%", escape="/"),
-                    ),
-                )
-                .order_by(
-                    EvidenceSpanRecord.file_id,
-                    EvidenceSpanRecord.page_number,
-                    EvidenceSpanRecord.sentence_index,
-                )
-                .limit(200)
+        await db.execute(
+            select(EvidenceSpanRecord, EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
+            .join(
+                EvidenceAnchorRecord,
+                and_(
+                    EvidenceAnchorRecord.parse_revision_id == EvidenceSpanRecord.parse_revision_id,
+                    EvidenceAnchorRecord.anchor_id == EvidenceSpanRecord.anchor_id,
+                ),
             )
+            .join(KnowledgeFile, KnowledgeFile.file_id == EvidenceSpanRecord.file_id)
+            .join(
+                KnowledgeParseRevision,
+                KnowledgeParseRevision.revision_id == EvidenceSpanRecord.parse_revision_id,
+            )
+            .where(
+                EvidenceSpanRecord.kb_id.in_(list(kb_ids)[:20]),
+                EvidenceSpanRecord.evidence_type == "caption",
+                EvidenceSpanRecord.container_label.isnot(None),
+                KnowledgeFile.active_parse_revision_id == EvidenceSpanRecord.parse_revision_id,
+                KnowledgeParseRevision.file_id == EvidenceSpanRecord.file_id,
+                KnowledgeParseRevision.kb_id == EvidenceSpanRecord.kb_id,
+                or_(
+                    EvidenceSpanRecord.container_label.ilike(f"%{escape_like(figure_label)}%", escape="/"),
+                    EvidenceSpanRecord.quote.ilike(f"%{escape_like(figure_label)}%", escape="/"),
+                ),
+            )
+            .order_by(
+                EvidenceSpanRecord.file_id,
+                EvidenceSpanRecord.page_number,
+                EvidenceSpanRecord.sentence_index,
+            )
+            .limit(200)
         )
-        .all()
-    )
+    ).all()
 
     candidates: list[dict[str, Any]] = []
     seen_anchors: set[tuple[str, str]] = set()

@@ -237,8 +237,7 @@ CSV_RECORD = SourceContractSpec(
         "chunking": "行级记录投影 · 由规范记录确定性生成",
         "ingest": "上传 → Schema/列映射预检 → Canonical Commit → 建索引",
         "identity": (
-            "业务主键跨版本稳定；未提供主键时按 dataset_revision_id + row_number 生成"
-            "（UI 须明示不可跨版本稳定识别）"
+            "业务主键跨版本稳定；未提供主键时按 dataset_revision_id + row_number 生成（UI 须明示不可跨版本稳定识别）"
         ),
     },
 )

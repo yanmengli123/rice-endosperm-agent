@@ -30,14 +30,7 @@ def allow_insecure_remote_http() -> bool:
 
 def _assert_public_address(address: str) -> None:
     ip = ipaddress.ip_address(address)
-    if (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    ):
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
         raise McpSecurityError(f"MCP endpoint resolves to a non-public address: {ip}")
 
 

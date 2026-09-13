@@ -1169,14 +1169,9 @@ class MilvusKB(KnowledgeBase):
                     if inspect.isawaitable(query_embedding):
                         query_embedding = await query_embedding
                 except Exception as exc:  # noqa: BLE001 - lexical retrieval remains authoritative and available
-                    logger.warning(
-                        f"Milvus hybrid embedding unavailable for {kb_id}; "
-                        f"falling back to BM25: {exc}"
-                    )
+                    logger.warning(f"Milvus hybrid embedding unavailable for {kb_id}; falling back to BM25: {exc}")
                     retrieved_chunks = await search_bm25()
-                    logger.debug(
-                        f"Milvus hybrid BM25 fallback response: {len(retrieved_chunks)} chunks found"
-                    )
+                    logger.debug(f"Milvus hybrid BM25 fallback response: {len(retrieved_chunks)} chunks found")
                     query_embedding = None
                 bm25_top_k = int(merged_kwargs.get("bm25_top_k", recall_top_k))
                 bm25_top_k = max(bm25_top_k, 1)

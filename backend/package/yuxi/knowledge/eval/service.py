@@ -526,9 +526,7 @@ class EvaluationService:
         updated = await self.eval_repo.update_dataset(dataset_id, data)
         return self._dataset_to_dict(updated)
 
-    async def add_dataset_item(
-        self, dataset_id: str, payload: dict[str, Any], *, operator: str
-    ) -> dict[str, Any]:
+    async def add_dataset_item(self, dataset_id: str, payload: dict[str, Any], *, operator: str) -> dict[str, Any]:
         row = await self._get_dataset_or_raise(dataset_id)
         self._require_draft(row)
         item, field_errors = parse_item_payload(payload)
@@ -1639,8 +1637,6 @@ class EvaluationService:
         }
         from yuxi.knowledge.eval.result_export import build_run_results_workbook
 
-        package = build_run_results_workbook(
-            run=run_dict, items=[self._run_item_to_dict(item) for item in items]
-        )
+        package = build_run_results_workbook(run=run_dict, items=[self._run_item_to_dict(item) for item in items])
         logger.info(f"评估结果导出完成 run={run_id} items={len(items)}")
         return package

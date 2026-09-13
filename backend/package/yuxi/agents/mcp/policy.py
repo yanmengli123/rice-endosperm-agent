@@ -41,11 +41,7 @@ class PolicyError(ValueError):
 def get_stdio_allowlist() -> tuple[str, ...]:
     """读取 stdio 白名单前缀；环境变量未设置时用默认值。"""
     raw = os.environ.get(ENV_STDIO_ALLOWLIST, "")
-    entries = tuple(
-        item.strip()
-        for item in raw.split(",")
-        if item.strip()
-    )
+    entries = tuple(item.strip() for item in raw.split(",") if item.strip())
     return entries or DEFAULT_STDIO_ALLOWLIST
 
 
@@ -89,9 +85,7 @@ def assert_transport_allowed(
         return
 
     if transport != TRANSPORT_STDIO and not is_builtin_source and transport not in USER_CONFIGURABLE_TRANSPORTS:
-        raise PolicyError(
-            f"用户创建的 MCP 仅支持 {', '.join(USER_CONFIGURABLE_TRANSPORTS)} 或已过白名单的 stdio"
-        )
+        raise PolicyError(f"用户创建的 MCP 仅支持 {', '.join(USER_CONFIGURABLE_TRANSPORTS)} 或已过白名单的 stdio")
 
 
 def expand_env_refs(mapping: dict[str, Any] | None) -> tuple[dict[str, str], list[str]]:

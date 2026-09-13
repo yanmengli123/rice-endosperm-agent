@@ -117,9 +117,7 @@ class HttpOciRuntimeProvider(McpRuntimeProvider):
 
     async def stop(self, runtime_ref: str) -> None:
         async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
-            response = await client.delete(
-                f"{self.base_url}/v1/runtimes/{runtime_ref}", headers=self._headers()
-            )
+            response = await client.delete(f"{self.base_url}/v1/runtimes/{runtime_ref}", headers=self._headers())
         response.raise_for_status()
 
 

@@ -53,9 +53,7 @@ def normalize_transport(raw: str | None) -> str:
         raise NormalizationError("transport 不能为空")
     canonical = TRANSPORT_ALIASES.get(str(raw).strip().lower())
     if canonical is None:
-        raise NormalizationError(
-            f"未知的 transport: {raw!r}，支持 {', '.join(KNOWN_TRANSPORTS)}"
-        )
+        raise NormalizationError(f"未知的 transport: {raw!r}，支持 {', '.join(KNOWN_TRANSPORTS)}")
     return canonical
 
 
@@ -63,12 +61,12 @@ def normalize_transport(raw: str | None) -> str:
 # === artifact / runtime：进程从哪来 ===
 # =============================================================================
 
-ARTIFACT_REMOTE = "remote"          # 远程 Streamable HTTP / legacy SSE，无本地进程
-ARTIFACT_PYPI = "pypi"              # Python 包（uvx 独立环境运行）
-ARTIFACT_NPM = "npm"                # npm 包（npx 运行）
-ARTIFACT_BINARY = "binary"          # 预装二进制/脚本（本地可执行文件路径或 PATH 命令）
+ARTIFACT_REMOTE = "remote"  # 远程 Streamable HTTP / legacy SSE，无本地进程
+ARTIFACT_PYPI = "pypi"  # Python 包（uvx 独立环境运行）
+ARTIFACT_NPM = "npm"  # npm 包（npx 运行）
+ARTIFACT_BINARY = "binary"  # 预装二进制/脚本（本地可执行文件路径或 PATH 命令）
 
-RUNTIME_PROVIDER_NONE = "none"      # remote，不需要启动进程
+RUNTIME_PROVIDER_NONE = "none"  # remote，不需要启动进程
 RUNTIME_PROVIDER_UV = "uv"
 RUNTIME_PROVIDER_NODE = "node"
 RUNTIME_PROVIDER_PREINSTALLED = "preinstalled"
@@ -84,17 +82,17 @@ class McpInstallPlan:
     schema_version: int = SPEC_SCHEMA_VERSION
 
     # artifact：这个 MCP 是什么、从哪获取
-    artifact_kind: str = ARTIFACT_BINARY   # remote | pypi | npm | binary
-    identifier: str = ""                    # 包名 / URL / 可执行文件
-    version: str | None = None              # pinned 版本；None 仅手工录入允许
+    artifact_kind: str = ARTIFACT_BINARY  # remote | pypi | npm | binary
+    identifier: str = ""  # 包名 / URL / 可执行文件
+    version: str | None = None  # pinned 版本；None 仅手工录入允许
 
     # runtime：用什么 provider 跑起来（仅 stdio 相关）
     runtime_provider: str = RUNTIME_PROVIDER_PREINSTALLED  # none | uv | node | preinstalled
-    entrypoint: str | None = None           # 包内入口命令名（如 bio-mcp）；binary 时即命令本身
+    entrypoint: str | None = None  # 包内入口命令名（如 bio-mcp）；binary 时即命令本身
 
     # transport + 协议策略
     transport: str = TRANSPORT_STDIO
-    protocol_mode: str = "compat-1x"        # 终态为 official SDK mode="auto"；当前 adapters 栈
+    protocol_mode: str = "compat-1x"  # 终态为 official SDK mode="auto"；当前 adapters 栈
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -278,9 +276,7 @@ class PolicyUnpinnedArtifact(ValueError):
     """未 pin 版本的包型 artifact 拒绝物化（生产原则：不许 latest/*）。"""
 
     def __init__(self, identifier: str, kind: str):
-        super().__init__(
-            f"artifact '{identifier}' ({kind}) 未固定版本；安装必须使用精确版本号（不允许 latest/*/>=x）"
-        )
+        super().__init__(f"artifact '{identifier}' ({kind}) 未固定版本；安装必须使用精确版本号（不允许 latest/*/>=x）")
 
 
 __all__ = [

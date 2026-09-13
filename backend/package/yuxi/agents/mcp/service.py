@@ -22,6 +22,21 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.agents.mcp.bioinfomcp_catalog import (
+    BIOINFOMCP_COMMIT,
+    BIOINFOMCP_RUNTIME_SCHEMA,
+    BIOINFOMCP_SERVERS,
+    BIOINFOMCP_SLUGS,
+)
+from yuxi.agents.mcp.credentials import inject_credential, open_mcp_credential
+from yuxi.agents.mcp.domain import (
+    McpDataAccessLevel,
+    McpDependencyMode,
+    McpLifecycleStatus,
+    McpRuntimeLevel,
+    development_runtime_allowed,
+)
+from yuxi.agents.mcp.execution import get_mcp_execution_context
 from yuxi.agents.mcp.health import (
     CODE_CLIENT_INIT_FAILED,
     CODE_CONFIG_MISSING,
@@ -34,15 +49,6 @@ from yuxi.agents.mcp.health import (
     error_result,
     ok_result,
 )
-from yuxi.agents.mcp.credentials import inject_credential, open_mcp_credential
-from yuxi.agents.mcp.domain import (
-    McpDataAccessLevel,
-    McpDependencyMode,
-    McpLifecycleStatus,
-    McpRuntimeLevel,
-    development_runtime_allowed,
-)
-from yuxi.agents.mcp.execution import get_mcp_execution_context
 from yuxi.agents.mcp.host import McpHostError, get_host
 from yuxi.agents.mcp.langchain_adapter import assemble_tools, set_host_resolver
 from yuxi.agents.mcp.policy import (
@@ -50,28 +56,24 @@ from yuxi.agents.mcp.policy import (
     assert_transport_allowed,
     expand_env_refs,
 )
-from yuxi.agents.mcp.security import (
-    assert_no_inline_secrets,
-    validate_remote_url_dns,
-    validate_remote_url_static,
-)
 from yuxi.agents.mcp.registry import (
     SOURCE_TYPE_BUILTIN,
     SOURCE_TYPE_MANUAL,
     ImportFormatError,
     smart_parse,
 )
-from yuxi.agents.mcp.bioinfomcp_catalog import (
-    BIOINFOMCP_COMMIT,
-    BIOINFOMCP_RUNTIME_SCHEMA,
-    BIOINFOMCP_SERVERS,
-    BIOINFOMCP_SLUGS,
+from yuxi.agents.mcp.security import (
+    assert_no_inline_secrets,
+    validate_remote_url_dns,
+    validate_remote_url_static,
 )
 from yuxi.agents.mcp.spec import (
     ARTIFACT_NPM,
-    NormalizationError,
     SPEC_SCHEMA_VERSION,
+    NormalizationError,
     build_plan_from_legacy_fields,
+)
+from yuxi.agents.mcp.spec import (
     to_camel_case as spec_to_camel_case,
 )
 from yuxi.storage.postgres.models_business import (
@@ -138,8 +140,7 @@ _DEFAULT_MCP_SERVERS = {
         "timeout": 300,
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": (
-            "https://github.com/florensiawidjaja/BioinfoMCP@"
-            "7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_fastqc"
+            "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_fastqc"
         ),
     },
 }
@@ -251,9 +252,7 @@ def build_runtime_config(slug: str, server_config: dict[str, Any]) -> dict[str, 
             runtime[section] = value
 
     if missing_notes:
-        logger.warning(
-            f"MCP '{slug}' 引用的环境变量不存在，相关条目已剔除: {', '.join(missing_notes)}"
-        )
+        logger.warning(f"MCP '{slug}' 引用的环境变量不存在，相关条目已剔除: {', '.join(missing_notes)}")
 
     if slug in _WORKSPACE_SCOPED_MCP_SLUGS:
         # 只给经过代码审计的内置容器 wrapper 注入当前执行身份。wrapper 根据这
@@ -548,9 +547,7 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
         transport=config["transport"], url=config.get("url"), command=config.get("command"), args=config.get("args")
     )
     development = development_runtime_allowed()
-    bioinfomcp_runtime_ready = (
-        _bioinfomcp_runtime_ready(slug) if slug in _WORKSPACE_SCOPED_MCP_SLUGS else True
-    )
+    bioinfomcp_runtime_ready = _bioinfomcp_runtime_ready(slug) if slug in _WORKSPACE_SCOPED_MCP_SLUGS else True
     runtime_artifact = {
         "kind": "development_stdio",
         "transport": "stdio",
@@ -643,11 +640,7 @@ async def get_mcp_tools(
 
     global_disabled = set(server_config.get("disabled_tools") or [])
     arg_disabled = set(disabled_tools or [])
-    alive = [
-        d
-        for d in descriptors
-        if d.name not in global_disabled and d.name not in arg_disabled
-    ]
+    alive = [d for d in descriptors if d.name not in global_disabled and d.name not in arg_disabled]
 
     if cache:
         get_host().note_filter(
@@ -919,9 +912,7 @@ async def create_mcp_server(
     if existing:
         raise ValueError(f"Server slug '{slug}' already exists")
 
-    _validate_for_policy(
-        transport=transport, command=command, created_by=created_by, source_type=source_type
-    )
+    _validate_for_policy(transport=transport, command=command, created_by=created_by, source_type=source_type)
     assert_no_inline_secrets(env, section="env")
     assert_no_inline_secrets(headers, section="headers")
     if transport in ("sse", "streamable_http"):
@@ -1086,10 +1077,10 @@ async def update_mcp_server(
     )
     assert_no_inline_secrets(server.env, section="env")
     assert_no_inline_secrets(server.headers, section="headers")
-    connection_changed = any(
-        value is not None
-        for value in (transport, url, command, args, headers, timeout, sse_read_timeout)
-    ) or env is not _UNSET_SENTINEL
+    connection_changed = (
+        any(value is not None for value in (transport, url, command, args, headers, timeout, sse_read_timeout))
+        or env is not _UNSET_SENTINEL
+    )
     if server.transport in ("sse", "streamable_http"):
         server.url = validate_remote_url_static(str(server.url or ""))
         server.runtime_level = McpRuntimeLevel.TRUSTED_REMOTE.value
@@ -1117,9 +1108,7 @@ async def update_mcp_server(
         server.enabled = 0
 
     # spec 跟随连接字段重建；归一化失败时保留旧 spec
-    refreshed_spec = build_spec(
-        transport=server.transport, url=server.url, command=server.command, args=server.args
-    )
+    refreshed_spec = build_spec(transport=server.transport, url=server.url, command=server.command, args=server.args)
     if refreshed_spec.get("normalized") is not False:
         server.spec = refreshed_spec
     server.normalized_manifest = {
@@ -1357,9 +1346,7 @@ async def probe_mcp_server(
         try:
             runtime_config["url"] = await validate_remote_url_dns(str(runtime_config.get("url") or ""))
         except ValueError as exc:
-            return await _finish(
-                error_result(STAGE_TRANSPORT, "SSRF_POLICY_REJECTED", str(exc), retryable=False)
-            )
+            return await _finish(error_result(STAGE_TRANSPORT, "SSRF_POLICY_REJECTED", str(exc), retryable=False))
 
     source_type_attr = getattr(server, "source_type", None)
     if not _is_builtin_source(source_type_attr, getattr(server, "created_by", None)) and server.transport == "stdio":
@@ -1485,16 +1472,10 @@ async def import_mcp_servers(
                     continue
 
                 deployment = record.deployment
-                lifecycle_status = (
-                    deployment.status.value if deployment else McpLifecycleStatus.RESOLVED.value
-                )
-                runtime_level = (
-                    deployment.runtime_level.value if deployment and deployment.runtime_level else None
-                )
+                lifecycle_status = deployment.status.value if deployment else McpLifecycleStatus.RESOLVED.value
+                runtime_level = deployment.runtime_level.value if deployment and deployment.runtime_level else None
                 runtime_artifact = (
-                    deployment.runtime_artifact.to_dict()
-                    if deployment and deployment.runtime_artifact
-                    else None
+                    deployment.runtime_artifact.to_dict() if deployment and deployment.runtime_artifact else None
                 )
 
                 assert_no_inline_secrets(record.env, section="env")
@@ -1510,10 +1491,14 @@ async def import_mcp_servers(
                         source_type=record.source_type,
                     )
 
-                spec_payload = record.plan.to_dict() if record.plan else {
-                    "schema_version": SPEC_SCHEMA_VERSION,
-                    "normalized": False,
-                }
+                spec_payload = (
+                    record.plan.to_dict()
+                    if record.plan
+                    else {
+                        "schema_version": SPEC_SCHEMA_VERSION,
+                        "normalized": False,
+                    }
+                )
                 server = MCPServer(
                     slug=record.slug,
                     name=record.name[:100],

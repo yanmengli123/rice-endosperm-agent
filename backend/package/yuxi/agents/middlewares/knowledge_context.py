@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any
 from dataclasses import replace
+from typing import Any
 
 from deepagents.middleware._utils import append_to_system_message
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -78,8 +78,10 @@ def _filter_tools_by_turn_plan(tools: list[Any], plan: TurnExecutionPlan) -> lis
             )
             if profile_source not in plan.source.allowed_sources:
                 continue
-            if policy == SourcePolicy.HYBRID_EXPLICIT and required and (
-                not profile or required.isdisjoint(profile.capabilities)
+            if (
+                policy == SourcePolicy.HYBRID_EXPLICIT
+                and required
+                and (not profile or required.isdisjoint(profile.capabilities))
             ):
                 continue
             filtered.append(tool)

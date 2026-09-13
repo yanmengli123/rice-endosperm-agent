@@ -78,9 +78,7 @@ def _render_locator_block(binding: dict | None) -> str:
     return f"已可靠定位到原文：{NARRATIVE_LOCATOR_MARKER}"
 
 
-def render_answer_draft(
-    text: str, *, locator_bindings: dict[str, dict] | None = None
-) -> tuple[str, dict[str, str]]:
+def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None = None) -> tuple[str, dict[str, str]]:
     """Render a structured draft; preserve legacy Markdown on schema failure.
 
     ``locator_bindings``：binding_id → locator_resolution（含 binding 投影）。

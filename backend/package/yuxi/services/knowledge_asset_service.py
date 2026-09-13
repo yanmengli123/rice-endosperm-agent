@@ -25,7 +25,6 @@ from typing import Any
 
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
-
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
@@ -122,10 +121,7 @@ def _image_object_prefix(revision: KnowledgeParseRevision) -> str:
     MUST mirror ``scientific_pdf_ingest_service``'s ``image_prefix``::
         ``tenants/{tenant_id}/documents/{source_sha256}/mineru/{revision_id}/images``
     """
-    return (
-        f"tenants/{revision.tenant_id}/documents/{revision.source_sha256}/"
-        f"mineru/{revision.revision_id}/images"
-    )
+    return f"tenants/{revision.tenant_id}/documents/{revision.source_sha256}/mineru/{revision.revision_id}/images"
 
 
 async def materialize_reused_revision_assets(
@@ -156,9 +152,7 @@ async def materialize_reused_revision_assets(
         _validate_asset_name(asset_name)
         target_object_name = f"{target_prefix}/{asset_name}"
         if not await get_minio_client().acopy_object(ASSET_BUCKET, target_object_name, source_object_name):
-            raise KnowledgeAssetError(
-                f"canonical image missing during reuse: {asset_name}", status_code=404
-            )
+            raise KnowledgeAssetError(f"canonical image missing during reuse: {asset_name}", status_code=404)
         copied.append(
             {
                 "source": source_object_name,
@@ -179,9 +173,7 @@ def rewrite_kbasset_uri(
     """Rewrite ``kbasset://`` URIs from the canonical identity to the reusing identity."""
     if not markdown:
         return markdown
-    pattern = re.compile(
-        r"kbasset://" + re.escape(source_file_id) + r"/" + re.escape(source_revision_id) + r"/"
-    )
+    pattern = re.compile(r"kbasset://" + re.escape(source_file_id) + r"/" + re.escape(source_revision_id) + r"/")
     return pattern.sub(
         f"kbasset://{target_file_id}/{target_revision_id}/",
         markdown,
@@ -213,9 +205,7 @@ async def _load_knowledge_file(file_id: str) -> KnowledgeFile | None:
 async def _load_knowledge_base(kb_id: str) -> KnowledgeBase | None:
     async with pg_manager.get_async_session_context() as session:
         return (
-            (await session.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id)))
-            .scalars()
-            .one_or_none()
+            (await session.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id))).scalars().one_or_none()
         )
 
 
@@ -245,9 +235,7 @@ async def _stat_object(bucket_name: str, object_name: str) -> Any | None:
         raise KnowledgeAssetError("object unavailable", status_code=404) from exc
 
 
-async def resolve_asset(
-    *, kb_id: str, file_id: str, revision_id: str, asset_name: str, user: User
-) -> dict[str, Any]:
+async def resolve_asset(*, kb_id: str, file_id: str, revision_id: str, asset_name: str, user: User) -> dict[str, Any]:
     """Validated + authorized asset resolution.
 
     Returns a plain dict with ``object_key``/``media_type``/``stat`` when the

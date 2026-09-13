@@ -247,10 +247,7 @@ def build_canonical_records(
     answer_index = header.index(answer_col) if answer_col in header else None
     for offset, row in enumerate(rows):
         row_number = offset + 2  # 第 1 行是表头
-        values = {
-            name: (str(row[idx]).strip() if idx < len(row) else "")
-            for idx, name in enumerate(header)
-        }
+        values = {name: (str(row[idx]).strip() if idx < len(row) else "") for idx, name in enumerate(header)}
         if contract_key == "csv_qa":
             question = _cell(row, question_index)
             answer = _cell(row, answer_index)

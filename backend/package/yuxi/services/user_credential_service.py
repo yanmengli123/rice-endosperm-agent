@@ -101,9 +101,7 @@ async def revoke_user_credential(db: AsyncSession, uid: str, credential_id: int)
     credential.revoked_at = utc_now_naive()
     model_spec = custom_model_spec(credential)
     if model_spec:
-        preference_result = await db.execute(
-            select(UserModelPreference).where(UserModelPreference.uid == uid)
-        )
+        preference_result = await db.execute(select(UserModelPreference).where(UserModelPreference.uid == uid))
         preference = preference_result.scalar_one_or_none()
         if preference is not None and preference.chat_model_spec == model_spec:
             preference.chat_model_spec = None
@@ -335,7 +333,6 @@ def _resolve_env_value(env: dict[str, Any], keys: tuple[str, ...]) -> tuple[str 
         if value:
             return key, value
     return None, None
-
 
 
 def parse_claude_model_configuration(raw_configuration: str | dict[str, Any]) -> dict[str, Any]:

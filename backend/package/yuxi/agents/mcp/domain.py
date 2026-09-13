@@ -232,11 +232,7 @@ def choose_deployment(
 
     if allow_dev:
         candidate = next(
-            (
-                item
-                for item in pinned
-                if item.metadata.get("development_requested") and item.metadata.get("command")
-            ),
+            (item for item in pinned if item.metadata.get("development_requested") and item.metadata.get("command")),
             None,
         )
         if candidate:
@@ -272,7 +268,5 @@ def choose_deployment(
 
 
 __all__ = [
-    name
-    for name in globals()
-    if name.startswith("Mcp") or name in {"choose_deployment", "development_runtime_allowed"}
+    name for name in globals() if name.startswith("Mcp") or name in {"choose_deployment", "development_runtime_allowed"}
 ]

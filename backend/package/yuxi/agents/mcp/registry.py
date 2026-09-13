@@ -39,7 +39,7 @@ from yuxi.agents.mcp.spec import (
 )
 
 SOURCE_TYPE_REGISTRY = "registry"
-SOURCE_TYPE_IMPORT = "import"      # Claude/Cursor 等配置导入
+SOURCE_TYPE_IMPORT = "import"  # Claude/Cursor 等配置导入
 SOURCE_TYPE_MANUAL = "manual"
 SOURCE_TYPE_BUILTIN = "builtin"
 
@@ -62,7 +62,7 @@ class NormalizedServerRecord:
 
     slug: str
     name: str
-    transport: str                       # 规范值（stdio/sse/streamable_http）
+    transport: str  # 规范值（stdio/sse/streamable_http）
     url: str | None = None
     command: str | None = None
     args: list[str] | None = None
@@ -72,10 +72,10 @@ class NormalizedServerRecord:
     tags: list[str] | None = None
     icon: str | None = None
     source_type: str = SOURCE_TYPE_IMPORT
-    source_ref: str | None = None        # registry 标识 / 导入来源说明
-    plan: McpInstallPlan | None = None   # 对应安装计划（可能为 None：未 pin 的降级路径）
+    source_ref: str | None = None  # registry 标识 / 导入来源说明
+    plan: McpInstallPlan | None = None  # 对应安装计划（可能为 None：未 pin 的降级路径）
     warnings: list[str] = field(default_factory=list)
-    unpinned: bool = False               # 包型 artifact 未固定版本时置位，由上层裁决
+    unpinned: bool = False  # 包型 artifact 未固定版本时置位，由上层裁决
     raw_manifest: dict[str, Any] | None = None
     manifest_schema_url: str | None = None
     normalized_manifest: dict[str, Any] | None = None

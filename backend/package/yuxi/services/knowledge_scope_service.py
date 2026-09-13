@@ -4,8 +4,8 @@ from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi.knowledge.runtime import knowledge_base
 from yuxi.knowledge.products.registry import is_derived_product
+from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.knowledge_scope_repository import (
     DEFAULT_QA_SCOPE_ID,
     KnowledgeScopeRepository,

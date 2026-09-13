@@ -228,9 +228,7 @@ def _locator_citation_row(
     }
 
 
-def append_locator_citations(
-    citations: list[dict[str, Any]], locator: dict[str, Any] | None
-) -> list[dict[str, Any]]:
+def append_locator_citations(citations: list[dict[str, Any]], locator: dict[str, Any] | None) -> list[dict[str, Any]]:
     """把确定性定位结果（含图注反链）并入引用池，使解释部分的 [E#] 有据可引。
 
     纯定位流不经过本函数（无生成通道）；复合意图流在编排器尾部调用，
@@ -242,9 +240,7 @@ def append_locator_citations(
     if not isinstance(locator, dict) or locator.get("status") != "VERIFIED":
         return rows
     known_evidence_ids = {str(row.get("evidence_id")) for row in rows if row.get("evidence_id")}
-    known_anchor_ids = {
-        str(anchor_id) for row in rows for anchor_id in (row.get("anchor_ids") or []) if anchor_id
-    }
+    known_anchor_ids = {str(anchor_id) for row in rows for anchor_id in (row.get("anchor_ids") or []) if anchor_id}
 
     def _already_covered(*, evidence_id: Any, anchor_id: Any) -> bool:
         if evidence_id and str(evidence_id) in known_evidence_ids:
@@ -392,11 +388,7 @@ def reverse_bind_citations(
     def _bind(sentence: str) -> str | None:
         """返回芯片文本；None = 保持原句（必要时记入 uncovered）。"""
         nonlocal processed
-        clean = (
-            sentence.replace(" " + NARRATIVE_LOCATOR_MARKER, "")
-            .replace(NARRATIVE_LOCATOR_MARKER, "")
-            .strip()
-        )
+        clean = sentence.replace(" " + NARRATIVE_LOCATOR_MARKER, "").replace(NARRATIVE_LOCATOR_MARKER, "").strip()
         if not clean or "证据E" in sentence or "引文定位" in sentence:
             return None
         hard = extract_hard_constraints(clean)
@@ -426,8 +418,7 @@ def reverse_bind_citations(
             # 幂等防重：紧随本表的脚注行（上一轮绑定产物）存在时整表跳过，
             # 避免守卫+落库双重应用给同一表追加第二组脚注。
             already_annotated = any(
-                lines[peek].strip().startswith("> 表格依据：")
-                for peek in range(end + 1, min(end + 3, len(lines)))
+                lines[peek].strip().startswith("> 表格依据：") for peek in range(end + 1, min(end + 3, len(lines)))
             )
             footnotes: list[str] = []
             for row_index in range(start, end + 1):
@@ -560,14 +551,20 @@ def _render_references_section(text: str, citations: list[dict[str, Any]]) -> tu
         pages = format_pages(citation.get("page_numbers") or [])
         anchor_id = (citation.get("anchor_ids") or ["—"])[0]
         rows.append(
-            "- " + ref + "｜" + zone_label + "·第" + pages + "页｜"
-            + _shorten_filename(citation.get("filename")) + "｜" + str(anchor_id)
+            "- "
+            + ref
+            + "｜"
+            + zone_label
+            + "·第"
+            + pages
+            + "页｜"
+            + _shorten_filename(citation.get("filename"))
+            + "｜"
+            + str(anchor_id)
         )
     if not rows:
         return text, False
-    block = (
-        "\n" + _REFERENCES_SECTION_HEADER + "（后端渲染，页码来自证据锚点）\n" + "\n".join(rows)
-    )
+    block = "\n" + _REFERENCES_SECTION_HEADER + "（后端渲染，页码来自证据锚点）\n" + "\n".join(rows)
     return text.rstrip() + block, True
 
 
@@ -666,9 +663,7 @@ def _rewrite_fabricated_chips(
     fallback = locator_chip or ""
     rewritten = 0
     removed = 0
-    legitimate_chips = {
-        render_citation_chip(citation) for citation in _citation_pool(citations)
-    }
+    legitimate_chips = {render_citation_chip(citation) for citation in _citation_pool(citations)}
     if locator_chip:
         legitimate_chips.add(locator_chip)
 

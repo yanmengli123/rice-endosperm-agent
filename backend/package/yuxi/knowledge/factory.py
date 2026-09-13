@@ -112,9 +112,7 @@ class KnowledgeBaseFactory:
         """
         spec = get_product_spec(kb_type)
         if spec.category == "derived_product":
-            raise KBNotFoundError(
-                f"kb_type={spec.kb_type!r} is a derived knowledge product without a storage adapter"
-            )
+            raise KBNotFoundError(f"kb_type={spec.kb_type!r} is a derived knowledge product without a storage adapter")
         if kb_type not in cls._kb_types:
             available_types = list(cls._kb_types.keys())
             raise KBNotFoundError(f"Unknown knowledge base type: {kb_type}. Available types: {available_types}")

@@ -14,7 +14,6 @@ from typing import Any
 
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-
 from yuxi.knowledge.chunking.ragflow_like.parsers.academic import ACADEMIC_CHUNKER_VERSION
 from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact, PipelineResult, UnifiedArticle
 from yuxi.knowledge.pdf_evidence.pipeline import PIPELINE_VERSION, ScientificPdfPipeline, build_parser_fingerprint

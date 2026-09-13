@@ -17,7 +17,6 @@ import json
 import uuid
 
 from sqlalchemy import select
-
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
@@ -36,15 +35,18 @@ class ReleaseStateError(ValueError):
 
 
 def _manifest_hash(manifest: dict) -> str:
-    return "sha256:" + hashlib.sha256(
-        json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 async def build_release(kb_id: str, operator_id: str | None) -> dict:
     """从各文件的活跃修订构建 STAGED 发布清单（不可变）。"""
-    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
     from yuxi.knowledge.source_contracts import SourceContractError, load_kb_contract
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
     kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     if kb is None:
@@ -115,9 +117,7 @@ async def build_release(kb_id: str, operator_id: str | None) -> dict:
 async def publish_release(kb_id: str, release_id: str, operator_id: str | None) -> dict:
     """原子发布：置前一个 ACTIVE 为 SUPERSEDED，切换发布指针，治理状态置 PUBLISHED。"""
     async with pg_manager.get_async_session_context() as session:
-        kb = (
-            await session.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id))
-        ).scalar_one_or_none()
+        kb = (await session.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id))).scalar_one_or_none()
         if kb is None:
             raise ValueError(f"知识库 {kb_id} 不存在")
         release = (
@@ -133,12 +133,14 @@ async def publish_release(kb_id: str, release_id: str, operator_id: str | None) 
             raise ReleaseStateError(f"发布清单状态为 {release.status}，只有 STAGED 清单可以发布")
 
         previous = (
-            await session.execute(
-                select(KnowledgeRelease).where(
-                    KnowledgeRelease.kb_id == kb_id, KnowledgeRelease.status == "ACTIVE"
+            (
+                await session.execute(
+                    select(KnowledgeRelease).where(KnowledgeRelease.kb_id == kb_id, KnowledgeRelease.status == "ACTIVE")
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         previous_id = None
         for item in previous:
             if item.release_id != release_id:
@@ -162,18 +164,18 @@ async def publish_release(kb_id: str, release_id: str, operator_id: str | None) 
 async def rollback_release(kb_id: str, operator_id: str | None) -> dict:
     """回滚：把指针切回上一个被替换的 ACTIVE 清单（原子操作 + 审计）。"""
     async with pg_manager.get_async_session_context() as session:
-        kb = (
-            await session.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id))
-        ).scalar_one_or_none()
+        kb = (await session.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id))).scalar_one_or_none()
         if kb is None:
             raise ValueError(f"知识库 {kb_id} 不存在")
         current = (
-            await session.execute(
-                select(KnowledgeRelease).where(
-                    KnowledgeRelease.kb_id == kb_id, KnowledgeRelease.status == "ACTIVE"
+            (
+                await session.execute(
+                    select(KnowledgeRelease).where(KnowledgeRelease.kb_id == kb_id, KnowledgeRelease.status == "ACTIVE")
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if not current:
             raise ReleaseStateError("当前没有 ACTIVE 发布清单可回滚")
         current_ids = {item.release_id for item in current}
@@ -183,9 +185,7 @@ async def rollback_release(kb_id: str, operator_id: str | None) -> dict:
             if item.previous_release_id and item.previous_release_id not in current_ids:
                 target_row = (
                     await session.execute(
-                        select(KnowledgeRelease).where(
-                            KnowledgeRelease.release_id == item.previous_release_id
-                        )
+                        select(KnowledgeRelease).where(KnowledgeRelease.release_id == item.previous_release_id)
                     )
                 ).scalar_one_or_none()
                 if target_row is not None and target_row.status == "SUPERSEDED":
@@ -248,14 +248,13 @@ async def list_releases(kb_id: str, limit: int = 50) -> dict:
             }
             for row in rows
         ]
-        return {"releases": items, "active_release_id": next(
-            (item["release_id"] for item in items if item["status"] == "ACTIVE"), None
-        )}
+        return {
+            "releases": items,
+            "active_release_id": next((item["release_id"] for item in items if item["status"] == "ACTIVE"), None),
+        }
 
 
-async def create_retrieval_policy_revision(
-    kb_id: str, policy: dict, operator_id: str | None
-) -> dict:
+async def create_retrieval_policy_revision(kb_id: str, policy: dict, operator_id: str | None) -> dict:
     """查询策略修订（reranker/召回数/融合权重等）；变化不重建索引。"""
     from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
@@ -313,8 +312,8 @@ async def capability_report(kb_id: str) -> dict:
 
     知识库层不显示单一"部分"，而是给出覆盖率分布（完整/部分/不可用篇数）。
     """
-    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
     from yuxi.knowledge.source_contracts import SourceContractError, load_kb_contract
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
     kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     if kb is None:
@@ -328,9 +327,7 @@ async def capability_report(kb_id: str) -> dict:
         rows = (
             (
                 await session.execute(
-                    select(KnowledgeFile).where(
-                        KnowledgeFile.kb_id == kb_id, KnowledgeFile.is_folder.is_(False)
-                    )
+                    select(KnowledgeFile).where(KnowledgeFile.kb_id == kb_id, KnowledgeFile.is_folder.is_(False))
                 )
             )
             .scalars()

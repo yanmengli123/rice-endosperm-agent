@@ -12,7 +12,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-
 _LEFT_BRACKET = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
 _RIGHT_BRACKET = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
 _TAG_RE = re.compile(

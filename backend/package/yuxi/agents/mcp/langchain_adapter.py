@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from yuxi.agents.mcp.host import McpHost, McpHostError, McpToolDescriptor
 from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
+from yuxi.agents.mcp.host import McpHost, McpHostError, McpToolDescriptor
 from yuxi.agents.mcp.spec import to_camel_case
 from yuxi.knowledge.contracts.source_envelopes import BibliographicEnvelope, McpDataEnvelope
 from yuxi.utils import logger
@@ -71,9 +71,7 @@ def build_mcp_base_tool(
                 stable_tool_id=descriptor.stable_id,
                 server=descriptor.server_slug,
                 capability=(
-                    sorted(capability.value for capability in profile.capabilities)[0]
-                    if profile
-                    else "UNCLASSIFIED"
+                    sorted(capability.value for capability in profile.capabilities)[0] if profile else "UNCLASSIFIED"
                 ),
                 source_class=profile.source_class if profile else "UNCLASSIFIED",
                 citation_semantics=profile.citation_semantics if profile else "DATA_PROVENANCE",
@@ -108,9 +106,7 @@ def build_mcp_base_tool(
                 capability.value for capability in (trusted_profile.capabilities if trusted_profile else ())
             ),
             "trusted_source_class": trusted_profile.source_class if trusted_profile else "UNCLASSIFIED",
-            "produces_document_evidence": bool(
-                trusted_profile and trusted_profile.produces_document_evidence
-            ),
+            "produces_document_evidence": bool(trusted_profile and trusted_profile.produces_document_evidence),
         },
     )
     return structured

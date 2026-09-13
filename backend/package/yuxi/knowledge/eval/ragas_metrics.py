@@ -8,10 +8,10 @@ import copy
 import json
 import math
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable
 
 from yuxi.knowledge.eval.ragas_adapter import (
     BasePrompt,
@@ -133,8 +133,7 @@ def _serialize_prompt(prompt: Any) -> dict[str, Any]:
         "instruction": prompt.instruction,
         "language": getattr(prompt, "language", "english"),
         "examples": [
-            [input_data.model_dump(), output_data.model_dump()]
-            for input_data, output_data in (prompt.examples or [])
+            [input_data.model_dump(), output_data.model_dump()] for input_data, output_data in (prompt.examples or [])
         ],
     }
 

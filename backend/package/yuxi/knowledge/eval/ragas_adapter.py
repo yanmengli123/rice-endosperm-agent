@@ -63,8 +63,7 @@ except ImportError as e:  # pragma: no cover - 仅在未安装 ragas 的环境�
 def require_ragas() -> None:
     if not RAGAS_AVAILABLE:
         raise RuntimeError(
-            f"ragas 未安装或不可用（{_ragas_import_error}）。"
-            "请在启用 RAGAS 评估前安装 ragas 依赖组（yuxi[ragas]）。"
+            f"ragas 未安装或不可用（{_ragas_import_error}）。请在启用 RAGAS 评估前安装 ragas 依赖组（yuxi[ragas]）。"
         )
 
 
@@ -86,9 +85,7 @@ def _coerce_parsed(parsed: Any, response_model: type) -> Any:
     """
     if isinstance(parsed, list):
         list_fields = [
-            name
-            for name, field in response_model.model_fields.items()
-            if typing.get_origin(field.annotation) is list
+            name for name, field in response_model.model_fields.items() if typing.get_origin(field.annotation) is list
         ]
         if len(list_fields) == 1:
             return {list_fields[0]: parsed}

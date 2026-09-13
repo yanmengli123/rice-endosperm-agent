@@ -31,8 +31,7 @@ CHUNK_PRESETS: dict[str, dict[str, str]] = {
     "academic": {
         "label": "Academic PDF",
         "description": (
-            "科研文献分块：按章节和段落组织，保留页码与证据锚点，"
-            "图表/公式独立成块，参考文献不进入普通问答。"
+            "科研文献分块：按章节和段落组织，保留页码与证据锚点，图表/公式独立成块，参考文献不进入普通问答。"
         ),
     },
     "separator": {

@@ -62,11 +62,15 @@ def _dedupe_edges_by_semantic_key(edges: list[dict[str, Any]]) -> list[dict[str,
     for edge in edges:
         properties = edge.get("properties") or {}
         triple_id = properties.get("triple_id")
-        key = ("triple", triple_id) if triple_id else (
-            "st",
-            edge.get("source_id"),
-            edge.get("type"),
-            edge.get("target_id"),
+        key = (
+            ("triple", triple_id)
+            if triple_id
+            else (
+                "st",
+                edge.get("source_id"),
+                edge.get("type"),
+                edge.get("target_id"),
+            )
         )
         if key in seen:
             continue
@@ -729,9 +733,7 @@ class MilvusGraphService:
             return {"nodes": [], "edges": [], "truncated": False}
         label = safe_neo4j_label(effective_kb_id)
         try:
-            return await _run_neo4j_query_io(
-                self._query_full_graph_sync, effective_kb_id, label, exclude_chunk
-            )
+            return await _run_neo4j_query_io(self._query_full_graph_sync, effective_kb_id, label, exclude_chunk)
         except Exception as e:
             logger.error(f"Milvus full graph query failed: {e}")
             return {"nodes": [], "edges": [], "truncated": False}

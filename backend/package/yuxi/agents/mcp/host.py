@@ -21,18 +21,18 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from yuxi.agents.mcp.execution import record_mcp_call
 from yuxi.agents.mcp.health import (
     CODE_CLIENT_INIT_FAILED,
     CODE_DISCOVERY_FAILED,
     STAGE_TRANSPORT,
     failure_from_exception,
 )
-from yuxi.agents.mcp.spec import to_camel_case
-from yuxi.agents.mcp.execution import record_mcp_call
 from yuxi.agents.mcp.security import (
     build_safe_httpx_client_factory,
     validate_remote_url_dns,
 )
+from yuxi.agents.mcp.spec import to_camel_case
 
 ADAPTER_LEGACY_HTTP_DIALECT = "streamable-http"
 ADAPTER_MODERN_HTTP_DIALECT = "streamable_http"
@@ -55,10 +55,10 @@ class McpToolDescriptor:
     """一个 MCP tool 的稳定描述（不序列化、进程内流转）。"""
 
     server_slug: str
-    name: str                                   # 原始 MCP tool name（disabled_tools 匹配依据）
-    stable_id: str                              # mcp__{server_cc}__{tool_cc}
+    name: str  # 原始 MCP tool name（disabled_tools 匹配依据）
+    stable_id: str  # mcp__{server_cc}__{tool_cc}
     description: str = ""
-    args_model: Any = None                      # pydantic 模型类或 JSON-schema dict（adapter 构造），UI/LangChain 共用
+    args_model: Any = None  # pydantic 模型类或 JSON-schema dict（adapter 构造），UI/LangChain 共用
     annotations: dict[str, Any] = field(default_factory=dict)
     output_schema: dict[str, Any] | None = None
     raw_tool: Any = field(default=None, repr=False, compare=False)
@@ -139,19 +139,13 @@ class McpHost(ABC):
     ) -> McpToolResult: ...
 
     @abstractmethod
-    async def discover_resources(
-        self, slug: str, config: dict[str, Any]
-    ) -> list[McpResourceDescriptor]: ...
+    async def discover_resources(self, slug: str, config: dict[str, Any]) -> list[McpResourceDescriptor]: ...
 
     @abstractmethod
-    async def read_resource(
-        self, slug: str, config: dict[str, Any], uri: str
-    ) -> McpToolResult: ...
+    async def read_resource(self, slug: str, config: dict[str, Any], uri: str) -> McpToolResult: ...
 
     @abstractmethod
-    async def discover_prompts(
-        self, slug: str, config: dict[str, Any]
-    ) -> list[McpPromptDescriptor]: ...
+    async def discover_prompts(self, slug: str, config: dict[str, Any]) -> list[McpPromptDescriptor]: ...
 
     @abstractmethod
     async def get_prompt(
@@ -493,9 +487,7 @@ class LegacyLangChainHost(McpHost):
                 await session.initialize()
                 yield session
 
-    async def discover_resources(
-        self, slug: str, config: dict[str, Any]
-    ) -> list[McpResourceDescriptor]:
+    async def discover_resources(self, slug: str, config: dict[str, Any]) -> list[McpResourceDescriptor]:
         try:
             async with self._official_session(config) as session:
                 response = await session.list_resources()
@@ -514,9 +506,7 @@ class LegacyLangChainHost(McpHost):
             for item in response.resources
         ]
 
-    async def read_resource(
-        self, slug: str, config: dict[str, Any], uri: str
-    ) -> McpToolResult:
+    async def read_resource(self, slug: str, config: dict[str, Any], uri: str) -> McpToolResult:
         started = time.perf_counter()
         try:
             async with self._official_session(config) as session:
@@ -542,9 +532,7 @@ class LegacyLangChainHost(McpHost):
         )
         return result
 
-    async def discover_prompts(
-        self, slug: str, config: dict[str, Any]
-    ) -> list[McpPromptDescriptor]:
+    async def discover_prompts(self, slug: str, config: dict[str, Any]) -> list[McpPromptDescriptor]:
         try:
             async with self._official_session(config) as session:
                 response = await session.list_prompts()

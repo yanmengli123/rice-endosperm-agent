@@ -19,7 +19,6 @@ from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.knowledge.products.contracts import WikiNavigationHit
 from yuxi.knowledge.products.registry import is_derived_product
 from yuxi.storage.postgres.models_knowledge import (

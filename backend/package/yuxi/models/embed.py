@@ -186,9 +186,7 @@ class OtherEmbedding(BaseEmbeddingModel):
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    f"Embedding request exceeded {EMBEDDING_TOTAL_TIMEOUT_SECONDS:.0f}s total timeout"
-                )
+                raise TimeoutError(f"Embedding request exceeded {EMBEDDING_TOTAL_TIMEOUT_SECONDS:.0f}s total timeout")
             try:
                 response = requests.post(
                     self.base_url,

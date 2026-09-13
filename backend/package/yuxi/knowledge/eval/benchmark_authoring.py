@@ -471,16 +471,12 @@ def validate_dataset_for_finalize(items: list[dict[str, Any]], *, review_require
 
     gold_chunk_count = stats["gold_chunk_count"]
     unanswerable_ids = {
-        item.get("item_id")
-        for item in items
-        if (item.get("item_metadata") or {}).get("answer_type") == "unanswerable"
+        item.get("item_id") for item in items if (item.get("item_metadata") or {}).get("answer_type") == "unanswerable"
     }
     answerable_total = total - len(unanswerable_ids)
     if 0 < gold_chunk_count < answerable_total:
         missing = [
-            item
-            for item in items
-            if not item.get("gold_chunk_ids") and item.get("item_id") not in unanswerable_ids
+            item for item in items if not item.get("gold_chunk_ids") and item.get("item_id") not in unanswerable_ids
         ]
         warnings.append(
             {

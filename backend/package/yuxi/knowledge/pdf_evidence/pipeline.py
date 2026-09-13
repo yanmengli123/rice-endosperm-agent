@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from yuxi.knowledge.chunking.ragflow_like.parsers.academic import ACADEMIC_CHUNKER_VERSION
-from yuxi.knowledge.parser.factory import DocumentProcessorFactory
 from yuxi.knowledge.evidence.document_partition import classify_anchor_partitions
+from yuxi.knowledge.parser.factory import DocumentProcessorFactory
 from yuxi.knowledge.pdf_evidence.aligner import ALIGNER_VERSION, align_texts_to_anchors
 from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact, PipelineResult, UnifiedArticle
 from yuxi.knowledge.pdf_evidence.grobid import GrobidClient

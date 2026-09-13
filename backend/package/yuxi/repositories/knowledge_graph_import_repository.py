@@ -345,8 +345,7 @@ class KnowledgeGraphImportRepository:
                             KnowledgeGraphEntityAlias.alias,
                         ).where(KnowledgeGraphEntityAlias.kb_id == kb_id)
                     )
-                )
-                .all()
+                ).all()
             )
             kb_name = await session.scalar(select(KnowledgeBase.name).where(KnowledgeBase.kb_id == kb_id))
 

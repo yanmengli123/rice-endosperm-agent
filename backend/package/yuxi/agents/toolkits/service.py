@@ -129,6 +129,7 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
         dependency_mode = "OPTIONAL"
         try:
             async with semaphore:
+
                 async def discover_tools() -> list[Any]:
                     nonlocal dependency_mode
                     dependency_mode = await get_mcp_dependency_mode(server_name)
@@ -145,31 +146,24 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
                     f"{MCP_RUNTIME_LOAD_TIMEOUT_SECONDS:.0f}s ({dependency_mode})"
                 ) from e
             logger.warning(
-                f"Optional MCP '{server_name}' timed out after "
-                f"{MCP_RUNTIME_LOAD_TIMEOUT_SECONDS:.0f}s; skip"
+                f"Optional MCP '{server_name}' timed out after {MCP_RUNTIME_LOAD_TIMEOUT_SECONDS:.0f}s; skip"
             )
             return []
         except Exception as e:
             if dependency_mode in {"REQUIRED", "AUTHORITATIVE"}:
-                raise RuntimeError(
-                    f"Required MCP '{server_name}' is unavailable ({dependency_mode}): {e}"
-                ) from e
+                raise RuntimeError(f"Required MCP '{server_name}' is unavailable ({dependency_mode}): {e}") from e
             logger.warning(f"Optional MCP '{server_name}' unavailable: {e}")
             return []
         if not mcp_tools:
             if dependency_mode in {"REQUIRED", "AUTHORITATIVE"}:
-                raise RuntimeError(
-                    f"Required MCP '{server_name}' exposes no usable tools ({dependency_mode})"
-                )
+                raise RuntimeError(f"Required MCP '{server_name}' exposes no usable tools ({dependency_mode})")
             logger.warning(f"Optional MCP unavailable, skip: {server_name}")
             return []
         return mcp_tools
 
     # MCP discovery is independent per server. Resolve it concurrently, but merge
     # results in configured order so duplicate tool names keep deterministic winners.
-    resolved_mcp_tools = await asyncio.gather(
-        *(load_mcp_server(server_name) for server_name in ordered_mcp_servers)
-    )
+    resolved_mcp_tools = await asyncio.gather(*(load_mcp_server(server_name) for server_name in ordered_mcp_servers))
     for mcp_tools in resolved_mcp_tools:
         for tool in mcp_tools:
             if tool.name in selected_tool_names:

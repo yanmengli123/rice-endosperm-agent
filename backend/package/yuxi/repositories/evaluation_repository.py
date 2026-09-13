@@ -99,9 +99,7 @@ class EvaluationRepository:
         """题目追加只增不复用序号：删题留空位，保证跨版本对比时行序稳定。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
-                select(func.max(EvaluationDatasetItem.item_index)).where(
-                    EvaluationDatasetItem.dataset_id == dataset_id
-                )
+                select(func.max(EvaluationDatasetItem.item_index)).where(EvaluationDatasetItem.dataset_id == dataset_id)
             )
             value = result.scalar()
             return int(value) if value is not None else -1
@@ -110,8 +108,7 @@ class EvaluationRepository:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(EvaluationDatasetItem.external_id).where(
-                    (EvaluationDatasetItem.dataset_id == dataset_id)
-                    & (EvaluationDatasetItem.external_id.is_not(None))
+                    (EvaluationDatasetItem.dataset_id == dataset_id) & (EvaluationDatasetItem.external_id.is_not(None))
                 )
             )
             return [str(value) for value in result.scalars().all() if value]

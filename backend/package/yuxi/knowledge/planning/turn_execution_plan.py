@@ -343,9 +343,7 @@ def plan_turn(
         legacy_intent = classify_task(text)
         intent = TaskIntent.ENTITY_PROFILE if legacy_intent == "ENTITY_LOOKUP" else TaskIntent.KB_EVIDENCE_QA
         evidence_required = (
-            has_knowledge_scope
-            and knowledge_enabled
-            and source_policy != SourcePolicy.NO_EXTERNAL_SOURCE
+            has_knowledge_scope and knowledge_enabled and source_policy != SourcePolicy.NO_EXTERNAL_SOURCE
         )
         capabilities = [Capability.DOCUMENT_QA] if evidence_required else []
 

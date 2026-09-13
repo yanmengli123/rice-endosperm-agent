@@ -284,9 +284,7 @@ def build_roundtrip_csvs(
                 pmids = item.get("pmid") or ""
                 dois = item.get("doi") or ""
                 quotes = item.get("evidence_quote") or ""
-            has_identifier = bool(
-                item.get("pmid") or item.get("doi") or metadata.get("pmids") or metadata.get("dois")
-            )
+            has_identifier = bool(item.get("pmid") or item.get("doi") or metadata.get("pmids") or metadata.get("dois"))
             relation_rows.append(
                 [
                     start_id,
@@ -405,9 +403,7 @@ def build_roundtrip_package(
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("nodes.csv", built["nodes_csv"])
         archive.writestr("relationships.csv", built["relationships_csv"])
-        archive.writestr(
-            "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
-        )
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
     filename = f"graph-roundtrip-{kb_id}.zip"
     return {"filename": filename, "content": buffer.getvalue(), "media_type": "application/zip", "manifest": manifest}
 
@@ -444,8 +440,16 @@ def build_evidence_workbook(
     entity_sheet = workbook.active
     entity_sheet.title = "实体"
     entity_headers = [
-        "entity_id", "canonical_identity", "label", "name", "normalized_name",
-        "gene_status", "rap_ids", "msu_ids", "aliases", "external_ids",
+        "entity_id",
+        "canonical_identity",
+        "label",
+        "name",
+        "normalized_name",
+        "gene_status",
+        "rap_ids",
+        "msu_ids",
+        "aliases",
+        "external_ids",
     ]
     fill_sheet(
         entity_sheet,
@@ -475,8 +479,15 @@ def build_evidence_workbook(
 
     triple_sheet = workbook.create_sheet("三元组")
     triple_headers = [
-        "triple_id", "source", "target", "relation_type", "content",
-        "support_count", "literature_count", "best_evidence_level", "consensus_direction",
+        "triple_id",
+        "source",
+        "target",
+        "relation_type",
+        "content",
+        "support_count",
+        "literature_count",
+        "best_evidence_level",
+        "consensus_direction",
     ]
     fill_sheet(
         triple_sheet,
@@ -498,12 +509,37 @@ def build_evidence_workbook(
     )
 
     evidence_headers = [
-        "evidence_id", "triple_id", "source", "target", "relation_type", "pmid", "doi", "literature_id",
-        "identifier_status", "direction", "directness", "assertion_status", "evidence_level",
-        "evidence_alignment_status", "outcome_class", "yield_measure_type", "experimental_subject_type",
-        "subject_material", "perturbs", "perturbation_direction", "condition", "cultivar",
-        "genetic_background", "development_stage", "observed_effect", "observed_relation",
-        "inferred_gene_function", "sentence_id", "claim_eligible", "evidence_quote", "metadata_json",
+        "evidence_id",
+        "triple_id",
+        "source",
+        "target",
+        "relation_type",
+        "pmid",
+        "doi",
+        "literature_id",
+        "identifier_status",
+        "direction",
+        "directness",
+        "assertion_status",
+        "evidence_level",
+        "evidence_alignment_status",
+        "outcome_class",
+        "yield_measure_type",
+        "experimental_subject_type",
+        "subject_material",
+        "perturbs",
+        "perturbation_direction",
+        "condition",
+        "cultivar",
+        "genetic_background",
+        "development_stage",
+        "observed_effect",
+        "observed_relation",
+        "inferred_gene_function",
+        "sentence_id",
+        "claim_eligible",
+        "evidence_quote",
+        "metadata_json",
     ]
     triple_by_id = {triple["triple_id"]: triple for triple in triples}
     evidence_rows = []
