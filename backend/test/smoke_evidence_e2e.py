@@ -23,9 +23,7 @@ async def _run_touched_kb_ids(db, run_id: str) -> set[str]:
         chunk_ids.extend(str(item) for item in (record.chunk_ids_json or []) if item)
     if not chunk_ids:
         return set()
-    rows = (
-        await db.execute(select(KnowledgeChunk.kb_id).where(KnowledgeChunk.chunk_id.in_(chunk_ids)))
-    ).all()
+    rows = (await db.execute(select(KnowledgeChunk.kb_id).where(KnowledgeChunk.chunk_id.in_(chunk_ids)))).all()
     return {str(row.kb_id) for row in rows if row.kb_id}
 
 
@@ -51,21 +49,36 @@ async def main() -> None:
         print("evidence_id:", item["evidence_id"], "| schema:", item["schema_version"])
         print("quote.exact:", (q["exact"] or "")[:70], "...")
         print(
-            "chars:", q["start_char"], "-", q["end_char"],
-            "| words:", q["start_word"], "-", q["end_word"],
-            "| prefix/suffix:", bool(q["prefix"]), bool(q["suffix"]),
+            "chars:",
+            q["start_char"],
+            "-",
+            q["end_char"],
+            "| words:",
+            q["start_word"],
+            "-",
+            q["end_word"],
+            "| prefix/suffix:",
+            bool(q["prefix"]),
+            bool(q["suffix"]),
         )
         frag = loc["fragments"][0] if loc["fragments"] else None
         print(
-            "page:", frag and frag["page_number"],
-            "| bbox:", frag and frag["bbox"],
-            "| quality:", loc["quality"],
-            "| locatable:", loc["locatable"],
+            "page:",
+            frag and frag["page_number"],
+            "| bbox:",
+            frag and frag["bbox"],
+            "| quality:",
+            loc["quality"],
+            "| locatable:",
+            loc["locatable"],
         )
         print(
-            "source: parse_rev =", (src["parse_revision_id"] or "")[:14],
-            "| sha:", (src["source_sha256"] or "")[:12],
-            "| index_rev:", (src["index_revision_id"] or "")[:14],
+            "source: parse_rev =",
+            (src["parse_revision_id"] or "")[:14],
+            "| sha:",
+            (src["source_sha256"] or "")[:12],
+            "| index_rev:",
+            (src["index_revision_id"] or "")[:14],
         )
         print("verification:", v["status"], v["errors"][:2])
     if result["rejected"]:

@@ -53,9 +53,7 @@ def test_image_object_prefix_matches_ingest_layout():
         source_sha256 = "a" * 64
         revision_id = "spr_x"
 
-    assert _image_object_prefix(FakeRevision()) == (
-        f"tenants/7/documents/{'a' * 64}/mineru/spr_x/images"
-    )
+    assert _image_object_prefix(FakeRevision()) == (f"tenants/7/documents/{'a' * 64}/mineru/spr_x/images")
 
 
 # --- reuse materialization --------------------------------------------------
@@ -124,10 +122,7 @@ async def test_materialize_rejects_cross_tenant_reuse():
 def test_rewrite_kbasset_uri_targets_only_source_identity():
     source_file, source_rev = "file_src", "rev_src"
     target_file, target_rev = "file_tgt", "rev_tgt"
-    markdown = (
-        f"![a](kbasset://{source_file}/{source_rev}/1.jpg)\n"
-        f"![b](kbasset://other_file/rev_other/2.png)\n"
-    )
+    markdown = f"![a](kbasset://{source_file}/{source_rev}/1.jpg)\n![b](kbasset://other_file/rev_other/2.png)\n"
     rewritten = rewrite_kbasset_uri(markdown, source_file, source_rev, target_file, target_rev)
     assert f"kbasset://{target_file}/{target_rev}/1.jpg" in rewritten
     # 不匹配的 URI 保持原样
@@ -215,9 +210,7 @@ async def test_resolve_asset_reconstructs_private_key_and_rejects_mime_mismatch(
     monkeypatch.setattr(
         asset_service,
         "_stat_object",
-        lambda _bucket, _key: _async_value(
-            SimpleNamespace(etag="asset-etag", size=42, content_type="image/jpeg")
-        ),
+        lambda _bucket, _key: _async_value(SimpleNamespace(etag="asset-etag", size=42, content_type="image/jpeg")),
     )
 
     resolved = await resolve_asset(
@@ -228,17 +221,13 @@ async def test_resolve_asset_reconstructs_private_key_and_rejects_mime_mismatch(
         user=SimpleNamespace(role="user"),
     )
 
-    assert resolved["object_key"] == (
-        f"tenants/7/documents/{'a' * 64}/mineru/spr_2/images/figure.jpg"
-    )
+    assert resolved["object_key"] == (f"tenants/7/documents/{'a' * 64}/mineru/spr_2/images/figure.jpg")
     assert resolved["media_type"] == "image/jpeg"
 
     monkeypatch.setattr(
         asset_service,
         "_stat_object",
-        lambda _bucket, _key: _async_value(
-            SimpleNamespace(etag="asset-etag", size=42, content_type="text/html")
-        ),
+        lambda _bucket, _key: _async_value(SimpleNamespace(etag="asset-etag", size=42, content_type="text/html")),
     )
     with pytest.raises(KnowledgeAssetError):
         await resolve_asset(

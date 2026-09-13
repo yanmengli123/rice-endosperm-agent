@@ -251,9 +251,7 @@ def test_bifc_page15_regression_with_ligature_truncated_quote():
         "tobacco leaf cells. The mixture of modified pUC-SPYNE and pUC-SPYCE vector was used as "
         "a negative control."
     )
-    method_template_page9 = (
-        "The fluorescence was observed using a FV1000 MP two-photon laser scanning microscope."
-    )
+    method_template_page9 = "The fluorescence was observed using a FV1000 MP two-photon laser scanning microscope."
     citations = [
         _bifc_citation("E1", 15, bifc_page15),
         _bifc_citation("E2", 9, method_template_page9),
@@ -263,9 +261,7 @@ def test_bifc_page15_regression_with_ligature_truncated_quote():
         "Two pairs of constructs, OsMYB73-VN173 and OsNF-YB1-VC155, were transformed into "
         "tobacco leaf cells. The mixture of modi"
     )
-    resolution = resolve_quote_locator_from_citations(
-        quote_text=truncated_quote, citations=citations
-    )
+    resolution = resolve_quote_locator_from_citations(quote_text=truncated_quote, citations=citations)
     assert resolution["status"] == LOCATOR_STATUS_VERIFIED
     assert resolution["page"] == 15
     assert resolution["citation_ref"] == "E1"

@@ -57,11 +57,7 @@ CITATIONS = [_citation("E1", 3, SANT_QUOTE), _citation("E2", 6, GEL_QUOTE)]
 
 def test_golden_no_heading_gluing_from_reverse_binding():
     """事故原样：句末换行 + 下一行标题。芯片必须在换行前，标题行首完整保留。"""
-    text = (
-        "OsMYB73 含两个 SANT 结构域，位于 115-164 与 167-215 氨基酸。\n"
-        "## 文献与位置\n"
-        "- 文献：Liu 等 (2024)"
-    )
+    text = "OsMYB73 含两个 SANT 结构域，位于 115-164 与 167-215 氨基酸。\n## 文献与位置\n- 文献：Liu 等 (2024)"
     guarded, validation = apply_citation_channel(text, CITATIONS)
     lines = guarded.split("\n")
     # 标题行完整且在独立行（事故中它被粘成 〔证据E6…〕## 文献与位置）
@@ -84,12 +80,7 @@ def test_golden_paragraph_gap_preserved():
 
 
 def test_golden_table_rows_never_get_inline_chips():
-    text = (
-        "| 结构域序号 | 氨基酸位置区间 |\n"
-        "| --- | --- |\n"
-        "| SANT 结构域 1 | 115-164 |\n"
-        "| SANT 结构域 2 | 167-215 |\n"
-    )
+    text = "| 结构域序号 | 氨基酸位置区间 |\n| --- | --- |\n| SANT 结构域 1 | 115-164 |\n| SANT 结构域 2 | 167-215 |\n"
     guarded, validation = apply_citation_channel(text, CITATIONS)
     table_lines = [line for line in guarded.split("\n") if line.strip().startswith("|")]
     assert len(table_lines) == 4  # 表格行数不变
@@ -120,10 +111,7 @@ def test_golden_heading_lines_never_bound():
 
 
 def test_golden_citation_omitted_never_reaches_display():
-    text = (
-        f"这是正文描述 {HISTORY_CITATION_PLACEHOLDER}，继续叙述。\n"
-        f"另一句也带 {HISTORY_CITATION_PLACEHOLDER}。"
-    )
+    text = f"这是正文描述 {HISTORY_CITATION_PLACEHOLDER}，继续叙述。\n另一句也带 {HISTORY_CITATION_PLACEHOLDER}。"
     guarded, validation = apply_citation_channel(text, CITATIONS)
     assert HISTORY_CITATION_PLACEHOLDER not in guarded
     assert validation["display_placeholders_stripped"] == 2
@@ -131,8 +119,7 @@ def test_golden_citation_omitted_never_reaches_display():
 
 def test_golden_marker_spam_collapsed_to_end_notice():
     text = (
-        f"句子一 {NARRATIVE_LOCATOR_MARKER}。句子二 {NARRATIVE_LOCATOR_MARKER}。\n"
-        f"句子三 {NARRATIVE_LOCATOR_MARKER}。"
+        f"句子一 {NARRATIVE_LOCATOR_MARKER}。句子二 {NARRATIVE_LOCATOR_MARKER}。\n句子三 {NARRATIVE_LOCATOR_MARKER}。"
     )
     guarded, validation = apply_citation_channel(text, CITATIONS)
     assert guarded.count(NARRATIVE_LOCATOR_MARKER) == 0  # 行内零残留
@@ -142,10 +129,7 @@ def test_golden_marker_spam_collapsed_to_end_notice():
 
 
 def test_golden_model_forged_references_header_removed_and_rewritten():
-    text = (
-        "OsMYB73 含两个 SANT 结构域，位于 115-164 aa。\n\n"
-        "【证据引用】（模型仿写）\n- 模型编造的引用行"
-    )
+    text = "OsMYB73 含两个 SANT 结构域，位于 115-164 aa。\n\n【证据引用】（模型仿写）\n- 模型编造的引用行"
     guarded, _ = apply_citation_channel(text, CITATIONS)
     assert "模型仿写" not in guarded  # 仿写区块头被剥除
     assert "【证据引用】（后端渲染，页码来自证据锚点）" in guarded  # 后端重渲染

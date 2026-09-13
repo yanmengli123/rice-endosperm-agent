@@ -16,6 +16,7 @@ from yuxi.knowledge.graphs.milvus_graph_service import (
     MilvusGraphService,
 )
 
+
 @pytest.fixture(autouse=True)
 def _legacy_kb_contract(monkeypatch):
     """_get_milvus_kb 的源契约门禁：单测默认 legacy_generic（等价旧行为）。
@@ -324,9 +325,7 @@ def _graph_build_service(chunk_repo, graph_vector_store):
         graph_repo=SimpleNamespace(upsert_chunk_graph=AsyncMock()),
         graph_vector_store=graph_vector_store,
     )
-    service._get_chunk_extraction_result = AsyncMock(
-        return_value={"entities": [], "relations": [], "metadata": {}}
-    )
+    service._get_chunk_extraction_result = AsyncMock(return_value={"entities": [], "relations": [], "metadata": {}})
     service.write_chunk_graph = MagicMock(
         side_effect=lambda kb_id, chunk, extraction: ([{"entity_id": chunk.chunk_id}], [])
     )
@@ -654,8 +653,14 @@ async def test_contract_gate_blocks_writes_but_not_status(monkeypatch):
     from types import SimpleNamespace
 
     service = MilvusGraphService(
-        kb_repo=SimpleNamespace(get_by_kb_id=AsyncMock(return_value=SimpleNamespace(
-            kb_type="milvus", additional_params={"graph_build_config": {"locked": True, "extractor_type": "llm"}})))
+        kb_repo=SimpleNamespace(
+            get_by_kb_id=AsyncMock(
+                return_value=SimpleNamespace(
+                    kb_type="milvus",
+                    additional_params={"graph_build_config": {"locked": True, "extractor_type": "llm"}},
+                )
+            )
+        )
     )
 
     class _StrictSpec(SimpleNamespace):
@@ -668,6 +673,7 @@ async def test_contract_gate_blocks_writes_but_not_status(monkeypatch):
         return _StrictSpec()
 
     import yuxi.knowledge.source_contracts as _contracts
+
     monkeypatch.setattr(_contracts, "load_kb_contract", _strict_contract)
 
     # 写入口：configure 被契约拒绝（在抽取器校验之前）

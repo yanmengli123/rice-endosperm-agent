@@ -97,9 +97,7 @@ def _patch_pipeline(
     monkeypatch.setattr(scope_gateway_module, "query_knowledge_scope_gateway", fake_gateway)
     monkeypatch.setattr(quote_locator, "resolve_quote_locator", fake_direct_locator)
     monkeypatch.setattr(retrieval_orchestrator, "_persist_audit", fake_audit)
-    monkeypatch.setattr(
-        retrieval_orchestrator, "_emit_knowledge_trace", lambda *_args, **_kwargs: None
-    )
+    monkeypatch.setattr(retrieval_orchestrator, "_emit_knowledge_trace", lambda *_args, **_kwargs: None)
     from yuxi.knowledge.rendering import citation_channel
 
     monkeypatch.setattr(citation_channel, "build_citations_for_contract", fake_citations)
@@ -158,9 +156,7 @@ async def test_full_scope_duplicate_cannot_be_hidden_by_top_k(monkeypatch: pytes
     """全范围存在重复物理位置时，Top-K 只返回一个候选也不能宣称唯一页码。"""
     _patch_pipeline(
         monkeypatch,
-        citations=[
-            _citation("E1", 3, "The structure of OsMYB73 protein was also predicted SANT domains.")
-        ],
+        citations=[_citation("E1", 3, "The structure of OsMYB73 protein was also predicted SANT domains.")],
         direct_locator={
             "status": "MULTIPLE_MATCHES",
             "locator_version": "test",
@@ -234,8 +230,7 @@ async def test_compound_locator_does_not_short_circuit(monkeypatch: pytest.Monke
     contract = await retrieval_orchestrator.prepare_knowledge_context(
         object(),
         question=(
-            "Figure S8 Rice grain starch physicochemical characteristics comparison "
-            "这句话在哪一页，具体是什么意思？"
+            "Figure S8 Rice grain starch physicochemical characteristics comparison 这句话在哪一页，具体是什么意思？"
         ),
         scope_snapshot=_SCOPE,
         run_id="run-3",
@@ -363,9 +358,7 @@ async def test_image_attachment_flow_resolves_and_freezes_figure_binding(monkeyp
     monkeypatch.setattr(provider_module, "get_vision_provider", lambda: _StubProvider())
     monkeypatch.setattr(figure_module, "resolve_figure_image_locator", fake_image_locator)
 
-    figure_citation = _citation(
-        "E1", 4, "Figure 1. Expression patterns of OsMYB73 in rice seeds measured by qRT-PCR."
-    )
+    figure_citation = _citation("E1", 4, "Figure 1. Expression patterns of OsMYB73 in rice seeds measured by qRT-PCR.")
     figure_citation.update(
         {
             "evidence_id": "ev_fig1_page4",

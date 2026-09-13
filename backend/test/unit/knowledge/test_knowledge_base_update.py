@@ -234,16 +234,18 @@ def test_get_database_info_prefers_metadata_stats(tmp_path):
 async def test_refresh_database_stats_persists_metadata(tmp_path, monkeypatch):
     kb = make_kb(tmp_path)
     kb.databases_meta["db"]["metadata"] = {}
-    records = make_file_records({
-        "file-1": {"kb_id": "db", "filename": "alpha.md", "chunk_count": 2, "token_count": 10},
-        "folder-1": {
-            "kb_id": "db",
-            "filename": "folder",
-            "is_folder": True,
-            "chunk_count": 99,
-            "token_count": 99,
-        },
-    })
+    records = make_file_records(
+        {
+            "file-1": {"kb_id": "db", "filename": "alpha.md", "chunk_count": 2, "token_count": 10},
+            "folder-1": {
+                "kb_id": "db",
+                "filename": "folder",
+                "is_folder": True,
+                "chunk_count": 99,
+                "token_count": 99,
+            },
+        }
+    )
     file_repo = FakeFileRepository(records)
     persisted_kbs = []
 
@@ -268,17 +270,19 @@ async def test_refresh_database_stats_persists_metadata(tmp_path, monkeypatch):
 async def test_repair_missing_file_stats_updates_files_and_database_metadata(tmp_path, monkeypatch):
     kb = make_kb(tmp_path)
     kb.databases_meta["db"]["metadata"] = {}
-    records = make_file_records({
-        "file-1": {"kb_id": "db", "filename": "alpha.md", "chunk_count": 0, "token_count": 0},
-        "file-2": {"kb_id": "db", "filename": "beta.md", "chunk_count": 1, "token_count": 7},
-        "folder-1": {
-            "kb_id": "db",
-            "filename": "folder",
-            "is_folder": True,
-            "chunk_count": 99,
-            "token_count": 99,
-        },
-    })
+    records = make_file_records(
+        {
+            "file-1": {"kb_id": "db", "filename": "alpha.md", "chunk_count": 0, "token_count": 0},
+            "file-2": {"kb_id": "db", "filename": "beta.md", "chunk_count": 1, "token_count": 7},
+            "folder-1": {
+                "kb_id": "db",
+                "filename": "folder",
+                "is_folder": True,
+                "chunk_count": 99,
+                "token_count": 99,
+            },
+        }
+    )
     file_repo = FakeFileRepository(records)
     persisted_kbs = []
 
@@ -326,29 +330,31 @@ async def test_repair_missing_file_stats_updates_files_and_database_metadata(tmp
 async def test_repair_missing_file_stats_skips_unindexed_files(tmp_path, monkeypatch):
     kb = make_kb(tmp_path)
     kb.databases_meta["db"]["metadata"] = {}
-    records = make_file_records({
-        "file-indexed": {
-            "kb_id": "db",
-            "filename": "alpha.md",
-            "status": "indexed",
-            "chunk_count": 0,
-            "token_count": 0,
-        },
-        "file-uploaded": {
-            "kb_id": "db",
-            "filename": "beta.md",
-            "status": "uploaded",
-            "chunk_count": 9,
-            "token_count": 90,
-        },
-        "file-parsed": {
-            "kb_id": "db",
-            "filename": "gamma.md",
-            "status": "parsed",
-            "chunk_count": 3,
-            "token_count": 30,
-        },
-    })
+    records = make_file_records(
+        {
+            "file-indexed": {
+                "kb_id": "db",
+                "filename": "alpha.md",
+                "status": "indexed",
+                "chunk_count": 0,
+                "token_count": 0,
+            },
+            "file-uploaded": {
+                "kb_id": "db",
+                "filename": "beta.md",
+                "status": "uploaded",
+                "chunk_count": 9,
+                "token_count": 90,
+            },
+            "file-parsed": {
+                "kb_id": "db",
+                "filename": "gamma.md",
+                "status": "parsed",
+                "chunk_count": 3,
+                "token_count": 30,
+            },
+        }
+    )
     file_repo = FakeFileRepository(records)
 
     class FakeChunkRepo:

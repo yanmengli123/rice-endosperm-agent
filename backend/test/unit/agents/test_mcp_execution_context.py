@@ -70,9 +70,7 @@ def test_reset_none_token_is_noop():
 
 
 def test_context_keeps_thread_scope_for_workspace_mcp_runtime():
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=3, uid="u-3", thread_id="thread-3", run_id="run-3")
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=3, uid="u-3", thread_id="thread-3", run_id="run-3"))
     try:
         current = get_mcp_execution_context()
         assert current is not None
@@ -86,6 +84,7 @@ async def test_worker_context_is_inherited_by_each_stream_consumer_task():
         McpExecutionContext(tenant_id=5, uid="u-worker", thread_id="thread-5", run_id="run-5")
     )
     try:
+
         async def _read_context():
             return get_mcp_execution_context()
 

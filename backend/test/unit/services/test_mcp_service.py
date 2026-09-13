@@ -194,9 +194,7 @@ async def test_get_enabled_mcp_tools_loads_latest_config_from_db(monkeypatch):
     assert captured == [
         {
             "server_name": "demo",
-            "additional_servers": {
-                "demo": {"transport": "stdio", "command": "demo", "disabled_tools": ["tool_b"]}
-            },
+            "additional_servers": {"demo": {"transport": "stdio", "command": "demo", "disabled_tools": ["tool_b"]}},
             "disabled_tools": ["tool_b"],
         }
     ]
@@ -204,9 +202,7 @@ async def test_get_enabled_mcp_tools_loads_latest_config_from_db(monkeypatch):
 
 def test_bioinfomcp_runtime_receives_only_current_execution_scope(monkeypatch):
     monkeypatch.setenv("YUXI_BIOINFOMCP_FASTQC_IMAGE", "registry.example/fastqc@sha256:123")
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=9, uid="u-9", thread_id="thread-9", run_id="run-9")
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=9, uid="u-9", thread_id="thread-9", run_id="run-9"))
     try:
         config = mcp_service.build_runtime_config(
             "bioinfomcp-fastqc",
@@ -226,9 +222,7 @@ def test_bioinfomcp_runtime_receives_only_current_execution_scope(monkeypatch):
 
 def test_generic_bioinfomcp_runtime_does_not_receive_fastqc_image_override(monkeypatch):
     monkeypatch.setenv("YUXI_BIOINFOMCP_FASTQC_IMAGE", "registry.example/private-fastqc")
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=9, uid="u-9", thread_id="thread-9")
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=9, uid="u-9", thread_id="thread-9"))
     try:
         config = mcp_service.build_runtime_config(
             "bioinfomcp-samtools",
@@ -247,9 +241,7 @@ def test_generic_bioinfomcp_runtime_does_not_receive_fastqc_image_override(monke
 
 
 def test_unrelated_mcp_does_not_receive_execution_scope():
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=9, uid="u-private", thread_id="thread-private")
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=9, uid="u-private", thread_id="thread-private"))
     try:
         config = mcp_service.build_runtime_config(
             "unrelated",

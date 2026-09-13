@@ -113,9 +113,7 @@ def test_text_supported_interpretation_requires_main_text_binding():
         locator=_LOCATOR,
         observation=_OBSERVATION,
     )
-    interpretation = [
-        claim for claim in result["claims"] if claim["claim_type"] == CLAIM_TEXT_SUPPORTED_INTERPRETATION
-    ]
+    interpretation = [claim for claim in result["claims"] if claim["claim_type"] == CLAIM_TEXT_SUPPORTED_INTERPRETATION]
     assert interpretation and interpretation[0]["ref"] == "E2"
     assert interpretation[0]["supported"] is True
 

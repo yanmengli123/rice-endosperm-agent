@@ -38,7 +38,7 @@ class _FakeDB:
         if "WHERE" in text and "model_user_credentials" in text:
             # upsert/get 的查询：按唯一键匹配（简化：遍历比对 uid+provider）
             for cred in self.rows.values():
-                if "status = 'active'" in text and cred.status != 'active':
+                if "status = 'active'" in text and cred.status != "active":
                     continue
                 if f"'{cred.uid}'" in text and f"'{cred.provider_id}'" in text:
                     return _Result(cred)
@@ -73,9 +73,7 @@ class TestUpsertAndOpen:
         assert created.masked_hint != "sk-user-secret-1"
         assert "sk-user-secret-1" not in created.api_key_ciphertext
 
-        opened = await open_user_credential_key(
-            db, "alice", created.id, expected_provider_id="deepseek"
-        )
+        opened = await open_user_credential_key(db, "alice", created.id, expected_provider_id="deepseek")
         assert opened == "sk-user-secret-1"
 
     @pytest.mark.asyncio
@@ -89,24 +87,16 @@ class TestUpsertAndOpen:
         assert second.version == first.version + 1
         assert first.status == "superseded"
         assert first.superseded_by_id == second.id
-        assert await open_user_credential_key(
-            db, "alice", second.id, expected_provider_id="deepseek"
-        ) == "sk-two"
+        assert await open_user_credential_key(db, "alice", second.id, expected_provider_id="deepseek") == "sk-two"
         # 冻结在旧版本的引用按 fail-closed 处理（不再可用）
-        assert await open_user_credential_key(
-            db, "alice", first.id, expected_provider_id="deepseek"
-        ) is None
+        assert await open_user_credential_key(db, "alice", first.id, expected_provider_id="deepseek") is None
 
     @pytest.mark.asyncio
     async def test_owner_scoped_open(self):
         db = _FakeDB()
         created = await upsert_user_credential(db, "alice", "deepseek", "sk-alice")
-        assert await open_user_credential_key(
-            db, "mallory", created.id, expected_provider_id="deepseek"
-        ) is None
-        assert await open_user_credential_key(
-            db, "alice", created.id, expected_provider_id="siliconflow-cn"
-        ) is None
+        assert await open_user_credential_key(db, "mallory", created.id, expected_provider_id="deepseek") is None
+        assert await open_user_credential_key(db, "alice", created.id, expected_provider_id="siliconflow-cn") is None
 
     @pytest.mark.asyncio
     async def test_active_lookup_filters_revoked(self):
@@ -174,14 +164,13 @@ class TestSsrfGuard:
             validate_public_base_url(bad)
 
     def test_loopback_allowed_flag_for_local_dev(self):
-        assert validate_public_base_url(
-            "http://127.0.0.1:8000", allow_loopback=True
-        ).startswith("http://127.0.0.1")
+        assert validate_public_base_url("http://127.0.0.1:8000", allow_loopback=True).startswith("http://127.0.0.1")
 
     def test_accepts_unambiguous_markdown_url_from_rich_text_copy(self):
-        assert validate_public_base_url(
-            "[https://free.example.org](https://free.example.org)"
-        ) == "https://free.example.org"
+        assert (
+            validate_public_base_url("[https://free.example.org](https://free.example.org)")
+            == "https://free.example.org"
+        )
 
     def test_rejects_query_parameters_that_could_leak_credentials(self):
         with pytest.raises(ValueError, match="查询参数"):
@@ -349,9 +338,7 @@ class TestLockedModelPolicy:
         original = ars.model_cache
         ars.model_cache = FakeCache()
         try:
-            resolved = resolve_agent_run_model_spec(
-                "minimax:minimax-m2", agent_item, backend, user_model_spec=None
-            )
+            resolved = resolve_agent_run_model_spec("minimax:minimax-m2", agent_item, backend, user_model_spec=None)
         finally:
             ars.model_cache = original
         assert resolved == "minimax:minimax-m2"

@@ -62,9 +62,7 @@ def test_freeze_invariant_fails_closed_when_evidence_not_frozen():
     assert contract["locator_resolution"]["status"] == "NOT_FOUND"
     assert "page" not in contract["locator_resolution"]
     # 原始结论只保留在审计字段，永不进入用户可见输出
-    assert contract["locator_resolution"]["_authority_gate_audit"]["violations"] == [
-        "VERIFIED_EVIDENCE_NOT_FROZEN"
-    ]
+    assert contract["locator_resolution"]["_authority_gate_audit"]["violations"] == ["VERIFIED_EVIDENCE_NOT_FROZEN"]
     assert contract["locator_resolution"]["_authority_gate_audit"]["original_status"] == "VERIFIED"
 
 

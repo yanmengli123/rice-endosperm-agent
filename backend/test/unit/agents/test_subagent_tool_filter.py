@@ -38,10 +38,12 @@ def test_subagent_tool_filter_middleware_filters_before_handler():
         return "ok"
 
     result = middleware.wrap_model_call(
-        _Request([
-            SimpleNamespace(name="present_artifacts"),
-            SimpleNamespace(name="allowed_tool"),
-        ]),
+        _Request(
+            [
+                SimpleNamespace(name="present_artifacts"),
+                SimpleNamespace(name="allowed_tool"),
+            ]
+        ),
         handler,
     )
 
@@ -59,10 +61,12 @@ async def test_subagent_tool_filter_middleware_filters_async_before_handler():
         return "ok"
 
     result = await middleware.awrap_model_call(
-        _Request([
-            {"name": "ask_user_question"},
-            SimpleNamespace(name="allowed_tool"),
-        ]),
+        _Request(
+            [
+                {"name": "ask_user_question"},
+                SimpleNamespace(name="allowed_tool"),
+            ]
+        ),
         handler,
     )
 

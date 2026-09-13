@@ -1,6 +1,5 @@
 """复合意图与引用完备性单测：意图分解、locator 引用并入、反向绑定、定位行保障、未依据明示。"""
 
-
 from yuxi.knowledge.evidence.quote_locator import (
     LOCATOR_KIND_QUOTE,
     SUB_INTENT_EXPLANATION,
@@ -36,8 +35,9 @@ def _citation(ref: str, page: int, quote: str, *, zone: str = "MAIN_TEXT") -> di
         "locatable": True,
         "toc_line": False,
         "secondary_of": None,
-        "_quote_norm": __import__("yuxi.knowledge.rendering.claim_evidence_resolver", fromlist=["normalize_for_match"])
-        .normalize_for_match(quote),
+        "_quote_norm": __import__(
+            "yuxi.knowledge.rendering.claim_evidence_resolver", fromlist=["normalize_for_match"]
+        ).normalize_for_match(quote),
     }
 
 
@@ -57,8 +57,7 @@ def test_decompose_compound_locator_plus_explanation():
 
 def test_decompose_pure_locator_stays_single_intent():
     result = decompose_question_intents(
-        "The structure of OsMYB73 protein was also predicted and the results revealed "
-        "这句原文出现在论文的正文第几页？"
+        "The structure of OsMYB73 protein was also predicted and the results revealed 这句原文出现在论文的正文第几页？"
     )
     assert result["sub_intents"] == [SUB_INTENT_LOCATOR]
     assert result["compound"] is False
@@ -188,8 +187,7 @@ def test_bifc_wrong_model_page_is_replaced_by_frozen_page15():
         )
     ]
     guarded, validation = apply_citation_channel(
-        "已可靠定位到原文：〔引文定位｜正文·第9页｜paper.pdf〕\n\n"
-        "这是一段 BiFC 实验方法描述。",
+        "已可靠定位到原文：〔引文定位｜正文·第9页｜paper.pdf〕\n\n这是一段 BiFC 实验方法描述。",
         citations,
         locator=locator,
     )
@@ -202,9 +200,7 @@ def test_bifc_wrong_model_page_is_replaced_by_frozen_page15():
 
 def test_apply_appends_uncovered_notice():
     citations = [_citation("E1", 3, SANT_QUOTE)]
-    guarded, validation = apply_citation_channel(
-        "OsMYB73 定位于细胞核并具有激酶活性 9999 位点。", citations
-    )
+    guarded, validation = apply_citation_channel("OsMYB73 定位于细胞核并具有激酶活性 9999 位点。", citations)
     assert "未在原文中定位到对应依据" in guarded
     assert validation["uncovered_claims"]
 

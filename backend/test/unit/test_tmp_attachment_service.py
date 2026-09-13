@@ -199,9 +199,9 @@ async def test_confirm_tmp_thread_attachments_materializes_original_and_parsed_f
     assert original_name.endswith("_demo.pdf")
     assert markdown_name.endswith("_demo.md")
     assert (tmp_path / "threads" / "thread-1" / "user-data" / "uploads" / original_name).read_bytes() == b"pdf-bytes"
-    assert (
-        tmp_path / "threads" / "thread-1" / "user-data" / "uploads" / "attachments" / markdown_name
-    ).read_text(encoding="utf-8") == "# parsed"
+    assert (tmp_path / "threads" / "thread-1" / "user-data" / "uploads" / "attachments" / markdown_name).read_text(
+        encoding="utf-8"
+    ) == "# parsed"
     assert Path(fake_repo.attachments[0]["original_path"]).name == original_name
 
 

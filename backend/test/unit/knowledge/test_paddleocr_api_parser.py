@@ -92,9 +92,7 @@ def test_paddleocr_pp_ocrv6_submits_model_specific_payload(tmp_path: Path, monke
             return FakeResponse(200, {"data": {"state": "done", "resultUrl": {"jsonUrl": "https://result.test/ocr"}}})
         row = {
             "result": {
-                "ocrResults": [
-                    {"prunedResult": {"rec_texts": ["PaddleOCR API Test", "", "Invoice total: 123.45"]}}
-                ]
+                "ocrResults": [{"prunedResult": {"rec_texts": ["PaddleOCR API Test", "", "Invoice total: 123.45"]}}]
             }
         }
         return FakeResponse(200, text=json.dumps(row))

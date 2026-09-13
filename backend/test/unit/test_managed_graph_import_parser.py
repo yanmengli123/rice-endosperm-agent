@@ -127,10 +127,7 @@ def test_multiple_quotes_for_one_literature_are_merged_without_losing_claim_elig
             "gene-1,OsPPDK,RICE_GENE,Os01g01010,,,,",
             "process-1,starch synthesis,PROCESS,,,,,",
         ],
-        [
-            "gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,12345671,10.1007/a,"
-            "quote one||quote two||quote three"
-        ],
+        ["gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,1,1,12345671,10.1007/a,quote one||quote two||quote three"],
     )
 
     assert result["valid"] is True
@@ -148,10 +145,7 @@ def test_ambiguous_multi_literature_evidence_is_preserved_as_nonclaimable_row_bu
             "gene-1,OsPPDK,RICE_GENE,Os01g01010,,,,",
             "process-1,starch synthesis,PROCESS,,,,,",
         ],
-        [
-            "gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,2,2,12345671,"
-            "10.1007/a|10.1007/b,quote one||quote two"
-        ],
+        ["gene-1,process-1,REQUIRED_FOR,POSITIVE,DIRECT,E1,2,2,12345671,10.1007/a|10.1007/b,quote one||quote two"],
     )
 
     assert result["valid"] is True

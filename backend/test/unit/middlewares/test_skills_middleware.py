@@ -256,9 +256,7 @@ async def test_resolve_configured_runtime_tools_loads_mcps_concurrently_in_confi
     monkeypatch.setattr(toolkit_service, "get_tool_instances_by_category", lambda category: [])
     monkeypatch.setattr("yuxi.agents.middlewares.skills.resolve_skill_gated_tools", lambda context: [])
 
-    tools = await resolve_configured_runtime_tools(
-        SimpleNamespace(tools=None, mcps=["first", "second", "first"])
-    )
+    tools = await resolve_configured_runtime_tools(SimpleNamespace(tools=None, mcps=["first", "second", "first"]))
 
     assert max_active == 2
     assert [tool.name for tool in tools] == ["tool-first", "tool-second"]

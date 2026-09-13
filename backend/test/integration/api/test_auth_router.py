@@ -161,9 +161,7 @@ async def test_superadmin_create_user_rejects_unknown_department_as_json(test_cl
     assert username not in {user["username"] for user in list_response.json()}
 
 
-async def test_superadmin_created_user_receives_listed_key_and_can_use_atomic_desktop_login(
-    test_client, admin_headers
-):
+async def test_superadmin_created_user_receives_listed_key_and_can_use_atomic_desktop_login(test_client, admin_headers):
     await _require_superadmin(test_client, admin_headers)
     suffix = uuid.uuid4().hex[:8]
     username = f"desktop_{suffix}"
@@ -184,9 +182,7 @@ async def test_superadmin_created_user_receives_listed_key_and_can_use_atomic_de
 
         keys_response = await test_client.get("/api/user/apikey/?limit=500", headers=admin_headers)
         assert keys_response.status_code == 200, keys_response.text
-        created_key = next(
-            key for key in keys_response.json()["api_keys"] if key["user_id"] == created_user["id"]
-        )
+        created_key = next(key for key in keys_response.json()["api_keys"] if key["user_id"] == created_user["id"])
         assert created_key["owner_uid"] == created_user["uid"]
         assert created_key["owner_username"] == username
         assert secret.startswith(created_key["key_prefix"])

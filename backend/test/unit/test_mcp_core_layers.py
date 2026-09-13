@@ -126,9 +126,7 @@ class TestPolicy:
         policy_mod.assert_transport_allowed("stdio", source_type="builtin", command="anything")
 
         monkeypatch.setenv("MY_TOKEN", "tok-123")
-        resolved, missing = policy_mod.expand_env_refs(
-            {"A": "${MY_TOKEN}", "B": "${NOT_SET_VAR_XYZ}", "C": "plain"}
-        )
+        resolved, missing = policy_mod.expand_env_refs({"A": "${MY_TOKEN}", "B": "${NOT_SET_VAR_XYZ}", "C": "plain"})
         assert resolved == {"A": "tok-123", "C": "plain"}
         assert missing == ["B=${NOT_SET_VAR_XYZ}"]
 
@@ -301,8 +299,7 @@ class TestRegistryImporters:
             "name": "io.github.acme/toolkit",
             "version": "2.0.1",
             "packages": [
-                {"registryType": "pypi", "identifier": "acme-mcp", "version": "2.0.1",
-                 "transport": {"type": "stdio"}}
+                {"registryType": "pypi", "identifier": "acme-mcp", "version": "2.0.1", "transport": {"type": "stdio"}}
             ],
             "remotes": [{"type": "streamable-http", "url": "https://acme.io/mcp"}],
         }

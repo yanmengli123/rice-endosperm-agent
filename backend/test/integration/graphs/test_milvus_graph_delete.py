@@ -35,14 +35,10 @@ def test_delete_file_graph_preserves_shared_and_unrelated_entities():
 
         with connection.driver.session() as session:
             remaining_entities = set(
-                session.run(
-                    f"MATCH (e:Entity:MilvusKB:`{label}`) RETURN e.name AS name"
-                ).value("name")
+                session.run(f"MATCH (e:Entity:MilvusKB:`{label}`) RETURN e.name AS name").value("name")
             )
             remaining_files = set(
-                session.run(
-                    f"MATCH (c:Chunk:MilvusKB:`{label}`) RETURN c.file_id AS file_id"
-                ).value("file_id")
+                session.run(f"MATCH (c:Chunk:MilvusKB:`{label}`) RETURN c.file_id AS file_id").value("file_id")
             )
 
         assert remaining_entities == {"shared", "unrelated_orphan"}
@@ -52,9 +48,7 @@ def test_delete_file_graph_preserves_shared_and_unrelated_entities():
 
         with connection.driver.session() as session:
             remaining_entities = set(
-                session.run(
-                    f"MATCH (e:Entity:MilvusKB:`{label}`) RETURN e.name AS name"
-                ).value("name")
+                session.run(f"MATCH (e:Entity:MilvusKB:`{label}`) RETURN e.name AS name").value("name")
             )
 
         assert remaining_entities == {"unrelated_orphan"}

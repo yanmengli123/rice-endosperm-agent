@@ -36,8 +36,16 @@ class _CaptureDB:
 class TestUsageLedgerModel:
     def test_columns_present(self):
         cols = {c.name for c in UsageLedger.__table__.columns}
-        assert {"run_id", "uid", "tenant_id", "model_spec", "input_tokens",
-                "output_tokens", "total_tokens", "estimated"} <= cols
+        assert {
+            "run_id",
+            "uid",
+            "tenant_id",
+            "model_spec",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "estimated",
+        } <= cols
         assert UsageLedger.__table__.columns["tenant_id"].nullable is False
 
     def test_indexes_for_query_dimensions(self):

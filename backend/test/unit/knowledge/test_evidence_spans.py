@@ -30,9 +30,7 @@ def test_splitter_detects_caption_table_row_sentence_and_formula():
         _FakeAnchor("a3", "| OsMYB73 | 115-164 | SANT |"),
     ]
     markdown = (
-        "Figure 2\nExpression profiles of OsMYB73 across endosperm stages.\n"
-        "| Test | WT | mutant |\n"
-        "| 45% | 30% | 55% |"
+        "Figure 2\nExpression profiles of OsMYB73 across endosperm stages.\n| Test | WT | mutant |\n| 45% | 30% | 55% |"
     )
     units = split_evidence_units(anchors=anchors, markdown_body=markdown)
     by_line = {unit.quote: unit for unit in units}
@@ -63,8 +61,7 @@ def test_normalize_numeric_range():
 
 def test_extract_lexical_rows_identifiers_numeric_citation_figure():
     quote = (
-        "OsMYB73 / LOC_Os01g01010 spans 115-164 aa; doi:10.1111/pbi.14558; "
-        "PMID: 35084453; see Figure 2A and Table 1."
+        "OsMYB73 / LOC_Os01g01010 spans 115-164 aa; doi:10.1111/pbi.14558; PMID: 35084453; see Figure 2A and Table 1."
     )
     rows = extract_lexical_rows(owner_type="span", owner_id="es_1", quote=quote)
     types = {row["lex_type"] for row in rows}

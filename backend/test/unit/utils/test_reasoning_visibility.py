@@ -6,8 +6,9 @@ from yuxi.utils.reasoning_visibility import (
 )
 
 
-L = chr(0x3c)  # '<'  -- written via chr() because the harness display eats '<'.
-G = chr(0x3e)  # '>'
+L = chr(0x3C)  # '<'  -- written via chr() because the harness display eats '<'.
+G = chr(0x3E)  # '>'
+
 
 def test_sanitize_visible_text_keeps_normal_answer() -> None:
     assert sanitize_visible_text("你好！我是稻芯智析。") == "你好！我是稻芯智析。"
@@ -65,8 +66,6 @@ def test_stream_buffer_holds_entity_and_escaped_split_tags() -> None:
                 emitted.append(visible_delta)
         assert "secret" not in "".join(emitted), f"reasoning leaked: {emitted}"
         assert "".join(emitted) == expected, f"unexpected emission {emitted!r}, want {expected!r}"
-
-
 
 
 def test_stateless_sanitize_keeps_incomplete_tag_as_visible_text() -> None:

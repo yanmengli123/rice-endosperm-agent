@@ -168,9 +168,7 @@ class TestConversationScoping:
         assert "conversations.thread_id" in captured["stmt"]
 
     def test_select_statement_compiles_with_filter(self):
-        stmt = select(Conversation).where(
-            Conversation.thread_id == "t", Conversation.uid == "u"
-        )
+        stmt = select(Conversation).where(Conversation.thread_id == "t", Conversation.uid == "u")
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": False}))
         assert "uid" in compiled and "thread_id" in compiled
 

@@ -25,23 +25,25 @@ async def main() -> None:
     pg_manager.initialize()
     async with pg_manager.get_async_session_context() as db:
         revision = (
-            await db.execute(
-                select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == revision_id)
-            )
+            await db.execute(select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == revision_id))
         ).scalar_one_or_none()
         if revision is None:
             print(f"revision not found: {revision_id}")
             return
         artifact = (
-            await db.execute(
-                select(KnowledgeParseArtifact)
-                .where(
-                    KnowledgeParseArtifact.revision_id == revision_id,
-                    KnowledgeParseArtifact.kind == "unified_article",
+            (
+                await db.execute(
+                    select(KnowledgeParseArtifact)
+                    .where(
+                        KnowledgeParseArtifact.revision_id == revision_id,
+                        KnowledgeParseArtifact.kind == "unified_article",
+                    )
+                    .order_by(KnowledgeParseArtifact.id.desc())
                 )
-                .order_by(KnowledgeParseArtifact.id.desc())
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if artifact is None:
             print(f"no unified_article artifact for {revision_id}")
             return
@@ -59,7 +61,9 @@ async def main() -> None:
                 await db.execute(
                     select(EvidenceAnchorRecord).where(EvidenceAnchorRecord.parse_revision_id == revision_id)
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         summary = await build_evidence_spans(db, revision=revision, anchors=anchors, markdown_body=body)
         print("span summary:", summary)

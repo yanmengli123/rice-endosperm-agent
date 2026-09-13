@@ -76,9 +76,7 @@ async def test_materialize_attachment_files_keeps_original_file_when_markdown_co
     assert result["status"] == "uploaded"
     assert result["path"] == "/home/gem/user-data/uploads/demo.pdf"
     assert result["original_path"] == "/home/gem/user-data/uploads/demo.pdf"
-    assert (
-        tmp_path / "threads" / "t-1" / "user-data" / "uploads" / "demo.pdf"
-    ).read_bytes() == b"%PDF-test"
+    assert (tmp_path / "threads" / "t-1" / "user-data" / "uploads" / "demo.pdf").read_bytes() == b"%PDF-test"
 
 
 @pytest.mark.asyncio
@@ -116,6 +114,6 @@ async def test_materialize_attachment_files_writes_markdown_copy_when_conversion
     assert result["file_path"] == "/home/gem/user-data/uploads/attachments/demo.md"
     assert result["markdown"] == "hello\nworld"
     assert (tmp_path / "threads" / "t-1" / "user-data" / "uploads" / "demo.txt").read_bytes() == b"hello"
-    assert (
-        tmp_path / "threads" / "t-1" / "user-data" / "uploads" / "attachments" / "demo.md"
-    ).read_text(encoding="utf-8") == "hello\nworld"
+    assert (tmp_path / "threads" / "t-1" / "user-data" / "uploads" / "attachments" / "demo.md").read_text(
+        encoding="utf-8"
+    ) == "hello\nworld"

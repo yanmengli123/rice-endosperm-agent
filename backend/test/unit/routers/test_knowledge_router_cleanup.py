@@ -449,9 +449,7 @@ async def test_direct_index_task_fails_when_any_document_fails(monkeypatch):
 async def test_graph_index_task_snapshots_selected_model_in_payload(monkeypatch):
     captured = {}
 
-    async def fake_ensure_database_supports_documents(
-        kb_id: str, operation: str, command: str | None = None
-    ) -> None:
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
         captured["ensure"] = (kb_id, operation)
 
     async def fake_has_running_graph_build_task(kb_id: str) -> bool:

@@ -13,9 +13,7 @@ def _router_dependencies(router):
 
 def test_graph_and_evaluation_routers_install_knowledge_guard():
     assert knowledge_access.authorize_knowledge_path in _router_dependencies(graph_router.graph)
-    assert knowledge_access.authorize_knowledge_path in _router_dependencies(
-        knowledge_eval_router.evaluation
-    )
+    assert knowledge_access.authorize_knowledge_path in _router_dependencies(knowledge_eval_router.evaluation)
 
 
 @pytest.mark.asyncio

@@ -152,48 +152,62 @@ class TestMediaValidation:
 class TestClassifyLegacyKb:
     def test_pdf_template(self):
         result = classify_legacy_kb(
-            format_template="pdf_literature", pdf_evidence_pipeline=False,
-            has_documents=True, has_llm_extraction=False,
+            format_template="pdf_literature",
+            pdf_evidence_pipeline=False,
+            has_documents=True,
+            has_llm_extraction=False,
         )
         assert result[:2] == ("pdf_evidence", "1.0.0")
 
     def test_explicit_pipeline_flag(self):
         result = classify_legacy_kb(
-            format_template=None, pdf_evidence_pipeline=True,
-            has_documents=True, has_llm_extraction=False,
+            format_template=None,
+            pdf_evidence_pipeline=True,
+            has_documents=True,
+            has_llm_extraction=False,
         )
         assert result[0] == "pdf_evidence"
 
     def test_pure_graph(self):
         result = classify_legacy_kb(
-            format_template="graph_csv", pdf_evidence_pipeline=False,
-            has_documents=False, has_llm_extraction=False,
+            format_template="graph_csv",
+            pdf_evidence_pipeline=False,
+            has_documents=False,
+            has_llm_extraction=False,
         )
         assert result[:2] == ("managed_graph", "1.0.0")
 
     def test_mixed_graph(self):
         result = classify_legacy_kb(
-            format_template="graph_csv", pdf_evidence_pipeline=False,
-            has_documents=True, has_llm_extraction=False,
+            format_template="graph_csv",
+            pdf_evidence_pipeline=False,
+            has_documents=True,
+            has_llm_extraction=False,
         )
         assert result[0] == "legacy_mixed"
         result2 = classify_legacy_kb(
-            format_template="graph_csv", pdf_evidence_pipeline=False,
-            has_documents=False, has_llm_extraction=True,
+            format_template="graph_csv",
+            pdf_evidence_pipeline=False,
+            has_documents=False,
+            has_llm_extraction=True,
         )
         assert result2[0] == "legacy_mixed"
 
     def test_old_csv_template_stays_legacy(self):
         result = classify_legacy_kb(
-            format_template="csv_dataset", pdf_evidence_pipeline=False,
-            has_documents=True, has_llm_extraction=False,
+            format_template="csv_dataset",
+            pdf_evidence_pipeline=False,
+            has_documents=True,
+            has_llm_extraction=False,
         )
         assert result[:2] == ("legacy_generic", "0")
 
     def test_unknown_template(self):
         result = classify_legacy_kb(
-            format_template=None, pdf_evidence_pipeline=False,
-            has_documents=True, has_llm_extraction=False,
+            format_template=None,
+            pdf_evidence_pipeline=False,
+            has_documents=True,
+            has_llm_extraction=False,
         )
         assert result[:2] == ("legacy_generic", "0")
 

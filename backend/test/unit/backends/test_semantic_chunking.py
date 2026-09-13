@@ -6,19 +6,23 @@ import pytest
 from yuxi.knowledge.chunking.ragflow_like.parsers import semantic
 from yuxi.models import select_embedding_model
 
+
 @pytest.fixture
 def embed_fn():
     """使用真实的嵌入函数 (从 SiliconFlow 获取)"""
     model_id = "siliconflow/Qwen/Qwen3-Embedding-0.6B"
     try:
         model = select_embedding_model(model_id)
+
         def encode(sentences):
             if isinstance(sentences, str):
                 sentences = [sentences]
             return model.encode(sentences)
+
         return encode
     except Exception as e:
         pytest.skip(f"无法初始化真实嵌入模型 {model_id}: {e}")
+
 
 @pytest.fixture
 def sample_markdown():
@@ -238,21 +242,19 @@ key-value格式表格
 | **信息提取** | 无实体识别功能 | 集成 NER 模型，自动提取关键实体 | 支持多维度精准检索，为文档打智能标签 |
 
 """
+
+
 def test_semantic_chunking_basic(embed_fn, sample_markdown):
     """测试基本的语义切分逻辑 (使用真实嵌入模型)"""
 
     # 配置切分参数
     parser_config = {
         "chunk_token_num": 1000,  # 针对标准文档调整 token 数
-        "overlapped_percent": 0.1
+        "overlapped_percent": 0.1,
     }
 
     # 执行语义切分
-    chunks = semantic.chunk_markdown(
-        sample_markdown,
-        parser_config=parser_config,
-        embed_fn=embed_fn
-    )
+    chunks = semantic.chunk_markdown(sample_markdown, parser_config=parser_config, embed_fn=embed_fn)
 
     # 1. 基础验证
     assert isinstance(chunks, list)
@@ -297,8 +299,9 @@ def test_semantic_chunking_basic(embed_fn, sample_markdown):
 
     if arch_start_chunks and highlight_start_chunks:
         # 确保起始片段不重合
-        assert not set(arch_start_chunks).intersection(set(highlight_start_chunks)), \
+        assert not set(arch_start_chunks).intersection(set(highlight_start_chunks)), (
             "语义聚类错误：架构设计与核心技术亮点的章节头部被挤在了同一个 chunk 中"
+        )
 
     print(f"\n[测试成功] 文档成功切分为 {len(chunks)} 个片段")
     print(f"识别到的关键技术词汇: {found_keywords}")
@@ -308,6 +311,7 @@ def test_semantic_chunking_basic(embed_fn, sample_markdown):
     for idx, chunk in enumerate(chunks, 1):
         print(f"\n[Chunk {idx}]\n{chunk}")
     print("\n--- 语义切分结果结束 ---")
+
 
 def test_heading_inference():
     """测试标题层级推断工具类"""

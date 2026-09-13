@@ -70,9 +70,7 @@ class FakeEvaluationRepository:
         return self.dataset
 
     async def list_all_dataset_items(self, dataset_id):
-        return sorted(
-            (item for item in self.items if item.dataset_id == dataset_id), key=lambda item: item.item_index
-        )
+        return sorted((item for item in self.items if item.dataset_id == dataset_id), key=lambda item: item.item_index)
 
     async def list_dataset_items(self, dataset_id, offset=0, limit=100, *, status=None, keyword=None):
         items = await self.list_all_dataset_items(dataset_id)
@@ -180,9 +178,7 @@ async def test_add_item_auto_external_id_and_duplicate_query_rejected():
 async def test_update_item_resets_status_only_on_content_change():
     repo = FakeEvaluationRepository(_draft_dataset())
     service = _service(repo)
-    created = await service.add_dataset_item(
-        "ds_1", {"query": "问题A", "gold_answer": "答案A"}, operator="u1"
-    )
+    created = await service.add_dataset_item("ds_1", {"query": "问题A", "gold_answer": "答案A"}, operator="u1")
     await service.review_dataset_items("ds_1", action="approve", operator="u1")
 
     unchanged = await service.update_dataset_item(

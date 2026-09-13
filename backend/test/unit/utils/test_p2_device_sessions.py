@@ -87,9 +87,7 @@ def _scripted_session_db(session_row, token_row, user_row):
 async def test_rotate_issues_new_refresh_and_marks_old_used():
     now = auth_service.utc_now()
     # 生产库 TIMESTAMPTZ 读回为 aware；测试桩同样使用 aware 以匹配真实行为
-    session_row = SimpleNamespace(
-        id=1, family_id=str(uuid4()), uid="alice", status="active", last_refreshed_at=None
-    )
+    session_row = SimpleNamespace(id=1, family_id=str(uuid4()), uid="alice", status="active", last_refreshed_at=None)
     token_row = SimpleNamespace(
         id=9,
         session_id=1,

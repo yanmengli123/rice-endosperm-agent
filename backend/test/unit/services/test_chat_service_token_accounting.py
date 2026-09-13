@@ -29,10 +29,9 @@ def test_token_usage_delta_handles_repeated_resume_loops_without_rebilling_paren
 
     assert _token_usage_delta(checkpoints[1], checkpoints[0]) == 40
     assert _token_usage_delta(checkpoints[2], checkpoints[1]) == 25
-    assert sum(
-        _token_usage_delta(current, previous) or 0
-        for previous, current in zip(checkpoints, checkpoints[1:])
-    ) == 65
+    assert (
+        sum(_token_usage_delta(current, previous) or 0 for previous, current in zip(checkpoints, checkpoints[1:])) == 65
+    )
 
 
 def test_token_usage_delta_skips_accounting_when_checkpoint_baseline_is_unavailable():

@@ -18,11 +18,7 @@ from yuxi.services.csv_dataset_service import (
     validate_record_mapping,
 )
 
-CSV_RECORD_BYTES = (
-    "gene_id,expression,note\n"
-    "LOC_Os01g01010,3.42,正常表达\n"
-    "LOC_Os01g01020,0.00,低表达\n"
-).encode()
+CSV_RECORD_BYTES = ("gene_id,expression,note\nLOC_Os01g01010,3.42,正常表达\nLOC_Os01g01020,0.00,低表达\n").encode()
 
 CSV_QA_BYTES = (
     "question,answer\n"
@@ -141,8 +137,12 @@ class TestCanonicalRecords:
     def test_qa_records_skip_invalid_rows(self):
         parsed = parse_csv_rows(CSV_QA_BYTES)
         records = build_canonical_records(
-            parsed["header"], parsed["rows"], contract_key="csv_qa",
-            identity_column=None, question_col="question", answer_col="answer",
+            parsed["header"],
+            parsed["rows"],
+            contract_key="csv_qa",
+            identity_column=None,
+            question_col="question",
+            answer_col="answer",
         )
         assert len(records) == 2
         assert records[0]["fields"]["__question__"] == "水稻基因组多大？"

@@ -168,16 +168,12 @@ class TestManageGuardsDeptScope:
     def test_cross_dept_admin_denied_without_creator_dept(self):
         from yuxi.repositories.agent_repository import user_can_manage_agent
 
-        assert not user_can_manage_agent(
-            self._user("admin", 2, uid="u-b"), self._agent("u-other")
-        )
+        assert not user_can_manage_agent(self._user("admin", 2, uid="u-b"), self._agent("u-other"))
 
     def test_same_dept_admin_allowed(self):
         from yuxi.repositories.agent_repository import user_can_manage_agent
 
-        assert user_can_manage_agent(
-            self._user("admin", 5, uid="u-b"), self._agent("u-other"), creator_department_id=5
-        )
+        assert user_can_manage_agent(self._user("admin", 5, uid="u-b"), self._agent("u-other"), creator_department_id=5)
 
     def test_other_dept_admin_denied(self):
         from yuxi.repositories.agent_repository import user_can_manage_agent

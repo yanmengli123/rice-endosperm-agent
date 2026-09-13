@@ -6,7 +6,7 @@ def test_structured_answer_draft_is_rendered_by_backend():
         '<YUXI_ANSWER_DRAFT>{"schema_version":"answer-draft.v1","blocks":['
         '{"type":"heading","text":"结论","evidence_refs":[]},'
         '{"type":"paragraph","text":"Figure S8 比较野生型和突变体。","evidence_refs":["E2"]}'
-        ']}</YUXI_ANSWER_DRAFT>'
+        "]}</YUXI_ANSWER_DRAFT>"
     )
 
     assert rendered == "## 结论\n\nFigure S8 比较野生型和突变体。 [E2]"
@@ -77,7 +77,7 @@ def test_v2_locator_block_renders_authoritative_chip_from_binding():
         '<YUXI_ANSWER_DRAFT>{"schema_version":"answer-draft.v2","blocks":['
         '{"type":"locator","text":"定位行","binding_id":"vlb_1"},'
         '{"type":"paragraph","text":"该图展示 OsMYB73 表达谱。","evidence_refs":["E1"]}'
-        ']}</YUXI_ANSWER_DRAFT>',
+        "]}</YUXI_ANSWER_DRAFT>",
         locator_bindings={"vlb_1": _verified_binding()},
     )
     assert validation["status"] == "RENDERED_V2"
@@ -93,7 +93,7 @@ def test_v2_locator_block_without_binding_renders_fail_closed():
     rendered, validation = render_answer_draft(
         '<YUXI_ANSWER_DRAFT>{"schema_version":"answer-draft.v2","blocks":['
         '{"type":"locator","text":"定位行","binding_id":"vlb_missing"}'
-        ']}</YUXI_ANSWER_DRAFT>',
+        "]}</YUXI_ANSWER_DRAFT>",
         locator_bindings={"vlb_1": _verified_binding()},
     )
     assert validation["status"] == "RENDERED_V2"

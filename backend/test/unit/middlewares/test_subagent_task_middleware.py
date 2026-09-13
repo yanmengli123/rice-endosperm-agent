@@ -424,9 +424,7 @@ async def test_task_tool_rejects_invalid_continuation_thread(monkeypatch) -> Non
             del db
 
         async def start(self, **kwargs):
-            raise ValueError(
-                f"无法继续子智能体线程 {kwargs['requested_thread_id']}：当前对话中没有找到对应的运行记录"
-            )
+            raise ValueError(f"无法继续子智能体线程 {kwargs['requested_thread_id']}：当前对话中没有找到对应的运行记录")
 
     _patch_session(monkeypatch)
     _patch_subagent_run_service(monkeypatch, _SubagentRunService)

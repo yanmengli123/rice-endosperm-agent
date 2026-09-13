@@ -41,6 +41,7 @@ class FakeDb:
                 return None
 
         return _R()
+
     async def flush(self):
         return None
 
