@@ -90,6 +90,18 @@
           @openRefs="emit('openRefs', $event)"
         />
       </div>
+
+      <!-- 历史轮状态入口：点击后状态面板聚焦该轮的执行轨迹与检索证据 -->
+      <button
+        v-if="canShowStatusButton"
+        type="button"
+        class="message-status-btn"
+        title="查看本轮执行状态"
+        @click="emit('openStatus', message)"
+      >
+        <Activity :size="14" />
+        <span>状态</span>
+      </button>
       <!-- 错误消息 -->
     </div>
 
@@ -137,7 +149,7 @@
 <script setup>
 import { computed, ref, onUnmounted } from 'vue'
 import RefsComponent from '@/components/RefsComponent.vue'
-import { Copy, Check, LoaderCircle, X } from '@lucide/vue'
+import { Copy, Check, LoaderCircle, X, Activity } from '@lucide/vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import MentionTextRenderer from '@/components/common/MentionTextRenderer.vue'
@@ -191,7 +203,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['retry', 'retryStoppedMessage', 'openRefs'])
+const emit = defineEmits(['retry', 'retryStoppedMessage', 'openRefs', 'openStatus'])
 
 // 图片全屏预览
 const imagePreview = ref({ visible: false, src: '', alt: '' })
@@ -252,6 +264,15 @@ const displayError = computed(() => {
   // 简化错误判断：只检查明确的错误类型标识
   return !!(props.message.error_type || props.message.extra_metadata?.error_type)
 })
+
+// 状态按钮显隐：只有带 run_id 且已完成生成的 AI 回答才有可回看的状态档案；
+// 流式中的消息状态未定，无 run_id 的存量消息按安静原则不显示入口
+const canShowStatusButton = computed(
+  () =>
+    props.message?.type === 'ai' &&
+    !props.isProcessing &&
+    Boolean(props.message?.run_id || props.message?.extra_metadata?.run_id)
+)
 
 const getErrorMessage = computed(() => {
   // 优先使用直接的 error_message 字段
@@ -388,6 +409,34 @@ const parsedData = computed(() => {
 
   &:hover {
     .message-copy-btn {
+      opacity: 1;
+    }
+  }
+
+  .message-status-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+    padding: 2px 8px;
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+    color: var(--gray-400);
+    font-size: 12px;
+    line-height: 18px;
+    cursor: pointer;
+    opacity: 0;
+    transition: all 0.2s ease;
+
+    &:hover {
+      color: var(--main-color);
+      background-color: var(--gray-50);
+    }
+  }
+
+  &:hover {
+    .message-status-btn {
       opacity: 1;
     }
   }

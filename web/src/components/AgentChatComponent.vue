@@ -80,6 +80,7 @@
                     :show-refs="showMsgRefs(displayItem.message, row.conv)"
                     :hide-tool-calls="true"
                     :mention="mentionConfig"
+                    @openStatus="handleOpenMessageStatus"
                     @retry="retryMessage(displayItem.message)"
                   >
                   </AgentMessageComponent>
@@ -208,6 +209,7 @@
               <div class="state-panel-header-actions">
                 <span class="state-panel-summary">{{ stateSummaryLabel }}</span>
                 <button
+                  v-if="!focusedRunId"
                   type="button"
                   class="state-refresh-btn"
                   title="刷新状态"
@@ -219,9 +221,36 @@
               </div>
             </div>
 
+            <!-- 查看焦点上下文条：pinned 历史轮时显示，防止用户误以为在看最新状态 -->
+            <div v-if="focusedRunId" class="state-focus-bar">
+              <span class="state-focus-bar__label">
+                <History :size="13" />
+                {{ focusBarLabel }}
+              </span>
+              <span class="state-focus-bar__actions">
+                <button
+                  v-if="isStatusFocusRetryable"
+                  type="button"
+                  class="state-focus-bar__back"
+                  :disabled="focusedArchiveEntry?.loading"
+                  @click="retryStatusFocus()"
+                >
+                  重试
+                </button>
+                <button
+                  type="button"
+                  class="state-focus-bar__back"
+                  :disabled="focusedArchiveEntry?.loading"
+                  @click="clearStatusFocus()"
+                >
+                  回到最新
+                </button>
+              </span>
+            </div>
+
             <div class="state-panel-body">
               <section
-                v-if="currentTrace"
+                v-if="displayedTrace"
                 class="state-section"
                 :class="{ 'is-collapsed': !isStateSectionExpanded('trace') }"
                 aria-label="本轮执行轨迹"
@@ -248,11 +277,11 @@
                   id="state-section-trace"
                   class="state-section-content"
                 >
-                  <TraceTimelinePanel :trace="currentTrace" />
+                  <TraceTimelinePanel :trace="displayedTrace" />
                 </div>
               </section>
               <section
-                v-if="hasCurrentEvidenceProjection"
+                v-if="hasDisplayedEvidenceProjection"
                 class="state-section"
                 :class="{ 'is-collapsed': !isStateSectionExpanded('evidence') }"
                 aria-label="本轮科研检索证据候选"
@@ -272,7 +301,7 @@
                       :class="{ 'is-collapsed': !isStateSectionExpanded('evidence') }"
                     />
                   </span>
-                  <span class="state-section-meta">{{ currentEvidenceSummary?.total || 0 }}</span>
+                  <span class="state-section-meta">{{ displayedEvidenceSummary?.total || 0 }}</span>
                 </button>
                 <div
                   v-show="isStateSectionExpanded('evidence')"
@@ -280,18 +309,18 @@
                   class="state-section-content"
                 >
                   <EvidenceList
-                    :evidence="currentEvidence"
-                    :summary="currentEvidenceSummary"
-                    :issues="currentEvidenceIssues"
-                    :evidence-role="currentEvidenceRole"
-                    :claim-binding-status="currentClaimBindingStatus"
-                    :projection-status="currentEvidenceProjectionStatus"
+                    :evidence="displayedEvidence"
+                    :summary="displayedEvidenceSummary"
+                    :issues="displayedEvidenceIssues"
+                    :evidence-role="displayedEvidenceRole"
+                    :claim-binding-status="displayedClaimBindingStatus"
+                    :projection-status="displayedEvidenceProjectionStatus"
                     @open-source="openEvidenceSource"
                   />
                 </div>
               </section>
               <section
-                v-if="currentTokenUsage"
+                v-if="currentTokenUsage && !focusedRunId"
                 class="state-section"
                 :class="{ 'is-collapsed': !isStateSectionExpanded('tokenUsage') }"
                 aria-label="上下文使用情况"
@@ -660,7 +689,7 @@ import {
   onDeactivated
 } from 'vue'
 import { message } from 'ant-design-vue'
-import { ChevronDown, FolderKanban, LayoutList, RefreshCw } from '@lucide/vue'
+import { ChevronDown, FolderKanban, History, LayoutList, RefreshCw } from '@lucide/vue'
 import { formatFileSize } from '@/utils/file_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -697,6 +726,7 @@ import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
 import { useRunTrace } from '@/composables/useRunTrace'
+import { useRunStatusArchive } from '@/composables/useRunStatusArchive'
 import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
@@ -1134,7 +1164,7 @@ const currentTrace = computed(() => {
   if (Object.keys(trace.spans || {}).length === 0 && !trace.summary) return null
   return trace
 })
-const traceSpanCount = computed(() => Object.keys(currentTrace.value?.spans || {}).length)
+const traceSpanCount = computed(() => Object.keys(displayedTrace.value?.spans || {}).length)
 // 本轮检索证据候选（yuxi.scientific-evidence.v1）：终态或历史恢复时拉取权威 DTO。
 const loadRunEvidence = async (threadId, runId) => {
   const ts = getThreadState(threadId)
@@ -1207,6 +1237,100 @@ const hasCurrentEvidenceProjection = computed(() => {
     summary.rejected
   )
 })
+
+// ==================== 历史轮状态档案（查看焦点） ====================
+// focusedRunId 为空 = live 模式（面板跟随线程槽位的最新一轮，行为与改造前一致）；
+// 非空 = pinned 模式（显示该轮的离线档案，与实时流完全隔离）。
+const {
+  focusedRunId,
+  entries: runStatusEntries,
+  focusRun,
+  clearFocus: clearStatusFocus,
+  resetArchive: resetRunStatusArchive
+} = useRunStatusArchive()
+
+const focusedArchiveEntry = computed(() =>
+  focusedRunId.value ? runStatusEntries.get(focusedRunId.value) || null : null
+)
+
+const displayedTrace = computed(() => {
+  if (!focusedRunId.value) return currentTrace.value
+  const trace = focusedArchiveEntry.value?.trace
+  if (trace && (Object.keys(trace.spans || {}).length > 0 || trace.summary)) return trace
+  return null
+})
+
+const hasDisplayedEvidenceProjection = computed(() => {
+  if (!focusedRunId.value) return hasCurrentEvidenceProjection.value
+  const entry = focusedArchiveEntry.value
+  if (!entry?.loaded) return false
+  if (entry.sourceManifest) return Boolean(entry.sourceManifest.document_evidence_requested)
+  const summary = entry.evidenceSummary || {}
+  return Boolean(
+    entry.evidence?.length ||
+    entry.evidenceRetrievals?.length ||
+    entry.evidenceIssues?.length ||
+    summary.rejected
+  )
+})
+
+const displayedEvidence = computed(() => {
+  if (!focusedRunId.value) return currentEvidence.value
+  const evidence = focusedArchiveEntry.value?.evidence
+  return Array.isArray(evidence) ? evidence : []
+})
+const displayedEvidenceSummary = computed(() =>
+  focusedRunId.value ? focusedArchiveEntry.value?.evidenceSummary : currentEvidenceSummary.value
+)
+const displayedEvidenceIssues = computed(() => {
+  if (!focusedRunId.value) return currentEvidenceIssues.value
+  const issues = focusedArchiveEntry.value?.evidenceIssues
+  return Array.isArray(issues) ? issues : []
+})
+const displayedEvidenceRole = computed(() =>
+  focusedRunId.value ? focusedArchiveEntry.value?.evidenceRole : currentEvidenceRole.value
+)
+const displayedClaimBindingStatus = computed(() =>
+  focusedRunId.value
+    ? focusedArchiveEntry.value?.claimBindingStatus
+    : currentClaimBindingStatus.value
+)
+const displayedEvidenceProjectionStatus = computed(() =>
+  focusedRunId.value
+    ? focusedArchiveEntry.value?.evidenceProjectionStatus
+    : currentEvidenceProjectionStatus.value
+)
+
+// 焦点上下文条文案：加载中 / 轨迹过保留期 / 历史轮短码
+const focusBarLabel = computed(() => {
+  const entry = focusedArchiveEntry.value
+  if (!entry) return '历史轮'
+  if (entry.loading) return '历史轮 · 加载中…'
+  if (entry.traceExpired) return '历史轮 · 轨迹已过保留期'
+  if (entry.traceError) return '历史轮 · 轨迹加载失败'
+  return `历史轮 · ${focusedRunId.value.slice(0, 8)}`
+})
+
+const handleOpenMessageStatus = (msg) => {
+  const runId = msg?.run_id || msg?.extra_metadata?.run_id
+  if (!runId) return
+  if (!statePanelOpen.value) statePanelOpen.value = true
+  // 聚焦的正是线程槽位当前一轮时，先用槽位投影即时显示，服务端快照到达后替换
+  focusRun(runId, {
+    seedTrace: currentTrace.value?.runId === runId ? currentTrace.value : null
+  })
+}
+
+// 档案拉取失败（非 404 过期）时允许整轮重拉；过期是终态，不提供重试
+const isStatusFocusRetryable = computed(() => {
+  const entry = focusedArchiveEntry.value
+  return Boolean(entry?.loaded && (entry.traceError || entry.evidenceError))
+})
+
+const retryStatusFocus = () => {
+  if (!focusedRunId.value) return
+  focusRun(focusedRunId.value, { force: true })
+}
 const openEvidenceSourceFallback = async (evidence) => {
   // 降级路径(pdf.js 渲染失败时使用):blob + #page= 仅保证 Chromium 跳页、
   // 无法高亮。zoom=page-width,left,top 不是合法 PDF Open Parameter,已移除。
@@ -1243,7 +1367,8 @@ const openEvidenceSource = (evidence) => {
   const fileId = evidence?.source?.file_id
   const fragment = evidence?.locator?.fragments?.[0]
   if (!kbId || !fileId || !fragment) return
-  const runId = evidence?.source?.run_id || evidence?.retrieval?.run_id || currentTrace.value?.runId
+  const runId =
+    evidence?.source?.run_id || evidence?.retrieval?.run_id || displayedTrace.value?.runId
   if (runId && evidence?.evidence_id) {
     // 原文查看审计:谁在何时查看了哪条证据的原文(失败仅告警,不打断阅读)
     agentApi
@@ -1253,7 +1378,7 @@ const openEvidenceSource = (evidence) => {
   evidenceViewer.visible = true
   evidenceViewer.error = ''
   evidenceViewer.evidence = evidence
-  evidenceViewer.evidenceList = currentEvidence.value.filter(
+  evidenceViewer.evidenceList = displayedEvidence.value.filter(
     (item) => item?.source?.file_id === fileId
   )
   evidenceViewer.kbId = kbId
@@ -2654,6 +2779,8 @@ const selectChat = async (chatId) => {
 
   if (previousThreadId !== chatId) {
     resetAgentPanelState()
+    // 历史轮状态档案按线程隔离：切走时清掉焦点与缓存，避免旧会话档案泄入新会话面板
+    resetRunStatusArchive()
   }
 
   try {
@@ -3930,6 +4057,54 @@ watch(currentChatId, (threadId, oldThreadId) => {
   flex-shrink: 0;
   font-size: 12px;
   color: var(--gray-500);
+}
+
+.state-focus-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 14px 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--main-20);
+}
+
+.state-focus-bar__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--main-700);
+}
+
+.state-focus-bar__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.state-focus-bar__back {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--main-700);
+  background: transparent;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    background: var(--gray-100);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
 }
 
 .state-panel-body {
