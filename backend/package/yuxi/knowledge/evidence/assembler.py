@@ -221,7 +221,13 @@ async def _assemble_locator_projection(
     failure_stage: str | None = None
     # failure_stage 优先取配置/提供方类失败（解释「为什么定位不了」），
     # 资产未命中（NO_MATCH）是常态路径，不作失败阶段
-    _FAILURE_STAGE_STATUSES = {"NOT_CONFIGURED", "SCHEMA_INVALID_OR_FAILED", "PROVIDER_FAILED", "FAILED"}
+    _FAILURE_STAGE_STATUSES = {
+        "NOT_CONFIGURED",
+        "SCHEMA_INVALID_OR_FAILED",
+        "PROVIDER_FAILED",
+        "PROVIDER_NOT_READY",
+        "FAILED",
+    }
     for record in records:
         resolution = dict(getattr(record, "locator_resolution_json", None) or {})
         status = str(resolution.get("status") or "")

@@ -78,12 +78,40 @@ def _render_locator_block(binding: dict | None) -> str:
     return f"已可靠定位到原文：{NARRATIVE_LOCATOR_MARKER}"
 
 
+def _repair_draft_text_blocks(candidate: str) -> str | None:
+    """一次受限 repair：从坏 JSON 中只回收 ``"text"`` 字段的纯文本值。
+
+    永不返回结构：不解析、不猜测字段语义，只按字符串安全转义提取各 block 的
+    text 内容并逐行渲染为段落——模型截断/尾部损坏的草案仍能保留纯文本答案，
+    而协议标签、JSON 结构、内部字段名绝不上屏。
+    """
+    text_values: list[str] = []
+    pattern = re.compile(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"')
+    for match in pattern.finditer(candidate):
+        raw = match.group(1)
+        try:
+            value = json.loads(f'"{raw}"')
+        except json.JSONDecodeError:
+            continue
+        value = str(value).strip()
+        if value:
+            text_values.append(value)
+    if not text_values:
+        return None
+    return "\n\n".join(text_values)
+
+
 def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None = None) -> tuple[str, dict[str, str]]:
     """Render a structured draft; preserve legacy Markdown on schema failure.
 
     ``locator_bindings``：binding_id → locator_resolution（含 binding 投影）。
     缺失绑定的 locator block 渲染为失败关闭文案——模型文本不存在任何能
     偷偷变成真实页码的路径。
+
+    G4 零泄漏：只要检测到协议标签或草案签名（即模型尝试输出结构化草案），
+    严格解析失败后**不再原样返回**（2026-09 生产 Run 泄漏 `},{"type":...`
+    与 `</YUXI_ANSWER_DRAFT>`）——先做一次受限 repair（只回收纯 text 字段），
+    repair 也失败则返回确定性安全文案并标记 ``ANSWER_DRAFT_SCHEMA_INVALID``。
     """
     source = str(text or "").strip()
     match = _DRAFT_PATTERN.search(source)
@@ -91,6 +119,9 @@ def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None =
         fenced = _CODE_FENCE_PATTERN.search(source)
         # 围栏 JSON 必须带草案签名，普通 JSON 代码块不能误当答案草案
         match = fenced if fenced and any(signature in fenced.group(1) for signature in _DRAFT_SIGNATURES) else None
+    # 协议检测：开标签出现即视为结构化草案（闭合标签缺失/JSON 截断的坏草案
+    # 不进入 Legacy Markdown 兼容——2026-09 生产泄漏正是此形态）
+    protocol_detected = match is not None or "<YUXI_ANSWER_DRAFT>" in source
     candidate = (
         match.group(1)
         if match
@@ -99,11 +130,30 @@ def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None =
         else _extract_bare_draft(source)
     )
     if candidate is None:
+        if protocol_detected:
+            # 坏草案（大括号未闭合）：受限 repair → 只回收纯文本字段
+            repaired = _repair_draft_text_blocks(source)
+            if repaired:
+                return repaired, {"schema_version": ANSWER_DRAFT_SCHEMA_VERSION, "status": "ANSWER_DRAFT_REPAIRED"}
+            return "（模型输出的结构化草案未通过校验，已由后端替换为安全回答；请重新提问。）", {
+                "schema_version": ANSWER_DRAFT_SCHEMA_VERSION,
+                "status": "ANSWER_DRAFT_SCHEMA_INVALID",
+            }
         return text, {"schema_version": ANSWER_DRAFT_SCHEMA_VERSION, "status": "LEGACY_MARKDOWN"}
     try:
         draft = AnswerDraft.model_validate(json.loads(candidate))
     except (json.JSONDecodeError, ValidationError):
-        return text, {"schema_version": ANSWER_DRAFT_SCHEMA_VERSION, "status": "INVALID_DRAFT_FALLBACK"}
+        if not protocol_detected:
+            # 普通文本中的普通坏 JSON（无协议标签/签名）：维持 Legacy Markdown 兼容
+            return text, {"schema_version": ANSWER_DRAFT_SCHEMA_VERSION, "status": "INVALID_DRAFT_FALLBACK"}
+        # 协议草案损坏：受限 repair → 只回收纯文本；再失败 → 确定性安全文案
+        repaired = _repair_draft_text_blocks(candidate or source)
+        if repaired:
+            return repaired, {"schema_version": ANSWER_DRAFT_SCHEMA_VERSION, "status": "ANSWER_DRAFT_REPAIRED"}
+        return "（模型输出的结构化草案未通过校验，已由后端替换为安全回答；请重新提问。）", {
+            "schema_version": ANSWER_DRAFT_SCHEMA_VERSION,
+            "status": "ANSWER_DRAFT_SCHEMA_INVALID",
+        }
 
     lines: list[str] = []
     locator_blocks = 0

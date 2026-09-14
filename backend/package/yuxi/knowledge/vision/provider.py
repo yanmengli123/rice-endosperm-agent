@@ -81,6 +81,10 @@ class NullVisionProvider:
     def available(self) -> bool:
         return False
 
+    @property
+    def ready(self) -> bool:
+        return False
+
 
 class ChatModelVisionProvider:
     """OpenAI 风格多模态 chat 模型观察器（image_url 内容块）。"""
@@ -91,6 +95,15 @@ class ChatModelVisionProvider:
     @property
     def available(self) -> bool:
         return bool(self.model_spec)
+
+    @property
+    def ready(self) -> bool:
+        """运行门禁（G5）：spec 非空 ≠ 能力可用——必须 canary 实测 READY。
+
+        canary 判定 PROVIDER_FAILED/SCHEMA_INVALID 后进程内缓存生效，运行时
+        不再调用 provider（状态机与实际执行行为一致）。
+        """
+        return bool(self.model_spec) and current_vision_status().get("status") == VISION_READY
 
     async def describe(self, image_bytes: bytes) -> VisualObservationEnvelope | None:
         if not image_bytes:

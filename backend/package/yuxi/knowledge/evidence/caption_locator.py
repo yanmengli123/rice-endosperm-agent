@@ -291,10 +291,15 @@ async def _scan_caption_rows(db, *, figure_label: str, kb_ids: list[str]):
             str(span.quote or ""), evidence_type=span.evidence_type, partition=partition
         ):
             continue
-        # 资格收口（Invariant 5）：页眉/页脚/running head 页码再准也不作回答证据
-        from yuxi.knowledge.evidence.anchor_eligibility import anchor_answer_eligible
+        # 资格收口（Invariant 5）：页眉/页脚/running head 页码再准也不作回答证据。
+        # footer-caption 存量兼容（Figure 4 事故）：题注位于页面底部被 MinerU 归为
+        # footer，语义角色仍是 caption——caption_layout_exception 全条件放行。
+        from yuxi.knowledge.evidence.anchor_eligibility import (
+            anchor_answer_eligible,
+            caption_layout_exception,
+        )
 
-        if not anchor_answer_eligible(anchor):
+        if not anchor_answer_eligible(anchor) and not caption_layout_exception(span, anchor):
             continue
         seen_anchors.add(anchor_key)
         scanned.append((span, anchor, knowledge_file, revision))
@@ -414,7 +419,10 @@ def _adjudicate_caption_candidates(candidates: list[dict[str, Any]], *, containe
     if not candidates:
         return None
     physical_locations = {
-        (candidate["parse_revision_id"], candidate["file_id"], candidate["page"]) for candidate in candidates
+        # G7：唯一性键含 anchor_id——同页两个同编号候选（跨块题注/上下双栏）
+        # 不被静默合并，也无法互相冒充唯一页码
+        (candidate["parse_revision_id"], candidate["file_id"], candidate["page"], candidate["anchor_id"])
+        for candidate in candidates
     }
     if len(physical_locations) > 1:
         return {

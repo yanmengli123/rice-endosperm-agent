@@ -139,10 +139,63 @@ def anchor_answer_eligible(
     )
 
 
+def caption_layout_exception(span: Any, anchor: Any) -> bool:
+    """footer-caption 存量兼容放行（semantic_role ≠ layout_region）。
+
+    2026-09 Figure 4 事故：题注位于页面底部被 MinerU 归为 ``anchor_type=
+    footer``，但它的**语义角色**是 caption——布局区域在页脚不代表它是页脚。
+    无条件资格收口把真实题注排成了 NOT_FOUND（正确应为正文第 8 页）。
+
+    放行必须**全部**满足（任一不满足即维持排除）：
+
+    1. span 语义角色为 caption（``evidence_type == "caption"``）；
+    2. 有规范化 container_label（Figure/Table 编号）；
+    3. span 页与 anchor 页一致（跨源页码一致性）；
+    4. span 与 anchor 题注文本一致（quote_hash 相等或归一化文本相等）；
+    5. anchor 与 span 文本都不是 running head / 页码行 / TOC（形态判定，
+       与 anchor_type 列值无关——页码行/版权行即使伪装成 caption 也不放行）。
+
+    生产侧长期修正仍走新 parser → 新 ParseRevision 重建（正确分类 caption
+    块）；本函数只是存量数据的读侧止血，不给「允许所有 footer」开口子。
+    """
+    span_quote = _field(span, "quote")
+    anchor_quote = _field(anchor, "quote")
+    if str(_field(span, "evidence_type") or "").strip().casefold() != "caption":
+        return False
+    if not str(_field(span, "container_label") or "").strip():
+        return False
+    span_page = getattr(span, "page_number", None)
+    anchor_page = getattr(anchor, "page", None)
+    if span_page is not None and anchor_page is not None:
+        try:
+            if int(span_page) >= 1 and int(anchor_page) >= 1 and int(span_page) != int(anchor_page):
+                return False
+        except (TypeError, ValueError):
+            return False
+    if _field(span, "quote_hash") and _field(span, "quote_hash") == _field(anchor, "quote_hash"):
+        text_consistent = True
+    else:
+        from yuxi.knowledge.rendering.claim_evidence_resolver import normalize_for_match
+
+        text_consistent = bool(span_quote and anchor_quote) and normalize_for_match(span_quote) == normalize_for_match(
+            anchor_quote
+        )
+    if not text_consistent:
+        return False
+    if is_running_head(anchor_quote) or is_running_head(span_quote):
+        return False
+    from yuxi.knowledge.evidence.quote_locator import is_toc_like
+
+    if is_toc_like(anchor_quote, evidence_type="caption") or is_toc_like(span_quote, evidence_type="caption"):
+        return False
+    return True
+
+
 __all__ = [
     "ANSWER_INELIGIBLE_ANCHOR_TYPES",
     "anchor_answer_eligible",
     "answer_eligibility_reason",
+    "caption_layout_exception",
     "classify_anchor_type",
     "is_answer_eligible",
     "is_running_head",

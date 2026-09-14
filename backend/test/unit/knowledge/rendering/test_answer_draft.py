@@ -14,11 +14,13 @@ def test_structured_answer_draft_is_rendered_by_backend():
 
 
 def test_invalid_answer_draft_falls_back_without_partial_rewrite():
+    """协议草案损坏：不再原样返回（G4 零泄漏）——无可回收文本 → 安全文案。"""
     source = '<YUXI_ANSWER_DRAFT>{"blocks":"broken"}</YUXI_ANSWER_DRAFT>'
     rendered, validation = render_answer_draft(source)
 
-    assert rendered == source
-    assert validation["status"] == "INVALID_DRAFT_FALLBACK"
+    assert validation["status"] == "ANSWER_DRAFT_SCHEMA_INVALID"
+    assert "YUXI_ANSWER_DRAFT" not in rendered and "{" not in rendered
+    assert "重新提问" in rendered
 
 
 def test_renders_draft_inside_code_fence_after_locator_line():
@@ -118,9 +120,11 @@ def test_v2_draft_rejects_extra_fields_on_block():
         "]}</YUXI_ANSWER_DRAFT>"
     )
     rendered, validation = render_answer_draft(source, locator_bindings={"vlb_1": _verified_binding()})
-    # 块级 extra=forbid：模型夹带 page_number → 整份草案回退，不部分采信
-    assert validation["status"] == "INVALID_DRAFT_FALLBACK"
-    assert rendered == source
+    # 块级 extra=forbid：模型夹带 page_number → 整份草案拒绝（G4：不原样返回，
+    # 受限 repair 只回收纯文本字段，结构化内容与 page_number 零泄漏）
+    assert validation["status"] == "ANSWER_DRAFT_REPAIRED"
+    assert "YUXI_ANSWER_DRAFT" not in rendered and "page_number" not in rendered
+    assert "定位行" not in rendered  # 夹带的 locator block 不部分采信
 
 
 def test_v1_drafts_remain_compatible():

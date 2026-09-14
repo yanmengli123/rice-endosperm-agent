@@ -226,8 +226,18 @@ async def _anchor_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]
     return entities
 
 
-def _physical_location(entity: dict[str, Any], asset: dict[str, Any]) -> tuple[str, str, int]:
-    return (str(entity["parse_revision_id"]), str(entity["file_id"]), int(asset["page"]))
+def _physical_location(entity: dict[str, Any], asset: dict[str, Any]) -> tuple[str, str, int, str]:
+    """物理唯一性键（G7）：revision + file + page + anchor_id。
+
+    同一页存在两个不同 Figure 时 (rev, file, page) 视为同一位置会把两图错误
+    收敛成唯一页码——Figure 身份唯一键必须包含 anchor_id。
+    """
+    return (
+        str(entity["parse_revision_id"]),
+        str(entity["file_id"]),
+        int(asset["page"]),
+        str(asset.get("anchor_id") or ""),
+    )
 
 
 def _best_phash_match(uploaded_phash: str | None, asset: dict[str, Any]) -> tuple[str | None, int]:

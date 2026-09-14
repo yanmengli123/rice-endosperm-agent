@@ -531,9 +531,13 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
             continue  # 目录/图注清单行不参与定位
         # 资格收口（Invariant 5）：可定位 ≠ 可作回答证据。页眉/页脚/页码锚点
         # 与 running head 即使页码准确也不得进入定位候选（「正文·第1页」事故）。
-        if not anchor_answer_eligible(anchor) or not anchor_answer_eligible(
-            {"anchor_type": span.evidence_type or "", "quote": span_quote}
-        ):
+        # footer-caption 存量兼容：语义角色为 caption 的 footer 锚点按
+        # caption_layout_exception 全条件放行（Figure 4 第 8 页事故）。
+        from yuxi.knowledge.evidence.anchor_eligibility import caption_layout_exception
+
+        if (
+            not anchor_answer_eligible(anchor) and not caption_layout_exception(span, anchor)
+        ) or not anchor_answer_eligible({"anchor_type": span.evidence_type or "", "quote": span_quote}):
             continue
         seen_anchors.add(anchor_key)
         candidates.append(

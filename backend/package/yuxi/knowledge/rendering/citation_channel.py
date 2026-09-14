@@ -851,6 +851,24 @@ def apply_citation_channel(
             expanded = expanded.rstrip() + ("\n\n" if expanded.strip() else "") + disclosure
             disclosure_appended = True
 
+    # 11) G3 未定位且无可信视觉观察（visual_explanation_allowed=False）：
+    #     模型答案整体不可信——无法用正则可靠区分「编造的文献身份」与
+    #     「看似合理的解释」，后端直接替换为确定性未定位文案（固定句 +
+    #     披露），文献身份/页码/引用只能由结构化 Binding Block 渲染。
+    answer_replaced_by_policy = False
+    if (
+        policy
+        and policy.get("document_citations_allowed") is False
+        and policy.get("visual_explanation_allowed") is False
+    ):
+        disclosure = str(policy.get("required_disclosure") or "")
+        safe_answer = "当前无法对该内容完成可靠的原文定位，系统不展示任何文献、编号或页码信息。"
+        if disclosure:
+            safe_answer = safe_answer + "\n\n" + disclosure
+        if expanded.strip() != safe_answer.strip():
+            answer_replaced_by_policy = True
+            expanded = safe_answer
+
     validation = {
         "version": CITATION_CHANNEL_VERSION,
         "locator": locator_validation,
@@ -867,6 +885,7 @@ def apply_citation_channel(
             "citations_revoked": policy_revokes_citations,
             "figure_label_claims_removed": figure_label_claims_removed,
             "disclosure_appended": disclosure_appended,
+            "answer_replaced_by_policy": answer_replaced_by_policy,
         },
         "bindings": bindings[:8],
         "citation_count": len(effective_citations),

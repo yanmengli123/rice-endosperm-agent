@@ -322,17 +322,24 @@ def _build_answer_policy(
     status: str,
     observation_available: bool,
     vision_status: str,
+    figure_identity_verified: bool = True,
+    locator_kind: str = "",
 ) -> dict[str, Any]:
     """按定位状态机构造结构化 answer_policy（进入模型上下文 + 输出守卫双执行）。
 
-    输出规则表（2026-09 收敛）：只有 VERIFIED 允许文献名/Figure 编号/页码/
-    文献引用；MULTIPLE/NOT_FOUND 只保留视觉解释或保守说明，永不发布候选页码。
+    输出规则表（2026-09 收敛，G2 扩展到全部定位意图）：只有 VERIFIED 允许
+    文献名/页码/文献引用；Figure 编号需要 figure_identity_binding 独立
+    VERIFIED（页码已验证但编号未确认时只发页码不发编号）；MULTIPLE/
+    NOT_FOUND 只保留视觉解释或保守说明，永不发布候选页码。任何定位入口
+    （QUOTE/FIGURE/PAGE/IMAGE）未验证时普通语义召回不得包装成来源定位证据。
     """
+    conservative_only = vision_status in {"NOT_CONFIGURED", "PROVIDER_FAILED", "SCHEMA_INVALID", "IMAGE_UNREADABLE"}
     if status == "VERIFIED":
         return {
             "mode": "LOCATOR_VERIFIED",
+            "locator_kind": locator_kind,
             "document_identity_allowed": True,
-            "figure_label_allowed": True,
+            "figure_label_allowed": figure_identity_verified,
             "page_claim_allowed": True,
             "document_citations_allowed": True,
             "visual_explanation_allowed": True,
@@ -341,19 +348,23 @@ def _build_answer_policy(
     if status == "MULTIPLE_MATCHES":
         return {
             "mode": "LOCATOR_AMBIGUOUS",
+            "locator_kind": locator_kind,
             "document_identity_allowed": False,
             "figure_label_allowed": False,
             "page_claim_allowed": False,
             "document_citations_allowed": False,
-            "visual_explanation_allowed": True,
+            # 图片内容解释只在存在可信视觉观察时允许；无观察的文本歧义
+            # 无法核验模型解释 → 守卫整体替换保守文案（G3）
+            "visual_explanation_allowed": observation_available,
             "required_disclosure": (
-                "该图片在当前知识范围内存在多个可能的匹配，无法唯一确定来源文献与页码；"
-                "可补充题注文字或限定知识库后重试。"
+                "该内容在当前知识范围内存在多个可能的匹配，无法唯一确定来源文献与页码；"
+                "可补充原文语句、题注文字或限定知识库后重试。"
             ),
         }
     if observation_available:
         return {
             "mode": "VISUAL_ONLY_UNLOCATED",
+            "locator_kind": locator_kind,
             "document_identity_allowed": False,
             "figure_label_allowed": False,
             "page_claim_allowed": False,
@@ -361,18 +372,20 @@ def _build_answer_policy(
             "visual_explanation_allowed": True,
             "required_disclosure": "可以解释图片可见内容，但无法可靠确定来源文献和页码。",
         }
-    conservative_only = vision_status in {"NOT_CONFIGURED", "PROVIDER_FAILED", "SCHEMA_INVALID", "IMAGE_UNREADABLE"}
     return {
         "mode": "UNLOCATED",
+        "locator_kind": locator_kind,
         "document_identity_allowed": False,
         "figure_label_allowed": False,
         "page_claim_allowed": False,
         "document_citations_allowed": False,
-        "visual_explanation_allowed": not conservative_only,
+        # 未定位且无可信视觉观察：解释不可核验 → 守卫整体替换保守文案（G3）；
+        # vision_status 仅决定披露文案口径
+        "visual_explanation_allowed": False,
         "required_disclosure": (
-            "当前无法对这张图片进行可靠定位（视觉定位通道不可用且指纹未命中），因此不能确定其来源文献与页码。"
+            "当前无法进行可靠定位（视觉定位通道不可用且指纹未命中），因此不能确定其来源文献与页码。"
             if conservative_only
-            else "当前知识库范围内无法可靠确定该图片所属的文献与页码。"
+            else "当前知识库范围内无法可靠确定该内容的来源文献与页码。"
         ),
     }
 
@@ -500,7 +513,9 @@ async def prepare_knowledge_context(
             from yuxi.knowledge.vision.provider import get_vision_provider, mark_observation_schema_invalid
 
             provider = get_vision_provider()
-            if provider.available:
+            # G5 运行门禁：ready = canary 实测 READY（spec 非空 ≠ 能力可用）；
+            # canary 判 FAILED/SCHEMA_INVALID 后本进程不再调用 provider
+            if getattr(provider, "ready", provider.available):
                 observation = await provider.describe(image_bytes)
                 if observation is None:
                     mark_observation_schema_invalid(str(getattr(provider, "model_spec", "") or ""))
@@ -511,7 +526,13 @@ async def prepare_knowledge_context(
                     }
                 )
             else:
-                attempt_ledger.append({"stage": "VISION_OBSERVATION", "status": "NOT_CONFIGURED"})
+                attempt_ledger.append(
+                    {
+                        "stage": "VISION_OBSERVATION",
+                        "status": "PROVIDER_NOT_READY",
+                        "reason": "canary 未通过或未配置",
+                    }
+                )
             contract["figure_image_observation"] = (
                 observation.model_dump(mode="json") if observation is not None else {"available": False}
             )
@@ -1097,31 +1118,37 @@ async def prepare_knowledge_context(
             "不得给出无依据推断。"
         )
     # AC15 描述权 ≠ 定位权 + 结构化 answer_policy（D2/D3/D4）：
-    # 自由文本 answer_instruction 从未真正投递给模型（模型上下文只经
-    # build_answer_context），现改为结构化策略——随模型上下文下行、由输出
-    # 守卫独立执行，双重约束；策略随 locator_resolution 持久化供状态投影。
-    _image_locator_required = bool(image_bytes and locator_intent.get("kind"))
-    if _image_locator_required:
+    # G2：answer_policy 扩展到**全部定位意图**（QUOTE/FIGURE/PAGE/IMAGE）——
+    # 任何入口只要定位任务成立且未 VERIFIED，都不得把普通语义召回包装成
+    # 来源定位证据（生产事故：Figure 4 题注 NOT_FOUND 后回答仍宣称 Liu 2024
+    # 并渲染第 8/13 页普通证据）。
+    _locator_required = bool(locator_intent.get("kind"))
+    if _locator_required:
         _final_resolution = contract.get("locator_resolution") or {}
         _final_status = str(_final_resolution.get("status") or "NOT_FOUND")
         _observation_available = isinstance(contract.get("figure_image_observation"), dict) and "figure_label" in (
             contract.get("figure_image_observation") or {}
         )
+        _identity_verified = bool(_final_resolution.get("container_label")) or bool(
+            _final_resolution.get("figure_identity_binding") == "VERIFIED"
+        )
         contract["answer_policy"] = _build_answer_policy(
             status=_final_status,
             observation_available=_observation_available,
             vision_status=str(_final_resolution.get("vision_status") or "UNKNOWN"),
+            figure_identity_verified=_identity_verified,
+            locator_kind=str(locator_intent.get("kind") or ""),
         )
         if isinstance(_final_resolution, dict) and "answer_policy" not in _final_resolution:
             _final_resolution["answer_policy"] = contract["answer_policy"]
         if _final_status != "VERIFIED":
-            # D3 关闭普通引用池：图片定位未验证时，普通语义检索命中不得升级为
-            # 图片来源证据——文献引用池必须为空（检索候选仍可在状态面板展示）。
+            # 关闭普通引用池：定位未验证时，普通语义检索命中不得升级为来源
+            # 定位证据——文献引用池必须为空（检索候选仍可在状态面板展示）。
             contract["citations"] = []
             contract["context_evidence"] = []
             contract["warnings"] = [
                 *(contract.get("warnings") or []),
-                "图片定位未通过验证：本轮不发布任何文献引用与页码；普通检索命中仅作为候选展示。",
+                "定位任务未通过验证：本轮不发布任何文献引用与页码；普通检索命中仅作为候选展示。",
             ]
             # 回答证据计数持久化为显式 0（不得为 NULL）
             contract["completeness"] = {

@@ -76,6 +76,16 @@ class VerifiedLocatorBinding(BaseModel):
     printed_page_label: str | None = None
     source_page_index: int | None = None
     panel_match: str | None = None
+    # G7 独立授权三元组：页码、Figure 身份、解释依据分别裁决（单一 VERIFIED
+    # 粒度过粗——图片匹配已确认第 10 页但 container_label=NULL 时，页码可发
+    # 而 Figure 编号不可发）：
+    # - page_binding：物理页绑定 VERIFIED 才允许发布页码
+    # - figure_identity_binding：规范化 Figure 编号确认 VERIFIED 才允许发布编号
+    # - explanation_grounding：机制解释依据（正文回链 VERIFIED / 题注 PARTIAL /
+    #   无依据 UNRESOLVED），只有 VERIFIED 才能把机制结论归因给原论文
+    page_binding: str = "UNRESOLVED"
+    figure_identity_binding: str = "UNRESOLVED"
+    explanation_grounding: str = "UNRESOLVED"
     hard_constraints_passed: list[str] = Field(default_factory=list)
     physical_unique: bool = False
     quote_head: str | None = None
@@ -90,6 +100,24 @@ class VerifiedLocatorBinding(BaseModel):
 def make_binding_id(*, retrieval_id: str, evidence_id: str | None, anchor_id: str | None) -> str:
     digest = hashlib.sha256(f"vlb|{retrieval_id}|{evidence_id or ''}|{anchor_id or ''}".encode()).hexdigest()[:20]
     return f"vlb_{digest}"
+
+
+def _resolution_figure_identity(resolution: dict[str, Any]) -> bool:
+    """Figure 身份确认：规范化 container_label 存在（图片匹配页码已验证但
+    container_label=NULL 时身份仍未确认，编号不可发布）。"""
+    label = str(resolution.get("container_label") or "").strip()
+    return bool(label) and label.lower() not in {"none", "null", "unknown"}
+
+
+def _resolution_explanation_grounding(resolution: dict[str, Any], *, status: str) -> str:
+    """解释依据分级：正文回链（mentioned_by）VERIFIED > 仅题注 PARTIAL > 无 UNRESOLVED。"""
+    if status != BINDING_VERIFIED:
+        return "UNRESOLVED"
+    if resolution.get("backlinks"):
+        return "VERIFIED"
+    if resolution.get("evidence_type") == "caption" or resolution.get("span_evidence_id"):
+        return "PARTIAL"
+    return "UNRESOLVED"
 
 
 def binding_from_locator_resolution(
@@ -139,6 +167,11 @@ def binding_from_locator_resolution(
         panel_match=resolution.get("panel_match"),
         hard_constraints_passed=list(hard_constraints or []),
         physical_unique=status == BINDING_VERIFIED,
+        page_binding="VERIFIED" if status == BINDING_VERIFIED and page_number else "UNRESOLVED",
+        figure_identity_binding="VERIFIED"
+        if status == BINDING_VERIFIED and _resolution_figure_identity(resolution)
+        else "UNRESOLVED",
+        explanation_grounding=_resolution_explanation_grounding(resolution, status=status),
         quote_head=resolution.get("quote_head"),
         verification={
             key: value

@@ -220,8 +220,10 @@ async def test_d3_unlocated_generic_page18_never_leaks(monkeypatch: pytest.Monke
     assert validation["answer_policy"]["citations_revoked"] is True
     assert validation["answer_policy"]["figure_label_claims_removed"] >= 1  # 芯片内编号随整块剥离，正文单独计数
     assert validation["answer_policy"]["disclosure_appended"] is True
-    # 视觉描述语义保留（普通文字不被误伤）
-    assert "根毛密度" in guarded or "表型" in guarded
+    # G3 收紧：UNLOCATED（视觉未配置、无观察）→ 模型答案整体不可信，后端固定
+    # 文案替换（编造的「根毛密度」描述与文献身份一并清除，零残留）
+    assert validation["answer_policy"]["answer_replaced_by_policy"] is True
+    assert "根毛密度" not in guarded and "Liu" not in guarded
     # 守卫幂等（双重应用字节稳定）
     twice, _ = apply_citation_channel(
         guarded, [unrelated], locator=contract.get("locator_resolution"), authority_policy=policy
@@ -256,7 +258,8 @@ async def test_policy_multiple_matches_mode(monkeypatch: pytest.MonkeyPatch):
     policy = contract["answer_policy"]
     assert policy["mode"] == "LOCATOR_AMBIGUOUS"
     assert policy["document_identity_allowed"] is False
-    assert policy["visual_explanation_allowed"] is True
+    # G3 收紧：无可信视觉观察的歧义不作「图片内容解释」授权 → 守卫整体替换保守文案
+    assert policy["visual_explanation_allowed"] is False
     assert "无法唯一确定" in (policy["required_disclosure"] or "")
     assert contract["citations"] == []
     assert contract["completeness"]["returned_evidence_count"] == 0
