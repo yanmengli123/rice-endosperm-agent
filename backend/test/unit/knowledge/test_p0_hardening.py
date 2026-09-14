@@ -90,9 +90,7 @@ def test_ac12_guard_is_idempotent_byte_for_byte():
 def test_ac13_fabricated_locator_chip_with_correct_values_is_stripped():
     """模型自造「〔引文定位｜正文·第4页｜合法文件名〕」即使数值碰巧正确：无后端签发 → 伪造。"""
     citations = []
-    text = (
-        "模型自造芯片：已可靠定位到原文：〔引文定位｜正文·第4页｜Plant Biotechnology Journal - 2024 - Liu.pdf〕"
-    )
+    text = "模型自造芯片：已可靠定位到原文：〔引文定位｜正文·第4页｜Plant Biotechnology Journal - 2024 - Liu.pdf〕"
     guarded, validation = apply_citation_channel(text, citations)
     assert "引文定位" not in guarded
     assert "已可靠定位到原文" not in guarded
