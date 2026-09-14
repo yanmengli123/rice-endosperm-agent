@@ -317,6 +317,66 @@ def _locator_verbatim_windows(quote_text: str) -> list[str]:
     return windows
 
 
+def _build_answer_policy(
+    *,
+    status: str,
+    observation_available: bool,
+    vision_status: str,
+) -> dict[str, Any]:
+    """按定位状态机构造结构化 answer_policy（进入模型上下文 + 输出守卫双执行）。
+
+    输出规则表（2026-09 收敛）：只有 VERIFIED 允许文献名/Figure 编号/页码/
+    文献引用；MULTIPLE/NOT_FOUND 只保留视觉解释或保守说明，永不发布候选页码。
+    """
+    if status == "VERIFIED":
+        return {
+            "mode": "LOCATOR_VERIFIED",
+            "document_identity_allowed": True,
+            "figure_label_allowed": True,
+            "page_claim_allowed": True,
+            "document_citations_allowed": True,
+            "visual_explanation_allowed": True,
+            "required_disclosure": None,
+        }
+    if status == "MULTIPLE_MATCHES":
+        return {
+            "mode": "LOCATOR_AMBIGUOUS",
+            "document_identity_allowed": False,
+            "figure_label_allowed": False,
+            "page_claim_allowed": False,
+            "document_citations_allowed": False,
+            "visual_explanation_allowed": True,
+            "required_disclosure": (
+                "该图片在当前知识范围内存在多个可能的匹配，无法唯一确定来源文献与页码；"
+                "可补充题注文字或限定知识库后重试。"
+            ),
+        }
+    if observation_available:
+        return {
+            "mode": "VISUAL_ONLY_UNLOCATED",
+            "document_identity_allowed": False,
+            "figure_label_allowed": False,
+            "page_claim_allowed": False,
+            "document_citations_allowed": False,
+            "visual_explanation_allowed": True,
+            "required_disclosure": "可以解释图片可见内容，但无法可靠确定来源文献和页码。",
+        }
+    conservative_only = vision_status in {"NOT_CONFIGURED", "PROVIDER_FAILED", "SCHEMA_INVALID", "IMAGE_UNREADABLE"}
+    return {
+        "mode": "UNLOCATED",
+        "document_identity_allowed": False,
+        "figure_label_allowed": False,
+        "page_claim_allowed": False,
+        "document_citations_allowed": False,
+        "visual_explanation_allowed": not conservative_only,
+        "required_disclosure": (
+            "当前无法对这张图片进行可靠定位（视觉定位通道不可用且指纹未命中），因此不能确定其来源文献与页码。"
+            if conservative_only
+            else "当前知识库范围内无法可靠确定该图片所属的文献与页码。"
+        ),
+    }
+
+
 def _ledger_status(resolution: dict[str, Any] | None) -> str:
     """resolution → ledger stage 状态（VERIFIED/MULTIPLE_MATCHES/NO_MATCH/...）。"""
     if not isinstance(resolution, dict):
@@ -519,21 +579,42 @@ async def prepare_knowledge_context(
             from yuxi.knowledge.evidence.quote_locator import attach_caption_backlinks
 
             await attach_caption_backlinks(db, kb_ids=scope_kb_ids, resolution=direct_locator)
+    # 图片流裁决结果单独保存（D1）：无论是否落在「终局原因」清单内，图片通道
+    # 的结论都不允许被文本回退的 NOT_APPLICABLE 覆盖。
+    image_flow_terminal: dict[str, Any] | None = image_locator if (locator_pending and image_bytes) else None
     if locator_pending and (direct_locator is None or direct_locator.get("status") == "NOT_FOUND"):
-        # 文本入口（QUOTE/FIGURE 编号）：caption/引文通道；图片 NOT_FOUND 时
-        # 问题文本本身可能携带题注片段（quote 兜底）。
-        from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator
+        # 文本回退资格：图片定位已产生结果时，只有用户确实提供了引文文本才允许
+        # 文本回退；纯图片问句没有可提取引句，回退只会把图片 NOT_FOUND
+        # （如 VISION_PROVIDER_UNAVAILABLE）覆盖成 NOT_APPLICABLE
+        # （no_extractable_quote），让下游误以为不存在必须失败关闭的定位任务。
+        if image_flow_terminal is not None and not locator_intent.get("quote_text"):
+            attempt_ledger.append(
+                {"stage": "TEXT_FALLBACK", "status": "NOT_APPLICABLE", "reason": "no_user_quote_text"}
+            )
+            direct_locator = image_flow_terminal
+        else:
+            from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator
 
-        direct_locator = await resolve_quote_locator(
-            db,
-            question=question,
-            kb_ids=[str(member["kb_id"]) for member in raw_members],
-        )
-        attempt_ledger.append(_ledger_entry("TEXT_FALLBACK", direct_locator))
+            text_result = await resolve_quote_locator(
+                db,
+                question=question,
+                kb_ids=[str(member["kb_id"]) for member in raw_members],
+            )
+            attempt_ledger.append(_ledger_entry("TEXT_FALLBACK", text_result))
+            # 优先归并：文本 VERIFIED 才有资格覆盖图片失败结论；否则图片终局保留
+            direct_locator = (
+                text_result
+                if text_result.get("status") == "VERIFIED" and (image_flow_terminal or {}).get("status") != "VERIFIED"
+                else (image_flow_terminal or text_result)
+            )
     if direct_locator is not None and attempt_ledger:
         # 账本随 locator_resolution 持久化（primary_reason 由最终状态承载；
         # NOT_APPLICABLE 只是路由不适用，无资格覆盖真实失败）
         direct_locator.setdefault("attempt_ledger", attempt_ledger)
+    if image_flow_terminal is not None and direct_locator is not None:
+        from yuxi.knowledge.vision.provider import current_vision_status
+
+        direct_locator.setdefault("vision_status", current_vision_status().get("status") or "UNKNOWN")
     if direct_locator and direct_locator.get("status") == "VERIFIED":
         locator_evidence = {
             "evidence_id": direct_locator.get("evidence_id"),
@@ -1015,18 +1096,47 @@ async def prepare_knowledge_context(
             "引用正文讨论段——找不到对应 [E#] 时明示「原文未提供该结论的依据」，"
             "不得给出无依据推断。"
         )
-    # AC15 描述权 ≠ 定位权：图片定位失败不禁止解释图片——基于视觉观察描述
-    # 图面仍可回答，但必须明示无法可靠确定所属文献与页码，页码字段为 0。
-    _failed_image_locator = contract.get("locator_resolution") or {}
-    _observation_available = isinstance(contract.get("figure_image_observation"), dict) and "figure_label" in (
-        contract.get("figure_image_observation") or {}
-    )
-    if image_bytes and _failed_image_locator.get("status") != "VERIFIED" and _observation_available:
-        contract["answer_instruction"] += (
-            " 本题图片未能可靠定位到知识库文献（不要编造文献名或页码）。仍请基于"
-            "图片本身的可见内容回答「是什么」：描述可见的 panel、图表类型、文字"
-            "标签与生物学对象，并明确说明「当前知识库范围内无法可靠确定该图片"
-            "所属的文献与页码」。不得宣称任何页码或文件名。"
+    # AC15 描述权 ≠ 定位权 + 结构化 answer_policy（D2/D3/D4）：
+    # 自由文本 answer_instruction 从未真正投递给模型（模型上下文只经
+    # build_answer_context），现改为结构化策略——随模型上下文下行、由输出
+    # 守卫独立执行，双重约束；策略随 locator_resolution 持久化供状态投影。
+    _image_locator_required = bool(image_bytes and locator_intent.get("kind"))
+    if _image_locator_required:
+        _final_resolution = contract.get("locator_resolution") or {}
+        _final_status = str(_final_resolution.get("status") or "NOT_FOUND")
+        _observation_available = isinstance(contract.get("figure_image_observation"), dict) and "figure_label" in (
+            contract.get("figure_image_observation") or {}
+        )
+        contract["answer_policy"] = _build_answer_policy(
+            status=_final_status,
+            observation_available=_observation_available,
+            vision_status=str(_final_resolution.get("vision_status") or "UNKNOWN"),
+        )
+        if isinstance(_final_resolution, dict) and "answer_policy" not in _final_resolution:
+            _final_resolution["answer_policy"] = contract["answer_policy"]
+        if _final_status != "VERIFIED":
+            # D3 关闭普通引用池：图片定位未验证时，普通语义检索命中不得升级为
+            # 图片来源证据——文献引用池必须为空（检索候选仍可在状态面板展示）。
+            contract["citations"] = []
+            contract["context_evidence"] = []
+            contract["warnings"] = [
+                *(contract.get("warnings") or []),
+                "图片定位未通过验证：本轮不发布任何文献引用与页码；普通检索命中仅作为候选展示。",
+            ]
+            # 回答证据计数持久化为显式 0（不得为 NULL）
+            contract["completeness"] = {
+                **(contract.get("completeness") or {}),
+                "status": f"LOCATOR_{_final_status}",
+                "returned_evidence_count": 0,
+            }
+        else:
+            contract["completeness"] = {
+                **(contract.get("completeness") or {}),
+                "status": "LOCATOR_VERIFIED",
+                "returned_evidence_count": 1,
+            }
+        contract["answer_instruction"] += " answer_policy（结构化，必须遵守）：" + json.dumps(
+            contract["answer_policy"], ensure_ascii=False
         )
     # NUMERIC 题型：数字/区间/单位必须逐字来自证据原文，禁止换算或近似改写（P2-12）
     if "NUMERIC" in (plan.get("question_types") or []):

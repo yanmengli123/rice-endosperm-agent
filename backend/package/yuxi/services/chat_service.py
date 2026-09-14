@@ -402,6 +402,7 @@ def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, d
         contract.get("citations") or [],
         locator=contract.get("locator_resolution"),
         partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
+        authority_policy=contract.get("answer_policy"),
     )
     citation_validation["answer_draft"] = draft_validation
     # P4 解释绑定：复合意图流按 Claim 分类验证（CAPTION_FACT/TEXT_SUPPORTED_
@@ -732,6 +733,7 @@ async def _save_ai_message(
             knowledge_contract.get("citations") or [],
             locator=knowledge_contract.get("locator_resolution"),
             partition_intent=(knowledge_contract.get("locator_intent") or {}).get("partition_intent"),
+            authority_policy=knowledge_contract.get("answer_policy"),
         )
         if citation_validation.get("changed"):
             extra_metadata["locator_validation"] = citation_validation
@@ -809,6 +811,7 @@ async def save_partial_message(
                     knowledge_contract.get("citations") or [],
                     locator=knowledge_contract.get("locator_resolution"),
                     partition_intent=(knowledge_contract.get("locator_intent") or {}).get("partition_intent"),
+                    authority_policy=knowledge_contract.get("answer_policy"),
                 )
                 if citation_validation.get("changed"):
                     extra_metadata["locator_validation"] = citation_validation

@@ -743,14 +743,30 @@ def apply_citation_channel(
     *,
     locator: dict[str, Any] | None = None,
     partition_intent: str | None = None,
+    authority_policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """输出门禁：剥离 → 伪造重写 → 提议验证展开。页码只可能经权威路径上屏。
 
     locator（QUOTE_LOCATOR 确定性解析结果）已 VERIFIED 时：模型自写的页码被
     确定性纠正为后端解析芯片，而非失败关闭标记。
+
+    ``authority_policy``（D4）：结构化输出授权，与编排器下行策略双执行。
+    当 ``document_citations_allowed=False``（图片定位未验证）时**独立收权**：
+    即使调用方误传了 citations，引用池也按空处理——文献芯片/【证据引用】
+    区块/定位芯片一律不得出境；``figure_label_allowed=False`` 时 Figure/Fig/
+    图+编号的确定性声明整体剥离；最后按 ``required_disclosure`` 追加标准化
+    未定位声明（幂等）。
     """
     original = str(text or "")
-    locator_chip = render_locator_chip(locator) if locator and locator.get("status") == "VERIFIED" else None
+    policy = authority_policy if isinstance(authority_policy, dict) else None
+    policy_revokes_citations = bool(policy and policy.get("document_citations_allowed") is False)
+    effective_citations: list[dict[str, Any]] = [] if policy_revokes_citations else (citations or [])
+    effective_locator = None if policy_revokes_citations else locator
+    locator_chip = (
+        render_locator_chip(effective_locator)
+        if effective_locator and effective_locator.get("status") == "VERIFIED"
+        else None
+    )
     source = original.replace(
         LEGACY_NARRATIVE_LOCATOR_MARKER,
         locator_chip or NARRATIVE_LOCATOR_MARKER,
@@ -758,7 +774,7 @@ def apply_citation_channel(
 
     # 1) 伪造芯片先进入 resolver。若先剥裸页码，芯片会被破坏成嵌套乱码。
     rewritten, fabrication = _rewrite_fabricated_chips(
-        source, citations or [], partition_intent=partition_intent, locator_chip=locator_chip
+        source, effective_citations, partition_intent=partition_intent, locator_chip=locator_chip
     )
 
     # 2) 暂时保护刚由后端生成的权威芯片，再剥离剩余裸页码/锚点。
@@ -777,16 +793,16 @@ def apply_citation_channel(
 
     # 3) [E#] 提议：resolver 验证后展开（Legacy Citation Repair 兼容层）
     expanded, expanded_count, bindings = expand_placeholders(
-        stripped, citations or [], partition_intent=partition_intent
+        stripped, effective_citations, partition_intent=partition_intent
     )
     expanded = _ADJACENT_LOCATOR_MARKERS.sub(lambda _: locator_chip or NARRATIVE_LOCATOR_MARKER, expanded)
 
     # 4) 反向绑定（引用完备性兜底）：模型漏写 [E#] 的硬约束句自动补权威芯片
     reverse_bound = 0
     uncovered: list[str] = []
-    if _citation_pool(citations or []):
+    if _citation_pool(effective_citations):
         expanded, reverse_bound, uncovered = reverse_bind_citations(
-            expanded, citations or [], partition_intent=partition_intent
+            expanded, effective_citations, partition_intent=partition_intent
         )
 
     # 5) 展示层占位符终点（P3）：模型通道占位符/仿写区块头/行内标记剥除。
@@ -812,13 +828,28 @@ def apply_citation_channel(
         )
 
     # 7) P4 引用平面模板化：已验证引用渲染为后端拥有的【证据引用】区块
-    expanded, references_rendered = _render_references_section(expanded, citations or [])
+    expanded, references_rendered = _render_references_section(expanded, effective_citations)
 
     # 8) 定位行保障：复合意图流中模型可能漏写定位行，后端确定性补齐并去重
     locator_line_prepended = False
     if locator_chip and f"已可靠定位到原文：{locator_chip}" not in expanded:
         locator_line_prepended = True
     expanded = _ensure_locator_line(expanded, locator_chip) if locator_chip else expanded
+
+    # 9) D4 策略收权：Figure/Fig/图+编号 的确定性声明在 figure_label_allowed=False
+    #    时整体剥离（模型编造 Figure 编号不得残留在未定位回答中）
+    figure_label_claims_removed = 0
+    if policy and policy.get("figure_label_allowed") is False:
+        stripped_labels, figure_label_claims_removed = _strip_figure_label_claims(expanded)
+        expanded = stripped_labels
+
+    # 10) D4 标准化未定位声明（幂等）：策略要求时追加，不依赖模型自觉
+    disclosure_appended = False
+    if policy and policy.get("required_disclosure"):
+        disclosure = str(policy["required_disclosure"])
+        if disclosure not in expanded:
+            expanded = expanded.rstrip() + ("\n\n" if expanded.strip() else "") + disclosure
+            disclosure_appended = True
 
     validation = {
         "version": CITATION_CHANNEL_VERSION,
@@ -831,11 +862,32 @@ def apply_citation_channel(
         "display_placeholders_stripped": placeholders_stripped,
         "references_rendered": references_rendered,
         "locator_line_prepended": locator_line_prepended,
+        "answer_policy": {
+            "mode": str((policy or {}).get("mode") or ""),
+            "citations_revoked": policy_revokes_citations,
+            "figure_label_claims_removed": figure_label_claims_removed,
+            "disclosure_appended": disclosure_appended,
+        },
         "bindings": bindings[:8],
-        "citation_count": len(citations or []),
+        "citation_count": len(effective_citations),
         "changed": expanded != original,
     }
     return expanded, validation
+
+
+_FIGURE_LABEL_CLAIM_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:Fig(?:ure)?\.?|图|表)\s*S?\d{1,3}[A-Za-z]?(?![A-Za-z0-9])",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_figure_label_claims(text: str) -> tuple[str, int]:
+    """剥离 Figure/Fig/图/表 + 编号 的确定性声明（保留 panel 字母与普通文字）。"""
+    result = str(text or "")
+    matches = _FIGURE_LABEL_CLAIM_PATTERN.findall(result)
+    result = _FIGURE_LABEL_CLAIM_PATTERN.sub("", result)
+    result = re.sub(r"[ \t]{2,}", " ", result)
+    return result, len(matches)
 
 
 def _quote_fingerprint(quote: Any) -> str:

@@ -193,6 +193,7 @@ def _apply_citation_guard(text: str, *, contract: dict | None) -> tuple[str, dic
         contract.get("citations") or [],
         locator=contract.get("locator_resolution"),
         partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
+        authority_policy=contract.get("answer_policy"),
     )
     validation["answer_draft"] = draft_validation
     if not validation.get("changed") and rendered == text:

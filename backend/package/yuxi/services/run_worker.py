@@ -1015,6 +1015,18 @@ async def _worker_startup(ctx):
     pg_manager.initialize()
     await pg_manager.create_business_tables()
     await pg_manager.ensure_business_schema()
+    # 视觉科研定位能力 canary（D5）：worker 是图片定位的主要执行进程，进程内
+    # 能力缓存与 API 不共享——必须在 worker 启动时独立探测并记录状态。
+    try:
+        from yuxi.knowledge.vision.provider import probe_vision_capability
+
+        capability = await probe_vision_capability()
+        logger.info(
+            f"[worker] Vision scientific locator: model = {capability['model'] or '(none)'}"
+            f", status = {capability['status']} ({capability['detail']})"
+        )
+    except Exception as exc:  # noqa: BLE001 - canary 失败不阻断 worker 启动
+        logger.warning(f"[worker] Vision capability canary skipped: {exc}")
     from yuxi.knowledge.runtime import knowledge_base
 
     await knowledge_base.initialize()

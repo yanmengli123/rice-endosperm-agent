@@ -733,13 +733,22 @@ async def test_ac15_failed_locator_still_allows_visual_explanation(monkeypatch: 
         image_bytes=b"fake-image-bytes",
     )
     assert contract["locator_resolution"]["status"] != "VERIFIED"
-    # 描述权 ≠ 定位权：指令允许基于视觉观察解释，但禁止宣称文献/页码
-    instruction = contract.get("answer_instruction") or ""
-    assert "无法可靠确定" in instruction
-    assert "不得宣称任何页码" in instruction
-    # 模型即便写出页码，守卫也剥离（页码字符串为 0）
-    model_answer = "图中可见 a/b/c 三个 panel 的柱状图。该图位于论文第 4 页。"
-    guarded, validation = apply_citation_channel(model_answer, contract.get("citations") or [])
+    # 描述权 ≠ 定位权：结构化 answer_policy 允许基于视觉观察解释，禁止文献/页码
+    policy = contract["answer_policy"]
+    assert policy["mode"] == "VISUAL_ONLY_UNLOCATED"
+    assert policy["visual_explanation_allowed"] is True
+    assert policy["page_claim_allowed"] is False
+    assert "无法可靠确定" in (policy["required_disclosure"] or "")
+    # 引用池已被 D3 关闭；守卫按策略独立收权（页码/Figure 编号/芯片为 0 + 标准化披露）
+    assert contract["citations"] == []
+    model_answer = "图中可见 a/b/c 三个 panel 的柱状图。该图位于论文第 4 页，是 Figure 1。"
+    guarded, validation = apply_citation_channel(
+        model_answer,
+        contract.get("citations") or [],
+        authority_policy=policy,
+    )
     assert "第 4 页" not in guarded and "第4页" not in guarded
+    assert "Figure 1" not in guarded
     assert "〔引文定位" not in guarded
+    assert policy["required_disclosure"] in guarded
     assert "panel" in guarded  # 视觉描述保留

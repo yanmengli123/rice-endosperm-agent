@@ -47,12 +47,14 @@ TIER_T3_WHITESPACE_COMPRESSED = "T3_WHITESPACE_COMPRESSED"
 
 # ---- Figure/Table 编号：抽取 + 规范键 + 硬约束 ----
 
+# panel 字母只在与数字直接相邻时才算编号组成部分（"Figure 5A"）；带空格的
+# "Figure 7 A schematic..." 中 A 是英文单词开头，不得把编号误归一成 figure 7a
 _LABEL_PATTERN = re.compile(
-    r"(?:fig(?:ure)?s?\.?|table|图|表)\s*[sS]?\s*\d{1,3}(?:\s?[A-Za-z](?![A-Za-z0-9]))?",
+    r"(?:fig(?:ure)?s?\.?|table|图|表)\s*[sS]?\s*\d{1,3}(?:[A-Za-z](?![A-Za-z0-9]))?",
     re.IGNORECASE,
 )
 _LABEL_FULL = re.compile(
-    r"(fig(?:ure)?s?|table|图|表)\.?\s*([sS])?\.?\s*(\d{1,3})(?:\s?([A-Za-z])(?![A-Za-z0-9]))?",
+    r"(fig(?:ure)?s?|table|图|表)\.?\s*([sS])?\.?\s*(\d{1,3})(?:([A-Za-z])(?![A-Za-z0-9]))?",
     re.IGNORECASE,
 )
 

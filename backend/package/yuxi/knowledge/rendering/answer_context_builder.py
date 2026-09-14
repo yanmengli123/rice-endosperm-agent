@@ -45,6 +45,16 @@ def _drop_derived_product_rows(rows: list[dict[str, Any]] | None) -> tuple[list[
     return kept, dropped
 
 
+def _answer_policy_payload(contract: dict[str, Any]) -> dict[str, Any] | None:
+    """结构化 answer_policy 投影（D2）：策略必须真正进入模型请求。
+
+    自由文本 answer_instruction 只进审计 contract，从未投递模型；图片定位
+    类问题的输出授权由本策略与输出守卫双重执行。
+    """
+    policy = contract.get("answer_policy")
+    return policy if isinstance(policy, dict) and policy.get("mode") else None
+
+
 def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: int = 10) -> str:
     """Compress the complete backend Contract into the context permitted for LLM narration."""
     # Authority Gate 第一层：WikiNavigationHit 等导航对象混入证据通道立即抛错。
@@ -132,6 +142,7 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "intent": (contract.get("retrieval_plan") or {}).get("intent"),
         "query_mode": (contract.get("retrieval_plan") or {}).get("query_mode"),
         "answer_mode": (contract.get("retrieval_plan") or {}).get("answer_mode"),
+        "answer_policy": _answer_policy_payload(contract),
         "count_facts": {
             "citable_claims": len(claims),
             "distinct_subjects": len(unique_subjects),
@@ -167,11 +178,30 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
             "authority": "NEO4J_PROJECTION_CONTEXT_ONLY",
         },
     }
+    policy_rules = ""
+    policy = _answer_policy_payload(contract)
+    if policy and policy.get("page_claim_allowed") is False:
+        policy_rules = (
+            "answer_policy 为本轮输出授权的硬约束（与上述规则冲突时以 answer_policy 为准）："
+            "本回答禁止出现文献名、Figure/Fig/图+编号、任何页码（第N页/p.N/pages N）与任何引用占位符；"
+            "不得宣称该图片出自某篇论文。"
+            + (
+                "只能基于图片可见内容作答（panel、图表类型、文字标签、生物学对象），并附上"
+                f"required_disclosure 原句：「{policy.get('required_disclosure') or ''}」。"
+                if policy.get("visual_explanation_allowed")
+                else (
+                    "只能保守说明无法定位，并附上 required_disclosure 原句："
+                    f"「{policy.get('required_disclosure') or ''}」。"
+                )
+            )
+        )
     return (
         "<AUTHORITATIVE_KNOWLEDGE_CONTRACT>\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         + "\n</AUTHORITATIVE_KNOWLEDGE_CONTRACT>\n"
-        "规则：仅依据上面的 Claim 组织科研解释。PMID、DOI、evidence_id 和完整结构化表由后端工具卡呈现，"
+        + policy_rules
+        + ("\n" if policy_rules else "")
+        + "规则：仅依据上面的 Claim 组织科研解释。PMID、DOI、evidence_id 和完整结构化表由后端工具卡呈现，"
         "不要自行生成、补全或改写这些引文标识符；plant_gene_lookup 等工具返回的官方基因、转录本、蛋白和"
         "RAP/MSU 位点 ID 不属于引文标识，可以在正文保留。即使存在引文标识格式问题，也必须完成基于 Claim 的"
         "科研解读，不得改为拒答或只返回计数。FUNCTIONAL_REGULATION 可表述为功能调控；"

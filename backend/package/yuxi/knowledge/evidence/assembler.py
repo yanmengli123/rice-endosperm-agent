@@ -216,6 +216,12 @@ async def _assemble_locator_projection(
     locator_candidate_count = 0
     locator_status: str | None = None
     locator_status_reason: str | None = None
+    vision_status: str | None = None
+    answer_mode: str | None = None
+    failure_stage: str | None = None
+    # failure_stage 优先取配置/提供方类失败（解释「为什么定位不了」），
+    # 资产未命中（NO_MATCH）是常态路径，不作失败阶段
+    _FAILURE_STAGE_STATUSES = {"NOT_CONFIGURED", "SCHEMA_INVALID_OR_FAILED", "PROVIDER_FAILED", "FAILED"}
     for record in records:
         resolution = dict(getattr(record, "locator_resolution_json", None) or {})
         status = str(resolution.get("status") or "")
@@ -223,6 +229,16 @@ async def _assemble_locator_projection(
             locator_status = locator_status or status
             if locator_status_reason is None and resolution.get("reason"):
                 locator_status_reason = str(resolution.get("reason"))
+        if vision_status is None and resolution.get("vision_status"):
+            vision_status = str(resolution["vision_status"])
+        if answer_mode is None and isinstance(resolution.get("answer_policy"), dict):
+            answer_mode = str(resolution["answer_policy"].get("mode") or "") or None
+        for entry in resolution.get("attempt_ledger") or []:
+            if not isinstance(entry, dict):
+                continue
+            stage_status = str(entry.get("status") or "")
+            if stage_status in _FAILURE_STAGE_STATUSES and failure_stage is None:
+                failure_stage = str(entry.get("stage") or "")
         if status == "VERIFIED":
             locator_candidate_count += 1
         elif isinstance(resolution.get("match_count"), int):
@@ -247,6 +263,9 @@ async def _assemble_locator_projection(
         "claim_binding_status": "DETERMINISTIC_LOCATOR",
         "locator_status": locator_status,
         "locator_status_reason": locator_status_reason,
+        "vision_status": vision_status,
+        "answer_mode": answer_mode,
+        "failure_stage": failure_stage,
         "retrievals": [
             {
                 "retrieval_id": record.retrieval_id,
