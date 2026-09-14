@@ -9,6 +9,17 @@ upstreams:
       send: 30
       read: 300
 
+  # 附件上传/解析专用：大文件传输与 PDF 解析耗时远超常规 API 超时。
+  - id: yuxi-backend-attachment
+    type: roundrobin
+    scheme: http
+    nodes:
+      "api:5050": 1
+    timeout:
+      connect: 5
+      send: 300
+      read: 600
+
 routes:
   - id: yuxi-public-credential-status
     name: yuxi-public-credential-status
@@ -561,12 +572,159 @@ routes:
         show_limit_quota_header: true
         allow_degradation: true
 
+  # P5 自省：用户自身用量与配额（user_router，鉴权由上游执行）。
+  - id: yuxi-user-quota
+    name: yuxi-user-quota
+    uri: /api/user/quota
+    methods:
+      - GET
+    priority: 90
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-user-usage
+    name: yuxi-user-usage
+    uri: /api/user/usage
+    methods:
+      - GET
+    priority: 90
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
   - id: yuxi-user-api-key-delete
     name: yuxi-user-api-key-delete
     uri: /api/user/apikey/:api_key_id
     methods:
       - DELETE
     priority: 95
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 10
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  # P2b 设备会话管理：列出与远程下线当前用户的会话。
+  # DELETE 是破坏性操作，限流收紧。
+  - id: yuxi-auth-session-list
+    name: yuxi-auth-session-list
+    uri: /api/auth/sessions
+    methods:
+      - GET
+    priority: 90
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-auth-session-revoke
+    name: yuxi-auth-session-revoke
+    uri: /api/auth/sessions/:family_id
+    methods:
+      - DELETE
+    priority: 90
     upstream_id: yuxi-backend
     plugins:
       request-id:
@@ -694,6 +852,185 @@ routes:
         show_limit_quota_header: true
         allow_degradation: true
 
+  # 桌面端附件链路（P5）：tmp 上传/解析 + 线程附件确认。
+  # 上传是 multipart，不做请求体 schema 校验；身份与归属仍由 Yuxi 校验。
+  - id: yuxi-chat-attachment-tmp-upload
+    name: yuxi-chat-attachment-tmp-upload
+    uri: /api/chat/attachments/tmp
+    methods:
+      - POST
+    priority: 120
+    upstream_id: yuxi-backend-attachment
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-chat-attachment-tmp-parse
+    name: yuxi-chat-attachment-tmp-parse
+    uri: /api/chat/attachments/tmp/parse
+    methods:
+      - POST
+    priority: 120
+    upstream_id: yuxi-backend-attachment
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      request-validation:
+        body_schema:
+          type: object
+          required:
+            - object_name
+            - file_name
+            - parse_method
+            - bucket_name
+          properties:
+            object_name:
+              type: string
+              minLength: 1
+              maxLength: 512
+            file_name:
+              type: string
+              minLength: 1
+              maxLength: 255
+            parse_method:
+              type: string
+              minLength: 1
+              maxLength: 64
+            bucket_name:
+              type: string
+              minLength: 1
+              maxLength: 128
+          additionalProperties: false
+        rejected_code: 400
+        rejected_msg: invalid request
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-chat-thread-attachment-confirm
+    name: yuxi-chat-thread-attachment-confirm
+    uri: /api/chat/thread/:thread_id/attachments/confirm
+    methods:
+      - POST
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      request-validation:
+        body_schema:
+          type: object
+          required:
+            - attachments
+          properties:
+            attachments:
+              type: array
+              minItems: 1
+              maxItems: 6
+              items:
+                type: object
+                required:
+                  - file_name
+                  - bucket_name
+                  - object_name
+                properties:
+                  file_name:
+                    type: string
+                    minLength: 1
+                    maxLength: 255
+                  file_type:
+                    type: string
+                    maxLength: 128
+                  bucket_name:
+                    type: string
+                    minLength: 1
+                    maxLength: 128
+                  object_name:
+                    type: string
+                    minLength: 1
+                    maxLength: 512
+                  parsed_object_name:
+                    type: string
+                    maxLength: 512
+                  truncated:
+                    type: boolean
+                additionalProperties: false
+          additionalProperties: false
+        rejected_code: 400
+        rejected_msg: invalid request
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
   - id: yuxi-desktop-native-run-create
     name: yuxi-desktop-native-run-create
     uri: /api/agent/runs
@@ -721,7 +1058,6 @@ routes:
         body_schema:
           type: object
           required:
-            - query
             - agent_slug
             - thread_id
             - meta
@@ -752,11 +1088,30 @@ routes:
                   type: string
                   enum:
                     - rice-endosperm-desktop
+                attachment_file_ids:
+                  type: array
+                  maxItems: 6
+                  items:
+                    type: string
+                    maxLength: 128
               additionalProperties: false
             model_spec:
               type: string
               minLength: 1
               maxLength: 200
+            # 中断恢复（P1）：载荷结构由 LangGraph 定义，网关只做存在性放行，
+            # 字段校验由上游 AgentRunCreate（agent_router.py）承担。
+            resume: {}
+            created_by_run_id:
+              type: string
+              minLength: 1
+              maxLength: 64
+          # query 与 resume 二选一：resume run（人工审批续跑）不带 query。
+          anyOf:
+            - required:
+                - query
+            - required:
+                - resume
           additionalProperties: false
         rejected_code: 400
         rejected_msg: invalid request
