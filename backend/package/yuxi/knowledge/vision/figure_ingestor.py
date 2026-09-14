@@ -17,6 +17,8 @@ from typing import Any
 from sqlalchemy import delete
 
 from yuxi.knowledge.evidence.caption_locator import canonical_figure_label, extract_figure_label
+from yuxi.knowledge.pdf_evidence.asset_paths import revision_image_prefix
+from yuxi.knowledge.rendering.claim_evidence_resolver import normalize_for_match
 from yuxi.knowledge.vision.phash import (
     compute_asset_digest,
     compute_panel_phashes,
@@ -29,11 +31,10 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils import logger
 
-FIGURE_INGESTOR_VERSION = "figure_ingestor_v1"
+FIGURE_INGESTOR_VERSION = "figure_ingestor_v3"
 
-# 与 ScientificPdfPipeline engine_params 一致（图片上传的目标 bucket/prefix）
+# 与 ScientificPdfPipeline engine_params 一致（图片上传的目标 bucket）
 FIGURE_ASSET_BUCKET = "knowledgebases"
-FIGURE_ASSET_PREFIX = "evidence/assets"
 _MAX_ASSETS_PER_REVISION = 200
 
 
@@ -42,13 +43,37 @@ def _entity_key_for_caption(caption: str) -> str | None:
     return label
 
 
-async def _resolve_asset_objects() -> dict[str, str]:
-    """前缀列表 → {safe_name: object_name}（对象名内容寻址，按文件名后缀回收）。"""
+def _caption_matches_visual_anchor(caption: str, anchor_quote: str) -> bool:
+    """Strictly validate a caption-to-visual-anchor lineage repair.
+
+    MinerU occasionally prefixes a chart caption with a panel marker such as
+    ``(i)`` in the physical anchor while the Markdown caption omits it.  The
+    figure label must still agree and the normalized full caption must contain
+    the other side; shared statistical boilerplate alone is never sufficient.
+    """
+    caption_label = _entity_key_for_caption(caption)
+    anchor_label = _entity_key_for_caption(anchor_quote)
+    if not caption_label or caption_label != anchor_label:
+        return False
+    caption_norm = normalize_for_match(caption)
+    anchor_norm = normalize_for_match(anchor_quote)
+    if min(len(caption_norm), len(anchor_norm)) < 40:
+        return False
+    return caption_norm == anchor_norm or caption_norm in anchor_norm or anchor_norm in caption_norm
+
+
+async def _resolve_asset_objects(revision: Any) -> dict[str, str]:
+    """版本专属前缀列表 → {safe_name: object_name}。"""
     from yuxi.storage.minio.client import get_minio_client
 
     client = get_minio_client()
+    prefix = revision_image_prefix(
+        tenant_id=int(revision.tenant_id),
+        source_sha256=str(revision.source_sha256),
+        revision_id=str(revision.revision_id),
+    )
     try:
-        names = await client.alist_object_names_by_prefix(FIGURE_ASSET_BUCKET, FIGURE_ASSET_PREFIX)
+        names = await client.alist_object_names_by_prefix(FIGURE_ASSET_BUCKET, f"{prefix}/")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"figure ingestor: asset prefix list failed (fingerprints skipped): {exc}")
         return {}
@@ -89,8 +114,11 @@ async def persist_figure_index(
             "version": FIGURE_INGESTOR_VERSION,
             "entities": 0,
             "assets": 0,
+            "anchored_assets": 0,
             "fingerprinted": 0,
             "fingerprint_misses": 0,
+            "locator_ready_assets": 0,
+            "repaired_caption_spans": 0,
         }
 
     caption_spans = [span for span in spans or [] if str(span.evidence_type) == "caption"]
@@ -114,7 +142,7 @@ async def persist_figure_index(
         anchor_by_page.setdefault(page, []).append(anchor)
     paired_anchor_ids: set[str] = set()
 
-    object_by_name = await _resolve_asset_objects()
+    object_by_name = await _resolve_asset_objects(revision)
     minio_client = None
 
     # 同一图表编号的多个视觉块聚合为一个实体；无编号块按 img_path 独立成实体
@@ -146,8 +174,11 @@ async def persist_figure_index(
         "version": FIGURE_INGESTOR_VERSION,
         "entities": len(entities),
         "assets": 0,
+        "anchored_assets": 0,
         "fingerprinted": 0,
         "fingerprint_misses": 0,
+        "locator_ready_assets": 0,
+        "repaired_caption_spans": 0,
     }
     for entity_data in entities.values():
         span = entity_data["span"]
@@ -163,11 +194,11 @@ async def persist_figure_index(
             container_label=entity_data["container_label"],
             caption=entity_data["caption"] or None,
             caption_page=int(entity_data["caption_page"] or 0) or None,
-            caption_anchor_id=None,
+            caption_anchor_id=str(span.anchor_id) if span is not None and span.anchor_id else None,
             caption_span_id=str(span.span_id) if span is not None else None,
             caption_span_evidence_id=str(span.evidence_id) if span is not None else None,
             document_partition=str(span.document_partition if span is not None else "UNKNOWN"),
-            association_method="span_linkage" if span is not None else "block_pairing",
+            association_method="span_linkage" if span is not None and span.anchor_id else "block_pairing",
             asset_count=len(entity_data["assets"]),
         )
         session.add(entity_row)
@@ -187,6 +218,30 @@ async def persist_figure_index(
                     matched_anchor = page_anchors[0]
             if matched_anchor is not None:
                 paired_anchor_ids.add(str(matched_anchor.anchor_id))
+                summary["anchored_assets"] += 1
+                if (
+                    span is not None
+                    and not span.anchor_id
+                    and int(entity_data["caption_page"] or 0) == int(matched_anchor.page or 0)
+                    and _caption_matches_visual_anchor(str(span.quote or ""), str(matched_anchor.quote or ""))
+                ):
+                    # The visual anchor and caption span describe the same complete
+                    # numbered caption on the same physical page. Repair the missing
+                    # span lineage before activation so the caption locator can use
+                    # the authoritative caption channel instead of a discussion hit.
+                    span.anchor_id = str(matched_anchor.anchor_id)
+                    span.page_number = int(matched_anchor.page)
+                    span.document_partition = str(matched_anchor.document_partition or "UNKNOWN")
+                    span.partition_confidence = float(matched_anchor.partition_confidence or 0.0)
+                    span.metadata_json = {
+                        **dict(span.metadata_json or {}),
+                        "anchor_link_repair": "figure_asset_same_page_full_caption",
+                        "anchor_locatable": bool(matched_anchor.locatable),
+                    }
+                    entity_row.caption_anchor_id = str(matched_anchor.anchor_id)
+                    entity_row.document_partition = str(matched_anchor.document_partition or "UNKNOWN")
+                    entity_row.association_method = "asset_caption_linkage"
+                    summary["repaired_caption_spans"] += 1
             safe_name = posixpath.basename(img_path) if img_path else ""
             object_name = object_by_name.get(safe_name, "") if safe_name else ""
             asset_sha = ""
@@ -208,6 +263,8 @@ async def persist_figure_index(
                     logger.warning(f"figure ingestor: asset fingerprint failed for {img_path}: {exc}")
             if asset_sha:
                 summary["fingerprinted"] += 1
+                if matched_anchor is not None:
+                    summary["locator_ready_assets"] += 1
             else:
                 summary["fingerprint_misses"] += 1
             session.add(
@@ -237,7 +294,6 @@ async def persist_figure_index(
 
 __all__ = [
     "FIGURE_ASSET_BUCKET",
-    "FIGURE_ASSET_PREFIX",
     "FIGURE_INGESTOR_VERSION",
     "persist_figure_index",
 ]

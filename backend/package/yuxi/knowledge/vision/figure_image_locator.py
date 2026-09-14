@@ -10,9 +10,11 @@ R-P2 起图片索引是**持久化的资产指纹索引**（figure_entities + fi
    绑定，不需要视觉模型。
 2. **V1_STRONG_PHASH**：感知哈希强匹配（距离 ≤ 8，整图或 panel 变体）且
    范围内物理唯一 → 绑定并报告 panel_key（用户只上传 (c) 子图仍绑定父图）。
-3. **V2_VISUAL_CONSTRAINTS**：观察编号 + 可见文本/实体/题注片段 ≥2 信号。
-4. **V3_MULTI_SIGNAL_HARD_CONSTRAINTS**：无编号但文本+实体多信号且物理唯一。
-5. **V4_SEMANTIC_ONLY**：仅语义相似 → Candidate only，永不发布页码。
+3. **V1_LOCAL_FEATURE_GEOMETRY**：pHash 未决时，对有界候选执行 ORB +
+   RANSAC 几何一致性验证，覆盖缩放、重编码和轻度裁切截图。
+4. **V2_VISUAL_CONSTRAINTS**：观察编号 + 可见文本/实体/题注片段 ≥2 信号。
+5. **V3_MULTI_SIGNAL_HARD_CONSTRAINTS**：无编号但文本+实体多信号且物理唯一。
+6. **V4_SEMANTIC_ONLY**：仅语义相似 → Candidate only，永不发布页码。
 
 失败语义：确定性层未决且观察不可用 → ``VISION_PROVIDER_UNAVAILABLE``（显式
 暴露，不静默退化为普通问答）；多物理位置 → ``MULTIPLE_MATCHES`` 不发布候选页码。
@@ -20,6 +22,7 @@ R-P2 起图片索引是**持久化的资产指纹索引**（figure_entities + fi
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -38,16 +41,19 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils import logger
 
-FIGURE_IMAGE_LOCATOR_VERSION = "figure_image_locator_v2"
+FIGURE_IMAGE_LOCATOR_VERSION = "figure_image_locator_v3"
 
 TIER_V0_EXACT_ASSET_SHA = "V0_EXACT_ASSET_SHA"
 TIER_V1_STRONG_PHASH_LABEL = "V1_STRONG_PHASH"
+TIER_V1_LOCAL_FEATURE_GEOMETRY = "V1_LOCAL_FEATURE_GEOMETRY"
 TIER_V2_VISUAL_CONSTRAINTS = "V2_VISUAL_CONSTRAINTS"
 TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS = "V3_MULTI_SIGNAL_HARD_CONSTRAINTS"
 TIER_V4_SEMANTIC_ONLY = "V4_SEMANTIC_ONLY"
 
 # 可见文本片段命中题注的最小归一化长度（防止 2-3 字符子串误命中）
 _VISIBLE_TEXT_MIN_CHARS = 6
+_LOCAL_FEATURE_PREFILTER_LIMIT = 12
+_LOCAL_FEATURE_DOWNLOAD_CONCURRENCY = 4
 
 # MinerU 视觉块锚点类型（v3 起含 chart）
 _IMAGE_ANCHOR_TYPES = ("image", "figure", "chart")
@@ -118,6 +124,8 @@ async def _persisted_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, An
                 "asset_digest": asset.asset_sha256 or None,
                 "asset_phash": asset.asset_phash or None,
                 "panel_phashes": dict(asset.panel_phashes or {}),
+                "object_bucket": asset.object_bucket,
+                "object_name": asset.object_name,
                 "img_path": asset.img_path,
                 "width": asset.width,
                 "height": asset.height,
@@ -296,6 +304,87 @@ def adjudicate_deterministic_match(
             "signals": {"asset_sha_exact": False, "phash_distance": distance, "panel_key": panel_key},
         }
     return {"status": "DETERMINISTIC_UNRESOLVED", "locator_kind": "FIGURE_IMAGE"}
+
+
+def _phash_prefilter_distance(uploaded_phash: str | None, asset: dict[str, Any]) -> int:
+    distances: list[int] = []
+    for value in [asset.get("asset_phash"), *(asset.get("panel_phashes") or {}).values()]:
+        distance = phash_hamming_distance(uploaded_phash, value)
+        if distance is not None:
+            distances.append(distance)
+    return min(distances) if distances else 10_000
+
+
+async def adjudicate_local_feature_match(
+    candidates: list[dict[str, Any]],
+    *,
+    image_bytes: bytes,
+    image_phash: str | None,
+) -> dict[str, Any]:
+    """Bounded ORB + homography fallback for resized/cropped screenshots.
+
+    pHash is used only to cap internal MinIO reads; it is not part of the publish
+    gate.  Local geometry must independently pass and be physically unique.
+    """
+    from yuxi.knowledge.vision.local_features import match_local_feature_geometry
+    from yuxi.storage.minio.client import get_minio_client
+
+    ranked: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for entity in candidates:
+        for asset in entity.get("assets") or []:
+            if not asset.get("object_name") or not asset.get("anchor_id"):
+                continue
+            ranked.append((_phash_prefilter_distance(image_phash, asset), entity, asset))
+    ranked.sort(key=lambda item: (item[0], str(item[1].get("entity_key") or ""), str(item[2].get("img_path") or "")))
+    ranked = ranked[:_LOCAL_FEATURE_PREFILTER_LIMIT]
+    if not ranked:
+        return {"status": "DETERMINISTIC_UNRESOLVED", "locator_kind": "FIGURE_IMAGE"}
+
+    client = get_minio_client()
+    semaphore = asyncio.Semaphore(_LOCAL_FEATURE_DOWNLOAD_CONCURRENCY)
+
+    async def evaluate(item):
+        phash_distance, entity, asset = item
+        try:
+            async with semaphore:
+                candidate_bytes = await client.adownload_file(
+                    str(asset.get("object_bucket") or "knowledgebases"),
+                    str(asset["object_name"]),
+                )
+            metrics = await asyncio.to_thread(match_local_feature_geometry, image_bytes, candidate_bytes)
+            return entity, asset, phash_distance, metrics
+        except Exception as exc:  # noqa: BLE001 - one missing asset cannot widen authority
+            logger.warning(f"figure local-feature candidate unavailable: {asset.get('object_name')}: {exc}")
+            return entity, asset, phash_distance, {"strong": False}
+
+    evaluated = await asyncio.gather(*(evaluate(item) for item in ranked))
+    strong = [item for item in evaluated if bool(item[3].get("strong"))]
+    if not strong:
+        return {"status": "DETERMINISTIC_UNRESOLVED", "locator_kind": "FIGURE_IMAGE"}
+    locations = {_physical_location(entity, asset) for entity, asset, _distance, _metrics in strong}
+    if len(locations) != 1:
+        return {
+            "status": "MULTIPLE_MATCHES",
+            "locator_kind": "FIGURE_IMAGE",
+            "match_count": len(locations),
+            "reason": "local_feature_hits_multiple_physical_locations",
+        }
+    entity, asset, phash_distance, metrics = max(
+        strong,
+        key=lambda item: (
+            int(item[3].get("inliers") or 0),
+            float(item[3].get("inlier_ratio") or 0.0),
+            float(item[3].get("query_coverage") or 0.0),
+        ),
+    )
+    return {
+        "status": "VERIFIED",
+        "tier": TIER_V1_LOCAL_FEATURE_GEOMETRY,
+        "entity": entity,
+        "asset": asset,
+        "panel_key": "geometry",
+        "signals": {"phash_distance": phash_distance, "local_feature_geometry": metrics},
+    }
 
 
 def _text_signal(fragments: list[str], caption_norm: str) -> int:
@@ -491,15 +580,25 @@ async def resolve_figure_image_locator(
         if image_bytes:
             from yuxi.knowledge.vision.phash import compute_asset_digest, compute_phash
 
+            image_phash = compute_phash(image_bytes)
             deterministic = adjudicate_deterministic_match(
                 candidates,
                 image_asset_digest=compute_asset_digest(image_bytes),
-                image_phash=compute_phash(image_bytes),
+                image_phash=image_phash,
             )
             if deterministic.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
                 if deterministic.get("status") == "MULTIPLE_MATCHES":
                     return {**deterministic, "locator_version": FIGURE_IMAGE_LOCATOR_VERSION}
                 return await _materialize_resolution(db, deterministic)
+            local_feature = await adjudicate_local_feature_match(
+                candidates,
+                image_bytes=image_bytes,
+                image_phash=image_phash,
+            )
+            if local_feature.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
+                if local_feature.get("status") == "MULTIPLE_MATCHES":
+                    return {**local_feature, "locator_version": FIGURE_IMAGE_LOCATOR_VERSION}
+                return await _materialize_resolution(db, local_feature)
         if observation is None:
             # 显式暴露视觉通道不可用（不静默退化、不冒充定位）
             return {
@@ -526,10 +625,12 @@ __all__ = [
     "FIGURE_IMAGE_LOCATOR_VERSION",
     "TIER_V0_EXACT_ASSET_SHA",
     "TIER_V1_STRONG_PHASH_LABEL",
+    "TIER_V1_LOCAL_FEATURE_GEOMETRY",
     "TIER_V2_VISUAL_CONSTRAINTS",
     "TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS",
     "TIER_V4_SEMANTIC_ONLY",
     "adjudicate_deterministic_match",
+    "adjudicate_local_feature_match",
     "adjudicate_figure_candidates",
     "build_figure_index",
     "resolve_figure_image_locator",

@@ -164,7 +164,7 @@ def test_select_quote_candidates_prefers_distinctive_over_longest():
 def test_match_tier_t0_raw_and_t1_canonical():
     assert match_tier(_GENE_SENTENCE, _GENE_SENTENCE) == "T0_RAW_EXACT"
     # NFKC 连字 ﬁ→fi、破折号变体、大小写、空白 → T1
-    carrier = f"CRISPR/Cas9 knockout of OsMYB73 and OsNF-YB1 in rice callus, conﬁrmed by sequencing"
+    carrier = "CRISPR/Cas9 knockout of OsMYB73 and OsNF-YB1 in rice callus, conﬁrmed by sequencing"
     assert match_tier(_GENE_SENTENCE, carrier) == TIER_T1_CANONICAL_EXACT
 
 
@@ -633,7 +633,7 @@ async def test_caption_channel_rejects_span_anchor_page_mismatch(caption_session
     """跨源页码守卫：caption span 页与锚点页不一致（MinerU 误归属）→ 不发布。"""
     from sqlalchemy import update
 
-    _add_caption(
+    await _add_caption(
         caption_session,
         row_id=1,
         revision_id="spr_a",

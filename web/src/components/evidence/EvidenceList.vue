@@ -40,9 +40,12 @@
         以下内容已检索到，但未形成可靠页码绑定；候选页码不发布给回答。
       </p>
       <div class="evidence-items">
-        <div v-for="item in retrievalCandidates" :key="`rc-${item.evidence_id}`" class="evidence-item">
+        <div
+          v-for="item in retrievalCandidates"
+          :key="`rc-${item.evidence_id}`"
+          class="evidence-item"
+        >
           <div class="evidence-item-head">
-            <span class="evidence-page">第 {{ pageNumber(item) }} 页</span>
             <span class="evidence-quality">{{ item.locator?.quality || 'UNKNOWN' }}</span>
             <span class="evidence-status is-degraded">检索候选</span>
           </div>

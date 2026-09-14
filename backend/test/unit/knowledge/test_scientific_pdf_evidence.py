@@ -87,6 +87,16 @@ def test_parser_fingerprint_is_deterministic_and_config_sensitive():
     assert first != changed
 
 
+def test_figure_ingestor_version_participates_in_parser_fingerprint(monkeypatch):
+    from yuxi.knowledge.pdf_evidence import pipeline
+
+    before = pipeline.build_parser_fingerprint("a" * 64, {"ocr_engine": "mineru_official"})
+    monkeypatch.setattr(pipeline, "FIGURE_INGESTOR_VERSION", "figure_ingestor_future")
+    after = pipeline.build_parser_fingerprint("a" * 64, {"ocr_engine": "mineru_official"})
+
+    assert before != after
+
+
 def test_retry_job_identity_changes_only_after_attempt_changes():
     assert _ingest_job_id("spr_1", 0) == _ingest_job_id("spr_1", 0)
     assert _ingest_job_id("spr_1", 0) != _ingest_job_id("spr_1", 1)

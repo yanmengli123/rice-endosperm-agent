@@ -137,7 +137,7 @@ def test_long_caption_still_classified_as_caption():
 
 def test_html_entity_in_user_text_normalizes_to_space():
     """验收：粘贴含 &#x20; 实体的题注片段与原文精确匹配。"""
-    pasted = f"CRISPR/Cas9-mediated knockout of OsMYB73 and&#x20;OsNF-YB1 in rice callus."
+    pasted = "CRISPR/Cas9-mediated knockout of OsMYB73 and&#x20;OsNF-YB1 in rice callus."
     original = "CRISPR/Cas9-mediated knockout of OsMYB73 and OsNF-YB1 in rice callus."
     assert normalize_for_match(pasted) == normalize_for_match(original)
     # 实体残骸不再产生假 token（旧实现会多出 "x20"）
@@ -183,20 +183,22 @@ async def figure_session(monkeypatch):
     image.save(buffer, format="PNG")
     image_bytes = buffer.getvalue()
 
-    from yuxi.knowledge.vision import figure_ingestor
-
-    async def fake_resolve():
-        return {"fig5-chart.jpg": "evidence/assets/abc123-fig5-chart.jpg"}
+    object_prefix = f"tenants/1/documents/{'a' * 64}/mineru/spr_fig/images"
+    object_name = f"{object_prefix}/abc123-fig5-chart.jpg"
 
     class fake_minio:
+        async def alist_object_names_by_prefix(self, bucket, prefix):
+            assert bucket == "knowledgebases"
+            assert prefix == f"{object_prefix}/"
+            return [object_name]
+
         async def adownload_file(self, bucket, object_name):
             assert bucket == "knowledgebases"
-            assert object_name == "evidence/assets/abc123-fig5-chart.jpg"
+            assert object_name == f"{object_prefix}/abc123-fig5-chart.jpg"
             return image_bytes
 
     import yuxi.storage.minio.client as minio_module
 
-    monkeypatch.setattr(figure_ingestor, "_resolve_asset_objects", fake_resolve)
     monkeypatch.setattr(minio_module, "get_minio_client", lambda: fake_minio())
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -296,6 +298,9 @@ async def test_persist_figure_index_computes_fingerprints(figure_session):
     assert summary["entities"] == 1
     assert summary["assets"] == 1
     assert summary["fingerprinted"] == 1
+    assert summary["anchored_assets"] == 1
+    assert summary["locator_ready_assets"] == 1
+    assert summary["repaired_caption_spans"] == 0
 
     entity = (await session.execute(select(FigureEntityRecord))).scalars().one()
     asset = (await session.execute(select(FigureAssetRecord))).scalars().one()
@@ -306,7 +311,82 @@ async def test_persist_figure_index_computes_fingerprints(figure_session):
     assert asset.asset_sha256 == compute_asset_digest(image_bytes)
     assert asset.asset_phash == compute_phash(image_bytes)
     assert "whole" in (asset.panel_phashes or {})
-    assert asset.object_name == "evidence/assets/abc123-fig5-chart.jpg"
+    assert asset.object_name == f"tenants/1/documents/{'a' * 64}/mineru/spr_fig/images/abc123-fig5-chart.jpg"
+
+
+@pytest.mark.asyncio
+async def test_persist_figure_index_repairs_unanchored_caption_from_same_page_full_caption(figure_session):
+    """Figure 3 真实形态：Markdown span 无锚点，但 chart 锚点多一个 ``(i)`` 前缀。"""
+    session, _image_bytes = figure_session
+    from yuxi.knowledge.vision.figure_ingestor import persist_figure_index
+
+    revision = (await session.execute(select(KnowledgeParseRevision))).scalars().one()
+    caption = "Figure 3 Grain starch physicochemical characteristics comparison of ZH11 and cr-myb73 in T1 generation."
+    span = EvidenceSpanRecord(
+        id=2,
+        tenant_id=1,
+        parse_revision_id="spr_fig",
+        kb_id="kb-a",
+        file_id="file_fig",
+        span_id="es_fig3",
+        anchor_id=None,
+        sentence_index=1,
+        quote=caption,
+        quote_hash=hashlib.sha256(caption.encode()).hexdigest(),
+        page_number=None,
+        evidence_type="caption",
+        document_partition="UNKNOWN",
+        partition_confidence=0.0,
+        evidence_id="evs_fig3",
+        container_label="Figure 3",
+        metadata_json={"anchor_locatable": False},
+    )
+    anchor = EvidenceAnchorRecord(
+        id=2,
+        anchor_id="ea_fig3",
+        parse_revision_id="spr_fig",
+        page=10,
+        bbox=[80.0, 150.0, 920.0, 700.0],
+        word_start=0,
+        word_end=10,
+        quote_hash=hashlib.sha256(f"(i) {caption}".encode()).hexdigest(),
+        prefix_hash="p",
+        suffix_hash="s",
+        quote=f"(i) {caption}",
+        fragments=[{"page_index": 9, "bbox": [80.0, 150.0, 920.0, 700.0]}],
+        anchor_type="chart",
+        locator_quality="HIGH",
+        confidence=1.0,
+        locatable=True,
+        source="mineru",
+        document_partition="MAIN_TEXT",
+        partition_confidence=1.0,
+    )
+
+    summary = await persist_figure_index(
+        session,
+        revision=revision,
+        article_assets=[
+            {
+                "kind": "figure",
+                "block_type": "chart",
+                "img_path": "images/fig5-chart.jpg",
+                "page": 10,
+                "bbox": [80.0, 150.0, 920.0, 700.0],
+                "caption": f"(i) {caption}",
+            }
+        ],
+        spans=[span],
+        anchors=[anchor],
+    )
+
+    entity = (await session.execute(select(FigureEntityRecord))).scalars().one()
+    assert summary["repaired_caption_spans"] == 1
+    assert span.anchor_id == "ea_fig3"
+    assert span.page_number == 10
+    assert span.metadata_json["anchor_link_repair"] == "figure_asset_same_page_full_caption"
+    assert entity.caption_anchor_id == "ea_fig3"
+    assert entity.association_method == "asset_caption_linkage"
 
 
 @pytest.mark.asyncio
@@ -464,8 +544,8 @@ async def test_locator_run_projects_retrieval_candidates_and_counts(tmp_path):
                 word_start=1,
                 word_end=4,
                 quote_hash=hashlib.sha256(quote.encode()).hexdigest(),
-                prefix_hash=hashlib.sha256("context ".encode()).hexdigest(),
-                suffix_hash=hashlib.sha256(" tail".encode()).hexdigest(),
+                prefix_hash=hashlib.sha256(b"context ").hexdigest(),
+                suffix_hash=hashlib.sha256(b" tail").hexdigest(),
                 quote=quote,
                 fragments=[{"page_index": 2, "bbox": [40.0, 300.0, 280.0, 380.0], "coordinate_space": "pdf_points"}],
                 anchor_type="paragraph",

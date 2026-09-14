@@ -305,3 +305,33 @@ async def test_locator_audit_migration_uses_dedicated_json_column():
     statements = "\n".join(connection.statements)
     assert "knowledge_retrieval_runs" in statements
     assert "ADD COLUMN IF NOT EXISTS locator_resolution_json JSON" in statements
+
+
+@pytest.mark.asyncio
+async def test_figure_asset_lineage_repair_is_a_new_versioned_migration():
+    manager = PostgresManager()
+    connection = _RecordingConnection()
+
+    await manager._migration_0036_figure_asset_anchor_lineage(connection)
+
+    statements = "\n".join(connection.statements)
+    assert "ALTER TABLE IF EXISTS figure_assets" in statements
+    assert "ADD COLUMN IF NOT EXISTS anchor_id VARCHAR(64) NOT NULL DEFAULT ''" in statements
+    assert ("0036_figure_asset_anchor_lineage", "_migration_0036_figure_asset_anchor_lineage") in (
+        manager._VERSIONED_MIGRATIONS
+    )
+
+
+@pytest.mark.asyncio
+async def test_evidence_span_anchor_uniqueness_is_repaired_per_revision():
+    manager = PostgresManager()
+    connection = _RecordingConnection()
+
+    await manager._migration_0037_evidence_span_revision_anchor_scope(connection)
+
+    statements = "\n".join(connection.statements)
+    assert "DROP CONSTRAINT IF EXISTS uq_evidence_span_anchor" in statements
+    assert "UNIQUE (parse_revision_id, sentence_index, anchor_id)" in statements
+    assert ("0037_evidence_span_revision_anchor_scope", "_migration_0037_evidence_span_revision_anchor_scope") in (
+        manager._VERSIONED_MIGRATIONS
+    )

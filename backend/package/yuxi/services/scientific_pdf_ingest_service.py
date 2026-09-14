@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from yuxi.knowledge.chunking.ragflow_like.parsers.academic import ACADEMIC_CHUNKER_VERSION
+from yuxi.knowledge.pdf_evidence.asset_paths import revision_image_prefix
 from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact, PipelineResult, UnifiedArticle
 from yuxi.knowledge.pdf_evidence.pipeline import PIPELINE_VERSION, ScientificPdfPipeline, build_parser_fingerprint
 from yuxi.knowledge.runtime import knowledge_base
@@ -896,7 +897,10 @@ async def _store_artifacts(revision: KnowledgeParseRevision, artifacts: list[Par
     return uris
 
 
-async def _persist_article_records(revision_id: str, article: dict[str, Any], *, markdown_body: str = "") -> None:
+async def _persist_article_records(
+    revision_id: str, article: dict[str, Any], *, markdown_body: str = ""
+) -> dict[str, Any]:
+    summaries: dict[str, Any] = {}
     async with pg_manager.get_async_session_context() as session:
         # A retry rebuilds the exact same immutable revision; replace partial rows left by a process crash.
         await session.execute(delete(EvidenceAnchorRecord).where(EvidenceAnchorRecord.parse_revision_id == revision_id))
@@ -1014,18 +1018,12 @@ async def _persist_article_records(revision_id: str, article: dict[str, Any], *,
                 spans=list(spans),
                 anchors=list(anchor_rows),
             )
-            await session.execute(
-                update(KnowledgeParseRevision)
-                .where(KnowledgeParseRevision.revision_id == revision_id)
-                .values(
-                    qa_report={
-                        **(revision.qa_report or {}),
-                        "evidence_spans": spans_summary,
-                        "lexical_index": lexical_summary,
-                        "figure_index": figure_summary,
-                    }
-                )
-            )
+            summaries = {
+                "evidence_spans": spans_summary,
+                "lexical_index": lexical_summary,
+                "figure_index": figure_summary,
+            }
+    return summaries
 
 
 async def _link_stage_artifacts(revision_id: str) -> None:
@@ -1054,6 +1052,53 @@ async def _link_stage_artifacts(revision_id: str) -> None:
         for stage_name, artifact in mapping.items():
             if artifact and stage_name in by_name:
                 by_name[stage_name].output_artifact_id = artifact.artifact_id
+
+
+def _snapshot_active_file_state(
+    file_row: KnowledgeFile,
+    active_revision: KnowledgeParseRevision | None,
+) -> dict[str, Any]:
+    """Capture the serving activation independently from transient ingest state.
+
+    Submitting a replacement revision marks the file as ``parsing`` before the
+    worker starts.  When an older index remains active, its revision—not those
+    transient fields—is authoritative for the evidence capability restored after
+    a shadow-build failure or quality downgrade.
+    """
+    evidence_status = file_row.evidence_status
+    evidence_capabilities = file_row.evidence_capabilities
+    file_status = file_row.status
+    if active_revision is not None and file_row.active_index_revision_id:
+        evidence_status = active_revision.status
+        evidence_capabilities = {
+            "state": active_revision.status,
+            **dict(active_revision.capabilities or {}),
+            "qa": active_revision.qa_report,
+        }
+        file_status = "parsed"
+    return {
+        "active_parse_revision_id": file_row.active_parse_revision_id,
+        "active_index_revision_id": file_row.active_index_revision_id,
+        "markdown_file": file_row.markdown_file,
+        "status": file_status,
+        "processing_params": file_row.processing_params,
+        "evidence_status": evidence_status,
+        "evidence_capabilities": evidence_capabilities,
+    }
+
+
+def _restore_active_file_state(file_row: KnowledgeFile, snapshot: dict[str, Any]) -> None:
+    """Restore only the previously serving file projection after a shadow failure."""
+    for field in (
+        "active_parse_revision_id",
+        "active_index_revision_id",
+        "markdown_file",
+        "status",
+        "processing_params",
+        "evidence_status",
+        "evidence_capabilities",
+    ):
+        setattr(file_row, field, snapshot.get(field))
 
 
 async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) -> dict[str, Any] | None:
@@ -1088,6 +1133,16 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             file_record = (
                 await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id))
             ).scalar_one()
+            active_revision = None
+            if file_record.active_parse_revision_id:
+                active_revision = (
+                    await session.execute(
+                        select(KnowledgeParseRevision).where(
+                            KnowledgeParseRevision.revision_id == file_record.active_parse_revision_id
+                        )
+                    )
+                ).scalar_one_or_none()
+            previous_activation = _snapshot_active_file_state(file_record, active_revision)
             params = dict(file_record.processing_params or {})
             filename = str(file_record.original_filename or file_record.filename or "document.pdf")
         source_bytes = await _load_source(file_record)
@@ -1097,8 +1152,10 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
             temp_file.write(source_bytes)
             temp_path = temp_file.name
-        params["image_prefix"] = (
-            f"tenants/{revision.tenant_id}/documents/{revision.source_sha256}/mineru/{revision.revision_id}/images"
+        params["image_prefix"] = revision_image_prefix(
+            tenant_id=int(revision.tenant_id),
+            source_sha256=str(revision.source_sha256),
+            revision_id=str(revision.revision_id),
         )
         # Markdown 中的图片引用一律写 kbasset:// 逻辑 URI：渲染层经鉴权 Asset API
         # 拉取私有对象，MinIO 布局 / 预签名 URL 永不出现在知识数据里。
@@ -1144,6 +1201,20 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 stage_callback=stage_callback,
                 mineru_cache=mineru_cache,
             )
+        article: dict[str, Any] | None = None
+        if pipeline_result.capability != "REJECTED" and pipeline_result.unified_article is not None:
+            article = pipeline_result.unified_article.to_dict()
+            projection_summaries = await _persist_article_records(
+                revision_id,
+                article,
+                markdown_body=pipeline_result.annotated_markdown or "",
+            )
+            pipeline_result.qa_report.update(projection_summaries)
+            figure_summary = dict(projection_summaries.get("figure_index") or {})
+            pipeline_result.qa_report["capabilities"] = {
+                **dict(pipeline_result.qa_report.get("capabilities") or {}),
+                "figure_image_locator": bool(figure_summary.get("locator_ready_assets")),
+            }
         artifacts = [
             ParserArtifact("original_pdf", _safe_name(filename), source_bytes, "application/pdf"),
             *pipeline_result.artifacts,
@@ -1238,12 +1309,7 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             await _publish_identity_cache(revision)
             return {"revision_id": revision_id, "status": "REJECTED"}
 
-        article = pipeline_result.unified_article.to_dict()
-        await _persist_article_records(
-            revision_id,
-            article,
-            markdown_body=pipeline_result.annotated_markdown or "",
-        )
+        assert article is not None
         markdown_uri = artifact_uris["indexed_markdown"]
         chunking = _scientific_chunking_contract()
         chunker_fingerprint = _chunker_fingerprint(revision_id, chunking)
@@ -1285,15 +1351,6 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             file_row = (
                 await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id))
             ).scalar_one()
-            previous_activation = {
-                "active_parse_revision_id": file_row.active_parse_revision_id,
-                "active_index_revision_id": file_row.active_index_revision_id,
-                "markdown_file": file_row.markdown_file,
-                "status": file_row.status,
-                "processing_params": file_row.processing_params,
-                "evidence_status": file_row.evidence_status,
-                "evidence_capabilities": file_row.evidence_capabilities,
-            }
             file_row.markdown_file = markdown_uri
             file_row.status = "parsed"
             file_row.processing_params = _persistent_processing_params(params, chunking)
@@ -1400,20 +1457,21 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             ).scalar_one_or_none()
             active_index_survived = bool(
                 file_row
-                and file_row.active_index_revision_id
-                and file_row.active_index_revision_id != index_revision_id
+                and previous_activation.get("active_index_revision_id")
+                and previous_activation.get("active_index_revision_id") != index_revision_id
             )
-            if owns_revision and active_index_survived and pipeline_result is not None:
+            if owns_revision and active_index_survived:
                 # A shadow-index failure must never take a previously active
-                # parse/index offline. The failed index revision keeps the
-                # diagnostic and a later submission can retry deterministically.
-                current.status = pipeline_result.capability
-                current.error_message = None
+                # parse/index offline. The candidate itself must remain FAILED
+                # with its diagnostic so it can be retried deterministically;
+                # reporting the pipeline capability here creates a false-success
+                # terminal revision with zero evidence rows.
+                current.status = "FAILED"
+                current.error_message = str(exc)
                 current.completed_at = _workflow_now()
                 current.lease_owner = None
                 current.lease_expires_at = None
-                file_row.status = "parsed"
-                file_row.evidence_status = pipeline_result.capability
+                _restore_active_file_state(file_row, previous_activation)
                 file_row.error_message = None
             elif owns_revision:
                 current.status = "FAILED"

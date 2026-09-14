@@ -179,6 +179,56 @@ async def test_full_scope_duplicate_cannot_be_hidden_by_top_k(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
+async def test_figure_caption_direct_binding_cannot_be_overwritten_by_discussion_page(monkeypatch):
+    """Figure 题注物理绑定是终局；正文复述不能用引用池把第 7 页改成第 5 页。"""
+    caption = "Figure 3 Rice grain starch physicochemical characteristics in ZH11 and cr-myb73."
+    direct = {
+        "status": "VERIFIED",
+        "locator_version": "caption_locator_v3",
+        "locator_kind": "FIGURE_CAPTION",
+        "match_tier": "T0_RAW_EXACT",
+        "page": 7,
+        "zone": "MAIN_TEXT",
+        "anchor_id": "ea-caption",
+        "span_id": "es-caption",
+        "evidence_id": "ev-caption-physical",
+        "span_evidence_id": "evs-caption",
+        "parse_revision_id": "pr-active",
+        "index_revision_id": "ir-active",
+        "kb_id": "kb-a",
+        "file_id": "file-a",
+        "source_sha256": "a" * 64,
+        "quote": caption,
+        "quote_head": caption,
+        "filename": "paper.pdf",
+    }
+    _patch_pipeline(
+        monkeypatch,
+        citations=[
+            _citation(
+                "E1",
+                5,
+                "Figure 3 showed chain length distributions of amylopectin in ZH11 and cr-myb73.",
+            )
+        ],
+        direct_locator=direct,
+    )
+
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question=f"{caption} 这段题注在哪一页？",
+        scope_snapshot=_SCOPE,
+        run_id="run-figure-authority",
+        request_id="req-figure-authority",
+    )
+
+    assert contract["locator_resolution"]["status"] == "VERIFIED"
+    assert contract["locator_resolution"]["page"] == 7
+    assert contract["locator_resolution"]["anchor_id"] == "ea-caption"
+    assert contract["locator_resolution"]["locator_kind"] == "FIGURE_CAPTION"
+
+
+@pytest.mark.asyncio
 async def test_compound_locator_does_not_short_circuit(monkeypatch: pytest.MonkeyPatch):
     """复合意图（定位+解释）：不短路 LLM，locator 结果并入证据与引用池。"""
     _patch_pipeline(

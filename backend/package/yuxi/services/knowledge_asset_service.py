@@ -26,6 +26,7 @@ from typing import Any
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from yuxi.knowledge.runtime import knowledge_base
+from yuxi.knowledge.pdf_evidence.asset_paths import revision_image_prefix
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
@@ -121,7 +122,11 @@ def _image_object_prefix(revision: KnowledgeParseRevision) -> str:
     MUST mirror ``scientific_pdf_ingest_service``'s ``image_prefix``::
         ``tenants/{tenant_id}/documents/{source_sha256}/mineru/{revision_id}/images``
     """
-    return f"tenants/{revision.tenant_id}/documents/{revision.source_sha256}/mineru/{revision.revision_id}/images"
+    return revision_image_prefix(
+        tenant_id=int(revision.tenant_id),
+        source_sha256=str(revision.source_sha256),
+        revision_id=str(revision.revision_id),
+    )
 
 
 async def materialize_reused_revision_assets(

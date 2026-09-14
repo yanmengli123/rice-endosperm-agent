@@ -10,12 +10,15 @@ from PIL import Image, ImageDraw
 from yuxi.knowledge.planning.turn_execution_plan import TaskIntent, plan_turn
 from yuxi.knowledge.vision.figure_image_locator import (
     TIER_V0_EXACT_ASSET_SHA,
+    TIER_V1_LOCAL_FEATURE_GEOMETRY,
     TIER_V1_STRONG_PHASH_LABEL,
     TIER_V2_VISUAL_CONSTRAINTS,
     TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS,
     adjudicate_deterministic_match,
     adjudicate_figure_candidates,
+    adjudicate_local_feature_match,
 )
+from yuxi.knowledge.vision.local_features import match_local_feature_geometry
 from yuxi.knowledge.vision.phash import (
     compute_asset_digest,
     compute_panel_phashes,
@@ -152,6 +155,35 @@ def _bar_chart_png(*, different: bool = False) -> bytes:
     return buffer.getvalue()
 
 
+def _feature_rich_png(seed: int = 7) -> bytes:
+    import cv2
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    image = np.full((900, 1100, 3), 255, dtype=np.uint8)
+    for index in range(80):
+        x, y = (int(value) for value in rng.integers([30, 30], [1070, 870]))
+        radius = int(rng.integers(5, 35))
+        color = tuple(int(value) for value in rng.integers(0, 220, size=3))
+        cv2.circle(image, (x, y), radius, color, 2)
+        cv2.putText(image, f"OsMYB73-{index}", (max(0, x - 30), y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return encoded.tobytes()
+
+
+def _resampled_screenshot(image_bytes: bytes) -> bytes:
+    import cv2
+    import numpy as np
+
+    image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    image = image[25:-20, 35:-30]
+    image = cv2.resize(image, (719, 653), interpolation=cv2.INTER_AREA)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return encoded.tobytes()
+
+
 def test_phash_identical_and_similar_images():
     original = _bar_chart_png()
     assert compute_phash(original) is not None
@@ -187,6 +219,21 @@ def test_quadrant_crop_matches_parent_panel_fingerprint():
     crop_hash = compute_phash(buffer.getvalue())
     distance = phash_hamming_distance(crop_hash, panels["q3"])
     assert distance is not None and distance <= 8
+
+
+def test_local_feature_geometry_accepts_resampled_cropped_screenshot():
+    original = _feature_rich_png()
+    metrics = match_local_feature_geometry(_resampled_screenshot(original), original)
+
+    assert metrics["strong"] is True
+    assert metrics["inliers"] >= 20
+    assert metrics["inlier_ratio"] >= 0.45
+
+
+def test_local_feature_geometry_rejects_unrelated_image():
+    metrics = match_local_feature_geometry(_feature_rich_png(seed=11), _feature_rich_png(seed=29))
+
+    assert metrics["strong"] is False
 
 
 # ---- V0/V1 确定性裁决（VLM 后置的核心验收） ----
@@ -265,6 +312,88 @@ def test_v0_multiple_locations_fail_closed():
 def test_deterministic_unresolved_when_no_fingerprints():
     resolution = adjudicate_deterministic_match([_entity(), _fig4_entity()], image_asset_digest="b" * 64)
     assert resolution["status"] == "DETERMINISTIC_UNRESOLVED"
+
+
+@pytest.mark.asyncio
+async def test_local_feature_fallback_verifies_unique_physical_asset(monkeypatch):
+    original = _feature_rich_png()
+    screenshot = _resampled_screenshot(original)
+    entity = _entity(
+        assets=[
+            {
+                **_entity()["assets"][0],
+                "asset_phash": compute_phash(original),
+                "object_bucket": "knowledgebases",
+                "object_name": "scoped/figure-1.png",
+            }
+        ]
+    )
+
+    class FakeMinio:
+        async def adownload_file(self, bucket, object_name):
+            assert (bucket, object_name) == ("knowledgebases", "scoped/figure-1.png")
+            return original
+
+    import yuxi.storage.minio.client as minio_module
+
+    monkeypatch.setattr(minio_module, "get_minio_client", lambda: FakeMinio())
+    resolution = await adjudicate_local_feature_match(
+        [entity],
+        image_bytes=screenshot,
+        image_phash=compute_phash(screenshot),
+    )
+
+    assert resolution["status"] == "VERIFIED"
+    assert resolution["tier"] == TIER_V1_LOCAL_FEATURE_GEOMETRY
+    assert resolution["asset"]["page"] == 4
+
+
+@pytest.mark.asyncio
+async def test_local_feature_fallback_fails_closed_for_duplicate_physical_locations(monkeypatch):
+    original = _feature_rich_png()
+    screenshot = _resampled_screenshot(original)
+    first = _entity(
+        assets=[
+            {
+                **_entity()["assets"][0],
+                "asset_phash": compute_phash(original),
+                "object_bucket": "knowledgebases",
+                "object_name": "scoped/first.png",
+            }
+        ]
+    )
+    second = _entity(
+        file_id="file-b",
+        parse_revision_id="pr_2",
+        page=11,
+        assets=[
+            {
+                **_entity()["assets"][0],
+                "anchor_id": "ea_fig1_b",
+                "page": 11,
+                "asset_phash": compute_phash(original),
+                "object_bucket": "knowledgebases",
+                "object_name": "scoped/second.png",
+            }
+        ],
+    )
+
+    class FakeMinio:
+        async def adownload_file(self, _bucket, _object_name):
+            return original
+
+    import yuxi.storage.minio.client as minio_module
+
+    monkeypatch.setattr(minio_module, "get_minio_client", lambda: FakeMinio())
+    resolution = await adjudicate_local_feature_match(
+        [first, second],
+        image_bytes=screenshot,
+        image_phash=compute_phash(screenshot),
+    )
+
+    assert resolution["status"] == "MULTIPLE_MATCHES"
+    assert resolution["match_count"] == 2
+    assert "page" not in resolution
 
 
 # ---- V2/V3 观察裁决（新实体形状） ----

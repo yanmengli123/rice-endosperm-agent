@@ -46,7 +46,7 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils import logger
 
-LOCATOR_VERSION = "quote_locator_v2"
+LOCATOR_VERSION = "quote_locator_v3"
 
 LOCATOR_STATUS_VERIFIED = "VERIFIED"
 LOCATOR_STATUS_MULTIPLE_MATCHES = "MULTIPLE_MATCHES"
@@ -70,6 +70,7 @@ ZONE_SUPPORTING_INFO = PARTITION_SUPPORTING_INFO
 
 # 意图触发词：命中即认为用户在做定位询问
 _LOCATOR_KEYWORDS = re.compile(
+    r"(?:在)?哪篇(?:论文|文献|文章).{0,8}(?:哪一页|第几页|哪页|页码)|"
     r"哪一页|那一页|第几页|几页|哪个页|哪页|在哪页|出处在哪|原文在哪|位于哪|页码是多少|"
     r"哪一句|第几句|哪一段|第几段|哪个段落|原文.{0,8}(?:什么位置|哪里|何处)|"
     r"which\s+page|what\s+page|where\s+in\s+the\s+(paper|article|manuscript|pdf)",
@@ -87,6 +88,7 @@ _SI_KEYWORDS = re.compile(
 )
 # 问句脚手架：从引文候选中剔除
 _SCAFFOLDING_PATTERN = re.compile(
+    r"(?:这句(?:话|原文)?|这段题注|该题注|这个?图片|这个?图)?(?:的题注)?在?哪篇(?:论文|文献|文章).{0,8}(?:哪一页|第几页|哪页|页码)[?？]?|"
     r"这句(?:原文)?(?:出现|记载|位于)?在?论文的?正文?第几页[?？]?|"
     r"这句话(?:原文)?(?:出现|记载)?在?哪个?文献的?哪一页[?？]?|"
     r"原文出现在?论文的?正文第几页[?？]?|"

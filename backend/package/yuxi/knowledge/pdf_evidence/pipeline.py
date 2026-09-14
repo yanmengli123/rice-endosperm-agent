@@ -22,13 +22,16 @@ from yuxi.knowledge.pdf_evidence.mineru_layout import (
 )
 from yuxi.knowledge.pdf_evidence.native import PYMUPDF_PROVIDER_VERSION, inspect_native_pdf
 from yuxi.knowledge.pdf_evidence.page_map import PHYSICAL_PAGE_MAP_VERSION, build_physical_page_map
+from yuxi.knowledge.vision.figure_ingestor import FIGURE_INGESTOR_VERSION
 from yuxi.utils import logger
 
 # v1.1: 图片引用由 MinIO URL 改为 kbasset:// 逻辑 URI（鉴权 Asset API 渲染），
 # canonical Markdown 内容变化，重新解析需生成新 parse revision。
 # v3.0: chart/chart_caption 纳入视觉块（Figure 5 事故），assets 携带视觉块
 # 记录供 Figure Ingestor 建资产指纹索引——重解析生成新 parse revision。
-PIPELINE_VERSION = "scientific_pdf_v3.0"
+# v3.1: 图片对象定位改为 parse-revision 专属前缀，Figure Ingestor 版本进入
+# parser fingerprint，避免下游索引修复后错误复用旧 revision。
+PIPELINE_VERSION = "scientific_pdf_v3.2"
 QUALITY_PROFILE_VERSION = "pdf_evidence_v2"
 ANCHOR_MARKER = "<!-- yuxi-evidence-anchor:{anchor_id};page={page} -->"
 
@@ -48,6 +51,7 @@ def build_parser_fingerprint(source_sha256: str, params: dict[str, Any]) -> str:
         "native_provider": f"pymupdf-{PYMUPDF_PROVIDER_VERSION}",
         "aligner": ALIGNER_VERSION,
         "mineru_layout_adapter": MINERU_LAYOUT_ADAPTER_VERSION,
+        "figure_ingestor": FIGURE_INGESTOR_VERSION,
         "academic_chunker": ACADEMIC_CHUNKER_VERSION,
         "quality_profile": QUALITY_PROFILE_VERSION,
     }

@@ -1050,6 +1050,8 @@ class PostgresManager(metaclass=SingletonMeta):
         ),
         ("0034_retrieval_locator_audit", "_migration_0034_retrieval_locator_audit"),
         ("0035_figure_asset_index", "_migration_0035_figure_asset_index"),
+        ("0036_figure_asset_anchor_lineage", "_migration_0036_figure_asset_anchor_lineage"),
+        ("0037_evidence_span_revision_anchor_scope", "_migration_0037_evidence_span_revision_anchor_scope"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2456,6 +2458,38 @@ class PostgresManager(metaclass=SingletonMeta):
         )
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_figure_assets_entity ON figure_assets (entity_id)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_figure_assets_sha ON figure_assets (asset_sha256)"))
+
+    async def _migration_0036_figure_asset_anchor_lineage(self, conn) -> None:
+        """Repair upgraded databases whose applied 0035 predates asset lineage.
+
+        ``0035_figure_asset_index`` originally shipped without ``anchor_id``.
+        Editing that already-applied migration only repaired fresh installs; existing
+        databases kept the old table and every figure-index transaction rolled back.
+        A new versioned migration is therefore required for the additive column.
+        """
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS figure_assets ADD COLUMN IF NOT EXISTS anchor_id VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+        )
+
+    async def _migration_0037_evidence_span_revision_anchor_scope(self, conn) -> None:
+        """Repair the legacy cross-revision evidence-span uniqueness scope.
+
+        Stable physical anchor ids intentionally repeat across parse revisions of
+        the same source.  The original constraint omitted ``parse_revision_id``;
+        upgraded databases therefore rejected the second revision even though the
+        ORM and fresh schema already use revision-scoped uniqueness.
+        """
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS evidence_spans DROP CONSTRAINT IF EXISTS uq_evidence_span_anchor")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS evidence_spans ADD CONSTRAINT uq_evidence_span_anchor "
+                "UNIQUE (parse_revision_id, sentence_index, anchor_id)"
+            )
+        )
 
     async def _apply_versioned_migrations(self):
         self._check_initialized()

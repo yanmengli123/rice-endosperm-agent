@@ -125,6 +125,23 @@ def test_detect_quote_locator_removes_english_location_suffix():
     assert intent["partition_intent"] == "MAIN_TEXT"
 
 
+def test_detect_figure_locator_for_which_document_which_page_wording():
+    intent = detect_locator_intent("Figure 1 的题注在哪篇文献哪一页？")
+
+    assert intent["kind"] == "FIGURE_LOCATOR"
+    assert intent["figure_label"] == "Figure 1"
+
+
+def test_detect_caption_quote_for_which_paper_which_page_wording():
+    caption = "Figure 5 CRISPR/Cas9 mediated target mutagenesis of rice OsMYB73 and OsNF-YB1 mutants."
+    intent = detect_locator_intent(f"{caption} 在哪篇论文哪一页，代表什么意思？")
+
+    assert intent["kind"] == "QUOTE_LOCATOR"
+    assert intent["figure_label"] == "Figure 5"
+    assert "OsMYB73" in intent["quote_text"]
+    assert intent["compound"] is True
+
+
 @pytest.mark.asyncio
 async def test_locator_uses_only_active_parse_revision(locator_session):
     _seed(locator_session, row_id=1, file_id="paper", revision="rev-active", page=3)

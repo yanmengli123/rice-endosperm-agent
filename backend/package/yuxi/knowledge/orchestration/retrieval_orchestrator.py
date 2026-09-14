@@ -802,7 +802,15 @@ async def prepare_knowledge_context(
     ):
         from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator_from_citations
 
-        if direct_locator and direct_locator.get("status") == "MULTIPLE_MATCHES":
+        if image_bytes and direct_locator and direct_locator.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
+            # 图片物理裁决是终局：不得再用文本引用池覆盖图片本体页。
+            locator_resolution = direct_locator
+        elif locator_intent.get("figure_label") and direct_locator:
+            # Figure 编号/题注必须由 caption span + physical anchor 通道裁决。
+            # 普通正文可能复述 “Figure N showed ...”，引用池不得重新计算并
+            # 冒充题注所在页；旧 revision 无题注锚点时宁可失败关闭。
+            locator_resolution = direct_locator
+        elif direct_locator and direct_locator.get("status") == "MULTIPLE_MATCHES":
             # 全冻结范围已确认跨物理位置重复；Top-K 即使只召回其中一条也不得
             # 把歧义错误收缩成唯一页码。
             locator_resolution = direct_locator
