@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 
-_EVIDENCE_CHIP = re.compile(r"〔(?:证据E\d{1,3}|引文定位)｜[^〕]+〕")
+from yuxi.knowledge.rendering.authority_markers import authority_marker_pattern
+
+_EVIDENCE_CHIP = authority_marker_pattern()
 _EVIDENCE_REF = re.compile(r"\[E\d{1,3}\]")
 _ANCHOR_ID = re.compile(r"\b(?:ea|ev|evs)_[0-9a-f]{12,64}\b", re.I)
 _PAGE = re.compile(r"第\s*\d{1,4}\s*页|\bp\.\s*\d{1,4}\b|\bpages?\s+\d{1,4}\b", re.I)

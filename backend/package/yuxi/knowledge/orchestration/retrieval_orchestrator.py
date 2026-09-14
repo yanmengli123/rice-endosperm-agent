@@ -317,6 +317,27 @@ def _locator_verbatim_windows(quote_text: str) -> list[str]:
     return windows
 
 
+def _ledger_status(resolution: dict[str, Any] | None) -> str:
+    """resolution → ledger stage 状态（VERIFIED/MULTIPLE_MATCHES/NO_MATCH/...）。"""
+    if not isinstance(resolution, dict):
+        return "NOT_APPLICABLE"
+    status = str(resolution.get("status") or "")
+    if status == "VERIFIED":
+        return "VERIFIED"
+    if status == "MULTIPLE_MATCHES":
+        return "MULTIPLE_MATCHES"
+    if status == "NOT_APPLICABLE":
+        return "NOT_APPLICABLE"
+    return "NO_MATCH"
+
+
+def _ledger_entry(stage: str, resolution: dict[str, Any] | None) -> dict[str, str]:
+    entry = {"stage": stage, "status": _ledger_status(resolution)}
+    if isinstance(resolution, dict) and resolution.get("reason"):
+        entry["reason"] = str(resolution["reason"])
+    return entry
+
+
 def _freeze_locator_evidence(contract: dict[str, Any], row: dict[str, Any] | None) -> None:
     """Prepend one verified locator row to both answer and validation evidence."""
     if not row or not row.get("evidence_id"):
@@ -397,40 +418,91 @@ async def prepare_knowledge_context(
         plan = {**plan, "retrieval_required": True}
     direct_locator: dict[str, Any] | None = None
     locator_evidence: dict[str, Any] | None = None
+    # LocatorAttemptLedger（P0-D）：定位链路每个 stage 的尝试结论随审计行
+    # 持久化——失败原因保真，NOT_APPLICABLE 永不覆盖真实失败。
+    attempt_ledger: list[dict[str, str]] = []
     if locator_pending and image_bytes:
-        # 图片附件入口（FIGURE_IMAGE）：确定性指纹（V0 SHA / V1 pHash）先行，
-        # 未决且视觉 provider 可用时才调用观察（VLM 最后，永不决定页码）。
+        # 图片附件入口（FIGURE_IMAGE）权威链（P0 收敛版）：
+        #   指纹（V0 SHA/V1 pHash/V1G ORB）→ 视觉观察（VLM 最后）→ Caption
+        #   Bridge（观察编号 + 逐字文本经真实题注 T0/T1 验证）→ 文本回退。
+        # 每 stage 记账；V0/V1/V1G 或观察层 VERIFIED 即终局，后续 stage 跳过。
         from yuxi.knowledge.vision.figure_image_locator import resolve_figure_image_locator
 
+        scope_kb_ids = [str(member["kb_id"]) for member in raw_members]
         image_locator = await resolve_figure_image_locator(
             db,
-            kb_ids=[str(member["kb_id"]) for member in raw_members],
+            kb_ids=scope_kb_ids,
             image_bytes=image_bytes,
         )
+        attempt_ledger.append(_ledger_entry("ASSET_FINGERPRINT", image_locator))
+        observation = None
         if image_locator.get("reason") == "VISION_PROVIDER_UNAVAILABLE":
-            from yuxi.knowledge.vision.provider import get_vision_provider
+            from yuxi.knowledge.vision.provider import get_vision_provider, mark_observation_schema_invalid
 
             provider = get_vision_provider()
-            observation = await provider.describe(image_bytes) if provider.available else None
+            if provider.available:
+                observation = await provider.describe(image_bytes)
+                if observation is None:
+                    mark_observation_schema_invalid(str(getattr(provider, "model_spec", "") or ""))
+                attempt_ledger.append(
+                    {
+                        "stage": "VISION_OBSERVATION",
+                        "status": "OK" if observation is not None else "SCHEMA_INVALID_OR_FAILED",
+                    }
+                )
+            else:
+                attempt_ledger.append({"stage": "VISION_OBSERVATION", "status": "NOT_CONFIGURED"})
             contract["figure_image_observation"] = (
                 observation.model_dump(mode="json") if observation is not None else {"available": False}
             )
             if observation is not None:
                 retried = await resolve_figure_image_locator(
                     db,
-                    kb_ids=[str(member["kb_id"]) for member in raw_members],
+                    kb_ids=scope_kb_ids,
                     image_bytes=image_bytes,
                     observation=observation,
                 )
                 if retried.get("reason") != "VISION_PROVIDER_UNAVAILABLE":
                     image_locator = retried
-            else:
-                # 原因保真：确定性指纹已比对未命中 + 视觉通道不可用是两个独立事实，
-                # 排查时不把「指纹未命中」误判成「只是没配视觉模型」。
-                image_locator["detail"] = {
-                    "deterministic_match": "missed",
-                    "vision": "not_configured" if not provider.available else "observation_invalid",
+                    attempt_ledger.append({"stage": "VISUAL_CONSTRAINTS", "status": _ledger_status(retried)})
+        # Caption Bridge（P0-C）：指纹与观察约束都未决，但观察给出了图表编号 →
+        # 把观察的编号/逐字文本结构化交题注通道裁决（不构造假自然语言问句）。
+        if (
+            observation is not None
+            and observation.figure_label
+            and image_locator.get("status") not in {"VERIFIED", "MULTIPLE_MATCHES"}
+        ):
+            from yuxi.knowledge.evidence.caption_locator import FigureCaptionQuery, resolve_caption_bridge
+
+            bridge = await resolve_caption_bridge(
+                db,
+                query=FigureCaptionQuery(
+                    canonical_label=str(observation.figure_label),
+                    verbatim_segments=tuple(str(item) for item in observation.visible_text or []),
+                    visible_entities=tuple(str(item) for item in observation.visible_entities or []),
+                ),
+                kb_ids=scope_kb_ids,
+            )
+            attempt_ledger.append(
+                {
+                    "stage": "CAPTION_BRIDGE",
+                    "status": "OK" if bridge is not None else "NO_MATCH",
+                    "reason": str(bridge.get("reason") or "") if bridge else "no_caption_candidate",
                 }
+            )
+            if bridge is not None:
+                # 桥接命中：定位身份仍是 FIGURE_IMAGE 入口，裁决层是题注权威
+                bridge["locator_kind"] = "FIGURE_IMAGE"
+                bridge["match_tier"] = f"CAPTION_BRIDGE_{bridge.get('match_tier') or 'LABEL'}"
+                image_locator = bridge
+        elif image_locator.get("status") not in {"VERIFIED", "MULTIPLE_MATCHES"}:
+            attempt_ledger.append(
+                {
+                    "stage": "CAPTION_BRIDGE",
+                    "status": "SKIPPED",
+                    "reason": "no_observation_label" if observation is not None else "observation_unavailable",
+                }
+            )
         if image_locator.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
             # 图片裁决优先且终局：MULTIPLE_MATCHES 不允许文本路径收缩成唯一页码；
             # 观察不可用等失败关闭结论同样终局。
@@ -446,9 +518,7 @@ async def prepare_knowledge_context(
             # 解释阶段的 [E#] 优先绑定正文讨论段
             from yuxi.knowledge.evidence.quote_locator import attach_caption_backlinks
 
-            await attach_caption_backlinks(
-                db, kb_ids=[str(member["kb_id"]) for member in raw_members], resolution=direct_locator
-            )
+            await attach_caption_backlinks(db, kb_ids=scope_kb_ids, resolution=direct_locator)
     if locator_pending and (direct_locator is None or direct_locator.get("status") == "NOT_FOUND"):
         # 文本入口（QUOTE/FIGURE 编号）：caption/引文通道；图片 NOT_FOUND 时
         # 问题文本本身可能携带题注片段（quote 兜底）。
@@ -459,6 +529,11 @@ async def prepare_knowledge_context(
             question=question,
             kb_ids=[str(member["kb_id"]) for member in raw_members],
         )
+        attempt_ledger.append(_ledger_entry("TEXT_FALLBACK", direct_locator))
+    if direct_locator is not None and attempt_ledger:
+        # 账本随 locator_resolution 持久化（primary_reason 由最终状态承载；
+        # NOT_APPLICABLE 只是路由不适用，无资格覆盖真实失败）
+        direct_locator.setdefault("attempt_ledger", attempt_ledger)
     if direct_locator and direct_locator.get("status") == "VERIFIED":
         locator_evidence = {
             "evidence_id": direct_locator.get("evidence_id"),
@@ -939,6 +1014,19 @@ async def prepare_knowledge_context(
             "事实（实验内容）必须引用题注条目；作者的推断结论（功能/机制）必须"
             "引用正文讨论段——找不到对应 [E#] 时明示「原文未提供该结论的依据」，"
             "不得给出无依据推断。"
+        )
+    # AC15 描述权 ≠ 定位权：图片定位失败不禁止解释图片——基于视觉观察描述
+    # 图面仍可回答，但必须明示无法可靠确定所属文献与页码，页码字段为 0。
+    _failed_image_locator = contract.get("locator_resolution") or {}
+    _observation_available = isinstance(contract.get("figure_image_observation"), dict) and "figure_label" in (
+        contract.get("figure_image_observation") or {}
+    )
+    if image_bytes and _failed_image_locator.get("status") != "VERIFIED" and _observation_available:
+        contract["answer_instruction"] += (
+            " 本题图片未能可靠定位到知识库文献（不要编造文献名或页码）。仍请基于"
+            "图片本身的可见内容回答「是什么」：描述可见的 panel、图表类型、文字"
+            "标签与生物学对象，并明确说明「当前知识库范围内无法可靠确定该图片"
+            "所属的文献与页码」。不得宣称任何页码或文件名。"
         )
     # NUMERIC 题型：数字/区间/单位必须逐字来自证据原文，禁止换算或近似改写（P2-12）
     if "NUMERIC" in (plan.get("question_types") or []):

@@ -32,6 +32,7 @@ from yuxi.knowledge.evidence.document_partition import (
     PARTITION_SUPPORTING_INFO,
     effective_partition,
 )
+from yuxi.knowledge.rendering.authority_markers import authority_marker_pattern
 from yuxi.knowledge.rendering.claim_evidence_resolver import (
     BINDING_VERIFIED,
     extract_hard_constraints,
@@ -70,8 +71,10 @@ LEGACY_NARRATIVE_LOCATOR_MARKER = "〔页码与锚点以后端引用为准〕"
 HISTORY_CITATION_PLACEHOLDER = "[citation omitted]"
 
 _PLACEHOLDER_PATTERN = re.compile(r"\[(E\d{1,3})\]")
-# 伪造芯片：模型模仿渲染产物手写的任何「〔…证据E#…〕」形态（含嵌套损坏形态）
-_FABRICATED_CHIP_PATTERN = re.compile(r"〔[^〕]*证据\s*E\d{1,3}[^〕]*〕")
+# 伪造芯片：模型模仿渲染产物手写的任何「〔…证据E#…〕/〔…引文定位…〕」形态
+# （含嵌套损坏形态）。引文定位形态 2026-09 起纳入——伪造定位芯片此前既不被
+# 伪造判定覆盖、又被权威保护模式放行（D3 漏洞）。
+_FABRICATED_CHIP_PATTERN = re.compile(r"〔[^〕]*(?:证据\s*E\d{1,3}|引文定位)[^〕]*〕")
 _BARE_PAGE_PATTERNS = (
     re.compile(r"第\s*[0-9]{1,4}\s*页"),
     re.compile(r"\bp\.\s*[0-9]{1,3}\b", flags=re.IGNORECASE),
@@ -527,10 +530,15 @@ def _strip_display_placeholders(text: str) -> tuple[str, int, int]:
     result = re.sub(r"\n{3,}", "\n\n", result)
     marker_count = result.count(NARRATIVE_LOCATOR_MARKER)
     result = result.replace(NARRATIVE_LOCATOR_MARKER, "")
+    # 悬空定位行前缀清理：伪造芯片被替换为失败关闭标记、标记又被剥除后，
+    # 「已可靠定位到原文：」若未紧跟合法芯片（〔引文定位…〕）即为残留，清除。
+    # 必须在标记剥除之后执行——否则前缀后跟标记（〔当前…）会被豁免。
+    dangling_locator_prefix = len(re.findall(r"已可靠定位到原文：(?!〔)", result))
+    result = re.sub(r"已可靠定位到原文：(?!〔)", "", result)
     # 剥离残留清理：标点前多余空格、纯空白行收敛（不动表格对齐空白）
     result = re.sub(r"[ \t]+([,，.。;；、])", r"\1", result)
     result = re.sub(r"\n{3,}", "\n\n", result)
-    return result, marker_count, placeholder_count + header_count
+    return result, marker_count, placeholder_count + header_count + dangling_locator_prefix
 
 
 def _render_references_section(text: str, citations: list[dict[str, Any]]) -> tuple[str, bool]:
@@ -664,21 +672,30 @@ def _rewrite_fabricated_chips(
 
     绝不"ref 存在就信 ref"——先进入 resolver 验证该证据是否真的支持附近文本；
     VERIFIED → 重写为真芯片；否则整块剥离（locator 已验证时替换为定位芯片）。
+    引文定位形态没有 ref 可信：唯一合法判据是与本 run 后端签发的定位芯片
+    **完全一致**；模型构造的定位芯片（即使数值碰巧正确）一律按伪造剥离，
+    单独计入 ``fabricated_locator_removed``（AC13）。
     幂等防线：与当前引用池渲染产物**完全一致**的芯片是后端上一轮生成的合法
     芯片（守卫+落库双重应用场景），原样保留，不进入伪造判定。
     """
     fallback = locator_chip or ""
     rewritten = 0
     removed = 0
+    locator_removed = 0
     legitimate_chips = {render_citation_chip(citation) for citation in _citation_pool(citations)}
     if locator_chip:
         legitimate_chips.add(locator_chip)
 
     def _substitute(match: re.Match) -> str:
-        nonlocal rewritten, removed
+        nonlocal rewritten, removed, locator_removed
         chip = match.group(0)
         if chip in legitimate_chips:
             return chip
+        if "引文定位" in chip:
+            # 定位芯片合法性只来自后端签发（数值碰巧正确不构成权威，AC13）
+            locator_removed += 1
+            # 绝不返回空串：以失败关闭标记占位，由展示层终点规则统一剥除并披露
+            return fallback or NARRATIVE_LOCATOR_MARKER
         ref_match = re.search(r"E\d{1,3}", chip)
         binding = resolve_binding(
             claim_context=_claim_context_around(text, match.start(), match.end()),
@@ -691,10 +708,15 @@ def _rewrite_fabricated_chips(
             proposed = next((c for c in citations if str(c.get("ref")) == binding["ref"]), None)
             return render_citation_chip(proposed) if proposed else fallback or NARRATIVE_LOCATOR_MARKER
         removed += 1
-        return fallback
+        # 绝不返回空串：以失败关闭标记占位，由展示层终点规则统一剥除并披露
+        return fallback or NARRATIVE_LOCATOR_MARKER
 
     rewritten_text = _FABRICATED_CHIP_PATTERN.sub(_substitute, str(text or ""))
-    return rewritten_text, {"fabricated_rewritten": rewritten, "fabricated_removed": removed}
+    return rewritten_text, {
+        "fabricated_rewritten": rewritten,
+        "fabricated_removed": removed,
+        "fabricated_locator_removed": locator_removed,
+    }
 
 
 def sanitize_history_text(text: str) -> str:
@@ -747,8 +769,8 @@ def apply_citation_channel(
         protected[token] = match.group(0)
         return token
 
-    authoritative_pattern = re.compile(r"〔(?:证据E\d{1,3}|引文定位)｜[^〕]+〕")
-    protected_text = authoritative_pattern.sub(_protect, rewritten)
+    # 权威芯片形态唯一来源：authority_markers（勿在本文件重写 regex）
+    protected_text = authority_marker_pattern().sub(_protect, rewritten)
     stripped, locator_validation = strip_bare_locators(protected_text, replacement=locator_chip)
     for token, chip in protected.items():
         stripped = stripped.replace(token, chip)
@@ -902,6 +924,12 @@ def build_citation_rows(
 
         row_evidence_type = row.get("evidence_type") or row.get("span_evidence_type")
         row_partition = row.get("document_partition")
+        # 资格收口（Invariant 5）是**硬过滤**：页眉/页脚/running head 页码再准
+        # 也不进入引用池（可定位 ≠ 可作回答证据）。与下方 toc 软过滤语义不同
+        # ——toc 全滤时保留原列表降级标注，资格全滤时该行不产生任何引用。
+        from yuxi.knowledge.evidence.anchor_eligibility import anchor_answer_eligible
+
+        anchors = [anchor for anchor in anchors if anchor_answer_eligible(anchor)]
         non_toc_anchors = [
             anchor
             for anchor in anchors

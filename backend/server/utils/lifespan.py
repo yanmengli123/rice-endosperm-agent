@@ -170,6 +170,19 @@ async def lifespan(app: FastAPI):
     # 启动运行时配置同步线程（周期性从 Redis 拉取管理员保存的配置快照）
     config.start_runtime_sync()
 
+    # 视觉科研定位能力 canary：配置存在 ≠ 能力可用，真实链路确立 READY。
+    # 未配置/未就绪只告警不阻断（确定性指纹与文本定位不依赖视觉通道）。
+    try:
+        from yuxi.knowledge.vision.provider import probe_vision_capability
+
+        capability = await probe_vision_capability()
+        logger.info(
+            f"Vision scientific locator: model = {capability['model'] or '(none)'}"
+            f", status = {capability['status']} ({capability['detail']})"
+        )
+    except Exception as e:
+        logger.warning(f"Vision capability canary skipped: {e}")
+
     try:
         init_sandbox_provider()
     except Exception as e:

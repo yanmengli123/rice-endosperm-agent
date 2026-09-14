@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import and_, or_, select
@@ -213,31 +214,22 @@ def select_quote_candidates(text: str | None, *, min_normalized_chars: int = 25)
 # ---- 题注通道：label 硬约束下的 caption span 定位 ----
 
 
-async def resolve_figure_caption_locator(
-    db,
-    *,
-    figure_label: str,
-    quote_text: str | None = None,
-    kb_ids: list[str],
-) -> dict[str, Any] | None:
-    """在 caption span 通道内按 label 硬约束定位图表题注。
+async def _scan_caption_rows(db, *, figure_label: str, kb_ids: list[str]):
+    """label 硬过滤后的题注候选行（span/anchor/file/revision 四元组）。
 
-    返回与 :func:`yuxi.knowledge.evidence.quote_locator.resolve_quote_locator`
-    同形的 resolution dict（含 locator_kind=FIGURE_CAPTION 与 match_tier）；
-    范围内不存在该 label 的题注时返回 None（调用方回退常规引文路径）。
-    失败关闭：同 label 多个物理位置且无法消歧 → MULTIPLE_MATCHES，无候选页码。
+    统一施加：编号规范键一致、页码合法、span/锚点跨源页码一致、分区可定位、
+    非目录/清单行。文本入口与视觉桥接（FigureCaptionQuery）共用本扫描。
     """
     from yuxi.knowledge.evidence.document_partition import (
         LOCATOR_ELIGIBLE_PARTITIONS,
         effective_partition,
     )
-    from yuxi.knowledge.evidence.protocol import derive_evidence_id
     from yuxi.knowledge.evidence.quote_locator import is_toc_like
     from yuxi.knowledge.evidence.verbatim import escape_like
 
     label_key = canonical_figure_label(figure_label)
     if not label_key:
-        return None
+        return []
     rows = (
         await db.execute(
             select(EvidenceSpanRecord, EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
@@ -274,7 +266,7 @@ async def resolve_figure_caption_locator(
         )
     ).all()
 
-    candidates: list[dict[str, Any]] = []
+    scanned: list[tuple[Any, Any, Any, Any]] = []
     seen_anchors: set[tuple[str, str]] = set()
     for span, anchor, knowledge_file, revision in rows:
         # label 硬约束：container_label 规范键必须与输入一致（Figure 4 永不冒充 Figure 5）
@@ -297,38 +289,126 @@ async def resolve_figure_caption_locator(
             str(span.quote or ""), evidence_type=span.evidence_type, partition=partition
         ):
             continue
-        seen_anchors.add(anchor_key)
-        tier = match_tier(quote_text, anchor_quote) if quote_text else None
-        if quote_text and tier is None:
-            continue  # 有引文片段时必须匹配上题注载体（T0-T3 之一）
-        candidates.append(
-            {
-                "anchor_id": str(anchor.anchor_id),
-                "span_id": str(span.span_id),
-                "evidence_id": derive_evidence_id(
-                    source_sha256=str(revision.source_sha256),
-                    page_number=int(anchor.page),
-                    bbox=anchor.bbox,
-                    word_start=int(anchor.word_start or 0),
-                    word_end=int(anchor.word_end or anchor.word_start or 0),
-                    quote_hash=str(anchor.quote_hash or ""),
-                    anchor_id=str(anchor.anchor_id),
-                ),
-                "span_evidence_id": str(span.evidence_id),
-                "parse_revision_id": str(anchor.parse_revision_id),
-                "kb_id": str(span.kb_id),
-                "file_id": str(span.file_id),
-                "source_sha256": str(revision.source_sha256),
-                "index_revision_id": str(knowledge_file.active_index_revision_id or ""),
-                "filename": str(knowledge_file.filename or ""),
-                "page": int(anchor.page),
-                "quote_head": re.sub(r"\s+", " ", anchor_quote.strip())[:80],
-                "quote": anchor_quote[:1600],
-                "zone": partition,
-                "tier": tier or TIER_LABEL_CONTAINER_EXACT,
-            }
-        )
+        # 资格收口（Invariant 5）：页眉/页脚/running head 页码再准也不作回答证据
+        from yuxi.knowledge.evidence.anchor_eligibility import anchor_answer_eligible
 
+        if not anchor_answer_eligible(anchor):
+            continue
+        seen_anchors.add(anchor_key)
+        scanned.append((span, anchor, knowledge_file, revision))
+    return scanned
+
+
+def _candidate_from_row(span, anchor, knowledge_file, revision, *, tier: str | None) -> dict[str, Any]:
+    from yuxi.knowledge.evidence.protocol import derive_evidence_id
+
+    anchor_quote = str(anchor.quote or "")
+    return {
+        "anchor_id": str(anchor.anchor_id),
+        "span_id": str(span.span_id),
+        "evidence_id": derive_evidence_id(
+            source_sha256=str(revision.source_sha256),
+            page_number=int(anchor.page),
+            bbox=anchor.bbox,
+            word_start=int(anchor.word_start or 0),
+            word_end=int(anchor.word_end or anchor.word_start or 0),
+            quote_hash=str(anchor.quote_hash or ""),
+            anchor_id=str(anchor.anchor_id),
+        ),
+        "span_evidence_id": str(span.evidence_id),
+        "parse_revision_id": str(anchor.parse_revision_id),
+        "kb_id": str(span.kb_id),
+        "file_id": str(span.file_id),
+        "source_sha256": str(revision.source_sha256),
+        "index_revision_id": str(knowledge_file.active_index_revision_id or ""),
+        "filename": str(knowledge_file.filename or ""),
+        "page": int(anchor.page),
+        "quote_head": re.sub(r"\s+", " ", anchor_quote.strip())[:80],
+        "quote": anchor_quote[:1600],
+        "zone": effective_partition_of(anchor),
+        "tier": tier or TIER_LABEL_CONTAINER_EXACT,
+    }
+
+
+def effective_partition_of(anchor) -> str:
+    from yuxi.knowledge.evidence.document_partition import effective_partition
+
+    return effective_partition(anchor.document_partition, page=int(anchor.page))
+
+
+_TIER_RANK = {
+    TIER_T0_RAW_EXACT: 0,
+    TIER_T1_CANONICAL_EXACT: 1,
+    TIER_LABEL_CONTAINER_EXACT: 2,
+    TIER_T2_TOKEN_HARD_CONSTRAINTS: 3,
+    TIER_T3_WHITESPACE_COMPRESSED: 4,
+}
+
+
+def _best_verbatim_tier(verbatim_segments, carrier_quote: str) -> str | None:
+    """可见文本在题注载体上的最高**可发布**匹配层级。
+
+    只放行 T0/T1（逐字相等 / 规范化包含）。T2/T3 允许 VLM 概述文本以次优
+    形态通过，对「逐字观察」类输入不可信，本接合口一律不放行（返回 None）。
+    """
+    for segment in verbatim_segments:
+        tier = match_tier(segment, carrier_quote)
+        if tier in (TIER_T0_RAW_EXACT, TIER_T1_CANONICAL_EXACT):
+            return tier
+    return None
+
+
+def _entities_in_caption(visible_entities, caption_quote: str) -> bool:
+    """可见实体须全部以规范化形式出现在真实题注中（辅助消歧，不作独立发布条件）。"""
+    norm = normalize_for_match(caption_quote)
+    return bool(visible_entities) and all(
+        normalize_for_match(str(entity)) in norm for entity in visible_entities if str(entity)
+    )
+
+
+@dataclass(frozen=True)
+class FigureCaptionQuery:
+    """结构化题注定位查询（P0-C 视觉桥接入口）。
+
+    只允许确定性入参；模型自述的页码/文件/anchor 物理上不在本契约内：
+    - ``canonical_label``：观察得出的图表编号（如 ``Figure 1``）——label 硬过滤；
+    - ``verbatim_segments``：图中逐字照抄的可见文本——T0/T1 验证（可发布信号）；
+    - ``visible_entities``：图中可见标识符——仅在题注中精确出现且物理唯一时协助消歧。
+    ``inferred_caption_fragments`` 属推测字段，不进入本契约（仅审计展示）。
+    """
+
+    canonical_label: str
+    verbatim_segments: tuple[str, ...] = ()
+    visible_entities: tuple[str, ...] = ()
+    source: str = "VISUAL_OBSERVATION"
+
+
+async def resolve_caption_bridge(db, *, query: FigureCaptionQuery, kb_ids: list[str]) -> dict[str, Any] | None:
+    """观察 → 题注通道确定性接合（P0-C）。
+
+    图片定位指纹（V0/V1/V1G）未命中且观察给出编号时，由本桥接把观察结果
+    转交互题注通道裁决（label 硬过滤 + T0/T1 + 实体消歧 + 物理唯一）；页码
+    只可能从 caption anchor.page 出来。失败返回 None（调用方失败关闭）。
+    """
+    scanned = await _scan_caption_rows(db, figure_label=query.canonical_label, kb_ids=kb_ids)
+    if not scanned:
+        return None
+    candidates: list[dict[str, Any]] = []
+    for span, anchor, knowledge_file, revision in scanned:
+        anchor_quote = str(anchor.quote or "")
+        verbatim_tier = _best_verbatim_tier(query.verbatim_segments, anchor_quote)
+        if verbatim_tier is not None:
+            tier = verbatim_tier
+        elif query.visible_entities and _entities_in_caption(query.visible_entities, anchor_quote):
+            tier = TIER_LABEL_CONTAINER_EXACT
+        else:
+            continue
+        candidates.append(_candidate_from_row(span, anchor, knowledge_file, revision, tier=tier))
+    return _adjudicate_caption_candidates(candidates, container_label=query.canonical_label)
+
+
+def _adjudicate_caption_candidates(candidates: list[dict[str, Any]], *, container_label: str) -> dict[str, Any] | None:
+    """物理唯一性 + 区分度排序 → VERIFIED / MULTIPLE_MATCHES / None。"""
     if not candidates:
         return None
     physical_locations = {
@@ -345,7 +425,7 @@ async def resolve_figure_caption_locator(
     best = sorted(
         candidates,
         key=lambda item: (
-            {"T0_RAW_EXACT": 0, "T1_CANONICAL_EXACT": 1, "LABEL_CONTAINER_EXACT": 2}.get(item["tier"], 3),
+            _TIER_RANK.get(item["tier"], 3),
             -score_caption_text(item["quote"]),
             item["anchor_id"],
         ),
@@ -362,7 +442,7 @@ async def resolve_figure_caption_locator(
         "evidence_id": best["evidence_id"],
         "span_evidence_id": best["span_evidence_id"],
         "evidence_type": "caption",
-        "container_label": figure_label,
+        "container_label": container_label,
         "parse_revision_id": best["parse_revision_id"],
         "kb_id": best["kb_id"],
         "file_id": best["file_id"],
@@ -374,8 +454,34 @@ async def resolve_figure_caption_locator(
     }
 
 
+async def resolve_figure_caption_locator(
+    db,
+    *,
+    figure_label: str,
+    quote_text: str | None = None,
+    kb_ids: list[str],
+) -> dict[str, Any] | None:
+    """题注通道定位（文本/编号入口，兼容旧接口）。
+
+    返回与 :func:`yuxi.knowledge.evidence.quote_locator.resolve_quote_locator`
+    同形的 resolution dict（含 locator_kind=FIGURE_CAPTION 与 match_tier）；
+    范围内不存在该 label 的题注时返回 None（调用方回退常规引文路径）。
+    失败关闭：同 label 多个物理位置且无法消歧 → MULTIPLE_MATCHES，无候选页码。
+    """
+    scanned = await _scan_caption_rows(db, figure_label=figure_label, kb_ids=kb_ids)
+    candidates: list[dict[str, Any]] = []
+    for span, anchor, knowledge_file, revision in scanned:
+        anchor_quote = str(anchor.quote or "")
+        tier = match_tier(quote_text, anchor_quote) if quote_text else None
+        if quote_text and tier is None:
+            continue  # 有引文片段时必须匹配上题注载体（T0-T3 之一）
+        candidates.append(_candidate_from_row(span, anchor, knowledge_file, revision, tier=tier))
+    return _adjudicate_caption_candidates(candidates, container_label=figure_label)
+
+
 __all__ = [
     "CAPTION_LOCATOR_VERSION",
+    "FigureCaptionQuery",
     "TIER_LABEL_CONTAINER_EXACT",
     "TIER_T0_RAW_EXACT",
     "TIER_T1_CANONICAL_EXACT",
@@ -388,6 +494,7 @@ __all__ = [
     "hard_constraints_satisfied",
     "label_conflicts",
     "match_tier",
+    "resolve_caption_bridge",
     "resolve_figure_caption_locator",
     "score_caption_text",
     "select_quote_candidates",

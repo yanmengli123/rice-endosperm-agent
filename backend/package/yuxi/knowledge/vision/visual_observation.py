@@ -30,7 +30,10 @@ class VisualObservationEnvelope(BaseModel):
     panel_labels: list[str] = Field(default_factory=list)
     visible_entities: list[str] = Field(default_factory=list)
     visible_text: list[str] = Field(default_factory=list)
-    caption_fragments: list[str] = Field(default_factory=list)
+    # 模型对题注的**推测**（非逐字）：仅审计/候选生成，永不作为绑定信号——
+    # 字段名显式携带 inferred，防止未来开发者当 OCR truth 使用（VLM 幻觉的
+    # 题注短语恰好匹配库中某篇论文的事故防线）
+    inferred_caption_fragments: list[str] = Field(default_factory=list)
     visual_structure: dict[str, bool] = Field(default_factory=dict)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 

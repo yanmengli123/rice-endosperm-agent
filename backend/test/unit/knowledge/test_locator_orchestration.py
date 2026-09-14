@@ -371,7 +371,7 @@ async def test_image_attachment_flow_resolves_and_freezes_figure_binding(monkeyp
                     "panel_labels": ["a", "b", "c"],
                     "visible_entities": ["OsMYB73-GFP"],
                     "visible_text": ["Relative expression levels"],
-                    "caption_fragments": ["Rice OsMYB73 gene expression"],
+                    "inferred_caption_fragments": ["Rice OsMYB73 gene expression"],
                     "visual_structure": {"bar_chart": True},
                     "confidence": 0.9,
                 }
@@ -561,3 +561,185 @@ async def test_bifc_exact_anchor_is_frozen_into_answer_evidence(monkeypatch: pyt
     model_context = build_answer_context(contract)
     assert quote in model_context
     assert '"citation_refs":["E1"]' in model_context
+
+
+@pytest.mark.asyncio
+async def test_image_flow_caption_bridge_recovers_page_after_fingerprint_miss(monkeypatch: pytest.MonkeyPatch):
+    """P0-C 权威链：指纹未决 → 观察 → Caption Bridge 恢复第 4 页 + attempt ledger 记账。"""
+    from yuxi.knowledge.vision import figure_image_locator as figure_module
+    from yuxi.knowledge.vision import provider as provider_module
+    from yuxi.knowledge.vision.visual_observation import VisualObservationEnvelope
+
+    class _BridgeStubProvider:
+        available = True
+
+        async def describe(self, _image_bytes):
+            return VisualObservationEnvelope.model_validate(
+                {
+                    "schema_version": "visual-observation.v1",
+                    "figure_label": "Figure 1",
+                    "visible_entities": ["OsMYB73-GFP"],
+                    "visible_text": ["Relative expression levels"],
+                    "inferred_caption_fragments": ["Rice OsMYB73 gene expression"],
+                    "visual_structure": {"bar_chart": True},
+                    "confidence": 0.9,
+                }
+            )
+
+    call_state = {"with_observation": False}
+
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
+        assert kb_ids == ["kb-a"]
+        if observation is None:
+            return {
+                "status": "NOT_FOUND",
+                "locator_version": "figure_image_locator_v3",
+                "locator_kind": "FIGURE_IMAGE",
+                "reason": "VISION_PROVIDER_UNAVAILABLE",
+            }
+        call_state["with_observation"] = True
+        # 观察约束层（V2/V3）也不足（库内无指纹资产且文本信号弱）
+        return {
+            "status": "NOT_FOUND",
+            "locator_version": "figure_image_locator_v3",
+            "locator_kind": "FIGURE_IMAGE",
+            "reason": "no_figure_candidate_satisfies_two_signal_minimum",
+        }
+
+    async def fake_bridge(_db, *, query, kb_ids):
+        assert query.canonical_label == "Figure 1"
+        assert query.source == "VISUAL_OBSERVATION"
+        assert "Relative expression levels" in query.verbatim_segments
+        return {
+            "status": "VERIFIED",
+            "locator_version": "caption_locator_v3",
+            "locator_kind": "FIGURE_CAPTION",
+            "match_tier": "T1_CANONICAL_EXACT",
+            "page": 4,
+            "zone": "MAIN_TEXT",
+            "anchor_id": "ea_fig1",
+            "span_id": "es_fig1",
+            "evidence_id": "ev_fig1_page4",
+            "span_evidence_id": "evs_fig1",
+            "evidence_type": "caption",
+            "parse_revision_id": "pr-active",
+            "kb_id": "kb-a",
+            "file_id": "file-a",
+            "source_sha256": "a" * 64,
+            "index_revision_id": "ir-active",
+            "quote": "Figure 1. Expression patterns of OsMYB73 in rice seeds.",
+            "quote_head": "Figure 1. Expression patterns of OsMYB73 in rice seeds.",
+            "filename": "paper.pdf",
+        }
+
+    monkeypatch.setattr(provider_module, "get_vision_provider", lambda: _BridgeStubProvider())
+    monkeypatch.setattr(figure_module, "resolve_figure_image_locator", fake_image_locator)
+    from yuxi.knowledge.evidence import caption_locator as caption_module
+
+    monkeypatch.setattr(caption_module, "resolve_caption_bridge", fake_bridge)
+
+    figure_citation = _citation("E1", 4, "Figure 1. Expression patterns of OsMYB73 in rice seeds measured by qRT-PCR.")
+    figure_citation.update(
+        {"evidence_id": "ev_fig1_page4", "_physical_evidence_id": "ev_fig1_page4", "_anchor_id": "ea_fig1"}
+    )
+    _patch_pipeline(monkeypatch, citations=[figure_citation])
+    monkeypatch.setattr(
+        quote_locator,
+        "resolve_quote_locator",
+        lambda *_a, **_k: _async_return({"status": "NOT_FOUND", "locator_version": "test"}),
+    )
+
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question="这个图片在哪篇论文哪一页，是什么意思？",
+        scope_snapshot=_SCOPE,
+        run_id="run-bridge",
+        request_id="req-bridge",
+        image_bytes=b"fake-image-bytes",
+    )
+    assert call_state["with_observation"] is True
+    resolution = contract["locator_resolution"]
+    assert resolution["status"] == "VERIFIED"
+    assert resolution["page"] == 4
+    assert resolution["locator_kind"] == "FIGURE_IMAGE"
+    assert resolution["match_tier"].startswith("CAPTION_BRIDGE_")
+    ledger = resolution["attempt_ledger"]
+    stages = [(entry["stage"], entry["status"]) for entry in ledger]
+    assert ("ASSET_FINGERPRINT", "NO_MATCH") in stages
+    assert ("VISION_OBSERVATION", "OK") in stages
+    assert ("VISUAL_CONSTRAINTS", "NO_MATCH") in stages
+    assert ("CAPTION_BRIDGE", "OK") in stages
+    assert any(row.get("evidence_id") == "ev_fig1_page4" for row in contract["evidence"])
+
+
+@pytest.mark.asyncio
+async def test_ac15_failed_locator_still_allows_visual_explanation(monkeypatch: pytest.MonkeyPatch):
+    """AC15：定位失败不禁止解释——基于视觉观察作答，页码字符串为 0、定位芯片为 0。"""
+    from yuxi.knowledge.rendering.citation_channel import apply_citation_channel
+    from yuxi.knowledge.vision import figure_image_locator as figure_module
+    from yuxi.knowledge.vision import provider as provider_module
+    from yuxi.knowledge.vision.visual_observation import VisualObservationEnvelope
+
+    class _ObsProvider:
+        available = True
+
+        async def describe(self, _image_bytes):
+            return VisualObservationEnvelope.model_validate(
+                {
+                    "schema_version": "visual-observation.v1",
+                    "figure_label": None,
+                    "visible_text": ["Relative expression levels"],
+                    "visual_structure": {"bar_chart": True},
+                    "confidence": 0.7,
+                }
+            )
+
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
+        if observation is None:
+            return {
+                "status": "NOT_FOUND",
+                "locator_version": "figure_image_locator_v3",
+                "locator_kind": "FIGURE_IMAGE",
+                "reason": "VISION_PROVIDER_UNAVAILABLE",
+            }
+        return {
+            "status": "NOT_FOUND",
+            "locator_version": "figure_image_locator_v3",
+            "locator_kind": "FIGURE_IMAGE",
+            "reason": "no_figure_candidate_satisfies_two_signal_minimum",
+        }
+
+    monkeypatch.setattr(provider_module, "get_vision_provider", lambda: _ObsProvider())
+    monkeypatch.setattr(figure_module, "resolve_figure_image_locator", fake_image_locator)
+    from yuxi.knowledge.evidence import caption_locator as caption_module
+
+    async def no_bridge(_db, *, query, kb_ids):
+        return None
+
+    monkeypatch.setattr(caption_module, "resolve_caption_bridge", no_bridge)
+    _patch_pipeline(monkeypatch, citations=[])
+    monkeypatch.setattr(
+        quote_locator,
+        "resolve_quote_locator",
+        lambda *_a, **_k: _async_return({"status": "NOT_FOUND", "locator_version": "test"}),
+    )
+
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question="这个图片在哪篇论文哪一页，是什么意思？",
+        scope_snapshot=_SCOPE,
+        run_id="run-ac15",
+        request_id="req-ac15",
+        image_bytes=b"fake-image-bytes",
+    )
+    assert contract["locator_resolution"]["status"] != "VERIFIED"
+    # 描述权 ≠ 定位权：指令允许基于视觉观察解释，但禁止宣称文献/页码
+    instruction = contract.get("answer_instruction") or ""
+    assert "无法可靠确定" in instruction
+    assert "不得宣称任何页码" in instruction
+    # 模型即便写出页码，守卫也剥离（页码字符串为 0）
+    model_answer = "图中可见 a/b/c 三个 panel 的柱状图。该图位于论文第 4 页。"
+    guarded, validation = apply_citation_channel(model_answer, contract.get("citations") or [])
+    assert "第 4 页" not in guarded and "第4页" not in guarded
+    assert "〔引文定位" not in guarded
+    assert "panel" in guarded  # 视觉描述保留

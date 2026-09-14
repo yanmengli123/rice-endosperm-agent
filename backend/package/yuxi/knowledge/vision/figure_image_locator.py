@@ -179,9 +179,14 @@ async def _anchor_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]
 
     entities: list[dict[str, Any]] = []
     seen_anchors: set[tuple[str, str]] = set()
+    from yuxi.knowledge.evidence.anchor_eligibility import anchor_answer_eligible
+
     for anchor, knowledge_file, _revision in rows:
         anchor_key = (str(anchor.parse_revision_id), str(anchor.anchor_id))
         if anchor_key in seen_anchors or not anchor.page or int(anchor.page) < 1:
+            continue
+        # 资格收口（Invariant 5）：页眉/页脚形态锚点不入图片索引投影
+        if not anchor_answer_eligible(anchor):
             continue
         seen_anchors.add(anchor_key)
         quote = str(anchor.quote or "")
@@ -409,7 +414,9 @@ def adjudicate_figure_candidates(
     observed_label_key = _label_key(observation.figure_label)
     text_fragments = [str(item) for item in observation.visible_text or []]
     entity_fragments = [str(item) for item in observation.visible_entities or []]
-    caption_fragments = [str(item) for item in observation.caption_fragments or []]
+    # inferred_caption_fragments 是模型对题注的推测：仅审计展示，永不计入
+    # 绑定信号（VLM 幻觉的题注短语不得单独支撑发布）
+    inferred_fragments = [str(item) for item in observation.inferred_caption_fragments or []]
 
     scored: list[dict[str, Any]] = []
     for entity in candidates:
@@ -424,9 +431,11 @@ def adjudicate_figure_candidates(
         label_match = bool(observed_label_key and candidate_label_key == observed_label_key)
         visible_text_hits = _text_signal(text_fragments, caption_norm)
         entity_hits = _text_signal(entity_fragments, caption_norm)
-        caption_hits = _text_signal(caption_fragments, caption_norm)
+        inferred_caption_hits = _text_signal(inferred_fragments, caption_norm)
 
-        if label_match and (visible_text_hits + entity_hits + caption_hits) >= 2:
+        # 双信号 = 编号硬约束 + 至少一个经数据库真实题注验证的文本/实体命中；
+        # inferred_caption_hits 仅审计展示，永不计入（VLM 推测不产生 authority）
+        if label_match and (visible_text_hits + entity_hits) >= 1:
             tier = TIER_V2_VISUAL_CONSTRAINTS
         elif not observed_label_key and visible_text_hits >= 1 and entity_hits >= 1:
             tier = TIER_V3_MULTI_SIGNAL_HARD_CONSTRAINTS
@@ -443,7 +452,7 @@ def adjudicate_figure_candidates(
                     "label_match": label_match,
                     "visible_text_hits": visible_text_hits,
                     "entity_hits": entity_hits,
-                    "caption_hits": caption_hits,
+                    "inferred_caption_hits": inferred_caption_hits,
                     "phash_distance": None,
                     "panel_key": "whole",
                 },

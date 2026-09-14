@@ -24,6 +24,7 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 
 from yuxi.knowledge.contracts.citation_binding import CitationBindingCandidate
+from yuxi.knowledge.evidence.anchor_eligibility import anchor_answer_eligible
 from yuxi.knowledge.evidence.caption_locator import (
     carrier_label_conflicts,
     extract_figure_label,
@@ -528,6 +529,12 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
             span_quote, evidence_type=span.evidence_type, partition=partition
         ):
             continue  # 目录/图注清单行不参与定位
+        # 资格收口（Invariant 5）：可定位 ≠ 可作回答证据。页眉/页脚/页码锚点
+        # 与 running head 即使页码准确也不得进入定位候选（「正文·第1页」事故）。
+        if not anchor_answer_eligible(anchor) or not anchor_answer_eligible(
+            {"anchor_type": span.evidence_type or "", "quote": span_quote}
+        ):
+            continue
         seen_anchors.add(anchor_key)
         candidates.append(
             {
@@ -684,6 +691,9 @@ async def resolve_caption_backlinks(
             continue
         partition = effective_partition(anchor.document_partition, page=int(anchor.page))
         if partition != PARTITION_MAIN_TEXT or is_toc_like(quote, partition=partition):
+            continue
+        # 资格收口：running head/页脚不参与正文反链（否则图注解释会引到刊名行）
+        if not anchor_answer_eligible(anchor):
             continue
         backlinks.append(
             {

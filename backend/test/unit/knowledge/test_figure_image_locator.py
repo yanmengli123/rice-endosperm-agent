@@ -51,7 +51,7 @@ def _observation(**overrides) -> VisualObservationEnvelope:
         "panel_labels": ["a", "b", "c"],
         "visible_entities": ["OsMYB73-GFP"],
         "visible_text": ["Relative expression levels", "Seed 5 DAF"],
-        "caption_fragments": ["Rice OsMYB73 gene expression", "histochemical GUS staining"],
+        "inferred_caption_fragments": ["Rice OsMYB73 gene expression", "histochemical GUS staining"],
         "visual_structure": {"bar_chart": True, "microscopy": True, "tissue_images": True},
         "confidence": 0.9,
     }
@@ -409,13 +409,13 @@ def test_v2_label_plus_constraints_verifies_uploaded_figure_page():
 
 
 def test_label_conflict_rejects_wrong_figure():
-    observation = _observation(visible_text=["Bar, 1.0 cm"], caption_fragments=["Bar, 1.0 cm"])
+    observation = _observation(visible_text=["Bar, 1.0 cm"], inferred_caption_fragments=["Bar, 1.0 cm"])
     resolution = adjudicate_figure_candidates(observation, [_fig4_entity()])
     assert resolution["status"] == "NOT_FOUND"
 
 
 def test_single_signal_never_publishes_page():
-    observation = _observation(visible_text=[], visible_entities=[], caption_fragments=[])
+    observation = _observation(visible_text=[], visible_entities=[], inferred_caption_fragments=[])
     resolution = adjudicate_figure_candidates(observation, [_entity()])
     assert resolution["status"] == "NOT_FOUND"
     assert resolution["reason"] == "no_figure_candidate_satisfies_two_signal_minimum"
