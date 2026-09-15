@@ -379,8 +379,23 @@ async def test_locator_projection_replays_exact_audited_anchor(evidence_session)
                 "file_id": "file_locator",
                 "span_id": "es_locator",
                 "anchor_id": "ea_locator",
-                "page": 3,
+                "page": 99,  # stale top-level audit projection; Binding is authoritative
                 "source_sha256": source_sha,
+                "binding": {
+                    "binding_id": "vlb-assembler-page3",
+                    "status": "VERIFIED",
+                    "page_binding": "VERIFIED",
+                    "page_number": 3,
+                    "partition": "MAIN_TEXT",
+                    "physical_evidence_id": physical_evidence_id,
+                    "span_evidence_id": "evs_locator",
+                    "parse_revision_id": "spr_locator",
+                    "kb_id": "kb_allowed",
+                    "file_id": "file_locator",
+                    "span_id": "es_locator",
+                    "anchor_id": "ea_locator",
+                    "source_sha256": source_sha,
+                },
             },
         )
     )
@@ -414,11 +429,28 @@ async def test_locator_projection_degrades_from_binding_when_lineage_unavailable
                 "file_id": "file_stale",
                 "span_id": "es_stale",
                 "anchor_id": "ea_stale",
-                "page": 10,
+                "page": 99,  # stale top-level value must not reach the state panel
                 "source_sha256": "9" * 64,
                 "zone": "MAIN_TEXT",
                 "quote": "Figure 5 CRISPR/Cas9 knockout of OsMYB73 in rice callus.",
                 "filename": "paper.pdf",
+                "binding": {
+                    "binding_id": "vlb-assembler-page10",
+                    "status": "VERIFIED",
+                    "page_binding": "VERIFIED",
+                    "page_number": 10,
+                    "partition": "MAIN_TEXT",
+                    "filename": "paper.pdf",
+                    "physical_evidence_id": "ev_stale_page10",
+                    "span_evidence_id": "evs_stale",
+                    "parse_revision_id": "spr_reparsed_away",
+                    "kb_id": "kb_allowed",
+                    "file_id": "file_stale",
+                    "span_id": "es_stale",
+                    "anchor_id": "ea_stale",
+                    "source_sha256": "9" * 64,
+                    "quote_head": "Figure 5 CRISPR/Cas9 knockout of OsMYB73 in rice callus.",
+                },
             },
         )
     )
@@ -438,3 +470,31 @@ async def test_locator_projection_degrades_from_binding_when_lineage_unavailable
     assert degraded["retrieval"]["role"] == "ANSWER_CITATION"
     assert any(issue["code"] == "LOCATOR_LINEAGE_UNAVAILABLE" for issue in result["issues"])
     assert result["summary"]["degraded"] == 1
+
+
+async def test_locator_projection_fails_closed_for_verified_row_without_binding(evidence_session):
+    """状态面板也遵守 I1：历史 VERIFIED 顶层字段不能替代缺失 Binding。"""
+    session, records = evidence_session
+    records.append(
+        SimpleNamespace(
+            retrieval_id="kr_missing_binding",
+            status="COMPLETED",
+            intent="QUOTE_LOCATOR",
+            chunk_ids_json=[],
+            evidence_ids_json=["ev-untrusted"],
+            locator_resolution_json={
+                "status": "VERIFIED",
+                "page": 4,
+                "evidence_id": "ev-untrusted",
+                "kb_id": "kb_allowed",
+            },
+        )
+    )
+    await session.commit()
+
+    result = await assemble_evidence_for_run(session, "run_missing_binding", allowed_kb_ids={"kb_allowed"})
+
+    assert result["projection_status"] == "LOCATOR_FAILED"
+    assert result["locator_status"] == "NOT_FOUND"
+    assert result["evidence"] == []
+    assert result["summary"]["verified_binding_count"] == 0

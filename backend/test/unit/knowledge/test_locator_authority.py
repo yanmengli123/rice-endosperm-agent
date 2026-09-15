@@ -60,6 +60,7 @@ def test_freeze_invariant_fails_closed_when_evidence_not_frozen():
     assert contract["status"] == "DEGRADED"
     assert contract["error_code"] == "ANSWER_VALIDATION_FAILED"
     assert contract["locator_resolution"]["status"] == "NOT_FOUND"
+    assert contract["locator_resolution"]["reason"] == "answer_validation_failed_locator_evidence_not_frozen"
     assert "page" not in contract["locator_resolution"]
     # 原始结论只保留在审计字段，永不进入用户可见输出
     assert contract["locator_resolution"]["_authority_gate_audit"]["violations"] == ["VERIFIED_EVIDENCE_NOT_FROZEN"]
@@ -75,6 +76,25 @@ def test_freeze_invariant_fails_closed_without_physical_evidence_id():
     enforce_locator_authority(contract, retrieval_id="kr_1")
     assert contract["error_code"] == "ANSWER_VALIDATION_FAILED"
     assert contract["locator_resolution"]["status"] == "NOT_FOUND"
+
+
+def test_freeze_invariant_fails_closed_without_verified_page_binding():
+    """VERIFIED without a physical page binding is never publishable."""
+    contract = {
+        "locator_resolution": _verified_resolution(page=None),
+        "evidence": [{"evidence_id": "ev_frozen_1"}],
+        "warnings": [],
+    }
+
+    binding = enforce_locator_authority(contract, retrieval_id="kr_1")
+
+    assert binding.status == BINDING_VERIFIED
+    assert binding.page_binding == "UNRESOLVED"
+    assert contract["error_code"] == "ANSWER_VALIDATION_FAILED"
+    assert contract["locator_resolution"]["status"] == "NOT_FOUND"
+    assert contract["locator_resolution"]["reason"] == "answer_validation_failed_locator_page_binding"
+    assert "page" not in contract["locator_resolution"]
+    assert contract["locator_resolution"]["_authority_gate_audit"]["violations"] == ["VERIFIED_WITHOUT_PAGE_BINDING"]
 
 
 def test_gate_is_noop_for_unverified_resolutions():

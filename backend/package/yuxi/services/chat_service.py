@@ -379,23 +379,35 @@ def _decode_image_bytes(image_content: str | None) -> bytes | None:
 
 def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
     """Render QUOTE_LOCATOR without giving an LLM any page-number authority."""
+    from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
+
     plan = contract.get("retrieval_plan") or {}
     if plan.get("answer_mode") != "DETERMINISTIC_LOCATOR":
         return None
     locator = contract.get("locator_resolution") or {}
     status = str(locator.get("status") or "")
-    if status == "VERIFIED":
-        return f"已可靠定位到原文：{render_locator_chip(locator)}"
+    policy = contract.get("answer_policy") or {}
+    binding = locator.get("binding") or {}
+    authoritative_locator = authoritative_locator_projection(binding)
+    locator_authorized = bool(
+        policy.get("page_claim_allowed") is True
+        and policy.get("document_citations_allowed") is True
+        and authoritative_locator is not None
+    )
+    if locator_authorized:
+        return f"已可靠定位到原文：{render_locator_chip(authoritative_locator)}"
     if status == "MULTIPLE_MATCHES":
         return "该原句在当前知识范围内存在多个物理位置，当前无法可靠定位唯一原文页码。"
     return "当前无法可靠定位原文页码。"
 
 
 def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
+
     locator_resolution = contract.get("locator_resolution") or {}
     binding = locator_resolution.get("binding") or {}
     # locator block → binding → 权威芯片；缺失绑定渲染为失败关闭文案（无 Binding 就没有页码）
-    locator_bindings = {str(binding["binding_id"]): locator_resolution} if binding.get("binding_id") else None
+    locator_bindings = {str(binding["binding_id"]): binding} if binding.get("binding_id") else None
     rendered, draft_validation = render_answer_draft(text, locator_bindings=locator_bindings)
     guarded, citation_validation = apply_citation_channel(
         rendered,
@@ -405,14 +417,23 @@ def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, d
         authority_policy=contract.get("answer_policy"),
     )
     citation_validation["answer_draft"] = draft_validation
-    # H2b 解释依据执行：mechanism_attribution_allowed=False（无正文回链）时，
-    # 无依据机制归因句从用户可见输出中删除（分类器只审计，这里是执行）
-    if isinstance(contract.get("answer_policy"), dict) and (
-        contract["answer_policy"].get("mechanism_attribution_allowed") is False
-    ):
+    # I4 逐 Claim 证据授权执行：机制/题注句在权限拒绝时逐句过 resolve_binding
+    # 验证——有 VERIFIED 证据绑定的保留，无据（或引用池为空无法验证）的删除。
+    if isinstance(contract.get("answer_policy"), dict):
         from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
 
-        guarded, mechanism_removed = enforce_explanation_grounding(guarded, policy=contract["answer_policy"])
+        answer_policy = contract["answer_policy"]
+        evidence_authorized = bool(
+            answer_policy.get("page_claim_allowed") is True
+            and answer_policy.get("document_citations_allowed") is True
+            and authoritative_locator_projection(binding) is not None
+        )
+        guarded, mechanism_removed = enforce_explanation_grounding(
+            guarded,
+            policy=answer_policy,
+            citations=(contract.get("citations") or []) if evidence_authorized else [],
+            locator=locator_resolution,
+        )
         citation_validation["mechanism_claims_removed"] = mechanism_removed
     # P4 解释绑定：复合意图流按 Claim 分类验证（CAPTION_FACT/TEXT_SUPPORTED_
     # INTERPRETATION 必须绑定对应载体；UNSUPPORTED 明示，不静默输出）

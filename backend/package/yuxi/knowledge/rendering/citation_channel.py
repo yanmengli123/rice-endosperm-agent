@@ -239,9 +239,15 @@ def append_locator_citations(citations: list[dict[str, Any]], locator: dict[str,
     幂等去重：引用池已含同一物理证据（evidence_id 或 anchor_id 相同）时不
     重复追加——冻结定位行进入证据集后，citations 构建已覆盖该锚点。
     """
+    from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
+
     rows = list(citations or [])
-    if not isinstance(locator, dict) or locator.get("status") != "VERIFIED":
+    if not isinstance(locator, dict):
         return rows
+    authoritative_locator = authoritative_locator_projection(locator.get("binding"))
+    if authoritative_locator is None:
+        return rows
+    locator = authoritative_locator
     known_evidence_ids = {str(row.get("evidence_id")) for row in rows if row.get("evidence_id")}
     known_anchor_ids = {str(anchor_id) for row in rows for anchor_id in (row.get("anchor_ids") or []) if anchor_id}
 
@@ -253,6 +259,7 @@ def append_locator_citations(citations: list[dict[str, Any]], locator: dict[str,
     if locator.get("page") and not _already_covered(
         evidence_id=locator.get("evidence_id"), anchor_id=locator.get("anchor_id")
     ):
+        locator_quote = str(locator.get("quote") or locator.get("quote_head") or "")
         rows.append(
             _locator_citation_row(
                 f"E{len(rows) + 1}",
@@ -262,9 +269,9 @@ def append_locator_citations(citations: list[dict[str, Any]], locator: dict[str,
                 file_id=locator.get("file_id"),
                 kb_id=locator.get("kb_id"),
                 anchor_id=locator.get("anchor_id"),
-                quote=str(locator.get("quote") or locator.get("quote_head") or ""),
+                quote=locator_quote,
                 evidence_id=locator.get("evidence_id"),
-                toc_line=bool(_TOC_LINE_PATTERN.match(str(locator.get("quote") or ""))),
+                toc_line=bool(_TOC_LINE_PATTERN.match(locator_quote)),
             )
         )
     for backlink in locator.get("backlinks") or []:
@@ -759,9 +766,32 @@ def apply_citation_channel(
     """
     original = str(text or "")
     policy = authority_policy if isinstance(authority_policy, dict) else None
+    authoritative_locator = None
+    if policy is not None and "page_claim_allowed" in policy:
+        from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
+
+        authoritative_locator = authoritative_locator_projection((locator or {}).get("binding"))
+        locator_authorized = bool(
+            policy.get("page_claim_allowed") is True
+            and policy.get("document_citations_allowed") is True
+            and authoritative_locator is not None
+        )
+        if not locator_authorized:
+            # Defense in depth: the renderer does not trust a contradictory policy.
+            # Binding remains the sole authority even if an upstream caller mistakenly
+            # sets every permission bit to true.
+            policy = {
+                **policy,
+                "document_identity_allowed": False,
+                "figure_label_allowed": False,
+                "page_claim_allowed": False,
+                "document_citations_allowed": False,
+                "required_disclosure": policy.get("required_disclosure")
+                or "定位结论未形成可审计的权威绑定，系统不展示任何文献、编号或页码信息。",
+            }
     policy_revokes_citations = bool(policy and policy.get("document_citations_allowed") is False)
     effective_citations: list[dict[str, Any]] = [] if policy_revokes_citations else (citations or [])
-    effective_locator = None if policy_revokes_citations else locator
+    effective_locator = None if policy_revokes_citations else (authoritative_locator or locator)
     locator_chip = (
         render_locator_chip(effective_locator)
         if effective_locator and effective_locator.get("status") == "VERIFIED"
@@ -877,6 +907,20 @@ def apply_citation_channel(
             answer_replaced_by_policy = True
             expanded = safe_answer
 
+    # 12) I3 定位状态一致性守卫（Answer–State Mismatch = 0）：
+    #     定位结论由后端固定区块渲染，模型自然语言不得与之矛盾——
+    #     VERIFIED 时剥离「未被定位到/无法确定页码」矛盾句（生产事故：芯片
+    #     显示正文第 8 页、正文却写"该 Figure 4 图注本身未被定位到具体页码"）；
+    #     未定位/歧义时剥离「定位成功」措辞（后端芯片被剥离后残留的成功宣称）。
+    locator_contradiction_claims_removed = 0
+    if policy and policy.get("page_claim_allowed") is True:
+        expanded, locator_contradiction_claims_removed = _strip_locator_contradiction_claims(
+            expanded, direction="VERIFIED"
+        )
+    elif policy and policy.get("page_claim_allowed") is False:
+        expanded, _unlocated_success_removed = _strip_locator_contradiction_claims(expanded, direction="UNLOCATED")
+        locator_contradiction_claims_removed = _unlocated_success_removed
+
     validation = {
         "version": CITATION_CHANNEL_VERSION,
         "locator": locator_validation,
@@ -895,6 +939,7 @@ def apply_citation_channel(
             "document_identity_claims_removed": document_identity_claims_removed,
             "disclosure_appended": disclosure_appended,
             "answer_replaced_by_policy": answer_replaced_by_policy,
+            "locator_contradiction_claims_removed": locator_contradiction_claims_removed,
         },
         "bindings": bindings[:8],
         "citation_count": len(effective_citations),
@@ -908,24 +953,40 @@ _FIGURE_LABEL_CLAIM_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
-# 文献身份断言（H1）：出处动词句 + 作者-年份引用式。不枚举期刊名（不可穷举），
-# 只认「断言来源」的句法形态；正文里讨论基因功能的句子不会命中。注意不收
-# 「来源」名词形态——披露文案自身含「确定来源文献」不得被误剥（幂等前提）。
+# 文献身份断言（H1→I2 升级）：独立 Source 子句、出处动词、作者-年份与
+# 书名号标题引用。Source 子句从其前缀到行尾删除；其余按句删除，避免
+# 「图片显示绿色荧光。该图出自……论文。」整行删除而误伤视觉观察。
+_SOURCE_CLAUSE_PATTERN = re.compile(
+    r"(?:^|(?<=[。.!?！？]))[ \t]*(?:[-*+]\s*)?(?:\*\*|__)?"
+    r"(?:Source|Reference|Cite|来源)(?:\*\*|__)?\s*[:：].*$",
+    flags=re.IGNORECASE,
+)
 _PROVENANCE_CLAIM_PATTERN = re.compile(
-    r"(?:出自于?|来自于?|刊载?于|发表在|发表于|摘自|引用自|见诸|"
+    r"(?:出自于?|来自于?|刊载?于|发表在|发表于|摘自|引用自|见诸|来源为|来源是|"
+    r"依据.{0,40}的(?:研究|文献|论文|报道)|对应\s*《[^》]{4,}》|《[^》]{6,}》|"
     r"published\s+in|from\s+the\s+(?:paper|journal|study|literature)|"
     r"[A-Z][A-Za-z]+\s*(?:et\s+al\.?|等)\s*[,，]?\s*\(?((?:19|20)\d{2})\)?|"
     r"\((?:19|20)\d{2}\)\s*(?:Plant|New|The|BMC|Frontiers|Nature|Science|PLOS)[A-Za-z\s]*?Journal)",
     flags=re.IGNORECASE,
 )
-_IDENTITY_TAIL_PATTERN = re.compile(r"(论文|文献|期刊|杂志|journal|paper|study|article)\s*[。.；;]?", re.IGNORECASE)
+_IDENTITY_TAIL_PATTERN = re.compile(
+    r"(论文|文献|期刊|杂志|研究|报道|journal|paper|study|article|work|report|et\s+al|等\s*[（(]?\s*(?:19|20)\d{2}|《)",
+    re.IGNORECASE,
+)
+# 行首出处前缀（Source:/Reference:/来源:）——整行天然是身份断言
+_PROVENANCE_LINE_PREFIX = re.compile(r"^\s*(?:Source|Reference|Cite|来源)\s*[:：]", re.IGNORECASE)
+_CJK_PATTERN = re.compile(r"[\u4e00-\u9fff]")
 
 
 def _strip_document_identity_claims(text: str) -> tuple[str, int]:
-    """按句剥离文献身份断言（保留视觉描述等其余内容）。
+    """三级混合策略剥离文献身份断言（I2：句点切开与中文混排两类场景都覆盖）。
 
-    判定：句子同时满足「出处动词/作者-年份形态」与「论文/期刊类尾词」即视为
-    身份断言句；只含作者-年份不含尾词的保守保留（可能是普通行文年份）。
+    A. 行首 Source:/Reference:/Cite:/来源: 前缀 → 整行剥离；
+    B. 句内同时命中出处形态与身份尾词 → 仅该句剥离（中文混排行不误伤
+       「图片显示绿色荧光」等视觉描述）；
+    C. 行内命中「作者-年份 + 身份尾词」且整行**不含中文** → 整行剥离
+       （英文独立引用行 "Liu et al. 2024, Plant Biotechnology Journal."
+       被句点切成两句，句级判定永远凑不齐双条件；CJK 检查防止误删混排行）。
     """
     result = str(text or "")
     if not result:
@@ -933,25 +994,87 @@ def _strip_document_identity_claims(text: str) -> tuple[str, int]:
     removed = 0
     kept_lines: list[str] = []
     for line in result.split("\n"):
-        sentences = _SENTENCE_SPLIT_PATTERN.findall(line)
-        if not sentences:
-            kept_lines.append(line)
+        if _PROVENANCE_LINE_PREFIX.match(line):
+            removed += 1
             continue
-        kept: list[str] = []
-        for sentence in sentences:
-            if _PROVENANCE_CLAIM_PATTERN.search(sentence) and _IDENTITY_TAIL_PATTERN.search(sentence):
-                removed += 1
-                continue
-            kept.append(sentence)
-        rebuilt = "".join(kept)
-        if rebuilt.strip() or not line.strip():
-            kept_lines.append(rebuilt if kept else "")
-        else:
-            kept_lines.append(line)
+        if (
+            not _CJK_PATTERN.search(line)
+            and _PROVENANCE_CLAIM_PATTERN.search(line)
+            and _IDENTITY_TAIL_PATTERN.search(line)
+        ):
+            removed += 1
+            continue
+        sentences = _SENTENCE_SPLIT_PATTERN.findall(line)
+        if sentences:
+            kept = []
+            for sentence in sentences:
+                if _PROVENANCE_CLAIM_PATTERN.search(sentence) and _IDENTITY_TAIL_PATTERN.search(sentence):
+                    removed += 1
+                    continue
+                kept.append(sentence)
+            rebuilt = "".join(kept)
+            # 整行句子全部剥离时行一并消失（不回退原行——那会把已删内容复活）
+            kept_lines.append(rebuilt)
+            continue
+        kept_lines.append(line)
     cleaned = "\n".join(kept_lines)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     # 只清行首残留标点（不动空白行——剥离句后的空行属于合法排版，幂等前提）
     cleaned = re.sub(r"^[，。；,.;]+", "", cleaned, flags=re.MULTILINE)
+    return cleaned, removed
+
+
+# I3 定位状态矛盾句（按句剥离，与后端权威芯片/披露方向一致）
+_LOCATOR_CONTRADICTION_VERIFIED = re.compile(
+    r"(?:未(?:被)?定位到|无法定位|不能确定.{0,6}页码|无法可靠确定.{0,8}页码|"
+    r"未找到.{0,6}页码|页码(?:未知|不详|不可用|无法确认)|无法可靠定位原文页码|"
+    r"未能形成可靠.{0,4}绑定|not\s+located|unable\s+to\s+locate|"
+    r"cannot\s+determine\s+the\s+page|page\s+(?:is\s+|was\s+)?(?:unknown|unavailable|not\s+found))",
+    re.IGNORECASE,
+)
+_LOCATOR_SUCCESS_UNLOCATED = re.compile(
+    r"(?:已可靠定位|成功定位|定位到原文|已定位到.{0,8}页|原文位于|"
+    r"located\s+(?:at|on)\s+page|(?:location|source)\s*[:：]\s*(?:page|p\.))",
+    re.IGNORECASE,
+)
+
+
+def _strip_locator_contradiction_claims(text: str, *, direction: str) -> tuple[str, int]:
+    """剥离与后端定位结论矛盾的自然语言句子（I3，Answer–State Mismatch=0）。
+
+    - ``VERIFIED``：后端芯片已发布权威页码，模型写的「未被定位到具体页码」
+      是对权威结论的否认 → 整句删除；
+    - ``UNLOCATED``：后端已失败关闭，模型的「已可靠定位/定位到第 N 页」
+      成功宣称 → 整句删除。
+    定位结论只能由后端固定区块渲染，模型不生成任何定位状态描述。
+    """
+    result = str(text or "")
+    if not result.strip():
+        return result, 0
+    pattern = _LOCATOR_CONTRADICTION_VERIFIED if direction == "VERIFIED" else _LOCATOR_SUCCESS_UNLOCATED
+    removed = 0
+    kept_lines: list[str] = []
+    for line in result.split("\n"):
+        # 只有 VERIFIED 方向才保护后端权威定位行；未定位方向的同形文本是
+        # 模型伪造的成功宣称，必须删除。
+        if direction == "VERIFIED" and line.strip().startswith("已可靠定位到原文："):
+            kept_lines.append(line)
+            continue
+        sentences = _SENTENCE_SPLIT_PATTERN.findall(line)
+        if not sentences:
+            kept_lines.append(line)
+            continue
+        kept = []
+        for sentence in sentences:
+            if pattern.search(sentence):
+                removed += 1
+                continue
+            kept.append(sentence)
+        rebuilt = "".join(kept)
+        kept_lines.append(rebuilt)
+    cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"^[，。；,.;]+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned, removed
 
 

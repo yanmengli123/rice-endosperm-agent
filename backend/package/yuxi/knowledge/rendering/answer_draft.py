@@ -68,13 +68,15 @@ def _extract_bare_draft(source: str) -> str | None:
 
 def _render_locator_block(binding: dict | None) -> str:
     """locator block 的确定性渲染：binding VERIFIED → 权威芯片；否则失败关闭。"""
+    from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
     from yuxi.knowledge.rendering.citation_channel import (
         NARRATIVE_LOCATOR_MARKER,
         render_locator_chip,
     )
 
-    if isinstance(binding, dict) and binding.get("status") == "VERIFIED" and binding.get("page"):
-        return f"已可靠定位到原文：{render_locator_chip(binding)}"
+    locator = authoritative_locator_projection(binding)
+    if locator is not None:
+        return f"已可靠定位到原文：{render_locator_chip(locator)}"
     return f"已可靠定位到原文：{NARRATIVE_LOCATOR_MARKER}"
 
 
@@ -104,7 +106,7 @@ def _repair_draft_text_blocks(candidate: str) -> str | None:
 def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None = None) -> tuple[str, dict[str, str]]:
     """Render a structured draft; preserve legacy Markdown on schema failure.
 
-    ``locator_bindings``：binding_id → locator_resolution（含 binding 投影）。
+    ``locator_bindings``：binding_id → VerifiedLocatorBinding JSON。
     缺失绑定的 locator block 渲染为失败关闭文案——模型文本不存在任何能
     偷偷变成真实页码的路径。
 

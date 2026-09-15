@@ -642,9 +642,12 @@ def test_h2_policy_consumes_binding_triple():
         status="VERIFIED",
         observation_available=False,
         vision_status="NOT_CONFIGURED",
-        figure_identity_verified=True,  # 顶层字段声称已验证——必须被 Binding 覆盖
         locator_kind="FIGURE_IMAGE",
         binding={
+            "binding_id": "vlb-h2-unresolved",
+            "status": "VERIFIED",
+            "page_number": 10,
+            "physical_evidence_id": "ev-h2-unresolved",
             "page_binding": "VERIFIED",
             "figure_identity_binding": "UNRESOLVED",
             "explanation_grounding": "UNRESOLVED",
@@ -662,6 +665,10 @@ def test_h2_policy_consumes_binding_triple():
         vision_status="READY",
         locator_kind="FIGURE_CAPTION",
         binding={
+            "binding_id": "vlb-h2-grounded",
+            "status": "VERIFIED",
+            "page_number": 10,
+            "physical_evidence_id": "ev-h2-grounded",
             "page_binding": "VERIFIED",
             "figure_identity_binding": "VERIFIED",
             "explanation_grounding": "VERIFIED",
@@ -677,6 +684,10 @@ def test_h2_policy_consumes_binding_triple():
         vision_status="READY",
         locator_kind="FIGURE_CAPTION",
         binding={
+            "binding_id": "vlb-h2-partial",
+            "status": "VERIFIED",
+            "page_number": 10,
+            "physical_evidence_id": "ev-h2-partial",
             "page_binding": "VERIFIED",
             "figure_identity_binding": "VERIFIED",
             "explanation_grounding": "PARTIAL",
@@ -706,5 +717,409 @@ def test_h2b_mechanism_claims_removed_when_grounding_unverified():
     # 幂等 + 未授权时原样返回
     again, again_removed = enforce_explanation_grounding(enforced, policy=policy)
     assert again == enforced and again_removed == 0
-    untouched, _ = enforce_explanation_grounding(text, policy={"mechanism_attribution_allowed": True})
+    untouched, _ = enforce_explanation_grounding(text, policy=None)
     assert untouched == text
+
+
+# ---- I2：身份收权升级（评审实测绕过形态逐条封堵） ----
+
+
+def _unlocated_policy() -> dict:
+    return {
+        "mode": "VISUAL_ONLY_UNLOCATED",
+        "document_identity_allowed": False,
+        "figure_label_allowed": False,
+        "page_claim_allowed": False,
+        "document_citations_allowed": False,
+        "visual_explanation_allowed": True,
+        "required_disclosure": "可以解释图片可见内容，但无法可靠确定来源文献和页码。",
+    }
+
+
+def test_i2_english_source_line_bypass_closed():
+    """评审原例：'Source: Liu et al. 2024, Plant Biotechnology Journal.' 不再穿透。"""
+    guarded, validation = apply_citation_channel(
+        "Visible green signal.\nSource: Liu et al. 2024, Plant Biotechnology Journal.",
+        [],
+        authority_policy=_unlocated_policy(),
+    )
+    assert "Liu" not in guarded and "Plant Biotechnology Journal" not in guarded
+    assert "Source" not in guarded
+    assert "green signal" in guarded
+    assert validation["answer_policy"]["document_identity_claims_removed"] == 1
+
+
+def test_i2_chinese_identity_variants_closed():
+    """评审原例：来源为/依据…的研究/《标题》三种中文变体全部封堵。"""
+    text = (
+        "图中可见绿色荧光信号。\n"
+        "来源为 Liu 等（2024），Plant Biotechnology Journal。\n"
+        "依据 Liu 2024 的研究。\n"
+        "对应《A novel transcription factor OsMYB73 affects grain size and chalkiness》。\n"
+        "荧光集中在细胞核区域。"
+    )
+    guarded, validation = apply_citation_channel(text, [], authority_policy=_unlocated_policy())
+    assert validation["answer_policy"]["document_identity_claims_removed"] == 3
+    assert "Liu" not in guarded and "Plant Biotechnology" not in guarded
+    assert "A novel transcription factor" not in guarded and "《" not in guarded
+    assert "绿色荧光" in guarded and "细胞核" in guarded
+
+
+def test_i2_normal_sentences_still_not_stripped():
+    text = "图中可见三个 panel 的柱状图。作者在 2024 年使用了 GUS 染色方法。数据来源为三个生物学重复。"
+    guarded, validation = apply_citation_channel(text, [], authority_policy=_unlocated_policy())
+    assert validation["answer_policy"]["document_identity_claims_removed"] == 0
+    assert "GUS" in guarded
+    assert "三个生物学重复" in guarded
+
+
+def test_i2_markdown_source_prefix_is_removed_without_losing_visual_sentence():
+    text = "图中可见绿色信号。\n- **Source:** Liu et al. 2024, Plant Biotechnology Journal."
+
+    guarded, validation = apply_citation_channel(text, [], authority_policy=_unlocated_policy())
+
+    assert "绿色信号" in guarded
+    assert "Source" not in guarded and "Liu" not in guarded
+    assert validation["answer_policy"]["document_identity_claims_removed"] == 1
+
+
+# ---- I1：Binding 否决不再走顶层 VERIFIED 回退 ----
+
+
+def test_i1_binding_veto_overrides_top_level_verified():
+    """评审构造：顶层 VERIFIED + Binding.page_binding=UNRESOLVED → 全部拒绝。"""
+    from yuxi.knowledge.orchestration.retrieval_orchestrator import _build_answer_policy
+
+    policy = _build_answer_policy(
+        status="VERIFIED",
+        observation_available=False,
+        vision_status="READY",
+        locator_kind="FIGURE_IMAGE",
+        binding={
+            "binding_id": "vlb-i1-veto",
+            "status": "VERIFIED",
+            "page_number": None,
+            "page_binding": "UNRESOLVED",
+            "figure_identity_binding": "UNRESOLVED",
+            "explanation_grounding": "UNRESOLVED",
+        },
+    )
+    assert policy["page_claim_allowed"] is False
+    assert policy["figure_label_allowed"] is False
+    assert policy["document_identity_allowed"] is False
+    assert policy["document_citations_allowed"] is False
+
+
+def test_i1_verified_without_binding_fails_closed():
+    """Binding 缺失 + 顶层 VERIFIED → 失败关闭（不再回退授权）。"""
+    from yuxi.knowledge.orchestration.retrieval_orchestrator import _build_answer_policy
+
+    policy = _build_answer_policy(
+        status="VERIFIED",
+        observation_available=False,
+        vision_status="READY",
+        locator_kind="QUOTE_LOCATOR",
+        binding=None,
+    )
+    assert policy["mode"] == "LOCATOR_DEGRADED_NO_BINDING"
+    assert policy["page_claim_allowed"] is False
+    assert policy["document_citations_allowed"] is False
+    assert policy["required_disclosure"]
+
+
+def test_i1_nonverified_binding_status_overrides_stale_top_level_status():
+    from yuxi.knowledge.orchestration.retrieval_orchestrator import _build_answer_policy
+
+    policy = _build_answer_policy(
+        status="NOT_FOUND",  # stale audit projection
+        observation_available=False,
+        vision_status="READY",
+        locator_kind="FIGURE_IMAGE",
+        binding={
+            "binding_id": "vlb-i1-multiple",
+            "status": "MULTIPLE_MATCHES",
+            "page_binding": "UNRESOLVED",
+        },
+    )
+
+    assert policy["mode"] == "LOCATOR_AMBIGUOUS"
+    assert policy["page_claim_allowed"] is False
+
+
+# ---- I3：定位状态一致性（Answer–State Mismatch = 0） ----
+
+
+def test_i3_verified_mode_strips_unlocated_contradiction():
+    """生产事故复现：芯片第 8 页 + 正文'该图注本身未被定位到具体页码'→ 矛盾句删除。"""
+    policy = {
+        "mode": "LOCATOR_VERIFIED",
+        "document_identity_allowed": True,
+        "figure_label_allowed": True,
+        "page_claim_allowed": True,
+        "document_citations_allowed": True,
+        "visual_explanation_allowed": True,
+        "required_disclosure": None,
+    }
+    text = (
+        "已可靠定位到原文：〔引文定位｜正文·第8页｜liu-2024-pbj.pdf〕\n\n"
+        "该 Figure 4 图注本身在当前证据策略下未被定位到具体页码。\n\n"
+        "图注描述了 T1 代株系的表型分析。"
+    )
+    guarded, validation = apply_citation_channel(
+        text,
+        [],
+        locator={
+            "status": "VERIFIED",
+            "page": 99,
+            "zone": "MAIN_TEXT",
+            "filename": "wrong-top-level.pdf",
+            "binding": {
+                "binding_id": "vlb-i3-page8",
+                "status": "VERIFIED",
+                "page_binding": "VERIFIED",
+                "page_number": 8,
+                "physical_evidence_id": "ev-i3-page8",
+                "partition": "MAIN_TEXT",
+                "filename": "liu-2024-pbj.pdf",
+            },
+        },
+        authority_policy=policy,
+    )
+    # 后端权威定位行保留；矛盾句删除；正常解释保留
+    assert "已可靠定位到原文" in guarded
+    assert "第8页" in guarded and "第99页" not in guarded
+    assert "未被定位到" not in guarded and "无法定位" not in guarded
+    assert "表型分析" in guarded
+    assert validation["answer_policy"]["locator_contradiction_claims_removed"] == 1
+
+
+def test_i3_unlocated_mode_strips_success_claims():
+    policy = _unlocated_policy()
+    text = "已成功定位到论文第 8 页。图中可见绿色荧光。"
+    guarded, validation = apply_citation_channel(text, [], authority_policy=policy)
+    assert "成功定位" not in guarded
+    assert "绿色荧光" in guarded
+
+
+def test_i3_verified_mode_strips_english_unknown_page_claim():
+    policy = {
+        "page_claim_allowed": True,
+        "document_citations_allowed": True,
+        "document_identity_allowed": True,
+    }
+    locator = {
+        "status": "VERIFIED",
+        "binding": {
+            "binding_id": "vlb-i3-english",
+            "status": "VERIFIED",
+            "page_binding": "VERIFIED",
+            "page_number": 4,
+            "physical_evidence_id": "ev-i3-english",
+            "partition": "MAIN_TEXT",
+            "filename": "paper.pdf",
+        },
+    }
+
+    guarded, validation = apply_citation_channel(
+        "The page is unknown. The image contains three panels.",
+        [],
+        locator=locator,
+        authority_policy=policy,
+    )
+
+    assert "page is unknown" not in guarded
+    assert "three panels" in guarded
+    assert validation["answer_policy"]["locator_contradiction_claims_removed"] == 1
+
+
+# ---- I4：机制句逐 Claim 证据授权 ----
+
+
+def _main_text_citation(quote: str) -> dict:
+    return {
+        "ref": "E1",
+        "evidence_id": "ev-E1",
+        "kb_id": "kb-a",
+        "file_id": "file-a",
+        "filename": "paper.pdf",
+        "zone": "MAIN_TEXT",
+        "page_numbers": [6],
+        "primary_page": 6,
+        "quote_head": quote[:80],
+        "anchor_ids": ["ea-E1"],
+        "locatable": True,
+        "toc_line": False,
+        "secondary_of": None,
+        "_anchor_id": "ea-E1",
+        "_physical_evidence_id": "ev-E1",
+        "_retrieval_channel": "DOCUMENT",
+        "_span_id": "es-E1",
+        "_span_evidence_id": "evs-E1",
+        "_parse_revision_id": "pr-active",
+        "_index_revision_id": "ir-active",
+        "_source_sha256": "a" * 64,
+        "_quote": quote,
+        "_quote_norm": _norm(quote),
+    }
+
+
+def test_i1_output_guard_vetoes_a_forged_allow_policy():
+    """输出守卫独立核验 Binding，不信任上游误传的全 True 权限位。"""
+    forged_policy = {
+        "mode": "LOCATOR_VERIFIED",
+        "document_identity_allowed": True,
+        "figure_label_allowed": True,
+        "page_claim_allowed": True,
+        "document_citations_allowed": True,
+        "visual_explanation_allowed": True,
+    }
+    locator = {
+        "status": "VERIFIED",
+        "page": 8,
+        "binding": {
+            "binding_id": "vlb-forged-allow",
+            "status": "VERIFIED",
+            "page_binding": "UNRESOLVED",
+            "page_number": None,
+        },
+    }
+    text = "图中可见绿色信号 [E1]。该图出自 Liu 2024 年的一篇论文。"
+
+    guarded, validation = apply_citation_channel(
+        text,
+        [_main_text_citation("The image contains a green signal.")],
+        locator=locator,
+        authority_policy=forged_policy,
+    )
+
+    assert "绿色信号" in guarded
+    assert "证据E1" not in guarded and "第8页" not in guarded
+    assert "Liu" not in guarded and "论文" not in guarded
+    assert validation["answer_policy"]["citations_revoked"] is True
+
+
+def test_i4_unsupported_mechanism_sentence_removed_even_with_pool():
+    """评审原例：'Results support OsMYB73 as a negative regulator of Wx.' 无据 → 删除。"""
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    policy = {"mechanism_attribution_allowed": False}
+    # 引用池存在但正文证据不含 OsMYB73/Wx（无法验证该 Claim）
+    citations = [_main_text_citation("Grain length measurements across T1 generation lines.")]
+    text = "Results support OsMYB73 as a negative regulator of Wx. 图中可见三个 panel。"
+    enforced, removed = enforce_explanation_grounding(text, policy=policy, citations=citations)
+    assert removed == 1
+    assert "regulator" not in enforced and "Wx" not in enforced
+    assert "panel" in enforced
+
+
+def test_i4_supported_mechanism_sentence_kept():
+    """有 VERIFIED 证据绑定的机制句保留（逐 Claim 授权，不是全局死刑）。"""
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    policy = {"mechanism_attribution_allowed": False}
+    body_quote = "These results indicate that OsMYB73 acts as a negative regulator of Wx in rice endosperm."
+    citations = [_main_text_citation(body_quote)]
+    text = "Results support OsMYB73 as a negative regulator of Wx."
+    enforced, removed = enforce_explanation_grounding(text, policy=policy, citations=citations)
+    assert removed == 0
+    assert "OsMYB73" in enforced
+
+
+def test_i4_chinese_mechanism_variants_removed():
+    """评审原例：结果支持/与模型一致/负向作用三种中文变体全部删除。"""
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    policy = {"mechanism_attribution_allowed": False}
+    text = (
+        "结果支持 OsMYB73 是 Wx 的上游负调控因子。\n"
+        "这些数据与 OsMYB73 抑制 Wx 的模型一致。\n"
+        "OsMYB73 对 Wx 具有负向作用。\n"
+        "图中可见染色信号。"
+    )
+    enforced, removed = enforce_explanation_grounding(text, policy=policy, citations=[])
+    assert removed == 3
+    assert "Wx" not in enforced and "负调控" not in enforced
+    assert "染色信号" in enforced
+
+
+def test_i4_caption_fact_denied_strips_caption_claims():
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    policy = {"caption_fact_allowed": False, "mechanism_attribution_allowed": True}
+    text = "题注中记载了 GUS 染色实验。图中可见三个 panel。"
+    enforced, removed = enforce_explanation_grounding(text, policy=policy, citations=[])
+    assert removed == 1
+    assert "题注" not in enforced
+    assert "panel" in enforced
+
+
+def test_i4_global_allow_does_not_authorize_an_unbound_mechanism_claim():
+    """全局能力位不是 Claim 通行证；每个机制句仍须绑定自己的正文证据。"""
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    citations = [_main_text_citation("Grain length measurements across T1 generation lines.")]
+    text = "OsMYB73 regulates Wx expression in rice endosperm."
+
+    enforced, removed = enforce_explanation_grounding(
+        text,
+        policy={"mechanism_attribution_allowed": True},
+        citations=citations,
+    )
+
+    assert removed == 1
+    assert "regulates" not in enforced
+
+
+def test_i4_visual_prefix_cannot_bypass_mechanism_grounding():
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    text = "图中可见的结果支持 OsMYB73 调控 Wx。图中可见三个 panel。"
+    enforced, removed = enforce_explanation_grounding(
+        text,
+        policy={"mechanism_attribution_allowed": True},
+        citations=[],
+    )
+
+    assert removed == 1
+    assert "调控 Wx" not in enforced
+    assert "三个 panel" in enforced
+
+
+def test_i4_caption_evidence_cannot_authorize_a_mechanism_claim():
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    caption = _main_text_citation("Figure 1 shows that OsMYB73 regulates Wx expression.")
+    caption.update(
+        {
+            "zone": "SUPPORTING_INFO",
+            "_anchor_id": "ea-caption",
+            "anchor_ids": ["ea-caption"],
+        }
+    )
+    text = "Figure 1 shows that OsMYB73 regulates Wx expression."
+
+    enforced, removed = enforce_explanation_grounding(
+        text,
+        policy={"mechanism_attribution_allowed": True, "caption_fact_allowed": True},
+        citations=[caption],
+    )
+
+    assert removed == 1
+    assert "regulates" not in enforced
+
+
+def test_i4_caption_fact_with_matching_caption_evidence_is_kept():
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    caption = _main_text_citation("Figure 1 shows GUS staining across rice tissues.")
+    caption.update({"zone": "SUPPORTING_INFO", "_anchor_id": "ea-caption", "anchor_ids": ["ea-caption"]})
+    text = "Figure 1 shows GUS staining across rice tissues."
+
+    enforced, removed = enforce_explanation_grounding(
+        text,
+        policy={"caption_fact_allowed": True},
+        citations=[caption],
+    )
+
+    assert removed == 0
+    assert enforced == text

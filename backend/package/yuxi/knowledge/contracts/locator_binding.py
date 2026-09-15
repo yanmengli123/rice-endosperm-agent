@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 LOCATOR_AUTHORITY_VERSION = "locator_authority_v1"
 
@@ -37,6 +37,7 @@ LOCATOR_KIND_FIGURE_IMAGE = "FIGURE_IMAGE"
 # 出口门禁违例码
 VIOLATION_NO_PHYSICAL_EVIDENCE = "VERIFIED_WITHOUT_PHYSICAL_EVIDENCE"
 VIOLATION_EVIDENCE_NOT_FROZEN = "VERIFIED_EVIDENCE_NOT_FROZEN"
+VIOLATION_NO_PAGE_BINDING = "VERIFIED_WITHOUT_PAGE_BINDING"
 
 
 class VerifiedLocatorBinding(BaseModel):
@@ -194,6 +195,8 @@ def verify_freeze_invariant(binding: VerifiedLocatorBinding, contract: dict[str,
     """出口不变量：VERIFIED ⇒ 物理证据已冻结进证据契约。返回违例码列表。"""
     if not binding.verified:
         return []
+    if binding.page_binding != "VERIFIED" or binding.page_number is None:
+        return [VIOLATION_NO_PAGE_BINDING]
     if not binding.physical_evidence_id:
         return [VIOLATION_NO_PHYSICAL_EVIDENCE]
     frozen_ids = {
@@ -204,6 +207,47 @@ def verify_freeze_invariant(binding: VerifiedLocatorBinding, contract: dict[str,
     if str(binding.physical_evidence_id) not in frozen_ids:
         return [VIOLATION_EVIDENCE_NOT_FROZEN]
     return []
+
+
+def authoritative_locator_projection(binding_payload: Any) -> dict[str, Any] | None:
+    """Project a validated Binding into the only DTO allowed to render a locator.
+
+    The legacy ``locator_resolution`` contains duplicated top-level page/source fields.
+    Those fields remain useful for audit and diagnostics, but they are not publication
+    authority.  Renderers call this helper so an inconsistent top-level value can never
+    override the frozen Binding.
+    """
+    if not isinstance(binding_payload, dict):
+        return None
+    try:
+        binding = VerifiedLocatorBinding.model_validate(binding_payload)
+    except ValidationError:
+        return None
+    if (
+        not binding.verified
+        or binding.page_binding != "VERIFIED"
+        or binding.page_number is None
+        or not binding.physical_evidence_id
+    ):
+        return None
+    return {
+        "status": BINDING_VERIFIED,
+        "page": binding.page_number,
+        "zone": binding.partition,
+        "filename": binding.filename,
+        "file_id": binding.file_id,
+        "kb_id": binding.kb_id,
+        "anchor_id": binding.anchor_id,
+        "evidence_id": binding.physical_evidence_id,
+        "span_id": binding.span_id,
+        "span_evidence_id": binding.span_evidence_id,
+        "parse_revision_id": binding.parse_revision_id,
+        "index_revision_id": binding.index_revision_id,
+        "source_sha256": binding.source_sha256,
+        "quote_head": binding.quote_head,
+        "backlinks": binding.backlinks,
+        "binding": binding.model_dump(mode="json"),
+    }
 
 
 def enforce_locator_authority(
@@ -232,10 +276,15 @@ def enforce_locator_authority(
         resolution["binding"] = binding.model_dump(mode="json")
         contract["locator_resolution"] = resolution
         return binding
+    reason_by_violation = {
+        VIOLATION_NO_PAGE_BINDING: "answer_validation_failed_locator_page_binding",
+        VIOLATION_NO_PHYSICAL_EVIDENCE: "answer_validation_failed_locator_physical_evidence",
+        VIOLATION_EVIDENCE_NOT_FROZEN: "answer_validation_failed_locator_evidence_not_frozen",
+    }
     contract["locator_resolution"] = {
         "status": BINDING_NOT_FOUND,
         "locator_version": LOCATOR_AUTHORITY_VERSION,
-        "reason": "answer_validation_failed_locator_evidence_not_frozen",
+        "reason": reason_by_violation.get(violations[0], "answer_validation_failed_locator_binding_invariant"),
         "binding": binding.model_dump(mode="json"),
         "_authority_gate_audit": {"violations": violations, "original_status": binding.status},
     }
@@ -259,6 +308,7 @@ __all__ = [
     "LOCATOR_KIND_PAGE",
     "LOCATOR_KIND_QUOTE",
     "VerifiedLocatorBinding",
+    "authoritative_locator_projection",
     "binding_from_locator_resolution",
     "enforce_locator_authority",
     "make_binding_id",

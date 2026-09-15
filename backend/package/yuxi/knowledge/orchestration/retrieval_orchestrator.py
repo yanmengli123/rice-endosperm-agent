@@ -322,7 +322,6 @@ def _build_answer_policy(
     status: str,
     observation_available: bool,
     vision_status: str,
-    figure_identity_verified: bool = True,
     locator_kind: str = "",
     binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -335,40 +334,70 @@ def _build_answer_policy(
     （QUOTE/FIGURE/PAGE/IMAGE）未验证时普通语义召回不得包装成来源定位证据。
     """
     conservative_only = vision_status in {"NOT_CONFIGURED", "PROVIDER_FAILED", "SCHEMA_INVALID", "IMAGE_UNREADABLE"}
-    # H2 唯一授权源：冻结 Binding 三元组优先——顶层 status/container_label 仅在
-    # binding 缺失（非 VERIFIED 或历史数据）时兜底，禁止并行读取两套事实。
-    if isinstance(binding, dict) and binding.get("page_binding") == "VERIFIED":
-        grounding = str(binding.get("explanation_grounding") or "UNRESOLVED")
+    decision_status = status
+    # I1 严格唯一授权源：Binding 存在 → 所有权限只读 Binding，UNRESOLVED 一律
+    # 拒绝（顶层 status=VERIFIED + Binding.page_binding=UNRESOLVED 的矛盾构造
+    # 以 Binding 为准，不再回退顶层）；Binding 缺失 + 顶层 VERIFIED → 失败关闭
+    # （出口门禁保证新 Run 的 VERIFIED 必有 Binding，缺失即链路异常，宁可拒答）。
+    # 顶层 status/container_label 此后只用于审计投影，不参与授权。
+    if isinstance(binding, dict):
+        from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
+
+        authoritative_locator = authoritative_locator_projection(binding)
+        if authoritative_locator is not None:
+            authoritative_binding = authoritative_locator["binding"]
+            grounding = str(authoritative_binding.get("explanation_grounding") or "UNRESOLVED")
+            return {
+                "mode": "LOCATOR_VERIFIED",
+                "locator_kind": locator_kind,
+                "document_identity_allowed": True,
+                "figure_label_allowed": authoritative_binding.get("figure_identity_binding") == "VERIFIED",
+                "page_claim_allowed": True,
+                "document_citations_allowed": True,
+                "visual_explanation_allowed": True,
+                # 解释依据分级：机制归因需要正文回链（VERIFIED）；题注字面
+                # 解释在 PARTIAL 即可；UNRESOLVED 只能描述可见内容
+                "explanation_grounding": grounding,
+                "mechanism_attribution_allowed": grounding == "VERIFIED",
+                "caption_fact_allowed": grounding in {"VERIFIED", "PARTIAL"},
+                "required_disclosure": None,
+            }
+        # Binding 明确否决或结构不完整：即使顶层 status=VERIFIED 也不授予
+        # 任何定位权限。顶层字段不能把一个无效 Binding 重新升级为 VERIFIED。
+        if status == "VERIFIED" or binding.get("status") == "VERIFIED":
+            return {
+                "mode": "LOCATOR_BINDING_UNRESOLVED",
+                "locator_kind": locator_kind,
+                "document_identity_allowed": False,
+                "figure_label_allowed": False,
+                "page_claim_allowed": False,
+                "document_citations_allowed": False,
+                "visual_explanation_allowed": observation_available,
+                "explanation_grounding": "UNRESOLVED",
+                "mechanism_attribution_allowed": False,
+                "caption_fact_allowed": False,
+                "required_disclosure": "定位结论未形成可审计的页码绑定，系统不展示任何文献、编号或页码信息。",
+            }
+        binding_status = str(binding.get("status") or "NOT_FOUND")
+        decision_status = (
+            binding_status if binding_status in {"MULTIPLE_MATCHES", "NOT_FOUND", "NOT_APPLICABLE"} else "NOT_FOUND"
+        )
+    elif status == "VERIFIED":
+        # Binding 缺失 + 顶层 VERIFIED：失败关闭（不允许顶层回退授权）
         return {
-            "mode": "LOCATOR_VERIFIED",
+            "mode": "LOCATOR_DEGRADED_NO_BINDING",
             "locator_kind": locator_kind,
-            "document_identity_allowed": True,
-            "figure_label_allowed": binding.get("figure_identity_binding") == "VERIFIED",
-            "page_claim_allowed": True,
-            "document_citations_allowed": True,
-            "visual_explanation_allowed": True,
-            # 解释依据分级（H2）：机制归因需要正文回链（VERIFIED）；题注字面
-            # 解释在 PARTIAL 即可；UNRESOLVED 只能描述可见内容
-            "explanation_grounding": grounding,
-            "mechanism_attribution_allowed": grounding == "VERIFIED",
-            "caption_fact_allowed": grounding in {"VERIFIED", "PARTIAL"},
-            "required_disclosure": None,
-        }
-    if status == "VERIFIED":  # binding 缺失的防御回退：与 gate 不变量一致才可能到达
-        return {
-            "mode": "LOCATOR_VERIFIED",
-            "locator_kind": locator_kind,
-            "document_identity_allowed": True,
-            "figure_label_allowed": figure_identity_verified,
-            "page_claim_allowed": True,
-            "document_citations_allowed": True,
-            "visual_explanation_allowed": True,
+            "document_identity_allowed": False,
+            "figure_label_allowed": False,
+            "page_claim_allowed": False,
+            "document_citations_allowed": False,
+            "visual_explanation_allowed": False,
             "explanation_grounding": "UNRESOLVED",
             "mechanism_attribution_allowed": False,
             "caption_fact_allowed": False,
-            "required_disclosure": None,
+            "required_disclosure": "定位结论缺少可审计的权威绑定，系统不展示任何文献、编号或页码信息。",
         }
-    if status == "MULTIPLE_MATCHES":
+    if decision_status == "MULTIPLE_MATCHES":
         return {
             "mode": "LOCATOR_AMBIGUOUS",
             "locator_kind": locator_kind,
@@ -379,6 +408,9 @@ def _build_answer_policy(
             # 图片内容解释只在存在可信视觉观察时允许；无观察的文本歧义
             # 无法核验模型解释 → 守卫整体替换保守文案（G3）
             "visual_explanation_allowed": observation_available,
+            "explanation_grounding": "UNRESOLVED",
+            "mechanism_attribution_allowed": False,
+            "caption_fact_allowed": False,
             "required_disclosure": (
                 "该内容在当前知识范围内存在多个可能的匹配，无法唯一确定来源文献与页码；"
                 "可补充原文语句、题注文字或限定知识库后重试。"
@@ -393,6 +425,9 @@ def _build_answer_policy(
             "page_claim_allowed": False,
             "document_citations_allowed": False,
             "visual_explanation_allowed": True,
+            "explanation_grounding": "UNRESOLVED",
+            "mechanism_attribution_allowed": False,
+            "caption_fact_allowed": False,
             "required_disclosure": "可以解释图片可见内容，但无法可靠确定来源文献和页码。",
         }
     return {
@@ -405,6 +440,9 @@ def _build_answer_policy(
         # 未定位且无可信视觉观察：解释不可核验 → 守卫整体替换保守文案（G3）；
         # vision_status 仅决定披露文案口径
         "visual_explanation_allowed": False,
+        "explanation_grounding": "UNRESOLVED",
+        "mechanism_attribution_allowed": False,
+        "caption_fact_allowed": False,
         "required_disclosure": (
             "当前无法进行可靠定位（视觉定位通道不可用且指纹未命中），因此不能确定其来源文献与页码。"
             if conservative_only
@@ -1152,22 +1190,22 @@ async def prepare_knowledge_context(
         _observation_available = isinstance(contract.get("figure_image_observation"), dict) and "figure_label" in (
             contract.get("figure_image_observation") or {}
         )
-        _identity_verified = bool(_final_resolution.get("container_label")) or bool(
-            _final_resolution.get("figure_identity_binding") == "VERIFIED"
-        )
         # H2 唯一授权源：策略消费出口门禁冻结的 Binding 对象（三元组），
         # 不再并行读取顶层字段推导权限
         contract["answer_policy"] = _build_answer_policy(
             status=_final_status,
             observation_available=_observation_available,
             vision_status=str(_final_resolution.get("vision_status") or "UNKNOWN"),
-            figure_identity_verified=_identity_verified,
             locator_kind=str(locator_intent.get("kind") or ""),
             binding=_final_resolution.get("binding") if isinstance(_final_resolution, dict) else None,
         )
         if isinstance(_final_resolution, dict) and "answer_policy" not in _final_resolution:
             _final_resolution["answer_policy"] = contract["answer_policy"]
-        if _final_status != "VERIFIED":
+        _locator_authorized = bool(
+            contract["answer_policy"].get("page_claim_allowed") is True
+            and contract["answer_policy"].get("document_citations_allowed") is True
+        )
+        if not _locator_authorized:
             # 关闭普通引用池：定位未验证时，普通语义检索命中不得升级为来源
             # 定位证据——文献引用池必须为空（检索候选仍可在状态面板展示）。
             contract["citations"] = []
@@ -1179,7 +1217,7 @@ async def prepare_knowledge_context(
             # 回答证据计数持久化为显式 0（不得为 NULL）
             contract["completeness"] = {
                 **(contract.get("completeness") or {}),
-                "status": f"LOCATOR_{_final_status}",
+                "status": str(contract["answer_policy"].get("mode") or f"LOCATOR_{_final_status}"),
                 "returned_evidence_count": 0,
             }
         else:

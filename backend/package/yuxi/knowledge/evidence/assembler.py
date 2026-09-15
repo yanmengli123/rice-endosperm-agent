@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
 from yuxi.knowledge.evidence.highlight_refiner import HIGHLIGHT_REFINER_VERSION, refine_highlight_quote
 from yuxi.knowledge.evidence.protocol import SCIENTIFIC_EVIDENCE_SCHEMA_VERSION, build_evidence_dto
 from yuxi.knowledge.evidence.validator import verify_evidence
@@ -38,6 +39,22 @@ MAX_RETRIEVED_CHUNKS = 200
 MAX_ANCHORS_PER_RUN = 400
 MAX_EVIDENCE_PER_RUN = 100
 MAX_ISSUES_PER_RUN = 100
+
+
+def _binding_authoritative_status(resolution: dict[str, Any]) -> str:
+    """Return the status that the evidence panel is allowed to publish."""
+    binding = resolution.get("binding")
+    if isinstance(binding, dict):
+        if authoritative_locator_projection(binding) is not None:
+            return "VERIFIED"
+        binding_status = str(binding.get("status") or "NOT_FOUND")
+        if binding_status in {"MULTIPLE_MATCHES", "NOT_FOUND", "NOT_APPLICABLE"}:
+            return binding_status
+        return "NOT_FOUND"
+    top_level_status = str(resolution.get("status") or "NOT_FOUND")
+    # Historical non-verified rows remain displayable.  A historical VERIFIED row
+    # without Binding is not publishable after I1 and therefore fails closed.
+    return "NOT_FOUND" if top_level_status == "VERIFIED" else top_level_status
 
 
 async def _assemble_locator_projection(
@@ -67,13 +84,14 @@ async def _assemble_locator_projection(
     degraded_lineage_count = 0
 
     for record in records:
-        locator = dict(getattr(record, "locator_resolution_json", None) or {})
-        if locator.get("status") != "VERIFIED":
+        resolution = dict(getattr(record, "locator_resolution_json", None) or {})
+        locator = authoritative_locator_projection(resolution.get("binding"))
+        if locator is None:
             _append_issue(
                 issues,
                 "LOCATOR_NOT_VERIFIED",
                 retrieval_id=str(record.retrieval_id),
-                locator_status=str(locator.get("status") or "NOT_FOUND"),
+                locator_status=_binding_authoritative_status(resolution),
             )
             continue
 
@@ -230,7 +248,7 @@ async def _assemble_locator_projection(
     }
     for record in records:
         resolution = dict(getattr(record, "locator_resolution_json", None) or {})
-        status = str(resolution.get("status") or "")
+        status = _binding_authoritative_status(resolution)
         if status:
             locator_status = locator_status or status
             if locator_status_reason is None and resolution.get("reason"):
@@ -247,8 +265,11 @@ async def _assemble_locator_projection(
                 failure_stage = str(entry.get("stage") or "")
         if status == "VERIFIED":
             locator_candidate_count += 1
-        elif isinstance(resolution.get("match_count"), int):
-            locator_candidate_count += int(resolution["match_count"])
+        else:
+            binding_verification = (resolution.get("binding") or {}).get("verification") or {}
+            match_count = binding_verification.get("match_count", resolution.get("match_count"))
+            if isinstance(match_count, int):
+                locator_candidate_count += int(match_count)
     retrieval_candidates = retrieval_projection.get("evidence") or []
     summary = _summary(evidence_items, rejected)
     summary.update(

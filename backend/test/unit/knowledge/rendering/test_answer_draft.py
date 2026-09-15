@@ -66,11 +66,13 @@ def test_plain_json_code_block_without_signature_not_touched():
 
 def _verified_binding() -> dict:
     return {
+        "binding_id": "vlb_1",
         "status": "VERIFIED",
-        "page": 4,
-        "zone": "MAIN_TEXT",
+        "page_binding": "VERIFIED",
+        "page_number": 4,
+        "physical_evidence_id": "ev-answer-draft",
+        "partition": "MAIN_TEXT",
         "filename": "osmyb73-paper.pdf",
-        "binding": {"binding_id": "vlb_1", "page_number": 4, "status": "VERIFIED"},
     }
 
 
@@ -104,8 +106,7 @@ def test_v2_locator_block_without_binding_renders_fail_closed():
 
 
 def test_v2_locator_block_with_unverified_binding_renders_fail_closed():
-    binding = {**_verified_binding(), "status": "NOT_FOUND"}
-    binding.pop("page")
+    binding = {**_verified_binding(), "status": "NOT_FOUND", "page_binding": "UNRESOLVED", "page_number": None}
     rendered, _ = render_answer_draft(
         '{"schema_version":"answer-draft.v2","blocks":[{"type":"locator","text":"定位","binding_id":"vlb_1"}]}',
         locator_bindings={"vlb_1": binding},

@@ -97,6 +97,20 @@ def test_append_locator_citations_includes_backlinks():
             }
         ],
     }
+    locator["binding"] = {
+        "binding_id": "vlb-compound-caption",
+        "status": "VERIFIED",
+        "page_binding": "VERIFIED",
+        "page_number": 17,
+        "partition": "SUPPORTING_INFO",
+        "anchor_id": "ea-cap",
+        "quote_head": locator["quote_head"],
+        "filename": "paper.pdf",
+        "file_id": "file-1",
+        "kb_id": "kb-1",
+        "physical_evidence_id": "ev-cap",
+        "backlinks": locator["backlinks"],
+    }
     base = [_citation("E1", 3, SANT_QUOTE)]
     merged = append_locator_citations(base, locator)
     assert [row["ref"] for row in merged] == ["E1", "E2", "E3"]

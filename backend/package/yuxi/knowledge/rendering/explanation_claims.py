@@ -50,13 +50,19 @@ def _caption_pool(citations: list[dict[str, Any]], locator: dict[str, Any] | Non
     """CAPTION_FACT 的合法载体：locator 锚点行 + 题注句首编号的引用行。"""
     pool: list[dict[str, Any]] = []
     locator_anchor = str((locator or {}).get("anchor_id") or "")
+    locator_head = str((locator or {}).get("quote") or (locator or {}).get("quote_head") or "")
+    locator_is_caption = bool(
+        (locator or {}).get("evidence_type") == "caption"
+        or (locator or {}).get("locator_kind") == "FIGURE_CAPTION"
+        or _CAPTION_LABEL_HEAD.match(locator_head)
+    )
     for citation in citations or []:
         if not citation.get("locatable"):
             continue
         quote = str(citation.get("_quote") or citation.get("quote_head") or "")
-        if (locator_anchor and str(citation.get("_anchor_id") or "") == locator_anchor) or _CAPTION_LABEL_HEAD.match(
-            quote
-        ):
+        if (
+            locator_is_caption and locator_anchor and str(citation.get("_anchor_id") or "") == locator_anchor
+        ) or _CAPTION_LABEL_HEAD.match(quote):
             pool.append(citation)
     return pool
 
@@ -157,11 +163,28 @@ __all__ = [
 
 # 机制归因句标记（H2b enforce）：只有 explanation_grounding=VERIFIED（正文回链）
 # 才允许「某基因调控某通路/据此认为」类机制结论；UNRESOLVED/PARTIAL 时整句删除
+# 机制归因句标记（I4）：识别「归因科研机制」的句法形态。注意这**不是**安全
+# 边界——安全边界是逐 Claim 的 resolve_binding 证据验证；本模式只负责圈出
+# 「需要验证的候选句」（宽召回），有 VERIFIED 正文证据绑定的候选句会被保留。
 _MECHANISM_CLAIM_PATTERN = re.compile(
-    r"(?:这说明|这表明|这证明|据此认为|由此可知|由此可见|提示\s*\S+\s*(?:调控|调节|参与|介导|影响|决定)|"
-    r"\S+\s*(?:调控|调节|介导)\s*\S+\s*(?:通路|过程|表达|发育)|"
-    r"(?:demonstrates|indicates|suggests|implies)\s+that\s+\S+\s+(?:regulates|mediates|controls))",
+    r"(?:这说明|这表明|这证明|据此认为|由此可知|由此可见|结果支持|"
+    r"提示.{0,80}(?:调控|调节|参与|介导|影响|决定)|"
+    r".{0,80}(?:调控|调节|介导|抑制|促进|激活).{0,80}(?:通路|过程|表达|发育|活性|基因|因子)|"
+    r"(?:负|正)调控(?:因子|作用)|上游(?:负|正)?(?:调控|调节).{0,40}|"
+    r"与.{0,80}(?:模型|机制).{0,20}一致|对.{0,60}具有(?:负向|正向|抑制|促进)作用|"
+    r"(?:results?|data|findings?).{0,30}(?:support|suggest|indicate|demonstrate|are\s+consistent\s+with)|"
+    r".{0,60}\bas\s+an?\s+.{0,30}(?:negative|positive|upstream|downstream)?\s*regulator|"
+    r"(?:demonstrates|indicates|suggests|implies)\s+that.{0,100}"
+    r"(?:regulates|mediates|controls|inhibits|promotes)|"
+    r"\b(?:regulates?|regulation|mediates?|controls?|inhibits?|promotes?|activates?)\b|"
+    r"consistent\s+with\s+the\s+model\s+that)",
     flags=re.IGNORECASE,
+)
+# 题注事实句标记（I4 caption_fact_allowed 执行）：声称转述题注内容
+_CAPTION_FACT_CLAIM_PATTERN = re.compile(
+    r"(?:题注(?:中|里|说|描述|表明|记载)|(?:figure|table)\s+caption\s+(?:states|describes|indicates)|"
+    r"图注(?:中|说|描述|表明)|(?:figure|图|表)\s*S?\d{1,3}.{0,30}(?:shows|describes|展示|描述))",
+    re.IGNORECASE,
 )
 
 
@@ -169,18 +192,39 @@ def enforce_explanation_grounding(
     answer_text: str,
     *,
     policy: dict[str, Any] | None,
+    citations: list[dict[str, Any]] | None = None,
+    locator: dict[str, Any] | None = None,
 ) -> tuple[str, int]:
-    """机制归因权限执行（H2b）：grounding 非 VERIFIED 时删除无依据机制句。
+    """逐 Claim 证据授权执行（I4）：机制/题注句必须绑定 VERIFIED 证据才保留。
 
-    与审计用的 :func:`classify_explanation_claims` 互补——分类器记录「哪句无依据」，
-    本函数把无依据句从用户可见输出中**删除**（宁可少答，不可无据归因）。
-    纯函数、幂等；policy 为空或 mechanism_attribution_allowed 非 False 时原样返回。
+    升级自 H2b 的关键词删除——现在的判定顺序：
+
+    1. 句子不匹配机制/题注模式 → 保留（普通描述不强制绑定）；
+    2. 匹配机制或题注模式 → 无论全局能力位真假，均尝试逐 Claim 验证：
+       ``resolve_binding`` 对正文/题注引用池四层验证，VERIFIED 则保留；
+       验证不过即删除（全局能力位不是单条 Claim 的通行证）；
+    3. 引用池为空（无法逐 Claim 验证）→ 直接删除（无法验证即无据）。
+
+    与审计用的 :func:`classify_explanation_claims` 互补——分类器记录「哪句
+    无依据」，本函数把无依据句从用户可见输出中删除。纯函数、幂等。
     """
-    if not isinstance(policy, dict) or policy.get("mechanism_attribution_allowed") is not False:
+    if not isinstance(policy, dict):
+        return str(answer_text or ""), 0
+    mechanism_governed = "mechanism_attribution_allowed" in policy
+    caption_governed = "caption_fact_allowed" in policy
+    if not mechanism_governed and not caption_governed:
         return str(answer_text or ""), 0
     result = str(answer_text or "")
     if not result.strip():
         return result, 0
+    pool = [citation for citation in (citations or []) if citation.get("locatable")]
+    caption_pool = _caption_pool(pool, locator)
+    caption_refs = {str(citation.get("ref") or "") for citation in caption_pool}
+    mechanism_pool = [
+        citation
+        for citation in pool
+        if str(citation.get("zone") or "") == "MAIN_TEXT" and str(citation.get("ref") or "") not in caption_refs
+    ]
     removed = 0
     kept_lines: list[str] = []
     for line in result.split("\n"):
@@ -188,10 +232,39 @@ def enforce_explanation_grounding(
         if not sentences:
             kept_lines.append(line)
             continue
-        kept = [s for s in sentences if not _MECHANISM_CLAIM_PATTERN.search(s)]
-        removed += len(sentences) - len(kept)
-        kept_lines.append("".join(kept))
+        kept = []
+        for sentence in sentences:
+            is_caption = caption_governed and bool(_CAPTION_FACT_CLAIM_PATTERN.search(sentence))
+            is_mechanism = mechanism_governed and bool(_MECHANISM_CLAIM_PATTERN.search(sentence))
+            # 纯图面观察由 VisualObservationEnvelope 负责；若同句同时作出机制
+            # 归因或题注转述，则仍必须进入证据验证，不能用“图中可见”前缀绕过。
+            if _VISUAL_MARKER.match(sentence.strip()) and not (is_mechanism or is_caption):
+                kept.append(sentence)
+                continue
+            if not is_mechanism and not is_caption:
+                kept.append(sentence)
+                continue
+            # 同句同时包含题注事实与机制归因时按更严格的正文机制证据验证，
+            # 题注不能单独授权论文机制结论。
+            claim_pool = mechanism_pool if is_mechanism else caption_pool
+            if not claim_pool:
+                removed += 1  # 无法逐 Claim 验证 → 无据 → 删除
+                continue
+            chip_ref = _CHIP_REF_PATTERN.search(sentence)
+            proposed_ref = chip_ref.group(1) if chip_ref else None
+            binding = resolve_binding(
+                claim_context=sentence,
+                proposed_ref=proposed_ref,
+                citations=claim_pool,
+            )
+            if binding.get("status") == BINDING_VERIFIED:
+                kept.append(sentence)  # 有 VERIFIED 证据绑定：保留（宁可少答不误删有据句）
+            else:
+                removed += 1
+        rebuilt = "".join(kept)
+        kept_lines.append(rebuilt)
     cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"^[，。；,.;]+", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned, removed
 

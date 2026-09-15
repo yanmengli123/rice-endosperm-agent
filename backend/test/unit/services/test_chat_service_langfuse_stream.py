@@ -100,14 +100,28 @@ def test_stream_boundary_redacts_tagged_reasoning_across_deltas() -> None:
 def test_deterministic_locator_answer_uses_only_verified_locator_dto() -> None:
     verified = {
         "retrieval_plan": {"answer_mode": "DETERMINISTIC_LOCATOR"},
+        "answer_policy": {
+            "page_claim_allowed": True,
+            "document_citations_allowed": True,
+        },
         "locator_resolution": {
             "status": "VERIFIED",
-            "page": 3,
+            "page": 99,  # conflicting audit projection must never override Binding
             "zone": "MAIN_TEXT",
             "filename": "paper.pdf",
+            "binding": {
+                "binding_id": "vlb-service-verified",
+                "status": "VERIFIED",
+                "page_binding": "VERIFIED",
+                "page_number": 3,
+                "physical_evidence_id": "ev-service-verified",
+                "partition": "MAIN_TEXT",
+                "filename": "paper.pdf",
+            },
         },
     }
     assert svc._deterministic_locator_answer(verified) == "已可靠定位到原文：〔引文定位｜正文·第3页｜paper.pdf〕"
+    assert "第99页" not in svc._deterministic_locator_answer(verified)
     ambiguous = {
         "retrieval_plan": {"answer_mode": "DETERMINISTIC_LOCATOR"},
         "locator_resolution": {"status": "MULTIPLE_MATCHES", "match_count": 2},
@@ -115,6 +129,33 @@ def test_deterministic_locator_answer_uses_only_verified_locator_dto() -> None:
     answer = svc._deterministic_locator_answer(ambiguous)
     assert "无法可靠定位唯一原文页码" in answer
     assert "第" not in answer
+
+
+def test_deterministic_locator_answer_fails_closed_when_binding_denies_page() -> None:
+    contradictory = {
+        "retrieval_plan": {"answer_mode": "DETERMINISTIC_LOCATOR"},
+        "answer_policy": {
+            "page_claim_allowed": False,
+            "document_citations_allowed": False,
+        },
+        "locator_resolution": {
+            "status": "VERIFIED",
+            "page": 3,
+            "zone": "MAIN_TEXT",
+            "filename": "paper.pdf",
+            "binding": {
+                "binding_id": "vlb-service-denied",
+                "status": "VERIFIED",
+                "page_binding": "UNRESOLVED",
+                "page_number": None,
+            },
+        },
+    }
+
+    answer = svc._deterministic_locator_answer(contradictory)
+
+    assert answer == "当前无法可靠定位原文页码。"
+    assert "第3页" not in answer
 
 
 @pytest.fixture(autouse=True)
