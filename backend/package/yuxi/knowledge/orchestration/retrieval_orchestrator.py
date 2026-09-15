@@ -324,6 +324,7 @@ def _build_answer_policy(
     vision_status: str,
     figure_identity_verified: bool = True,
     locator_kind: str = "",
+    binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """按定位状态机构造结构化 answer_policy（进入模型上下文 + 输出守卫双执行）。
 
@@ -334,7 +335,26 @@ def _build_answer_policy(
     （QUOTE/FIGURE/PAGE/IMAGE）未验证时普通语义召回不得包装成来源定位证据。
     """
     conservative_only = vision_status in {"NOT_CONFIGURED", "PROVIDER_FAILED", "SCHEMA_INVALID", "IMAGE_UNREADABLE"}
-    if status == "VERIFIED":
+    # H2 唯一授权源：冻结 Binding 三元组优先——顶层 status/container_label 仅在
+    # binding 缺失（非 VERIFIED 或历史数据）时兜底，禁止并行读取两套事实。
+    if isinstance(binding, dict) and binding.get("page_binding") == "VERIFIED":
+        grounding = str(binding.get("explanation_grounding") or "UNRESOLVED")
+        return {
+            "mode": "LOCATOR_VERIFIED",
+            "locator_kind": locator_kind,
+            "document_identity_allowed": True,
+            "figure_label_allowed": binding.get("figure_identity_binding") == "VERIFIED",
+            "page_claim_allowed": True,
+            "document_citations_allowed": True,
+            "visual_explanation_allowed": True,
+            # 解释依据分级（H2）：机制归因需要正文回链（VERIFIED）；题注字面
+            # 解释在 PARTIAL 即可；UNRESOLVED 只能描述可见内容
+            "explanation_grounding": grounding,
+            "mechanism_attribution_allowed": grounding == "VERIFIED",
+            "caption_fact_allowed": grounding in {"VERIFIED", "PARTIAL"},
+            "required_disclosure": None,
+        }
+    if status == "VERIFIED":  # binding 缺失的防御回退：与 gate 不变量一致才可能到达
         return {
             "mode": "LOCATOR_VERIFIED",
             "locator_kind": locator_kind,
@@ -343,6 +363,9 @@ def _build_answer_policy(
             "page_claim_allowed": True,
             "document_citations_allowed": True,
             "visual_explanation_allowed": True,
+            "explanation_grounding": "UNRESOLVED",
+            "mechanism_attribution_allowed": False,
+            "caption_fact_allowed": False,
             "required_disclosure": None,
         }
     if status == "MULTIPLE_MATCHES":
@@ -1132,12 +1155,15 @@ async def prepare_knowledge_context(
         _identity_verified = bool(_final_resolution.get("container_label")) or bool(
             _final_resolution.get("figure_identity_binding") == "VERIFIED"
         )
+        # H2 唯一授权源：策略消费出口门禁冻结的 Binding 对象（三元组），
+        # 不再并行读取顶层字段推导权限
         contract["answer_policy"] = _build_answer_policy(
             status=_final_status,
             observation_available=_observation_available,
             vision_status=str(_final_resolution.get("vision_status") or "UNKNOWN"),
             figure_identity_verified=_identity_verified,
             locator_kind=str(locator_intent.get("kind") or ""),
+            binding=_final_resolution.get("binding") if isinstance(_final_resolution, dict) else None,
         )
         if isinstance(_final_resolution, dict) and "answer_policy" not in _final_resolution:
             _final_resolution["answer_policy"] = contract["answer_policy"]

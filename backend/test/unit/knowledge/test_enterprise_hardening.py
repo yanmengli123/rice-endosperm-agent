@@ -581,3 +581,130 @@ def test_g7_same_page_two_figures_are_distinct_locations():
     assert resolution["status"] == "VERIFIED"
     assert resolution["tier"] == TIER_V0_EXACT_ASSET_SHA
     assert resolution["asset"]["anchor_id"] == "ea_fig6"
+
+
+# ---- H1：VISUAL_ONLY_UNLOCATED 文献身份零泄漏（评审原例） ----
+
+
+def test_h1_visual_only_unlocated_document_identity_never_leaks():
+    """评审原例：页码/Figure 已剥离但「该图出自 Liu 2024 年 … 论文」必须一并清零。"""
+    policy = {
+        "mode": "VISUAL_ONLY_UNLOCATED",
+        "locator_kind": "FIGURE_IMAGE",
+        "document_identity_allowed": False,
+        "figure_label_allowed": False,
+        "page_claim_allowed": False,
+        "document_citations_allowed": False,
+        "visual_explanation_allowed": True,
+        "required_disclosure": "可以解释图片可见内容，但无法可靠确定来源文献和页码。",
+    }
+    text = "图片显示绿色荧光。该图出自 Liu 2024 年的 Plant Biotechnology Journal 论文。Figure 9，第12页。"
+    guarded, validation = apply_citation_channel(text, [], authority_policy=policy)
+    assert "Liu" not in guarded
+    assert "Plant Biotechnology Journal" not in guarded
+    assert "论文" not in guarded
+    assert "Figure 9" not in guarded and "第12页" not in guarded
+    assert "绿色荧光" in guarded  # 视觉描述保留
+    assert validation["answer_policy"]["document_identity_claims_removed"] == 1
+    assert validation["answer_policy"]["answer_replaced_by_policy"] is False  # 有观察：不做整体替换
+    assert policy["required_disclosure"] in guarded
+    # 幂等
+    twice, _ = apply_citation_channel(guarded, [], authority_policy=policy)
+    assert twice == guarded
+
+
+def test_h1_identity_strip_keeps_normal_sentences():
+    """只剥离身份断言句：普通功能描述（不含出处形态）不误伤。"""
+    policy = {
+        "mode": "VISUAL_ONLY_UNLOCATED",
+        "document_identity_allowed": False,
+        "figure_label_allowed": False,
+        "page_claim_allowed": False,
+        "document_citations_allowed": False,
+        "visual_explanation_allowed": True,
+        "required_disclosure": "可以解释图片可见内容，但无法可靠确定来源文献和页码。",
+    }
+    text = "图中可见三个 panel 的柱状图，绿色信号集中在细胞核区域。作者在 2024 年使用了 GUS 染色方法。"
+    guarded, validation = apply_citation_channel(text, [], authority_policy=policy)
+    assert "柱状图" in guarded and "GUS 染色" in guarded
+    # 「作者在 2024 年使用…」无出处动词 + 无论文/期刊尾词 → 不是身份断言，保留
+    assert validation["answer_policy"]["document_identity_claims_removed"] == 0
+
+
+# ---- H2：Binding 三元组为唯一授权源 ----
+
+
+def test_h2_policy_consumes_binding_triple():
+    """页码 VERIFIED + 编号 UNRESOLVED + 无正文回链 → 页码可发/编号不可发/机制不可归因。"""
+    from yuxi.knowledge.orchestration.retrieval_orchestrator import _build_answer_policy
+
+    policy = _build_answer_policy(
+        status="VERIFIED",
+        observation_available=False,
+        vision_status="NOT_CONFIGURED",
+        figure_identity_verified=True,  # 顶层字段声称已验证——必须被 Binding 覆盖
+        locator_kind="FIGURE_IMAGE",
+        binding={
+            "page_binding": "VERIFIED",
+            "figure_identity_binding": "UNRESOLVED",
+            "explanation_grounding": "UNRESOLVED",
+        },
+    )
+    assert policy["page_claim_allowed"] is True
+    assert policy["figure_label_allowed"] is False  # Binding 覆盖顶层 container_label
+    assert policy["mechanism_attribution_allowed"] is False
+    assert policy["caption_fact_allowed"] is False
+    assert policy["explanation_grounding"] == "UNRESOLVED"
+
+    grounded = _build_answer_policy(
+        status="VERIFIED",
+        observation_available=False,
+        vision_status="READY",
+        locator_kind="FIGURE_CAPTION",
+        binding={
+            "page_binding": "VERIFIED",
+            "figure_identity_binding": "VERIFIED",
+            "explanation_grounding": "VERIFIED",
+        },
+    )
+    assert grounded["figure_label_allowed"] is True
+    assert grounded["mechanism_attribution_allowed"] is True
+    assert grounded["caption_fact_allowed"] is True
+
+    partial = _build_answer_policy(
+        status="VERIFIED",
+        observation_available=False,
+        vision_status="READY",
+        locator_kind="FIGURE_CAPTION",
+        binding={
+            "page_binding": "VERIFIED",
+            "figure_identity_binding": "VERIFIED",
+            "explanation_grounding": "PARTIAL",
+        },
+    )
+    assert partial["mechanism_attribution_allowed"] is False  # 仅题注，无正文回链
+    assert partial["caption_fact_allowed"] is True
+
+
+# ---- H2b：机制归因执行（删除而非仅审计） ----
+
+
+def test_h2b_mechanism_claims_removed_when_grounding_unverified():
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    policy = {"mechanism_attribution_allowed": False}
+    text = (
+        "图中可见 a/b/c 三个 panel。\n"
+        "这说明 OsMYB73 调控淀粉合成通路。\n"
+        "据此认为该基因参与籽粒发育调控。\n"
+        "绿色荧光信号集中在细胞核区域。"
+    )
+    enforced, removed = enforce_explanation_grounding(text, policy=policy)
+    assert removed == 2
+    assert "调控" not in enforced and "据此认为" not in enforced
+    assert "panel" in enforced and "绿色荧光" in enforced  # 视觉描述保留
+    # 幂等 + 未授权时原样返回
+    again, again_removed = enforce_explanation_grounding(enforced, policy=policy)
+    assert again == enforced and again_removed == 0
+    untouched, _ = enforce_explanation_grounding(text, policy={"mechanism_attribution_allowed": True})
+    assert untouched == text

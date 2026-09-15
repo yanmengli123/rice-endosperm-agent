@@ -843,6 +843,14 @@ def apply_citation_channel(
         stripped_labels, figure_label_claims_removed = _strip_figure_label_claims(expanded)
         expanded = stripped_labels
 
+    # 9b) H1 文献身份收权：document_identity_allowed=False 时按句剥离文献身份
+    #     断言（出自/来自/发表于/刊于/来源于…论文/期刊/文献 + 作者-年份引用式）。
+    #     不用正则猜具体期刊名——身份只能由后端结构化 Binding 渲染；VISUAL_ONLY
+    #     分支保留视觉描述，但编造的「该图出自 Liu 2024 年 … 论文」零残留。
+    document_identity_claims_removed = 0
+    if policy and policy.get("document_identity_allowed") is False:
+        expanded, document_identity_claims_removed = _strip_document_identity_claims(expanded)
+
     # 10) D4 标准化未定位声明（幂等）：策略要求时追加，不依赖模型自觉
     disclosure_appended = False
     if policy and policy.get("required_disclosure"):
@@ -884,6 +892,7 @@ def apply_citation_channel(
             "mode": str((policy or {}).get("mode") or ""),
             "citations_revoked": policy_revokes_citations,
             "figure_label_claims_removed": figure_label_claims_removed,
+            "document_identity_claims_removed": document_identity_claims_removed,
             "disclosure_appended": disclosure_appended,
             "answer_replaced_by_policy": answer_replaced_by_policy,
         },
@@ -898,6 +907,52 @@ _FIGURE_LABEL_CLAIM_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?:Fig(?:ure)?\.?|图|表)\s*S?\d{1,3}[A-Za-z]?(?![A-Za-z0-9])",
     flags=re.IGNORECASE,
 )
+
+# 文献身份断言（H1）：出处动词句 + 作者-年份引用式。不枚举期刊名（不可穷举），
+# 只认「断言来源」的句法形态；正文里讨论基因功能的句子不会命中。注意不收
+# 「来源」名词形态——披露文案自身含「确定来源文献」不得被误剥（幂等前提）。
+_PROVENANCE_CLAIM_PATTERN = re.compile(
+    r"(?:出自于?|来自于?|刊载?于|发表在|发表于|摘自|引用自|见诸|"
+    r"published\s+in|from\s+the\s+(?:paper|journal|study|literature)|"
+    r"[A-Z][A-Za-z]+\s*(?:et\s+al\.?|等)\s*[,，]?\s*\(?((?:19|20)\d{2})\)?|"
+    r"\((?:19|20)\d{2}\)\s*(?:Plant|New|The|BMC|Frontiers|Nature|Science|PLOS)[A-Za-z\s]*?Journal)",
+    flags=re.IGNORECASE,
+)
+_IDENTITY_TAIL_PATTERN = re.compile(r"(论文|文献|期刊|杂志|journal|paper|study|article)\s*[。.；;]?", re.IGNORECASE)
+
+
+def _strip_document_identity_claims(text: str) -> tuple[str, int]:
+    """按句剥离文献身份断言（保留视觉描述等其余内容）。
+
+    判定：句子同时满足「出处动词/作者-年份形态」与「论文/期刊类尾词」即视为
+    身份断言句；只含作者-年份不含尾词的保守保留（可能是普通行文年份）。
+    """
+    result = str(text or "")
+    if not result:
+        return result, 0
+    removed = 0
+    kept_lines: list[str] = []
+    for line in result.split("\n"):
+        sentences = _SENTENCE_SPLIT_PATTERN.findall(line)
+        if not sentences:
+            kept_lines.append(line)
+            continue
+        kept: list[str] = []
+        for sentence in sentences:
+            if _PROVENANCE_CLAIM_PATTERN.search(sentence) and _IDENTITY_TAIL_PATTERN.search(sentence):
+                removed += 1
+                continue
+            kept.append(sentence)
+        rebuilt = "".join(kept)
+        if rebuilt.strip() or not line.strip():
+            kept_lines.append(rebuilt if kept else "")
+        else:
+            kept_lines.append(line)
+    cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    # 只清行首残留标点（不动空白行——剥离句后的空行属于合法排版，幂等前提）
+    cleaned = re.sub(r"^[，。；,.;]+", "", cleaned, flags=re.MULTILINE)
+    return cleaned, removed
 
 
 def _strip_figure_label_claims(text: str) -> tuple[str, int]:

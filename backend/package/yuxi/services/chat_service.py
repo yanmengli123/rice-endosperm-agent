@@ -405,6 +405,15 @@ def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, d
         authority_policy=contract.get("answer_policy"),
     )
     citation_validation["answer_draft"] = draft_validation
+    # H2b 解释依据执行：mechanism_attribution_allowed=False（无正文回链）时，
+    # 无依据机制归因句从用户可见输出中删除（分类器只审计，这里是执行）
+    if isinstance(contract.get("answer_policy"), dict) and (
+        contract["answer_policy"].get("mechanism_attribution_allowed") is False
+    ):
+        from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+        guarded, mechanism_removed = enforce_explanation_grounding(guarded, policy=contract["answer_policy"])
+        citation_validation["mechanism_claims_removed"] = mechanism_removed
     # P4 解释绑定：复合意图流按 Claim 分类验证（CAPTION_FACT/TEXT_SUPPORTED_
     # INTERPRETATION 必须绑定对应载体；UNSUPPORTED 明示，不静默输出）
     if (contract.get("locator_intent") or {}).get("compound") and locator_resolution.get("status") == "VERIFIED":

@@ -153,3 +153,47 @@ __all__ = [
     "EXPLANATION_CLAIMS_VERSION",
     "classify_explanation_claims",
 ]
+
+
+# 机制归因句标记（H2b enforce）：只有 explanation_grounding=VERIFIED（正文回链）
+# 才允许「某基因调控某通路/据此认为」类机制结论；UNRESOLVED/PARTIAL 时整句删除
+_MECHANISM_CLAIM_PATTERN = re.compile(
+    r"(?:这说明|这表明|这证明|据此认为|由此可知|由此可见|提示\s*\S+\s*(?:调控|调节|参与|介导|影响|决定)|"
+    r"\S+\s*(?:调控|调节|介导)\s*\S+\s*(?:通路|过程|表达|发育)|"
+    r"(?:demonstrates|indicates|suggests|implies)\s+that\s+\S+\s+(?:regulates|mediates|controls))",
+    flags=re.IGNORECASE,
+)
+
+
+def enforce_explanation_grounding(
+    answer_text: str,
+    *,
+    policy: dict[str, Any] | None,
+) -> tuple[str, int]:
+    """机制归因权限执行（H2b）：grounding 非 VERIFIED 时删除无依据机制句。
+
+    与审计用的 :func:`classify_explanation_claims` 互补——分类器记录「哪句无依据」，
+    本函数把无依据句从用户可见输出中**删除**（宁可少答，不可无据归因）。
+    纯函数、幂等；policy 为空或 mechanism_attribution_allowed 非 False 时原样返回。
+    """
+    if not isinstance(policy, dict) or policy.get("mechanism_attribution_allowed") is not False:
+        return str(answer_text or ""), 0
+    result = str(answer_text or "")
+    if not result.strip():
+        return result, 0
+    removed = 0
+    kept_lines: list[str] = []
+    for line in result.split("\n"):
+        sentences = _SENTENCE_SPLIT_PATTERN.findall(line)
+        if not sentences:
+            kept_lines.append(line)
+            continue
+        kept = [s for s in sentences if not _MECHANISM_CLAIM_PATTERN.search(s)]
+        removed += len(sentences) - len(kept)
+        kept_lines.append("".join(kept))
+    cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned, removed
+
+
+__all__.append("enforce_explanation_grounding")

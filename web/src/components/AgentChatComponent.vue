@@ -309,7 +309,7 @@
                       :class="{ 'is-collapsed': !isStateSectionExpanded('evidence') }"
                     />
                   </span>
-                  <span class="state-section-meta">{{ displayedEvidenceSummary?.total || 0 }}</span>
+                  <span class="state-section-meta">{{ evidenceHeaderCount }}</span>
                 </button>
                 <div
                   v-show="isStateSectionExpanded('evidence')"
@@ -1337,6 +1337,16 @@ const currentLocatorStatusReason = computed(
 const displayedLocatorStatusReason = computed(() =>
   focusedRunId.value ? focusedArchiveEntry.value?.locatorStatusReason : currentLocatorStatusReason.value
 )
+// H3 状态标题多计数：「已验证 X · 候选 Y」——定位失败时不再把三种数量压成一个 0
+const evidenceHeaderCount = computed(() => {
+  const summary = displayedEvidenceSummary.value || {}
+  const verified = Number(summary.verified_binding_count ?? 0)
+  const candidates = Number(summary.retrieval_candidate_count ?? 0)
+  const total = Number(summary.total ?? 0)
+  if (candidates && !total) return `已验证 ${verified} · 候选 ${candidates}`
+  if (candidates && total) return `${total} · 候选 ${candidates}`
+  return String(total)
+})
 
 // 焦点上下文条文案：加载中 / 轨迹过保留期 / 历史轮短码
 const focusBarLabel = computed(() => {
