@@ -239,6 +239,36 @@ def _emit_knowledge_trace(
     )
 
 
+def _emit_figure_projection_trace(retrieval_id: str, contract: dict[str, Any]) -> None:
+    """图卡投影留痕（P0-4 SLA 采集点）：attached/suppressed + 抑制原因枚举。
+
+    只读 locator_resolution["figure_projection"]（在 contract_hash 之前写入），
+    不修改 contract；无投影信封（无定位裁决）时 no-op。
+    """
+    resolution = contract.get("locator_resolution") or {}
+    projection = resolution.get("figure_projection") if isinstance(resolution, dict) else None
+    if not isinstance(projection, dict):
+        return
+    from yuxi.trace import emit_trace
+
+    status = str(projection.get("status") or "suppressed")
+    emit_trace(
+        category="KNOWLEDGE",
+        operation="figure_projection",
+        event_type=f"knowledge.figure_projection.{status}",
+        span_id=retrieval_id,
+        title="图卡资产投影",
+        summary="论文原图投影已附着" if status == "attached" else f"论文原图投影被抑制：{projection.get('reason')}",
+        attributes={
+            "reason": projection.get("reason"),
+            "figure_count": len(projection.get("figures") or []),
+            "locator_kind": resolution.get("locator_kind") if isinstance(resolution, dict) else None,
+        },
+        resource_refs=[{"type": "knowledge_retrieval", "id": retrieval_id}],
+        visibility="ADMIN",
+    )
+
+
 async def _persist_audit(
     db: AsyncSession,
     *,
@@ -355,6 +385,10 @@ def _build_answer_policy(
                 "page_claim_allowed": True,
                 "document_citations_allowed": True,
                 "visual_explanation_allowed": True,
+                # 图卡发布授权（figure card projection）：与视觉解释授权分立——
+                # 只有冻结 Binding 的 VERIFIED 定位才允许把论文原图投进对话流；
+                # 发布开关（figure_card_enabled）在 chat 层读取，与此位双闸
+                "figure_image_publish_allowed": True,
                 # 解释依据分级：机制归因需要正文回链（VERIFIED）；题注字面
                 # 解释在 PARTIAL 即可；UNRESOLVED 只能描述可见内容
                 "explanation_grounding": grounding,
@@ -373,6 +407,7 @@ def _build_answer_policy(
                 "page_claim_allowed": False,
                 "document_citations_allowed": False,
                 "visual_explanation_allowed": observation_available,
+                "figure_image_publish_allowed": False,
                 "explanation_grounding": "UNRESOLVED",
                 "mechanism_attribution_allowed": False,
                 "caption_fact_allowed": False,
@@ -392,6 +427,7 @@ def _build_answer_policy(
             "page_claim_allowed": False,
             "document_citations_allowed": False,
             "visual_explanation_allowed": False,
+            "figure_image_publish_allowed": False,
             "explanation_grounding": "UNRESOLVED",
             "mechanism_attribution_allowed": False,
             "caption_fact_allowed": False,
@@ -408,6 +444,7 @@ def _build_answer_policy(
             # 图片内容解释只在存在可信视觉观察时允许；无观察的文本歧义
             # 无法核验模型解释 → 守卫整体替换保守文案（G3）
             "visual_explanation_allowed": observation_available,
+            "figure_image_publish_allowed": False,
             "explanation_grounding": "UNRESOLVED",
             "mechanism_attribution_allowed": False,
             "caption_fact_allowed": False,
@@ -425,6 +462,7 @@ def _build_answer_policy(
             "page_claim_allowed": False,
             "document_citations_allowed": False,
             "visual_explanation_allowed": True,
+            "figure_image_publish_allowed": False,
             "explanation_grounding": "UNRESOLVED",
             "mechanism_attribution_allowed": False,
             "caption_fact_allowed": False,
@@ -440,6 +478,7 @@ def _build_answer_policy(
         # 未定位且无可信视觉观察：解释不可核验 → 守卫整体替换保守文案（G3）；
         # vision_status 仅决定披露文案口径
         "visual_explanation_allowed": False,
+        "figure_image_publish_allowed": False,
         "explanation_grounding": "UNRESOLVED",
         "mechanism_attribution_allowed": False,
         "caption_fact_allowed": False,
@@ -1229,6 +1268,18 @@ async def prepare_knowledge_context(
         contract["answer_instruction"] += " answer_policy（结构化，必须遵守）：" + json.dumps(
             contract["answer_policy"], ensure_ascii=False
         )
+    # 图卡资产投影（P0-1 暗发布）：从冻结 Binding 派生可发布资产投影，写入
+    # locator_resolution["figure_projection"]。必须在 _hash_contract 之前执行
+    # （信封随 contract_hash 落库审计）；投影永远计算、与发布开关解耦，
+    # 抑制只影响图卡，绝不影响文本回答/芯片/PDF 跳转。
+    if isinstance((contract.get("locator_resolution") or {}).get("binding"), dict):
+        from yuxi.knowledge.contracts.figure_asset_projection import attach_figure_projection
+
+        await attach_figure_projection(
+            db,
+            contract["locator_resolution"],
+            publish_allowed=bool((contract.get("answer_policy") or {}).get("figure_image_publish_allowed")),
+        )
     # NUMERIC 题型：数字/区间/单位必须逐字来自证据原文，禁止换算或近似改写（P2-12）
     if "NUMERIC" in (plan.get("question_types") or []):
         contract["answer_instruction"] += (
@@ -1247,4 +1298,5 @@ async def prepare_knowledge_context(
         started_at=started_at,
     )
     _emit_knowledge_trace(retrieval_id, contract, started_at)
+    _emit_figure_projection_trace(retrieval_id, contract)
     return contract

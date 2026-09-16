@@ -141,6 +141,9 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     },
     "knowledge.search.skipped": frozenset({"intent", "contract_status", "knowledge_scope_version"}),
     "knowledge.search.interrupted": _COMMON_ATTRIBUTES,
+    # 图卡资产投影（ADR-0004 P0-4 SLA 采集点）：reason 为 9 种抑制原因闭合枚举之一
+    "knowledge.figure_projection.attached": frozenset({"reason", "figure_count", "locator_kind"}),
+    "knowledge.figure_projection.suppressed": frozenset({"reason", "figure_count", "locator_kind"}),
     "validation.quality.passed": frozenset({"validator", "result_digest"}),
     "validation.quality.failed": _COMMON_ATTRIBUTES | {"validator", "result_digest"},
     "system.execution.started": frozenset(),
