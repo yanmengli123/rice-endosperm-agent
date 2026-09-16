@@ -63,6 +63,10 @@ class Config(BaseModel):
         default="",
         description="科研图像观察视觉模型（多模态 chat spec；留空=视觉通道失败关闭，不做图片定位）",
     )
+    figure_card_enabled: bool = Field(
+        default=False,
+        description="对话流图卡：是否随 citation_ready 发布论文原图（投影与审计恒开启，本开关只控制 SSE 发布）",
+    )
     default_ocr_engine: str = Field(default=DEFAULT_OCR_ENGINE, description="默认 OCR 解析引擎")
 
     _config_file: Path | None = PrivateAttr(default=None)

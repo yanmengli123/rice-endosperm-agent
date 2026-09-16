@@ -401,6 +401,28 @@ def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
     return "当前无法可靠定位原文页码。"
 
 
+_CITATION_READY_KEYS = ("status", "evidence_id", "file_id", "filename", "zone", "page", "anchor_id")
+
+
+def _citation_ready_payload(locator: dict[str, Any]) -> dict[str, Any]:
+    """citation_ready 载荷（v2）：七键 + kb_id/revision_id（前端取图三段式的硬前置）。
+
+    figures 只在 ``figure_card_enabled`` 开启且后端投影已附着时携带——**字段缺席 ⟺ 未发布**
+    （不发明空数组）。图卡数据只来自 ``locator_resolution["figure_projection"]``（编排器在
+    contract_hash 之前写入的确定性投影），这里不现查表、不做任何二次裁决。
+    """
+    citation = {key: locator.get(key) for key in _CITATION_READY_KEYS}
+    citation["kb_id"] = locator.get("kb_id")
+    citation["revision_id"] = locator.get("parse_revision_id")
+    payload: dict[str, Any] = {"citation": citation}
+    if getattr(conf, "figure_card_enabled", False):
+        projection = locator.get("figure_projection")
+        figures = projection.get("figures") if isinstance(projection, dict) else None
+        if figures:
+            payload["figures"] = list(figures)
+    return payload
+
+
 def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
 
@@ -1028,6 +1050,21 @@ async def save_messages_from_langgraph_state(
             **dict(run_metadata),
         }
         await conv_repo.db.flush()
+    if last_ai_message and knowledge_contract and knowledge_contract.get("status") != "SKIPPED":
+        # 与确定性定位路径（citation_binding）同形落库：历史恢复可读回 Binding 与
+        # figure_projection，刷新页面后定位芯片/图卡不丢失
+        locator = knowledge_contract.get("locator_resolution")
+        if isinstance(locator, dict) and locator:
+            persisted = {
+                **dict(last_ai_message.extra_metadata or {}),
+                "knowledge_retrieval_id": knowledge_contract.get("retrieval_id"),
+                "citation_binding": locator,
+            }
+            if str(locator.get("status") or "") == "VERIFIED":
+                # 与流末 citation_ready 事件同一载荷（历史恢复只读它，不读审计用的 binding）
+                persisted["citation_ready"] = _citation_ready_payload(locator)
+            last_ai_message.extra_metadata = persisted
+            await conv_repo.db.flush()
 
     if run_id and last_ai_message:
         run_repo = AgentRunRepository(conv_repo.db)
@@ -1555,6 +1592,7 @@ async def stream_agent_chat(
                 return
             message_id = f"msg_{uuid.uuid4().hex}"
             locator = knowledge_contract.get("locator_resolution") or {}
+            citation_ready = _citation_ready_payload(locator) if locator.get("status") == "VERIFIED" else None
             ai_message = await conv_repo.add_message_by_thread_id(
                 thread_id=thread_id,
                 role="assistant",
@@ -1564,6 +1602,10 @@ async def stream_agent_chat(
                     "id": message_id,
                     "knowledge_retrieval_id": knowledge_contract.get("retrieval_id"),
                     "citation_binding": locator,
+                    # 实际发布的 citation_ready 载荷（含/不含 figures）：历史恢复只读它——
+                    # 刷新后还原的必须是当时发布的内容（暗发布期 figure_projection 恒存于
+                    # citation_binding 供审计，但不得从那里漏出图卡）
+                    **({"citation_ready": citation_ready} if citation_ready else {}),
                     "turn_execution_plan": turn_plan.public_dict(),
                     "run_source_manifest": source_manifest.model_dump(mode="json"),
                     **get_trace_info(langfuse_run),
@@ -1587,15 +1629,8 @@ async def stream_agent_chat(
                 status="loading",
                 thread_id=thread_id,
             )
-            if locator.get("status") == "VERIFIED":
-                yield make_chunk(
-                    status="citation_ready",
-                    citation={
-                        key: locator.get(key)
-                        for key in ("status", "evidence_id", "file_id", "filename", "zone", "page", "anchor_id")
-                    },
-                    meta=meta,
-                )
+            if citation_ready is not None:
+                yield make_chunk(status="citation_ready", meta=meta, **citation_ready)
             meta["time_cost"] = asyncio.get_event_loop().time() - start_time
             yield make_chunk(status="finished", meta=meta)
             return
@@ -1843,14 +1878,7 @@ async def stream_agent_chat(
             and (knowledge_contract.get("locator_resolution") or {}).get("status") == "VERIFIED"
         ):
             locator_terminal = knowledge_contract.get("locator_resolution") or {}
-            yield make_chunk(
-                status="citation_ready",
-                citation={
-                    key: locator_terminal.get(key)
-                    for key in ("status", "evidence_id", "file_id", "filename", "zone", "page", "anchor_id")
-                },
-                meta=meta,
-            )
+            yield make_chunk(status="citation_ready", meta=meta, **_citation_ready_payload(locator_terminal))
 
         yield make_chunk(status="finished", meta=meta)
 

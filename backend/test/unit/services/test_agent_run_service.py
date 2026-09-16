@@ -1866,6 +1866,30 @@ def test_compact_stream_chunk_retains_verified_citation_dto():
     assert compact == {"status": "citation_ready", "citation": citation}
 
 
+def test_compact_stream_chunk_retains_figure_card_projection():
+    """图卡 P0-2 契约锁：figures 必须穿过 verbose=false 压缩白名单（漏加即前端静默收不到）。"""
+    figures = [{"binding_id": "vlb_x", "kb_id": "kb-a", "revision_id": "pr_1", "asset_name": "d-fig.png", "page": 3}]
+
+    compact = agent_run_service._compact_stream_chunk(
+        {
+            "status": "citation_ready",
+            "citation": {"status": "VERIFIED", "kb_id": "kb-a", "revision_id": "pr_1"},
+            "figures": figures,
+            "meta": {"internal": True},
+        }
+    )
+
+    assert compact == {
+        "status": "citation_ready",
+        "citation": {"status": "VERIFIED", "kb_id": "kb-a", "revision_id": "pr_1"},
+        "figures": figures,
+    }
+    # 未发布时字段缺席，压缩后同样缺席（不发明空数组）
+    assert "figures" not in agent_run_service._compact_stream_chunk(
+        {"status": "citation_ready", "citation": {"status": "VERIFIED"}}
+    )
+
+
 @pytest.mark.asyncio
 async def test_reconcile_stale_agent_runs_marks_terminal_and_notifies(monkeypatch):
     runs = [
