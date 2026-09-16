@@ -144,6 +144,10 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     # 图卡资产投影（ADR-0004 P0-4 SLA 采集点）：reason 为 9 种抑制原因闭合枚举之一
     "knowledge.figure_projection.attached": frozenset({"reason", "figure_count", "locator_kind"}),
     "knowledge.figure_projection.suppressed": frozenset({"reason", "figure_count", "locator_kind"}),
+    # 文献作用域解析（"哪篇文献"）：SLA = 解析唯一率 / 跨文献歧义率
+    "knowledge.document_scope.resolved": frozenset({"channel", "candidate_count", "file_count"}),
+    "knowledge.document_scope.ambiguous": frozenset({"channel", "candidate_count", "file_count"}),
+    "knowledge.document_scope.unresolved": frozenset({"channel", "candidate_count", "file_count"}),
     "validation.quality.passed": frozenset({"validator", "result_digest"}),
     "validation.quality.failed": _COMMON_ATTRIBUTES | {"validator", "result_digest"},
     "system.execution.started": frozenset(),

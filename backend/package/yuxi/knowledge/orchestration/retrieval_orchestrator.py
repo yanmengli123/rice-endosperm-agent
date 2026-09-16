@@ -239,6 +239,34 @@ def _emit_knowledge_trace(
     )
 
 
+def _emit_document_scope_trace(retrieval_id: str, scope: Any) -> None:
+    """文献作用域解析留痕（SLA：文献解析唯一率 / 跨文献歧义率）。不修改 contract。"""
+    from yuxi.trace import emit_trace
+
+    status = str(getattr(scope, "status", "") or "").lower()
+    if status not in {"resolved", "ambiguous", "unresolved"}:
+        return
+    candidates = list(getattr(scope, "candidates", []) or [])
+    file_ids = list(getattr(scope, "file_ids", []) or [])
+    channel = getattr(scope, "channel", None)
+    summary = {
+        "resolved": f"文献引用已解析为 {len(file_ids)} 篇（{channel}）",
+        "ambiguous": f"文献引用命中 {len(candidates)} 篇，交由定位器在候选内裁决（{channel}）",
+        "unresolved": f"文献引用在当前范围内无匹配（{channel}）",
+    }[status]
+    emit_trace(
+        category="KNOWLEDGE",
+        operation="document_scope",
+        event_type=f"knowledge.document_scope.{status}",
+        span_id=retrieval_id,
+        title="文献作用域解析",
+        summary=summary,
+        attributes={"channel": channel, "candidate_count": len(candidates), "file_count": len(file_ids)},
+        resource_refs=[{"type": "knowledge_retrieval", "id": retrieval_id}],
+        visibility="ADMIN",
+    )
+
+
 def _emit_figure_projection_trace(retrieval_id: str, contract: dict[str, Any]) -> None:
     """图卡投影留痕（P0-4 SLA 采集点）：attached/suppressed + 抑制原因枚举。
 
@@ -389,6 +417,7 @@ def _build_answer_policy(
                 # 只有冻结 Binding 的 VERIFIED 定位才允许把论文原图投进对话流；
                 # 发布开关（figure_card_enabled）在 chat 层读取，与此位双闸
                 "figure_image_publish_allowed": True,
+                "candidate_documents_allowed": False,
                 # 解释依据分级：机制归因需要正文回链（VERIFIED）；题注字面
                 # 解释在 PARTIAL 即可；UNRESOLVED 只能描述可见内容
                 "explanation_grounding": grounding,
@@ -408,6 +437,7 @@ def _build_answer_policy(
                 "document_citations_allowed": False,
                 "visual_explanation_allowed": observation_available,
                 "figure_image_publish_allowed": False,
+                "candidate_documents_allowed": False,
                 "explanation_grounding": "UNRESOLVED",
                 "mechanism_attribution_allowed": False,
                 "caption_fact_allowed": False,
@@ -428,6 +458,7 @@ def _build_answer_policy(
             "document_citations_allowed": False,
             "visual_explanation_allowed": False,
             "figure_image_publish_allowed": False,
+            "candidate_documents_allowed": False,
             "explanation_grounding": "UNRESOLVED",
             "mechanism_attribution_allowed": False,
             "caption_fact_allowed": False,
@@ -445,12 +476,15 @@ def _build_answer_policy(
             # 无法核验模型解释 → 守卫整体替换保守文案（G3）
             "visual_explanation_allowed": observation_available,
             "figure_image_publish_allowed": False,
+            # 候选文献清单只列文档身份（不带页码/图片），供用户 @ 指定文献后重试——
+            # 不违反"非 VERIFIED 不发布页码"的红线
+            "candidate_documents_allowed": True,
             "explanation_grounding": "UNRESOLVED",
             "mechanism_attribution_allowed": False,
             "caption_fact_allowed": False,
             "required_disclosure": (
                 "该内容在当前知识范围内存在多个可能的匹配，无法唯一确定来源文献与页码；"
-                "可补充原文语句、题注文字或限定知识库后重试。"
+                "可输入 @ 选择「文献」指定其中一篇，或补充原文语句、题注文字后重试。"
             ),
         }
     if observation_available:
@@ -463,6 +497,7 @@ def _build_answer_policy(
             "document_citations_allowed": False,
             "visual_explanation_allowed": True,
             "figure_image_publish_allowed": False,
+            "candidate_documents_allowed": False,
             "explanation_grounding": "UNRESOLVED",
             "mechanism_attribution_allowed": False,
             "caption_fact_allowed": False,
@@ -479,6 +514,7 @@ def _build_answer_policy(
         # vision_status 仅决定披露文案口径
         "visual_explanation_allowed": False,
         "figure_image_publish_allowed": False,
+        "candidate_documents_allowed": False,
         "explanation_grounding": "UNRESOLVED",
         "mechanism_attribution_allowed": False,
         "caption_fact_allowed": False,
@@ -575,7 +611,23 @@ async def prepare_knowledge_context(
         detect_locator_intent,
     )
 
-    locator_intent = detect_locator_intent(question)
+    # 文献作用域（"哪篇文献"）：@doc 提及 / DOI / 文件名片段 → file_ids 硬约束。定位意图与
+    # 引文抽取用剥离 @doc token 后的文本；模型上下文仍用原问题。AMBIGUOUS 时把候选集当作
+    # 硬约束交给定位器在候选内判唯一，永不用模型猜文献。
+    from yuxi.knowledge.planning.document_scope import SCOPE_NONE, resolve_document_scope
+
+    document_scope = await resolve_document_scope(
+        db, question=question, kb_ids=[str(member["kb_id"]) for member in raw_members]
+    )
+    contract["document_scope"] = document_scope.public_dict()
+    scope_file_ids = document_scope.constraint_file_ids
+    locator_question = document_scope.clean_question or question
+    if document_scope.status != SCOPE_NONE:
+        _emit_document_scope_trace(retrieval_id, document_scope)
+
+    locator_intent = detect_locator_intent(locator_question)
+    if scope_file_ids:
+        locator_intent["file_ids"] = list(scope_file_ids)
     contract["locator_intent"] = locator_intent
     # FIGURE_LOCATOR（图表编号问题）与 QUOTE_LOCATOR 同为精确定位意图：
     # 编号走 caption 通道 + label 硬约束（caption_locator v3）。图片附件在场时
@@ -606,6 +658,7 @@ async def prepare_knowledge_context(
             db,
             kb_ids=scope_kb_ids,
             image_bytes=image_bytes,
+            file_ids=scope_file_ids,
         )
         attempt_ledger.append(_ledger_entry("ASSET_FINGERPRINT", image_locator))
         observation = None
@@ -642,6 +695,7 @@ async def prepare_knowledge_context(
                     kb_ids=scope_kb_ids,
                     image_bytes=image_bytes,
                     observation=observation,
+                    file_ids=scope_file_ids,
                 )
                 if retried.get("reason") != "VISION_PROVIDER_UNAVAILABLE":
                     image_locator = retried
@@ -663,6 +717,7 @@ async def prepare_knowledge_context(
                     visible_entities=tuple(str(item) for item in observation.visible_entities or []),
                 ),
                 kb_ids=scope_kb_ids,
+                file_ids=scope_file_ids,
             )
             attempt_ledger.append(
                 {
@@ -718,8 +773,9 @@ async def prepare_knowledge_context(
 
             text_result = await resolve_quote_locator(
                 db,
-                question=question,
+                question=locator_question,
                 kb_ids=[str(member["kb_id"]) for member in raw_members],
+                file_ids=scope_file_ids,
             )
             attempt_ledger.append(_ledger_entry("TEXT_FALLBACK", text_result))
             # 优先归并：文本 VERIFIED 才有资格覆盖图片失败结论；否则图片终局保留
@@ -1122,6 +1178,9 @@ async def prepare_knowledge_context(
             ):
                 locator_resolution["backlinks"] = direct_locator.get("backlinks") or []
         contract["locator_resolution"] = locator_resolution
+        if scope_file_ids and isinstance(locator_resolution, dict):
+            # 审计：本次定位受文献作用域硬约束（随 Binding.document_scope 落库）
+            locator_resolution["document_scope"] = document_scope.channel
         # Locator Authority 出口门禁：VERIFIED ⇒ 物理证据必须已在冻结证据契约
         # 中（binding 随 locator_resolution_json 持久化，状态投影/渲染器只消费
         # 该对象）。违例 → ANSWER_VALIDATION_FAILED，失败关闭不展示页码。

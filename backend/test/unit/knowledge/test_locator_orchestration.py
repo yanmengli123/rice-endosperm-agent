@@ -86,7 +86,7 @@ def _patch_pipeline(
     async def fake_audit(*_args, **_kwargs):
         return None
 
-    async def fake_direct_locator(_db, *, question, kb_ids):
+    async def fake_direct_locator(_db, *, question, kb_ids, file_ids=None):
         assert kb_ids == ["kb-a"]
         return direct_locator or {
             "status": "NOT_FOUND",
@@ -377,7 +377,7 @@ async def test_image_attachment_flow_resolves_and_freezes_figure_binding(monkeyp
                 }
             )
 
-    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None, file_ids=None):
         assert kb_ids == ["kb-a"]
         assert image_bytes
         return {
@@ -418,7 +418,7 @@ async def test_image_attachment_flow_resolves_and_freezes_figure_binding(monkeyp
     )
     _patch_pipeline(monkeypatch, citations=[figure_citation])
 
-    async def fake_quote_locator(_db, *, question, kb_ids):  # 图片裁决已终局，不应回退文本通道
+    async def fake_quote_locator(_db, *, question, kb_ids, file_ids=None):  # 图片裁决已终局，不应回退文本通道
         raise AssertionError("image flow must not fall back to quote locator")
 
     monkeypatch.setattr(quote_locator, "resolve_quote_locator", fake_quote_locator)
@@ -451,7 +451,7 @@ async def test_image_flow_fails_closed_when_vision_provider_unavailable(monkeypa
 
     monkeypatch.setattr(provider_module, "get_vision_provider", lambda: provider_module.NullVisionProvider())
 
-    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None, file_ids=None):
         assert observation is None
         return {
             "status": "NOT_FOUND",
@@ -462,7 +462,7 @@ async def test_image_flow_fails_closed_when_vision_provider_unavailable(monkeypa
 
     monkeypatch.setattr(figure_module, "resolve_figure_image_locator", fake_image_locator)
 
-    async def fake_quote_locator(_db, *, question, kb_ids):
+    async def fake_quote_locator(_db, *, question, kb_ids, file_ids=None):
         return {"status": "NOT_FOUND", "locator_version": "test", "reason": "no_text_quote"}
 
     _patch_pipeline(monkeypatch, citations=[])
@@ -588,7 +588,7 @@ async def test_image_flow_caption_bridge_recovers_page_after_fingerprint_miss(mo
 
     call_state = {"with_observation": False}
 
-    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None, file_ids=None):
         assert kb_ids == ["kb-a"]
         if observation is None:
             return {
@@ -606,7 +606,7 @@ async def test_image_flow_caption_bridge_recovers_page_after_fingerprint_miss(mo
             "reason": "no_figure_candidate_satisfies_two_signal_minimum",
         }
 
-    async def fake_bridge(_db, *, query, kb_ids):
+    async def fake_bridge(_db, *, query, kb_ids, file_ids=None):
         assert query.canonical_label == "Figure 1"
         assert query.source == "VISUAL_OBSERVATION"
         assert "Relative expression levels" in query.verbatim_segments
@@ -694,7 +694,7 @@ async def test_ac15_failed_locator_still_allows_visual_explanation(monkeypatch: 
                 }
             )
 
-    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None, file_ids=None):
         if observation is None:
             return {
                 "status": "NOT_FOUND",
@@ -713,7 +713,7 @@ async def test_ac15_failed_locator_still_allows_visual_explanation(monkeypatch: 
     monkeypatch.setattr(figure_module, "resolve_figure_image_locator", fake_image_locator)
     from yuxi.knowledge.evidence import caption_locator as caption_module
 
-    async def no_bridge(_db, *, query, kb_ids):
+    async def no_bridge(_db, *, query, kb_ids, file_ids=None):
         return None
 
     monkeypatch.setattr(caption_module, "resolve_caption_bridge", no_bridge)

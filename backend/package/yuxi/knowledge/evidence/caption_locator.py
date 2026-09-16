@@ -49,24 +49,41 @@ TIER_T3_WHITESPACE_COMPRESSED = "T3_WHITESPACE_COMPRESSED"
 
 # panel 字母只在与数字直接相邻时才算编号组成部分（"Figure 5A"）；带空格的
 # "Figure 7 A schematic..." 中 A 是英文单词开头，不得把编号误归一成 figure 7a
+# 限定词：Supplementary/Supplemental Figure N → figure sN（与 "Figure S8" 写法共用规范键）；
+# Extended Data Fig. N → figure edN。不扩展前，主图 Figure 2 与 Supplementary Figure 2 会
+# 归一成同一键，跨文献/同文献都会被误判为 MULTIPLE。
+_LABEL_QUALIFIER = r"(?:(supplementa(?:ry|l)|extended\s+data|ext\.?\s*data)\s+)?"
 _LABEL_PATTERN = re.compile(
-    r"(?:fig(?:ure)?s?\.?|table|图|表)\s*[sS]?\s*\d{1,3}(?:[A-Za-z](?![A-Za-z0-9]))?",
+    _LABEL_QUALIFIER + r"(?:fig(?:ure)?s?\.?|table|图|表)\s*[sS]?\s*\d{1,3}(?:[A-Za-z](?![A-Za-z0-9]))?",
     re.IGNORECASE,
 )
 _LABEL_FULL = re.compile(
-    r"(fig(?:ure)?s?|table|图|表)\.?\s*([sS])?\.?\s*(\d{1,3})(?:([A-Za-z])(?![A-Za-z0-9]))?",
+    _LABEL_QUALIFIER + r"(fig(?:ure)?s?|table|图|表)\.?\s*([sS])?\.?\s*(\d{1,3})(?:([A-Za-z])(?![A-Za-z0-9]))?",
     re.IGNORECASE,
 )
 
 
 def canonical_figure_label(label: str | None) -> str | None:
-    """归一图表编号为规范键：Fig.5 / figure S8 / 图5A → figure 5 / figure s8 / figure 5a。"""
+    """归一图表编号为规范键：Fig.5 / figure S8 / 图5A → figure 5 / figure s8 / figure 5a；
+    Supplementary Figure 2 → figure s2；Extended Data Fig. 1 → figure ed1。"""
     match = _LABEL_FULL.fullmatch(re.sub(r"\s+", " ", str(label or "").strip()))
     if not match:
         return None
-    kind, suffix, number, panel = match.groups()
+    qualifier, kind, suffix, number, panel = match.groups()
     kind_key = "table" if kind.lower().startswith("tab") or kind == "表" else "figure"
-    return f"{kind_key} {(suffix or '').lower()}{number}{(panel or '').lower()}"
+    prefix = ""
+    if qualifier:
+        prefix = "ed" if qualifier.lower().startswith("ext") else "s"
+    suffix_key = (suffix or "").lower()
+    if prefix == "s" and suffix_key == "s":
+        suffix_key = ""
+    return f"{kind_key} {prefix}{suffix_key}{number}{(panel or '').lower()}"
+
+
+def label_number(label_key: str | None) -> str | None:
+    """规范键中的编号数字（"figure s12" → "12"），供 SQL 预过滤使用。"""
+    match = re.search(r"\d{1,3}", str(label_key or ""))
+    return match.group(0) if match else None
 
 
 def extract_figure_label(text: str | None) -> str | None:
@@ -216,11 +233,12 @@ def select_quote_candidates(text: str | None, *, min_normalized_chars: int = 25)
 # ---- 题注通道：label 硬约束下的 caption span 定位 ----
 
 
-async def _scan_caption_rows(db, *, figure_label: str, kb_ids: list[str]):
+async def _scan_caption_rows(db, *, figure_label: str, kb_ids: list[str], file_ids: list[str] | None = None):
     """label 硬过滤后的题注候选行（span/anchor/file/revision 四元组）。
 
     统一施加：编号规范键一致、页码合法、span/锚点跨源页码一致、分区可定位、
     非目录/清单行。文本入口与视觉桥接（FigureCaptionQuery）共用本扫描。
+    ``file_ids`` 为"哪篇文献"的硬约束（@doc 提及 / DOI / 文件名解析得到），非空时只扫这些文件。
     """
     from yuxi.knowledge.evidence.document_partition import (
         LOCATOR_ELIGIBLE_PARTITIONS,
@@ -232,6 +250,23 @@ async def _scan_caption_rows(db, *, figure_label: str, kb_ids: list[str]):
     label_key = canonical_figure_label(figure_label)
     if not label_key:
         return []
+    # SQL 预过滤按编号数字：容器标签 "Fig. 2" / "Figure 2" / "图2" 写法不同但数字一致，
+    # 原先按输入原文 ilike 会把 "Fig. 2" 问 "Figure 2" 的题注整个漏掉；规范键相等在 Python 层严格判定
+    number = label_number(label_key) or figure_label
+    conditions = [
+        EvidenceSpanRecord.kb_id.in_(list(kb_ids)[:20]),
+        EvidenceSpanRecord.evidence_type == "caption",
+        EvidenceSpanRecord.container_label.isnot(None),
+        KnowledgeFile.active_parse_revision_id == EvidenceSpanRecord.parse_revision_id,
+        KnowledgeParseRevision.file_id == EvidenceSpanRecord.file_id,
+        KnowledgeParseRevision.kb_id == EvidenceSpanRecord.kb_id,
+        or_(
+            EvidenceSpanRecord.container_label.ilike(f"%{escape_like(number)}%", escape="/"),
+            EvidenceSpanRecord.quote.ilike(f"%{escape_like(figure_label)}%", escape="/"),
+        ),
+    ]
+    if file_ids:
+        conditions.append(EvidenceSpanRecord.file_id.in_([str(item) for item in file_ids][:50]))
     rows = (
         await db.execute(
             select(EvidenceSpanRecord, EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
@@ -247,24 +282,13 @@ async def _scan_caption_rows(db, *, figure_label: str, kb_ids: list[str]):
                 KnowledgeParseRevision,
                 KnowledgeParseRevision.revision_id == EvidenceSpanRecord.parse_revision_id,
             )
-            .where(
-                EvidenceSpanRecord.kb_id.in_(list(kb_ids)[:20]),
-                EvidenceSpanRecord.evidence_type == "caption",
-                EvidenceSpanRecord.container_label.isnot(None),
-                KnowledgeFile.active_parse_revision_id == EvidenceSpanRecord.parse_revision_id,
-                KnowledgeParseRevision.file_id == EvidenceSpanRecord.file_id,
-                KnowledgeParseRevision.kb_id == EvidenceSpanRecord.kb_id,
-                or_(
-                    EvidenceSpanRecord.container_label.ilike(f"%{escape_like(figure_label)}%", escape="/"),
-                    EvidenceSpanRecord.quote.ilike(f"%{escape_like(figure_label)}%", escape="/"),
-                ),
-            )
+            .where(*conditions)
             .order_by(
                 EvidenceSpanRecord.file_id,
                 EvidenceSpanRecord.page_number,
                 EvidenceSpanRecord.sentence_index,
             )
-            .limit(200)
+            .limit(500)
         )
     ).all()
 
@@ -390,14 +414,16 @@ class FigureCaptionQuery:
     source: str = "VISUAL_OBSERVATION"
 
 
-async def resolve_caption_bridge(db, *, query: FigureCaptionQuery, kb_ids: list[str]) -> dict[str, Any] | None:
+async def resolve_caption_bridge(
+    db, *, query: FigureCaptionQuery, kb_ids: list[str], file_ids: list[str] | None = None
+) -> dict[str, Any] | None:
     """观察 → 题注通道确定性接合（P0-C）。
 
     图片定位指纹（V0/V1/V1G）未命中且观察给出编号时，由本桥接把观察结果
     转交互题注通道裁决（label 硬过滤 + T0/T1 + 实体消歧 + 物理唯一）；页码
     只可能从 caption anchor.page 出来。失败返回 None（调用方失败关闭）。
     """
-    scanned = await _scan_caption_rows(db, figure_label=query.canonical_label, kb_ids=kb_ids)
+    scanned = await _scan_caption_rows(db, figure_label=query.canonical_label, kb_ids=kb_ids, file_ids=file_ids)
     if not scanned:
         return None
     candidates: list[dict[str, Any]] = []
@@ -425,12 +451,28 @@ def _adjudicate_caption_candidates(candidates: list[dict[str, Any]], *, containe
         for candidate in candidates
     }
     if len(physical_locations) > 1:
+        # 候选文献清单：只列文档身份（file_id/kb_id/filename），不带任何页码——供用户 @ 指定
+        # 文献后重试；同一文献内多处命中时清单只有一个文档，调用方不提示"选文献"
+        documents: dict[str, dict[str, Any]] = {}
+        for candidate in candidates:
+            file_id = str(candidate.get("file_id") or "")
+            if not file_id:
+                continue
+            documents.setdefault(
+                file_id,
+                {
+                    "file_id": file_id,
+                    "kb_id": str(candidate.get("kb_id") or ""),
+                    "filename": str(candidate.get("filename") or ""),
+                },
+            )
         return {
             "status": "MULTIPLE_MATCHES",
             "locator_version": CAPTION_LOCATOR_VERSION,
             "locator_kind": "FIGURE_CAPTION",
             "match_count": len(physical_locations),
             "reason": "figure_label_hits_multiple_physical_locations",
+            "candidate_documents": sorted(documents.values(), key=lambda item: (item["filename"], item["file_id"])),
         }
     best = sorted(
         candidates,
@@ -470,15 +512,17 @@ async def resolve_figure_caption_locator(
     figure_label: str,
     quote_text: str | None = None,
     kb_ids: list[str],
+    file_ids: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """题注通道定位（文本/编号入口，兼容旧接口）。
 
     返回与 :func:`yuxi.knowledge.evidence.quote_locator.resolve_quote_locator`
     同形的 resolution dict（含 locator_kind=FIGURE_CAPTION 与 match_tier）；
     范围内不存在该 label 的题注时返回 None（调用方回退常规引文路径）。
-    失败关闭：同 label 多个物理位置且无法消歧 → MULTIPLE_MATCHES，无候选页码。
+    失败关闭：同 label 多个物理位置且无法消歧 → MULTIPLE_MATCHES，无候选页码
+    （但携带 candidate_documents 供用户 @ 指定文献）。``file_ids`` 为文献硬约束。
     """
-    scanned = await _scan_caption_rows(db, figure_label=figure_label, kb_ids=kb_ids)
+    scanned = await _scan_caption_rows(db, figure_label=figure_label, kb_ids=kb_ids, file_ids=file_ids)
     candidates: list[dict[str, Any]] = []
     for span, anchor, knowledge_file, revision in scanned:
         anchor_quote = str(anchor.quote or "")
@@ -503,6 +547,7 @@ __all__ = [
     "extract_latin_runs",
     "hard_constraints_satisfied",
     "label_conflicts",
+    "label_number",
     "match_tier",
     "resolve_caption_bridge",
     "resolve_figure_caption_locator",

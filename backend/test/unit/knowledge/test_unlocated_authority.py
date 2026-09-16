@@ -89,10 +89,10 @@ def _patch_unlocated_pipeline(
     async def fake_audit(*_args, **_kwargs):
         return None
 
-    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None, file_ids=None):
         return dict(image_result)
 
-    async def fake_quote_locator(_db, *, question, kb_ids):
+    async def fake_quote_locator(_db, *, question, kb_ids, file_ids=None):
         return dict(quote_result or {"status": "NOT_APPLICABLE", "locator_version": "test"})
 
     monkeypatch.setattr(scope_gateway_module, "query_knowledge_scope_gateway", fake_gateway)

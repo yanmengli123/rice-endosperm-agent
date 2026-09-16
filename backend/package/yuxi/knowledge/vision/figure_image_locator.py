@@ -71,25 +71,29 @@ def _label_key(label: str | None) -> str | None:
     return canonical_figure_label(label)
 
 
-async def build_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]:
-    """查询期 figure index：持久化资产索引优先，旧版本回退锚点读取投影。"""
-    entities = await _persisted_figure_index(db, kb_ids=kb_ids)
+async def build_figure_index(db, *, kb_ids: list[str], file_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    """查询期 figure index：持久化资产索引优先，旧版本回退锚点读取投影。
+    ``file_ids``（文献硬约束）非空时只索引这些文件。"""
+    entities = await _persisted_figure_index(db, kb_ids=kb_ids, file_ids=file_ids)
     if entities:
         return entities
-    return await _anchor_figure_index(db, kb_ids=kb_ids)
+    return await _anchor_figure_index(db, kb_ids=kb_ids, file_ids=file_ids)
 
 
-async def _persisted_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]:
+async def _persisted_figure_index(db, *, kb_ids: list[str], file_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    conditions = [
+        FigureEntityRecord.kb_id.in_(list(kb_ids)[:20]),
+        KnowledgeFile.kb_id == FigureEntityRecord.kb_id,
+        KnowledgeFile.active_parse_revision_id == FigureEntityRecord.parse_revision_id,
+    ]
+    if file_ids:
+        conditions.append(FigureEntityRecord.file_id.in_([str(item) for item in file_ids][:50]))
     rows = (
         await db.execute(
             select(FigureEntityRecord, FigureAssetRecord, KnowledgeFile)
             .join(FigureAssetRecord, FigureAssetRecord.entity_id == FigureEntityRecord.id)
             .join(KnowledgeFile, KnowledgeFile.file_id == FigureEntityRecord.file_id)
-            .where(
-                FigureEntityRecord.kb_id.in_(list(kb_ids)[:20]),
-                KnowledgeFile.kb_id == FigureEntityRecord.kb_id,
-                KnowledgeFile.active_parse_revision_id == FigureEntityRecord.parse_revision_id,
-            )
+            .where(*conditions)
             .order_by(FigureEntityRecord.parse_revision_id, FigureEntityRecord.entity_key)
             .limit(600)
         )
@@ -134,8 +138,17 @@ async def _persisted_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, An
     return list(grouped.values())
 
 
-async def _anchor_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]:
+async def _anchor_figure_index(db, *, kb_ids: list[str], file_ids: list[str] | None = None) -> list[dict[str, Any]]:
     """旧解析版本回退：视觉锚点 + caption span 的读取投影（无资产指纹）。"""
+    conditions = [
+        KnowledgeParseRevision.kb_id.in_(list(kb_ids)[:20]),
+        KnowledgeFile.active_parse_revision_id == EvidenceAnchorRecord.parse_revision_id,
+        KnowledgeFile.kb_id == KnowledgeParseRevision.kb_id,
+        EvidenceAnchorRecord.anchor_type.in_(_IMAGE_ANCHOR_TYPES),
+        EvidenceAnchorRecord.page >= 1,
+    ]
+    if file_ids:
+        conditions.append(KnowledgeParseRevision.file_id.in_([str(item) for item in file_ids][:50]))
     rows = (
         await db.execute(
             select(EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
@@ -144,13 +157,7 @@ async def _anchor_figure_index(db, *, kb_ids: list[str]) -> list[dict[str, Any]]
                 KnowledgeParseRevision.revision_id == EvidenceAnchorRecord.parse_revision_id,
             )
             .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
-            .where(
-                KnowledgeParseRevision.kb_id.in_(list(kb_ids)[:20]),
-                KnowledgeFile.active_parse_revision_id == EvidenceAnchorRecord.parse_revision_id,
-                KnowledgeFile.kb_id == KnowledgeParseRevision.kb_id,
-                EvidenceAnchorRecord.anchor_type.in_(_IMAGE_ANCHOR_TYPES),
-                EvidenceAnchorRecord.page >= 1,
-            )
+            .where(*conditions)
             .order_by(
                 EvidenceAnchorRecord.parse_revision_id,
                 EvidenceAnchorRecord.page,
@@ -581,13 +588,15 @@ async def resolve_figure_image_locator(
     kb_ids: list[str],
     image_bytes: bytes | None = None,
     observation: VisualObservationEnvelope | None = None,
+    file_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """图片定位入口：确定性指纹（V0/V1）优先，视觉观察（V2/V3）最后。
 
     确定性层命中即返回（未配置视觉模型也能完成 SHA/pHash 定位）；两层都
     未决时按观察可用性返回显式失败原因——绝不静默退化为自由回答页码。
+    ``file_ids``：文献硬约束（@doc 提及 / DOI / 文件名解析），非空时只在这些文件的资产里比对。
     """
-    candidates = await build_figure_index(db, kb_ids=kb_ids)
+    candidates = await build_figure_index(db, kb_ids=kb_ids, file_ids=file_ids)
     if not candidates:
         return {
             "status": "NOT_FOUND",

@@ -390,7 +390,9 @@ def _prefilter_tokens(quote_norm: str) -> list[str]:
     return sorted(values, key=lambda value: (-len(value), value))[:_PREFILTER_TOKEN_LIMIT]
 
 
-async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict[str, Any]:
+async def resolve_quote_locator(
+    db, *, question: str, kb_ids: list[str], file_ids: list[str] | None = None
+) -> dict[str, Any]:
     """独立全库定位（也用于补齐冻结证据集的精确召回）。
 
     运行时页码最终仍由 :func:`resolve_quote_locator_from_citations` 从冻结证据
@@ -400,6 +402,7 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
     图表编号问题（Figure 5 / 图S8）优先走 caption span 通道（label 硬约束，
     caption_locator v3）；通道无命中时回退常规引文路径，并在候选过滤中保留
     label 硬约束——编号冲突的锚点（Figure 4 的统计模板题注）直接剔除。
+    ``file_ids``：文献硬约束（@doc 提及 / DOI / 文件名解析），只对题注通道生效。
     """
     intent = detect_locator_intent(question)
     partition_intent = intent.get("partition_intent")
@@ -416,6 +419,7 @@ async def resolve_quote_locator(db, *, question: str, kb_ids: list[str]) -> dict
             figure_label=figure_label,
             quote_text=quote_text,
             kb_ids=kb_ids,
+            file_ids=file_ids,
         )
         if caption_resolution is not None:
             if caption_resolution.get("status") == "VERIFIED":

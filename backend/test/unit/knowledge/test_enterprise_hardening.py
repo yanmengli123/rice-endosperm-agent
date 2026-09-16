@@ -262,7 +262,7 @@ def _patch_text_locator_failure(monkeypatch: pytest.MonkeyPatch, *, citations: l
     async def fake_citations(_db, rows):
         return citations
 
-    async def fake_quote_locator(_db, *, question, kb_ids):
+    async def fake_quote_locator(_db, *, question, kb_ids, file_ids=None):
         return {"status": "NOT_FOUND", "locator_version": "test", "reason": "no_normalized_match"}
 
     monkeypatch.setattr(scope_gateway_module, "query_knowledge_scope_gateway", fake_gateway)
@@ -327,7 +327,7 @@ async def test_g2_verified_text_locator_keeps_citations(monkeypatch: pytest.Monk
     citation = _citation("E1", 15, quote)
     citation.update({"evidence_id": "ev-quote", "_physical_evidence_id": "ev-quote"})
 
-    async def fake_quote_locator(_db, *, question, kb_ids):
+    async def fake_quote_locator(_db, *, question, kb_ids, file_ids=None):
         return {
             "status": "VERIFIED",
             "locator_version": "test",
@@ -446,7 +446,7 @@ async def test_g5_orchestrator_skips_provider_when_not_ready(monkeypatch: pytest
             call_state["describe_called"] = True
             return None
 
-    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None):
+    async def fake_image_locator(_db, *, kb_ids, image_bytes=None, observation=None, file_ids=None):
         if observation is None:
             return {
                 "status": "NOT_FOUND",

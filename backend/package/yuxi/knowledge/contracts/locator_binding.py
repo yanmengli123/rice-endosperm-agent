@@ -90,6 +90,8 @@ class VerifiedLocatorBinding(BaseModel):
     hard_constraints_passed: list[str] = Field(default_factory=list)
     physical_unique: bool = False
     quote_head: str | None = None
+    # 文献作用域审计：本次定位是否受"哪篇文献"硬约束（MENTION / DOI / FILENAME），None = 全范围
+    document_scope: str | None = None
     verification: dict[str, Any] = Field(default_factory=dict)
     backlinks: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -174,6 +176,7 @@ def binding_from_locator_resolution(
         else "UNRESOLVED",
         explanation_grounding=_resolution_explanation_grounding(resolution, status=status),
         quote_head=resolution.get("quote_head"),
+        document_scope=(str(resolution["document_scope"]) if resolution.get("document_scope") else None),
         verification={
             key: value
             for key, value in resolution.items()
