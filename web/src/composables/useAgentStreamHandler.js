@@ -268,13 +268,21 @@ export function useAgentStreamHandler({
         }
         return false
 
-      case 'citation_ready':
+      case 'citation_ready': {
         // Binding is already final and server-verified. Keep the structured
         // fact for diagnostics/UI consumers; never re-resolve it in-browser.
         threadState.verifiedCitation = chunk.citation || null
         // 图卡只接受后端确定性投影（figures 字段缺席 ⟺ 未发布，此时清空）
-        threadState.verifiedFigures = normalizeVerifiedFigures(chunk.figures)
+        const figures = normalizeVerifiedFigures(chunk.figures)
+        threadState.verifiedFigures = figures
+        // 答案气泡内图卡：按 run 暂存（新一轮 resetRunEvidence 不清），让上一条答案的
+        // 图卡在历史回读前不消失
+        const runId = String(chunk.run_id || threadState.activeRunId || '')
+        if (runId && figures.length) {
+          threadState.figuresByRun = { ...(threadState.figuresByRun || {}), [runId]: figures }
+        }
         return false
+      }
 
       case 'finished':
         streamSmoother?.flushThread(threadId)

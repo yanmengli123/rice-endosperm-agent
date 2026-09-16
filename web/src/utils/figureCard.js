@@ -47,6 +47,31 @@ export const normalizeVerifiedFigures = (figures) => {
 const isAssistantMessage = (message) =>
   Boolean(message) && (message.type === 'ai' || message.role === 'assistant')
 
+const lastAssistantMessage = (conv) => {
+  const messages = Array.isArray(conv?.messages) ? conv.messages : []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isAssistantMessage(messages[index])) return messages[index]
+  }
+  return null
+}
+
+/**
+ * 答案气泡内的图卡数据源（消息级附件，不进 Markdown 正文）：
+ * 1. 已落库的实际发布载荷 `extra_metadata.citation_ready.figures`（历史/刷新）；
+ * 2. 本会话内按 run 暂存的实时载荷 `figuresByRun[run_id]`（流结束到历史回读之间的桥）。
+ * 只挂在该轮最后一条 AI 消息上（工具调用中间消息不挂）；非 AI 消息恒为空。
+ */
+export const inlineFiguresForMessage = (message, conv, figuresByRun) => {
+  if (!isAssistantMessage(message)) return []
+  const last = lastAssistantMessage(conv)
+  if (!last || (last !== message && !(last.id && last.id === message.id))) return []
+  const persisted = normalizeVerifiedFigures(message?.extra_metadata?.citation_ready?.figures)
+  if (persisted.length) return persisted
+  const runId = String(message.run_id || message?.extra_metadata?.run_id || '')
+  if (!runId || !figuresByRun || typeof figuresByRun !== 'object') return []
+  return normalizeVerifiedFigures(figuresByRun[runId])
+}
+
 /**
  * 历史恢复：取最后一条 AI 消息的 `extra_metadata.citation_ready`。
  * 最后一条 AI 消息没有该载荷时返回 null（不回退到更早轮次——芯片/图卡表示的是最新一轮）。

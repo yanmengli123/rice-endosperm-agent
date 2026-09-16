@@ -51,6 +51,15 @@
         class="message-md"
       />
 
+      <!-- 已验证定位的论文原图：消息级附件，与状态面板同源（citation_ready.figures），不进 Markdown 正文 -->
+      <FigureCardGroup
+        v-if="figures && figures.length"
+        class="message-figure-cards"
+        :figures="figures"
+        :evidence-ids="evidenceIdSet"
+        @open-source="emit('openFigureSource', $event)"
+      />
+
       <!-- 错误提示块 -->
       <div v-if="displayError" class="error-hint">
         <span v-if="getErrorMessage">{{ getErrorMessage }}</span>
@@ -160,6 +169,7 @@ import { MessageProcessor } from '@/utils/messageProcessor'
 import { inferImageMimeTypeFromBase64, normalizeAttachmentPreviews } from '@/utils/file_utils'
 import { buildMentionDisplayLabels } from '@/utils/mention_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
+import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 
 const props = defineProps({
@@ -196,6 +206,16 @@ const props = defineProps({
     type: Object,
     default: () => null
   },
+  // 已验证定位的论文原图（消息级附件；数据只来自后端 citation_ready，不进 Markdown 正文）
+  figures: {
+    type: Array,
+    default: () => []
+  },
+  // 可跳转原文的 evidence_id 集合（Set）；缺失即不显示「查看原文」
+  evidenceIdSet: {
+    type: Object,
+    default: null
+  },
   // 是否显示调试信息 (已废弃，使用 infoStore.debugMode)
   debugMode: {
     type: Boolean,
@@ -203,7 +223,13 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['retry', 'retryStoppedMessage', 'openRefs', 'openStatus'])
+const emit = defineEmits([
+  'retry',
+  'retryStoppedMessage',
+  'openRefs',
+  'openStatus',
+  'openFigureSource'
+])
 
 // 图片全屏预览
 const imagePreview = ref({ visible: false, src: '', alt: '' })
@@ -646,6 +672,10 @@ const parsedData = computed(() => {
     object-fit: contain;
     cursor: pointer;
   }
+}
+
+.message-figure-cards {
+  margin: 10px 0 4px;
 }
 
 .message-md {

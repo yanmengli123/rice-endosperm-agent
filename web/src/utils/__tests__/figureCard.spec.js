@@ -4,6 +4,7 @@ import {
   extractCitationReadyFromHistory,
   figureAssetUri,
   figureCardTitle,
+  inlineFiguresForMessage,
   normalizeVerifiedFigures
 } from '../figureCard.js'
 
@@ -82,6 +83,38 @@ const run = () => {
   assert.equal(extractCitationReadyFromHistory(noPayload), null)
   assert.equal(extractCitationReadyFromHistory([]), null)
   assert.equal(extractCitationReadyFromHistory(undefined), null)
+
+  // 答案气泡内图卡：只挂该轮最后一条 AI 消息；已落库载荷优先；否则按 run_id 取本会话暂存
+  const human = { type: 'human', content: 'Figure 1 在哪' }
+  const toolAi = { type: 'ai', id: 'ai-tool', run_id: 'run-1', tool_calls: [{ name: 'search' }] }
+  const finalAi = {
+    type: 'ai',
+    id: 'ai-final',
+    run_id: 'run-1',
+    extra_metadata: { run_id: 'run-1' }
+  }
+  const conv = { messages: [human, toolAi, finalAi], status: 'finished' }
+  const figuresByRun = { 'run-1': [figure] }
+  assert.deepEqual(inlineFiguresForMessage(finalAi, conv, figuresByRun), [figure])
+  assert.deepEqual(inlineFiguresForMessage(toolAi, conv, figuresByRun), []) // 中间消息不挂
+  assert.deepEqual(inlineFiguresForMessage(human, conv, figuresByRun), [])
+  assert.deepEqual(inlineFiguresForMessage(finalAi, conv, {}), []) // 无暂存、无落库 → 空
+  const persistedAi = {
+    type: 'ai',
+    id: 'ai-p',
+    run_id: 'run-2',
+    extra_metadata: {
+      citation_ready: { citation: {}, figures: [{ ...figure, caption: 'persisted' }] }
+    }
+  }
+  const conv2 = { messages: [human, persistedAi] }
+  // 已落库优先于暂存
+  assert.equal(
+    inlineFiguresForMessage(persistedAi, conv2, { 'run-2': [figure] })[0].caption,
+    'persisted'
+  )
+  // 同 id 的副本对象也能命中（displayItem 可能是拷贝）
+  assert.deepEqual(inlineFiguresForMessage({ ...finalAi }, conv, figuresByRun), [figure])
 
   console.log('figureCard: all assertions passed')
 }

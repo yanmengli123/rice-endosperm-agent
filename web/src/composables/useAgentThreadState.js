@@ -46,7 +46,10 @@ export function useAgentThreadState({
         sourceManifest: null,
         verifiedCitation: null,
         // 本轮已发布的论文原图投影（citation_ready.figures）；字段缺席 ⟺ 未发布
-        verifiedFigures: []
+        verifiedFigures: [],
+        // 答案气泡内图卡的会话级暂存：run_id → figures（线程生命周期内不随新一轮重置，
+        // 桥接"流结束 → 历史回读"之间；历史回读后以消息 extra_metadata.citation_ready 为准）
+        figuresByRun: {}
       }
     }
     return chatState.threadStates[threadId]

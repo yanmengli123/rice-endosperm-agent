@@ -80,7 +80,10 @@
                     :show-refs="showMsgRefs(displayItem.message, row.conv)"
                     :hide-tool-calls="true"
                     :mention="mentionConfig"
+                    :figures="inlineFigures(displayItem.message, row.conv)"
+                    :evidence-id-set="displayedEvidenceIdSet"
                     @openStatus="handleOpenMessageStatus"
+                    @openFigureSource="openFigureSource"
                     @retry="retryMessage(displayItem.message)"
                   >
                   </AgentMessageComponent>
@@ -746,7 +749,7 @@ import { useRunStatusArchive } from '@/composables/useRunStatusArchive'
 import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
-import { extractCitationReadyFromHistory } from '@/utils/figureCard'
+import { extractCitationReadyFromHistory, inlineFiguresForMessage } from '@/utils/figureCard'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
@@ -1260,6 +1263,9 @@ const currentVerifiedFigures = computed(() => {
     : null
   return Array.isArray(figures) ? figures : []
 })
+// 答案气泡内图卡（消息级附件）：已落库载荷优先，其次本会话按 run 暂存；只挂该轮最后一条 AI 消息
+const inlineFigures = (message, conv) =>
+  inlineFiguresForMessage(message, conv, currentThreadState.value?.figuresByRun)
 const hasCurrentEvidenceProjection = computed(() => {
   const threadState = currentChatId.value ? chatState.threadStates[currentChatId.value] : null
   if (!threadState?.evidenceRunId) return false
