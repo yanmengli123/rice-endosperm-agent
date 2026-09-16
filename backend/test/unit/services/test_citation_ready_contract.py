@@ -32,7 +32,7 @@ _FIGURE = {
     "caption": "Figure 1. Expression patterns.",
     "width": 800,
     "height": 600,
-    "selection": {"asset_count": 1, "rule": "anchor_desc_sha_desc_id_asc"},
+    "selection": {"asset_count": 1, "rule": "primary_first_then_reading_order"},
 }
 
 _LOCATOR = {
