@@ -158,7 +158,12 @@ def decompose_question_intents(question: str) -> dict[str, Any]:
     保障定位行与引用芯片。纯函数。
     """
     source = str(question or "")
-    if not _LOCATOR_KEYWORDS.search(source):
+    has_locator_keyword = bool(_LOCATOR_KEYWORDS.search(source))
+    # P0-A 见编号即定位：问题里出现图表编号（Figure 4 / 图3 / Table 2 …）时，无论动词是
+    # "给我展示出来 / 在哪页 / 是什么意思"，一律进入 FIGURE_LOCATOR——展示与定位由后端
+    # 确定性链路回答并出原图卡，模型永远不回答"能不能展示图片"这类能力问题。
+    forced_figure_label = None if has_locator_keyword else extract_figure_label(source)
+    if not has_locator_keyword and not forced_figure_label:
         return {
             "kind": LOCATOR_INTENT_NONE,
             "quote_text": None,
@@ -182,7 +187,13 @@ def decompose_question_intents(question: str) -> dict[str, Any]:
     # （Bar, 1.0 cm / ANOVA / Tukey）即使更长也排在含基因符号的段之后。
     candidates = select_quote_candidates(remainder)
     quote_text = candidates[0] if candidates else None
-    if quote_text and len(normalize_for_match(quote_text)) >= _QUOTE_MIN_NORMALIZED_CHARS:
+    if not has_locator_keyword:
+        # 展示/解读类（无定位词）：编号意图优先，忽略引文候选——"文献的Figure 4给我展示出来"
+        # 这类问法里的文献名片段不得被当成待定位原句
+        kind = LOCATOR_KIND_FIGURE
+        figure_label = forced_figure_label
+        quote_text = None
+    elif quote_text and len(normalize_for_match(quote_text)) >= _QUOTE_MIN_NORMALIZED_CHARS:
         kind = LOCATOR_KIND_QUOTE
     elif figure_label:
         kind = LOCATOR_KIND_FIGURE

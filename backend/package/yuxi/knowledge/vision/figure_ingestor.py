@@ -43,7 +43,7 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils import logger
 
-FIGURE_INGESTOR_VERSION = "figure_ingestor_v4"
+FIGURE_INGESTOR_VERSION = "figure_ingestor_v4_1"
 
 # 与 ScientificPdfPipeline engine_params 一致（图片上传的目标 bucket）
 FIGURE_ASSET_BUCKET = "knowledgebases"
@@ -273,6 +273,95 @@ def _panel_letter_count(caption: str) -> int:
     return len({match.lower() for match in _PANEL_LETTER.findall(str(caption or ""))})
 
 
+def _label_number(label_key: str | None) -> int | None:
+    match = re.search(r"(\d+)", str(label_key or ""))
+    return int(match.group(1)) if match else None
+
+
+def _min_y0(members: list[dict[str, Any]]) -> float:
+    values = [block["bbox"][1] for block in members if block["bbox"] is not None]
+    return min(values) if values else float("inf")
+
+
+def _bind_orphan_captions(
+    groups: list[tuple[str | None, list[dict[str, Any]]]],
+    *,
+    span_by_label: dict[str, Any],
+    anchors: list[Any],
+    summary: dict[str, Any],
+) -> list[tuple[str | None, list[dict[str, Any]]]]:
+    """题注 span 反向绑定（v4.1，ADR-0004 §11）。
+
+    修复"题注压在上一页页脚（MinerU 判 footer）、图块在下一页顶部且自身无 caption 文本"
+    的跨页断链（实测：OsMYB73 Figure 4 题注第 8 页 footer、图块第 9 页）。规则（全确定性）：
+
+    - 候选 = 未被任何有 label 图组认领的题注 span；
+    - 同页（span 页 == 簇页）：按题注锚点 bbox 与簇的间隙取最近；
+    - 跨页（span 页 == 簇页 - 1）：要求簇是该页**最靠上**的无 label 簇，且编号与两侧
+      有 label 图组单调（存在编号更小、页码 ≤ span 页的图组，和编号更大、页码 ≥ 簇页的图组）；
+    - 多候选打平（同分）→ 保持无 label（失败关闭），summary 计数审计。
+    """
+    anchor_bbox_by_id = {str(getattr(a, "anchor_id", "") or ""): _anchor_bbox(a) for a in anchors or []}
+    labeled: list[tuple[int | None, int | None]] = [
+        (_label_number(key), min((b["page"] for b in members), default=None)) for key, members in groups if key
+    ]
+    claimed = {key for key, _ in groups if key}
+    unassigned_clusters = [members for key, members in groups if not key]
+    topmost_by_page: dict[int, list[dict[str, Any]]] = {}
+    for members in unassigned_clusters:
+        page = min((b["page"] for b in members), default=None)
+        if page is None:
+            continue
+        current = topmost_by_page.get(page)
+        if current is None or _min_y0(members) < _min_y0(current):
+            topmost_by_page[page] = members
+
+    bound: list[tuple[str | None, list[dict[str, Any]]]] = []
+    for key, members in groups:
+        if key:
+            bound.append((key, members))
+            continue
+        page = min((b["page"] for b in members), default=None)
+        best: tuple[tuple[int, float], str, Any] | None = None
+        ties = 0
+        for label_key, span in span_by_label.items():
+            if label_key in claimed or page is None:
+                continue
+            span_page = span.page_number if isinstance(span.page_number, int) and span.page_number >= 1 else None
+            if span_page is None:
+                continue
+            page_distance = 0 if span_page == page else (1 if span_page == page - 1 else None)
+            if page_distance is None:
+                continue
+            if page_distance == 1:
+                if topmost_by_page.get(page) is not members:
+                    continue
+                number = _label_number(label_key)
+                if number is None:
+                    continue
+                has_below = any(n is not None and n < number and p is not None and p <= span_page for n, p in labeled)
+                has_above = any(n is not None and n > number and p is not None and p >= page for n, p in labeled)
+                if not (has_below and has_above):
+                    continue
+            anchor_box = anchor_bbox_by_id.get(str(getattr(span, "anchor_id", "") or ""))
+            gaps = [
+                _bbox_gap(b["bbox"], anchor_box) for b in members if b["bbox"] is not None and anchor_box is not None
+            ] or [0.0]
+            score = (page_distance, min(gaps))
+            if best is None or score < best[0]:
+                best = (score, label_key, span)
+                ties = 1
+            elif score == best[0]:
+                ties += 1
+        if best is not None and ties == 1:
+            summary["caption_span_linked_clusters"] = summary.get("caption_span_linked_clusters", 0) + 1
+            bound.append((best[1], members))
+            claimed.add(best[1])  # 一个题注 span 只绑一个簇，后续簇不得重复认领
+        else:
+            bound.append((None, members))
+    return bound
+
+
 # ---- 合成整图（有原 PDF 时按图组 bbox 并集渲染）----
 
 
@@ -342,6 +431,7 @@ async def persist_figure_index(
         "synthetic_primary": 0,
         "synthetic_failures": 0,
         "partial_figure_suspected": 0,
+        "caption_span_linked_clusters": 0,
     }
     if not visual_assets:
         return summary
@@ -426,6 +516,7 @@ async def persist_figure_index(
         )
 
     groups = group_visual_blocks(blocks)
+    groups = _bind_orphan_captions(groups, span_by_label=span_by_label, anchors=anchors, summary=summary)
     summary["entities"] = len(groups)
     summary["merged_unlabeled_blocks"] = sum(1 for block in blocks if block.get("merged_into_label"))
     tenant_id = int(revision.tenant_id)
@@ -434,9 +525,19 @@ async def persist_figure_index(
         captioned = [block for block in members if block["caption"]]
         labeled = [block for block in members if block["label_key"]]
         head = labeled[0] if labeled else (captioned[0] if captioned else members[0])
-        caption = head["caption"]
-        entity_key = label_key or f"asset:{head['img_path'] or head['block_id']}"
         span = span_by_label.get(label_key) if label_key else None
+        # 反向绑定的簇自身无 caption 文本——题注与页码以 span 为准（跨页时题注页 ≠ 图页）
+        caption = head["caption"] or (str(span.quote or "") if span is not None else "")
+        entity_key = label_key or f"asset:{head['img_path'] or head['block_id']}"
+        caption_page = (
+            (
+                int(span.page_number)
+                if span is not None and isinstance(span.page_number, int) and span.page_number >= 1
+                else None
+            )
+            or int(head["page"] or 0)
+            or None
+        )
         entity_row = FigureEntityRecord(
             tenant_id=tenant_id,
             parse_revision_id=revision_id,
@@ -448,12 +549,16 @@ async def persist_figure_index(
             entity_key=entity_key,
             container_label=extract_figure_label(caption) if caption else None,
             caption=caption or None,
-            caption_page=int(head["page"] or 0) or None,
+            caption_page=caption_page,
             caption_anchor_id=str(span.anchor_id) if span is not None and span.anchor_id else None,
             caption_span_id=str(span.span_id) if span is not None else None,
             caption_span_evidence_id=str(span.evidence_id) if span is not None else None,
             document_partition=str(span.document_partition if span is not None else "UNKNOWN"),
-            association_method="span_linkage" if span is not None and span.anchor_id else "block_pairing",
+            association_method=(
+                "span_linkage"
+                if span is not None and span.anchor_id
+                else ("caption_span_linkage" if span is not None else "block_pairing")
+            ),
             asset_count=len(members),
         )
         session.add(entity_row)

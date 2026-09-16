@@ -395,7 +395,9 @@ def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
         and authoritative_locator is not None
     )
     if locator_authorized:
-        return f"已可靠定位到原文：{render_locator_chip(authoritative_locator)}"
+        figure_label = str(locator.get("container_label") or "").strip()
+        prefix = f"已定位 {figure_label}：" if figure_label else "已可靠定位到原文："
+        return f"{prefix}{render_locator_chip(authoritative_locator)}"
     if status == "MULTIPLE_MATCHES":
         documents = _candidate_documents(locator, policy)
         if len(documents) > 1:

@@ -105,6 +105,8 @@ class PublishableFigure(BaseModel):
     role: str = "panel"
     group_index: int = 0
     panel_label: str = ""
+    # 资产自身所在页（跨页图表：题注页 == page/Binding，图页 == asset_page；相同则只显示一个）
+    asset_page: int = 0
     selection: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -267,6 +269,7 @@ async def project_publishable_figures(
                 role=str(getattr(member, "role", "") or "panel"),
                 group_index=int(getattr(member, "group_index", 0) or 0),
                 panel_label=str(getattr(member, "panel_label", "") or ""),
+                asset_page=int(getattr(member, "page", 0) or 0),
                 selection={"asset_count": len(ordered), "rule": _SELECTION_RULE},
             )
         )

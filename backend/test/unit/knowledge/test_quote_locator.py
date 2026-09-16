@@ -322,3 +322,35 @@ def test_evidence_set_locator_requires_replayable_span_lineage():
 
     assert resolution["status"] == "NOT_FOUND"
     assert "page" not in resolution
+
+
+# ---- P0-A：见编号即定位（展示类零 LLM；解读类 compound）----
+
+
+@pytest.mark.parametrize(
+    "question,compound",
+    [
+        ("Figure 4给我展示出来", False),
+        ("展示 Figure 4", False),
+        ("给我看 Figure 4 的图", False),
+        ("把 Figure 4 的原图显示出来", False),
+        ("文献的Figure 4给我展示出来", False),
+        ("图3 展示一下", False),
+        ("Table 2 显示", False),
+        ("Figure 4 是什么意思", True),
+        ("Figure S2 给我看看，再解释一下含义", True),
+    ],
+)
+def test_figure_display_intent_routes_to_figure_locator(question, compound):
+    """问题里出现图表编号即 FIGURE_LOCATOR：展示/解读动词只决定复合与否，
+    模型永远不回答"能不能展示图片"。"""
+    intent = detect_locator_intent(question)
+    assert intent["kind"] == "FIGURE_LOCATOR"
+    assert intent["figure_label"]
+    assert intent["quote_text"] is None  # 文献名片段不得被当成待定位原句
+    assert intent["compound"] is compound
+
+
+def test_no_figure_no_locator_still_none():
+    assert detect_locator_intent("今天天气怎么样")["kind"] is None
+    assert detect_locator_intent("帮我总结这篇文献的方法")["kind"] is None

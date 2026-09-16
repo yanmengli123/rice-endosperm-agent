@@ -314,3 +314,136 @@ async def test_v4_without_pdf_promotes_largest_panel_and_keeps_far_block_separat
     assert by_path["images/a.jpg"].role == ROLE_PRIMARY and by_path["images/k.jpg"].role == ROLE_PANEL
     assert sum(1 for row in rows if row.entity_id == entities["figure 2"].id and row.role == ROLE_PRIMARY) == 1
     assert by_path["images/b.jpg"].role == ROLE_PRIMARY  # 单块无 label 实体自身即 primary
+
+
+# ---- v4.1：题注 span 反向绑定（跨页页脚断链修复）----
+
+
+def _ns_span(label, page, anchor_id):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        container_label=label,
+        quote=f"{label} Yeast two-hybrid and one-hybrid assays of rice transcription factor.",
+        page_number=page,
+        anchor_id=anchor_id,
+        span_id=f"es_{label.replace(' ', '_')}",
+        evidence_id=f"evs_{label.replace(' ', '_')}",
+        document_partition="MAIN_TEXT",
+    )
+
+
+def _ns_anchor(anchor_id, bbox):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(anchor_id=anchor_id, bbox=list(bbox), fragments=None)
+
+
+def test_bind_orphan_captions_cross_page_footer_with_monotonic_guard():
+    from yuxi.knowledge.vision.figure_ingestor import _bind_orphan_captions
+
+    groups = [
+        ("figure 3", [_block("f3.jpg", 7, (72, 72, 300, 300), "Figure 3 A")]),
+        ("figure 5", [_block("f5.jpg", 10, (72, 72, 300, 300), "Figure 5 B")]),
+        (None, [_block("top9.jpg", 9, (72, 60, 300, 200))]),  # 下一页最靠上 → 应绑 Figure 4
+        (None, [_block("far9.jpg", 9, (72, 600, 300, 760))]),  # 非最靠上 → 保持无 label
+    ]
+    span_by_label = {
+        "figure 3": _ns_span("Figure 3", 7, "ea_f3"),
+        "figure 4": _ns_span("Figure 4", 8, "ea_f4"),
+        "figure 5": _ns_span("Figure 5", 10, "ea_f5"),
+    }
+    summary: dict = {}
+    bound = _bind_orphan_captions(
+        groups, span_by_label=span_by_label, anchors=[_ns_anchor("ea_f4", (60, 700, 520, 760))], summary=summary
+    )
+    keys = {id(members): key for key, members in bound}
+    assert keys[id(groups[2][1])] == "figure 4"  # 顶部簇绑上题注
+    assert keys[id(groups[3][1])] is None  # 非顶部簇失败关闭
+    assert summary["caption_span_linked_clusters"] == 1
+
+
+def test_bind_orphan_captions_same_page_nearest_and_tie_fails_closed():
+    from yuxi.knowledge.vision.figure_ingestor import _bind_orphan_captions
+
+    groups = [
+        (None, [_block("a.jpg", 5, (72, 60, 300, 200))]),
+        (None, [_block("b.jpg", 5, (72, 500, 300, 640))]),
+    ]
+    span_by_label = {
+        "figure 9": _ns_span("Figure 9", 5, "ea_f9"),
+    }
+    summary: dict = {}
+    bound = _bind_orphan_captions(
+        groups, span_by_label=span_by_label, anchors=[_ns_anchor("ea_f9", (60, 220, 520, 300))], summary=summary
+    )
+    keys = {id(members): key for key, members in bound}
+    assert keys[id(groups[0][1])] == "figure 9"  # 同页最近（题注在顶部簇下方 20pt）
+    assert keys[id(groups[1][1])] is None
+
+    # 同分打平：两个未认领题注到簇的 (页距, bbox 距离) 完全一致 → 失败关闭。
+    # 注意 dict 迭代顺序：先入者更优（score < 才更新），同分 ties+=1 → 保持无 label
+    tie_span_by_label = {
+        "figure 9": _ns_span("Figure 9", 5, "ea_f9a"),
+        "figure 10": _ns_span("Figure 10", 5, "ea_f9b"),
+    }
+    bound2 = _bind_orphan_captions(
+        [(None, [_block("c.jpg", 5, (72, 60, 300, 200))])],
+        span_by_label=tie_span_by_label,
+        anchors=[_ns_anchor("ea_f9a", (60, 220, 520, 300)), _ns_anchor("ea_f9b", (60, 220, 520, 300))],
+        summary={},
+    )
+    assert bound2[0][0] is None  # 同分歧义 → 失败关闭
+
+
+@pytest.mark.asyncio
+async def test_v41_reverse_binding_creates_labeled_entity_with_caption_page(v4_session):
+    session, _uploads = v4_session
+    revision = (await session.execute(select(KnowledgeParseRevision))).scalars().one()
+    span4 = EvidenceSpanRecord(
+        id=9,
+        tenant_id=1,
+        parse_revision_id="spr_v4",
+        kb_id="kb-a",
+        file_id="file_v4",
+        span_id="es_fig4",
+        anchor_id="ea_fig4_footer",
+        sentence_index=0,
+        quote="Figure 4 Yeast two-hybrid and one-hybrid assays of OsMYB73.",
+        quote_hash=hashlib.sha256(b"fig4").hexdigest(),
+        page_number=8,
+        evidence_type="caption",
+        document_partition="MAIN_TEXT",
+        partition_confidence=1.0,
+        evidence_id="evs_fig4",
+        container_label="Figure 4",
+    )
+    footer_anchor = _anchor(9, 8, (60, 700, 520, 760), "Figure 4 Yeast two-hybrid")
+    labeled_assets = [
+        {"kind": "figure", "img_path": "images/f3.jpg", "page": 7, "bbox": [72, 72, 300, 300], "caption": "Figure 3 A"},
+        {
+            "kind": "figure",
+            "img_path": "images/f5.jpg",
+            "page": 10,
+            "bbox": [72, 72, 300, 300],
+            "caption": "Figure 5 B",
+        },
+        # Figure 4 的图块在第 9 页顶部，自身无 caption 文本（题注压在上一页页脚）
+        {"kind": "figure", "img_path": "images/f4a.jpg", "page": 9, "bbox": [72, 60, 540, 300], "caption": ""},
+        {"kind": "figure", "img_path": "images/f4b.jpg", "page": 9, "bbox": [72, 320, 540, 560], "caption": ""},
+    ]
+    summary = await persist_figure_index(
+        session, revision=revision, article_assets=labeled_assets, spans=[span4], anchors=[footer_anchor]
+    )
+    await session.flush()
+    assert summary["caption_span_linked_clusters"] == 1
+    entities = {row.entity_key: row for row in (await session.execute(select(FigureEntityRecord))).scalars().all()}
+    fig4 = entities["figure 4"]
+    assert fig4.caption_anchor_id == "ea_fig4_footer"
+    assert fig4.caption_page == 8  # 题注页（跨页：图在第 9 页）
+    assert fig4.association_method == "span_linkage"
+    assert fig4.caption.startswith("Figure 4 Yeast")
+    rows = (
+        (await session.execute(select(FigureAssetRecord).where(FigureAssetRecord.entity_id == fig4.id))).scalars().all()
+    )
+    assert sorted(row.page for row in rows) == [9, 9]  # 资产页 = 图页

@@ -22,7 +22,10 @@
     <div class="figure-card__body">
       <div class="figure-card__title" :title="title">{{ title }}</div>
       <div class="figure-card__meta">
-        <span>第{{ figure.page }}页</span>
+        <span v-if="figure.asset_page && figure.asset_page !== figure.page">
+          题注第{{ figure.page }}页 · 图第{{ figure.asset_page }}页
+        </span>
+        <span v-else>第{{ figure.page }}页</span>
         <span v-if="figure.panel_match">· panel {{ figure.panel_match }}</span>
       </div>
       <button

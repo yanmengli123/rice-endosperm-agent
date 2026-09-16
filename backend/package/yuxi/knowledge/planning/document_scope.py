@@ -34,8 +34,9 @@ CHANNEL_MENTION = "MENTION"
 CHANNEL_DOI = "DOI"
 CHANNEL_FILENAME = "FILENAME"
 
-# 与 web/src/utils/mention_utils.js 的 mentionTokenRegex 同一语法（仅 doc 类型）
-_DOC_MENTION = re.compile(r'@doc:(?:"((?:\\.|[^"\\])*)"|(\S+))')
+# 与 web/src/utils/mention_utils.js 的 mentionTokenRegex 同一语法；@knowledge 是知识库提及
+# （只剥离、不作文件约束），@doc 是文献提及（值进入 file_ids 硬约束）
+_SCOPE_MENTION = re.compile(r'@(doc|knowledge):(?:"((?:\\.|[^"\\])*)"|(\S+))')
 _DOI = re.compile(r"\b10\.\d{4,9}/[^\s\"'<>，。；；)\]]+", re.IGNORECASE)
 _QUOTED = re.compile(r"[\"“「『]([^\"”」』]{4,160})[\"”」』]")
 _PDF_TOKEN = re.compile(r"[^\s\"“”「」『』]+\.pdf\b", re.IGNORECASE)
@@ -77,15 +78,18 @@ def _unquote(value: str) -> str:
 
 
 def extract_document_mentions(question: str) -> tuple[str, list[str]]:
-    """抽出 ``@doc`` 提及值并从问题中剥离 token（剥离后的文本供定位意图/引文抽取使用）。"""
+    """抽出 ``@doc`` 提及值并从问题中剥离 scope 提及 token（含 ``@knowledge``，其值不作文件约束）——
+    剥离后的文本供定位意图/引文抽取使用，避免知识库引号名被当成待定位原句或文件名提示。"""
     text = str(question or "")
     values: list[str] = []
-    for match in _DOC_MENTION.finditer(text):
-        raw = match.group(1) if match.group(1) is not None else match.group(2)
+    for match in _SCOPE_MENTION.finditer(text):
+        if match.group(1) != "doc":
+            continue
+        raw = match.group(2) if match.group(2) is not None else match.group(3)
         value = _unquote(raw or "").strip()
         if value:
             values.append(value)
-    clean = re.sub(r"\s{2,}", " ", _DOC_MENTION.sub(" ", text)).strip()
+    clean = re.sub(r"\s{2,}", " ", _SCOPE_MENTION.sub(" ", text)).strip()
     return clean, values
 
 
