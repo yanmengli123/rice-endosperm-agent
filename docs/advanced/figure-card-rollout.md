@@ -156,9 +156,9 @@ trace 事件 `knowledge.figure_projection.attached` 落库；页面历史恢复�
 
 图卡改动应单独成 PR，避免与其他工作混入扩大回滚面：
 
-- 后端：`knowledge/contracts/figure_asset_projection.py`、`knowledge/orchestration/retrieval_orchestrator.py`、`services/chat_service.py`、`services/agent_run_service.py`、`config/app.py`、`trace/protocol.py`
+- 后端：`knowledge/contracts/figure_asset_projection.py`、`knowledge/orchestration/retrieval_orchestrator.py`、`services/chat_service.py`、`services/agent_run_service.py`、`config/app.py`、`trace/protocol.py`；文献限定：`knowledge/planning/document_scope.py`、`knowledge/evidence/caption_locator.py`、`knowledge/evidence/quote_locator.py`、`knowledge/vision/figure_image_locator.py`、`knowledge/contracts/locator_binding.py`、`knowledge/pdf_evidence/grobid.py`、`knowledge/pdf_evidence/pipeline.py`、`server/routers/mention_router.py`
 - 测试：`test/unit/knowledge/test_figure_asset_projection.py`、`test/unit/services/test_citation_ready_contract.py`、`test/unit/services/test_agent_run_service.py`
-- 前端：`utils/figureCard.js`、`utils/__tests__/figureCard.spec.js`、`components/evidence/FigureCard.vue`、`components/evidence/FigureCardGroup.vue`、`composables/useAgentStreamHandler.js`、`composables/useAgentThreadState.js`、`components/AgentChatComponent.vue`、`components/AgentMessageComponent.vue`、`components/BasicSettingsSection.vue`
+- 前端：`utils/figureCard.js`、`utils/__tests__/figureCard.spec.js`、`components/evidence/FigureCard.vue`、`components/evidence/FigureCardGroup.vue`、`composables/useAgentStreamHandler.js`、`composables/useAgentThreadState.js`、`components/AgentChatComponent.vue`、`components/AgentMessageComponent.vue`、`components/BasicSettingsSection.vue`；文献限定：`utils/mention_utils.js`、`apis/mention_api.js`、`components/MessageInputComponent.vue`
 - 文档：`docs/adr/adr-0004-figure-card-projection.md`、本文、`docs/.vitepress/config.mts`
 
 桌面端（rice-endosperm-desktop）零改动：SSE 帧动态解析、未消费 `citation_ready`，本次为纯加法字段（ADR-0004 §7 为协议变更记录）。
@@ -166,3 +166,60 @@ trace 事件 `knowledge.figure_projection.attached` 落库；页面历史恢复�
 ## 9. Phase 1 冻结清单
 
 不给模型 `figure_image` draft block；不做正文内联回填与多图轮播；不上图注向量 RAG；不做「无编号瞎猜也出图」；不把 FigureCard 注册为知识产品。
+
+## 10. 适配全部入库 PDF：图表就绪报表与存量补跑 SOP
+
+图卡对**任何**走过科研 PDF 证据流水线的 PDF 通用；覆盖面由入库决定。文件级就绪标签：
+
+```sql
+-- SQL-5 图表就绪覆盖（按文件）：FIGURE_READY 才能出图；LEGACY_NO_REVISION 需补跑；TEXT_ONLY 永远无图
+SELECT f.kb_id, f.file_id, left(f.filename, 60) AS filename,
+       CASE WHEN f.active_parse_revision_id IS NULL THEN 'LEGACY_NO_REVISION'
+            WHEN coalesce((r.qa_report->'figure_index'->>'locator_ready_assets')::int, 0) > 0 THEN 'FIGURE_READY'
+            WHEN f.evidence_status = 'INDEXED_TEXT_ONLY' THEN 'TEXT_ONLY'
+            ELSE 'REVISION_NO_FIGURES' END AS readiness,
+       coalesce((r.qa_report->'figure_index'->>'locator_ready_assets')::int, 0) AS locator_ready_assets,
+       left(coalesce(r.qa_report->'mineru'->>'error', ''), 80) AS mineru_error
+FROM knowledge_files f
+LEFT JOIN knowledge_parse_revisions r ON r.revision_id = f.active_parse_revision_id
+WHERE lower(f.filename) LIKE '%.pdf' AND coalesce(f.is_folder, false) = false
+ORDER BY readiness, f.kb_id, f.filename;
+```
+
+存量补跑（管理员）：对 `LEGACY_NO_REVISION` 逐个调用
+`POST /api/knowledge/databases/{kb_id}/documents/{file_id}/evidence-retry`（返回 `PENDING`；同 sha 的
+文件在其他库会命中身份缓存 `WAITING_CACHE`），然后重跑 SQL-5。新上传一律走 `academic` 预设 +
+`pdf_evidence_pipeline=true`（`POST /databases/{kb_id}/documents` 的 `params`）。
+
+**环境前置（2026-09-16 实测阻塞，均非代码问题）**：
+
+- MinerU 官方 API 处理成功后，结果包从 `cdn-mineru.openxlab.org.cn` 下载在 worker 容器内 SSL EOF 失败
+  → 全部退化 `INDEXED_TEXT_ONLY`（`qa_report.mineru.error` 可查）。worker 只配了 `no_proxy`，需为其配置
+  出网代理（`HTTPS_PROXY`）后重跑；
+- MinIO `XMinioStorageFull`（本机存储触底）会让上传直接 500，补跑前先确认对象存储余量。
+
+## 11. 问"哪篇文献的 Figure N"：三条确定性通道
+
+| 用法 | 通道 | 行为 |
+|---|---|---|
+| 输入 `@` → 「文献」分组选文档 | `@doc:"file_id"`（MENTION） | 定位只在该文献内裁决；编辑器/气泡显示文件名 |
+| 问题里带 DOI（`10.1002/fes3.354`） | DOI | 匹配文件名 `10.1002_fes3.354` 写法或 `qa_report.bibliography.doi` |
+| 引号包裹标题/文件名片段、`xxx.pdf` | FILENAME | 归一化包含匹配文件名 / 题录标题；片段消费后从定位文本剥离 |
+| 不带任何文献引用 | NONE | 全范围裁决；跨文献同编号 → `MULTIPLE_MATCHES` + 候选文献清单（只列文档身份），状态面板出现可点选芯片，一键以 `@doc` 重问 |
+
+审计：`knowledge_retrieval_runs.locator_resolution_json->>'document_scope'` 与
+`->'binding'->>'document_scope'`；trace `knowledge.document_scope.resolved|ambiguous|unresolved`：
+
+```sql
+-- SQL-6 文献解析唯一率 / 跨文献歧义率
+SELECT event_type, attributes->>'channel' AS channel, count(*)
+FROM agent_run_trace_events
+WHERE event_type LIKE 'knowledge.document_scope.%' AND occurred_at > now() - interval '7 days'
+GROUP BY 1, 2 ORDER BY 1, 2;
+```
+
+开发环境实测（2026-09-16）：`@doc:"file_708e44" Figure 1 在哪页` → VERIFIED + 原图，Binding.document_scope=MENTION；
+`@doc:"<无图文献>" Figure 1 在哪页` → NOT_FOUND（硬约束确实排除了另一篇）；
+`“Plant Biotechnology Journal - 2024 - Liu” 这篇的 Figure 1 在哪页` → FILENAME 通道 VERIFIED + 原图；
+`Fig. 1 在哪页` → VERIFIED（缩写预过滤修复）。跨文献 `MULTIPLE_MATCHES` + 候选清单由单测
+（`test_document_scope.py`）以真实 SQL 语义覆盖，线上复现需第二篇图表就绪 PDF（见第 10 节环境前置）。

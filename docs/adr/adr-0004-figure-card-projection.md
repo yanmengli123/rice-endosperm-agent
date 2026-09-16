@@ -128,6 +128,43 @@ kill-switch 关闭演练成功；G1–G9 + 双路径持久化测试全绿。
 - 多资产实体的确定性选择（anchor 优先 > sha 优先 > id 升序）是启发式，
   `selection` 观测字段为 Phase 2 轮播/人工核验预留；
 - `_persisted_figure_index` 的 limit 600 / kb_ids[:20] 截断影响裁决候选面
-  （非投影 join），超大库 `no_asset_row` 偏高时另立工单；
+  （非投影 join），超大库 `no_asset_row` 偏高时另立工单；文献作用域限定后候选面自然收敛；
 - 状态面板图卡跟随线程最新一轮（与定位芯片同语义）；答案内图卡逐消息持久展示。
   多图轮播、`figure_image` draft block 仍不做；Markdown 正文内联（图片语法进 content）明确否决。
+
+### 10. 文献限定：从"唯一候选的巧合"到"哪篇文献的 Figure N"
+
+**现状判定**：机制对任何走过科研 PDF 证据流水线的 PDF 通用，但 ①存量 PDF 多为 legacy 入库
+（无 parse revision、0 图实体），②系统原本听不懂"哪篇文献"——题注检索只按知识库过滤，
+跨文献同编号会 `MULTIPLE_MATCHES` 失败关闭且不给任何选择。
+
+**决策：文献作用域（`planning/document_scope.py`）三条确定性通道，产出 `file_ids` 硬约束**：
+
+1. `@doc:"<file_id 或文件名>"` 提及（与 `mention_utils` 同一 token 语法；前端「文献」分组由
+   `GET /api/mention/documents` 提供候选，只返回用户可访问知识库内的文档身份 + 图表就绪标记）；
+2. DOI（匹配文件名的 `10.xxxx_yyy` 写法或 `qa_report.bibliography.doi`）；
+3. 引号包裹的标题/文件名片段、`.pdf` token（归一化后包含匹配文件名或 `bibliography.title`）。
+
+结论三态：`RESOLVED` → `file_ids`；`AMBIGUOUS` → **候选集本身作为硬约束**交给定位器在候选内
+判唯一；`UNRESOLVED`/`NONE` → 不限定。已被消费的引用片段（含引号）从定位用问题文本里剥离，
+否则会被引文抽取当成"待定位原句"（真实 run 暴露：`no_normalized_match`）。模型上下文仍用原问题。
+
+**裁决层配套**：`resolve_figure_caption_locator` / `resolve_caption_bridge` / `resolve_quote_locator` /
+`resolve_figure_image_locator` 全部接受 `file_ids`；`MULTIPLE_MATCHES` 携带 `candidate_documents`
+（只含 file_id/kb_id/filename，永不带页码）；`answer_policy` 新增 `candidate_documents_allowed`
+（仅 `LOCATOR_AMBIGUOUS` 为真），确定性回答列出候选并提示 @ 指定文献，同时发
+`locator_candidates` SSE（白名单 `candidates`），前端渲染成可点选芯片，一键以 `@doc` 重问。
+`VerifiedLocatorBinding.document_scope` 记录本次定位受哪条通道约束（审计）。
+
+**编号规范键扩展**：`Supplementary/Supplemental Figure N → figure sN`（与 `Figure SN` 共键）、
+`Extended Data Fig. N → figure edN`，主图/补充图同号不再互相干扰；SQL 预过滤改为按编号数字，
+修掉"问 Fig. 2 漏掉 Figure 2 题注"的缺口。
+
+**题录**：pipeline 在 `qa_report.bibliography` 落 GROBID header（title/authors/doi/year，失败时仅
+文件名）；`parse_tei` 增 DOI（限 sourceDesc/biblStruct）与年份抽取。存量 revision 无此字段，
+解析器回落文件名匹配。
+
+**观测**：`knowledge.document_scope.resolved|ambiguous|unresolved`（attributes: channel /
+candidate_count / file_count）→ 文献解析唯一率与跨文献歧义率。
+
+**明确不做**：不用向量相似度或模型猜"哪篇文献"；候选清单不携带页码/图片；不给模型任何文献身份的编造通道。
