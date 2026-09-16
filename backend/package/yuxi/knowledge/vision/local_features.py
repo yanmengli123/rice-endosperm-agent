@@ -11,12 +11,49 @@ from __future__ import annotations
 
 from typing import Any
 
-LOCAL_FEATURE_VERSION = "orb_homography_v1"
+LOCAL_FEATURE_VERSION = "orb_homography_v2"
 LOCAL_FEATURE_MIN_GOOD_MATCHES = 24
 LOCAL_FEATURE_MIN_INLIERS = 20
 LOCAL_FEATURE_MIN_INLIER_RATIO = 0.45
 LOCAL_FEATURE_MIN_QUERY_COVERAGE = 0.12
 LOCAL_FEATURE_MIN_CANDIDATE_COVERAGE = 0.08
+# "截图包含候选"形态：候选被内点凸包覆盖 ≥ 50%，查询侧只需 ≥ 2%（单 panel 在整图中的占比）
+_SUPERSET_MIN_CANDIDATE_COVERAGE = 0.5
+_SUPERSET_MIN_QUERY_COVERAGE = 0.02
+
+
+def local_feature_thresholds(query_short_side: int) -> dict[str, float]:
+    """按查询图短边分级的发布门限（确定性、随 metrics 一并审计）。
+
+    小图（单 panel 截图，常见 250–350px）特征点天然少，沿用大图门限会把真实命中整体挡在
+    门外；分级后仍要求 RANSAC 几何一致 + 双向覆盖，只是把"多少个一致点算够"随尺寸缩放。
+    """
+    if query_short_side >= 600:
+        return {
+            "profile": "large",
+            "min_good": LOCAL_FEATURE_MIN_GOOD_MATCHES,
+            "min_inliers": LOCAL_FEATURE_MIN_INLIERS,
+            "min_inlier_ratio": LOCAL_FEATURE_MIN_INLIER_RATIO,
+            "min_query_coverage": LOCAL_FEATURE_MIN_QUERY_COVERAGE,
+            "min_candidate_coverage": LOCAL_FEATURE_MIN_CANDIDATE_COVERAGE,
+        }
+    if query_short_side >= 300:
+        return {
+            "profile": "medium",
+            "min_good": 16,
+            "min_inliers": 14,
+            "min_inlier_ratio": 0.35,
+            "min_query_coverage": 0.10,
+            "min_candidate_coverage": 0.06,
+        }
+    return {
+        "profile": "small",
+        "min_good": 12,
+        "min_inliers": 10,
+        "min_inlier_ratio": 0.30,
+        "min_query_coverage": 0.08,
+        "min_candidate_coverage": 0.05,
+    }
 
 
 def _coverage(points: Any, shape: tuple[int, int]) -> float:
@@ -30,8 +67,13 @@ def _coverage(points: Any, shape: tuple[int, int]) -> float:
     return area / image_area
 
 
-def match_local_feature_geometry(query_bytes: bytes, candidate_bytes: bytes) -> dict[str, Any]:
-    """Return audited ORB/RANSAC metrics; decode/feature failures fail closed."""
+def match_local_feature_geometry(
+    query_bytes: bytes, candidate_bytes: bytes, *, thresholds: dict[str, float] | None = None
+) -> dict[str, Any]:
+    """Return audited ORB/RANSAC metrics; decode/feature failures fail closed.
+
+    ``thresholds`` 缺省按查询图短边分级（:func:`local_feature_thresholds`），并随 metrics 回传供审计。
+    """
     empty = {
         "version": LOCAL_FEATURE_VERSION,
         "strong": False,
@@ -51,6 +93,8 @@ def match_local_feature_geometry(query_bytes: bytes, candidate_bytes: bytes) -> 
         candidate = cv2.imdecode(np.frombuffer(candidate_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
         if query is None or candidate is None:
             return empty
+        gate = dict(thresholds or local_feature_thresholds(int(min(query.shape[:2]))))
+        empty["thresholds"] = gate
 
         def bounded(image):
             height, width = image.shape[:2]
@@ -86,15 +130,20 @@ def match_local_feature_geometry(query_bytes: bytes, candidate_bytes: bytes) -> 
         inlier_ratio = inliers / max(1, len(good))
         query_coverage = _coverage(query_xy[inlier_mask], query.shape[:2])
         candidate_coverage = _coverage(candidate_xy[inlier_mask], candidate.shape[:2])
+        # 覆盖判据两种合法形态：截图是候选的一部分（query 被大面积覆盖）；或截图包含候选
+        # （整张多 panel 图的截图 vs 库内单 panel 资产：candidate 被大面积覆盖，query 覆盖天然很小）
+        coverage_ok = (
+            query_coverage >= gate["min_query_coverage"] and candidate_coverage >= gate["min_candidate_coverage"]
+        ) or (candidate_coverage >= _SUPERSET_MIN_CANDIDATE_COVERAGE and query_coverage >= _SUPERSET_MIN_QUERY_COVERAGE)
         strong = bool(
-            len(good) >= LOCAL_FEATURE_MIN_GOOD_MATCHES
-            and inliers >= LOCAL_FEATURE_MIN_INLIERS
-            and inlier_ratio >= LOCAL_FEATURE_MIN_INLIER_RATIO
-            and query_coverage >= LOCAL_FEATURE_MIN_QUERY_COVERAGE
-            and candidate_coverage >= LOCAL_FEATURE_MIN_CANDIDATE_COVERAGE
+            len(good) >= gate["min_good"]
+            and inliers >= gate["min_inliers"]
+            and inlier_ratio >= gate["min_inlier_ratio"]
+            and coverage_ok
         )
         return {
             "version": LOCAL_FEATURE_VERSION,
+            "thresholds": gate,
             "strong": strong,
             "good_matches": len(good),
             "inliers": inliers,

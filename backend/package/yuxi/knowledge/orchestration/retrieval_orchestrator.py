@@ -382,6 +382,7 @@ def _build_answer_policy(
     vision_status: str,
     locator_kind: str = "",
     binding: dict[str, Any] | None = None,
+    locator_reason: str = "",
 ) -> dict[str, Any]:
     """按定位状态机构造结构化 answer_policy（进入模型上下文 + 输出守卫双执行）。
 
@@ -511,19 +512,42 @@ def _build_answer_policy(
         "page_claim_allowed": False,
         "document_citations_allowed": False,
         # 未定位且无可信视觉观察：解释不可核验 → 守卫整体替换保守文案（G3）；
-        # vision_status 仅决定披露文案口径
+        # 文案按 vision_status × locator_reason 分因（B3：失败也要可行动），永不给页码
         "visual_explanation_allowed": False,
         "figure_image_publish_allowed": False,
         "candidate_documents_allowed": False,
         "explanation_grounding": "UNRESOLVED",
         "mechanism_attribution_allowed": False,
         "caption_fact_allowed": False,
-        "required_disclosure": (
-            "当前无法进行可靠定位（视觉定位通道不可用且指纹未命中），因此不能确定其来源文献与页码。"
-            if conservative_only
-            else "当前知识库范围内无法可靠确定该内容的来源文献与页码。"
+        "required_disclosure": _unlocated_disclosure(
+            vision_status=vision_status, locator_reason=locator_reason, conservative_only=conservative_only
         ),
     }
+
+
+def _unlocated_disclosure(*, vision_status: str, locator_reason: str, conservative_only: bool) -> str:
+    """UNLOCATED 分因文案：用户拿到的永远是"原因 + 可行动建议"，绝不编页码。"""
+    if vision_status == "NOT_CONFIGURED":
+        return (
+            "当前未配置视觉定位模型，无法对图片进行可靠定位；可粘贴图注文字、输入 @ 指定文献，"
+            "或请管理员在系统设置中开启多模态观察模型。"
+        )
+    if vision_status in {"PROVIDER_FAILED", "SCHEMA_INVALID"}:
+        return "视觉定位服务当前异常且指纹未命中，无法确定来源文献与页码；可粘贴图注文字或输入 @ 指定文献后重试。"
+    if vision_status == "IMAGE_UNREADABLE":
+        return "图片无法解析，无法定位来源；请上传更清晰的截图（建议包含图表编号或题注）。"
+    if locator_reason == "figure_index_empty_in_scope":
+        return (
+            "当前知识范围内没有可比对的图表证据（文献未启用科研 PDF 解析或尚未完成），"
+            "无法定位来源；请确认文献已按 academic 预设解析。"
+        )
+    if not conservative_only:
+        # 视觉就绪但指纹未唯一命中：给出可行动的截图建议
+        return (
+            "未能在库内图表中唯一匹配该图片；请截取包含图表编号（如 Figure 2）或题注的"
+            "更完整区域，或直接粘贴题注文字查询。"
+        )
+    return "当前知识库范围内无法可靠确定该内容的来源文献与页码。"
 
 
 def _ledger_status(resolution: dict[str, Any] | None) -> str:
@@ -1296,6 +1320,7 @@ async def prepare_knowledge_context(
             vision_status=str(_final_resolution.get("vision_status") or "UNKNOWN"),
             locator_kind=str(locator_intent.get("kind") or ""),
             binding=_final_resolution.get("binding") if isinstance(_final_resolution, dict) else None,
+            locator_reason=str(_final_resolution.get("reason") or "") if isinstance(_final_resolution, dict) else "",
         )
         if isinstance(_final_resolution, dict) and "answer_policy" not in _final_resolution:
             _final_resolution["answer_policy"] = contract["answer_policy"]

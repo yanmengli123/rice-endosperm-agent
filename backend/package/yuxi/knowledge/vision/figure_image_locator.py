@@ -52,7 +52,9 @@ TIER_V4_SEMANTIC_ONLY = "V4_SEMANTIC_ONLY"
 
 # 可见文本片段命中题注的最小归一化长度（防止 2-3 字符子串误命中）
 _VISIBLE_TEXT_MIN_CHARS = 6
-_LOCAL_FEATURE_PREFILTER_LIMIT = 12
+_LOCAL_FEATURE_PREFILTER_LIMIT = 24
+# small 档位（查询短边 <300px）ORB 强匹配的 pHash 第二意见上限（64bit 汉明距离）
+_SMALL_PROFILE_MAX_PHASH_DISTANCE = 14
 _LOCAL_FEATURE_DOWNLOAD_CONCURRENCY = 4
 
 # MinerU 视觉块锚点类型（v3 起含 chart）
@@ -380,16 +382,28 @@ async def adjudicate_local_feature_match(
             return entity, asset, phash_distance, {"strong": False}
 
     evaluated = await asyncio.gather(*(evaluate(item) for item in ranked))
-    strong = [item for item in evaluated if bool(item[3].get("strong"))]
+    # 小图档位（自适应门限放宽后）额外要求 pHash 第二意见：真实 panel 裁片与其资产的感知哈希
+    # 距离通常 ≤ 14，而纯文字/网格线对图形的伪几何命中不会同时满足——防止小截图误发页码
+    strong = [
+        item
+        for item in evaluated
+        if bool(item[3].get("strong"))
+        and (
+            str((item[3].get("thresholds") or {}).get("profile") or "") != "small"
+            or (item[2] is not None and int(item[2]) <= _SMALL_PROFILE_MAX_PHASH_DISTANCE)
+        )
+    ]
     if not strong:
         return {"status": "DETERMINISTIC_UNRESOLVED", "locator_kind": "FIGURE_IMAGE"}
     locations = {_physical_location(entity, asset) for entity, asset, _distance, _metrics in strong}
     if len(locations) != 1:
+        # 几何证据在多处"都像"= 该信号对此查询不具区分度（文字块、网格线），不能像 SHA/pHash
+        # 歧义那样终局——降为未决，让视觉观察 + 题注桥接继续裁决（仍失败关闭，绝不发页码）
         return {
-            "status": "MULTIPLE_MATCHES",
+            "status": "DETERMINISTIC_UNRESOLVED",
             "locator_kind": "FIGURE_IMAGE",
-            "match_count": len(locations),
-            "reason": "local_feature_hits_multiple_physical_locations",
+            "reason": "local_feature_ambiguous_across_locations",
+            "ambiguous_locations": len(locations),
         }
     entity, asset, phash_distance, metrics = max(
         strong,
@@ -606,7 +620,7 @@ async def resolve_figure_image_locator(
         }
     try:
         if image_bytes:
-            from yuxi.knowledge.vision.phash import compute_asset_digest, compute_phash
+            from yuxi.knowledge.vision.phash import compute_asset_digest, compute_phash, normalize_query_image
 
             image_phash = compute_phash(image_bytes)
             deterministic = adjudicate_deterministic_match(
@@ -614,14 +628,29 @@ async def resolve_figure_image_locator(
                 image_asset_digest=compute_asset_digest(image_bytes),
                 image_phash=image_phash,
             )
+            # 查询侧归一化（去近白边框 + 限长边）后再做一次 V1：截图白边是 pHash 漂移主因；
+            # 发布门禁不放松（物理唯一），只是让指纹别被边框拖垮
+            normalized_bytes, normalize_info = normalize_query_image(image_bytes)
+            normalized_phash = compute_phash(normalized_bytes) if normalize_info.get("changed") else None
+            if (
+                deterministic.get("status") not in {"VERIFIED", "MULTIPLE_MATCHES"}
+                and normalized_phash
+                and normalized_phash != image_phash
+            ):
+                deterministic = adjudicate_deterministic_match(candidates, image_phash=normalized_phash)
+                if deterministic.get("status") == "VERIFIED":
+                    deterministic["signals"] = {
+                        **(deterministic.get("signals") or {}),
+                        "query_normalized": True,
+                    }
             if deterministic.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
                 if deterministic.get("status") == "MULTIPLE_MATCHES":
                     return {**deterministic, "locator_version": FIGURE_IMAGE_LOCATOR_VERSION}
                 return await _materialize_resolution(db, deterministic)
             local_feature = await adjudicate_local_feature_match(
                 candidates,
-                image_bytes=image_bytes,
-                image_phash=image_phash,
+                image_bytes=normalized_bytes if normalize_info.get("changed") else image_bytes,
+                image_phash=normalized_phash or image_phash,
             )
             if local_feature.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
                 if local_feature.get("status") == "MULTIPLE_MATCHES":

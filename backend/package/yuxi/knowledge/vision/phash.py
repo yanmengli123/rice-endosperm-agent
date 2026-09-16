@@ -125,13 +125,75 @@ def phash_hamming_distance(first: str | None, second: str | None) -> int | None:
         return None
 
 
+QUERY_NORMALIZE_VERSION = "query_normalize_v1"
+# 近白像素阈值（截图四周的纸面/网页白边）；裁掉面积 ≥1% 才视为"有边可去"
+_BORDER_WHITE_THRESHOLD = 242
+_MIN_CROP_AREA_RATIO = 0.01
+_QUERY_MAX_SIDE = 1600
+
+
+def normalize_query_image(image_bytes: bytes) -> tuple[bytes, dict]:
+    """截图查询侧归一化（确定性、无模型）：去近白边框 + 限制最长边。
+
+    截图相对库内资产最常见的漂移是四周白边与缩放——两者都会把 64bit pHash 的汉明距离
+    推过强匹配阈值（8），也会拉低 ORB 的覆盖率。去边/缩放后再算指纹，命中面显著变大，
+    而发布门禁（物理唯一、RANSAC 几何一致）一律不放松。任何失败返回原字节且
+    ``changed=False``，绝不阻断定位。
+    """
+    info: dict = {"version": QUERY_NORMALIZE_VERSION, "changed": False}
+    if not _HAS_IMAGE_STACK or not image_bytes:
+        return image_bytes, info
+    try:
+        with _PILImage.open(io.BytesIO(image_bytes)) as source:
+            image = source.convert("RGB")
+        width, height = image.size
+        info["original_size"] = [width, height]
+        grayscale = _np.asarray(image.convert("L"), dtype=_np.uint8)
+        content_mask = grayscale < _BORDER_WHITE_THRESHOLD
+        rows = _np.where(content_mask.any(axis=1))[0]
+        cols = _np.where(content_mask.any(axis=0))[0]
+        normalized = image
+        if rows.size and cols.size:
+            pad_x = max(2, int(width * 0.01))
+            pad_y = max(2, int(height * 0.01))
+            box = (
+                max(0, int(cols[0]) - pad_x),
+                max(0, int(rows[0]) - pad_y),
+                min(width, int(cols[-1]) + 1 + pad_x),
+                min(height, int(rows[-1]) + 1 + pad_y),
+            )
+            crop_area = (box[2] - box[0]) * (box[3] - box[1])
+            if 0 < crop_area <= width * height * (1.0 - _MIN_CROP_AREA_RATIO):
+                normalized = image.crop(box)
+                info["crop_box"] = list(box)
+                info["changed"] = True
+        longest = max(normalized.size)
+        if longest > _QUERY_MAX_SIDE:
+            scale = _QUERY_MAX_SIDE / float(longest)
+            normalized = normalized.resize(
+                (max(1, round(normalized.width * scale)), max(1, round(normalized.height * scale))),
+                _PILImage.Resampling.LANCZOS,
+            )
+            info["changed"] = True
+        info["normalized_size"] = list(normalized.size)
+        if not info["changed"]:
+            return image_bytes, info
+        buffer = io.BytesIO()
+        normalized.save(buffer, format="PNG")
+        return buffer.getvalue(), info
+    except Exception:  # noqa: BLE001 - 归一化失败按未归一化处理，不阻断
+        return image_bytes, {**info, "changed": False, "error": "normalize_failed"}
+
+
 __all__ = [
     "PHASH_STRONG_DISTANCE",
     "PHASH_VERSION",
+    "QUERY_NORMALIZE_VERSION",
     "compute_asset_digest",
     "compute_panel_phashes",
     "compute_phash",
     "compute_phash_from_image",
     "image_dimensions",
+    "normalize_query_image",
     "phash_hamming_distance",
 ]

@@ -391,8 +391,11 @@ async def test_local_feature_fallback_fails_closed_for_duplicate_physical_locati
         image_phash=compute_phash(screenshot),
     )
 
-    assert resolution["status"] == "MULTIPLE_MATCHES"
-    assert resolution["match_count"] == 2
+    # 几何证据在两处"都像"= 对此查询不具区分度：降为未决交给观察/桥接继续裁决（仍失败关闭，无页码），
+    # 不再像 SHA/pHash 歧义那样终局为 MULTIPLE_MATCHES（真实 run：纯文字裁片伪几何命中挡住了视觉通道）
+    assert resolution["status"] == "DETERMINISTIC_UNRESOLVED"
+    assert resolution["reason"] == "local_feature_ambiguous_across_locations"
+    assert resolution["ambiguous_locations"] == 2
     assert "page" not in resolution
 
 

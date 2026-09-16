@@ -66,6 +66,35 @@ _PROVIDER_SINGLETON: dict[str, object] = {}
 # 观察缓存：复合键（图片字节 sha256 + spec + prompt 版本 + schema 版本），
 # 有界 LRU。pHash 不参与缓存身份（感知哈希有碰撞，两张近似图共享观察会串结果）。
 _OBSERVATION_CACHE_LIMIT = 32
+# 发往视觉模型前的确定性降采样：最长边 ≤ 1024、JPEG q82。整页级 PNG（>500KB）在外部
+# API 上会超时；观察任务只需读编号/可见文字/结构，降采样不改变契约语义
+_OBSERVATION_MAX_SIDE = 1024
+_OBSERVATION_JPEG_QUALITY = 82
+
+
+def _downscale_for_observation(image_bytes: bytes) -> tuple[bytes, str]:
+    """返回 (payload, mime)；任何失败回退原字节 + image/png（不阻断观察）。"""
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            image = source.convert("RGB")
+        longest = max(image.size)
+        if longest > _OBSERVATION_MAX_SIDE:
+            scale = _OBSERVATION_MAX_SIDE / float(longest)
+            image = image.resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=_OBSERVATION_JPEG_QUALITY, optimize=True)
+        return buffer.getvalue(), "image/jpeg"
+    except Exception:  # noqa: BLE001 - 降采样失败按原图发送
+        return image_bytes, "image/png"
+
+
 _OBSERVATION_CACHE: OrderedDict[tuple[str, str, str, str], VisualObservationEnvelope] = OrderedDict()
 # canary 结论（进程级缓存；key = spec）
 _CAPABILITY_CACHE: dict[str, dict[str, str]] = {}
@@ -132,14 +161,17 @@ class ChatModelVisionProvider:
             from yuxi.models.chat import select_model
 
             adapter = select_model(self.model_spec)
-            encoded = base64.b64encode(image_bytes).decode("ascii")
+            payload, mime = _downscale_for_observation(image_bytes)
+            encoded = base64.b64encode(payload).decode("ascii")
             message = HumanMessage(
                 content=[
                     {"type": "text", "text": OBSERVATION_PROMPT},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
                 ]
             )
-            response = await adapter.call(message)
+            # adapter.call 经 convert_to_messages 归一化，需要"消息序列"；传单个 HumanMessage 会被
+            # 当成 (field, value) 元组迭代而报 "Unexpected message type: 'content'"
+            response = await adapter.call([message])
             return parse_visual_observation(getattr(response, "content", None))
         except Exception as exc:  # noqa: BLE001 - provider 故障按观察不可用处理
             logger.error(f"vision provider failed (observation unavailable): {exc}")
