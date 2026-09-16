@@ -1009,7 +1009,17 @@ async def _persist_article_records(
             )
             # R-P2：图表资产指纹索引（实体 + 资产：sha256/pHash/尺寸/panel 变体）。
             # 失败不阻断入库（summary 如实计数），重解析随 revision 级联重建。
+            # v4：多 panel 图组需要原 PDF 渲染合成整图——按需惰性下载（身份缓存复用路径同样可用）
             from yuxi.knowledge.vision.figure_ingestor import persist_figure_index
+
+            source_file = (
+                (await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == str(revision.file_id))))
+                .scalars()
+                .first()
+            )
+
+            async def _load_pdf_for_figures() -> bytes | None:
+                return await _load_source(source_file) if source_file is not None else None
 
             figure_summary = await persist_figure_index(
                 session,
@@ -1017,6 +1027,7 @@ async def _persist_article_records(
                 article_assets=list(article.get("assets") or []),
                 spans=list(spans),
                 anchors=list(anchor_rows),
+                pdf_bytes_loader=_load_pdf_for_figures,
             )
             summaries = {
                 "evidence_spans": spans_summary,
@@ -1901,3 +1912,92 @@ async def list_scientific_pdf_pipeline_tasks(*, status: str | None = None, limit
             "type_counts": dict(type_counter),
         },
     }
+
+
+async def rebuild_figure_index_for_file(*, kb_id: str, file_id: str, render_synthetic: bool = True) -> dict[str, Any]:
+    """不重解析地用当前 figure_ingestor 重建 active revision 的图表索引（ADR-0004 §11）。
+
+    用途：ingestor 升级（v4 多 panel 聚合）后对存量文献补索引，或对象存储/MinerU 不可用时
+    仍要拿到图组与锚点配对。只读 MinIO 中的 unified_article 产物与图片字节；``render_synthetic``
+    关闭时完全不写对象存储。实体/资产行按 revision 级联重建（幂等）。
+    """
+    async with pg_manager.get_async_session_context() as session:
+        file_record = (
+            (
+                await session.execute(
+                    select(KnowledgeFile).where(KnowledgeFile.file_id == file_id, KnowledgeFile.kb_id == kb_id)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if file_record is None or not file_record.active_parse_revision_id:
+            raise ValueError("文件不存在或没有已激活的科研 PDF 解析版本")
+        revision = (
+            (
+                await session.execute(
+                    select(KnowledgeParseRevision).where(
+                        KnowledgeParseRevision.revision_id == file_record.active_parse_revision_id
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if revision is None:
+            raise ValueError("激活的解析版本不存在")
+        artifact = (
+            (
+                await session.execute(
+                    select(KnowledgeParseArtifact).where(
+                        KnowledgeParseArtifact.revision_id == revision.revision_id,
+                        KnowledgeParseArtifact.kind == "unified_article",
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if artifact is None or not is_minio_url(artifact.object_uri):
+            raise ValueError("该解析版本没有 unified_article 产物，无法重建图表索引")
+        bucket, object_name = parse_minio_url(artifact.object_uri)
+        article = json.loads((await get_minio_client().adownload_file(bucket, object_name)).decode("utf-8"))
+        spans = list(
+            (
+                await session.execute(
+                    select(EvidenceSpanRecord).where(EvidenceSpanRecord.parse_revision_id == revision.revision_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        anchors = list(
+            (
+                await session.execute(
+                    select(EvidenceAnchorRecord).where(EvidenceAnchorRecord.parse_revision_id == revision.revision_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        from yuxi.knowledge.vision.figure_ingestor import persist_figure_index
+
+        async def _load_pdf() -> bytes | None:
+            return await _load_source(file_record)
+
+        summary = await persist_figure_index(
+            session,
+            revision=revision,
+            article_assets=list(article.get("assets") or []),
+            spans=spans,
+            anchors=anchors,
+            pdf_bytes_loader=_load_pdf if render_synthetic else None,
+        )
+        qa_report = dict(revision.qa_report or {})
+        qa_report["figure_index"] = summary
+        capabilities = dict(qa_report.get("capabilities") or {})
+        capabilities["figure_image_locator"] = bool(summary.get("locator_ready_assets"))
+        qa_report["capabilities"] = capabilities
+        revision.qa_report = qa_report
+        await session.commit()
+        return {"revision_id": str(revision.revision_id), "figure_index": summary}

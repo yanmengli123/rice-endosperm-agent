@@ -65,6 +65,7 @@ from yuxi.services.task_service import TaskContext, tasker
 from yuxi.services.scientific_pdf_ingest_service import (
     create_or_reuse_scientific_pdf_ingest,
     get_scientific_pdf_status,
+    rebuild_figure_index_for_file,
 )
 from yuxi.services.knowledge_asset_service import (
     KnowledgeAssetError,
@@ -196,9 +197,7 @@ async def _delete_document_storage_objects(kb_id: str, doc_id: str, file_path: s
         logger.warning(f"从MinIO删除预览 PDF 失败: {minio_error}")
 
 
-async def _ensure_database_supports_documents(
-    kb_id: str, operation: str, command: str | None = None
-):
+async def _ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None):
     """写入口统一门禁：适配器能力检查 + （可选）Source Contract 命令门禁。
 
     command 为 None 时仅保留旧的 supports_documents 行为（读端点）；
@@ -318,9 +317,7 @@ def _validate_uploaded_document_items(items: list[str], params: dict, contract_s
         if params.get("pdf_evidence_pipeline"):
             preprocessed_name = ""
             if isinstance(preprocessed, dict):
-                preprocessed_name = str(
-                    preprocessed.get("original_filename") or preprocessed.get("filename") or ""
-                )
+                preprocessed_name = str(preprocessed.get("original_filename") or preprocessed.get("filename") or "")
             _, object_name = parse_minio_url(item)
             candidate_name = str(source_path or preprocessed_name or object_name)
             if not candidate_name.lower().split("?", 1)[0].endswith(".pdf"):
@@ -333,9 +330,7 @@ def _validate_uploaded_document_items(items: list[str], params: dict, contract_s
             _, object_name = parse_minio_url(item)
             preprocessed_name = ""
             if isinstance(preprocessed, dict):
-                preprocessed_name = str(
-                    preprocessed.get("original_filename") or preprocessed.get("filename") or ""
-                )
+                preprocessed_name = str(preprocessed.get("original_filename") or preprocessed.get("filename") or "")
             candidate_name = str(source_path or preprocessed_name or object_name).split("?", 1)[0]
             try:
                 validate_contract_media(contract_spec, candidate_name)
@@ -448,9 +443,7 @@ async def create_database(
             contract_spec = LEGACY_GENERIC
             legacy_fallback = True
             if kb_type == "milvus":
-                logger.warning(
-                    f"[source_contract] 创建知识库未选择契约，映射 legacy_generic@0: {database_name}"
-                )
+                logger.warning(f"[source_contract] 创建知识库未选择契约，映射 legacy_generic@0: {database_name}")
 
         from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
 
@@ -472,9 +465,7 @@ async def create_database(
 
             info = model_cache.get_model_info(data.embedding_model_spec)
             if not info or info.model_type != "embedding":
-                raise HTTPException(
-                    status_code=400, detail=f"不支持的 embedding 模型: {data.embedding_model_spec}"
-                )
+                raise HTTPException(status_code=400, detail=f"不支持的 embedding 模型: {data.embedding_model_spec}")
             embedding_model_spec = data.embedding_model_spec
         else:
             embedding_model_spec = None
@@ -579,9 +570,7 @@ async def _resolve_default_share_config(current_user: User, share_config: dict |
         async with pg_manager.get_async_session_context() as session:
             tenant_id = await resolve_tenant_id(session, str(current_user.uid))
             if tenant_id is not None:
-                tenant = (
-                    await session.execute(select(Tenant).where(Tenant.id == int(tenant_id)))
-                ).scalar_one_or_none()
+                tenant = (await session.execute(select(Tenant).where(Tenant.id == int(tenant_id)))).scalar_one_or_none()
                 tenant_policy = (tenant.default_kb_share_policy or {}) if tenant else None
     except Exception as policy_error:  # noqa: BLE001
         logger.warning(f"[share_config] 读取租户默认策略失败，兜底 Private: {policy_error}")
@@ -1051,9 +1040,7 @@ async def update_database_info(
 async def delete_database(kb_id: str, current_user: User = Depends(get_admin_user)):
     """删除知识库"""
     logger.debug(f"Delete database {kb_id}")
-    if not await knowledge_base.check_accessible(
-        {"role": current_user.role, "uid": current_user.uid}, kb_id
-    ):
+    if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
         raise HTTPException(status_code=404, detail="Database not found")
     try:
         await knowledge_base.delete_database(kb_id)
@@ -1272,11 +1259,25 @@ async def scientific_pdf_evidence_status(
     file_id: str,
     current_user: User = Depends(get_admin_user),
 ):
-    if not await knowledge_base.check_accessible(
-        {"role": current_user.role, "uid": current_user.uid}, kb_id
-    ):
+    if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
         raise HTTPException(status_code=404, detail="Database not found")
     return await get_scientific_pdf_status(kb_id=kb_id, file_id=file_id)
+
+
+@knowledge.post("/databases/{kb_id}/documents/{file_id}/figure-index/rebuild")
+async def rebuild_figure_index(
+    kb_id: str,
+    file_id: str,
+    synthetic: bool = Query(True, description="是否渲染并上传合成整图（对象存储不可写时关闭）"),
+    current_user: User = Depends(get_admin_user),
+):
+    """不重解析地按当前 figure_ingestor 重建图表索引（ingestor 升级后的存量补索引；ADR-0004 §11）。"""
+    if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
+        raise HTTPException(status_code=404, detail="Database not found")
+    try:
+        return await rebuild_figure_index_for_file(kb_id=kb_id, file_id=file_id, render_synthetic=synthetic)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @knowledge.post("/databases/{kb_id}/documents/{file_id}/evidence-retry")
@@ -1285,9 +1286,7 @@ async def retry_scientific_pdf_evidence(
     file_id: str,
     current_user: User = Depends(get_admin_user),
 ):
-    if not await knowledge_base.check_accessible(
-        {"role": current_user.role, "uid": current_user.uid}, kb_id
-    ):
+    if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
         raise HTTPException(status_code=404, detail="Database not found")
     await _ensure_database_supports_documents(kb_id, "科研 PDF 重试", COMMAND_SCIENTIFIC_PDF_RETRY)
     try:
@@ -1307,9 +1306,7 @@ async def add_documents(
 ):
     """添加文档到知识库（上传 -> 解析 -> 可选入库）"""
     logger.debug(f"Add documents for kb_id {kb_id}: {items} {params=}")
-    if not await knowledge_base.check_accessible(
-        {"role": current_user.role, "uid": current_user.uid}, kb_id
-    ):
+    if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
         raise HTTPException(status_code=404, detail="Database not found")
     contract_spec = await _ensure_database_supports_documents(kb_id, "文档添加/解析/入库", COMMAND_DOCUMENT_UPLOAD)
 
@@ -1399,9 +1396,7 @@ async def add_documents(
                 )
 
         failed_count = len([item for item in processed_items if _is_failed_item(item)])
-        recovery_note = (
-            f"；{deferred_count} 个任务已持久化并等待恢复队列补偿" if deferred_count else ""
-        )
+        recovery_note = f"；{deferred_count} 个任务已持久化并等待恢复队列补偿" if deferred_count else ""
         return {
             "message": (
                 f"科研 PDF 已持久接收：提交 {len(items)}，进入证据流水线 {queued_count}，"
@@ -2601,9 +2596,7 @@ async def import_workspace_files(
     if not paths:
         raise HTTPException(status_code=400, detail="请选择至少一个工作区文件")
 
-    contract_spec = await _ensure_database_supports_documents(
-        kb_id, "文档添加/解析/入库", COMMAND_DOCUMENT_UPLOAD
-    )
+    contract_spec = await _ensure_database_supports_documents(kb_id, "文档添加/解析/入库", COMMAND_DOCUMENT_UPLOAD)
 
     bucket_name = MinIOClient.KB_BUCKETS["documents"]
     results = []
@@ -2672,9 +2665,7 @@ async def upload_file(
 
     upload_contract_spec = None
     if kb_id:
-        upload_contract_spec = await _ensure_database_supports_documents(
-            kb_id, "文档上传", COMMAND_DOCUMENT_UPLOAD
-        )
+        upload_contract_spec = await _ensure_database_supports_documents(kb_id, "文档上传", COMMAND_DOCUMENT_UPLOAD)
 
     logger.debug(f"Received upload file with filename: {upload_filename}")
 

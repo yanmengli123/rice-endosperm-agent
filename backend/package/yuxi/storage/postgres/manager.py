@@ -1052,6 +1052,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0035_figure_asset_index", "_migration_0035_figure_asset_index"),
         ("0036_figure_asset_anchor_lineage", "_migration_0036_figure_asset_anchor_lineage"),
         ("0037_evidence_span_revision_anchor_scope", "_migration_0037_evidence_span_revision_anchor_scope"),
+        ("0038_figure_asset_group_role", "_migration_0038_figure_asset_group_role"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2470,6 +2471,26 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(
             text(
                 "ALTER TABLE IF EXISTS figure_assets ADD COLUMN IF NOT EXISTS anchor_id VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+        )
+
+    async def _migration_0038_figure_asset_group_role(self, conn) -> None:
+        """figure_ingestor v4 图组：资产角色（primary/panel）、阅读序、panel 标签（ADR-0004 §11）。
+
+        纯增量列，存量行默认 panel/0/''；重解析或身份缓存复用时随 revision 级联重建。
+        """
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS figure_assets ADD COLUMN IF NOT EXISTS role VARCHAR(16) NOT NULL DEFAULT 'panel'"
+            )
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS figure_assets ADD COLUMN IF NOT EXISTS group_index INTEGER NOT NULL DEFAULT 0")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS figure_assets "
+                "ADD COLUMN IF NOT EXISTS panel_label VARCHAR(16) NOT NULL DEFAULT ''"
             )
         )
 

@@ -1602,4 +1602,8 @@ class FigureAssetRecord(Base):
     bbox = Column(JSON_VALUE)
     page = Column(Integer, nullable=False)
     ocr_text = Column(Text)
+    # v4 图组：role=primary（合成整图或最大块，投影先发）/ panel；group_index 阅读序（合成整图 -1）
+    role = Column(String(16), nullable=False, default="panel")
+    group_index = Column(Integer, nullable=False, default=0)
+    panel_label = Column(String(16), nullable=False, default="")
     created_at = Column(DateTime(timezone=True), default=utc_now)
