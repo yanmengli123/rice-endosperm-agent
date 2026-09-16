@@ -79,7 +79,7 @@
                     :is-processing="isDisplayMessageProcessing(row.conv, displayItem)"
                     :show-refs="showMsgRefs(displayItem.message, row.conv)"
                     :hide-tool-calls="true"
-                    :mention="mentionConfig"
+                    :mention="mentionConfigWithDocuments"
                     :figures="inlineFigures(displayItem.message, row.conv)"
                     :evidence-id-set="displayedEvidenceIdSet"
                     @openStatus="handleOpenMessageStatus"
@@ -153,7 +153,7 @@
                 :is-loading="isProcessing"
                 :disabled="!currentAgent"
                 :send-button-disabled="isSendButtonDisabled"
-                :mention="mentionConfig"
+                :mention="mentionConfigWithDocuments"
                 :thread-id="currentChatId"
                 :supports-file-upload="supportsFileUpload"
                 :attachments="currentPendingThreadAttachments"
@@ -297,6 +297,23 @@
                 :evidence-ids="displayedEvidenceIdSet"
                 @open-source="openFigureSource"
               />
+              <div
+                v-if="currentLocatorCandidates.length"
+                class="state-locator-candidates"
+                aria-label="候选文献"
+              >
+                <span class="state-locator-candidates__title">该编号命中多篇文献，请选择：</span>
+                <button
+                  v-for="doc in currentLocatorCandidates"
+                  :key="doc.file_id"
+                  type="button"
+                  class="state-locator-candidates__item"
+                  :title="doc.filename || doc.file_id"
+                  @click="askWithDocument(doc)"
+                >
+                  {{ doc.filename || doc.file_id }}
+                </button>
+              </div>
               <section
                 v-if="hasDisplayedEvidenceProjection"
                 class="state-section"
@@ -750,6 +767,7 @@ import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import { extractCitationReadyFromHistory, inlineFiguresForMessage } from '@/utils/figureCard'
+import { formatMentionToken } from '@/utils/mention_utils'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
@@ -1228,6 +1246,7 @@ const resetRunEvidence = (threadId, runId = null) => {
   ts.sourceManifest = null
   ts.verifiedCitation = null
   ts.verifiedFigures = []
+  ts.locatorCandidates = []
 }
 const currentEvidence = computed(() => {
   const threadId = currentChatId.value
@@ -1266,6 +1285,30 @@ const currentVerifiedFigures = computed(() => {
 // 答案气泡内图卡（消息级附件）：已落库载荷优先，其次本会话按 run 暂存；只挂该轮最后一条 AI 消息
 const inlineFigures = (message, conv) =>
   inlineFiguresForMessage(message, conv, currentThreadState.value?.figuresByRun)
+// 跨文献歧义的候选文献（只含文档身份）；点选后以 @doc 提及重新提问
+const currentLocatorCandidates = computed(() => {
+  const candidates = currentChatId.value
+    ? chatState.threadStates[currentChatId.value]?.locatorCandidates
+    : null
+  return Array.isArray(candidates) ? candidates : []
+})
+const lastHumanQuestionText = () => {
+  const convs = conversations.value || []
+  for (let index = convs.length - 1; index >= 0; index -= 1) {
+    const human = (convs[index]?.messages || []).find((item) => item?.type === 'human')
+    const content = typeof human?.content === 'string' ? human.content : ''
+    if (content.trim()) {
+      // 去掉上一轮已带的 @doc 提及，避免叠加多篇
+      return content.replace(/@doc:(?:"(?:\\.|[^"\\])*"|\S+)\s*/g, '').trim()
+    }
+  }
+  return ''
+}
+const askWithDocument = (doc) => {
+  const fileId = String(doc?.file_id || '')
+  if (!fileId) return
+  userInput.value = `${formatMentionToken('doc', fileId)} ${lastHumanQuestionText()}`.trim()
+}
 const hasCurrentEvidenceProjection = computed(() => {
   const threadState = currentChatId.value ? chatState.threadStates[currentChatId.value] : null
   if (!threadState?.evidenceRunId) return false
@@ -1765,6 +1808,30 @@ const { mentionConfig } = useAgentMentionConfig({
   configurableItems,
   agentConfig
 })
+// @doc 提及在编辑器/消息气泡里要显示为文件名：汇总线程内已知文献（候选清单、已验证引用、
+// 历史消息里的 citation_ready.citation）作为显示名字典；未知的回落显示 file_id
+const knownDocuments = computed(() => {
+  const documents = new Map()
+  const push = (fileId, filename) => {
+    const id = String(fileId || '')
+    const name = String(filename || '')
+    if (id && name && !documents.has(id)) documents.set(id, { file_id: id, filename: name })
+  }
+  currentLocatorCandidates.value.forEach((doc) => push(doc.file_id, doc.filename))
+  const citation = currentVerifiedCitation.value
+  if (citation) push(citation.file_id, citation.filename)
+  ;(conversations.value || []).forEach((conv) => {
+    ;(conv?.messages || []).forEach((message) => {
+      const persisted = message?.extra_metadata?.citation_ready?.citation
+      if (persisted) push(persisted.file_id, persisted.filename)
+    })
+  })
+  return [...documents.values()]
+})
+const mentionConfigWithDocuments = computed(() => ({
+  ...(mentionConfig.value || {}),
+  documents: knownDocuments.value
+}))
 
 const currentThreadMessages = computed(() => threadMessages.value[currentChatId.value] || [])
 const currentThreadHasHistory = computed(() => currentThreadMessages.value.length > 0)
@@ -4209,6 +4276,43 @@ watch(currentChatId, (threadId, oldThreadId) => {
   flex-direction: column;
   gap: 12px;
   overflow: auto;
+}
+
+.state-locator-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--color-warning-300, #e0a03a);
+  border-radius: 10px;
+  background: var(--color-warning-50, rgba(224, 160, 58, 0.08));
+  font-size: 12px;
+}
+
+.state-locator-candidates__title {
+  color: var(--color-warning-700, #8a5a00);
+  font-weight: 600;
+}
+
+.state-locator-candidates__item {
+  max-width: 100%;
+  padding: 2px 10px;
+  border: 1px solid var(--gray-200);
+  border-radius: 999px;
+  background: var(--gray-0);
+  color: var(--main-600);
+  font-size: 12px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state-locator-candidates__item:hover {
+  border-color: var(--main-200);
+  background: var(--main-10);
 }
 
 .state-locator-chip {

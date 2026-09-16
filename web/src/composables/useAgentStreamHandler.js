@@ -284,6 +284,14 @@ export function useAgentStreamHandler({
         return false
       }
 
+      case 'locator_candidates':
+        // 跨文献歧义：后端只给文档身份（file_id/kb_id/filename，无页码无图），前端渲染成
+        // 可点选的候选文献，点选后以 @doc 提及重新提问（确定性硬约束）
+        threadState.locatorCandidates = Array.isArray(chunk.candidates)
+          ? chunk.candidates.filter((item) => item && typeof item === 'object' && item.file_id)
+          : []
+        return false
+
       case 'finished':
         streamSmoother?.flushThread(threadId)
         // 先标记流式结束，但保持消息显示直到历史记录加载完成

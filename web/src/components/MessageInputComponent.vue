@@ -141,6 +141,29 @@
           </div>
         </div>
 
+        <!-- 文献（知识库文档）列表：插入 @doc:"file_id"，后端据此把定位限定到该文献 -->
+        <div v-if="mentionItems.documents.length > 0" class="mention-group">
+          <div class="mention-group-title">文献</div>
+          <div
+            v-for="(item, index) in mentionItems.documents"
+            :key="'doc-' + item.value"
+            :class="['mention-item', 'resource-item', { active: isItemSelected('doc', index) }]"
+            @click="insertMention(item)"
+          >
+            <div class="resource-name">
+              <span
+                v-for="(part, pIdx) in splitTextByQuery(item.label, mentionQuery)"
+                :key="pIdx"
+                :class="{ 'query-match': part.isMatch }"
+                >{{ part.text }}</span
+              >
+            </div>
+            <div v-if="item.description" class="resource-description" :title="item.description">
+              {{ item.description }}
+            </div>
+          </div>
+        </div>
+
         <!-- MCP 列表 -->
         <div v-if="mentionItems.mcps.length > 0" class="mention-group">
           <div class="mention-group-title">MCP</div>
@@ -291,7 +314,7 @@ import {
 } from 'vue'
 import { SendOutlined, ArrowUpOutlined, PauseOutlined } from '@ant-design/icons-vue'
 import { Paperclip } from '@lucide/vue'
-import { searchMentionFiles } from '@/apis/mention_api'
+import { searchMentionDocuments, searchMentionFiles } from '@/apis/mention_api'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import {
   getMentionIconComponent,
@@ -378,7 +401,16 @@ const mentionEnabled = computed(() => {
   return !!props.mention
 })
 
-const mentionDisplayLabels = computed(() => buildMentionDisplayLabels(props.mention || {}))
+// 编辑器里 @doc:"file_id" 要显示成文件名：远程搜索命中的文献在此登记（父级传入的 documents 也合并）
+const knownDocumentLabels = ref({})
+const registerDocumentLabel = (fileId, filename) => {
+  if (!fileId || !filename) return
+  knownDocumentLabels.value = { ...knownDocumentLabels.value, [`doc:${fileId}`]: filename }
+}
+const mentionDisplayLabels = computed(() => ({
+  ...buildMentionDisplayLabels(props.mention || {}),
+  ...knownDocumentLabels.value
+}))
 
 let lastRawSelectionRange = null
 let lastSyncedEditorValue = props.modelValue || ''
@@ -810,10 +842,14 @@ const updateMentionItems = (query = '') => {
   mentionItems.value = {
     files: filteredLocalFiles,
     knowledgeBases: filterItems(knowledgeItems),
+    documents: mentionItems.value.documents || [],
     mcps: filterItems(mcpItems),
     skills: filterItems(skillItems),
     subagents: filterItems(subagentItems)
   }
+
+  // 文献候选来自远程（范围内知识库文档，含空查询 → 前 20 篇），与文件搜索并行防抖
+  scheduleDocumentSearch(normalizedQuery, knowledgeBases)
 
   if (normalizedQuery) {
     const activeThreadId = props.threadId || ''
@@ -885,6 +921,7 @@ const isItemSelected = (type, index) => {
 
   const filesLen = mentionItems.value.files.length
   const kbLen = mentionItems.value.knowledgeBases.length
+  const docLen = mentionItems.value.documents.length
   const mcpLen = mentionItems.value.mcps.length
   const skillsLen = mentionItems.value.skills.length
 
@@ -892,13 +929,56 @@ const isItemSelected = (type, index) => {
     return mentionSelectedIndex.value === index
   } else if (type === 'knowledge') {
     return mentionSelectedIndex.value === filesLen + index
-  } else if (type === 'mcp') {
+  } else if (type === 'doc') {
     return mentionSelectedIndex.value === filesLen + kbLen + index
+  } else if (type === 'mcp') {
+    return mentionSelectedIndex.value === filesLen + kbLen + docLen + index
   } else if (type === 'skill') {
-    return mentionSelectedIndex.value === filesLen + kbLen + mcpLen + index
+    return mentionSelectedIndex.value === filesLen + kbLen + docLen + mcpLen + index
   } else {
-    return mentionSelectedIndex.value === filesLen + kbLen + mcpLen + skillsLen + index
+    return mentionSelectedIndex.value === filesLen + kbLen + docLen + mcpLen + skillsLen + index
   }
+}
+
+let documentSearchTimer = null
+let documentAbortController = null
+const documentSearchRequestId = ref(0)
+const scheduleDocumentSearch = (query, knowledgeBases) => {
+  clearTimeout(documentSearchTimer)
+  if (documentAbortController) {
+    documentAbortController.abort()
+    documentAbortController = null
+  }
+  documentSearchRequestId.value++
+  const currentId = documentSearchRequestId.value
+  const kbIds = (knowledgeBases || []).map((kb) => kb?.kb_id).filter(Boolean)
+
+  documentSearchTimer = setTimeout(async () => {
+    documentAbortController = new AbortController()
+    try {
+      const rows = await searchMentionDocuments(kbIds, query, documentAbortController.signal)
+      if (currentId !== documentSearchRequestId.value || !Array.isArray(rows)) return
+      rows.forEach((doc) => registerDocumentLabel(doc.file_id, doc.filename))
+      mentionItems.value.documents = rows.map((doc) => ({
+        value: doc.file_id,
+        label: doc.filename || doc.file_id,
+        type: 'doc',
+        insertValue: doc.file_id,
+        tokenLabel: formatMentionToken('doc', doc.filename || doc.file_id),
+        description: doc.figure_ready ? '图表证据就绪' : '未启用图表证据（问 Figure 不会出图）',
+        kbId: doc.kb_id,
+        figureReady: Boolean(doc.figure_ready)
+      }))
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        console.error('Mention document search error:', error)
+      }
+    } finally {
+      if (currentId === documentSearchRequestId.value) {
+        documentAbortController = null
+      }
+    }
+  }, 250)
 }
 
 // 是否有任何候选项
@@ -912,6 +992,7 @@ const hasAnyItems = computed(() => {
     showFileSearchPrompt.value ||
     items.files.length > 0 ||
     items.knowledgeBases.length > 0 ||
+    items.documents.length > 0 ||
     items.mcps.length > 0 ||
     items.skills.length > 0 ||
     items.subagents.length > 0
@@ -972,6 +1053,7 @@ const handleMentionNavigation = (e) => {
   const allItems = [
     ...mentionItems.value.files,
     ...mentionItems.value.knowledgeBases,
+    ...mentionItems.value.documents,
     ...mentionItems.value.mcps,
     ...mentionItems.value.skills,
     ...mentionItems.value.subagents
@@ -1194,7 +1276,14 @@ const handleSendOrStop = () => {
 // @ 提及功能状态
 const mentionPopupVisible = ref(false)
 const mentionQuery = ref('')
-const mentionItems = ref({ files: [], knowledgeBases: [], mcps: [], skills: [], subagents: [] })
+const mentionItems = ref({
+  files: [],
+  knowledgeBases: [],
+  documents: [],
+  mcps: [],
+  skills: [],
+  subagents: []
+})
 const mentionSelectedIndex = ref(0)
 const searchRequestId = ref(0)
 const isComposing = ref(false)

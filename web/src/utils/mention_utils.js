@@ -2,6 +2,8 @@ import { getDisplayFileName } from '@/utils/file_utils'
 
 export const mentionTypePrefixMap = {
   file: 'file',
+  // 知识库文档（文献）：值为 file_id，后端文献作用域解析器把它转成定位硬约束
+  doc: 'doc',
   knowledge: 'knowledge',
   mcp: 'mcp',
   skill: 'skill',
@@ -113,6 +115,11 @@ export const buildMentionDisplayLabels = (mention = {}) => {
     setMentionLabel(labels, 'subagent', subagent?.value, label)
     setMentionLabel(labels, 'subagent', subagent?.slug, label)
     setMentionLabel(labels, 'subagent', subagent?.name, label)
+  })
+  ;(mention.documents || []).forEach((doc) => {
+    const label = doc?.filename || doc?.name || doc?.label || doc?.file_id || ''
+    setMentionLabel(labels, 'doc', doc?.file_id, label)
+    setMentionLabel(labels, 'doc', doc?.value, label)
   })
 
   return labels
