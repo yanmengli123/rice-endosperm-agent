@@ -168,3 +168,45 @@ kill-switch 关闭演练成功；G1–G9 + 双路径持久化测试全绿。
 candidate_count / file_count）→ 文献解析唯一率与跨文献歧义率。
 
 **明确不做**：不用向量相似度或模型猜"哪篇文献"；候选清单不携带页码/图片；不给模型任何文献身份的编造通道。
+
+### 11. 多 panel 聚合与截图定位强化（v4）
+
+**问题（真实数据）**：MinerU 把一张多 panel 图拆成十余块，只有带题注的块绑到编号——OsMYB73 的
+Figure 2 只有 284×351 的 panel (k)，同页 15 张裁片无 label（部分无锚点）。结果：问 Figure 2 只出
+一个 panel；截图任何别的 panel 都失败关闭（`vision_model_spec` 未配置 + 指纹层无对象可比）。
+
+**决策一：入库聚合（figure_ingestor v4 + 迁移 0038）**。同页无 label 视觉块按空隙（≤36pt，迭代
+传递允许链式相邻）并入最近的有 label 图组；有 label 图组之间永不合并。题注绑图组；每块按
+bbox（IoU≥0.5 或包含≥0.8，回退 v3 的页码+题注文本一致）配视觉锚点；`role=primary/panel`、
+`group_index` 阅读序入库。多块图组用原 PDF 按并集 bbox 渲染**合成整图**（`asset_key=synthetic:*`，
+group_index=-1）上传为 primary——渲染/上传失败只计数不阻断；题注 panel 字母数 > 块数记
+`partial_figure_suspected`。存量文献不重解析即可重建：
+`POST /databases/{kb}/documents/{file}/figure-index/rebuild`（从 unified_article 产物 + 库内
+span/anchor 重建，`synthetic=false` 时零对象存储写入）。实测 OsMYB73：实体 51→7，43 块归组，
+Figure 2 = 16 资产（合成整图因宿主磁盘触底暂缺，最大块任 primary）。
+
+**决策二：投影发整组（A2）**。`project_publishable_figures` 发布实体全部过门资产（primary 优先 +
+阅读序，≤24），成员各自过 asset_name/指纹门、不合格跳过不抑制整组；`PublishableFigure` 增
+`role/group_index/panel_label`。前端 `FigureCardGroup` 按 binding 分组：primary 大图 + panel 缩略条。
+
+**决策三：截图定位强化（B2，全确定性）**。查询侧先归一化（去近白边框 + 最长边 1600）再算
+pHash（白边是截图指纹漂移主因，`signals.query_normalized` 可审计）；ORB 门限按查询短边分级
+（≥600/300–599/<300），small 档位强匹配额外要求 pHash 距离 ≤14 作第二意见；覆盖判据增加
+"截图包含候选"形态（candidate 覆盖 ≥50% 即可，query 侧 ≥2%）——整图截图对库内单 panel 成立；
+几何证据在多处"都像"时降为 `DETERMINISTIC_UNRESOLVED`（不具区分度）让视觉观察继续，而
+SHA/pHash 歧义仍终局 MULTIPLE。预筛池 12→24。
+
+**决策四：视觉通道启用（B0）+ provider 修复**。`vision_model_spec = siliconflow-cn:Qwen/Qwen3-VL-8B-Instruct`
+（canary 实测 READY；启用前需把该模型加入 provider 的 enabled_models，Qwen2.5-VL-72B 在该账号为
+Model disabled）。修复两个从未暴露的 provider bug：消息必须以**序列**传给 `adapter.call`（单个
+HumanMessage 会被当字段元组迭代）；发往 VLM 前确定性降采样（最长边 1024、JPEG q82——整页级
+PNG 会请求超时）。金标（真实 run）：panel 截图 → `V1_STRONG_PHASH(query_normalized=true)` 第 5 页
++ 整组；整图（含题注）PDF 渲染截图 → 指纹 miss → 观察 → `V2_VISUAL_CONSTRAINTS` 第 5 页 + 整组；
+纯文字窄裁片 → 失败关闭（正确）。
+
+**分因文案（B3）**：`UNLOCATED` 按 `vision_status × locator_reason` 给出原因 + 可行动建议
+（未配置视觉 / 视觉异常 / 图表证据缺失 / 请截含编号区域），永不给页码。
+
+**环境前置（实测）**：worker 无出网代理 → MinerU 结果包下载 SSL EOF（重入库不可用，但
+figure-index/rebuild 与身份缓存复用不受影响）；宿主磁盘触底 → MinIO `XMinioStorageFull`
+（合成整图上传失败、上传新文件 500）——清盘后执行 rebuild 即可补齐合成整图。

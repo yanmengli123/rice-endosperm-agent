@@ -156,7 +156,7 @@ trace 事件 `knowledge.figure_projection.attached` 落库；页面历史恢复�
 
 图卡改动应单独成 PR，避免与其他工作混入扩大回滚面：
 
-- 后端：`knowledge/contracts/figure_asset_projection.py`、`knowledge/orchestration/retrieval_orchestrator.py`、`services/chat_service.py`、`services/agent_run_service.py`、`config/app.py`、`trace/protocol.py`；文献限定：`knowledge/planning/document_scope.py`、`knowledge/evidence/caption_locator.py`、`knowledge/evidence/quote_locator.py`、`knowledge/vision/figure_image_locator.py`、`knowledge/contracts/locator_binding.py`、`knowledge/pdf_evidence/grobid.py`、`knowledge/pdf_evidence/pipeline.py`、`server/routers/mention_router.py`
+- 后端：`knowledge/contracts/figure_asset_projection.py`、`knowledge/orchestration/retrieval_orchestrator.py`、`services/chat_service.py`、`services/agent_run_service.py`、`config/app.py`、`trace/protocol.py`；文献限定：`knowledge/planning/document_scope.py`、`knowledge/evidence/caption_locator.py`、`knowledge/evidence/quote_locator.py`、`knowledge/vision/figure_image_locator.py`、`knowledge/contracts/locator_binding.py`、`knowledge/pdf_evidence/grobid.py`、`knowledge/pdf_evidence/pipeline.py`、`server/routers/mention_router.py`；多 panel 聚合与截图定位：`knowledge/vision/figure_ingestor.py`、`knowledge/vision/phash.py`、`knowledge/vision/local_features.py`、`knowledge/vision/provider.py`、`knowledge/pdf_evidence/asset_paths`（无改动，惰性导入）、`storage/postgres/models_knowledge.py`、`storage/postgres/manager.py`（迁移 0038）、`services/scientific_pdf_ingest_service.py`、`server/routers/knowledge_router.py`
 - 测试：`test/unit/knowledge/test_figure_asset_projection.py`、`test/unit/services/test_citation_ready_contract.py`、`test/unit/services/test_agent_run_service.py`
 - 前端：`utils/figureCard.js`、`utils/__tests__/figureCard.spec.js`、`components/evidence/FigureCard.vue`、`components/evidence/FigureCardGroup.vue`、`composables/useAgentStreamHandler.js`、`composables/useAgentThreadState.js`、`components/AgentChatComponent.vue`、`components/AgentMessageComponent.vue`、`components/BasicSettingsSection.vue`；文献限定：`utils/mention_utils.js`、`apis/mention_api.js`、`components/MessageInputComponent.vue`
 - 文档：`docs/adr/adr-0004-figure-card-projection.md`、本文、`docs/.vitepress/config.mts`
@@ -223,3 +223,40 @@ GROUP BY 1, 2 ORDER BY 1, 2;
 `“Plant Biotechnology Journal - 2024 - Liu” 这篇的 Figure 1 在哪页` → FILENAME 通道 VERIFIED + 原图；
 `Fig. 1 在哪页` → VERIFIED（缩写预过滤修复）。跨文献 `MULTIPLE_MATCHES` + 候选清单由单测
 （`test_document_scope.py`）以真实 SQL 语义覆盖，线上复现需第二篇图表就绪 PDF（见第 10 节环境前置）。
+
+## 12. 多 panel 图组与截图定位（figure_ingestor v4 / ADR-0004 §11）
+
+### 12.1 图表索引重建（不重解析、不依赖 MinerU）
+
+```bash
+# ingestor 升级后的存量补索引；对象存储不可写时 synthetic=false（零写入，只缺合成整图）
+curl -X POST "http://127.0.0.1:5050/api/knowledge/databases/{kb}/documents/{file}/figure-index/rebuild?synthetic=true" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+返回 `figure_index` summary：关注 `merged_unlabeled_blocks`（归组块数）、`synthetic_primary /
+synthetic_failures`（合成整图）、`partial_figure_suspected`（题注 panel 字母数 > 块数）。
+实测 OsMYB73：实体 51→7、43 块归组、Figure 2 = 16 资产、`synthetic_failures=5`（宿主磁盘触底）。
+
+### 12.2 视觉观察模型（截图反查兜底）
+
+1. 在模型提供方（如 SiliconFlow）的启用模型里加入一个多模态模型（实测 `Qwen/Qwen3-VL-8B-Instruct`
+   可用；`Qwen/Qwen2.5-VL-72B-Instruct` 在当前账号为 Model disabled）；
+2. `POST /api/system/config {"key":"vision_model_spec","value":"siliconflow-cn:Qwen/Qwen3-VL-8B-Instruct"}`；
+3. **重启 worker**（canary 结论进程级缓存），验证：
+   `docker compose exec worker uv run --no-sync python -c "import asyncio; from yuxi.config import config; config.refresh(); from yuxi.knowledge.vision import provider as vp; print(asyncio.run(vp.probe_vision_capability(force=True)))"`
+   → `status: READY`。
+
+### 12.3 截图定位金标（实测）
+
+| 用例 | 预期 | 实测 |
+|---|---|---|
+| 上传库内 panel 截图（含白边/缩放/JPEG） | V1 `query_normalized=true` | VERIFIED 第 5 页 + 16 图组 |
+| 整张图（含题注）截图 | 指纹 miss → 观察 → V2 | VERIFIED 第 5 页 + 16 图组 |
+| 纯文字窄裁片（题注锚点区） | 失败关闭（无区分度证据） | NOT_FOUND（正确） |
+| 文本问 `Figure 2 在哪页` | 图组 | 第 5 页 + 16 资产 |
+
+### 12.4 SLA
+
+截图定位成功率按层统计（`locator_resolution.match_tier`：V0/V1/V1G/V2/V3）；视觉 canary 状态；
+`partial_figure_suspected` 率；`synthetic_failures`（对象存储健康度信号）。
