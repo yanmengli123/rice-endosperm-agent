@@ -57,8 +57,10 @@ SUPPRESS_PROJECTION_ERROR = "projection_error"
 
 _FIGURE_KINDS = {LOCATOR_KIND_FIGURE_IMAGE, LOCATOR_KIND_FIGURE_CAPTION}
 
-# 多资产行的确定性选择规则（观测字段随投影输出，Phase 2 轮播预留）
-_SELECTION_RULE = "anchor_desc_sha_desc_id_asc"
+# 图组投影：primary（合成整图/最大块）优先，其余按阅读序；单条 SSE 最多发布的资产数
+_SELECTION_RULE = "primary_first_then_reading_order"
+ROLE_PRIMARY = "primary"
+_MAX_GROUP_FIGURES = 24
 
 # 以下三组常量镜像 services/knowledge_asset_service（该模块拖 FastAPI/MinIO
 # 依赖，contracts 层不做生产期 import）；与签发方的等价性由
@@ -99,6 +101,10 @@ class PublishableFigure(BaseModel):
     caption: str = ""
     width: int = 0
     height: int = 0
+    # A2 图组：primary（合成整图/最大块，前端大图）/ panel（缩略）；group_index 阅读序（合成整图 -1）
+    role: str = "panel"
+    group_index: int = 0
+    panel_label: str = ""
     selection: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -162,6 +168,7 @@ async def _fetch_figure_rows(
         stmt = stmt.join(KnowledgeFile, KnowledgeFile.file_id == FigureEntityRecord.file_id)
         conditions.append(KnowledgeFile.active_parse_revision_id == revision_id)
     stmt = stmt.where(*conditions).order_by(
+        (FigureAssetRecord.role == ROLE_PRIMARY).desc(),
         (FigureAssetRecord.anchor_id != "").desc(),
         (FigureAssetRecord.asset_sha256 != "").desc(),
         FigureAssetRecord.id.asc(),
@@ -218,7 +225,7 @@ async def project_publishable_figures(
         return [], (SUPPRESS_REVISION_NOT_ACTIVE if scope_rows else SUPPRESS_SCOPE_MISMATCH)
 
     asset, entity = rows[0]
-    # 门5：object_name 非空且 asset_name 可推导可校验（与签发方同一接受域）
+    # 门5：object_name 非空且 asset_name 可推导可校验（与签发方同一接受域）——对 primary 判定
     asset_name = derive_asset_name(str(asset.object_name or ""))
     if asset_name is None:
         return [], SUPPRESS_ASSET_NAME_UNRESOLVABLE
@@ -229,24 +236,57 @@ async def project_publishable_figures(
     # 门7：发布授权位（与 visual_explanation_allowed 分立）
     if not publish_allowed:
         return [], SUPPRESS_PUBLISH_NOT_ALLOWED
-    figure = PublishableFigure(
-        binding_id=parsed.binding_id,
-        kb_id=kb_id,
-        file_id=file_id,
-        revision_id=revision_id,
-        asset_name=asset_name,
-        asset_sha256=asset_sha,
-        media_type=_MEDIA_TYPE_BY_SUFFIX[posixpath.splitext(asset_name)[1].lower()],
-        page=int(parsed.asset_pdf_page_number or parsed.page_number),
-        panel_match=parsed.panel_match,
-        evidence_id=str(parsed.physical_evidence_id),
-        figure_label=str(entity.container_label or ""),
-        caption=str(entity.caption or ""),
-        width=int(asset.width or 0),
-        height=int(asset.height or 0),
-        selection={"asset_count": len(rows), "rule": _SELECTION_RULE},
+
+    # A2 图组投影：同一实体（Figure N）的全部资产按 primary → 阅读序发布；成员各自过门 5/6，
+    # 不合格的 panel 跳过而不抑制整组；页码仍只来自 Binding（I2）
+    group_rows = await _fetch_group_assets(db, entity_id=int(entity.id), revision_id=revision_id)
+    ordered = group_rows or [asset]
+    page = int(parsed.asset_pdf_page_number or parsed.page_number)
+    figures: list[PublishableFigure] = []
+    for member in ordered[:_MAX_GROUP_FIGURES]:
+        member_name = derive_asset_name(str(member.object_name or ""))
+        member_sha = str(member.asset_sha256 or "")
+        if member_name is None or not member_sha:
+            continue
+        figures.append(
+            PublishableFigure(
+                binding_id=parsed.binding_id,
+                kb_id=kb_id,
+                file_id=file_id,
+                revision_id=revision_id,
+                asset_name=member_name,
+                asset_sha256=member_sha,
+                media_type=_MEDIA_TYPE_BY_SUFFIX[posixpath.splitext(member_name)[1].lower()],
+                page=page,
+                panel_match=parsed.panel_match,
+                evidence_id=str(parsed.physical_evidence_id),
+                figure_label=str(entity.container_label or ""),
+                caption=str(entity.caption or ""),
+                width=int(member.width or 0),
+                height=int(member.height or 0),
+                role=str(getattr(member, "role", "") or "panel"),
+                group_index=int(getattr(member, "group_index", 0) or 0),
+                panel_label=str(getattr(member, "panel_label", "") or ""),
+                selection={"asset_count": len(ordered), "rule": _SELECTION_RULE},
+            )
+        )
+    if not figures:
+        return [], SUPPRESS_ASSET_UNFINGERPRINTED
+    return figures, None
+
+
+async def _fetch_group_assets(db: AsyncSession, *, entity_id: int, revision_id: str) -> list[FigureAssetRecord]:
+    """图组全部资产：primary（合成整图/最大块）优先，其余按阅读序。"""
+    stmt = (
+        select(FigureAssetRecord)
+        .where(FigureAssetRecord.entity_id == entity_id, FigureAssetRecord.parse_revision_id == revision_id)
+        .order_by(
+            (FigureAssetRecord.role == ROLE_PRIMARY).desc(),
+            FigureAssetRecord.group_index.asc(),
+            FigureAssetRecord.id.asc(),
+        )
     )
-    return [figure], None
+    return list((await db.execute(stmt)).scalars().all())
 
 
 def figure_projection_envelope(figures: list[PublishableFigure], reason: str | None) -> dict[str, Any]:

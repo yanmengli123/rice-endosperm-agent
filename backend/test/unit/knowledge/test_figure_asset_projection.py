@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.knowledge.contracts.figure_asset_projection import (
@@ -177,6 +178,8 @@ async def _seed_asset(
     asset_anchor_id: str = "ea_fig1",
     object_name: str = _OBJECT_NAME,
     sha: str = _SHA_B,
+    role: str = "panel",
+    group_index: int = 0,
 ) -> None:
     """只追加资产行（同一实体的多资产场景，避免重复实体 PK/唯一键冲突）。"""
     session.add(
@@ -199,8 +202,58 @@ async def _seed_asset(
             height=600,
             bbox=[40.0, 400.0, 280.0, 480.0],
             page=4,
+            role=role,
+            group_index=group_index,
         )
     )
+
+
+# ---- G10：图组投影（A2）——primary 优先、阅读序、成员各自过门 ----
+
+
+@pytest.mark.asyncio
+async def test_g10_group_projection_primary_first_then_reading_order(figure_session):
+    await _seed_source(figure_session)
+    # 题注块 k（阅读序 2）；合成整图 primary（group_index -1）；panel a（0）；panel b 无对象（跳过不抑制）
+    await _seed_figure(figure_session, asset_key="images/k.jpg")
+    synthetic_name = f"tenants/1/documents/{_SHA_A}/mineru/pr_1/images/{'c' * 24}-synthetic_figure_1.png"
+    await _seed_asset(
+        figure_session,
+        entity_id=10,
+        asset_id=101,
+        asset_key="synthetic:figure 1",
+        object_name=synthetic_name,
+        sha="c" * 64,
+        role="primary",
+        group_index=-1,
+    )
+    await _seed_asset(
+        figure_session,
+        entity_id=10,
+        asset_id=102,
+        asset_key="images/a.jpg",
+        object_name=f"tenants/1/documents/{_SHA_A}/mineru/pr_1/images/{'d' * 24}-a.jpg",
+        sha="d" * 64,
+        group_index=0,
+    )
+    await _seed_asset(
+        figure_session, entity_id=10, asset_id=103, asset_key="images/b.jpg", object_name="", sha="", group_index=1
+    )
+    await figure_session.flush()
+    # 把题注块 k 标为阅读序 2
+    k_row = (await figure_session.execute(select(FigureAssetRecord).where(FigureAssetRecord.id == 100))).scalars().one()
+    k_row.group_index = 2
+    await figure_session.flush()
+
+    binding = _binding(locator_kind=LOCATOR_KIND_FIGURE_CAPTION, anchor_id="ea_cap1", asset_pdf_page_number=None)
+    figures, reason = await project_publishable_figures(figure_session, binding=binding, publish_allowed=True)
+    assert reason is None
+    assert [figure.role for figure in figures] == ["primary", "panel", "panel"]
+    assert [figure.group_index for figure in figures] == [-1, 0, 2]
+    assert figures[0].asset_name.endswith("-synthetic_figure_1.png") and figures[0].media_type == "image/png"
+    assert figures[1].media_type == "image/jpeg"
+    assert all(figure.page == 4 and figure.caption == _CAPTION for figure in figures)  # 页码/题注仍来自 Binding/实体
+    assert figures[0].selection["asset_count"] == 4  # 无对象的 b 计入组规模但不发布
 
 
 # ---- G1：FIGURE_IMAGE 全字段（含 I2 页码唯一来源 / asset_name 完整 basename）----
@@ -222,7 +275,7 @@ async def test_g1_figure_image_full_fields(figure_session):
     assert figure.figure_label == "Figure 1" and figure.caption == _CAPTION
     assert figure.kb_id == "kb-a" and figure.file_id == "file-a" and figure.revision_id == "pr_1"
     assert figure.projection_version == FIGURE_PROJECTION_VERSION
-    assert figure.selection == {"asset_count": 1, "rule": "anchor_desc_sha_desc_id_asc"}
+    assert figure.selection == {"asset_count": 1, "rule": "primary_first_then_reading_order"}
 
 
 # ---- G2：FIGURE_CAPTION 经实体 caption_anchor_id 中转；页码回落 Binding.page_number ----
@@ -337,7 +390,7 @@ async def test_g6_deterministic_multi_asset_selection(figure_session):
     assert len(figures) == 1
     assert figures[0].asset_name == _ASSET_BASENAME
     assert figures[0].selection["asset_count"] == 2
-    assert figures[0].selection["rule"] == "anchor_desc_sha_desc_id_asc"
+    assert figures[0].selection["rule"] == "primary_first_then_reading_order"
 
 
 # ---- G7：scope 错配（Binding 的 kb 与行 kb 不一致）----
