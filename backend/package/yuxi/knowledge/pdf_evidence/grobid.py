@@ -81,6 +81,16 @@ def parse_tei(tei_xml: str) -> dict[str, Any]:
         if name and name not in seen:
             seen.add(name)
             authors.append(name)
+    # 本文题录（非参考文献）：DOI 取 sourceDesc/biblStruct（限定作用域，避免扫到参考文献 DOI），
+    # 年份取 fileDesc 内首个带 when 属性或可解析年份的 date
+    source_bibl = root.find(".//tei:fileDesc/tei:sourceDesc/tei:biblStruct", TEI_NS)
+    doi = _doi_from_node(source_bibl) if source_bibl is not None else None
+    year: str | None = None
+    for date_node in root.findall(".//tei:fileDesc//tei:date", TEI_NS):
+        match = re.search(r"(?:19|20)\d{2}", str(date_node.attrib.get("when") or "") or _text(date_node))
+        if match:
+            year = match.group(0)
+            break
 
     sections: list[dict[str, Any]] = []
     for index, div in enumerate(root.findall(".//tei:text/tei:body//tei:div", TEI_NS)):
@@ -130,7 +140,7 @@ def parse_tei(tei_xml: str) -> dict[str, Any]:
             )
 
     return {
-        "metadata": {"title": title, "abstract": abstract, "authors": authors},
+        "metadata": {"title": title, "abstract": abstract, "authors": authors, "doi": doi, "year": year},
         "sections": sections,
         "references": references,
         "citation_mentions": mentions,

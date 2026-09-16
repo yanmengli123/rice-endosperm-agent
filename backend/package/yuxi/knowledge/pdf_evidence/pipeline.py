@@ -414,6 +414,15 @@ class ScientificPdfPipeline:
             "native": native.quality,
             "mineru": {"ok": mineru_ok, "error": mineru_error, "reused": mineru_cache is not None},
             "grobid": {"attempted": grobid_attempted, "ok": grobid_ok, "error": grobid_error},
+            # 本文题录（文献作用域解析器的确定性匹配源：DOI / 标题 / 文件名）；GROBID 失败时只有文件名
+            "bibliography": {
+                "title": str(article.title or ""),
+                "authors": [str(item) for item in (grobid_metadata.get("authors") or [])][:20],
+                "doi": str(grobid_metadata.get("doi") or ""),
+                "year": str(grobid_metadata.get("year") or ""),
+                "filename": path.name,
+                "source": "grobid" if grobid_ok else "filename",
+            },
             "quality_profile": QUALITY_PROFILE_VERSION,
             "counts": {
                 "pages": native.page_count,

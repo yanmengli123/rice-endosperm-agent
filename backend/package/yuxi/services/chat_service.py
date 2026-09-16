@@ -397,8 +397,40 @@ def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
     if locator_authorized:
         return f"已可靠定位到原文：{render_locator_chip(authoritative_locator)}"
     if status == "MULTIPLE_MATCHES":
+        documents = _candidate_documents(locator, policy)
+        if len(documents) > 1:
+            listing = "\n".join(f"- {item.get('filename') or item.get('file_id')}" for item in documents)
+            return (
+                "该编号在当前知识范围内命中多篇文献，无法唯一确定是哪一篇：\n"
+                f"{listing}\n"
+                "请输入 @ 选择「文献」指定其中一篇，或粘贴题注原文后重试。"
+            )
         return "该原句在当前知识范围内存在多个物理位置，当前无法可靠定位唯一原文页码。"
     return "当前无法可靠定位原文页码。"
+
+
+def _candidate_documents(locator: dict[str, Any], policy: dict[str, Any] | None) -> list[dict[str, str]]:
+    """MULTIPLE_MATCHES 下可发布的候选文献清单——只含文档身份（file_id/kb_id/filename），
+    不带页码、不带图片；策略位 candidate_documents_allowed 未授权即为空。"""
+    if not (policy or {}).get("candidate_documents_allowed"):
+        return []
+    documents = locator.get("candidate_documents")
+    if not isinstance(documents, list):
+        return []
+    published: list[dict[str, str]] = []
+    for item in documents:
+        if not isinstance(item, dict) or not item.get("file_id"):
+            continue
+        published.append(
+            {
+                "file_id": str(item.get("file_id") or ""),
+                "kb_id": str(item.get("kb_id") or ""),
+                "filename": str(item.get("filename") or ""),
+            }
+        )
+        if len(published) >= 10:
+            break
+    return published
 
 
 _CITATION_READY_KEYS = ("status", "evidence_id", "file_id", "filename", "zone", "page", "anchor_id")
@@ -1631,6 +1663,10 @@ async def stream_agent_chat(
             )
             if citation_ready is not None:
                 yield make_chunk(status="citation_ready", meta=meta, **citation_ready)
+            candidate_documents = _candidate_documents(locator, knowledge_contract.get("answer_policy"))
+            if len(candidate_documents) > 1:
+                # 跨文献歧义：把候选文献清单交给前端渲染成可点选的 @doc 提及（只含文档身份）
+                yield make_chunk(status="locator_candidates", candidates=candidate_documents, meta=meta)
             meta["time_cost"] = asyncio.get_event_loop().time() - start_time
             yield make_chunk(status="finished", meta=meta)
             return
@@ -1879,6 +1915,12 @@ async def stream_agent_chat(
         ):
             locator_terminal = knowledge_contract.get("locator_resolution") or {}
             yield make_chunk(status="citation_ready", meta=meta, **_citation_ready_payload(locator_terminal))
+        if knowledge_contract is not None:
+            _terminal_locator = knowledge_contract.get("locator_resolution") or {}
+            if _terminal_locator.get("status") == "MULTIPLE_MATCHES":
+                candidate_documents = _candidate_documents(_terminal_locator, knowledge_contract.get("answer_policy"))
+                if len(candidate_documents) > 1:
+                    yield make_chunk(status="locator_candidates", candidates=candidate_documents, meta=meta)
 
         yield make_chunk(status="finished", meta=meta)
 

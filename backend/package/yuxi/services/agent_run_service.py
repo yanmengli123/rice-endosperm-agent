@@ -331,6 +331,8 @@ def _compact_stream_chunk(chunk: dict) -> dict:
             # 图卡投影（citation_ready.figures）：默认 verbose=false 的前端/桌面端只收到
             # 本白名单字段，漏加即被静默剥离
             "figures",
+            # 跨文献歧义时的候选文献清单（locator_candidates 事件，只含文档身份）
+            "candidates",
         )
         if chunk.get(key) is not None and chunk.get(key) != ""
     }
