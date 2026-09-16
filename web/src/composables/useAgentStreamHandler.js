@@ -3,6 +3,7 @@ import { handleChatError } from '@/utils/errorHandler'
 import { unref } from 'vue'
 import { extractPendingInterrupt } from '@/composables/useApproval'
 import { ReasoningVisibilityBuffer } from '@/utils/reasoningVisibility'
+import { normalizeVerifiedFigures } from '@/utils/figureCard'
 
 const reasoningVisibilityByMessage = new Map()
 
@@ -271,6 +272,8 @@ export function useAgentStreamHandler({
         // Binding is already final and server-verified. Keep the structured
         // fact for diagnostics/UI consumers; never re-resolve it in-browser.
         threadState.verifiedCitation = chunk.citation || null
+        // 图卡只接受后端确定性投影（figures 字段缺席 ⟺ 未发布，此时清空）
+        threadState.verifiedFigures = normalizeVerifiedFigures(chunk.figures)
         return false
 
       case 'finished':

@@ -44,7 +44,9 @@ export function useAgentThreadState({
         claimBindingStatus: null,
         evidenceProjectionStatus: null,
         sourceManifest: null,
-        verifiedCitation: null
+        verifiedCitation: null,
+        // 本轮已发布的论文原图投影（citation_ready.figures）；字段缺席 ⟺ 未发布
+        verifiedFigures: []
       }
     }
     return chatState.threadStates[threadId]

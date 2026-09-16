@@ -169,6 +169,17 @@
             />
           </div>
         </div>
+
+        <div class="section-title">对话图卡</div>
+        <div class="section">
+          <div class="card">
+            <span class="label">{{ items?.figure_card_enabled?.des || '对话流图卡' }}</span>
+            <a-switch
+              :checked="configStore.config?.figure_card_enabled"
+              @change="handleChange('figure_card_enabled', $event)"
+            />
+          </div>
+        </div>
       </template>
     </template>
 

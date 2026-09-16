@@ -288,6 +288,12 @@
                   <template v-if="currentVerifiedCitation.zone === 'SUPPORTING_INFO'">· 补充材料</template>
                 </span>
               </div>
+              <FigureCardGroup
+                v-if="currentVerifiedFigures.length"
+                :figures="currentVerifiedFigures"
+                :evidence-ids="displayedEvidenceIdSet"
+                @open-source="openFigureSource"
+              />
               <section
                 v-if="hasDisplayedEvidenceProjection"
                 class="state-section"
@@ -739,6 +745,8 @@ import { useRunTrace } from '@/composables/useRunTrace'
 import { useRunStatusArchive } from '@/composables/useRunStatusArchive'
 import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
+import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
+import { extractCitationReadyFromHistory } from '@/utils/figureCard'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
@@ -1216,6 +1224,7 @@ const resetRunEvidence = (threadId, runId = null) => {
   ts.locatorStatusReason = null
   ts.sourceManifest = null
   ts.verifiedCitation = null
+  ts.verifiedFigures = []
 }
 const currentEvidence = computed(() => {
   const threadId = currentChatId.value
@@ -1243,6 +1252,13 @@ const currentEvidenceProjectionStatus = computed(
 const currentVerifiedCitation = computed(() => {
   const citation = currentChatId.value ? chatState.threadStates[currentChatId.value]?.verifiedCitation : null
   return citation && citation.status === 'VERIFIED' ? citation : null
+})
+// 本轮已发布的论文原图（与定位芯片同区展示；数据只来自后端 citation_ready.figures）
+const currentVerifiedFigures = computed(() => {
+  const figures = currentChatId.value
+    ? chatState.threadStates[currentChatId.value]?.verifiedFigures
+    : null
+  return Array.isArray(figures) ? figures : []
 })
 const hasCurrentEvidenceProjection = computed(() => {
   const threadState = currentChatId.value ? chatState.threadStates[currentChatId.value] : null
@@ -1301,6 +1317,11 @@ const displayedEvidence = computed(() => {
   const evidence = focusedArchiveEntry.value?.evidence
   return Array.isArray(evidence) ? evidence : []
 })
+// 图卡「查看原文」门控：只有证据集里能找到同 evidence_id 的证据才允许跳转（复用证据守卫）
+const displayedEvidenceIdSet = computed(
+  () =>
+    new Set(displayedEvidence.value.map((item) => String(item?.evidence_id || '')).filter(Boolean))
+)
 const displayedEvidenceSummary = computed(() =>
   focusedRunId.value ? focusedArchiveEntry.value?.evidenceSummary : currentEvidenceSummary.value
 )
@@ -1430,6 +1451,14 @@ const openEvidenceSource = (evidence) => {
   )
   evidenceViewer.kbId = kbId
   evidenceViewer.fileId = fileId
+}
+const openFigureSource = (figure) => {
+  const evidenceId = String(figure?.evidence_id || '')
+  const evidence = displayedEvidence.value.find(
+    (item) => String(item?.evidence_id || '') === evidenceId
+  )
+  if (!evidence) return
+  openEvidenceSource(evidence)
 }
 const tokenUsageSegments = computed(() => {
   const usage = currentTokenUsage.value
@@ -2529,6 +2558,16 @@ const createThread = async (agentId, title = '新的对话') => {
 }
 
 // 获取线程消息
+// 历史恢复只还原实际发布过的 citation_ready（含 figures）；审计用的 citation_binding 不参与，
+// 保证开关关闭的暗发布期刷新页面不会从审计数据漏出图卡
+const restoreCitationReadyFromHistory = (threadId, history) => {
+  const ts = getThreadState(threadId)
+  if (!ts) return
+  const restored = extractCitationReadyFromHistory(history)
+  ts.verifiedCitation = restored?.citation || null
+  ts.verifiedFigures = restored?.figures || []
+}
+
 const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
   if (!threadId || !agentId) return
 
@@ -2552,6 +2591,8 @@ const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
     } else {
       resetRunEvidence(threadId)
     }
+    // 定位芯片/图卡的历史恢复：只还原实际发布过的 citation_ready（loadRunEvidence 会先重置）
+    restoreCitationReadyFromHistory(threadId, history)
   } catch (error) {
     handleChatError(error, 'load')
     throw error
