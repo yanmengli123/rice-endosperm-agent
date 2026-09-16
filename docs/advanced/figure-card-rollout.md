@@ -20,9 +20,12 @@
 
 | 用户输入 | 后端路径 | 出图条件 | 用户看到 |
 |---|---|---|---|
-| 「Figure S2 在哪页」 | `DETERMINISTIC_LOCATOR`（不经 LLM） | 投影 attached **且** 开关 on | 定位文字 + 芯片 + 图卡 |
-| 「Figure S2 是什么意思」 | LLM 生成 + 守卫后流末 `citation_ready` | 同上 | 解释 + 芯片 + 图卡 |
-| 上传截图「这是哪张图」 | `FIGURE_IMAGE` V0–V4 | 同上（`panel_match` 透传） | 定位 + 图卡 |
+| 「Figure S2 在哪页」 | `DETERMINISTIC_LOCATOR`（不经 LLM） | 投影 attached **且** 开关 on | 定位文字 + **答案内原图卡** + 状态面板芯片/图卡 |
+| 「Figure S2 是什么意思」 | LLM 生成 + 守卫后流末 `citation_ready` | 同上 | 解释 + **答案内原图卡** + 状态面板芯片/图卡 |
+| 上传截图「这是哪张图」 | `FIGURE_IMAGE` V0–V4 | 同上（`panel_match` 透传） | 定位 + **答案内原图卡** + 状态面板图卡 |
+
+图卡在两处同源展示：答案气泡内（消息级附件，逐消息持久，`AgentMessageComponent`）与状态面板
+（跟随线程最新一轮）。原图**不进 Markdown 正文**（ADR-0004 §9）。
 
 不变量：`citation_ready` 只在 `locator_resolution.status == VERIFIED` 分支发出，投影门 1 亦要求 VERIFIED——「非 VERIFIED 发图」在代码层双重不可能；出图决策 100% 在后端，模型没有任何出图通道。
 
@@ -103,8 +106,8 @@ curl -s http://127.0.0.1:5050/api/system/config \
 2. 取该 run 的事件流：`GET /api/agent/runs/{run_id}/events?verbose=false`（Bearer），找 `citation_ready` 帧——
    开：有 `figures[]`，且 `citation.kb_id` / `citation.revision_id` 非空；关：**无 `figures` 键**。
    若 run 已结束再连流，加请求头 `Last-Event-ID: 0-0` 从头回放（worker 刚重启时立即连流可能拿到空流，这是连接竞态不是产品问题）；
-3. 页面：状态面板（头部「状态」按钮）「定位已验证」芯片下出现「论文原图」卡组；点图放大；证据集含同 `evidence_id` 时出现「查看原文」；
-4. 刷新页面：图卡仍在（读 `extra_metadata.citation_ready`）；回滚后新提的问题刷新只有芯片。
+3. 页面：答案气泡内、定位行正下方出现「论文原图」卡；状态面板（头部「状态」按钮）「定位已验证」芯片下同样出现卡组；点图放大；证据集含同 `evidence_id` 时出现「查看原文」；
+4. 刷新页面：两处图卡仍在（读 `extra_metadata.citation_ready`）；回滚后新提的问题刷新只有芯片。
 
 开发环境实测记录（2026-09-16，真实提问「Figure 1 在哪页」，KB `RC-G3 水稻科研 PDF 验收库`）：确定性路径零 LLM 回答；
 `citation_ready` 帧含 9 键 citation + 1 条 figure（Figure 1，题注取自实体表，1307×1320，image/jpeg）；
@@ -124,6 +127,7 @@ trace 事件 `knowledge.figure_projection.attached` 落库；页面历史恢复�
 | G6 | 上传库内截图问「这是哪张图」 | V0/V1 命中 → attached，`panel_match` 透传 | 图卡 + panel 标注；未命中不出图 |
 | G7 | 未入库 / 未解析 PDF | `no_asset_row` 抑制 | 占位不崩，文字照常 |
 | G8 | 图卡「查看原文」 | — | 证据集含同 `evidence_id` 才显示；点击开 PDF 抽屉到该页 |
+| G9 | 答案内图卡（实时 + 历史） | 消息 `extra_metadata.citation_ready.figures` 与 SSE 一致 | 界面发问后答案定位行下即刻出卡（`figuresByRun` 桥接，不等历史回读）；再问一轮后上一条答案的卡不消失；刷新后逐消息仍在；工具调用中间消息不带卡 |
 
 投影函数在开发环境真实数据上的冒烟结果：图片入口 attached（`asset_name` 与对象 basename 严格相等）；题注入口 attached（Figure 1，题注取自实体表）；负例 `scope_mismatch` / `publish_not_allowed` / `no_asset_row` 分类正确。
 
@@ -154,7 +158,7 @@ trace 事件 `knowledge.figure_projection.attached` 落库；页面历史恢复�
 
 - 后端：`knowledge/contracts/figure_asset_projection.py`、`knowledge/orchestration/retrieval_orchestrator.py`、`services/chat_service.py`、`services/agent_run_service.py`、`config/app.py`、`trace/protocol.py`
 - 测试：`test/unit/knowledge/test_figure_asset_projection.py`、`test/unit/services/test_citation_ready_contract.py`、`test/unit/services/test_agent_run_service.py`
-- 前端：`utils/figureCard.js`、`utils/__tests__/figureCard.spec.js`、`components/evidence/FigureCard.vue`、`components/evidence/FigureCardGroup.vue`、`composables/useAgentStreamHandler.js`、`composables/useAgentThreadState.js`、`components/AgentChatComponent.vue`、`components/BasicSettingsSection.vue`
+- 前端：`utils/figureCard.js`、`utils/__tests__/figureCard.spec.js`、`components/evidence/FigureCard.vue`、`components/evidence/FigureCardGroup.vue`、`composables/useAgentStreamHandler.js`、`composables/useAgentThreadState.js`、`components/AgentChatComponent.vue`、`components/AgentMessageComponent.vue`、`components/BasicSettingsSection.vue`
 - 文档：`docs/adr/adr-0004-figure-card-projection.md`、本文、`docs/.vitepress/config.mts`
 
 桌面端（rice-endosperm-desktop）零改动：SSE 帧动态解析、未消费 `citation_ready`，本次为纯加法字段（ADR-0004 §7 为协议变更记录）。

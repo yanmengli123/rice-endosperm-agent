@@ -109,11 +109,25 @@ asset_name 可校验 → sha 非空 → `figure_image_publish_allowed`。抑制�
 全量前验收门：非 VERIFIED 发图率 = 0；跨 revision 错图 = 0；白名单契约测试在 CI；
 kill-switch 关闭演练成功；G1–G9 + 双路径持久化测试全绿。
 
+### 9. 答案气泡内图卡 = 消息级附件，不是 Markdown 内联
+
+产品要求原图同时出现在状态面板与大模型答案里。两种实现里只有一种符合权威链：
+
+- **否决：把 `![caption](kbasset://…)` 注入 `message.content`。** 会污染答案文本、与守卫/
+  清洗器（`sanitize_visible_text`、`strip_bare_locators`、`_rewrite_fabricated_chips`）耦合、
+  聊天区 `MarkdownPreview` 未接资产解析（kb_id 缺失即碎图），且给"模型输出里出现图片语法"
+  留下灰区。
+- **采纳：消息级附件。** `message.content` 保持纯净；`AgentMessageComponent` 在 Markdown 正文
+  之后渲染同一个 `FigureCardGroup`。数据源与状态面板完全同源且逐消息：已落库的
+  `extra_metadata.citation_ready.figures` 优先；流结束到历史回读之间由
+  `threadState.figuresByRun[run_id]`（`citation_ready` 到达时按 run 暂存，新一轮不清）桥接。
+  只挂该轮最后一条 AI 消息（工具调用中间消息不挂）。模型依旧零出图通道，后端零改动。
+
 ## 后果
 
 - 多资产实体的确定性选择（anchor 优先 > sha 优先 > id 升序）是启发式，
   `selection` 观测字段为 Phase 2 轮播/人工核验预留；
 - `_persisted_figure_index` 的 limit 600 / kb_ids[:20] 截断影响裁决候选面
   （非投影 join），超大库 `no_asset_row` 偏高时另立工单；
-- 图卡跟随线程最新一轮（与定位芯片同语义）；聚焦归档 run 时不切换图卡，Phase 2 与
-  多图轮播、正文内联回填、`figure_image` draft block 一并评估。
+- 状态面板图卡跟随线程最新一轮（与定位芯片同语义）；答案内图卡逐消息持久展示。
+  多图轮播、`figure_image` draft block 仍不做；Markdown 正文内联（图片语法进 content）明确否决。
