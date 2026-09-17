@@ -1053,6 +1053,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0036_figure_asset_anchor_lineage", "_migration_0036_figure_asset_anchor_lineage"),
         ("0037_evidence_span_revision_anchor_scope", "_migration_0037_evidence_span_revision_anchor_scope"),
         ("0038_figure_asset_group_role", "_migration_0038_figure_asset_group_role"),
+        ("0039_graph_mention_evidence", "_migration_0039_graph_mention_evidence"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2473,6 +2474,28 @@ class PostgresManager(metaclass=SingletonMeta):
                 "ALTER TABLE IF EXISTS figure_assets ADD COLUMN IF NOT EXISTS anchor_id VARCHAR(64) NOT NULL DEFAULT ''"
             )
         )
+
+    async def _migration_0039_graph_mention_evidence(self, conn) -> None:
+        """图谱 mention 级原文证据（「点开即见原文」不变式 I1/I2）。
+
+        实体 mention 增加逐字主句引文与 chunk 内偏移；三元组 mention 增加引文偏移、
+        置信度、推测语气、实验语境、G7 触发词校验与双模型复核结果。全部 nullable：
+        旧数据留空（面板显示「旧数据，需重建」），完整回填 = 重置图谱后重跑构建，
+        不对历史行做不可追踪的猜测性 UPDATE。
+        """
+        columns = (
+            ("knowledge_graph_entity_mentions", "text", "TEXT"),
+            ("knowledge_graph_entity_mentions", "quote_start_char", "INTEGER"),
+            ("knowledge_graph_triple_mentions", "quote_start_char", "INTEGER"),
+            ("knowledge_graph_triple_mentions", "confidence", "DOUBLE PRECISION"),
+            ("knowledge_graph_triple_mentions", "hedge", "BOOLEAN"),
+            ("knowledge_graph_triple_mentions", "context_json", "JSONB"),
+            ("knowledge_graph_triple_mentions", "trigger_verified", "BOOLEAN"),
+            ("knowledge_graph_triple_mentions", "trigger_term", "VARCHAR(128)"),
+            ("knowledge_graph_triple_mentions", "verifier_confirmed", "BOOLEAN"),
+        )
+        for table, column, column_type in columns:
+            await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"))
 
     async def _migration_0038_figure_asset_group_role(self, conn) -> None:
         """figure_ingestor v4 图组：资产角色（primary/panel）、阅读序、panel 标签（ADR-0004 §11）。

@@ -71,14 +71,28 @@ def normalize_extraction_result(result: dict[str, Any], extractor_type: str) -> 
         text = str(relation.get("text") or "").strip()
         if not text:
             raise ValueError("relations[].text 不能为空")
-        normalized_relations.append(
-            {
-                "source": source,
-                "target": target,
-                "text": text,
-                "label": str(relation.get("label") or "RELATED_TO").strip() or "RELATED_TO",
+        normalized_relation = {
+            "source": source,
+            "target": target,
+            "text": text,
+            "label": str(relation.get("label") or "RELATED_TO").strip() or "RELATED_TO",
+        }
+        # 科研抽取器附带的关系级证据属性：缺省不出现，保持通用抽取器输出形状不变
+        if relation.get("confidence") is not None:
+            normalized_relation["confidence"] = min(1.0, max(0.0, float(relation["confidence"])))
+        if relation.get("hedge") is not None:
+            normalized_relation["hedge"] = bool(relation["hedge"])
+        if isinstance(relation.get("context"), dict) and relation["context"]:
+            normalized_relation["context"] = {
+                str(key): str(value) for key, value in relation["context"].items() if str(value).strip()
             }
-        )
+        if relation.get("trigger_verified") is not None:
+            normalized_relation["trigger_verified"] = bool(relation["trigger_verified"])
+        if relation.get("trigger_term"):
+            normalized_relation["trigger_term"] = str(relation["trigger_term"])
+        if relation.get("verifier_confirmed") is not None:
+            normalized_relation["verifier_confirmed"] = bool(relation["verifier_confirmed"])
+        normalized_relations.append(normalized_relation)
 
     metadata = dict(result.get("metadata") or {})
     metadata.setdefault("extractor_type", extractor_type)
@@ -136,11 +150,26 @@ def _normalize_entity(entity: Any, path: str) -> dict[str, Any]:
             }
         )
 
-    return {
+    normalized = {
         "text": text,
         "label": str(entity.get("label") or "Entity").strip() or "Entity",
         "attributes": normalized_attributes,
     }
+    aliases = entity.get("aliases")
+    if isinstance(aliases, list):
+        seen = {text}
+        normalized_aliases = []
+        for alias in aliases:
+            alias_text = str(alias or "").strip()
+            if alias_text and alias_text not in seen:
+                seen.add(alias_text)
+                normalized_aliases.append(alias_text)
+        if normalized_aliases:
+            normalized["aliases"] = normalized_aliases
+    mention_quote = str(entity.get("mention_quote") or "").strip()
+    if mention_quote:
+        normalized["mention_quote"] = mention_quote
+    return normalized
 
 
 def _entity_key(entity: dict[str, Any]) -> tuple[str, str]:
@@ -163,3 +192,12 @@ def _merge_attributes(target: dict[str, Any], source: dict[str, Any]) -> None:
         if attribute_key not in known_attributes:
             target.setdefault("attributes", []).append(attribute)
             known_attributes.add(attribute_key)
+    source_aliases = source.get("aliases") or []
+    if source_aliases:
+        known_aliases = {target["text"], *(target.get("aliases") or [])}
+        for alias in source_aliases:
+            if alias not in known_aliases:
+                target.setdefault("aliases", []).append(alias)
+                known_aliases.add(alias)
+    if not target.get("mention_quote") and source.get("mention_quote"):
+        target["mention_quote"] = source["mention_quote"]

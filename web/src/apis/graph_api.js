@@ -67,6 +67,34 @@ export const graphApi = {
 
     const queryParams = new URLSearchParams({ kb_id })
     return await apiGet(`/api/graph/labels?${queryParams.toString()}`, {}, true)
+  },
+
+  // 「点开即见原文」：边/节点的全部逐字引文（PostgreSQL mention 表，显示时逐条重验）
+  getTripleEvidence: async (kb_id, triple_id) => {
+    if (!kb_id || !triple_id) {
+      throw new Error('kb_id and triple_id are required')
+    }
+
+    const queryParams = new URLSearchParams({ kb_id, triple_id })
+    return await apiGet(`/api/graph/evidence/triple?${queryParams.toString()}`, {}, true)
+  },
+
+  getEntityEvidence: async (kb_id, entity_id) => {
+    if (!kb_id || !entity_id) {
+      throw new Error('kb_id and entity_id are required')
+    }
+
+    const queryParams = new URLSearchParams({ kb_id, entity_id })
+    return await apiGet(`/api/graph/evidence/entity?${queryParams.toString()}`, {}, true)
+  },
+
+  getIntegrity: async (kb_id) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+
+    const queryParams = new URLSearchParams({ kb_id })
+    return await apiGet(`/api/graph/integrity?${queryParams.toString()}`, {}, true)
   }
 }
 

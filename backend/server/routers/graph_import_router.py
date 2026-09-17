@@ -11,6 +11,7 @@ from yuxi.knowledge.graphs.graph_export_service import (
     ManagedGraphExportService,
     content_disposition_header,
 )
+from yuxi.knowledge.graphs.llm_graph_promotion import LLMGraphPromotionService
 from yuxi.knowledge.graphs.managed_import_service import (
     GRAPH_IMPORT_ROLLBACK_TASK_TYPE,
     GRAPH_IMPORT_TASK_TYPE,
@@ -89,20 +90,42 @@ async def list_graph_imports(kb_id: str, current_user: User = Depends(get_admin_
 @graph_import.get("/databases/{kb_id}/graph-export")
 async def export_graph(
     kb_id: str,
-    variant: Literal["roundtrip", "evidence"] = Query(default="roundtrip"),
+    variant: Literal["roundtrip", "evidence", "projection"] = Query(default="roundtrip"),
     current_user: User = Depends(get_admin_user),
 ):
-    """从 PostgreSQL 规范层导出图谱数据（往返包 zip / 证据明细 xlsx）。"""
+    """导出图谱数据：roundtrip / evidence 取自 PostgreSQL 规范层，projection 取自 Neo4j 投影（全部节点与关系）。"""
     try:
-        package = await ManagedGraphExportService().export(
-            kb_id, variant=variant, exported_by=current_user.uid
-        )
+        package = await ManagedGraphExportService().export(kb_id, variant=variant, exported_by=current_user.uid)
     except ValueError as exc:
         message = str(exc)
         raise HTTPException(status_code=404 if "没有可导出" in message else 400, detail=message)
     except Exception as exc:
         logger.exception(f"图谱导出失败: {exc}")
         raise HTTPException(status_code=500, detail=f"图谱导出失败：{exc}")
+    return Response(
+        content=package["content"],
+        media_type=package["media_type"],
+        headers={"Content-Disposition": content_disposition_header(package["filename"])},
+    )
+
+
+@graph_import.get("/databases/{kb_id}/graph-promotion-export")
+async def export_graph_promotion(
+    kb_id: str,
+    min_support_count: int = Query(default=1, ge=1, le=1000),
+    current_user: User = Depends(get_admin_user),
+):
+    """导出 LLM 抽取图谱的晋升包（v3 契约 zip）：人工审定后经托管导入并入规范图谱。"""
+    try:
+        package = await LLMGraphPromotionService().export(
+            kb_id, min_support_count=min_support_count, exported_by=current_user.uid
+        )
+    except ValueError as exc:
+        message = str(exc)
+        raise HTTPException(status_code=404 if "没有可导出" in message else 400, detail=message)
+    except Exception as exc:
+        logger.exception(f"图谱晋升包导出失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"图谱晋升包导出失败：{exc}")
     return Response(
         content=package["content"],
         media_type=package["media_type"],

@@ -7,6 +7,7 @@ from typing import Any
 
 from yuxi.knowledge.graphs.extractors import GraphExtractor, GraphExtractorFactory, normalize_extraction_result
 from yuxi.knowledge.graphs.graph_utils import (
+    RELATION_EVIDENCE_FIELDS,
     build_graph_payload,
     compute_entity_id,
     compute_triple_id,
@@ -34,6 +35,8 @@ GRAPH_CONFIG_KEY = "graph_build_config"
 GRAPH_TASK_TYPE = "knowledge_graph_index"
 GRAPH_INDEX_MAX_ATTEMPTS = 3
 NEO4J_QUERY_OFFLOAD_LIMIT = 8
+# 走聊天模型的抽取器：configure 需校验 chat 模型、并发数取 concurrency_count
+LLM_EXTRACTOR_TYPES = frozenset({"llm", "llm_scientific"})
 # 全图模式的硬安全上限：超过即截断并置 truncated 标志，保护浏览器渲染与 Neo4j 查询
 FULL_GRAPH_NODE_CAP = 3000
 FULL_GRAPH_EDGE_CAP = 6000
@@ -95,6 +98,53 @@ def _finalize_full_graph_result(
     bounded_edges = [edge for edge in edges if edge.get("source_id") in node_ids and edge.get("target_id") in node_ids]
     final_edges = bounded_edges[:edge_cap]
     return {"nodes": final_nodes, "edges": final_edges, "truncated": truncated}
+
+
+def _merge_extraction_stats(total: dict[str, Any], metadata: dict[str, Any]) -> None:
+    """把单个 chunk 的科研抽取 metadata（gates/windows/llm_calls）累加进构建级统计。
+
+    通用 llm 抽取器没有 gates 字段，直接跳过；幻觉率在累加后按总候选重新计算，
+    避免对各 chunk 的比率求平均。
+    """
+    gates = metadata.get("gates")
+    if not isinstance(gates, dict):
+        return
+    total["chunks_with_stats"] = total.get("chunks_with_stats", 0) + 1
+    for key in ("windows", "llm_calls"):
+        total[key] = total.get(key, 0) + int(metadata.get(key) or 0)
+    for key in ("entity_candidates", "relation_candidates", "accepted_entities", "accepted_relations"):
+        total[key] = total.get(key, 0) + int(gates.get(key) or 0)
+    rejected = total.setdefault("rejected", {})
+    for code, count in (gates.get("rejected") or {}).items():
+        rejected[code] = rejected.get(code, 0) + int(count or 0)
+    relation_candidates = total.get("relation_candidates", 0)
+    verbatim_failures = rejected.get("G2_VERBATIM_QUOTE", 0) + rejected.get("G2_MISSING_ENDPOINT", 0)
+    total["hallucination_rate"] = round(verbatim_failures / relation_candidates, 4) if relation_candidates else None
+    total["identifier_violations"] = rejected.get("G3_IDENTIFIER_PROVENANCE", 0)
+
+
+def _bind_quote_offsets(
+    chunk_content: str, entity_records: list[dict[str, Any]], triple_records: list[dict[str, Any]]
+) -> None:
+    """把实体/三元组的逐字引文定位到 chunk 原文（偏移供面板高亮；找不到时留 None，显示时做空白折叠校验）。"""
+    for record in entity_records:
+        quote = record.get("mention_quote") or ""
+        position = chunk_content.find(quote) if quote else -1
+        record["mention_quote_start"] = position if position >= 0 else None
+    for record in triple_records:
+        quote = record.get("text") or ""
+        position = chunk_content.find(quote) if quote else -1
+        record["quote_start_char"] = position if position >= 0 else None
+
+
+def _assert_mention_evidence(entity_records: list[dict[str, Any]], triple_records: list[dict[str, Any]]) -> None:
+    """科研抽取轨写入断言（不变式 I1/I2）：无原文引文的节点/边不允许进入图谱，fail-fast 不回退。"""
+    missing_entities = [record["name"] for record in entity_records if not record.get("mention_quote")]
+    missing_triples = [record["triple_id"] for record in triple_records if not (record.get("text") or "").strip()]
+    if missing_entities or missing_triples:
+        raise ValueError(
+            f"科研抽取轨拒绝写入缺少原文引文的图元素：实体 {missing_entities[:5]}，三元组 {missing_triples[:5]}"
+        )
 
 
 def _get_neo4j_query_offload_semaphore() -> asyncio.Semaphore:
@@ -238,9 +288,9 @@ class MilvusGraphService:
                 raise ValueError("图谱抽取器类型已锁定，只能修改模型、Schema 等抽取参数")
 
         extractor_options = extractor_options or {}
-        if normalized_extractor_type == "llm" and extractor_options.get("prompt"):
+        if normalized_extractor_type in LLM_EXTRACTOR_TYPES and extractor_options.get("prompt"):
             raise ValueError("LLM 图谱抽取器不支持自定义完整 Prompt，请使用 schema 配置抽取约束")
-        if normalized_extractor_type == "llm":
+        if normalized_extractor_type in LLM_EXTRACTOR_TYPES:
             model_spec = str(extractor_options.get("model_spec") or "").strip()
             model_info = model_cache.get_model_info(model_spec)
             if not model_info or model_info.model_type != "chat":
@@ -281,6 +331,7 @@ class MilvusGraphService:
         processed = 0
         attempt_counts: dict[str, int] = {}
         last_errors: dict[str, str] = {}
+        extraction_stats: dict[str, Any] = {}
         write_lock = asyncio.Lock()
 
         while True:
@@ -345,6 +396,7 @@ class MilvusGraphService:
                                     chunk.chunk_id,
                                     ent_ids=[entity["entity_id"] for entity in entities],
                                 )
+                                _merge_extraction_stats(extraction_stats, extraction_result.get("metadata") or {})
                             processed += 1
                             last_errors.pop(chunk.chunk_id, None)
                         except Exception as exc:
@@ -380,10 +432,12 @@ class MilvusGraphService:
                 return {
                     "kb_id": kb_id,
                     "model_spec": extractor_options.get("model_spec"),
+                    "extractor_type": extractor.extractor_type,
                     "success": processed,
                     "failed": 0,
                     "remaining": 0,
                     "failure_attempts": sum(attempt_counts.values()) - processed,
+                    "extraction_stats": extraction_stats,
                 }
             if attempted_in_pass == 0:
                 break
@@ -398,11 +452,13 @@ class MilvusGraphService:
         result = {
             "kb_id": kb_id,
             "model_spec": extractor_options.get("model_spec"),
+            "extractor_type": extractor.extractor_type,
             "success": processed,
             "failed": remaining,
             "remaining": remaining,
             "failure_attempts": sum(attempt_counts.values()) - processed,
             "failed_details": failed_details,
+            "extraction_stats": extraction_stats,
         }
         if context is not None:
             await context.set_result(result)
@@ -411,7 +467,7 @@ class MilvusGraphService:
 
     @staticmethod
     def _get_worker_count(config: dict[str, Any]) -> int:
-        if (config.get("extractor_type") or "").lower() != "llm":
+        if (config.get("extractor_type") or "").lower() not in LLM_EXTRACTOR_TYPES:
             return 1
         try:
             worker_count = int((config.get("extractor_options") or {}).get("concurrency_count") or 1)
@@ -461,6 +517,9 @@ class MilvusGraphService:
             entity["id"]: record for entity, record in zip(entities, entity_records, strict=True)
         }
         triple_records = self._build_triple_records(kb_id, relations, entity_record_by_local_id, graph_payload)
+        _bind_quote_offsets(chunk.content or "", entity_records, triple_records)
+        if relation_extractor_type == "llm_scientific":
+            _assert_mention_evidence(entity_records, triple_records)
         content_preview = (chunk.content or "")[:300]
 
         # 预构建 Cypher 模板（同一 chunk 内复用）
@@ -544,6 +603,8 @@ class MilvusGraphService:
                     "label": label,
                     "name": entity["text"],
                     "attributes": entity.get("attributes") or [],
+                    "aliases": list(entity.get("aliases") or []),
+                    "mention_quote": entity.get("mention_quote") or "",
                     "content": normalized_name,
                 }
             )
@@ -575,18 +636,20 @@ class MilvusGraphService:
                 continue
             seen_triple_ids.add(triple_id)
             content = f"{source_record['normalized_name']} → {relation_type} → {target_record['normalized_name']}"
-            records.append(
-                {
-                    "triple_id": triple_id,
-                    "kb_id": kb_id,
-                    "source_entity_id": source_record["entity_id"],
-                    "target_entity_id": target_record["entity_id"],
-                    "relation_type": relation_type,
-                    "content": content,
-                    "text": relation["text"],
-                    "extractor_type": extractor_type,
-                }
-            )
+            record = {
+                "triple_id": triple_id,
+                "kb_id": kb_id,
+                "source_entity_id": source_record["entity_id"],
+                "target_entity_id": target_record["entity_id"],
+                "relation_type": relation_type,
+                "content": content,
+                "text": relation["text"],
+                "extractor_type": extractor_type,
+            }
+            for field in RELATION_EVIDENCE_FIELDS:
+                if relation.get(field) is not None:
+                    record[field] = relation[field]
+            records.append(record)
         return records
 
     async def reset(self, kb_id: str, *, clear_extraction_result: bool, clear_config: bool) -> dict[str, Any]:

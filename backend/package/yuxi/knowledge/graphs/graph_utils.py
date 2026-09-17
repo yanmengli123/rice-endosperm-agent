@@ -10,6 +10,9 @@ from typing import Any
 
 from yuxi.utils import hashstr
 
+# 关系级证据属性（llm_scientific 轨）：从抽取结果一路透传到 knowledge_graph_triple_mentions 行
+RELATION_EVIDENCE_FIELDS = ("confidence", "hedge", "context", "trigger_verified", "trigger_term", "verifier_confirmed")
+
 
 def normalize_entity_name(text: str) -> str:
     """统一实体名称：去首尾空白、小写化、压缩内部连续空白。"""
@@ -61,6 +64,11 @@ def build_graph_payload(normalized_result: dict[str, Any]) -> dict[str, Any]:
                 if attribute_key not in known_attributes:
                     existing.setdefault("attributes", []).append(attribute)
                     known_attributes.add(attribute_key)
+            for alias in entity.get("aliases") or []:
+                if alias not in existing["aliases"] and alias != existing["text"]:
+                    existing["aliases"].append(alias)
+            if not existing.get("mention_quote") and entity.get("mention_quote"):
+                existing["mention_quote"] = entity["mention_quote"]
             return existing["id"]
 
         graph_entity = {
@@ -68,6 +76,8 @@ def build_graph_payload(normalized_result: dict[str, Any]) -> dict[str, Any]:
             "text": entity["text"],
             "label": entity.get("label") or "Entity",
             "attributes": list(entity.get("attributes") or []),
+            "aliases": list(entity.get("aliases") or []),
+            "mention_quote": entity.get("mention_quote") or "",
         }
         entities.append(graph_entity)
         entity_by_key[key] = graph_entity
@@ -78,14 +88,17 @@ def build_graph_payload(normalized_result: dict[str, Any]) -> dict[str, Any]:
 
     relations = []
     for relation in normalized_result["relations"]:
-        relations.append(
-            {
-                "source": add_entity(relation["source"]),
-                "target": add_entity(relation["target"]),
-                "text": relation["text"],
-                "label": relation.get("label") or "RELATED_TO",
-            }
-        )
+        graph_relation = {
+            "source": add_entity(relation["source"]),
+            "target": add_entity(relation["target"]),
+            "text": relation["text"],
+            "label": relation.get("label") or "RELATED_TO",
+        }
+        # 科研抽取器的关系级证据属性随边一起投影到 mention 行
+        for field in RELATION_EVIDENCE_FIELDS:
+            if relation.get(field) is not None:
+                graph_relation[field] = relation[field]
+        relations.append(graph_relation)
 
     return {"entities": entities, "relations": relations, "metadata": normalized_result["metadata"]}
 

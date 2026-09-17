@@ -58,18 +58,30 @@
                   <a-button
                     class="action-btn"
                     :loading="exportingGraph"
-                    title="从规范层导出图谱数据"
+                    title="导出图谱数据（规范层 / Neo4j 投影）"
                     @click.prevent
                   >
                     <Download :size="16" />
                   </a-button>
                   <template #overlay>
                     <a-menu @click="onExportMenuClick">
-                      <a-menu-item key="roundtrip" title="严格符合导入契约的节点/关系 CSV 与清单，可直接重新导入">
+                      <a-menu-item
+                        key="roundtrip"
+                        title="严格符合导入契约的节点/关系 CSV 与清单，可直接重新导入"
+                      >
                         标准往返包（CSV + 清单）
                       </a-menu-item>
-                      <a-menu-item key="evidence" title="实体 / 三元组 / 证据明细三张工作表，供科研审阅">
+                      <a-menu-item
+                        key="evidence"
+                        title="实体 / 三元组 / 证据明细三张工作表，供科研审阅"
+                      >
                         证据明细（Excel）
+                      </a-menu-item>
+                      <a-menu-item
+                        key="projection"
+                        title="Neo4j 投影的全部实体节点、块节点、实体关系与提及关系（JSONL + 清单），含与规范层的对账结果"
+                      >
+                        Neo4j 投影全量（JSONL + 清单）
                       </a-menu-item>
                     </a-menu>
                   </template>
@@ -151,6 +163,7 @@
           :visible="graph.showDetailDrawer"
           :item="graph.selectedItem"
           :type="graph.selectedItemType"
+          :kb-id="kbId"
           @close="graph.handleCanvasClick"
         />
 
@@ -171,7 +184,9 @@
                       v-model:checked="settingsForm.fullGraph"
                       :disabled="graphSettingsSaving"
                     />
-                    <span class="full-graph-hint">加载全库（口径与规范层一致），忽略搜索、深度与上限</span>
+                    <span class="full-graph-hint"
+                      >加载全库（口径与规范层一致），忽略搜索、深度与上限</span
+                    >
                   </div>
                 </a-form-item>
                 <a-form-item label="最大节点数 (limit)">
@@ -253,11 +268,15 @@
                 type="error"
                 show-icon
                 :message="graphBuildStatus?.build_task_message || '图谱索引未全部完成'"
-                :description="graphBuildStatus?.build_task_error || '请检查模型服务后重试待索引 Chunk。'"
+                :description="
+                  graphBuildStatus?.build_task_error || '请检查模型服务后重试待索引 Chunk。'
+                "
               />
               <div v-if="graphBuildModelSpec" class="status-row">
                 <span class="status-label">抽取模型</span>
-                <span class="status-model" :title="graphBuildModelSpec">{{ graphBuildModelSpec }}</span>
+                <span class="status-model" :title="graphBuildModelSpec">{{
+                  graphBuildModelSpec
+                }}</span>
               </div>
               <div class="stats-grid">
                 <div class="stat-item">
@@ -386,7 +405,14 @@
             @select-model="(spec) => (graphConfigForm.model_spec = spec)"
           />
         </a-form-item>
-        <a-form-item label="Schema">
+        <a-form-item v-if="isScientificExtractor" label="抽取约束">
+          <a-alert
+            type="info"
+            show-icon
+            message="闭集词表科研抽取：实体类型与关系谓词固定为托管图谱白名单（16 类实体 / 21 种关系），按句窗抽取并经逐字校验门；不接受自定义 Schema。构建结果中的 extraction_stats 会给出候选数、拒绝分布与幻觉率。"
+          />
+        </a-form-item>
+        <a-form-item v-else label="Schema">
           <a-textarea
             v-model:value="graphConfigForm.schema"
             :rows="6"
@@ -497,17 +523,17 @@ const extractorTypeOptions = [
     value: 'llm',
     label: 'LLM',
     description: '使用大模型按 Schema 抽取实体和关系',
-    helper: '当前唯一支持的图谱抽取方式',
+    helper: '通用开放 Schema，适合非科研语料',
     icon: BrainCircuit,
     disabled: false
   },
   {
-    value: 'more',
-    label: '更多',
-    description: '更多抽取方式正在拓展中',
-    helper: '拓展中',
+    value: 'llm_scientific',
+    label: '科研闭集',
+    description: '闭集词表 + 句窗抽取 + 逐字校验门，产出可度量的科研三元组',
+    helper: '推荐用于人工整理的文献结果段 Markdown',
     icon: ScanText,
-    disabled: true
+    disabled: false
   }
 ]
 
@@ -597,6 +623,12 @@ const onExportMenuClick = ({ key }) => {
   exportGraph(key)
 }
 
+const EXPORT_SUCCESS_MESSAGES = {
+  roundtrip: '标准往返包导出成功',
+  evidence: '证据明细导出成功',
+  projection: 'Neo4j 投影全量导出成功'
+}
+
 const exportGraph = async (variant) => {
   if (!kbId.value || exportingGraph.value) return
   exportingGraph.value = true
@@ -606,7 +638,8 @@ const exportGraph = async (variant) => {
     const contentDisposition =
       response.headers.get('Content-Disposition') || response.headers.get('content-disposition')
     const suffix = variant === 'evidence' ? 'xlsx' : 'zip'
-    const filename = parseExportFilename(contentDisposition) || `graph-${variant}-${kbId.value}.${suffix}`
+    const filename =
+      parseExportFilename(contentDisposition) || `graph-${variant}-${kbId.value}.${suffix}`
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -615,7 +648,7 @@ const exportGraph = async (variant) => {
     link.click()
     document.body.removeChild(link)
     window.URL.revokeObjectURL(url)
-    message.success(variant === 'evidence' ? '证据明细导出成功' : '标准往返包导出成功')
+    message.success(EXPORT_SUCCESS_MESSAGES[variant] || '图谱导出成功')
   } catch (error) {
     console.error('图谱导出失败:', error)
     message.error(`图谱导出失败: ${error.message || '未知错误'}`)
@@ -664,6 +697,7 @@ const graphConfigForm = reactive({
   concurrency_count: 50,
   model_params_text: ''
 })
+const isScientificExtractor = computed(() => graphConfigForm.extractor_type === 'llm_scientific')
 
 const graph = reactive(useGraph(graphRef))
 const graphLoaded = ref(false)
@@ -814,7 +848,7 @@ const parseModelParams = () => {
 const fillGraphConfigForm = () => {
   const config = graphBuildStatus.value?.config
   const options = config?.extractor_options || {}
-  graphConfigForm.extractor_type = 'llm'
+  graphConfigForm.extractor_type = config?.extractor_type || 'llm'
   graphConfigForm.model_spec = options.model_spec || configStore.config?.default_model || ''
   graphConfigForm.schema = options.schema || ''
   graphConfigForm.concurrency_count = Number(options.concurrency_count || 50)
@@ -834,12 +868,16 @@ const selectExtractorType = (option) => {
 }
 
 const buildExtractorOptions = () => {
-  return {
+  const options = {
     model_spec: graphConfigForm.model_spec,
-    schema: graphConfigForm.schema.trim(),
     concurrency_count: graphConfigForm.concurrency_count || 50,
     model_params: parseModelParams()
   }
+  // 科研闭集抽取器使用固定词表 Prompt，后端拒绝 schema 字段
+  if (!isScientificExtractor.value) {
+    options.schema = graphConfigForm.schema.trim()
+  }
+  return options
 }
 
 const configureGraphBuild = async () => {
@@ -847,7 +885,7 @@ const configureGraphBuild = async () => {
     document.activeElement?.blur()
     await nextTick()
     await graphBuildApi.configure(kbId.value, {
-      extractor_type: 'llm',
+      extractor_type: graphConfigForm.extractor_type,
       extractor_options: buildExtractorOptions()
     })
     message.success(isEditingGraphConfig.value ? '图谱抽取配置已更新' : '图谱抽取配置已保存')
@@ -942,7 +980,9 @@ const loadGraph = async () => {
         ? Boolean(res.data.truncated)
         : (res.data.nodes || []).length >= subgraphParams.maxNodes
       if (graphTruncated.value && subgraphParams.fullGraph) {
-        message.warning('全图规模超过安全上限（节点 3000 / 关系 6000），画布已截断；建议改用搜索或类型过滤缩小范围')
+        message.warning(
+          '全图规模超过安全上限（节点 3000 / 关系 6000），画布已截断；建议改用搜索或类型过滤缩小范围'
+        )
       }
     }
   } catch (e) {

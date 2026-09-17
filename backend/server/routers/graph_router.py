@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from server.utils.auth_middleware import get_admin_user
 from server.utils.knowledge_access import authorize_knowledge_path
+from yuxi.knowledge.graphs.graph_evidence_service import GraphEvidenceService
 from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
@@ -93,9 +94,7 @@ async def get_subgraph(
 ):
     """查询 Milvus 知识库图谱子图"""
     try:
-        logger.info(
-            f"Querying subgraph - kb_id: {kb_id}, label: {node_label}, full_graph: {full_graph}"
-        )
+        logger.info(f"Querying subgraph - kb_id: {kb_id}, label: {node_label}, full_graph: {full_graph}")
         service = await _get_graph_service(kb_id)
         if full_graph:
             result_data = await service.query_full_graph(exclude_chunk=exclude_chunk)
@@ -173,3 +172,48 @@ async def get_graph_stats(
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
+
+@graph.get("/evidence/triple")
+async def get_triple_evidence(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    triple_id: str = Query(..., description="三元组 ID（Neo4j 边属性 triple_id）"),
+    current_user: User = Depends(get_admin_user),
+):
+    """边的原文证据：该三元组在 PostgreSQL 规范层的全部逐字引文（显示时逐条重验）。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    try:
+        data = await GraphEvidenceService().triple_evidence(kb_id, triple_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"success": True, "data": data}
+
+
+@graph.get("/evidence/entity")
+async def get_entity_evidence(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    entity_id: str = Query(..., description="实体 ID（Neo4j 节点属性 entity_id）"),
+    current_user: User = Depends(get_admin_user),
+):
+    """节点的原文证据：定义语句（派生）+ 该实体出现的全部逐字主句。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    try:
+        data = await GraphEvidenceService().entity_evidence(kb_id, entity_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"success": True, "data": data}
+
+
+@graph.get("/integrity")
+async def get_graph_integrity(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    limit: int = Query(5000, ge=100, le=50000, description="逐条重验引文的上限（每类）"),
+    current_user: User = Depends(get_admin_user),
+):
+    """「点开即见原文」完整性审计：无 mention 的边 / 无引文的节点 / 引文漂移计数，任一非零即 VIOLATION。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    data = await GraphEvidenceService().integrity(kb_id, limit=limit)
+    return {"success": True, "data": data}

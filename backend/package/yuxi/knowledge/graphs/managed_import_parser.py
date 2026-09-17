@@ -65,6 +65,8 @@ NODE_TYPE_MAPPING = {
     "CULTIVAR": ("Cultivar", None),
     "EXPERIMENT": ("Experiment", None),
     "PUBLICATION": ("Publication", None),
+    # 实验方法（qRT-PCR/CRISPR/Y2H…）：chunk 抽取轨闭集词表成员，晋升导出需能映射回 v3 node_type
+    "METHOD": ("Method", None),
 }
 
 GENE_RELATION_TYPES = {

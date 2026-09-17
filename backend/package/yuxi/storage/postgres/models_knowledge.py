@@ -629,6 +629,9 @@ class KnowledgeGraphEntityMention(Base):
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
     file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False)
     chunk_id = Column(String(128), ForeignKey("knowledge_chunks.chunk_id", ondelete="CASCADE"), nullable=False)
+    # 实体在该 chunk 中的原文主句（llm_scientific 轨逐字引文；旧数据为空）与 chunk 内偏移
+    text = Column(Text)
+    quote_start_char = Column(Integer)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
@@ -678,6 +681,14 @@ class KnowledgeGraphTripleMention(Base):
     chunk_id = Column(String(128), ForeignKey("knowledge_chunks.chunk_id", ondelete="CASCADE"), nullable=False)
     text = Column(Text)
     extractor_type = Column(String(128))
+    # 关系级证据属性（llm_scientific 轨）：引文偏移、置信度、推测语气、实验语境、G7 触发词与复核结果
+    quote_start_char = Column(Integer)
+    confidence = Column(Float)
+    hedge = Column(Boolean)
+    context_json = Column(JSON_VALUE)
+    trigger_verified = Column(Boolean)
+    trigger_term = Column(String(128))
+    verifier_confirmed = Column(Boolean)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 

@@ -136,8 +136,8 @@ def test_llm_graph_extractor_appends_schema_to_fixed_prompt():
     assert "文本：\n张三任职于公司" in prompt
 
 
-def test_graph_extractor_factory_supports_only_llm():
-    assert GraphExtractorFactory.supported_types() == ["llm"]
+def test_graph_extractor_factory_supports_llm_family_only():
+    assert GraphExtractorFactory.supported_types() == ["llm", "llm_scientific"]
 
 
 def test_graph_extractor_factory_rejects_spacy():
