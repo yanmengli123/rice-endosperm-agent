@@ -460,3 +460,85 @@ def test_plan_turn_image_without_locator_intent_stays_normal():
     plan = plan_turn("帮我总结一下这张图", has_knowledge_scope=True, has_image=True)
     assert plan.task.primary_intent != TaskIntent.FIGURE_LOCATOR
     assert plan.task.target_type != "FIGURE_IMAGE"
+
+
+# ---- P0/P2：多裁剪变体 + 降级回答 ----
+
+
+def test_query_crop_variants_generated():
+    """P2：多裁剪变体应包含全图 + 中心 + 四象限。"""
+    from yuxi.knowledge.vision.phash import query_crop_variants
+
+    # 用 640x480 大图确保所有裁剪区域 ≥ 100px
+    from PIL import Image, ImageDraw
+    import io
+    image = Image.new("RGB", (640, 480), "white")
+    draw = ImageDraw.Draw(image)
+    for i, h in enumerate((200, 150, 100, 240, 180)):
+        x0 = 60 + i * 110
+        draw.rectangle((x0, 480 - h, x0 + 70, 460), fill=(30, 144, 255))
+    buf = io.BytesIO(); image.save(buf, format="PNG")
+    variants = query_crop_variants(buf.getvalue())
+    labels = [label for _bytes, label in variants]
+    assert "normalized_whole" in labels
+    assert "center_50" in labels
+    assert any(label.startswith("q_") for label in labels)
+    # 每个变体都是有效图片字节
+    for data, _label in variants:
+        assert len(data) > 100
+
+
+def test_query_crop_variants_degenerate():
+    """P2：退化输入（空字节）不崩溃。"""
+    from yuxi.knowledge.vision.phash import query_crop_variants
+
+    assert query_crop_variants(b"") == []
+
+
+def test_observation_summary_carried_on_failure():
+    """P0：V2/V3 全 miss 时，observation_summary 应携带到 NOT_FOUND resolution。"""
+    observation = _observation(figure_label="Figure 2", visible_entities=["OsMYB73", "GUS"], visible_text=["Bar, 1.0 cm"])
+    # 用空候选列表让裁决全部 miss
+    resolution = adjudicate_figure_candidates(observation, [])
+    assert resolution.get("status") != "VERIFIED"
+
+
+def test_visual_description_from_observation_summary():
+    """P0：chat 层的视觉描述——只引用观察契约字段，不做推断。"""
+    from yuxi.services.chat_service import _visual_description
+
+    summary = {
+        "figure_label": "Figure 2",
+        "visible_entities": ["OsMYB73", "cr-myb73"],
+        "visible_text": ["Bar, 1.0 cm"],
+        "visual_structure_active": ["bar_chart", "microscopy"],
+        "panel_labels": ["a", "b", "c"],
+        "confidence": 0.9,
+    }
+    text = _visual_description({"observation_summary": summary})
+    assert "Figure 2" in text
+    assert "OsMYB73" in text
+    assert "柱状图" in text
+    assert "显微" in text
+    assert "3 个子图" in text
+    # 空摘要 → 空串
+    assert _visual_description({}) == ""
+    assert _visual_description({"observation_summary": {}}) == ""
+
+
+def test_caption_search_hint_from_candidates():
+    """P0/P1：题注搜索候选 → "可能来自"提示。"""
+    from yuxi.services.chat_service import _caption_search_hint
+
+    locator = {
+        "caption_search_candidates": [
+            {"figure_label": "Figure 5", "filename": "paper-a.pdf", "signal_hits": 3},
+            {"figure_label": "Figure 2", "filename": "paper-a.pdf", "signal_hits": 2},
+        ]
+    }
+    hint = _caption_search_hint(locator)
+    assert "Figure 5" in hint
+    assert "paper-a.pdf" in hint
+    assert "Figure 2" in hint  # 第二候选也在提示中
+    # 空候选 → 空串
+    assert _caption_search_hint({}) == ""

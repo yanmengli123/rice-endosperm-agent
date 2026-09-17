@@ -596,6 +596,20 @@ async def _materialize_resolution(db, adjudication: dict[str, Any]) -> dict[str,
     }
 
 
+def _observation_summary(observation: VisualObservationEnvelope) -> dict[str, Any]:
+    """把观察契约为降级回答提取确定性字段——不推断、不添加。"""
+    structure = observation.visual_structure or {}
+    active = [key for key, value in structure.items() if value is True]
+    return {
+        "figure_label": observation.figure_label,
+        "panel_labels": list(observation.panel_labels or []),
+        "visible_entities": list(observation.visible_entities or [])[:8],
+        "visible_text": list(observation.visible_text or [])[:6],
+        "visual_structure_active": active,
+        "confidence": observation.confidence,
+    }
+
+
 async def resolve_figure_image_locator(
     db,
     *,
@@ -628,8 +642,26 @@ async def resolve_figure_image_locator(
                 image_asset_digest=compute_asset_digest(image_bytes),
                 image_phash=image_phash,
             )
-            # 查询侧归一化（去近白边框 + 限长边）后再做一次 V1：截图白边是 pHash 漂移主因；
-            # 发布门禁不放松（物理唯一），只是让指纹别被边框拖垮
+            # P2：查询侧多裁剪变体（归一化全图 + 中心50% + 四象限），每个变体独立算 pHash 比对——
+            # 用户截取的子图在资产中可能是任意位置；白边/缩放归一化 + 空间裁剪双管齐下。
+            # 发布门禁不放松（物理唯一），只是让指纹别被"截了不完整"拖垮。
+            from yuxi.knowledge.vision.phash import query_crop_variants
+
+            crop_variants = query_crop_variants(image_bytes)
+            for variant_bytes, variant_label in crop_variants:
+                if deterministic.get("status") in {"VERIFIED", "MULTIPLE_MATCHES"}:
+                    break
+                variant_phash = compute_phash(variant_bytes)
+                if not variant_phash or variant_phash == image_phash:
+                    continue
+                variant_result = adjudicate_deterministic_match(candidates, image_phash=variant_phash)
+                if variant_result.get("status") == "VERIFIED":
+                    variant_result["signals"] = {
+                        **(variant_result.get("signals") or {}),
+                        "query_crop_variant": variant_label,
+                    }
+                    deterministic = variant_result
+            # 兼容路径：旧 normalize_query_image 归一化（已包含在 crop_variants 的 normalized_whole 里）
             normalized_bytes, normalize_info = normalize_query_image(image_bytes)
             normalized_phash = compute_phash(normalized_bytes) if normalize_info.get("changed") else None
             if (
@@ -666,7 +698,14 @@ async def resolve_figure_image_locator(
             }
         adjudication = adjudicate_figure_candidates(observation, candidates)
         if adjudication.get("status") != "VERIFIED":
-            return {**adjudication, "locator_version": FIGURE_IMAGE_LOCATOR_VERSION}
+            # P0 降级：定位失败但视觉观察已产出——把确定性观察字段带入 resolution，
+            # 供下游（chat 层/前端）给出"看到了什么 + 可行动建议"而不是死胡同。
+            # 观察是 Observation 不是 Authority：这些字段永不参与页码/文献发布。
+            return {
+                **adjudication,
+                "locator_version": FIGURE_IMAGE_LOCATOR_VERSION,
+                "observation_summary": _observation_summary(observation),
+            }
         return await _materialize_resolution(db, adjudication)
     except Exception as exc:  # noqa: BLE001
         logger.error(f"figure image locator failed (fail-closed): {exc}")

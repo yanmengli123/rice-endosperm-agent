@@ -724,6 +724,27 @@ async def prepare_knowledge_context(
                 if retried.get("reason") != "VISION_PROVIDER_UNAVAILABLE":
                     image_locator = retried
                     attempt_ledger.append({"stage": "VISUAL_CONSTRAINTS", "status": _ledger_status(retried)})
+                # P1 降级：V2/V3 全 miss 但观察已产出——用可见实体/文字在题注语料做
+                # 确定性文本搜索（无页码发布），给用户"可能来自 Figure N"的方向提示；
+                # 任何异常静默跳过（降级增强不阻断主链路）
+                if image_locator.get("status") not in {"VERIFIED", "MULTIPLE_MATCHES"}:
+                    try:
+                        from yuxi.knowledge.evidence.caption_locator import search_captions_by_observation
+
+                        caption_candidates = await search_captions_by_observation(
+                            db, observation=observation, kb_ids=scope_kb_ids, file_ids=scope_file_ids
+                        )
+                        if caption_candidates:
+                            image_locator.setdefault("caption_search_candidates", caption_candidates)
+                            attempt_ledger.append(
+                                {
+                                    "stage": "CAPTION_SEARCH",
+                                    "status": "CANDIDATES",
+                                    "reason": f"{len(caption_candidates)} probable captions",
+                                }
+                            )
+                    except Exception:  # noqa: BLE001 - 降级搜索失败静默跳过
+                        pass
         # Caption Bridge（P0-C）：指纹与观察约束都未决，但观察给出了图表编号 →
         # 把观察的编号/逐字文本结构化交题注通道裁决（不构造假自然语言问句）。
         if (

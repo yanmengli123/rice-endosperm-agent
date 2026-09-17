@@ -506,6 +506,78 @@ def _adjudicate_caption_candidates(candidates: list[dict[str, Any]], *, containe
     }
 
 
+async def search_captions_by_observation(
+    db,
+    *,
+    observation,
+    kb_ids: list[str],
+    file_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """P1 降级：用 VLM 观察的可见实体/文字在题注语料做确定性文本搜索。
+
+    返回命中的候选 caption（含编号与文件身份），**不带页码**——这些结果仅用于
+    "可能来自 Figure N"的提示与用户引导，永不参与页码/文献发布（只有 VERIFIED
+    Binding 才能发页码）。观察是 Observation 不是 Authority。
+    """
+    from yuxi.knowledge.evidence.verbatim import escape_like
+
+    entity_fragments = [str(item) for item in (observation.visible_entities or []) if len(str(item).strip()) >= 3][:8]
+    text_fragments = [str(item) for item in (observation.visible_text or []) if len(str(item).strip()) >= 6][:6]
+    fragments = entity_fragments + text_fragments
+    if not fragments:
+        return []
+
+    conditions = [
+        EvidenceSpanRecord.kb_id.in_(list(kb_ids)[:20]),
+        EvidenceSpanRecord.evidence_type == "caption",
+        EvidenceSpanRecord.container_label.isnot(None),
+        KnowledgeFile.active_parse_revision_id == EvidenceSpanRecord.parse_revision_id,
+        KnowledgeParseRevision.file_id == EvidenceSpanRecord.file_id,
+        KnowledgeParseRevision.kb_id == EvidenceSpanRecord.kb_id,
+    ]
+    if file_ids:
+        conditions.append(EvidenceSpanRecord.file_id.in_([str(item) for item in file_ids][:50]))
+    rows = (
+        await db.execute(
+            select(EvidenceSpanRecord, KnowledgeFile)
+            .join(KnowledgeFile, KnowledgeFile.file_id == EvidenceSpanRecord.file_id)
+            .join(
+                KnowledgeParseRevision,
+                KnowledgeParseRevision.revision_id == EvidenceSpanRecord.parse_revision_id,
+            )
+            .where(
+                *conditions,
+                or_(
+                    *[EvidenceSpanRecord.quote.ilike(f"%{escape_like(frag)}%", escape="/") for frag in fragments[:6]],
+                ),
+            )
+            .order_by(EvidenceSpanRecord.file_id, EvidenceSpanRecord.page_number)
+            .limit(50)
+        )
+    ).all()
+
+    scored: dict[tuple[str, str], dict[str, Any]] = {}
+    for span, knowledge_file in rows:
+        caption_norm = normalize_for_match(str(span.quote or ""))
+        hits = sum(1 for frag in fragments if normalize_for_match(frag) in caption_norm)
+        if hits == 0:
+            continue
+        key = (str(span.file_id), str(span.container_label or ""))
+        entry = scored.setdefault(
+            key,
+            {
+                "file_id": str(span.file_id),
+                "kb_id": str(span.kb_id or ""),
+                "filename": str(knowledge_file.filename or ""),
+                "figure_label": str(span.container_label or ""),
+                "caption_head": re.sub(r"\s+", " ", str(span.quote or ""))[:120],
+                "signal_hits": 0,
+            },
+        )
+        entry["signal_hits"] = max(entry["signal_hits"], hits)
+    return sorted(scored.values(), key=lambda item: (-item["signal_hits"], item["figure_label"]))[:5]
+
+
 async def resolve_figure_caption_locator(
     db,
     *,
@@ -552,5 +624,6 @@ __all__ = [
     "resolve_caption_bridge",
     "resolve_figure_caption_locator",
     "score_caption_text",
+    "search_captions_by_observation",
     "select_quote_candidates",
 ]

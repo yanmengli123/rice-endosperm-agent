@@ -185,9 +185,67 @@ def normalize_query_image(image_bytes: bytes) -> tuple[bytes, dict]:
         return image_bytes, {**info, "changed": False, "error": "normalize_failed"}
 
 
+QUERY_CROP_VERSION = "query_crop_v1"
+_CROP_MIN_SIDE = 100
+
+
+def query_crop_variants(image_bytes: bytes) -> list[tuple[bytes, str]]:
+    """P2：查询截图的裁剪变体集（确定性、无模型），扩大 pHash 命中面。
+
+    用户截取的子图在存储资产中可能是任意位置（panel (k) 的左上角 25%），
+    固定四分裁剪覆盖最常见的 panel 排版。返回 [(bytes, variant_label)]，
+    含归一化全图 + 中心 50% + 四象限；每个变体独立算 pHash 比对。
+    任何解码失败只返回全图归一化，绝不阻断。
+    """
+    if not _HAS_IMAGE_STACK or not image_bytes:
+        return []
+    try:
+        normalized, _info = normalize_query_image(image_bytes)
+        variants: list[tuple[bytes, str]] = [(normalized, "normalized_whole")]
+        if _info.get("changed"):
+            variants.append((image_bytes, "original_whole"))
+        with _PILImage.open(io.BytesIO(normalized)) as source:
+            image = source.convert("RGB")
+        width, height = image.size
+        # 中心 50%（panel 常在中间、白边在外围）
+        _append_crop(
+            variants, image, (int(width * 0.25), int(height * 0.25), int(width * 0.75), int(height * 0.75)), "center_50"
+        )
+        # 四象限（2×2 panel 版式最常见的子图位置）
+        half_w, half_h = width // 2, height // 2
+        for name, box in {
+            "q_top_left": (0, 0, half_w, half_h),
+            "q_top_right": (half_w, 0, width, half_h),
+            "q_bottom_left": (0, half_h, half_w, height),
+            "q_bottom_right": (half_w, half_h, width, height),
+        }.items():
+            _append_crop(variants, image, box, name)
+        return variants
+    except Exception:  # noqa: BLE001 - 变体生成失败按全图
+        try:
+            normalized, _info = normalize_query_image(image_bytes)
+            return [(normalized, "normalized_whole")]
+        except Exception:
+            return []
+
+
+def _append_crop(variants: list[tuple[bytes, str]], image, box: tuple, label: str) -> None:
+    """裁剪 → PNG → 加入变体列表；区域太小（<100px）跳过。"""
+    try:
+        cropped = image.crop(box)
+        if cropped.width < _CROP_MIN_SIDE or cropped.height < _CROP_MIN_SIDE:
+            return
+        buffer = io.BytesIO()
+        cropped.save(buffer, format="PNG")
+        variants.append((buffer.getvalue(), label))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 __all__ = [
     "PHASH_STRONG_DISTANCE",
     "PHASH_VERSION",
+    "QUERY_CROP_VERSION",
     "QUERY_NORMALIZE_VERSION",
     "compute_asset_digest",
     "compute_panel_phashes",
@@ -196,4 +254,5 @@ __all__ = [
     "image_dimensions",
     "normalize_query_image",
     "phash_hamming_distance",
+    "query_crop_variants",
 ]

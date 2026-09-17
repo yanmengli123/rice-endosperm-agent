@@ -653,3 +653,41 @@ async def test_caption_channel_rejects_span_anchor_page_mismatch(caption_session
         kb_ids=["kb-a"],
     )
     assert resolution is None
+
+
+# ---- P1：题注观察搜索（降级：无页码发布，仅方向提示）----
+
+
+@pytest.mark.asyncio
+async def test_search_captions_by_observation_matches_entities(caption_session):
+    """VLM 看到的基因名在题注语料做确定性文本搜索。"""
+    from types import SimpleNamespace
+
+    from yuxi.knowledge.evidence.caption_locator import search_captions_by_observation
+
+    # 借用现有 fixture 的 Figure 4/5 题注（含 OsMYB73）
+    # 先添加含目标词的题注
+    await _add_caption(caption_session, row_id=10, revision_id="pr_a", file_id="file_a",
+                       container_label="Figure 5", quote=f"Figure 5 OsMYB73 gene expression qRT-PCR analysis", page=10)
+    await _add_caption(caption_session, row_id=11, revision_id="pr_a", file_id="file_a",
+                       container_label="Figure 4", quote=f"Figure 4 OsMYB73 protein structure prediction", page=9)
+    await caption_session.commit()
+    observation = SimpleNamespace(
+        visible_entities=["OsMYB73"],
+        visible_text=["qRT-PCR"],
+    )
+    results = await search_captions_by_observation(caption_session, observation=observation, kb_ids=["kb-a"])
+    assert len(results) >= 1
+    assert all("page" not in r for r in results)  # 永不带页码
+    assert all(r["signal_hits"] >= 1 for r in results)
+
+
+@pytest.mark.asyncio
+async def test_search_captions_by_observation_empty_fragments(caption_session):
+    """观察无实体/文字 → 空列表（不查库）。"""
+    from types import SimpleNamespace
+
+    from yuxi.knowledge.evidence.caption_locator import search_captions_by_observation
+
+    observation = SimpleNamespace(visible_entities=[], visible_text=[])
+    assert await search_captions_by_observation(None, observation=observation, kb_ids=["kb-a"]) == []

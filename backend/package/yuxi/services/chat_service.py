@@ -408,7 +408,73 @@ def _deterministic_locator_answer(contract: dict[str, Any]) -> str | None:
                 "请输入 @ 选择「文献」指定其中一篇，或粘贴题注原文后重试。"
             )
         return "该原句在当前知识范围内存在多个物理位置，当前无法可靠定位唯一原文页码。"
+    # P0 降级：定位失败但视觉观察可用——描述看到了什么 + 可行动建议（永不给页码）
+    visual_hint = _visual_description(locator)
+    caption_candidates = _caption_search_hint(locator)
+    if visual_hint or caption_candidates:
+        lines = []
+        if visual_hint:
+            lines.append(visual_hint)
+        if caption_candidates:
+            lines.append(caption_candidates)
+        lines.append("未能从库内图表唯一匹配该截图。建议：")
+        lines.append("① 截取包含图表编号（如 Figure 2）或题注的更完整区域")
+        lines.append("② 直接粘贴题注文字查询")
+        lines.append("③ 输入 @ 选择文献后用 Figure N 查询")
+        return "\n".join(lines)
     return "当前无法可靠定位原文页码。"
+
+
+def _caption_search_hint(locator: dict[str, Any]) -> str:
+    """P1：题注搜索候选 → "可能来自"提示（无页码，仅编号+文件名）。"""
+    candidates = locator.get("caption_search_candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return ""
+    top = candidates[0]
+    label = str(top.get("figure_label") or "").strip()
+    filename = str(top.get("filename") or "").strip()
+    hits = int(top.get("signal_hits") or 0)
+    if not label or hits < 1:
+        return ""
+    hint = f"该截图可能来自 {label}（{filename}）" if filename else f"该截图可能来自 {label}"
+    if len(candidates) > 1:
+        others = [str(c.get("figure_label") or "").strip() for c in candidates[1:4] if c.get("figure_label")]
+        if others:
+            hint += f"；其他可能：{', '.join(others)}"
+    return hint + "。"
+
+
+def _visual_description(locator: dict[str, Any]) -> str:
+    """从 locator_resolution.observation_summary 生成确定性视觉描述——只引用观察契约字段。"""
+    summary = locator.get("observation_summary")
+    if not isinstance(summary, dict):
+        return ""
+    parts: list[str] = []
+    label = str(summary.get("figure_label") or "").strip()
+    if label:
+        parts.append(f"截图包含图表编号「{label}」")
+    entities = [str(item) for item in (summary.get("visible_entities") or []) if str(item).strip()][:4]
+    if entities:
+        parts.append(f"可见基因/蛋白名：{', '.join(entities)}")
+    text_fragments = [str(item) for item in (summary.get("visible_text") or []) if str(item).strip()][:3]
+    if text_fragments:
+        parts.append(f"图中文字：{', '.join(text_fragments)}")
+    structure = [str(item) for item in (summary.get("visual_structure_active") or []) if str(item).strip()]
+    structure_cn = {
+        "bar_chart": "柱状图",
+        "line_chart": "折线图",
+        "microscopy": "显微照片",
+        "tissue_images": "组织切片",
+        "gel": "凝胶电泳",
+        "phylogenetic_tree": "系统进化树",
+    }
+    described = [structure_cn.get(item, item) for item in structure if item in structure_cn]
+    if described:
+        parts.append(f"图表类型：{'、'.join(described)}")
+    panels = summary.get("panel_labels") or []
+    if panels and len(panels) > 1:
+        parts.append(f"包含 {len(panels)} 个子图 ({', '.join(str(p) for p in panels[:6])})")
+    return "；".join(parts) + "。" if parts else ""
 
 
 def _candidate_documents(locator: dict[str, Any], policy: dict[str, Any] | None) -> list[dict[str, str]]:
