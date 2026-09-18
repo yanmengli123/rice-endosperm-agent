@@ -465,9 +465,20 @@ export const graphImportApi = {
 // =============================================================================
 
 export const graphExportApi = {
-  // variant: 'roundtrip'（v3 往返包 zip）| 'evidence'（证据明细 xlsx）
-  exportGraph: async (kbId, variant) =>
-    apiAdminGet(`/api/knowledge/databases/${kbId}/graph-export?variant=${variant}`, {}, 'blob')
+  // variant: 'roundtrip'（v3 往返包 zip）| 'evidence'（证据明细 xlsx）| 'projection'（Neo4j 投影全量 JSONL zip）
+  // projection 可选 includeEvidence / includeChunkText：原文证据成员与段落全文的开关
+  exportGraph: async (kbId, variant, { includeEvidence = true, includeChunkText = true } = {}) => {
+    const params = new URLSearchParams({ variant })
+    if (variant === 'projection') {
+      params.set('include_evidence', String(includeEvidence))
+      params.set('include_chunk_text', String(includeChunkText))
+    }
+    return apiAdminGet(
+      `/api/knowledge/databases/${kbId}/graph-export?${params.toString()}`,
+      {},
+      'blob'
+    )
+  }
 }
 
 // =============================================================================

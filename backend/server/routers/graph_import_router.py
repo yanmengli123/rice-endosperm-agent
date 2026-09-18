@@ -10,6 +10,7 @@ from server.utils.knowledge_access import authorize_knowledge_path
 from yuxi.knowledge.graphs.graph_export_service import (
     ManagedGraphExportService,
     content_disposition_header,
+    evidence_summary_header,
 )
 from yuxi.knowledge.graphs.llm_graph_promotion import LLMGraphPromotionService
 from yuxi.knowledge.graphs.managed_import_service import (
@@ -91,22 +92,36 @@ async def list_graph_imports(kb_id: str, current_user: User = Depends(get_admin_
 async def export_graph(
     kb_id: str,
     variant: Literal["roundtrip", "evidence", "projection"] = Query(default="roundtrip"),
+    include_evidence: bool = Query(default=True, description="projection：是否带上原文证据 / 段落 / 决策成员"),
+    include_chunk_text: bool = Query(default=True, description="projection：是否导出被引用段落全文"),
     current_user: User = Depends(get_admin_user),
 ):
-    """导出图谱数据：roundtrip / evidence 取自 PostgreSQL 规范层，projection 取自 Neo4j 投影（全部节点与关系）。"""
+    """导出图谱数据：roundtrip / evidence 取自 PostgreSQL 规范层，projection 取自 Neo4j 投影（全部节点与关系）。
+
+    projection 默认含证据成员（evidence / chunks / decisions，v2 契约）：
+    - include_evidence=false → 仅结构轻量包（v1 契约，无证据成员）；
+    - include_chunk_text=false → 含引文但不含段落全文（大库逃生口，仅保留 content_sha256）。
+    """
     try:
-        package = await ManagedGraphExportService().export(kb_id, variant=variant, exported_by=current_user.uid)
+        package = await ManagedGraphExportService().export(
+            kb_id,
+            variant=variant,
+            exported_by=current_user.uid,
+            include_evidence=include_evidence,
+            include_chunk_text=include_chunk_text,
+        )
     except ValueError as exc:
         message = str(exc)
         raise HTTPException(status_code=404 if "没有可导出" in message else 400, detail=message)
     except Exception as exc:
         logger.exception(f"图谱导出失败: {exc}")
         raise HTTPException(status_code=500, detail=f"图谱导出失败：{exc}")
-    return Response(
-        content=package["content"],
-        media_type=package["media_type"],
-        headers={"Content-Disposition": content_disposition_header(package["filename"])},
-    )
+    headers = {"Content-Disposition": content_disposition_header(package["filename"])}
+    # ASCII 摘要，供客户端在读不到包内容时也能提示证据规模（CORS expose_headers 已登记）
+    summary = evidence_summary_header(package)
+    if summary:
+        headers["X-Export-Evidence-Summary"] = summary
+    return Response(content=package["content"], media_type=package["media_type"], headers=headers)
 
 
 @graph_import.get("/databases/{kb_id}/graph-promotion-export")

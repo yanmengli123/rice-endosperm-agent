@@ -73,15 +73,27 @@
                       </a-menu-item>
                       <a-menu-item
                         key="evidence"
-                        title="实体 / 三元组 / 证据明细三张工作表，供科研审阅"
+                        title="实体 / 三元组 / 证据明细 / 原文引文四类工作表，供科研审阅"
                       >
                         证据明细（Excel）
                       </a-menu-item>
                       <a-menu-item
                         key="projection"
-                        title="Neo4j 投影的全部实体节点、块节点、实体关系与提及关系（JSONL + 清单），含与规范层的对账结果"
+                        title="Neo4j 投影的全部实体节点、块节点与全部关系，附逐条原文引文、段落全文与人工决策（JSONL + 清单）"
                       >
-                        Neo4j 投影全量（JSONL + 清单）
+                        Neo4j 投影全量（含原文证据与段落）
+                      </a-menu-item>
+                      <a-menu-item
+                        key="projection-quotes"
+                        title="含逐条引文与校验态，但不含段落全文：体积更小，引文来源仍可核对"
+                      >
+                        Neo4j 投影全量（含引文，不含段落）
+                      </a-menu-item>
+                      <a-menu-item
+                        key="projection-structure"
+                        title="仅节点、关系与对账清单，不含证据成员（体积最小）"
+                      >
+                        Neo4j 投影（仅结构，轻量）
                       </a-menu-item>
                     </a-menu>
                   </template>
@@ -650,23 +662,65 @@ const onExportMenuClick = ({ key }) => {
   exportGraph(key)
 }
 
-const EXPORT_SUCCESS_MESSAGES = {
-  roundtrip: '标准往返包导出成功',
-  evidence: '证据明细导出成功',
-  projection: 'Neo4j 投影全量导出成功'
+const EXPORT_MENU_ITEMS = {
+  roundtrip: { variant: 'roundtrip', label: '标准往返包' },
+  evidence: { variant: 'evidence', label: '证据明细' },
+  projection: {
+    variant: 'projection',
+    options: { includeEvidence: true, includeChunkText: true },
+    label: 'Neo4j 投影全量（含原文证据与段落）'
+  },
+  'projection-quotes': {
+    variant: 'projection',
+    options: { includeEvidence: true, includeChunkText: false },
+    label: 'Neo4j 投影全量（含引文，不含段落）'
+  },
+  'projection-structure': {
+    variant: 'projection',
+    options: { includeEvidence: false, includeChunkText: false },
+    label: 'Neo4j 投影（仅结构，轻量）'
+  }
 }
 
-const exportGraph = async (variant) => {
-  if (!kbId.value || exportingGraph.value) return
+// X-Export-Evidence-Summary 是 ASCII 键值（HTTP 头必须 latin-1），这里翻成中文提示
+const EVIDENCE_SUMMARY_LABELS = {
+  evidence: '引文',
+  ok: '逐字命中',
+  degraded: '与原文不一致',
+  missing: '无引文',
+  unverifiable: '不可比对',
+  chunks: '段落',
+  decisions: '决策'
+}
+
+const formatEvidenceSummary = (raw) => {
+  if (!raw) return ''
+  return String(raw)
+    .split(';')
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => {
+      const [key, value] = token.split('=').map((item) => (item || '').trim())
+      if (key === 'complete') return value === 'true' ? '证据覆盖完整' : '证据覆盖不完整'
+      const label = EVIDENCE_SUMMARY_LABELS[key]
+      return label && value ? `${label} ${value}` : ''
+    })
+    .filter(Boolean)
+    .join(' · ')
+}
+
+const exportGraph = async (menuKey) => {
+  const item = EXPORT_MENU_ITEMS[menuKey]
+  if (!item || !kbId.value || exportingGraph.value) return
   exportingGraph.value = true
   try {
-    const response = await graphExportApi.exportGraph(kbId.value, variant)
+    const response = await graphExportApi.exportGraph(kbId.value, item.variant, item.options)
     const blob = await response.blob()
     const contentDisposition =
       response.headers.get('Content-Disposition') || response.headers.get('content-disposition')
-    const suffix = variant === 'evidence' ? 'xlsx' : 'zip'
+    const suffix = item.variant === 'evidence' ? 'xlsx' : 'zip'
     const filename =
-      parseExportFilename(contentDisposition) || `graph-${variant}-${kbId.value}.${suffix}`
+      parseExportFilename(contentDisposition) || `graph-${item.variant}-${kbId.value}.${suffix}`
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -675,7 +729,11 @@ const exportGraph = async (variant) => {
     link.click()
     document.body.removeChild(link)
     window.URL.revokeObjectURL(url)
-    message.success(EXPORT_SUCCESS_MESSAGES[variant] || '图谱导出成功')
+    const summary = formatEvidenceSummary(
+      response.headers.get('X-Export-Evidence-Summary') ||
+        response.headers.get('x-export-evidence-summary')
+    )
+    message.success(`${item.label}导出成功${summary ? `（${summary}）` : ''}`)
   } catch (error) {
     console.error('图谱导出失败:', error)
     message.error(`图谱导出失败: ${error.message || '未知错误'}`)
