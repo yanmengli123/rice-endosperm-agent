@@ -107,6 +107,14 @@
                     :class="`status-dot--${graphIndexDotStatus}`"
                   ></span>
                 </a-button>
+                <a-button
+                  v-if="isMilvus"
+                  class="action-btn"
+                  @click="showReviewQueue = true"
+                  title="审核队列：验证 / 拒绝 / 批量处理 LLM 抽取的候选关系"
+                >
+                  <ClipboardCheck :size="16" />
+                </a-button>
                 <a-button class="action-btn" @click="toggleSettingsPanel" title="设置">
                   <Settings :size="16" />
                 </a-button>
@@ -165,6 +173,7 @@
           :type="graph.selectedItemType"
           :kb-id="kbId"
           @close="graph.handleCanvasClick"
+          @reviewed="loadGraph"
         />
 
         <!-- 设置浮动面板 -->
@@ -214,6 +223,19 @@
                     v-model:checked="settingsForm.excludeChunk"
                     :disabled="graphSettingsSaving"
                   />
+                </a-form-item>
+                <a-form-item label="审核策略">
+                  <a-radio-group
+                    v-model:value="settingsForm.reviewPolicy"
+                    :disabled="graphSettingsSaving"
+                    size="small"
+                  >
+                    <a-radio-button value="candidates_visible">候选可见</a-radio-button>
+                    <a-radio-button value="approved_only">仅已验证</a-radio-button>
+                  </a-radio-group>
+                  <div class="full-graph-hint">
+                    「仅已验证」下主图与 Graph-RAG 检索只含人工验证与规范层的关系
+                  </div>
                 </a-form-item>
                 <a-form-item>
                   <a-button
@@ -443,6 +465,7 @@
       :kb-id="kbId"
       @imported="handleGraphImported"
     />
+    <GraphReviewQueue v-model:open="showReviewQueue" :kb-id="kbId" @reviewed="loadGraph" />
   </div>
 </template>
 
@@ -461,11 +484,13 @@ import {
   Download,
   Network,
   BrainCircuit,
-  ScanText
+  ScanText,
+  ClipboardCheck
 } from '@lucide/vue'
 import GraphCanvas from '@/components/GraphCanvas.vue'
 import GraphDetailPanel from '@/components/GraphDetailPanel.vue'
 import GraphImportModal from '@/components/GraphImportModal.vue'
+import GraphReviewQueue from '@/components/GraphReviewQueue.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
 import { getKbTypeLabel } from '@/utils/kb_utils'
 import { unifiedApi } from '@/apis/graph_api'
@@ -481,7 +506,8 @@ const DEFAULT_GRAPH_VIEW_SETTINGS = Object.freeze({
   maxNodes: 100,
   maxDepth: 2,
   excludeChunk: true,
-  fullGraph: false
+  fullGraph: false,
+  reviewPolicy: 'candidates_visible'
 })
 
 const props = defineProps({
@@ -513,6 +539,7 @@ const graphBuildStatus = ref(null)
 const graphBuildLoading = ref(false)
 const showGraphConfig = ref(false)
 const showGraphImport = ref(false)
+const showReviewQueue = ref(false)
 let buildStatusPollTimer = null
 let graphSettingsRequestSeq = 0
 let graphSettingsLoadPromise = null
@@ -742,7 +769,8 @@ const getErrorDetail = (e, fallback) => {
 const normalizeGraphViewSettings = (value = {}) => ({
   maxNodes: Math.min(1000, Math.max(10, Number(value.max_nodes) || 100)),
   maxDepth: Math.min(5, Math.max(1, Number(value.max_depth) || 2)),
-  excludeChunk: typeof value.exclude_chunk === 'boolean' ? value.exclude_chunk : true
+  excludeChunk: typeof value.exclude_chunk === 'boolean' ? value.exclude_chunk : true,
+  reviewPolicy: value.review_policy === 'approved_only' ? 'approved_only' : 'candidates_visible'
 })
 
 // 全库存量（PG 规范层口径），用于左下角「可见/全量」复合显示
@@ -1004,7 +1032,8 @@ const applySettings = async () => {
     const response = await unifiedApi.updateViewSettings(currentDatabaseId, {
       max_nodes: settingsForm.maxNodes,
       max_depth: settingsForm.maxDepth,
-      exclude_chunk: settingsForm.excludeChunk
+      exclude_chunk: settingsForm.excludeChunk,
+      review_policy: settingsForm.reviewPolicy
     })
     if (currentDatabaseId !== kbId.value) return
     const settings = normalizeGraphViewSettings(response?.data)
@@ -1034,7 +1063,8 @@ const onDisplayLimitChange = async (value) => {
     await unifiedApi.updateViewSettings(kbId.value, {
       max_nodes: clamped,
       max_depth: subgraphParams.maxDepth,
-      exclude_chunk: subgraphParams.excludeChunk
+      exclude_chunk: subgraphParams.excludeChunk,
+      review_policy: subgraphParams.reviewPolicy
     })
   } catch (e) {
     // 持久化失败不阻塞本地生效，下次进入回退为旧值

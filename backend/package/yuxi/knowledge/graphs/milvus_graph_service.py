@@ -17,10 +17,20 @@ from yuxi.knowledge.graphs.graph_utils import (
     normalize_entity_name,
 )
 from yuxi.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
+from yuxi.knowledge.graphs.review_overlay import (
+    KIND_ENTITY,
+    KIND_TRIPLE,
+    STATUS_APPROVED,
+    STATUS_CANONICAL,
+    STATUS_REJECTED,
+    ReviewDecisionIndex,
+    plan_replay,
+)
 from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
 from yuxi.repositories.knowledge_graph_repository import KnowledgeGraphRepository
+from yuxi.repositories.knowledge_graph_review_repository import KnowledgeGraphReviewRepository
 from yuxi.storage.neo4j import (
     Neo4jConnectionManager,
     get_shared_neo4j_connection,
@@ -37,6 +47,11 @@ GRAPH_INDEX_MAX_ATTEMPTS = 3
 NEO4J_QUERY_OFFLOAD_LIMIT = 8
 # 走聊天模型的抽取器：configure 需校验 chat 模型、并发数取 concurrency_count
 LLM_EXTRACTOR_TYPES = frozenset({"llm", "llm_scientific"})
+# 图查询审核策略：候选边显示（默认，靠徽标区分）/ 只显示 APPROVED 与 CANONICAL（企业严格模式）
+REVIEW_POLICY_CANDIDATES_VISIBLE = "candidates_visible"
+REVIEW_POLICY_APPROVED_ONLY = "approved_only"
+REVIEW_POLICIES = frozenset({REVIEW_POLICY_CANDIDATES_VISIBLE, REVIEW_POLICY_APPROVED_ONLY})
+_VISIBLE_UNDER_APPROVED_ONLY = frozenset({STATUS_APPROVED, STATUS_CANONICAL})
 # 全图模式的硬安全上限：超过即截断并置 truncated 标志，保护浏览器渲染与 Neo4j 查询
 FULL_GRAPH_NODE_CAP = 3000
 FULL_GRAPH_EDGE_CAP = 6000
@@ -147,6 +162,64 @@ def _assert_mention_evidence(entity_records: list[dict[str, Any]], triple_record
         )
 
 
+def _group_by_status(status_by_id: dict[str, str]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for target_id, status in status_by_id.items():
+        grouped.setdefault(status, []).append(target_id)
+    return grouped
+
+
+def normalized_result_from_snapshot(
+    payload: dict[str, Any], quote: str, *, extractor_type: str = "human_pinned"
+) -> dict[str, Any]:
+    """APPROVE 决策快照 → 与抽取器同形状的 normalized_result（走同一条写入路径重建对象）。"""
+
+    def entity_from(snapshot: dict[str, Any]) -> dict[str, Any]:
+        attributes = snapshot.get("attributes")
+        return {
+            "text": snapshot["name"],
+            "label": snapshot["label"],
+            "attributes": list(attributes) if isinstance(attributes, list) else [],
+            "mention_quote": quote,
+        }
+
+    entities: list[dict[str, Any]] = []
+    relations: list[dict[str, Any]] = []
+    if payload.get("entity"):
+        entities.append(entity_from(payload["entity"]))
+    if payload.get("triple") and payload.get("source") and payload.get("target"):
+        source = entity_from(payload["source"])
+        target = entity_from(payload["target"])
+        entities.extend([source, target])
+        relations.append(
+            {
+                "source": source,
+                "target": target,
+                "text": quote,
+                "label": payload["triple"]["relation_type"],
+                "confidence": 1.0,
+                "hedge": False,
+            }
+        )
+    return {
+        "entities": entities,
+        "relations": relations,
+        "metadata": {"extractor_type": extractor_type, "schema_version": 2},
+    }
+
+
+def filter_edges_by_policy(result: dict[str, Any], policy: str) -> dict[str, Any]:
+    """approved_only 下隐藏 CANDIDATE 边；缺 review_status 属性的边（托管导入投影）视为 CANONICAL 可见。"""
+    if policy != REVIEW_POLICY_APPROVED_ONLY:
+        return result
+    edges = [
+        edge
+        for edge in result.get("edges") or []
+        if ((edge.get("properties") or {}).get("review_status") or STATUS_CANONICAL) in _VISIBLE_UNDER_APPROVED_ONLY
+    ]
+    return {**result, "edges": edges}
+
+
 def _get_neo4j_query_offload_semaphore() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     loop_id = id(loop)
@@ -191,15 +264,21 @@ class MilvusGraphService:
         kb_repo: KnowledgeBaseRepository | None = None,
         chunk_repo: KnowledgeChunkRepository | None = None,
         graph_repo: KnowledgeGraphRepository | None = None,
+        review_repo: KnowledgeGraphReviewRepository | None = None,
         graph_vector_store: MilvusGraphVectorStore | None = None,
         neo4j_connection: Neo4jConnectionManager | None = None,
+        review_policy: str | None = None,
     ):
         self.kb_id = kb_id
         self.kb_repo = kb_repo or KnowledgeBaseRepository()
         self.chunk_repo = chunk_repo or KnowledgeChunkRepository()
         self.graph_repo = graph_repo or KnowledgeGraphRepository()
+        self.review_repo = review_repo or KnowledgeGraphReviewRepository()
         self._graph_vector_store = graph_vector_store
         self._connection = neo4j_connection
+        # 图查询的审核策略：candidates_visible（默认，候选边显示 + 徽标）
+        # / approved_only（主图与检索只含 APPROVED/CANONICAL）
+        self.review_policy = review_policy
 
     @property
     def connection(self) -> Neo4jConnectionManager:
@@ -332,6 +411,9 @@ class MilvusGraphService:
         attempt_counts: dict[str, int] = {}
         last_errors: dict[str, str] = {}
         extraction_stats: dict[str, Any] = {}
+        # 人工审核决策一次性加载进内存（不逐 chunk 打 PG），每 chunk 写入后幂等重放
+        review_index = ReviewDecisionIndex(await self.review_repo.list_decisions(kb_id))
+        review_replay: dict[str, int] = {"decisions_loaded": len(review_index)}
         write_lock = asyncio.Lock()
 
         while True:
@@ -397,6 +479,11 @@ class MilvusGraphService:
                                     ent_ids=[entity["entity_id"] for entity in entities],
                                 )
                                 _merge_extraction_stats(extraction_stats, extraction_result.get("metadata") or {})
+                                replayed = await self.replay_review_for_chunk(
+                                    kb, chunk, entities, triples, review_index
+                                )
+                                for key, count in replayed.items():
+                                    review_replay[key] = review_replay.get(key, 0) + count
                             processed += 1
                             last_errors.pop(chunk.chunk_id, None)
                         except Exception as exc:
@@ -438,6 +525,7 @@ class MilvusGraphService:
                     "remaining": 0,
                     "failure_attempts": sum(attempt_counts.values()) - processed,
                     "extraction_stats": extraction_stats,
+                    "review_replay": review_replay,
                 }
             if attempted_in_pass == 0:
                 break
@@ -459,6 +547,7 @@ class MilvusGraphService:
             "failure_attempts": sum(attempt_counts.values()) - processed,
             "failed_details": failed_details,
             "extraction_stats": extraction_stats,
+            "review_replay": review_replay,
         }
         if context is not None:
             await context.set_result(result)
@@ -498,6 +587,170 @@ class MilvusGraphService:
         normalized_result = normalize_extraction_result(extraction_result, extractor_type)
         await self.chunk_repo.update_extraction_result(chunk.chunk_id, normalized_result)
         return normalized_result
+
+    # ── 人工审核决策叠加层：重放与投影 ─────────────────────────────
+
+    async def replay_review_for_chunk(
+        self,
+        kb,
+        chunk,
+        entity_records: list[dict[str, Any]],
+        triple_records: list[dict[str, Any]],
+        index: ReviewDecisionIndex,
+    ) -> dict[str, int]:
+        """chunk 写入后按决策幂等重放：快照恢复 → 缓存状态 → pinned 证据 → Neo4j/Milvus 投影清理。
+
+        决策按内容哈希身份匹配：同一句话再抽一次得到同一 ID，REJECT 决策再次生效、APPROVE 决策
+        再次固定证据；本次再生成没产出但决策 pinned 在本 chunk 的对象按快照补回。
+        """
+        if len(index) == 0:
+            return {}
+        kb_id = chunk.kb_id
+        plan = plan_replay(
+            index,
+            chunk_id=chunk.chunk_id,
+            chunk_content=chunk.content or "",
+            entity_records=entity_records,
+            triple_records=triple_records,
+        )
+        if plan.is_empty:
+            return {}
+        summary: dict[str, int] = {}
+        for decision in plan.restore_entities:
+            await self.restore_from_decision(kb, chunk, decision)
+            summary["entities_restored"] = summary.get("entities_restored", 0) + 1
+        for decision in plan.restore_triples:
+            await self.restore_from_decision(kb, chunk, decision)
+            summary["triples_restored"] = summary.get("triples_restored", 0) + 1
+        for status, ids in _group_by_status(plan.triple_status).items():
+            await self.review_repo.set_review_status(KIND_TRIPLE, ids, status)
+            summary[f"triples_{status.lower()}"] = summary.get(f"triples_{status.lower()}", 0) + len(ids)
+        for status, ids in _group_by_status(plan.entity_status).items():
+            await self.review_repo.set_review_status(KIND_ENTITY, ids, status)
+            summary[f"entities_{status.lower()}"] = summary.get(f"entities_{status.lower()}", 0) + len(ids)
+        for kind, target_id in plan.repin:
+            decision = index.get(kind, target_id)
+            await self.review_repo.pin_mention(
+                kind, target_id, chunk.chunk_id, (decision or {}).get("actor_uid") or "system"
+            )
+        if plan.repin:
+            summary["mentions_repinned"] = summary.get("mentions_repinned", 0) + len(plan.repin)
+        await asyncio.to_thread(
+            self.apply_review_projection,
+            kb_id,
+            triple_status=plan.triple_status,
+            reject_triple_ids=plan.reject_triple_ids,
+            reject_entity_ids=plan.reject_entity_ids,
+            entity_overrides=plan.entity_overrides,
+        )
+        if plan.reject_triple_ids or plan.reject_entity_ids:
+            await self.graph_vector_store.delete_graph_records(
+                kb_id, entity_ids=list(plan.reject_entity_ids), triple_ids=list(plan.reject_triple_ids)
+            )
+        return summary
+
+    async def restore_from_decision(self, kb, chunk, decision: dict[str, Any]) -> tuple[list[dict], list[dict]]:
+        """按 APPROVE 决策快照重建三元组/实体（含 human_pinned 引文 mention），走与抽取相同的写入路径。"""
+        normalized = normalized_result_from_snapshot(decision.get("payload") or {}, decision.get("pinned_quote") or "")
+        kb_id = chunk.kb_id
+        entities, triples = await asyncio.to_thread(self.write_chunk_graph, kb_id, chunk, normalized)
+        await self.graph_repo.upsert_chunk_graph(
+            kb_id=kb_id, file_id=chunk.file_id, chunk_id=chunk.chunk_id, entities=entities, triples=triples
+        )
+        await self.graph_vector_store.insert_missing_graph_records(
+            kb_id=kb_id, embedding_model_spec=kb.embedding_model_spec, entities=entities, triples=triples
+        )
+        actor = decision.get("actor_uid") or "system"
+        for entity in entities:
+            await self.review_repo.pin_mention(KIND_ENTITY, entity["entity_id"], chunk.chunk_id, actor)
+        for triple in triples:
+            await self.review_repo.pin_mention(KIND_TRIPLE, triple["triple_id"], chunk.chunk_id, actor)
+        return entities, triples
+
+    def apply_review_projection(
+        self,
+        kb_id: str,
+        *,
+        triple_status: dict[str, str] | None = None,
+        reject_triple_ids: list[str] | tuple[str, ...] = (),
+        reject_entity_ids: list[str] | tuple[str, ...] = (),
+        entity_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        """Neo4j 投影按审核态刷新：边属性 review_status 一次刷所有平行边（MERGE 键含 chunk_id），
+        REJECTED 边直接删除，REJECTED 实体 DETACH DELETE，RENAME/RETYPE 只写展示属性不改身份。"""
+        label = safe_neo4j_label(kb_id)
+        status_updates = {t: s for t, s in (triple_status or {}).items() if s != STATUS_REJECTED}
+        if not (status_updates or reject_triple_ids or reject_entity_ids or entity_overrides):
+            return
+        edge_pattern = (
+            f"MATCH (:Entity:MilvusKB:`{label}`)-[r:RELATION {{kb_id: $kb_id, triple_id: $triple_id}}]->"
+            f"(:Entity:MilvusKB:`{label}`) "
+        )
+
+        def query(tx):
+            for triple_id, status in status_updates.items():
+                tx.run(edge_pattern + "SET r.review_status = $status", kb_id=kb_id, triple_id=triple_id, status=status)
+            for triple_id in reject_triple_ids:
+                tx.run(edge_pattern + "DELETE r", kb_id=kb_id, triple_id=triple_id)
+            for entity_id in reject_entity_ids:
+                tx.run(
+                    f"MATCH (e:Entity:MilvusKB:`{label}` {{kb_id: $kb_id, entity_id: $entity_id}}) DETACH DELETE e",
+                    kb_id=kb_id,
+                    entity_id=entity_id,
+                )
+            for entity_id, override in (entity_overrides or {}).items():
+                tx.run(
+                    f"MATCH (e:Entity:MilvusKB:`{label}` {{kb_id: $kb_id, entity_id: $entity_id}}) "
+                    "SET e.display_name = $display_name, e.label_override = $label_override",
+                    kb_id=kb_id,
+                    entity_id=entity_id,
+                    display_name=override.get("display_name"),
+                    label_override=override.get("label"),
+                )
+
+        neo4j_write(self.driver, query)
+
+    def count_projected_edges(self, kb_id: str, triple_ids: list[str]) -> int:
+        """I4 审计：统计这些三元组在 Neo4j 投影中的平行边数（REJECTED 应为 0）。"""
+        if not triple_ids:
+            return 0
+        label = safe_neo4j_label(kb_id)
+        cypher = (
+            f"MATCH (:Entity:MilvusKB:`{label}`)-[r:RELATION {{kb_id: $kb_id}}]->(:Entity:MilvusKB:`{label}`) "
+            "WHERE r.triple_id IN $triple_ids RETURN count(r) AS edge_count"
+        )
+        result = neo4j_read(self.driver, cypher, kb_id=kb_id, triple_ids=triple_ids)
+        return int(result[0]["edge_count"]) if result else 0
+
+    def delete_chunk_graph_from_neo4j(self, kb_id: str, chunk_id: str) -> None:
+        """单 chunk 重抽前清掉该 chunk 的平行边、MENTIONS 与孤儿实体节点（重建时按需再生）。"""
+        label = safe_neo4j_label(kb_id)
+
+        def query(tx):
+            tx.run(
+                f"MATCH (:Entity:MilvusKB:`{label}`)-[r:RELATION {{kb_id: $kb_id, chunk_id: $chunk_id}}]->"
+                f"(:Entity:MilvusKB:`{label}`) DELETE r",
+                kb_id=kb_id,
+                chunk_id=chunk_id,
+            )
+            tx.run(
+                f"MATCH (c:Chunk:MilvusKB:`{label}` {{chunk_id: $chunk_id}})-[m:MENTIONS]->"
+                f"(e:Entity:MilvusKB:`{label}`) "
+                "DELETE m WITH DISTINCT e WHERE NOT ()-[:MENTIONS]->(e) DETACH DELETE e",
+                chunk_id=chunk_id,
+            )
+            tx.run(f"MATCH (c:Chunk:MilvusKB:`{label}` {{chunk_id: $chunk_id}}) DETACH DELETE c", chunk_id=chunk_id)
+
+        neo4j_write(self.driver, query)
+
+    async def resolve_review_policy(self, kb_id: str) -> str:
+        """图查询的审核策略：显式注入 > 知识库 graph_view_settings.review_policy > candidates_visible。"""
+        if self.review_policy:
+            return self.review_policy
+        record = await self.kb_repo.get_by_kb_id(kb_id)
+        settings = getattr(record, "graph_view_settings", None) or {}
+        policy = settings.get("review_policy") if isinstance(settings, dict) else None
+        return policy if policy in REVIEW_POLICIES else REVIEW_POLICY_CANDIDATES_VISIBLE
 
     def write_chunk_graph(
         self,
@@ -739,7 +992,8 @@ class MilvusGraphService:
         label = safe_neo4j_label(effective_kb_id)
         limit = max_nodes
         try:
-            return await _run_neo4j_query_io(
+            policy = await self.resolve_review_policy(effective_kb_id)
+            result = await _run_neo4j_query_io(
                 self._query_nodes_sync,
                 effective_kb_id,
                 label,
@@ -748,6 +1002,7 @@ class MilvusGraphService:
                 max_depth,
                 exclude_chunk,
             )
+            return filter_edges_by_policy(result, policy)
         except Exception as e:
             logger.error(f"Milvus graph query failed: {e}")
             return {"nodes": [], "edges": []}
@@ -796,7 +1051,9 @@ class MilvusGraphService:
             return {"nodes": [], "edges": [], "truncated": False}
         label = safe_neo4j_label(effective_kb_id)
         try:
-            return await _run_neo4j_query_io(self._query_full_graph_sync, effective_kb_id, label, exclude_chunk)
+            policy = await self.resolve_review_policy(effective_kb_id)
+            result = await _run_neo4j_query_io(self._query_full_graph_sync, effective_kb_id, label, exclude_chunk)
+            return filter_edges_by_policy(result, policy)
         except Exception as e:
             logger.error(f"Milvus full graph query failed: {e}")
             return {"nodes": [], "edges": [], "truncated": False}
@@ -866,13 +1123,15 @@ class MilvusGraphService:
         RETURN graph_nodes AS nodes, collect(DISTINCT rel) AS edges
         """
         try:
-            return await _run_neo4j_query_io(
+            policy = await self.resolve_review_policy(kb_id)
+            result = await _run_neo4j_query_io(
                 self._query_seed_subgraph_sync,
                 kb_id,
                 cypher,
                 seed_entity_ids,
                 max_nodes,
             )
+            return filter_edges_by_policy(result, policy)
         except Exception as e:
             logger.error(f"Milvus seed subgraph query failed: {e}")
             return {"nodes": [], "edges": []}
@@ -1208,8 +1467,17 @@ class MilvusGraphService:
         effective_kb_id = kb_id or self.kb_id
         db_label = properties.get("kb_id") or effective_kb_id
         filtered_labels = [label for label in labels if label not in {"MilvusKB", db_label}]
-        entity_type = "Chunk" if "Chunk" in labels else properties.get("label", "Entity")
-        name = properties.get("name") or properties.get("content_preview") or properties.get("chunk_id") or "Unknown"
+        # RENAME/RETYPE 决策只写展示属性（display_name/label_override），不改内容哈希身份
+        entity_type = (
+            "Chunk" if "Chunk" in labels else properties.get("label_override") or properties.get("label", "Entity")
+        )
+        name = (
+            properties.get("display_name")
+            or properties.get("name")
+            or properties.get("content_preview")
+            or properties.get("chunk_id")
+            or "Unknown"
+        )
         return {
             "id": node_id,
             "name": name,

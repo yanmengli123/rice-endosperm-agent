@@ -1054,6 +1054,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0037_evidence_span_revision_anchor_scope", "_migration_0037_evidence_span_revision_anchor_scope"),
         ("0038_figure_asset_group_role", "_migration_0038_figure_asset_group_role"),
         ("0039_graph_mention_evidence", "_migration_0039_graph_mention_evidence"),
+        ("0040_graph_review_overlay", "_migration_0040_graph_review_overlay"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2474,6 +2475,39 @@ class PostgresManager(metaclass=SingletonMeta):
                 "ALTER TABLE IF EXISTS figure_assets ADD COLUMN IF NOT EXISTS anchor_id VARCHAR(64) NOT NULL DEFAULT ''"
             )
         )
+
+    async def _migration_0040_graph_review_overlay(self, conn) -> None:
+        """图谱人工审核决策叠加层（CANDIDATE / APPROVED / REJECTED / CANONICAL）。
+
+        - 新表 knowledge_graph_review_decisions（按哈希身份持久化的人类决策，不随图谱行删除）
+          与 knowledge_graph_review_audit（append-only 操作账本）由 metadata.create_all 建立；
+        - 三元组/实体表加审核态缓存列：nullable 加列 → 回填（有托管导入来源行 → CANONICAL，
+          其余 → CANDIDATE）→ NOT NULL，不设数据库默认值掩盖漏传；
+        - mention 表加 pinned_by/pinned_at：审核人验证过的证据不随单 chunk 重抽删除。
+        """
+        if hasattr(conn, "run_sync"):
+            await conn.run_sync(KnowledgeBase.metadata.create_all)
+        for table, source_table, key in (
+            ("knowledge_graph_triples", "knowledge_graph_triple_sources", "triple_id"),
+            ("knowledge_graph_entities", "knowledge_graph_entity_sources", "entity_id"),
+        ):
+            await conn.execute(
+                text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS review_status VARCHAR(16)")
+            )
+            await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS review_version INTEGER"))
+            await conn.execute(
+                text(
+                    f"UPDATE {table} t SET review_status = CASE WHEN EXISTS "
+                    f"(SELECT 1 FROM {source_table} s WHERE s.{key} = t.{key}) THEN 'CANONICAL' ELSE 'CANDIDATE' END "
+                    "WHERE t.review_status IS NULL"
+                )
+            )
+            await conn.execute(text(f"UPDATE {table} SET review_version = 0 WHERE review_version IS NULL"))
+            await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ALTER COLUMN review_status SET NOT NULL"))
+            await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ALTER COLUMN review_version SET NOT NULL"))
+        for table in ("knowledge_graph_triple_mentions", "knowledge_graph_entity_mentions"):
+            await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS pinned_by VARCHAR(64)"))
+            await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ"))
 
     async def _migration_0039_graph_mention_evidence(self, conn) -> None:
         """图谱 mention 级原文证据（「点开即见原文」不变式 I1/I2）。

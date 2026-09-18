@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -38,24 +39,58 @@ _TRIPLE_MENTION_FIELDS = (
 
 
 class GraphEvidenceService:
-    def __init__(self, graph_repo: KnowledgeGraphRepository | None = None):
+    def __init__(
+        self,
+        graph_repo: KnowledgeGraphRepository | None = None,
+        review_repo: Any = None,
+        graph_service: Any = None,
+    ):
         self.graph_repo = graph_repo or KnowledgeGraphRepository()
+        self.review_repo = review_repo
+        self.graph_service = graph_service
 
     async def triple_evidence(self, kb_id: str, triple_id: str) -> dict[str, Any]:
         source = await self.graph_repo.get_triple_evidence_source(kb_id, triple_id)
         if source is None:
             raise ValueError(f"三元组 {triple_id} 不存在")
-        return build_triple_evidence(source)
+        evidence = build_triple_evidence(source)
+        evidence["decision"] = await self._decision(kb_id, "TRIPLE", triple_id)
+        return evidence
 
     async def entity_evidence(self, kb_id: str, entity_id: str) -> dict[str, Any]:
         source = await self.graph_repo.get_entity_evidence_source(kb_id, entity_id)
         if source is None:
             raise ValueError(f"实体 {entity_id} 不存在")
-        return build_entity_evidence(source)
+        evidence = build_entity_evidence(source)
+        evidence["decision"] = await self._decision(kb_id, "ENTITY", entity_id)
+        return evidence
 
     async def integrity(self, kb_id: str, *, limit: int = 5000) -> dict[str, Any]:
         source = await self.graph_repo.list_integrity_source(kb_id, limit=limit)
-        return build_integrity_report(source)
+        report = build_integrity_report(source)
+        if self.review_repo is not None:
+            review_counts = await self.review_repo.integrity_counts(kb_id)
+            rejected_triple_ids = review_counts.pop("rejected_triple_ids")
+            if self.graph_service is not None and rejected_triple_ids:
+                projected = await asyncio.to_thread(
+                    self.graph_service.count_projected_edges, kb_id, rejected_triple_ids
+                )
+                review_counts["I4_rejected_edges_projected"] = projected
+            for key, value in review_counts.items():
+                report["counts"][key] = value
+                if key.startswith("I"):
+                    report["violations"][key] = value
+            if any(report["violations"].values()):
+                report["status"] = "VIOLATION"
+        return report
+
+    async def _decision(self, kb_id: str, kind: str, target_id: str) -> dict[str, Any] | None:
+        if self.review_repo is None:
+            return None
+        decision = await self.review_repo.get_decision(kb_id, kind, target_id)
+        if decision is None:
+            return None
+        return {key: decision.get(key) for key in ("action", "reason", "actor_uid", "version", "updated_at")}
 
 
 def build_triple_evidence(source: dict[str, Any]) -> dict[str, Any]:
@@ -72,6 +107,8 @@ def build_triple_evidence(source: dict[str, Any]) -> dict[str, Any]:
         "support_count": int(triple.get("support_count") or 0) or len(mentions),
         "literature_count": literature_count,
         "trust_tier": trust_tier(mentions, literature_count),
+        "review_status": triple.get("review_status"),
+        "review_version": triple.get("review_version"),
         "mentions": mentions,
         "verification_summary": _verification_summary(mentions),
     }
@@ -87,6 +124,8 @@ def build_entity_evidence(source: dict[str, Any]) -> dict[str, Any]:
         "name": entity["name"],
         "label": entity["label"],
         "canonical_identity": entity.get("canonical_identity"),
+        "review_status": entity.get("review_status"),
+        "review_version": entity.get("review_version"),
         "aliases": [alias["alias"] for alias in source.get("aliases") or []],
         "definition": definition,
         "mentions": mentions,
@@ -219,6 +258,7 @@ def _mention_view(mention: dict[str, Any]) -> dict[str, Any]:
         "identifiers": provenance["identifiers"],
         "page": provenance["page"],
         "quote_start_char": offset,
+        "pinned_by": mention.get("pinned_by"),
         "context": build_context_snippet(content, quote, offset) if quote else None,
         "chunk_content": content,
     }

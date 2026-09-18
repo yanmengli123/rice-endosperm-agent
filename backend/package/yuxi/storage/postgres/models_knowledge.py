@@ -588,6 +588,10 @@ class KnowledgeGraphEntity(Base):
     label = Column(String(128), nullable=False)
     name = Column(String(512), nullable=False)
     attributes = Column(JSON_VALUE)
+    # 审核态缓存（权威在 knowledge_graph_review_decisions，可重放重算）：
+    # CANDIDATE（LLM 产物）/ APPROVED / REJECTED / CANONICAL（托管导入，只读）
+    review_status = Column(String(16), nullable=False, default="CANDIDATE")
+    review_version = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
@@ -632,6 +636,9 @@ class KnowledgeGraphEntityMention(Base):
     # 实体在该 chunk 中的原文主句（llm_scientific 轨逐字引文；旧数据为空）与 chunk 内偏移
     text = Column(Text)
     quote_start_char = Column(Integer)
+    # 审核人点「验证」时看着的证据：pinned 的 mention 不随单 chunk 重抽删除（I3）
+    pinned_by = Column(String(64))
+    pinned_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
@@ -659,6 +666,8 @@ class KnowledgeGraphTriple(Base):
     literature_count = Column(Integer, nullable=False, default=0)
     best_evidence_level = Column(String(64))
     consensus_direction = Column(String(64), nullable=False, default="UNKNOWN")
+    review_status = Column(String(16), nullable=False, default="CANDIDATE")
+    review_version = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
@@ -689,6 +698,8 @@ class KnowledgeGraphTripleMention(Base):
     trigger_verified = Column(Boolean)
     trigger_term = Column(String(128))
     verifier_confirmed = Column(Boolean)
+    pinned_by = Column(String(64))
+    pinned_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
@@ -860,6 +871,61 @@ class KnowledgeGraphOutboxEvent(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
     processed_at = Column(DateTime(timezone=True))
+
+
+class KnowledgeGraphReviewDecision(Base):
+    """人工审核决策叠加层：按内容哈希身份持久化，永不随图谱行删除，写入/重建时幂等重放。
+
+    一个对象（三元组或实体）只有一条现行决策，更新即覆盖并递增 version（乐观并发）。
+    action ∈ APPROVE / REJECT / SUPERSEDE / RENAME / RETYPE；pinned_* 记录审核人看着哪句原文
+    做的决定，重放时 mention 丢失而 chunk 仍含该引文则以 human_pinned 补回（I3）。
+    """
+
+    __tablename__ = "knowledge_graph_review_decisions"
+    __table_args__ = (
+        UniqueConstraint("decision_id", name="uq_graph_review_decision_id"),
+        UniqueConstraint("kb_id", "target_kind", "target_id", name="uq_graph_review_decision_target"),
+        Index("ix_graph_review_decisions_kb", "kb_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    decision_id = Column(String(64), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_kind = Column(String(16), nullable=False)
+    target_id = Column(String(64), nullable=False)
+    action = Column(String(16), nullable=False)
+    payload = Column(JSON_VALUE)
+    pinned_chunk_id = Column(String(128))
+    pinned_quote = Column(Text)
+    reason = Column(Text)
+    actor_uid = Column(String(64), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+class KnowledgeGraphReviewAudit(Base):
+    """图谱审核操作账本（append-only，禁止 UPDATE/DELETE，与 usage_ledger 同纪律）。"""
+
+    __tablename__ = "knowledge_graph_review_audit"
+    __table_args__ = (
+        Index("ix_graph_review_audit_kb_created", "kb_id", "created_at"),
+        Index("ix_graph_review_audit_target", "target_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_kind = Column(String(16), nullable=False)
+    target_id = Column(String(64), nullable=False)
+    action = Column(String(32), nullable=False)
+    actor_uid = Column(String(64), nullable=False)
+    before_snapshot = Column(JSON_VALUE)
+    after_snapshot = Column(JSON_VALUE)
+    reason = Column(Text)
+    batch_id = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class KnowledgeRetrievalRun(Base):

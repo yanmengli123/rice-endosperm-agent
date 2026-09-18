@@ -75,6 +75,13 @@
             <div class="evidence-header">
               <span class="evidence-title">原文证据</span>
               <a-tag
+                v-if="evidence?.review_status"
+                size="small"
+                :color="reviewStatusColor(evidence.review_status)"
+              >
+                {{ reviewStatusLabel(evidence.review_status) }}
+              </a-tag>
+              <a-tag
                 v-if="evidence?.trust_tier"
                 size="small"
                 :color="trustColor(evidence.trust_tier)"
@@ -88,6 +95,10 @@
               {{ evidenceError }}
             </div>
             <template v-else-if="evidence">
+              <div v-if="evidence.decision?.reason" class="evidence-hint decision-reason">
+                最近决策：{{ evidence.decision.action }}（{{ evidence.decision.actor_uid }}）—
+                {{ evidence.decision.reason }}
+              </div>
               <div v-if="type === 'edge'" class="evidence-meta">
                 佐证 {{ evidence.support_count }} 处 · 文献 {{ evidence.literature_count }} 篇
                 <span v-if="evidence.verification_summary?.DEGRADED" class="evidence-warn">
@@ -132,6 +143,7 @@
                   <a-tag v-if="mention.verifier_confirmed" size="small" color="green"
                     >双模型复核</a-tag
                   >
+                  <a-tag v-if="mention.pinned_by" size="small" color="blue">已固定</a-tag>
                   <span v-if="typeof mention.confidence === 'number'" class="mention-confidence">
                     置信度 {{ mention.confidence.toFixed(2) }}
                   </span>
@@ -149,27 +161,219 @@
                 <div v-else class="evidence-hint">旧数据无引文，重置图谱后重新构建即可回填</div>
                 <div class="evidence-source">
                   <span>{{ sourceLine(mention) }}</span>
-                  <a
-                    v-if="mention.quote && mention.chunk_content"
-                    class="expand-link"
-                    @click.prevent="toggleMention(mentionKey(mention, index))"
-                  >
-                    {{
-                      expandedMentions.has(mentionKey(mention, index)) ? '收起段落' : '显示完整段落'
-                    }}
-                  </a>
+                  <span class="source-actions">
+                    <a
+                      v-if="mention.quote && mention.chunk_content"
+                      class="expand-link"
+                      @click.prevent="toggleMention(mentionKey(mention, index))"
+                    >
+                      {{
+                        expandedMentions.has(mentionKey(mention, index))
+                          ? '收起段落'
+                          : '显示完整段落'
+                      }}
+                    </a>
+                    <a
+                      class="expand-link"
+                      title="清除该段落未固定的图元素并重新抽取（已有决策不受影响）"
+                      @click.prevent="reextractChunk(mention)"
+                    >
+                      ↻ 重抽此段落
+                    </a>
+                  </span>
                 </div>
               </div>
             </template>
           </div>
+
+          <!-- 人工审核：决策叠加层，reset/重抽后自动重放 -->
+          <div v-if="reviewTargetId && evidence" class="review-section">
+            <div class="evidence-header">
+              <span class="evidence-title">审核操作</span>
+            </div>
+            <div v-if="reviewStatus === 'CANONICAL'" class="evidence-hint">
+              规范层（托管导入）对象只读。
+            </div>
+            <div v-else class="review-actions">
+              <a-button
+                v-if="reviewStatus !== 'APPROVED'"
+                size="small"
+                type="primary"
+                :loading="reviewBusy"
+                @click="approveTarget"
+              >
+                ✓ 验证（固定当前引文）
+              </a-button>
+              <a-button size="small" :loading="reviewBusy" class="review-btn" @click="openEdit">
+                ✎ 编辑
+              </a-button>
+              <a-button
+                v-if="type === 'node'"
+                size="small"
+                :loading="reviewBusy"
+                class="review-btn"
+                @click="openAddRelation"
+              >
+                ＋ 补关系
+              </a-button>
+              <a-button
+                v-if="reviewStatus !== 'REJECTED'"
+                size="small"
+                danger
+                :loading="reviewBusy"
+                class="review-btn"
+                @click="rejectOpen = true"
+              >
+                ✗ {{ reviewStatus === 'APPROVED' ? '撤销验证' : '拒绝' }}
+              </a-button>
+            </div>
+          </div>
+
+          <div v-if="history.length" class="history-section">
+            <div class="evidence-header">
+              <span class="evidence-title">操作历史</span>
+            </div>
+            <div v-for="entry in history" :key="entry.id" class="history-entry">
+              <span class="history-time">{{ formatTime(entry.created_at) }}</span>
+              <span class="history-text">
+                {{ entry.actor_uid }} · {{ historyActionLabel(entry.action) }}
+                <template v-if="entry.reason"> — {{ entry.reason }}</template>
+              </span>
+            </div>
+          </div>
         </template>
       </div>
+
+      <!-- 拒绝理由（必填，审计可查） -->
+      <a-modal
+        v-model:open="rejectOpen"
+        :title="reviewStatus === 'APPROVED' ? '撤销验证（填写理由）' : '拒绝（填写理由）'"
+        :confirm-loading="reviewBusy"
+        :ok-type="reviewStatus === 'APPROVED' ? 'default' : 'danger'"
+        ok-text="确认"
+        @ok="rejectTarget"
+      >
+        <a-textarea
+          v-model:value="rejectReason"
+          :rows="3"
+          placeholder="必填：如「方向反了，句子说的是 B 抑制 A」"
+        />
+      </a-modal>
+
+      <!-- 编辑：边 = SUPERSEDE（旧 ID 自动拒绝，新 ID 验证）；节点 = 展示覆盖（不改身份） -->
+      <a-modal
+        v-model:open="editOpen"
+        :title="type === 'edge' ? '编辑关系' : '编辑实体'"
+        :confirm-loading="reviewBusy"
+        ok-text="保存"
+        @ok="submitEdit"
+      >
+        <template v-if="type === 'edge'">
+          <a-form layout="vertical">
+            <a-form-item label="关系类型（闭集词表）">
+              <a-select
+                v-model:value="editForm.relation_type"
+                show-search
+                :options="relationOptions"
+                placeholder="选择谓词"
+              />
+            </a-form-item>
+            <a-form-item label="方向">
+              <a-radio-group v-model:value="editForm.reverse">
+                <a-radio :value="false"
+                  >正向（{{ evidence?.source?.name }} → {{ evidence?.target?.name }}）</a-radio
+                >
+                <a-radio :value="true"
+                  >反向（{{ evidence?.target?.name }} → {{ evidence?.source?.name }}）</a-radio
+                >
+              </a-radio-group>
+            </a-form-item>
+            <a-form-item label="备注（审计可查）">
+              <a-input v-model:value="editForm.note" placeholder="如「方向反了，已修正」" />
+            </a-form-item>
+          </a-form>
+          <a-alert
+            type="info"
+            show-icon
+            message="保存后旧关系自动标记为「已拒绝（被取代）」，新关系立即验证；同一句话再抽出旧关系时会自动保持拒绝。"
+          />
+        </template>
+        <template v-else>
+          <a-form layout="vertical">
+            <a-form-item label="显示名（RENAME，不改身份）">
+              <a-input v-model:value="editForm.display_name" placeholder="留空则不修改" />
+            </a-form-item>
+            <a-form-item label="实体类型（RETYPE，不改身份）">
+              <a-select
+                v-model:value="editForm.label"
+                show-search
+                allow-clear
+                :options="entityOptions"
+                placeholder="留空则不修改"
+              />
+            </a-form-item>
+            <a-form-item label="补充别名（逗号分隔）">
+              <a-input
+                v-model:value="editForm.aliases"
+                placeholder="如 OsCIN2, GRAIN INCOMPLETE FILLING 1"
+              />
+            </a-form-item>
+          </a-form>
+        </template>
+      </a-modal>
+
+      <!-- 补关系：手动新增（引文必须是所选段落原文的逐字子串，直接验证） -->
+      <a-modal
+        v-model:open="addOpen"
+        title="补充关系（手动）"
+        :confirm-loading="reviewBusy"
+        ok-text="创建并验证"
+        width="640px"
+        @ok="submitAddRelation"
+      >
+        <a-form layout="vertical">
+          <a-form-item label="对端实体（{{ evidence?.name }} 作为 subject）">
+            <a-select
+              v-model:value="addForm.target_entity_id"
+              show-search
+              :filter-option="false"
+              :options="addCandidates"
+              placeholder="输入名称搜索实体"
+              @search="searchEntities"
+            />
+          </a-form-item>
+          <a-form-item label="关系类型（闭集词表）">
+            <a-select
+              v-model:value="addForm.relation_type"
+              show-search
+              :options="relationOptions"
+              placeholder="选择谓词"
+            />
+          </a-form-item>
+          <a-form-item label="证据来源段落">
+            <a-select v-model:value="addForm.chunk_id" @change="onAddChunkChange">
+              <a-select-option
+                v-for="m in evidence?.mentions || []"
+                :key="m.chunk_id"
+                :value="m.chunk_id"
+              >
+                {{ m.filename }}{{ m.section ? ` · ${m.section}` : '' }} · {{ m.chunk_id }}
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="原文引文（逐字复制所选段落中的句子；可在上方展开段落复制）">
+            <a-textarea v-model:value="addForm.evidence_quote" :rows="3" />
+            <a class="expand-link" @click.prevent="fillQuoteFromChunk">用该段落的第一句</a>
+          </a-form-item>
+        </a-form>
+      </a-modal>
     </div>
   </transition>
 </template>
 
 <script setup>
 import { computed, reactive, ref, watch, defineComponent, h } from 'vue'
+import { message } from 'ant-design-vue'
 import { X } from '@lucide/vue'
 import { graphApi } from '@/apis/graph_api'
 
@@ -249,13 +453,35 @@ const props = defineProps({
   kbId: String
 })
 
-defineEmits(['close'])
+const emit = defineEmits(['close', 'reviewed'])
 
 const expandedKeys = reactive(new Set())
 const expandedMentions = reactive(new Set())
 const evidence = ref(null)
 const evidenceLoading = ref(false)
 const evidenceError = ref(null)
+const history = ref([])
+const reviewBusy = ref(false)
+const rejectOpen = ref(false)
+const rejectReason = ref('')
+const editOpen = ref(false)
+const editForm = reactive({
+  relation_type: null,
+  reverse: false,
+  note: '',
+  display_name: '',
+  label: null,
+  aliases: ''
+})
+const addOpen = ref(false)
+const addForm = reactive({
+  target_entity_id: null,
+  relation_type: null,
+  chunk_id: null,
+  evidence_quote: ''
+})
+const addCandidates = ref([])
+const vocabulary = ref({ entity_types: [], relation_types: [] })
 
 const TRUST_META = {
   VERIFIED_CORROBORATED: {
@@ -274,10 +500,29 @@ const TRUST_META = {
     hint: '仅通过逐字校验，尚未经语义验证或人工审定'
   }
 }
+const REVIEW_STATUS_META = {
+  CANDIDATE: { label: '候选', color: 'default' },
+  APPROVED: { label: '已验证', color: 'green' },
+  REJECTED: { label: '已拒绝', color: 'red' },
+  CANONICAL: { label: '规范层', color: 'purple' }
+}
 
 const trustLabel = (tier) => TRUST_META[tier]?.label || tier
 const trustColor = (tier) => TRUST_META[tier]?.color || 'default'
 const trustHint = (tier) => TRUST_META[tier]?.hint || ''
+const reviewStatusLabel = (status) => REVIEW_STATUS_META[status]?.label || status
+const reviewStatusColor = (status) => REVIEW_STATUS_META[status]?.color || 'default'
+const historyActionLabel = (action) =>
+  ({
+    APPROVE: '验证',
+    REJECT: '拒绝',
+    SUPERSEDE: '编辑（取代）',
+    RENAME: '改名/别名',
+    RETYPE: '改类型',
+    ADD_RELATION: '手动补关系',
+    REEXTRACT_CHUNK: '重抽段落',
+    REJECT_CASCADE: '级联拒绝'
+  })[action] || action
 const verificationLabel = (status) =>
   status === 'DEGRADED' ? '引文与当前原文不一致' : status === 'MISSING' ? '无引文' : status
 const mentionKey = (mention, index) => `${mention.chunk_id || 'chunk'}-${index}`
@@ -294,15 +539,31 @@ const sourceLine = (mention) =>
   ]
     .filter(Boolean)
     .join(' · ')
+const formatTime = (iso) => (iso ? new Date(iso).toLocaleString() : '')
+
+const reviewTargetId = computed(() => {
+  const properties = props.item?.data?.original?.properties || {}
+  return props.type === 'edge' ? properties.triple_id : properties.entity_id
+})
+const reviewStatus = computed(() => evidence.value?.review_status)
+const reviewKind = computed(() => (props.type === 'edge' ? 'TRIPLE' : 'ENTITY'))
+const relationOptions = computed(() =>
+  (vocabulary.value.relation_types || []).map((t) => ({ value: t, label: t }))
+)
+const entityOptions = computed(() =>
+  (vocabulary.value.entity_types || []).map((t) => ({ value: t, label: t }))
+)
+const firstQuotedMention = computed(() => evidence.value?.mentions?.find((m) => m.quote) || null)
+const selectedAddMention = computed(
+  () => evidence.value?.mentions?.find((m) => m.chunk_id === addForm.chunk_id) || null
+)
 
 const loadEvidence = async () => {
   evidence.value = null
   evidenceError.value = null
   expandedMentions.clear()
   if (!props.visible || !props.item || !props.kbId) return
-  const properties = props.item.data?.original?.properties || {}
-  const id = props.type === 'edge' ? properties.triple_id : properties.entity_id
-  if (!id) {
+  if (!reviewTargetId.value) {
     evidenceError.value =
       props.type === 'edge'
         ? '该边没有 triple_id，不是抽取图谱的关系边'
@@ -313,13 +574,232 @@ const loadEvidence = async () => {
   try {
     const response =
       props.type === 'edge'
-        ? await graphApi.getTripleEvidence(props.kbId, id)
-        : await graphApi.getEntityEvidence(props.kbId, id)
+        ? await graphApi.getTripleEvidence(props.kbId, reviewTargetId.value)
+        : await graphApi.getEntityEvidence(props.kbId, reviewTargetId.value)
     evidence.value = response?.data || null
   } catch (e) {
     evidenceError.value = e?.response?.data?.detail || e?.message || '原文加载失败'
   } finally {
     evidenceLoading.value = false
+  }
+}
+
+const loadHistory = async () => {
+  history.value = []
+  if (!props.visible || !reviewTargetId.value || !props.kbId) return
+  try {
+    const res = await graphApi.reviewAudit({
+      kb_id: props.kbId,
+      target_id: reviewTargetId.value,
+      limit: 20
+    })
+    history.value = res?.data || []
+  } catch {
+    history.value = []
+  }
+}
+
+const ensureVocabulary = async () => {
+  if (vocabulary.value.relation_types.length) return
+  try {
+    const res = await graphApi.getVocabulary()
+    vocabulary.value = res?.data || vocabulary.value
+  } catch {
+    /* 词表加载失败时编辑表单下拉为空，操作仍可输入 */
+  }
+}
+
+const afterReview = async (successMessage) => {
+  message.success(successMessage)
+  await loadEvidence()
+  await loadHistory()
+  emit('reviewed')
+}
+
+const approveTarget = async () => {
+  reviewBusy.value = true
+  try {
+    const res = await graphApi.reviewApprove({
+      kb_id: props.kbId,
+      target_kind: reviewKind.value,
+      target_id: reviewTargetId.value,
+      pinned_chunk_id: firstQuotedMention.value?.chunk_id,
+      if_version: evidence.value?.review_version || undefined
+    })
+    await afterReview(
+      res?.data?.unchanged
+        ? '已是验证状态（幂等，未重复记录）'
+        : '已验证：决策与 pinned 证据已记录，重抽/重建后自动恢复'
+    )
+  } catch (e) {
+    message.error(e?.response?.data?.detail || e?.message || '验证失败')
+  } finally {
+    reviewBusy.value = false
+  }
+}
+
+const rejectTarget = async () => {
+  if (!rejectReason.value.trim()) {
+    message.warning('拒绝必须填写理由')
+    return
+  }
+  reviewBusy.value = true
+  try {
+    await graphApi.reviewReject({
+      kb_id: props.kbId,
+      target_kind: reviewKind.value,
+      target_id: reviewTargetId.value,
+      reason: rejectReason.value,
+      if_version: evidence.value?.review_version || undefined
+    })
+    rejectOpen.value = false
+    rejectReason.value = ''
+    await afterReview('已拒绝：图上投影与向量已清理，审计可查')
+  } catch (e) {
+    message.error(e?.response?.data?.detail || e?.message || '拒绝失败')
+  } finally {
+    reviewBusy.value = false
+  }
+}
+
+const openEdit = async () => {
+  await ensureVocabulary()
+  editForm.relation_type = evidence.value?.relation_type || null
+  editForm.reverse = false
+  editForm.note = ''
+  editForm.display_name = ''
+  editForm.label = null
+  editForm.aliases = ''
+  editOpen.value = true
+}
+
+const submitEdit = async () => {
+  reviewBusy.value = true
+  try {
+    if (props.type === 'edge') {
+      const payload = {
+        kb_id: props.kbId,
+        triple_id: reviewTargetId.value,
+        note: editForm.note || undefined,
+        if_version: evidence.value?.review_version || undefined
+      }
+      if (editForm.relation_type && editForm.relation_type !== evidence.value?.relation_type) {
+        payload.relation_type = editForm.relation_type
+      }
+      if (editForm.reverse) payload.reverse = true
+      const res = await graphApi.reviewEditTriple(payload)
+      await afterReview(
+        `已编辑：旧关系自动拒绝，新关系 ${res?.data?.new_triple_id?.slice(0, 8) || ''}… 已验证`
+      )
+    } else {
+      const payload = {
+        kb_id: props.kbId,
+        entity_id: reviewTargetId.value,
+        if_version: evidence.value?.review_version || undefined
+      }
+      if (editForm.display_name.trim()) payload.display_name = editForm.display_name.trim()
+      if (editForm.label) payload.label = editForm.label
+      const aliases = editForm.aliases
+        .split(/[,，]/)
+        .map((a) => a.trim())
+        .filter(Boolean)
+      if (aliases.length) payload.aliases = aliases
+      await graphApi.reviewEditEntity(payload)
+      await afterReview('已更新展示覆盖（身份不变），别名已入表')
+    }
+    editOpen.value = false
+  } catch (e) {
+    message.error(e?.response?.data?.detail || e?.message || '编辑失败')
+  } finally {
+    reviewBusy.value = false
+  }
+}
+
+const openAddRelation = async () => {
+  await ensureVocabulary()
+  addForm.target_entity_id = null
+  addForm.relation_type = null
+  addForm.chunk_id = firstQuotedMention.value?.chunk_id || null
+  addForm.evidence_quote = ''
+  addCandidates.value = []
+  addOpen.value = true
+}
+
+const searchEntities = async (keyword) => {
+  if (!keyword || keyword.length < 2) {
+    addCandidates.value = []
+    return
+  }
+  try {
+    const res = await graphApi.getSubgraph({
+      kb_id: props.kbId,
+      node_label: keyword,
+      max_depth: 0,
+      max_nodes: 10,
+      exclude_chunk: true
+    })
+    addCandidates.value = (res?.data?.nodes || [])
+      .filter((node) => node.type !== 'Chunk' && node.properties?.entity_id)
+      .map((node) => ({
+        value: node.properties.entity_id,
+        label: `${node.name}（${node.properties.label || node.type}）`
+      }))
+  } catch {
+    addCandidates.value = []
+  }
+}
+
+const onAddChunkChange = () => {
+  addForm.evidence_quote = ''
+}
+
+const fillQuoteFromChunk = () => {
+  const mention = selectedAddMention.value
+  if (mention?.quote) {
+    addForm.evidence_quote = mention.quote
+  } else if (mention?.chunk_content) {
+    addForm.evidence_quote = mention.chunk_content.split(/(?<=[.。！？!?])\s/)[0]?.trim() || ''
+  }
+}
+
+const submitAddRelation = async () => {
+  reviewBusy.value = true
+  try {
+    const res = await graphApi.reviewAddTriple({
+      kb_id: props.kbId,
+      source_entity_id: reviewTargetId.value,
+      target_entity_id: addForm.target_entity_id,
+      relation_type: addForm.relation_type,
+      chunk_id: addForm.chunk_id,
+      evidence_quote: addForm.evidence_quote,
+      note: 'manual add from graph panel'
+    })
+    addOpen.value = false
+    await afterReview(
+      `已创建并验证（${res?.data?.triple_id?.slice(0, 8) || ''}…），重抽/重建后自动恢复`
+    )
+  } catch (e) {
+    message.error(
+      e?.response?.data?.detail || e?.message || '补关系失败（引文必须是所选段落原文的逐字子串）'
+    )
+  } finally {
+    reviewBusy.value = false
+  }
+}
+
+const reextractChunk = async (mention) => {
+  if (!mention?.chunk_id) return
+  reviewBusy.value = true
+  try {
+    const res = await graphApi.reviewReextract({ kb_id: props.kbId, chunk_id: mention.chunk_id })
+    message.success(
+      `重抽任务已提交（task ${res?.data?.task_id || ''}）：已固定的证据保留，已有决策会自动重放`
+    )
+    emit('reviewed')
+  } catch (e) {
+    message.error(e?.response?.data?.detail || e?.message || '重抽提交失败')
+  } finally {
+    reviewBusy.value = false
   }
 }
 
@@ -331,6 +811,7 @@ watch(
 )
 
 watch([() => props.item, () => props.visible, () => props.kbId], loadEvidence, { immediate: true })
+watch([() => props.item, () => props.visible], loadHistory, { immediate: true })
 
 const isOverThreshold = (value) => typeof value === 'string' && value.length > STACK_THRESHOLD
 
@@ -346,7 +827,7 @@ const filteredEdgeProperties = computed(() => {
   if (!props.item?.data?.original?.properties) return {}
   const properties = props.item.data.original.properties
   const filtered = {}
-  const hiddenFields = ['source_id', 'target_id', '_id', 'truncate']
+  const hiddenFields = ['source_id', 'target_id', '_id', 'truncate', 'review_status']
   Object.keys(properties).forEach((key) => {
     if (!hiddenFields.includes(key)) filtered[key] = properties[key]
   })
@@ -359,7 +840,7 @@ const filteredEdgeProperties = computed(() => {
   position: absolute;
   top: 60px;
   left: 10px;
-  width: 360px;
+  width: 380px;
   max-height: calc(100% - 60px);
   overflow-y: auto;
   z-index: 100;
@@ -455,7 +936,9 @@ const filteredEdgeProperties = computed(() => {
   }
 }
 
-.evidence-section {
+.evidence-section,
+.review-section,
+.history-section {
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid var(--gray-200);
@@ -491,6 +974,10 @@ const filteredEdgeProperties = computed(() => {
     &--error {
       color: var(--color-error, #cf1322);
     }
+  }
+
+  .decision-reason {
+    color: var(--gray-600);
   }
 
   .evidence-label {
@@ -555,15 +1042,47 @@ const filteredEdgeProperties = computed(() => {
     font-size: 11px;
     color: var(--gray-500);
 
+    .source-actions {
+      display: flex;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
     .expand-link {
       cursor: pointer;
       color: var(--main-700);
-      white-space: nowrap;
 
       &:hover {
         color: var(--main-500);
       }
     }
+  }
+}
+
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+
+  .review-btn {
+    margin-left: 0;
+  }
+}
+
+.history-entry {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 11px;
+  color: var(--gray-600);
+
+  .history-time {
+    flex-shrink: 0;
+    color: var(--gray-400);
+  }
+
+  .history-text {
+    word-break: break-all;
   }
 }
 

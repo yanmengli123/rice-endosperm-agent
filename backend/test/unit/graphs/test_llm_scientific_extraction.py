@@ -6,7 +6,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from yuxi.knowledge.graphs.extraction_gates import (
     G1_SCHEMA,
     G2_MISSING_ENDPOINT,

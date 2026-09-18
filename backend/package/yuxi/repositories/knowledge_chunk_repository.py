@@ -218,3 +218,13 @@ class KnowledgeChunkRepository:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(update(KnowledgeChunk).where(KnowledgeChunk.kb_id == kb_id).values(**values))
             return int(result.rowcount or 0)
+
+    async def reset_graph_state_by_chunk_id(self, chunk_id: str) -> int:
+        """单 chunk 重抽：清空该块的抽取缓存并重新标记待索引（不动 tags，那是分块期的块类型标签）。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                update(KnowledgeChunk)
+                .where(KnowledgeChunk.chunk_id == chunk_id)
+                .values(graph_indexed=False, extraction_result=None, ent_ids=None)
+            )
+            return int(result.rowcount or 0)

@@ -228,6 +228,19 @@ export function apiSuperAdminPut(url, data = {}, options = {}, responseType = 'j
   return apiPut(url, data, options, true, responseType)
 }
 
+export function apiPatch(url, data = {}, options = {}, requiresAuth = true, responseType = 'json') {
+  return apiRequest(
+    url,
+    {
+      method: 'PATCH',
+      body: data instanceof FormData ? data : JSON.stringify(data),
+      ...options
+    },
+    requiresAuth,
+    responseType
+  )
+}
+
 /**
  * 发送DELETE请求
  * @param {string} url - API端点

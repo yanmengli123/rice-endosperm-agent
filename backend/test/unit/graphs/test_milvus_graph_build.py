@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from yuxi.knowledge.graphs.extractors import (
     GraphExtractorFactory,
     LLMGraphExtractor,
@@ -323,6 +322,7 @@ def _graph_build_service(chunk_repo, graph_vector_store):
         kb_repo=SimpleNamespace(get_by_kb_id=AsyncMock(return_value=kb)),
         chunk_repo=chunk_repo,
         graph_repo=SimpleNamespace(upsert_chunk_graph=AsyncMock()),
+        review_repo=SimpleNamespace(list_decisions=AsyncMock(return_value=[])),
         graph_vector_store=graph_vector_store,
     )
     service._get_chunk_extraction_result = AsyncMock(return_value={"entities": [], "relations": [], "metadata": {}})

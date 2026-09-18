@@ -742,6 +742,8 @@ def _build_entity(
         "label": label,
         "name": name,
         "attributes": attributes,
+        # 托管导入即规范层：审核态固定 CANONICAL，人工审核 UI 只读、决策 API 拒绝
+        "review_status": "CANONICAL",
         "content": " ".join(part for part in [name, label, *attributes["rap_ids"], *attributes["msu_ids"]] if part),
     }
 
@@ -859,6 +861,7 @@ def _triple(
         "literature_count": 0,
         "best_evidence_level": None,
         "consensus_direction": "UNKNOWN",
+        "review_status": "CANONICAL",
     }
 
 

@@ -57,8 +57,13 @@ class KnowledgeGraphRepository:
     ) -> None:
         async with pg_manager.get_async_session_context() as session:
             if entities:
+                # 新行审核态 CANDIDATE；冲突时 set_ 不含 review_*，已有决策状态不会被再生成覆盖
                 entity_rows = [
-                    {key: value for key, value in entity.items() if key not in _ENTITY_NON_COLUMN_KEYS}
+                    {
+                        "review_status": "CANDIDATE",
+                        "review_version": 0,
+                        **{key: value for key, value in entity.items() if key not in _ENTITY_NON_COLUMN_KEYS},
+                    }
                     for entity in entities
                 ]
                 entity_stmt = insert(KnowledgeGraphEntity).values(entity_rows)
@@ -96,7 +101,11 @@ class KnowledgeGraphRepository:
 
             if triples:
                 triple_rows = [
-                    {key: value for key, value in triple.items() if key not in _TRIPLE_NON_COLUMN_KEYS}
+                    {
+                        "review_status": "CANDIDATE",
+                        "review_version": 0,
+                        **{key: value for key, value in triple.items() if key not in _TRIPLE_NON_COLUMN_KEYS},
+                    }
                     for triple in triples
                 ]
                 triple_stmt = insert(KnowledgeGraphTriple).values(triple_rows)
@@ -236,6 +245,8 @@ class KnowledgeGraphRepository:
                         select(KnowledgeGraphTriple).where(
                             KnowledgeGraphTriple.kb_id == kb_id,
                             KnowledgeGraphTriple.support_count >= max(min_support_count, 1),
+                            # 只有人工验证过的三元组才有资格进入规范图谱晋升包
+                            KnowledgeGraphTriple.review_status == "APPROVED",
                         )
                     )
                 )
@@ -498,6 +509,8 @@ class KnowledgeGraphRepository:
                 "filename": original_filename or filename,
                 "quote": mention.text,
                 "quote_start_char": mention.quote_start_char,
+                "pinned_by": mention.pinned_by,
+                "pinned_at": mention.pinned_at.isoformat() if mention.pinned_at else None,
             }
             if model is KnowledgeGraphTripleMention:
                 item.update(
@@ -522,6 +535,8 @@ def _entity_dict(row: KnowledgeGraphEntity) -> dict[str, Any]:
         "label": row.label,
         "canonical_identity": row.canonical_identity,
         "attributes": row.attributes,
+        "review_status": row.review_status,
+        "review_version": row.review_version,
     }
 
 
@@ -533,6 +548,8 @@ def _triple_dict(row: KnowledgeGraphTriple) -> dict[str, Any]:
         "target_entity_id": row.target_entity_id,
         "support_count": row.support_count,
         "literature_count": row.literature_count,
+        "review_status": row.review_status,
+        "review_version": row.review_version,
     }
 
 

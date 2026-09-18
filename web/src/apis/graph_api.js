@@ -1,4 +1,4 @@
-import { apiGet, apiPut } from './base'
+import { apiGet, apiPatch, apiPost, apiPut } from './base'
 
 export const graphApi = {
   getGraphs: async () => {
@@ -95,6 +95,97 @@ export const graphApi = {
 
     const queryParams = new URLSearchParams({ kb_id })
     return await apiGet(`/api/graph/integrity?${queryParams.toString()}`, {}, true)
+  },
+
+  // 人工审核闭环（决策叠加层）：approve 携带审核人看着的原文 chunk，reject 必填理由
+  getVocabulary: async () => {
+    return await apiGet('/api/graph/vocabulary', {}, true)
+  },
+
+  reviewApprove: async (payload) => {
+    if (!payload?.kb_id || !payload?.target_id) {
+      throw new Error('kb_id and target_id are required')
+    }
+    return await apiPost('/api/graph/review/approve', payload, {}, true)
+  },
+
+  reviewReject: async (payload) => {
+    if (!payload?.kb_id || !payload?.target_id) {
+      throw new Error('kb_id and target_id are required')
+    }
+    return await apiPost('/api/graph/review/reject', payload, {}, true)
+  },
+
+  reviewBatch: async (payload) => {
+    if (!payload?.kb_id || !Array.isArray(payload?.targets)) {
+      throw new Error('kb_id and targets are required')
+    }
+    return await apiPost('/api/graph/review/batch', payload, {}, true)
+  },
+
+  reviewEditTriple: async (payload) => {
+    if (!payload?.kb_id || !payload?.triple_id) {
+      throw new Error('kb_id and triple_id are required')
+    }
+    return await apiPatch('/api/graph/review/triple', payload, {}, true)
+  },
+
+  reviewEditEntity: async (payload) => {
+    if (!payload?.kb_id || !payload?.entity_id) {
+      throw new Error('kb_id and entity_id are required')
+    }
+    return await apiPatch('/api/graph/review/entity', payload, {}, true)
+  },
+
+  reviewAddTriple: async (payload) => {
+    if (!payload?.kb_id || !payload?.chunk_id || !payload?.evidence_quote) {
+      throw new Error('kb_id, chunk_id and evidence_quote are required')
+    }
+    return await apiPost('/api/graph/review/triple', payload, {}, true)
+  },
+
+  reviewReextract: async (payload) => {
+    if (!payload?.kb_id || !payload?.chunk_id) {
+      throw new Error('kb_id and chunk_id are required')
+    }
+    return await apiPost('/api/graph/review/reextract', payload, {}, true)
+  },
+
+  reviewQueue: async (params) => {
+    const {
+      kb_id,
+      status = 'CANDIDATE',
+      page = 1,
+      page_size = 20,
+      order = 'support_asc',
+      file_id
+    } = params || {}
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({
+      kb_id,
+      status,
+      page: String(page),
+      page_size: String(page_size),
+      order
+    })
+    if (file_id) {
+      queryParams.set('file_id', file_id)
+    }
+    return await apiGet(`/api/graph/review/queue?${queryParams.toString()}`, {}, true)
+  },
+
+  reviewAudit: async (params) => {
+    const { kb_id, target_id, limit = 50 } = params || {}
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({ kb_id, limit: String(limit) })
+    if (target_id) {
+      queryParams.set('target_id', target_id)
+    }
+    return await apiGet(`/api/graph/review/audit?${queryParams.toString()}`, {}, true)
   }
 }
 

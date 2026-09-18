@@ -159,5 +159,6 @@ def cypher_merge_relation(db_label: str) -> str:
     SET r.triple_id = $triple_id,
         r.text = $text,
         r.file_id = $file_id,
-        r.extractor_type = $extractor_type
+        r.extractor_type = $extractor_type,
+        r.review_status = coalesce(r.review_status, 'CANDIDATE')
     """

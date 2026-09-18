@@ -10,7 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from yuxi.knowledge.graphs.graph_export_service import reverse_map_node_type
 from yuxi.knowledge.graphs.llm_graph_promotion import LLMGraphPromotionService, adapt_promotion_source
 

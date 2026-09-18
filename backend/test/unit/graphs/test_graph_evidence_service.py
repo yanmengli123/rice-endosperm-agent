@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from yuxi.knowledge.graphs.graph_evidence_service import (
     TRUST_CANDIDATE,
     TRUST_VERIFIED_CORROBORATED,
@@ -236,9 +235,10 @@ def _entity_none():
     return None
 
 
-def test_migration_0039_is_registered_with_handler():
+def test_graph_migrations_are_registered_with_handlers():
     from yuxi.storage.postgres.manager import PostgresManager
 
     versions = [version for version, _ in PostgresManager._VERSIONED_MIGRATIONS]
-    assert versions[-1] == "0039_graph_mention_evidence"
+    assert versions[-2:] == ["0039_graph_mention_evidence", "0040_graph_review_overlay"]
     assert callable(getattr(PostgresManager, "_migration_0039_graph_mention_evidence"))
+    assert callable(getattr(PostgresManager, "_migration_0040_graph_review_overlay"))
