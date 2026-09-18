@@ -31,408 +31,433 @@
     </template>
 
     <div class="add-files-content">
-      <!-- 1. 顶部操作栏 -->
-      <div class="top-action-bar">
-        <div class="mode-switch">
-          <a-segmented
-            v-model:value="uploadMode"
-            :options="uploadModeOptions"
-            :disabled="hasPendingUploads || chunkLoading"
-            class="custom-segmented"
-          />
-        </div>
-        <div class="auto-index-toggle">
-          <a-checkbox v-model:checked="autoIndex" :disabled="hasPendingUploads || chunkLoading">
-            上传后自动入库
-          </a-checkbox>
+      <!-- 契约门禁：csv / 图谱契约库不接受普通文档上传（后端命令门禁同样 fail-closed 拒绝） -->
+      <div v-if="isContractBlockedKb" class="contract-blocked-panel">
+        <div class="inline-alert warning">
+          <Info :size="16" />
+          <span>{{ contractBlockedHint }}</span>
         </div>
       </div>
 
-      <!-- 2. 配置面板 -->
-      <div
-        class="settings-panel"
-        v-if="folderTreeData.length > 0 || uploadMode !== 'url' || autoIndex"
-      >
-        <!-- 第一行：存储位置 + OCR 引擎 -->
-        <div
-          class="setting-row"
-          v-if="folderTreeData.length > 0 || uploadMode !== 'url'"
-          :class="{ 'two-cols': uploadMode !== 'url' && folderTreeData.length > 0 }"
-        >
-          <div class="col-item" v-if="folderTreeData.length > 0">
-            <div class="setting-label">存储位置</div>
-            <div class="setting-content flex-row">
-              <a-tree-select
-                v-model:value="selectedFolderId"
-                show-search
-                class="folder-select"
-                :dropdown-style="{ maxHeight: '400px', overflow: 'auto' }"
-                placeholder="选择目标文件夹（默认为根目录）"
-                allow-clear
-                tree-default-expand-all
-                :tree-data="folderTreeData"
-                tree-node-filter-prop="title"
-              >
-              </a-tree-select>
-            </div>
-            <p class="param-description">选择文件保存的目标文件夹</p>
+      <template v-if="!isContractBlockedKb">
+        <!-- 1. 顶部操作栏 -->
+        <div class="top-action-bar">
+          <div class="mode-switch">
+            <a-segmented
+              v-model:value="uploadMode"
+              :options="uploadModeOptions"
+              :disabled="hasPendingUploads || chunkLoading"
+              class="custom-segmented"
+            />
           </div>
-          <div class="col-item" v-if="uploadMode !== 'url'">
-            <div class="setting-label">
-              OCR 引擎（仅应用于 PDF/图片文件）
-              <a-tooltip title="检查服务状态">
-                <ReloadOutlined
-                  class="action-icon refresh-icon"
-                  :class="{ spinning: ocrHealthChecking }"
-                  @click="checkOcrHealth"
-                />
-              </a-tooltip>
-            </div>
-            <div class="setting-content">
-              <a-popover
-                v-model:open="ocrPanelOpen"
-                placement="bottomLeft"
-                trigger="click"
-                overlayClassName="ocr-engine-popover"
-                @openChange="handleOcrPanelOpenChange"
-              >
-                <template #content>
-                  <div class="ocr-engine-panel">
-                    <button
-                      v-for="option in availableOcrOptions"
-                      :key="option.value"
-                      type="button"
-                      class="ocr-engine-option"
-                      :class="{ selected: processingParams.ocr_engine === option.value }"
-                      :disabled="chunkLoading"
-                      @click="selectOcrEngine(option.value)"
-                    >
-                      <span class="ocr-engine-option-header">
-                        <span class="ocr-engine-name">{{ option.label }}</span>
-                        <span
-                          class="ocr-engine-status"
-                          :class="`status-${getOcrStatus(option.value)}`"
-                        >
-                          {{ getOcrStatusLabel(option.value) }}
-                        </span>
-                      </span>
-                      <span class="ocr-engine-desc">{{ getOcrDescription(option.value) }}</span>
-                    </button>
+          <div class="auto-index-toggle">
+            <a-checkbox v-model:checked="autoIndex" :disabled="hasPendingUploads || chunkLoading">
+              上传后自动入库
+            </a-checkbox>
+          </div>
+        </div>
 
-                    <div v-if="unavailableOcrOptions.length" class="unavailable-ocr-options">
+        <!-- 2. 配置面板 -->
+        <div
+          class="settings-panel"
+          v-if="folderTreeData.length > 0 || uploadMode !== 'url' || autoIndex"
+        >
+          <!-- 第一行：存储位置 + OCR 引擎 -->
+          <div
+            class="setting-row"
+            v-if="folderTreeData.length > 0 || uploadMode !== 'url'"
+            :class="{ 'two-cols': uploadMode !== 'url' && folderTreeData.length > 0 }"
+          >
+            <div class="col-item" v-if="folderTreeData.length > 0">
+              <div class="setting-label">存储位置</div>
+              <div class="setting-content flex-row">
+                <a-tree-select
+                  v-model:value="selectedFolderId"
+                  show-search
+                  class="folder-select"
+                  :dropdown-style="{ maxHeight: '400px', overflow: 'auto' }"
+                  placeholder="选择目标文件夹（默认为根目录）"
+                  allow-clear
+                  tree-default-expand-all
+                  :tree-data="folderTreeData"
+                  tree-node-filter-prop="title"
+                >
+                </a-tree-select>
+              </div>
+              <p class="param-description">选择文件保存的目标文件夹</p>
+            </div>
+            <div class="col-item" v-if="uploadMode !== 'url'">
+              <div class="setting-label">
+                OCR 引擎（仅应用于 PDF/图片文件）
+                <a-tooltip title="检查服务状态">
+                  <ReloadOutlined
+                    class="action-icon refresh-icon"
+                    :class="{ spinning: ocrHealthChecking }"
+                    @click="checkOcrHealth"
+                  />
+                </a-tooltip>
+              </div>
+              <div class="setting-content">
+                <a-popover
+                  v-model:open="ocrPanelOpen"
+                  placement="bottomLeft"
+                  trigger="click"
+                  overlayClassName="ocr-engine-popover"
+                  @openChange="handleOcrPanelOpenChange"
+                >
+                  <template #content>
+                    <div class="ocr-engine-panel">
                       <button
+                        v-for="option in availableOcrOptions"
+                        :key="option.value"
                         type="button"
-                        class="unavailable-toggle"
-                        @click="toggleUnavailableOcrOptions"
+                        class="ocr-engine-option"
+                        :class="{ selected: processingParams.ocr_engine === option.value }"
+                        :disabled="chunkLoading"
+                        @click="selectOcrEngine(option.value)"
                       >
-                        <span>不可用选项（{{ unavailableOcrOptions.length }}）</span>
-                        <ChevronUp v-if="unavailableOcrExpanded" :size="14" />
-                        <ChevronDown v-else :size="14" />
+                        <span class="ocr-engine-option-header">
+                          <span class="ocr-engine-name">{{ option.label }}</span>
+                          <span
+                            class="ocr-engine-status"
+                            :class="`status-${getOcrStatus(option.value)}`"
+                          >
+                            {{ getOcrStatusLabel(option.value) }}
+                          </span>
+                        </span>
+                        <span class="ocr-engine-desc">{{ getOcrDescription(option.value) }}</span>
                       </button>
 
-                      <div v-if="unavailableOcrExpanded" class="unavailable-ocr-list">
+                      <div v-if="unavailableOcrOptions.length" class="unavailable-ocr-options">
                         <button
-                          v-for="option in unavailableOcrOptions"
-                          :key="option.value"
                           type="button"
-                          class="ocr-engine-option disabled"
-                          disabled
+                          class="unavailable-toggle"
+                          @click="toggleUnavailableOcrOptions"
                         >
-                          <span class="ocr-engine-option-header">
-                            <span class="ocr-engine-name">{{ option.label }}</span>
-                            <span
-                              class="ocr-engine-status"
-                              :class="`status-${getOcrStatus(option.value)}`"
-                            >
-                              {{ getOcrStatusLabel(option.value) }}
-                            </span>
-                          </span>
-                          <span class="ocr-engine-desc">{{ getOcrDescription(option.value) }}</span>
+                          <span>不可用选项（{{ unavailableOcrOptions.length }}）</span>
+                          <ChevronUp v-if="unavailableOcrExpanded" :size="14" />
+                          <ChevronDown v-else :size="14" />
                         </button>
+
+                        <div v-if="unavailableOcrExpanded" class="unavailable-ocr-list">
+                          <button
+                            v-for="option in unavailableOcrOptions"
+                            :key="option.value"
+                            type="button"
+                            class="ocr-engine-option disabled"
+                            disabled
+                          >
+                            <span class="ocr-engine-option-header">
+                              <span class="ocr-engine-name">{{ option.label }}</span>
+                              <span
+                                class="ocr-engine-status"
+                                :class="`status-${getOcrStatus(option.value)}`"
+                              >
+                                {{ getOcrStatusLabel(option.value) }}
+                              </span>
+                            </span>
+                            <span class="ocr-engine-desc">{{
+                              getOcrDescription(option.value)
+                            }}</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </template>
+                  </template>
 
-                <a-button class="ocr-engine-trigger" block>
-                  <span class="ocr-engine-trigger-main">
-                    <ReloadOutlined v-if="ocrHealthChecking" class="ocr-engine-trigger-loading" />
-                    <span class="ocr-engine-trigger-label">{{ selectedOcrEngineLabel }}</span>
-                  </span>
-                  <ChevronDown :size="14" />
-                </a-button>
-              </a-popover>
-            </div>
-          </div>
-        </div>
-
-        <!-- 第二行：自动入库配置 (仅在开启时显示) -->
-        <div class="setting-row" v-if="autoIndex">
-          <div class="col-item">
-            <div class="setting-label">入库参数配置</div>
-            <div class="setting-content">
-              <ChunkParamsConfig
-                :temp-chunk-params="indexParams"
-                :show-qa-split="true"
-                :show-chunk-size-overlap="true"
-                :show-preset="true"
-                :allow-preset-follow-default="true"
-                :database-preset-id="
-                  store.database?.additional_params?.chunk_preset_id || 'general'
-                "
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- PDF/图片OCR提醒 (Alert样式优化) -->
-      <div v-if="hasPdfOrImageFiles && !isOcrEnabled" class="inline-alert warning">
-        <Info :size="16" />
-        <span>检测到PDF或图片文件，建议启用 OCR 以提取文本内容</span>
-      </div>
-
-      <!-- 文件上传区域 -->
-      <div class="upload-area" v-if="uploadMode === 'file' || uploadMode === 'folder'">
-        <a-upload-dragger
-          class="custom-dragger"
-          v-model:fileList="fileList"
-          name="file"
-          :multiple="true"
-          :directory="isFolderUpload"
-          :disabled="chunkLoading"
-          :show-upload-list="!showAggregateProgress"
-          :accept="acceptedFileTypes"
-          :before-upload="beforeUpload"
-          :customRequest="customRequest"
-          :action="'/api/knowledge/files/upload?kb_id=' + kbId"
-          :headers="getAuthHeaders()"
-          @change="handleFileUpload"
-          @drop="handleDrop"
-        >
-          <p class="ant-upload-text">
-            {{ isFolderUpload ? '点击选择本机文献文件夹' : '点击选择或拖拽本机文献文件' }}
-          </p>
-          <p class="ant-upload-hint">支持类型: {{ uploadHint }}</p>
-          <div class="zip-tip" v-if="hasZipFiles">📦 ZIP包将自动解压提取 Markdown 与图片</div>
-        </a-upload-dragger>
-
-        <div class="local-path-hint">
-          <Info :size="14" />
-          <span>
-            系统上传文件内容并保留文件夹内的相对路径；出于浏览器安全限制，不读取或保存 D:\
-            等本机绝对路径。
-          </span>
-        </div>
-
-        <div v-if="showAggregateProgress" class="upload-progress-card">
-          <div class="progress-header">
-            <div class="progress-header-left">
-              <div class="progress-title">上传进度</div>
-              <div class="progress-stats inline-in-header">
-                <div class="stat-pill">总计 {{ totalUploadCount }}</div>
-                <div class="stat-pill uploading" v-if="uploadingUploadCount > 0">
-                  上传中 {{ uploadingUploadCount }}
-                </div>
-                <div class="stat-pill queued" v-if="queuedUploadCount > 0">
-                  排队 {{ queuedUploadCount }}
-                </div>
-                <div class="stat-pill error" v-if="failedUploadCount > 0">
-                  失败 {{ failedUploadCount }}
-                </div>
+                  <a-button class="ocr-engine-trigger" block>
+                    <span class="ocr-engine-trigger-main">
+                      <ReloadOutlined v-if="ocrHealthChecking" class="ocr-engine-trigger-loading" />
+                      <span class="ocr-engine-trigger-label">{{ selectedOcrEngineLabel }}</span>
+                    </span>
+                    <ChevronDown :size="14" />
+                  </a-button>
+                </a-popover>
               </div>
             </div>
-            <div class="progress-header-right">
-              <div class="progress-percent">{{ overallUploadProgress }}%</div>
-              <a-button
-                type="text"
-                size="small"
-                class="toggle-progress-btn"
-                @click="progressExpanded = !progressExpanded"
-              >
-                <span>{{ progressExpanded ? '收起' : '展开' }}</span>
-                <ChevronUp v-if="progressExpanded" :size="14" />
-                <ChevronDown v-else :size="14" />
-              </a-button>
-            </div>
           </div>
 
-          <div v-if="progressExpanded" class="progress-details">
-            <div class="details-list" v-if="failedDetailItems.length > 0">
-              <div v-for="item in failedDetailItems" :key="item.uid" class="detail-row">
-                <span class="detail-name" :title="item.name">{{ item.name }}</span>
-                <span class="detail-error" :title="item.errorText">{{ item.errorText }}</span>
+          <!-- 第二行：自动入库配置 (仅在开启时显示) -->
+          <div class="setting-row" v-if="autoIndex && !isPdfEvidenceKb">
+            <div class="col-item">
+              <div class="setting-label">入库参数配置</div>
+              <div class="setting-content">
+                <ChunkParamsConfig
+                  :temp-chunk-params="indexParams"
+                  :show-qa-split="true"
+                  :show-chunk-size-overlap="true"
+                  :show-preset="true"
+                  :allow-preset-follow-default="true"
+                  :database-preset-id="databaseChunkPresetId"
+                />
               </div>
             </div>
-
-            <div class="progress-tip" v-else>当前无失败文件。</div>
-
-            <div class="progress-tip" v-if="hasPendingUploads">
-              文件夹上传采用队列模式，最多同时上传 {{ MAX_UPLOAD_CONCURRENCY }} 个文件。
+          </div>
+          <!-- pdf_evidence 契约：分块由科研证据流水线托管，只读展示 -->
+          <div class="setting-row" v-else-if="autoIndex && isPdfEvidenceKb">
+            <div class="col-item">
+              <div class="setting-label">入库参数配置</div>
+              <div class="setting-content contract-managed-note">
+                <Info :size="14" />
+                <span>
+                  分块策略由系统托管：<strong>学术证据分块（academic）</strong>。解析、分块与检索参数随科研
+                  PDF 证据流水线固定，此处不开放修改；文件级参数仅 OCR 相关项可调。
+                </span>
+              </div>
             </div>
-            <div class="progress-tip" v-else>上传队列已完成，可点击“添加到知识库”继续下一步。</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 工作区文件选择区域 -->
-      <div class="workspace-area" v-if="uploadMode === 'workspace'">
-        <div class="workspace-toolbar">
-          <div class="workspace-summary">
-            <FolderOpen :size="16" />
-            <span class="workspace-current-path" :title="workspaceCurrentPath">
-              {{ workspaceCurrentPath }}
-            </span>
-            <span
-              >已选择
-              {{ selectedWorkspacePaths.length }}
-              个文件，注意上传会扁平化上传，不保留文件层级结构</span
-            >
-          </div>
-          <div class="workspace-actions">
-            <a-button
-              size="small"
-              class="lucide-icon-btn"
-              :disabled="workspaceCurrentPath === '/' || workspaceLoading"
-              @click="openWorkspaceParent"
-            >
-              <ArrowLeft :size="14" />
-            </a-button>
-            <a-button
-              size="small"
-              @click="loadWorkspaceFiles()"
-              :loading="workspaceLoading"
-              class="lucide-icon-btn"
-            >
-              <RotateCw :size="14" />
-            </a-button>
           </div>
         </div>
 
-        <div class="workspace-list" v-if="workspaceItems.length > 0">
-          <button
-            v-for="item in workspaceDirectoryItems"
-            :key="item.path"
-            type="button"
-            class="workspace-item workspace-directory"
+        <!-- PDF/图片OCR提醒 (Alert样式优化) -->
+        <div v-if="hasPdfOrImageFiles && !isOcrEnabled" class="inline-alert warning">
+          <Info :size="16" />
+          <span>检测到PDF或图片文件，建议启用 OCR 以提取文本内容</span>
+        </div>
+
+        <!-- 文件上传区域 -->
+        <div class="upload-area" v-if="uploadMode === 'file' || uploadMode === 'folder'">
+          <a-upload-dragger
+            class="custom-dragger"
+            v-model:fileList="fileList"
+            name="file"
+            :multiple="true"
+            :directory="isFolderUpload"
             :disabled="chunkLoading"
-            @click="openWorkspaceDirectory(item.path)"
+            :show-upload-list="!showAggregateProgress"
+            :accept="acceptedFileTypes"
+            :before-upload="beforeUpload"
+            :customRequest="customRequest"
+            :action="'/api/knowledge/files/upload?kb_id=' + kbId"
+            :headers="getAuthHeaders()"
+            @change="handleFileUpload"
+            @drop="handleDrop"
           >
-            <a-checkbox disabled />
-            <FileTypeIcon is-dir :size="16" class="workspace-file-icon" />
-            <span class="workspace-file-name" :title="item.path">{{ item.name }}</span>
-          </button>
+            <p class="ant-upload-text">
+              {{ isFolderUpload ? '点击选择本机文献文件夹' : '点击选择或拖拽本机文献文件' }}
+            </p>
+            <p class="ant-upload-hint">支持类型: {{ uploadHint }}</p>
+            <div class="zip-tip" v-if="hasZipFiles">📦 ZIP包将自动解压提取 Markdown 与图片</div>
+          </a-upload-dragger>
 
-          <label
-            v-for="item in workspaceFileItems"
-            :key="item.path"
-            class="workspace-item"
-            :class="{ disabled: !item.supported }"
-          >
-            <a-checkbox
-              :checked="selectedWorkspacePathSet.has(item.path)"
-              :disabled="!item.supported || chunkLoading"
-              @change="toggleWorkspacePath(item.path, $event.target.checked)"
-            />
-            <FileTypeIcon :name="item.path" :size="16" class="workspace-file-icon" />
-            <span class="workspace-file-name" :title="item.path">{{ item.path }}</span>
-            <span class="workspace-file-size">{{ formatFileSize(item.size) }}</span>
-          </label>
-        </div>
-
-        <div class="url-empty-tip" v-else>
-          <Info :size="16" />
-          <span>{{ workspaceLoading ? '正在加载工作区文件' : '当前目录暂无文件' }}</span>
-        </div>
-      </div>
-
-      <!-- URL 输入区域 -->
-      <div class="url-area" v-if="uploadMode === 'url'">
-        <div class="url-input-wrapper">
-          <a-textarea
-            v-model:value="newUrl"
-            placeholder="输入 URL，一行一个&#10;https://site1.com&#10;https://site2.com"
-            :auto-size="{ minRows: 4, maxRows: 8 }"
-            class="url-input"
-            @keydown.enter.ctrl="handleFetchUrls"
-          />
-          <div class="url-actions">
-            <span class="url-hint">
-              支持批量粘贴，自动过滤空行。
-              <span class="warning-text">需配置白名单，详见文档说明</span>
+          <div class="local-path-hint">
+            <Info :size="14" />
+            <span>
+              系统上传文件内容并保留文件夹内的相对路径；出于浏览器安全限制，不读取或保存 D:\
+              等本机绝对路径。
             </span>
-            <a-button
-              type="primary"
-              @click="handleFetchUrls"
-              class="add-url-btn"
-              :loading="fetchingUrls"
-              :disabled="!newUrl.trim()"
-            >
-              加载 URLs
-            </a-button>
           </div>
-        </div>
-        <div class="url-list" v-if="urlList.length > 0">
-          <div v-for="(item, index) in urlList" :key="index" class="url-item">
-            <div class="url-icon-wrapper">
-              <Link v-if="item.status === 'success'" :size="14" class="url-icon success" />
-              <Info
-                v-else-if="item.status === 'error'"
-                :size="14"
-                class="url-icon error"
-                :title="item.error"
-              />
-              <RotateCw v-else :size="14" class="url-icon spinning" />
-            </div>
-            <div class="url-content">
-              <span class="url-text" :title="item.url">{{ item.url }}</span>
-              <span v-if="item.status === 'error'" class="url-error-msg">{{ item.error }}</span>
-            </div>
-            <a-button type="text" size="small" class="remove-url-btn" @click="removeUrl(index)">
-              <X :size="14" />
-            </a-button>
-          </div>
-        </div>
-        <div class="url-empty-tip" v-else>
-          <Info :size="16" />
-          <span>输入 URL 后点击加载，系统将自动抓取网页内容</span>
-        </div>
-      </div>
 
-      <!-- 同名文件提示 -->
-      <div v-if="sameNameFiles.length > 0" class="conflict-files-panel">
-        <div class="panel-header">
-          <Info :size="14" class="icon-warning" />
-          <span>已存在同名文件 ({{ sameNameFiles.length }})</span>
-        </div>
-        <div class="file-list-scroll">
-          <div v-for="file in sameNameFiles" :key="file.file_id" class="conflict-item">
-            <div class="file-meta">
-              <span class="fname" :title="file.filename">{{ file.filename }}</span>
-              <span class="ftime">{{ formatFileTime(file.created_at) }}</span>
+          <div v-if="showAggregateProgress" class="upload-progress-card">
+            <div class="progress-header">
+              <div class="progress-header-left">
+                <div class="progress-title">上传进度</div>
+                <div class="progress-stats inline-in-header">
+                  <div class="stat-pill">总计 {{ totalUploadCount }}</div>
+                  <div class="stat-pill uploading" v-if="uploadingUploadCount > 0">
+                    上传中 {{ uploadingUploadCount }}
+                  </div>
+                  <div class="stat-pill queued" v-if="queuedUploadCount > 0">
+                    排队 {{ queuedUploadCount }}
+                  </div>
+                  <div class="stat-pill error" v-if="failedUploadCount > 0">
+                    失败 {{ failedUploadCount }}
+                  </div>
+                </div>
+              </div>
+              <div class="progress-header-right">
+                <div class="progress-percent">{{ overallUploadProgress }}%</div>
+                <a-button
+                  type="text"
+                  size="small"
+                  class="toggle-progress-btn"
+                  @click="progressExpanded = !progressExpanded"
+                >
+                  <span>{{ progressExpanded ? '收起' : '展开' }}</span>
+                  <ChevronUp v-if="progressExpanded" :size="14" />
+                  <ChevronDown v-else :size="14" />
+                </a-button>
+              </div>
             </div>
-            <div class="file-actions">
-              <a-button
-                type="text"
-                size="small"
-                class="action-btn download"
-                @click="downloadSameNameFile(file)"
-              >
-                <Download :size="14" />
-              </a-button>
-              <a-button
-                type="text"
-                size="small"
-                danger
-                class="action-btn delete"
-                @click="deleteSameNameFile(file)"
-              >
-                <Trash2 :size="14" />
-              </a-button>
+
+            <div v-if="progressExpanded" class="progress-details">
+              <div class="details-list" v-if="failedDetailItems.length > 0">
+                <div v-for="item in failedDetailItems" :key="item.uid" class="detail-row">
+                  <span class="detail-name" :title="item.name">{{ item.name }}</span>
+                  <span class="detail-error" :title="item.errorText">{{ item.errorText }}</span>
+                </div>
+              </div>
+
+              <div class="progress-tip" v-else>当前无失败文件。</div>
+
+              <div class="progress-tip" v-if="hasPendingUploads">
+                文件夹上传采用队列模式，最多同时上传 {{ MAX_UPLOAD_CONCURRENCY }} 个文件。
+              </div>
+              <div class="progress-tip" v-else>
+                上传队列已完成，可点击“添加到知识库”继续下一步。
+              </div>
             </div>
           </div>
         </div>
-      </div>
+
+        <!-- 工作区文件选择区域 -->
+        <div class="workspace-area" v-if="uploadMode === 'workspace'">
+          <div class="workspace-toolbar">
+            <div class="workspace-summary">
+              <FolderOpen :size="16" />
+              <span class="workspace-current-path" :title="workspaceCurrentPath">
+                {{ workspaceCurrentPath }}
+              </span>
+              <span
+                >已选择
+                {{ selectedWorkspacePaths.length }}
+                个文件，注意上传会扁平化上传，不保留文件层级结构</span
+              >
+            </div>
+            <div class="workspace-actions">
+              <a-button
+                size="small"
+                class="lucide-icon-btn"
+                :disabled="workspaceCurrentPath === '/' || workspaceLoading"
+                @click="openWorkspaceParent"
+              >
+                <ArrowLeft :size="14" />
+              </a-button>
+              <a-button
+                size="small"
+                @click="loadWorkspaceFiles()"
+                :loading="workspaceLoading"
+                class="lucide-icon-btn"
+              >
+                <RotateCw :size="14" />
+              </a-button>
+            </div>
+          </div>
+
+          <div class="workspace-list" v-if="workspaceItems.length > 0">
+            <button
+              v-for="item in workspaceDirectoryItems"
+              :key="item.path"
+              type="button"
+              class="workspace-item workspace-directory"
+              :disabled="chunkLoading"
+              @click="openWorkspaceDirectory(item.path)"
+            >
+              <a-checkbox disabled />
+              <FileTypeIcon is-dir :size="16" class="workspace-file-icon" />
+              <span class="workspace-file-name" :title="item.path">{{ item.name }}</span>
+            </button>
+
+            <label
+              v-for="item in workspaceFileItems"
+              :key="item.path"
+              class="workspace-item"
+              :class="{ disabled: !item.supported }"
+            >
+              <a-checkbox
+                :checked="selectedWorkspacePathSet.has(item.path)"
+                :disabled="!item.supported || chunkLoading"
+                @change="toggleWorkspacePath(item.path, $event.target.checked)"
+              />
+              <FileTypeIcon :name="item.path" :size="16" class="workspace-file-icon" />
+              <span class="workspace-file-name" :title="item.path">{{ item.path }}</span>
+              <span class="workspace-file-size">{{ formatFileSize(item.size) }}</span>
+            </label>
+          </div>
+
+          <div class="url-empty-tip" v-else>
+            <Info :size="16" />
+            <span>{{ workspaceLoading ? '正在加载工作区文件' : '当前目录暂无文件' }}</span>
+          </div>
+        </div>
+
+        <!-- URL 输入区域 -->
+        <div class="url-area" v-if="uploadMode === 'url'">
+          <div class="url-input-wrapper">
+            <a-textarea
+              v-model:value="newUrl"
+              placeholder="输入 URL，一行一个&#10;https://site1.com&#10;https://site2.com"
+              :auto-size="{ minRows: 4, maxRows: 8 }"
+              class="url-input"
+              @keydown.enter.ctrl="handleFetchUrls"
+            />
+            <div class="url-actions">
+              <span class="url-hint">
+                支持批量粘贴，自动过滤空行。
+                <span class="warning-text">需配置白名单，详见文档说明</span>
+              </span>
+              <a-button
+                type="primary"
+                @click="handleFetchUrls"
+                class="add-url-btn"
+                :loading="fetchingUrls"
+                :disabled="!newUrl.trim()"
+              >
+                加载 URLs
+              </a-button>
+            </div>
+          </div>
+          <div class="url-list" v-if="urlList.length > 0">
+            <div v-for="(item, index) in urlList" :key="index" class="url-item">
+              <div class="url-icon-wrapper">
+                <Link v-if="item.status === 'success'" :size="14" class="url-icon success" />
+                <Info
+                  v-else-if="item.status === 'error'"
+                  :size="14"
+                  class="url-icon error"
+                  :title="item.error"
+                />
+                <RotateCw v-else :size="14" class="url-icon spinning" />
+              </div>
+              <div class="url-content">
+                <span class="url-text" :title="item.url">{{ item.url }}</span>
+                <span v-if="item.status === 'error'" class="url-error-msg">{{ item.error }}</span>
+              </div>
+              <a-button type="text" size="small" class="remove-url-btn" @click="removeUrl(index)">
+                <X :size="14" />
+              </a-button>
+            </div>
+          </div>
+          <div class="url-empty-tip" v-else>
+            <Info :size="16" />
+            <span>输入 URL 后点击加载，系统将自动抓取网页内容</span>
+          </div>
+        </div>
+
+        <!-- 同名文件提示 -->
+        <div v-if="sameNameFiles.length > 0" class="conflict-files-panel">
+          <div class="panel-header">
+            <Info :size="14" class="icon-warning" />
+            <span>已存在同名文件 ({{ sameNameFiles.length }})</span>
+          </div>
+          <div class="file-list-scroll">
+            <div v-for="file in sameNameFiles" :key="file.file_id" class="conflict-item">
+              <div class="file-meta">
+                <span class="fname" :title="file.filename">{{ file.filename }}</span>
+                <span class="ftime">{{ formatFileTime(file.created_at) }}</span>
+              </div>
+              <div class="file-actions">
+                <a-button
+                  type="text"
+                  size="small"
+                  class="action-btn download"
+                  @click="downloadSameNameFile(file)"
+                >
+                  <Download :size="14" />
+                </a-button>
+                <a-button
+                  type="text"
+                  size="small"
+                  danger
+                  class="action-btn delete"
+                  @click="deleteSameNameFile(file)"
+                >
+                  <Trash2 :size="14" />
+                </a-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
     </div>
   </a-modal>
 </template>
@@ -530,7 +555,8 @@ watch(
       selectedFolderId.value = props.currentFolderId
       isFolderUpload.value = props.isFolderMode
       const requestedMode = props.mode || (props.isFolderMode ? 'folder' : 'file')
-      uploadMode.value = isPdfEvidenceLibrary.value && requestedMode === 'url' ? 'file' : requestedMode
+      uploadMode.value =
+        isPdfEvidenceLibrary.value && requestedMode === 'url' ? 'file' : requestedMode
       if (uploadMode.value === 'workspace') {
         loadWorkspaceFiles()
       }
@@ -705,6 +731,7 @@ const failedDetailItems = computed(() => {
 })
 
 const canSubmit = computed(() => {
+  if (isContractBlockedKb.value) return false
   if (uploadMode.value === 'url') {
     return urlList.value.some((item) => item.status === 'success')
   }
@@ -714,36 +741,38 @@ const canSubmit = computed(() => {
   return successUploadCount.value > 0 && !hasPendingUploads.value
 })
 
-const uploadModeOptions = computed(() => [
-  {
-    value: 'file',
-    label: h('div', { class: 'segmented-option' }, [
-      h(FileUp, { size: 16, class: 'option-icon' }),
-      h('span', { class: 'option-text' }, '本机文件')
-    ])
-  },
-  {
-    value: 'folder',
-    label: h('div', { class: 'segmented-option' }, [
-      h(FolderUp, { size: 16, class: 'option-icon' }),
-      h('span', { class: 'option-text' }, '本机文件夹')
-    ])
-  },
-  {
-    value: 'url',
-    label: h('div', { class: 'segmented-option' }, [
-      h(Link, { size: 16, class: 'option-icon' }),
-      h('span', { class: 'option-text' }, '解析 URL')
-    ])
-  },
-  {
-    value: 'workspace',
-    label: h('div', { class: 'segmented-option' }, [
-      h(FolderOpen, { size: 16, class: 'option-icon' }),
-      h('span', { class: 'option-text' }, '工作区')
-    ])
-  }
-].filter((option) => !(isPdfEvidenceLibrary.value && option.value === 'url')))
+const uploadModeOptions = computed(() =>
+  [
+    {
+      value: 'file',
+      label: h('div', { class: 'segmented-option' }, [
+        h(FileUp, { size: 16, class: 'option-icon' }),
+        h('span', { class: 'option-text' }, '本机文件')
+      ])
+    },
+    {
+      value: 'folder',
+      label: h('div', { class: 'segmented-option' }, [
+        h(FolderUp, { size: 16, class: 'option-icon' }),
+        h('span', { class: 'option-text' }, '本机文件夹')
+      ])
+    },
+    {
+      value: 'url',
+      label: h('div', { class: 'segmented-option' }, [
+        h(Link, { size: 16, class: 'option-icon' }),
+        h('span', { class: 'option-text' }, '解析 URL')
+      ])
+    },
+    {
+      value: 'workspace',
+      label: h('div', { class: 'segmented-option' }, [
+        h(FolderOpen, { size: 16, class: 'option-icon' }),
+        h('span', { class: 'option-text' }, '工作区')
+      ])
+    }
+  ].filter((option) => !(isPdfEvidenceLibrary.value && option.value === 'url'))
+)
 
 watch(uploadMode, (val) => {
   isFolderUpload.value = val === 'folder'
@@ -972,6 +1001,31 @@ const indexParams = ref({
   chunk_preset_id: '',
   chunk_parser_config: {}
 })
+
+// ---- 知识源契约感知：csv/图谱契约禁普通文档上传；pdf_evidence 分块系统托管 ----
+const kbContractKey = computed(() => String(store.database?.contract_key || '').trim())
+const isCsvContractKb = computed(
+  () => kbContractKey.value === 'csv_record' || kbContractKey.value === 'csv_qa'
+)
+const isGraphContractKb = computed(() => kbContractKey.value === 'managed_graph')
+const isPdfEvidenceKb = computed(() => kbContractKey.value === 'pdf_evidence')
+const isContractBlockedKb = computed(() => isCsvContractKb.value || isGraphContractKb.value)
+const contractBlockedHint = computed(() => {
+  if (isCsvContractKb.value) {
+    return '本库为 CSV 结构化数据集契约库，不接受普通文档上传。请前往库详情页的「数据集导入」完成预检与 Canonical 导入（分块由系统托管为 separator，一块一条记录）。'
+  }
+  if (isGraphContractKb.value) {
+    return '本库为规范科研知识图谱契约库，不接受普通文档上传。请使用图谱导入向导（节点 CSV + 关系 CSV）。'
+  }
+  return ''
+})
+// info 接口返回 metadata（而非 additional_params），两处都兜底
+const databaseChunkPresetId = computed(
+  () =>
+    store.database?.additional_params?.chunk_preset_id ||
+    store.database?.metadata?.chunk_preset_id ||
+    'general'
+)
 
 const buildAutoIndexParams = () => {
   return buildChunkParamsPayload(indexParams.value, {
@@ -2135,6 +2189,30 @@ const chunkData = async () => {
     background: var(--color-warning-50);
     border: 1px solid var(--color-warning-200);
     color: var(--color-warning-700);
+  }
+}
+
+/* 契约门禁与托管分块提示 */
+.contract-blocked-panel {
+  padding: 24px 4px;
+}
+
+.contract-managed-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  color: var(--gray-700);
+  font-size: 13px;
+  line-height: 1.6;
+
+  svg {
+    flex-shrink: 0;
+    margin-top: 3px;
+    color: var(--main-color);
   }
 }
 

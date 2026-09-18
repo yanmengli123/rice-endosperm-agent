@@ -457,6 +457,13 @@ async def create_database(
             "governance_status": "DRAFT",
         }
 
+        # 契约托管分块展示值随建库入参一次写入（normalize 保留显式合法值）：真正的分块在服务端流水线
+        # 固定（pdf→academic 流水线注入、csv→separator 在 Canonical Import 内写死），用户传入值一律被托管策略覆盖
+        managed_chunk_presets = {"pdf_evidence": "academic", "csv_record": "separator", "csv_qa": "separator"}
+        managed_preset = managed_chunk_presets.get(contract_spec.contract_key)
+        if managed_preset:
+            additional_params["chunk_preset_id"] = managed_preset
+
         additional_params = kb_class.normalize_additional_params(additional_params)
 
         if kb_class.requires_embedding_model:
@@ -643,14 +650,6 @@ async def resolve_source_contract(
     return {"resolved": payload, "message": "success"}
 
 
-class DatasetImportRequest(BaseModel):
-    minio_url: str
-    bucket_name: str | None = None
-    object_name: str | None = None
-    filename: str | None = None
-    mapping: dict = {}
-
-
 @knowledge.post("/databases/{kb_id}/dataset/preview")
 async def preview_dataset(
     kb_id: str,
@@ -695,36 +694,49 @@ async def preview_dataset(
 @knowledge.post("/databases/{kb_id}/dataset/import")
 async def import_dataset(
     kb_id: str,
-    payload: DatasetImportRequest,
+    file: UploadFile = File(...),
+    mapping: str | None = Form(None),
     current_user: User = Depends(get_admin_user),
 ):
     """CSV 数据集 Canonical Commit + 确定性检索投影 + 入索引。
 
-    前置：文件先经 /files/upload 上传；csv_qa 契约必须显式给出
-    question_col / answer_col 映射，空问答行不进入有效集。
+    multipart 直传原件：csv 契约禁止 document_upload，/files/upload 对本契约库会被
+    命令门禁拒绝，因此原件落对象存储在服务内完成（documents 桶 upload/ 前缀）。
+    csv_qa 契约必须显式给出 question_col / answer_col 映射，空问答行不进入有效集。
     """
     contract_spec = await _ensure_database_supports_documents(kb_id, "数据集导入", COMMAND_DATASET_IMPORT)
-    if not is_minio_url(payload.minio_url):
-        raise HTTPException(status_code=400, detail="minio_url 必须是合法的 MinIO 地址")
+    filename = _normalize_browser_upload_filename(file.filename)
+    if contract_spec is not None and contract_spec.accepted_media:
+        try:
+            validate_contract_media(contract_spec, filename)
+        except SourceContractError as exc:
+            raise _http_from_contract_error(exc) from exc
 
-    bucket_name = payload.bucket_name
-    object_name = payload.object_name
-    if not bucket_name or not object_name:
-        parsed_bucket, parsed_object = parse_minio_url(payload.minio_url)
-        bucket_name = bucket_name or parsed_bucket
-        object_name = object_name or parsed_object
+    mapping_dict = {}
+    if mapping:
+        try:
+            mapping_dict = json.loads(mapping)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="mapping 必须是合法 JSON") from exc
+
+    try:
+        raw = await read_upload_with_limit(
+            file,
+            max_size_bytes=MAX_UPLOAD_SIZE_BYTES,
+            too_large_message="文件过大，当前仅支持 100 MB 以内的文件",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 原件落对象存储（与 /files/upload 同一约定：documents 桶 + kb 前缀 + 时间戳版本）
+    basename, ext = os.path.splitext(filename)
+    timestamp = int(time.time() * 1000)
+    object_name = f"{kb_id}/upload/{basename}_{timestamp}{ext}"
+    minio_url = await aupload_file_to_minio(MinIOClient.KB_BUCKETS["documents"], object_name, raw)
 
     from yuxi.services.principal import resolve_tenant_id
     from yuxi.services.csv_dataset_service import CsvDatasetValidationError, import_csv_dataset, sha256_hex
-    from yuxi.storage.minio.client import get_minio_client
     from yuxi.storage.postgres.manager import pg_manager
-
-    try:
-        raw = await get_minio_client().adownload_file(bucket_name, object_name)
-    except Exception as download_error:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"从对象存储读取文件失败: {download_error}")
-    if not raw:
-        raise HTTPException(status_code=400, detail="对象存储中的文件为空")
 
     async with pg_manager.get_async_session_context() as session:
         tenant_id = await resolve_tenant_id(session, str(current_user.uid))
@@ -736,9 +748,9 @@ async def import_dataset(
             contract_key=contract_spec.contract_key,
             contract_version=contract_spec.version,
             raw=raw,
-            filename=payload.filename or object_name.rsplit("/", 1)[-1],
-            minio_url=payload.minio_url,
-            mapping=payload.mapping or {},
+            filename=filename,
+            minio_url=minio_url,
+            mapping=mapping_dict,
             operator_id=current_user.uid,
         )
     except CsvDatasetValidationError as exc:
@@ -1173,6 +1185,28 @@ async def reset_graph_build(
     except Exception as e:
         logger.error(f"重置图谱构建状态失败 {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"重置图谱构建状态失败: {e}")
+
+
+@knowledge.post("/databases/{kb_id}/graph-build/revive")
+async def revive_dead_graph_chunks(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """复活图谱构建死信 chunk（R2b）：累计失败达阈值的 chunk 被跳过，配置修复后在此清零重试。"""
+    await _ensure_database_supports_documents(kb_id, "图谱死信复活", COMMAND_LLM_GRAPH_RESET)
+    try:
+        if await _has_running_graph_build_task(kb_id):
+            raise HTTPException(status_code=409, detail="该知识库存在正在运行的图谱构建任务，无法复活")
+        revived = await MilvusGraphService().revive_dead_chunks(kb_id)
+        return {
+            "message": f"已复活 {revived} 个死信 Chunk（重新计入待索引）",
+            "status": "success",
+            "revived": revived,
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"复活图谱死信失败 {e}, {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"复活图谱死信失败: {e}")
 
 
 @knowledge.get("/databases/{kb_id}/export")

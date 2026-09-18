@@ -1645,7 +1645,19 @@ class KnowledgeBase(ABC):
             "additional_params": meta.get("metadata") or {},
         }
         if record_fields:
-            allowed_fields = {"share_config", "created_by"}
+            allowed_fields = {
+                "share_config",
+                "created_by",
+                # Source Contract 冻结字段（0029）：白名单漏掉会导致契约静默丢失，
+                # 且 manager.create_database 仍把契约回显进响应，门禁只能回落 legacy 全命令
+                "contract_key",
+                "contract_version",
+                "contract_digest",
+                "contract_snapshot",
+                "content_domain",
+                "tool_description",
+                "governance_status",
+            }
             payload.update({key: value for key, value in record_fields.items() if key in allowed_fields})
 
         if existing is None:

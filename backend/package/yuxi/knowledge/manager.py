@@ -459,25 +459,24 @@ class KnowledgeBaseManager:
 
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
-        kb_repo = KnowledgeBaseRepository()
-        if await kb_repo.get_by_kb_id(kb_id) is None:
-            await kb_repo.create(
-                {
-                    "kb_id": kb_id,
-                    "name": database_name,
-                    "description": description,
-                    "kb_type": kb_type,
-                    "embedding_model_spec": embedding_model_spec,
-                    "llm_model_spec": db_info.get("llm_model_spec"),
-                    "additional_params": kwargs.copy(),
-                    **record_fields,
-                }
-            )
+        # 契约/治理字段一律以 DB 行回读组装响应：持久化链路（base._persist_kb 白名单）
+        # 一旦再次丢字段，这里回读即为空并直接暴露，杜绝"响应带契约、库行空契约"的假成功
+        kb_row = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
+        if kb_row is None:
+            raise ValueError(f"知识库 {kb_id} 创建后未在数据库中找到持久化记录")
+        db_info["share_config"] = share_config
+        for field in (
+            "contract_key",
+            "contract_version",
+            "contract_digest",
+            "contract_snapshot",
+            "content_domain",
+            "tool_description",
+            "governance_status",
+        ):
+            db_info[field] = getattr(kb_row, field)
 
         logger.info(f"Created {kb_type} database: {database_name} ({kb_id}) with {kwargs}")
-        db_info["share_config"] = share_config
-        if contract_fields:
-            db_info.update(contract_fields)
         return db_info
 
     async def delete_database(self, kb_id: str) -> dict:

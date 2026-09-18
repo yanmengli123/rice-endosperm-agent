@@ -178,6 +178,19 @@
             <FileTable ref="fileTableRef" />
           </div>
 
+          <div
+            v-if="isMilvus && isCsvContractKb"
+            v-show="activeTab === 'dataset'"
+            class="tab-panel"
+          >
+            <DatasetImportPanel
+              v-if="kbId"
+              :kb-id="kbId"
+              :contract-key="kbContractKey"
+              @imported="onDatasetImported"
+            />
+          </div>
+
           <div v-show="activeTab === 'query'" class="tab-panel query-config-panel">
             <div class="query-config-layout">
               <div class="query-test-pane">
@@ -284,6 +297,13 @@
           </span>
         </a-form-item>
 
+        <a-form-item v-if="contractDisplayLabel" label="知识源契约">
+          <a-input :value="contractDisplayLabel" disabled />
+          <span style="font-size: 12px; color: var(--gray-500)">
+            契约在创建时冻结，决定允许的入库命令与媒体类型，不可修改
+          </span>
+        </a-form-item>
+
         <a-form-item v-if="!isConnector" name="chunk_preset_id">
           <template #label>
             <span class="chunk-preset-label">
@@ -293,7 +313,14 @@
               </a-tooltip>
             </span>
           </template>
+          <template v-if="isContractManagedChunking">
+            <div class="contract-managed-chunk-note">
+              <Lock :size="14" />
+              <span>由知识源契约托管：{{ contractManagedChunkLabel }}，不开放修改。</span>
+            </div>
+          </template>
           <a-select
+            v-else
             v-model:value="editForm.chunk_preset_id"
             :options="chunkPresetOptions"
             :loading="chunkPresetLoading"
@@ -382,11 +409,13 @@ import {
   FolderPlus,
   Hash,
   LoaderCircle,
+  Lock,
   Map as MapIcon,
   Network,
   Pencil,
   Save,
   Search,
+  Table,
   Trash2
 } from '@lucide/vue'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
@@ -399,6 +428,7 @@ import QuerySection from '@/components/QuerySection.vue'
 import MindMapSection from '@/components/MindMapSection.vue'
 import RAGEvaluationTab from '@/components/RAGEvaluationTab.vue'
 import EvaluationBenchmarks from '@/components/EvaluationBenchmarks.vue'
+import DatasetImportPanel from '@/components/DatasetImportPanel.vue'
 import SearchConfigPanel from '@/components/SearchConfigPanel.vue'
 import AiTextarea from '@/components/AiTextarea.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
@@ -437,6 +467,30 @@ const isConnector = computed(
 const isEvaluationSupported = computed(() => isMilvus.value)
 const kbTypeIcon = computed(() => getKbTypeIcon(kbType.value || 'milvus'))
 
+// ---- 知识源契约感知 ----
+const kbContractKey = computed(() => String(database.value?.contract_key || '').trim())
+const isCsvContractKb = computed(
+  () => kbContractKey.value === 'csv_record' || kbContractKey.value === 'csv_qa'
+)
+const isPdfEvidenceKb = computed(() => kbContractKey.value === 'pdf_evidence')
+const isGraphContractKb = computed(() => kbContractKey.value === 'managed_graph')
+const isContractManagedChunking = computed(
+  () => isCsvContractKb.value || isPdfEvidenceKb.value || isGraphContractKb.value
+)
+const contractManagedChunkLabel = computed(() => {
+  if (isCsvContractKb.value)
+    return '行级记录投影 separator · 一块一条记录，由 Canonical Import 托管'
+  if (isPdfEvidenceKb.value) return '学术证据分块 academic · 由科研 PDF 证据流水线托管'
+  if (isGraphContractKb.value) return '图谱契约不走文档分块'
+  return ''
+})
+const contractDisplayLabel = computed(() => {
+  if (!kbContractKey.value) return ''
+  const snapshotLabel = database.value?.contract_snapshot?.display?.label
+  if (snapshotLabel) return `${snapshotLabel} @ ${database.value?.contract_version || ''}`.trim()
+  return `${kbContractKey.value}@${database.value?.contract_version || ''}`
+})
+
 const databaseSubtitle = computed(() => {
   const typeLabel = getKbTypeLabel(kbType.value || 'milvus')
   if (!isCurrentDatabaseLoaded.value) return '正在加载知识库信息'
@@ -450,7 +504,7 @@ const databaseSubtitle = computed(() => {
 
 const tabs = computed(() => {
   if (isMilvus.value) {
-    return [
+    const milvusTabs = [
       { key: 'filetable', label: '文件管理', icon: FileText },
       { key: 'query', label: '检索测试', icon: Search },
       { key: 'graph', label: '知识图谱', icon: Network },
@@ -458,6 +512,10 @@ const tabs = computed(() => {
       { key: 'evaluation', label: 'RAG 评估', icon: BarChart3 },
       { key: 'benchmarks', label: '评估基准', icon: ClipboardList }
     ]
+    if (isCsvContractKb.value) {
+      milvusTabs.splice(1, 0, { key: 'dataset', label: '数据集导入', icon: Table })
+    }
+    return milvusTabs
   }
 
   return [{ key: 'query', label: '检索测试', icon: Search }]
@@ -507,6 +565,15 @@ const formatTokenStatNumber = (value) => {
 }
 
 const statsRepairing = ref(false)
+
+const onDatasetImported = async () => {
+  try {
+    await store.getDatabaseInfo(kbId.value, true, true)
+    fileTableRef.value?.refresh?.()
+  } catch (error) {
+    console.error('刷新知识库信息失败:', error)
+  }
+}
 
 const fileStats = computed(() => {
   const stats = store.database.stats || {}
@@ -1321,6 +1388,24 @@ onMounted(() => {
   color: var(--gray-500);
   cursor: help;
   font-size: 14px;
+}
+
+.contract-managed-chunk-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  color: var(--gray-700);
+  font-size: 13px;
+  line-height: 1.6;
+
+  svg {
+    flex-shrink: 0;
+    color: var(--main-color);
+  }
 }
 
 @media (max-width: 1024px) {

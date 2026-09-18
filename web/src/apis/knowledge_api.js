@@ -710,6 +710,36 @@ export const typeApi = {
    */
   getStatistics: async () => {
     return apiAdminGet('/api/knowledge/stats')
+  },
+
+  /**
+   * CSV 数据集预检：列统计、编码/分隔符检测、映射建议（不落库）
+   * @param {string} kbId - 知识库ID（csv_record / csv_qa 契约）
+   * @param {File} file - CSV 原件
+   * @param {Object} mapping - 可选映射（identity_column 或 question_col/answer_col）
+   */
+  previewCsvDataset: async (kbId, file, mapping = {}) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (mapping && Object.keys(mapping).length > 0) {
+      formData.append('mapping', JSON.stringify(mapping))
+    }
+    return apiAdminPost(`/api/knowledge/databases/${kbId}/dataset/preview`, formData)
+  },
+
+  /**
+   * CSV 数据集 Canonical 导入：原件直传，服务端落对象存储 + 行级投影 + separator 索引
+   * @param {string} kbId - 知识库ID（csv_record / csv_qa 契约）
+   * @param {File} file - CSV 原件
+   * @param {Object} mapping - 已确认的列映射
+   */
+  importCsvDataset: async (kbId, file, mapping = {}) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (mapping && Object.keys(mapping).length > 0) {
+      formData.append('mapping', JSON.stringify(mapping))
+    }
+    return apiAdminPost(`/api/knowledge/databases/${kbId}/dataset/import`, formData)
   }
 }
 

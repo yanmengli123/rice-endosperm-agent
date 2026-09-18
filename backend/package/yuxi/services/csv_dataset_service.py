@@ -362,10 +362,11 @@ async def import_csv_dataset(
         raise CsvDatasetValidationError("；".join(validation.get("issues") or ["数据校验失败"]))
 
     # 1. 文件记录（原始 CSV 是权威原件，走 KnowledgeFile 生命周期以便删除/审计）
+    # prepare_item_metadata 只认 content_hashes（按 item 索引的 dict），传单数 content_hash 会抛 Missing content_hash
     file_meta = await knowledge_base.add_file_record(
         kb_id,
         minio_url,
-        params={"source_path": filename, "content_hash": source_sha},
+        params={"source_path": filename, "content_hashes": {minio_url: source_sha}},
         operator_id=operator_id,
     )
     file_id = file_meta["file_id"]
@@ -405,6 +406,9 @@ async def import_csv_dataset(
             completed_at=utc_now(),
         )
         session.add(revision)
+        # 两个模型之间没有 relationship 声明，UoW 按表名排序插入会让
+        # knowledge_canonical_records 先于父修订行执行，PostgreSQL 立即触发外键违约
+        await session.flush()
         for record in records:
             session.add(
                 KnowledgeCanonicalRecord(
@@ -438,7 +442,8 @@ async def import_csv_dataset(
         kb_id=kb_id,
         data={
             "status": "parsed",
-            "markdown_file": upload_result.url,
+            # aupload_file_to_minio 直接返回 URL 字符串
+            "markdown_file": upload_result,
             "error_message": None,
         },
     )
