@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterable
 from typing import Any
 
 from sqlalchemy import delete, distinct, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from yuxi.knowledge.graphs.graph_utils import normalize_entity_name
+from yuxi.knowledge.graphs.graph_utils import mention_key, normalize_entity_name
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeChunk,
@@ -13,6 +14,7 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeGraphEntity,
     KnowledgeGraphEntityAlias,
     KnowledgeGraphEntityMention,
+    KnowledgeGraphRelationEvidence,
     KnowledgeGraphTriple,
     KnowledgeGraphTripleMention,
 )
@@ -478,6 +480,175 @@ class KnowledgeGraphRepository:
                 )
         return {"counts": {key: int(value or 0) for key, value in counts.items()}, "quotes": quotes, "limit": limit}
 
+    async def iter_projection_evidence(self, kb_id: str, *, page_size: int = 1000) -> AsyncIterator[dict[str, Any]]:
+        """投影导出的统一证据行（流式）：三元组/实体 mention（join chunk 全文与文件名、带审核态）
+        + 托管导入的 relation_evidence，一套 schema 覆盖两条轨。
+
+        按 mention 表自增 id 键集分页，逐页 join chunk/file 后逐行 yield——chunk 全文只随单行瞬时存在，
+        不在内存里累积整表（大库导出靠这条），行数由调用方旁路统计。
+        """
+        last_id = 0
+
+        async def paged(model, build: Any) -> AsyncIterator[dict[str, Any]]:
+            nonlocal last_id
+            last_id = 0
+            while True:
+                async with pg_manager.get_async_session_context() as session:
+                    batch = (
+                        (
+                            await session.execute(
+                                select(model)
+                                .where(model.kb_id == kb_id, model.id > last_id)
+                                .order_by(model.id.asc())
+                                .limit(page_size)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                if not batch:
+                    return
+                for item in await build(batch):
+                    yield item
+                last_id = batch[-1].id
+
+        async def build_triple(batch: list[KnowledgeGraphTripleMention]) -> list[dict[str, Any]]:
+            chunk_ids = {item.chunk_id for item in batch}
+            triple_ids = {item.triple_id for item in batch}
+            async with pg_manager.get_async_session_context() as session:
+                chunks = await _chunk_map(session, chunk_ids)
+                triples = {
+                    row.triple_id: row
+                    for row in (
+                        (
+                            await session.execute(
+                                select(KnowledgeGraphTriple).where(KnowledgeGraphTriple.triple_id.in_(list(triple_ids)))
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                }
+            return [
+                _evidence_row(
+                    kind="triple",
+                    target_id=item.triple_id,
+                    edge_business_id=item.triple_id,
+                    mention=item,
+                    chunk=chunks.get(item.chunk_id),
+                    review_status=_review_status(triples.get(item.triple_id)),
+                )
+                for item in batch
+            ]
+
+        async def build_entity(batch: list[KnowledgeGraphEntityMention]) -> list[dict[str, Any]]:
+            chunk_ids = {item.chunk_id for item in batch}
+            entity_ids = {item.entity_id for item in batch}
+            async with pg_manager.get_async_session_context() as session:
+                chunks = await _chunk_map(session, chunk_ids)
+                entities = {
+                    row.entity_id: row
+                    for row in (
+                        (
+                            await session.execute(
+                                select(KnowledgeGraphEntity).where(KnowledgeGraphEntity.entity_id.in_(list(entity_ids)))
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                }
+            return [
+                _evidence_row(
+                    kind="entity",
+                    target_id=item.entity_id,
+                    edge_business_id=mention_key(item.chunk_id, item.entity_id),
+                    mention=item,
+                    chunk=chunks.get(item.chunk_id),
+                    review_status=_review_status(entities.get(item.entity_id)),
+                )
+                for item in batch
+            ]
+
+        async for row in paged(KnowledgeGraphTripleMention, build_triple):
+            yield row
+        async for row in paged(KnowledgeGraphEntityMention, build_entity):
+            yield row
+        async with pg_manager.get_async_session_context() as session:
+            managed = (
+                (
+                    await session.execute(
+                        select(KnowledgeGraphRelationEvidence).where(KnowledgeGraphRelationEvidence.kb_id == kb_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for item in managed:
+            yield {
+                "kind": "triple",
+                "source": "relation_evidence",
+                "target_id": item.triple_id,
+                "edge_business_id": item.triple_id,
+                "chunk_id": None,
+                "file_id": None,
+                "filename": None,
+                "quote": item.evidence_quote,
+                "quote_start_char": None,
+                "extractor_type": "managed_import",
+                "confidence": None,
+                "hedge": None,
+                "context": None,
+                "trigger_verified": None,
+                "trigger_term": None,
+                "verifier_confirmed": None,
+                "pinned_by": None,
+                "pinned_at": None,
+                "review_status": "CANONICAL",
+                "pmid": item.pmid,
+                "doi": item.doi,
+                "chunk_content": None,
+                "source_provenance": None,
+            }
+
+    async def list_projection_evidence(self, kb_id: str, *, page_size: int = 1000) -> list[dict[str, Any]]:
+        """证据行的内存视图（Excel 证据明细需要整表宽表）；Neo4j 投影导出请走 iter_projection_evidence 流式读取。"""
+        return [row async for row in self.iter_projection_evidence(kb_id, page_size=page_size)]
+
+    async def iter_projection_chunks(
+        self, kb_id: str, chunk_ids: Iterable[str], *, batch_size: int = 500
+    ) -> AsyncIterator[dict[str, Any]]:
+        """被证据引用的 chunk 去重后按 chunk_id 有序分批取全文（投影导出 chunks.jsonl 数据源，流式）。"""
+        unique_ids = sorted({chunk_id for chunk_id in chunk_ids if chunk_id})
+        for start in range(0, len(unique_ids), batch_size):
+            slice_ids = unique_ids[start : start + batch_size]
+            async with pg_manager.get_async_session_context() as session:
+                rows = (
+                    await session.execute(
+                        select(KnowledgeChunk, KnowledgeFile.filename, KnowledgeFile.original_filename)
+                        .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeChunk.file_id)
+                        .where(KnowledgeChunk.kb_id == kb_id, KnowledgeChunk.chunk_id.in_(slice_ids))
+                        .order_by(KnowledgeChunk.chunk_id.asc())
+                    )
+                ).all()
+            for chunk, filename, original_filename in rows:
+                yield {
+                    "chunk_id": chunk.chunk_id,
+                    "file_id": chunk.file_id,
+                    "filename": original_filename or filename,
+                    "chunk_index": chunk.chunk_index,
+                    "content": chunk.content,
+                    "start_char_pos": chunk.start_char_pos,
+                    "end_char_pos": chunk.end_char_pos,
+                    "source_provenance": chunk.source_provenance,
+                }
+
+    async def list_chunks_for_projection(
+        self, kb_id: str, chunk_ids: Iterable[str], *, batch_size: int = 500
+    ) -> list[dict[str, Any]]:
+        """chunk 全文的内存视图（测试与离线脚本用）；投影导出请走 iter_projection_chunks。"""
+        return [row async for row in self.iter_projection_chunks(kb_id, chunk_ids, batch_size=batch_size)]
+
     @staticmethod
     async def _load_mentions(session, model, **filters) -> list[dict[str, Any]]:
         """mention 行 join chunk 原文与文件名，按文档序（文件、chunk_index）排列。"""
@@ -526,6 +697,74 @@ class KnowledgeGraphRepository:
                 )
             mentions.append(item)
         return mentions
+
+
+def _review_status(row: Any) -> str | None:
+    """证据行携带的审核态取自所属三元组/实体（对象已被删时为空，导出时如实留白）。"""
+    return getattr(row, "review_status", None) if row is not None else None
+
+
+async def _chunk_map(session, chunk_ids: set[str]) -> dict[str, dict[str, Any]]:
+    """chunk_id → {content, chunk_index, source_provenance, file_id, filename}（一次 join 取齐）。"""
+    if not chunk_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(KnowledgeChunk, KnowledgeFile.filename, KnowledgeFile.original_filename)
+            .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeChunk.file_id)
+            .where(KnowledgeChunk.chunk_id.in_(list(chunk_ids)))
+        )
+    ).all()
+    return {
+        chunk.chunk_id: {
+            "content": chunk.content,
+            "chunk_index": chunk.chunk_index,
+            "source_provenance": chunk.source_provenance,
+            "file_id": chunk.file_id,
+            "filename": original_filename or filename,
+        }
+        for chunk, filename, original_filename in rows
+    }
+
+
+def _evidence_row(
+    *,
+    kind: str,
+    target_id: str,
+    edge_business_id: str,
+    mention: Any,
+    chunk: dict[str, Any] | None,
+    review_status: str | None,
+) -> dict[str, Any]:
+    """mention ORM 行 → 投影导出统一证据行（校验与来源解析在导出层完成，仓储只搬数据）。"""
+    chunk = chunk or {}
+    row = {
+        "kind": kind,
+        "source": "chunk_mention",
+        "target_id": target_id,
+        "edge_business_id": edge_business_id,
+        "chunk_id": mention.chunk_id,
+        "file_id": mention.file_id,
+        "filename": chunk.get("filename"),
+        "chunk_index": chunk.get("chunk_index"),
+        "quote": mention.text,
+        "quote_start_char": mention.quote_start_char,
+        "extractor_type": getattr(mention, "extractor_type", None),
+        "confidence": getattr(mention, "confidence", None),
+        "hedge": getattr(mention, "hedge", None),
+        "context": getattr(mention, "context_json", None),
+        "trigger_verified": getattr(mention, "trigger_verified", None),
+        "trigger_term": getattr(mention, "trigger_term", None),
+        "verifier_confirmed": getattr(mention, "verifier_confirmed", None),
+        "pinned_by": mention.pinned_by,
+        "pinned_at": mention.pinned_at.isoformat() if mention.pinned_at else None,
+        "review_status": review_status,
+        "pmid": None,
+        "doi": None,
+        "chunk_content": chunk.get("content"),
+        "source_provenance": chunk.get("source_provenance"),
+    }
+    return row
 
 
 def _entity_dict(row: KnowledgeGraphEntity) -> dict[str, Any]:

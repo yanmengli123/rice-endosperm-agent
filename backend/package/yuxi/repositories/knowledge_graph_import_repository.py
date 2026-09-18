@@ -6,10 +6,11 @@ from typing import Any
 from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from yuxi.knowledge.graphs.graph_utils import normalize_entity_name
+from yuxi.knowledge.graphs.graph_utils import mention_key, normalize_entity_name
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
+    KnowledgeChunk,
     KnowledgeGraphEntity,
     KnowledgeGraphEntityAlias,
     KnowledgeGraphEntityMention,
@@ -357,6 +358,55 @@ class KnowledgeGraphImportRepository:
             "triples": [self.triple_to_dict(item) for item in triples],
             "evidence": [self.evidence_to_dict(item) for item in evidence],
             "aliases": aliases,
+            "kb_name": kb_name,
+        }
+
+    async def projection_reference(self, kb_id: str) -> dict[str, Any]:
+        """Neo4j 投影导出的对账参照：规范层实体 / 三元组 / 提及 / chunk 键集与库名，只取 ID 列不载入整行。
+
+        人工审核 REJECTED 的三元组/实体已按设计从 Neo4j 删除（决策叠加层），它们的身份单独给出，
+        对账时视为「应当不在投影」而非「投影落后」。
+        """
+        async with pg_manager.get_async_session_context() as session:
+            entity_rows = (
+                await session.execute(
+                    select(KnowledgeGraphEntity.entity_id, KnowledgeGraphEntity.review_status).where(
+                        KnowledgeGraphEntity.kb_id == kb_id
+                    )
+                )
+            ).all()
+            entity_ids = {entity_id for entity_id, _status in entity_rows}
+            rejected_entity_ids = {entity_id for entity_id, status in entity_rows if status == "REJECTED"}
+            triple_rows = (
+                await session.execute(
+                    select(KnowledgeGraphTriple.triple_id, KnowledgeGraphTriple.review_status).where(
+                        KnowledgeGraphTriple.kb_id == kb_id
+                    )
+                )
+            ).all()
+            triple_ids = {triple_id for triple_id, _status in triple_rows}
+            rejected_triple_ids = {triple_id for triple_id, status in triple_rows if status == "REJECTED"}
+            mention_rows = (
+                await session.execute(
+                    select(KnowledgeGraphEntityMention.chunk_id, KnowledgeGraphEntityMention.entity_id).where(
+                        KnowledgeGraphEntityMention.kb_id == kb_id
+                    )
+                )
+            ).all()
+            chunk_rows = (
+                await session.execute(
+                    select(KnowledgeChunk.chunk_id, KnowledgeChunk.graph_indexed).where(KnowledgeChunk.kb_id == kb_id)
+                )
+            ).all()
+            kb_name = await session.scalar(select(KnowledgeBase.name).where(KnowledgeBase.kb_id == kb_id))
+        return {
+            "entity_ids": entity_ids,
+            "triple_ids": triple_ids,
+            "rejected_entity_ids": rejected_entity_ids,
+            "rejected_triple_ids": rejected_triple_ids,
+            "mention_keys": {mention_key(chunk_id, entity_id) for chunk_id, entity_id in mention_rows},
+            "chunk_ids": {chunk_id for chunk_id, _indexed in chunk_rows},
+            "graph_indexed_chunk_ids": {chunk_id for chunk_id, indexed in chunk_rows if indexed},
             "kb_name": kb_name,
         }
 

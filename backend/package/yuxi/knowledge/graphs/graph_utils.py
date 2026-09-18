@@ -45,6 +45,11 @@ def graph_triple_collection_name(kb_id: str) -> str:
     return f"{kb_id}_triple"
 
 
+def mention_key(chunk_id: str, entity_id: str) -> str:
+    """Chunk→Entity 提及的业务键；PG entity_mentions 与 Neo4j MENTIONS 边对账共用。"""
+    return f"{chunk_id}->{entity_id}"
+
+
 def build_graph_payload(normalized_result: dict[str, Any]) -> dict[str, Any]:
     """将抽取器产出的标准化结果转换为 Neo4j 写入所需的图结构。
 
