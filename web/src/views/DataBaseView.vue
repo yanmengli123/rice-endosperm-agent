@@ -335,7 +335,7 @@
             class="derived-product-hint"
             type="warning"
             show-icon
-            message="点击创建后仅生成 DRAFT 知识库（不含数据）；随后在知识库详情页完成数据导入、校验与发布。"
+            message="点击创建后仅生成 DRAFT 知识库（不含数据）；随后在知识库详情页完成数据导入与校验。"
           />
         </div>
       </div>
@@ -1128,7 +1128,6 @@ const createEmptyDatabaseForm = () => ({
   tool_description: '',
   embedding_model_spec: configStore.config?.embed_model,
   kb_type: '',
-  storage: '',
   additional_params: {}
 })
 
@@ -1257,9 +1256,7 @@ const buildRequestData = () => {
   }
 
   // 高级路径：外部知识源类型自己的动态参数
-  if (['milvus'].includes(newDatabase.kb_type) && newDatabase.storage) {
-    requestData.additional_params.storage = newDatabase.storage
-  }
+  // （storage 死分支已移除：UI 从未写入该值，且高级区不可能出现 milvus）
   for (const field of createParamOptions.value) {
     const value = newDatabase.additional_params[field.key]
     requestData.additional_params[field.key] = typeof value === 'string' ? value.trim() : value
@@ -1286,11 +1283,13 @@ const handleCreateDatabase = async () => {
     state.openNewDatabaseModel = false
     // 规范图谱创建成功后直接引导到图谱页执行 CSV 导入
     if (selectedKey === 'managed_graph') {
-      const createdKbId =
-        data?.kb_id || data?.database?.kb_id || databaseStore.databases?.[0]?.kb_id || ''
+      const createdKbId = data?.kb_id || data?.database?.kb_id || ''
       if (createdKbId) {
         router.push(`/extensions/knowledgebase/${createdKbId}?tab=graph`)
         message.info('知识库已创建（DRAFT），请在图谱页导入节点 CSV 与关系 CSV')
+      } else {
+        // 响应缺失 kb_id 属异常：留在列表页提示，避免跳到列表首个（可能非刚建的）库
+        message.warning('知识库已创建，但响应未包含 ID，请在列表中打开新库执行图谱导入')
       }
     }
   } catch {
