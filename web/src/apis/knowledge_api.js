@@ -710,8 +710,14 @@ export const typeApi = {
    */
   getStatistics: async () => {
     return apiAdminGet('/api/knowledge/stats')
-  },
+  }
+}
 
+// =============================================================================
+// === CSV 数据集分组（Canonical 导入，知识库级端点） ===
+// =============================================================================
+
+export const datasetApi = {
   /**
    * CSV 数据集预检：列统计、编码/分隔符检测、映射建议（不落库）
    * @param {string} kbId - 知识库ID（csv_record / csv_qa 契约）

@@ -190,7 +190,7 @@
 import { computed, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { AlertTriangle, Check, FileUp, Table } from '@lucide/vue'
-import { databaseApi } from '@/apis/knowledge_api'
+import { datasetApi } from '@/apis/knowledge_api'
 import { formatFileSize } from '@/utils/file_utils'
 
 const props = defineProps({
@@ -271,7 +271,7 @@ async function runPreview() {
   preview.value = null
   importResult.value = null
   try {
-    const payload = await databaseApi.previewCsvDataset(props.kbId, selectedFile.value)
+    const payload = await datasetApi.previewCsvDataset(props.kbId, selectedFile.value)
     preview.value = payload
     applySuggestedMapping(payload)
   } catch (error) {
@@ -286,7 +286,7 @@ async function runImport() {
   importing.value = true
   errorMessage.value = ''
   try {
-    const payload = await databaseApi.importCsvDataset(props.kbId, selectedFile.value, {
+    const payload = await datasetApi.importCsvDataset(props.kbId, selectedFile.value, {
       ...(isQaContract.value
         ? { question_col: mapping.question_col, answer_col: mapping.answer_col }
         : { identity_column: mapping.identity_column || undefined })
