@@ -1033,7 +1033,8 @@ const policyKeyLabel = (key) => {
     ingest: '数据接入',
     identity: '记录识别',
     strict_validation: '严格校验',
-    rollback: '回滚'
+    rollback: '回滚',
+    navigation_products: '导航派生产品'
   }
   return labels[key] || key
 }

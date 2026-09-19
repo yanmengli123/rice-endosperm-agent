@@ -130,12 +130,10 @@ PDF_EVIDENCE = SourceContractSpec(
         operator_description="供课题组查询论文实验结论和出处的证据库。",
         entry_mode="primary",
     ),
-    allowed_commands=(*_DOCUMENT_LIFECYCLE, *_RELEASE),
+    allowed_commands=(*_DOCUMENT_LIFECYCLE, *_RELEASE, *_LLM_GRAPH, COMMAND_MINDMAP_GENERATE),
     forbidden_commands=(
         COMMAND_FETCH_URL,
-        *_LLM_GRAPH,
         *_GRAPH_IMPORT,
-        COMMAND_MINDMAP_GENERATE,
         *_DATASET,
     ),
     accepted_media=(
@@ -150,6 +148,8 @@ PDF_EVIDENCE = SourceContractSpec(
         "canonical_store": "postgresql_parse_revisions",
         "retrieval_projection": "milvus_hybrid",
         "model_summary": "non_authoritative_citation_only",
+        "llm_graph": "navigation_projection_non_authoritative",
+        "mindmap": "navigation_projection_non_authoritative",
     },
     required_provenance=("source_sha256", "parse_revision_id", "anchor_id"),
     base_capabilities={
@@ -168,6 +168,7 @@ PDF_EVIDENCE = SourceContractSpec(
         "parsing": "PyMuPDF 原生锚点 + MinerU 正文/版面 + 条件式 GROBID 题录",
         "retrieval": "混合检索（向量 + BM25）+ 科研多样性约束",
         "quality_gate": "validate_markdown_quality 拒绝空白/乱码，不可绕过",
+        "navigation_products": "LLM 图谱与思维导图为派生导航产品，非权威事实，不进入证据通道",
     },
 )
 
@@ -175,12 +176,12 @@ PDF_EVIDENCE = SourceContractSpec(
 # === csv_record@1.0.0 / csv_qa@1.0.0：CSV 结构化数据集 ===
 # =============================================================================
 
+# LLM 图谱与思维导图是「派生导航产品」，永不进入证据通道（对齐 ADR-0001 的 LLM-Wiki 四平面哲学）：
+# csv/pdf 权威源契约允许生成，不影响权威纯度；仅 managed_graph 保持完全禁止（规范图谱只应来自 Canonical 导入）。
 _CSV_SHARED_FORBIDDEN = (
     *_DOCUMENT_LIFECYCLE,
     COMMAND_FETCH_URL,
-    *_LLM_GRAPH,
     *_GRAPH_IMPORT,
-    COMMAND_MINDMAP_GENERATE,
 )
 
 CSV_RECORD = SourceContractSpec(
@@ -199,6 +200,8 @@ CSV_RECORD = SourceContractSpec(
     allowed_commands=(
         *_DATASET,
         *_RELEASE,
+        *_LLM_GRAPH,
+        COMMAND_MINDMAP_GENERATE,
         COMMAND_DOCUMENT_DELETE,
         COMMAND_DOCUMENT_MOVE,
         COMMAND_FOLDER_CREATE,
@@ -217,6 +220,8 @@ CSV_RECORD = SourceContractSpec(
         "artifact_store": "object_storage_csv_sha256",
         "canonical_store": "postgresql_canonical_records",
         "retrieval_projection": "deterministic_from_canonical_records",
+        "llm_graph": "navigation_projection_non_authoritative",
+        "mindmap": "navigation_projection_non_authoritative",
     },
     required_provenance=(
         "source_sha256",
@@ -236,6 +241,7 @@ CSV_RECORD = SourceContractSpec(
     processing_policy={
         "chunking": "行级记录投影 · 由规范记录确定性生成",
         "ingest": "上传 → Schema/列映射预检 → Canonical Commit → 建索引",
+        "navigation_products": "LLM 图谱与思维导图为派生导航产品，非权威事实，不进入证据通道",
         "identity": (
             "业务主键跨版本稳定；未提供主键时按 dataset_revision_id + row_number 生成（UI 须明示不可跨版本稳定识别）"
         ),

@@ -5,10 +5,15 @@ from __future__ import annotations
 import pytest
 
 from yuxi.knowledge.source_contracts import (
+    COMMAND_DATASET_IMPORT,
+    COMMAND_DATASET_PREVIEW,
     COMMAND_DOCUMENT_UPLOAD,
     COMMAND_FETCH_URL,
     COMMAND_GRAPH_IMPORT_EXECUTE,
     COMMAND_LLM_GRAPH_BUILD,
+    COMMAND_LLM_GRAPH_CONFIG,
+    COMMAND_LLM_GRAPH_RESET,
+    COMMAND_MINDMAP_GENERATE,
     ContractCommandForbidden,
     ContractMediaRejected,
     SourceContractError,
@@ -70,6 +75,9 @@ class TestRegistry:
     def test_managed_graph_forbids_llm_and_documents(self):
         spec = resolve_contract("managed_graph")
         assert COMMAND_LLM_GRAPH_BUILD not in spec.allowed_commands
+        assert COMMAND_LLM_GRAPH_CONFIG not in spec.allowed_commands
+        assert COMMAND_LLM_GRAPH_RESET not in spec.allowed_commands
+        assert COMMAND_MINDMAP_GENERATE not in spec.allowed_commands
         assert COMMAND_DOCUMENT_UPLOAD not in spec.allowed_commands
         assert COMMAND_GRAPH_IMPORT_EXECUTE in spec.allowed_commands
 
@@ -77,6 +85,8 @@ class TestRegistry:
         spec = resolve_contract("pdf_evidence")
         assert spec.authority_policy["canonical_store"] == "postgresql_parse_revisions"
         assert spec.authority_policy["model_summary"] == "non_authoritative_citation_only"
+        assert spec.authority_policy["llm_graph"] == "navigation_projection_non_authoritative"
+        assert spec.authority_policy["mindmap"] == "navigation_projection_non_authoritative"
 
     def test_csv_qa_requires_mapping_semantics(self):
         spec = resolve_contract("csv_qa")
@@ -90,6 +100,70 @@ class TestRegistry:
         assert COMMAND_FETCH_URL in spec.allowed_commands
         assert COMMAND_LLM_GRAPH_BUILD in spec.allowed_commands
         assert COMMAND_GRAPH_IMPORT_EXECUTE not in spec.allowed_commands
+
+
+class TestNavigationProductCommands:
+    """LLM 图谱与思维导图是「派生导航产品」：csv/pdf 允许生成，managed_graph 保持禁止。
+
+    回归背景：csv_record 库（稻胚乳缩写词典 kb_g7g7wr8dei）在 `/graph-build/index`
+    与 `/mindmap/generate` 处 422 `SOURCE_CONTRACT_VIOLATION`——严格契约把导航产品
+    命令误列入 `forbidden_commands`，禁令盖过了真实工作流（见 ADR-0001 四平面哲学）。
+    """
+
+    NAVIGATION_COMMANDS = (
+        COMMAND_MINDMAP_GENERATE,
+        COMMAND_LLM_GRAPH_BUILD,
+        COMMAND_LLM_GRAPH_CONFIG,
+        COMMAND_LLM_GRAPH_RESET,
+    )
+
+    def test_csv_record_allows_navigation_products(self):
+        spec = resolve_contract("csv_record", "1.0.0")
+        for command in self.NAVIGATION_COMMANDS:
+            assert command in spec.allowed_commands
+            assert command not in spec.forbidden_commands
+
+    def test_csv_record_still_forbids_document_lifecycle_and_graph_import(self):
+        spec = resolve_contract("csv_record", "1.0.0")
+        assert COMMAND_DOCUMENT_UPLOAD not in spec.allowed_commands
+        assert COMMAND_FETCH_URL not in spec.allowed_commands
+        assert COMMAND_GRAPH_IMPORT_EXECUTE not in spec.allowed_commands
+        assert COMMAND_DATASET_IMPORT in spec.allowed_commands
+        assert COMMAND_DATASET_PREVIEW in spec.allowed_commands
+
+    def test_csv_qa_inherits_csv_record_navigation_products(self):
+        spec = resolve_contract("csv_qa", "1.0.0")
+        for command in self.NAVIGATION_COMMANDS:
+            assert command in spec.allowed_commands
+
+    def test_pdf_evidence_allows_navigation_products(self):
+        spec = resolve_contract("pdf_evidence", "1.0.0")
+        for command in self.NAVIGATION_COMMANDS:
+            assert command in spec.allowed_commands
+            assert command not in spec.forbidden_commands
+        assert COMMAND_DOCUMENT_UPLOAD in spec.allowed_commands
+        assert COMMAND_DATASET_IMPORT not in spec.allowed_commands
+        assert COMMAND_GRAPH_IMPORT_EXECUTE not in spec.allowed_commands
+
+    def test_managed_graph_still_forbids_navigation_products(self):
+        spec = resolve_contract("managed_graph", "1.0.0")
+        for command in self.NAVIGATION_COMMANDS:
+            assert command not in spec.allowed_commands
+            assert command in spec.forbidden_commands
+        assert spec.authority_policy["llm_extraction"] == "forbidden"
+
+    def test_authority_policy_marks_navigation_products_non_authoritative(self):
+        for key in ("csv_record", "csv_qa", "pdf_evidence", "generic_document"):
+            policy = resolve_contract(key, "1.0.0").authority_policy
+            assert policy["llm_graph"] == "navigation_projection_non_authoritative"
+        for key in ("csv_record", "csv_qa", "pdf_evidence"):
+            policy = resolve_contract(key, "1.0.0").authority_policy
+            assert policy["mindmap"] == "navigation_projection_non_authoritative"
+
+    def test_navigation_products_documented_in_processing_policy(self):
+        for key in ("csv_record", "pdf_evidence"):
+            policy = resolve_contract(key, "1.0.0").processing_policy
+            assert "navigation_products" in policy
 
 
 class TestDigest:
@@ -227,6 +301,42 @@ async def test_command_gate_allows_and_forbids(monkeypatch):
         await gate.require_contract_command("kb_1", COMMAND_DOCUMENT_UPLOAD)
     assert exc_info.value.error_code == "SOURCE_CONTRACT_VIOLATION"
     assert exc_info.value.http_status == 422
+
+
+@pytest.mark.asyncio
+async def test_command_gate_allows_csv_record_navigation_products(monkeypatch):
+    """回归：csv_record 库（稻胚乳缩写词典）的图谱构建/思维导图生成不再 422。"""
+    from yuxi.knowledge.source_contracts import gate
+
+    spec = resolve_contract("csv_record", "1.0.0")
+
+    async def fake_load(kb_id):
+        return spec
+
+    monkeypatch.setattr(gate, "load_kb_contract", fake_load)
+    for command in (COMMAND_LLM_GRAPH_BUILD, COMMAND_MINDMAP_GENERATE, COMMAND_LLM_GRAPH_RESET):
+        assert (await gate.require_contract_command("kb_g7g7wr8dei", command)) is spec
+    # 数据集契约仍然禁止文档生命周期命令（权威纯度不回退）
+    with pytest.raises(ContractCommandForbidden) as exc_info:
+        await gate.require_contract_command("kb_g7g7wr8dei", COMMAND_DOCUMENT_UPLOAD)
+    assert exc_info.value.error_code == "SOURCE_CONTRACT_VIOLATION"
+    assert exc_info.value.http_status == 422
+
+
+@pytest.mark.asyncio
+async def test_command_gate_managed_graph_still_blocks_navigation_products(monkeypatch):
+    """managed_graph 契约保持严格：图谱只应来自 Canonical 导入。"""
+    from yuxi.knowledge.source_contracts import gate
+
+    spec = resolve_contract("managed_graph", "1.0.0")
+
+    async def fake_load(kb_id):
+        return spec
+
+    monkeypatch.setattr(gate, "load_kb_contract", fake_load)
+    for command in (COMMAND_LLM_GRAPH_BUILD, COMMAND_MINDMAP_GENERATE):
+        with pytest.raises(ContractCommandForbidden):
+            await gate.require_contract_command("kb_managed", command)
 
 
 @pytest.mark.asyncio
