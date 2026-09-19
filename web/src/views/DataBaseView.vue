@@ -1242,14 +1242,17 @@ const buildRequestData = () => {
     user_uids: shareConfig.value.access_level === 'user' ? shareConfig.value.user_uids || [] : []
   }
 
+  // 内容领域与工具说明对契约路径与外部连接器路径同属 Step2 表单（后端 create_database
+  // 统一受理），必须放公共段——此前只在契约分支写入，连接器路径用户填了即被静默丢弃
+  requestData.content_domain = newDatabase.content_domain?.trim() || ''
+  requestData.tool_description = newDatabase.tool_description?.trim() || ''
+
   if (state.selectedContractKey) {
     // 契约路径：分块/解析/检索参数由系统托管，前端不传处理参数
     requestData.source_contract = {
       key: state.selectedContractKey,
       version: contractVersion.value
     }
-    requestData.content_domain = newDatabase.content_domain?.trim() || ''
-    requestData.tool_description = newDatabase.tool_description?.trim() || ''
     return requestData
   }
 

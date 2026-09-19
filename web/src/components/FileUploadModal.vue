@@ -523,7 +523,13 @@ const emit = defineEmits(['update:visible', 'success'])
 const store = useDatabaseStore()
 const configStore = useConfigStore()
 const DEFAULT_OCR_ENGINE = 'rapid_ocr'
-const isPdfEvidenceLibrary = computed(() => props.formatTemplate === 'pdf_literature')
+const isPdfEvidenceLibrary = computed(() => {
+  // 判据以契约为唯一权威（新建 pdf_evidence 契约库不写 format_template，
+  // 该字段只作为 legacy 模板库（如 RC-G3）的兜底）
+  const contractKey = String(store.database?.contract_key || '').trim()
+  if (contractKey) return contractKey === 'pdf_evidence'
+  return props.formatTemplate === 'pdf_literature'
+})
 
 // 文件夹选择相关
 const selectedFolderId = ref(null)
@@ -1151,8 +1157,8 @@ const ocrEngineOptions = [
 ]
 
 const resolveDefaultOcrEngine = () => {
-  // PDF 文献证据库模板：默认使用 MinerU 官方引擎（文献解析质量优先）
-  if (props.formatTemplate === 'pdf_literature') {
+  // PDF 文献证据库：默认使用 MinerU 官方引擎（文献解析质量优先），判据同 isPdfEvidenceLibrary
+  if (isPdfEvidenceLibrary.value) {
     return 'mineru_official'
   }
   const configuredEngine = String(
