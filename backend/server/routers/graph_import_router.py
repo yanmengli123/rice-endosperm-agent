@@ -18,6 +18,14 @@ from yuxi.knowledge.graphs.managed_import_service import (
     GRAPH_IMPORT_TASK_TYPE,
     ManagedGraphImportService,
 )
+from yuxi.knowledge.source_contracts import (
+    COMMAND_GRAPH_IMPORT_EXECUTE,
+    COMMAND_GRAPH_IMPORT_ROLLBACK,
+    COMMAND_GRAPH_IMPORT_UPLOAD,
+    COMMAND_GRAPH_IMPORT_VALIDATE,
+    SourceContractError,
+    require_contract_command,
+)
 from yuxi.services.task_service import TaskContext, tasker
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
@@ -34,6 +42,16 @@ MAX_CYPHER_SIZE_BYTES = 5 * 1024 * 1024
 ACTIVE_TASK_STATUSES = {"pending", "running"}
 
 
+async def _require_graph_import_command(kb_id: str, command: str) -> None:
+    """统一命令门禁：契约 allowed/forbidden 是唯一权威源（此前仅服务层硬编码白名单，
+    形成双权威源且错误形态为 400 普通文案）；服务层校验保留为纵深防御。
+    错误形态与其余门禁端点一致：422 [SOURCE_CONTRACT_VIOLATION]。"""
+    try:
+        await require_contract_command(kb_id, command)
+    except SourceContractError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=f"[{exc.error_code}] {exc}") from exc
+
+
 @graph_import.post("/databases/{kb_id}/graph-imports")
 async def upload_graph_import(
     kb_id: str,
@@ -43,6 +61,7 @@ async def upload_graph_import(
     cypher_file: UploadFile | None = File(None),
     current_user: User = Depends(get_admin_user),
 ):
+    await _require_graph_import_command(kb_id, COMMAND_GRAPH_IMPORT_UPLOAD)
     _require_extension(nodes_file, ".csv", "节点文件必须是 CSV")
     _require_extension(relationships_file, ".csv", "关系文件必须是 CSV")
     if cypher_file:
@@ -164,6 +183,7 @@ async def validate_graph_import(
     data: dict | None = Body(default=None),
     current_user: User = Depends(get_admin_user),
 ):
+    await _require_graph_import_command(kb_id, COMMAND_GRAPH_IMPORT_VALIDATE)
     service = ManagedGraphImportService()
     await _require_scoped_import(service, kb_id, import_id)
     try:
@@ -179,6 +199,8 @@ async def execute_graph_import(
     data: dict | None = Body(default=None),
     current_user: User = Depends(get_admin_user),
 ):
+    # 执行前复检契约（上传时校验过，但契约清单是唯一权威源，各写入口独立执法）
+    await _require_graph_import_command(kb_id, COMMAND_GRAPH_IMPORT_EXECUTE)
     service = ManagedGraphImportService()
     record = await _require_scoped_import(service, kb_id, import_id)
     resolutions = (data or {}).get("resolutions") or {}
@@ -206,6 +228,7 @@ async def rollback_graph_import(
     import_id: str,
     current_user: User = Depends(get_admin_user),
 ):
+    await _require_graph_import_command(kb_id, COMMAND_GRAPH_IMPORT_ROLLBACK)
     service = ManagedGraphImportService()
     record = await _require_scoped_import(service, kb_id, import_id)
 

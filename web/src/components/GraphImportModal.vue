@@ -1,11 +1,5 @@
 <template>
-  <a-modal
-    :open="open"
-    title="托管图谱导入"
-    width="920px"
-    :footer="null"
-    @cancel="close"
-  >
+  <a-modal :open="open" title="托管图谱导入" width="920px" :footer="null" @cancel="close">
     <a-alert
       type="info"
       show-icon
@@ -18,7 +12,11 @@
       <a-tab-pane key="new" tab="新建导入">
         <a-form layout="vertical">
           <a-form-item label="批次名称">
-            <a-input v-model:value="batchName" :maxlength="255" placeholder="例如：水稻胚乳图谱 v3" />
+            <a-input
+              v-model:value="batchName"
+              :maxlength="255"
+              placeholder="例如：水稻胚乳图谱 v3"
+            />
           </a-form-item>
           <div class="file-grid">
             <FilePicker
@@ -64,12 +62,7 @@
             <a-tag :color="statusMeta.color">{{ statusMeta.label }}</a-tag>
           </div>
 
-          <a-progress
-            v-if="isRunning"
-            :percent="taskProgress"
-            status="active"
-            :show-info="true"
-          />
+          <a-progress v-if="isRunning" :percent="taskProgress" status="active" :show-info="true" />
           <a-alert
             v-if="currentImport.error_message"
             type="error"
@@ -78,7 +71,9 @@
             :message="currentImport.error_message"
           />
           <a-alert
-            v-if="currentImport.status === 'SUCCEEDED' && currentImport.result?.reconciliation?.matched"
+            v-if="
+              currentImport.status === 'SUCCEEDED' && currentImport.result?.reconciliation?.matched
+            "
             type="success"
             show-icon
             class="report-alert"
@@ -104,7 +99,11 @@
 
           <div v-if="report?.blockers?.length" class="issue-list">
             <div class="issue-title error">阻塞错误（{{ report.blockers.length }}）</div>
-            <div v-for="item in report.blockers.slice(0, 8)" :key="issueKey(item)" class="issue-row">
+            <div
+              v-for="item in report.blockers.slice(0, 8)"
+              :key="issueKey(item)"
+              class="issue-row"
+            >
               <span>{{ item.code }}</span>
               <span>{{ item.message }}</span>
               <span v-if="item.row_number">第 {{ item.row_number }} 行</span>
@@ -130,7 +129,8 @@
           <details v-if="caseReviews.length" class="review-disclosure">
             <summary>大小写待核验（{{ caseReviews.length }}）· 非阻塞</summary>
             <p class="conflict-help">
-              系统已按规范名称自动合并并保留全部别名。可选择展示名，也可前往 RAP-DB / Rice Genome Annotation Project 核验；不选择不会阻止导入。
+              系统已按规范名称自动合并并保留全部别名。可选择展示名，也可前往 RAP-DB / Rice Genome
+              Annotation Project 核验；不选择不会阻止导入。
             </p>
             <div v-for="review in caseReviews" :key="review.review_id" class="case-review-row">
               <div>
@@ -148,16 +148,16 @@
                 </a-radio-button>
               </a-radio-group>
               <div class="registry-links">
-                <a href="https://rapdb.dna.naro.go.jp/" target="_blank" rel="noopener noreferrer">RAP-DB</a>
+                <a href="https://rapdb.dna.naro.go.jp/" target="_blank" rel="noopener noreferrer"
+                  >RAP-DB</a
+                >
                 <a href="https://rice.uga.edu/" target="_blank" rel="noopener noreferrer">RGAP</a>
               </div>
             </div>
           </details>
 
           <div v-if="report?.conflicts?.length" class="conflict-section">
-            <div class="issue-title error">
-              需要人工选择（{{ report.conflicts.length }}）
-            </div>
+            <div class="issue-title error">需要人工选择（{{ report.conflicts.length }}）</div>
             <p class="conflict-help">
               系统不会猜测大小写名称或把基因与突变体自动合并。语义类型冲突会保留为不同实体；这里选择关系端点默认指向的记录。
             </p>
@@ -194,8 +194,13 @@
           <div v-if="report?.semantic_splits?.length" class="semantic-section">
             <div class="semantic-title-row">
               <div>
-                <div class="issue-title safe">安全拆分方案（{{ report.semantic_splits.length }}）</div>
-                <p class="conflict-help">默认保留 Gene 与 AlleleMutant 两个实体、建立 ALLELE_OF，并按证据语义逐行路由。以下方案可直接导入，也可逐关系覆盖。</p>
+                <div class="issue-title safe">
+                  安全拆分方案（{{ report.semantic_splits.length }}）
+                </div>
+                <p class="conflict-help">
+                  默认保留 Gene 与 AlleleMutant 两个实体、建立
+                  ALLELE_OF，并按证据语义逐行路由。以下方案可直接导入，也可逐关系覆盖。
+                </p>
               </div>
               <a-tag color="green">科研语义安全</a-tag>
             </div>
@@ -211,18 +216,30 @@
               <div class="entity-preview-grid">
                 <label class="entity-preview gene-preview">
                   <span>Gene</span>
-                  <a-input v-model:value="semanticResolutions[split.split_id].gene_name" size="small" :disabled="!reviewEditable" />
+                  <a-input
+                    v-model:value="semanticResolutions[split.split_id].gene_name"
+                    size="small"
+                    :disabled="!reviewEditable"
+                  />
                   <code>{{ split.preview.gene.canonical_identity }}</code>
                 </label>
                 <div class="allele-arrow">ALLELE_OF →</div>
                 <label class="entity-preview allele-preview">
                   <span>AlleleMutant</span>
-                  <a-input v-model:value="semanticResolutions[split.split_id].allele_name" size="small" :disabled="!reviewEditable" />
+                  <a-input
+                    v-model:value="semanticResolutions[split.split_id].allele_name"
+                    size="small"
+                    :disabled="!reviewEditable"
+                  />
                   <code>{{ split.preview.allele.canonical_identity }}</code>
                 </label>
               </div>
               <div class="route-table">
-                <div v-for="route in split.relation_routes" :key="route.row_number" class="route-row">
+                <div
+                  v-for="route in split.relation_routes"
+                  :key="route.row_number"
+                  class="route-row"
+                >
                   <div>
                     <strong>第 {{ route.row_number }} 行 · {{ route.relation_type }}</strong>
                     <span>{{ route.start_id }} → {{ route.end_id }}</span>
@@ -231,7 +248,11 @@
                   <label v-for="(_, endpoint) in route.endpoints" :key="endpoint">
                     {{ endpoint === 'start' ? '起点' : '终点' }}
                     <a-select
-                      v-model:value="semanticResolutions[split.split_id].relation_routes[String(route.row_number)][endpoint]"
+                      v-model:value="
+                        semanticResolutions[split.split_id].relation_routes[
+                          String(route.row_number)
+                        ][endpoint]
+                      "
                       size="small"
                       style="width: 130px"
                       :disabled="!reviewEditable"
@@ -264,12 +285,7 @@
               <ShieldCheck :size="16" />
               应用审阅方案并重新预检
             </a-button>
-            <a-button
-              v-if="canExecute"
-              type="primary"
-              :loading="executing"
-              @click="executeImport"
-            >
+            <a-button v-if="canExecute" type="primary" :loading="executing" @click="executeImport">
               <Play :size="16" />
               开始后台导入
             </a-button>
@@ -334,6 +350,7 @@ import { computed, defineComponent, h, onUnmounted, reactive, ref, watch } from 
 import { Modal, message } from 'ant-design-vue'
 import { FileSpreadsheet, Play, RefreshCw, ShieldCheck, Upload } from '@lucide/vue'
 import { graphImportApi } from '@/apis/knowledge_api'
+import { useDatabaseStore } from '@/stores/database'
 import { useTaskerStore } from '@/stores/tasker'
 
 const props = defineProps({
@@ -342,6 +359,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:open', 'imported'])
 const taskerStore = useTaskerStore()
+const databaseStore = useDatabaseStore()
 
 const activeTab = ref('new')
 const batchName = ref('水稻胚乳托管图谱导入')
@@ -421,9 +439,12 @@ const FilePicker = defineComponent({
 const report = computed(() => currentImport.value?.validation_report || null)
 const statusMeta = computed(() => getStatusMeta(currentImport.value?.status))
 const isRunning = computed(() => ACTIVE_STATUSES.has(currentImport.value?.status))
-const reviewEditable = computed(() => !['SUCCEEDED', 'ROLLED_BACK'].includes(currentImport.value?.status))
+const reviewEditable = computed(
+  () => !['SUCCEEDED', 'ROLLED_BACK'].includes(currentImport.value?.status)
+)
 const canExecute = computed(
-  () => report.value?.valid && ['READY', 'FAILED', 'CANCELLED'].includes(currentImport.value?.status)
+  () =>
+    report.value?.valid && ['READY', 'FAILED', 'CANCELLED'].includes(currentImport.value?.status)
 )
 const caseReviews = computed(() =>
   (report.value?.warnings || []).filter((item) => item.code === 'CASE_UNRESOLVED' && item.review_id)
@@ -463,8 +484,20 @@ const reconciliationDescription = computed(() => {
 watch(
   () => props.open,
   (open) => {
-    if (open) loadHistory()
-    else stopPolling()
+    if (open) {
+      // 契约顶层复检（防绕过入口按钮直接打开）：graph_import_* 命令以契约为唯一权威源
+      const contractKey = String(databaseStore.database?.contract_key || '').trim()
+      const allowed =
+        !contractKey || contractKey.startsWith('legacy_') || contractKey === 'managed_graph'
+      if (!allowed) {
+        message.error(
+          `知识源契约 ${contractKey} 不接受图谱导入命令，导入向导仅适用于 managed_graph（规范科研知识图谱）契约库`
+        )
+        emit('update:open', false)
+        return
+      }
+      loadHistory()
+    } else stopPolling()
   }
 )
 
@@ -488,7 +521,9 @@ const uploadAndValidate = async () => {
     })
     currentImport.value = response.data
     hydrateResolutions()
-    message.success(response.deduplicated ? '检测到相同文件，已打开已有导入批次' : '上传完成，预检报告已生成')
+    message.success(
+      response.deduplicated ? '检测到相同文件，已打开已有导入批次' : '上传完成，预检报告已生成'
+    )
     await loadHistory()
   } catch (error) {
     message.error(error.message || '上传与预检失败')
@@ -592,7 +627,8 @@ const viewImport = (record) => {
 const confirmRollback = (record) => {
   Modal.confirm({
     title: '确认回滚这个导入批次？',
-    content: '只会删除失去全部来源的数据；其他导入或文档仍引用的数据会保留，并重新校准 Neo4j/Milvus 投影。',
+    content:
+      '只会删除失去全部来源的数据；其他导入或文档仍引用的数据会保留，并重新校准 Neo4j/Milvus 投影。',
     okText: '安全回滚',
     okType: 'danger',
     cancelText: '取消',
@@ -635,7 +671,10 @@ const hydrateResolutions = () => {
     for (const route of split.relation_routes || []) {
       const savedRoute = value.relation_routes?.[String(route.row_number)] || {}
       relationRoutes[String(route.row_number)] = Object.fromEntries(
-        Object.entries(route.endpoints).map(([endpoint, role]) => [endpoint, savedRoute[endpoint] || role])
+        Object.entries(route.endpoints).map(([endpoint, role]) => [
+          endpoint,
+          savedRoute[endpoint] || role
+        ])
       )
     }
     semanticResolutions[split.split_id] = {
@@ -681,7 +720,17 @@ const close = () => emit('update:open', false)
 const issueKey = (item) => `${item.code}-${item.row_number || ''}-${item.message}`
 const formatDate = (value) => (value ? new Date(value).toLocaleString() : '-')
 const estimateProgress = (status) =>
-  ({ UPLOADED: 2, PARSING: 5, VALIDATING: 10, IMPORTING: 25, PROJECTING_NEO4J: 45, PROJECTING_MILVUS: 70, RECONCILING: 90, SUCCEEDED: 100, ROLLING_BACK: 55 }[status] || 0)
+  ({
+    UPLOADED: 2,
+    PARSING: 5,
+    VALIDATING: 10,
+    IMPORTING: 25,
+    PROJECTING_NEO4J: 45,
+    PROJECTING_MILVUS: 70,
+    RECONCILING: 90,
+    SUCCEEDED: 100,
+    ROLLING_BACK: 55
+  })[status] || 0
 const getStatusMeta = (status) => {
   const [label, color] = STATUS_META[status] || [status || '未知', 'default']
   return { label, color }
