@@ -24,7 +24,9 @@ from yuxi.knowledge.products.registry import is_derived_product
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
     KnowledgeChunk,
+    KnowledgeDoclexDefinition,
     KnowledgeFile,
+    KnowledgeGraphConflict,
     KnowledgeGraphEntity,
     KnowledgeGraphEntityAlias,
     KnowledgeGraphRelationEvidence,
@@ -51,7 +53,7 @@ from yuxi.storage.postgres.models_knowledge import (
 from yuxi.utils.datetime_utils import utc_now
 from yuxi.utils.logging_config import logger
 
-COMPILER_VERSION = "deterministic-authority-compiler/1.1"
+COMPILER_VERSION = "deterministic-authority-compiler/1.2"  # 1.2: 实体页定义口径并陈（R4a）
 VERIFICATION_POLICY_VERSION = "authority-evidence-required/1.0"
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{1,63}|[\u4e00-\u9fff]{2,12}")
 _NAVIGATION_STOP_WORDS = {
@@ -1077,6 +1079,46 @@ async def _compile_build(
         relations_by_entity[triple.target_entity_id].append(row)
         relation_groups[triple.triple_id].append(row)
 
+    # R4a 定义并陈：发育期实体的区间定义断言 + 未处置的定义冲突提示。
+    # 页面只引用区间/文献名/definition id，不复制引文正文（派生产品不回流证据）。
+    definitions_by_entity: dict[str, list[str]] = defaultdict(list)
+    definition_conflict_entities: set[str] = set()
+    stage_entity_names = {entity.normalized_name for entity in entities if entity.label == "DevelopmentStage"}
+    if stage_entity_names:
+        definition_rows = (
+            await db.execute(
+                select(KnowledgeDoclexDefinition, KnowledgeFile.filename, KnowledgeFile.original_filename)
+                .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeDoclexDefinition.file_id)
+                .where(
+                    KnowledgeDoclexDefinition.kb_id.in_(source_ids),
+                    KnowledgeDoclexDefinition.entity_normalized.in_(stage_entity_names),
+                )
+                .order_by(KnowledgeDoclexDefinition.entity_normalized, KnowledgeDoclexDefinition.file_id)
+            )
+        ).all()
+        for definition, filename, original_filename in definition_rows:
+            line = (
+                f"- {definition.interval_start}–{definition.interval_end} {definition.interval_unit or ''}"
+                f"（{definition.ref_event or '?'} 后）· 文献《{original_filename or filename}》"
+                f"· definition `{definition.definition_id}`"
+            )
+            definitions_by_entity[definition.entity_normalized].append(line)
+        open_definition_conflicts = (
+            (
+                await db.execute(
+                    select(KnowledgeGraphConflict.subject_ref).where(
+                        KnowledgeGraphConflict.kb_id.in_(source_ids),
+                        KnowledgeGraphConflict.kind == "DEFINITION",
+                        KnowledgeGraphConflict.status == "OPEN",
+                        KnowledgeGraphConflict.subject_ref.in_(stage_entity_names),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        definition_conflict_entities = set(open_definition_conflicts)
+
     page_revisions: dict[str, WikiPageRevision] = {}
     for entity in entities:
         entity_relations = relations_by_entity.get(entity.entity_id, [])
@@ -1090,6 +1132,13 @@ async def _compile_build(
         ]
         if alias_values:
             lines.append(f"- 别名：{', '.join(alias_values[:30])}")
+        entity_definitions = definitions_by_entity.get(entity.normalized_name, [])
+        if entity_definitions:
+            lines.append("")
+            lines.append("## 定义口径（区间断言，跨文献并陈）")
+            if entity.normalized_name in definition_conflict_entities:
+                lines.append("> ⚠ 该概念在文献间存在多种互不一致的定义口径，回答时须并陈而非取其一。")
+            lines.extend(entity_definitions[:10])
         lines.extend(["", "## 已验证关系导航"])
         if entity_relations:
             for triple, evidence, source_name, target_name in entity_relations[:200]:

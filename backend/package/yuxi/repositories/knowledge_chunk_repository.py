@@ -161,7 +161,16 @@ class KnowledgeChunkRepository:
             return int(result.scalar() or 0)
 
     async def count_graph_pending_by_kb_id(self, kb_id: str) -> int:
-        return await self._count_by_kb_id(kb_id, KnowledgeChunk.graph_indexed.is_not(True))
+        """待索引计数：死信排除在外（dead 单独计数），否则 remaining 口径与选取口径不一致。"""
+        return await self._count_by_kb_id(
+            kb_id, KnowledgeChunk.graph_indexed.is_not(True), KnowledgeChunk.graph_dead.is_not(True)
+        )
+
+    async def count_graph_dead_by_kb_id(self, kb_id: str) -> int:
+        """死信计数（未完成且 graph_dead）：构建结果与 get_status 单独暴露。"""
+        return await self._count_by_kb_id(
+            kb_id, KnowledgeChunk.graph_indexed.is_not(True), KnowledgeChunk.graph_dead.is_(True)
+        )
 
     async def _count_by_kb_id(self, kb_id: str, *conditions: Any) -> int:
         async with pg_manager.get_async_session_context() as session:
@@ -181,11 +190,71 @@ class KnowledgeChunkRepository:
             stmt = select(KnowledgeChunk).where(
                 KnowledgeChunk.kb_id == kb_id,
                 KnowledgeChunk.graph_indexed.is_not(True),
+                KnowledgeChunk.graph_dead.is_not(True),
             )
             if after_id is not None:
                 stmt = stmt.where(KnowledgeChunk.id > after_id)
             result = await session.execute(stmt.order_by(KnowledgeChunk.id.asc()).limit(max(limit, 1)))
             return list(result.scalars().all())
+
+    async def record_graph_attempt(self, chunk_id: str, error: str, *, dead_threshold: int) -> int:
+        """累计一次图谱构建失败并返回累计尝试数；达到阈值置死信（跨 job 持久）。
+
+        attempts 只反映失败（成功路径不调用）；graph_last_error 截 500 字符，
+        与构建结果 failed_details 同口径。
+        """
+        async with pg_manager.get_async_session_context() as session:
+            await session.execute(
+                update(KnowledgeChunk)
+                .where(KnowledgeChunk.chunk_id == chunk_id)
+                .values(
+                    graph_attempts=KnowledgeChunk.graph_attempts + 1,
+                    graph_last_error=(error or "")[:500] or None,
+                )
+            )
+            attempts = await session.scalar(
+                select(KnowledgeChunk.graph_attempts).where(KnowledgeChunk.chunk_id == chunk_id)
+            )
+            if attempts is not None and int(attempts) >= dead_threshold:
+                await session.execute(
+                    update(KnowledgeChunk)
+                    .where(KnowledgeChunk.chunk_id == chunk_id, KnowledgeChunk.graph_indexed.is_not(True))
+                    .values(graph_dead=True)
+                )
+            return int(attempts or 0)
+
+    async def revive_graph_chunks(self, kb_id: str) -> int:
+        """kb 级复活：清死信标志与累计尝试（配置修复后的运营入口），重新变为待索引。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                update(KnowledgeChunk)
+                .where(
+                    KnowledgeChunk.kb_id == kb_id,
+                    KnowledgeChunk.graph_dead.is_(True),
+                    KnowledgeChunk.graph_indexed.is_not(True),
+                )
+                .values(graph_dead=False, graph_attempts=0, graph_last_error=None)
+            )
+            return int(result.rowcount or 0)
+
+    async def count_stale_graph_cache_by_kb_id(self, kb_id: str) -> int:
+        """R7a 成本闸门：已缓存但无抽取指纹的历史 chunk 数（重建即全量重抽的预估下界）。
+
+        指纹失效的精确计数需逐 chunk 比对当前配置指纹（含 per-file doclex），
+        运营上以「无指纹缓存数」作为下界信号足够触发确认闸门。PG JSON 路径查询。
+        """
+        from sqlalchemy import text
+
+        async with pg_manager.get_async_session_context() as session:
+            value = await session.scalar(
+                text(
+                    "SELECT count(*) FROM knowledge_chunks "
+                    "WHERE kb_id = :kb_id AND extraction_result IS NOT NULL "
+                    "AND (extraction_result->'metadata'->>'extraction_fingerprint') IS NULL"
+                ),
+                {"kb_id": kb_id},
+            )
+            return int(value or 0)
 
     async def update_extraction_result(self, chunk_id: str, extraction_result: dict[str, Any]) -> None:
         async with pg_manager.get_async_session_context() as session:
@@ -201,7 +270,13 @@ class KnowledgeChunkRepository:
         ent_ids: list[str] | None = None,
         tags: list[str] | None = None,
     ) -> None:
-        values: dict[str, Any] = {"graph_indexed": True}
+        # 成功即清失败账（graph_attempts 只累计连续失败；复活语义由重抽/revive 入口承担）
+        values: dict[str, Any] = {
+            "graph_indexed": True,
+            "graph_dead": False,
+            "graph_attempts": 0,
+            "graph_last_error": None,
+        }
         if ent_ids is not None:
             values["ent_ids"] = ent_ids
         if tags is not None:
@@ -220,11 +295,18 @@ class KnowledgeChunkRepository:
             return int(result.rowcount or 0)
 
     async def reset_graph_state_by_chunk_id(self, chunk_id: str) -> int:
-        """单 chunk 重抽：清空该块的抽取缓存并重新标记待索引（不动 tags，那是分块期的块类型标签）。"""
+        """单 chunk 重抽：清空该块的抽取缓存并重新标记待索引（顺带复活死信：重抽入口即复活入口）。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 update(KnowledgeChunk)
                 .where(KnowledgeChunk.chunk_id == chunk_id)
-                .values(graph_indexed=False, extraction_result=None, ent_ids=None)
+                .values(
+                    graph_indexed=False,
+                    extraction_result=None,
+                    ent_ids=None,
+                    graph_dead=False,
+                    graph_attempts=0,
+                    graph_last_error=None,
+                )
             )
             return int(result.rowcount or 0)

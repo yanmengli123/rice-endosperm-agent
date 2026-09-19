@@ -20,6 +20,10 @@ class GraphExtractor(ABC):
     def validate_options(self) -> None:
         return None
 
+    def extraction_fingerprint(self, *, doclex_fingerprint: str | None = None) -> str | None:
+        """抽取配置指纹（D3 缓存失效）：返回 None 表示该抽取器不做指纹失效（保持旧行为）。"""
+        return None
+
 
 def normalize_extraction_result(result: dict[str, Any], extractor_type: str) -> dict[str, Any]:
     if not isinstance(result, dict):

@@ -2,6 +2,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
 from yuxi.knowledge.graphs.extractors.llm_scientific import SCIENTIFIC_RELATION_TYPES
 from yuxi.knowledge.graphs.graph_evidence_service import GraphEvidenceService
 from yuxi.knowledge.graphs.graph_review_service import GraphReviewService
@@ -329,6 +330,29 @@ class ReviewReextractBody(BaseModel):
     batch_size: int = Field(default=20, ge=1, le=200)
 
 
+class GateReviewResolveBody(BaseModel):
+    kb_id: str
+    review_id: str
+    action: Literal["PROMOTE", "DISCARD"]
+    note: str | None = None
+
+
+class ConflictResolveBody(BaseModel):
+    kb_id: str
+    conflict_id: str
+    resolution: Literal["SUPERSEDED", "CONTESTED", "RECONCILED"]
+    note: str | None = None
+
+
+class AliasPromoteBody(BaseModel):
+    kb_id: str
+    surface: str = Field(min_length=1, description="文档级别名 surface（如「该品种」解析出的别名）")
+    resolved_name: str = Field(min_length=1, description="规范实体名")
+    resolved_label: str = Field(default="Cultivar", description="实体类型（闭集）")
+    source_doclex_id: str | None = None
+    note: str | None = None
+
+
 def _review_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ReviewConflictError):
         return HTTPException(status_code=409, detail=str(exc))
@@ -533,4 +557,206 @@ async def review_audit(
     del current_user
     await _get_graph_kb_record(kb_id)
     data = await GraphReviewService().audit(kb_id, target_id=target_id, limit=limit)
+    return {"success": True, "data": data}
+
+
+@graph.get("/gate-reviews")
+async def gate_review_queue(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    status: str = Query("PENDING", description="PENDING / RESOLVED / ALL"),
+    gate_code: str | None = Query(None, description="G7_TRIGGER_UNVERIFIED / G9_NEGATION_REVIEW 等"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    current_user: User = Depends(get_admin_user),
+):
+    """门禁送审队列（D4）：G7 strict 未过与 G9 否定矛盾的关系候选，人工裁决后闭环。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    if status not in ("PENDING", "RESOLVED", "ALL"):
+        raise HTTPException(status_code=400, detail="status 必须是 PENDING / RESOLVED / ALL 之一")
+    data = await GraphReviewService().gate_reviews(
+        kb_id, status=status, gate_code=gate_code, page=page, page_size=page_size
+    )
+    return {"success": True, "data": data}
+
+
+@graph.post("/gate-reviews/resolve")
+async def gate_review_resolve(body: GateReviewResolveBody, current_user: User = Depends(get_admin_user)):
+    """裁决门禁送审候选：PROMOTE 升格为 APPROVED 三元组（引文逐字复核），DISCARD 关闭；幂等。"""
+    await _get_graph_kb_record(body.kb_id)
+    try:
+        data = await GraphReviewService().resolve_gate_review(
+            body.kb_id,
+            body.review_id,
+            action=body.action,
+            actor_uid=str(current_user.uid),
+            note=body.note,
+        )
+    except ValueError as exc:
+        raise _review_error(exc)
+    return {"success": True, "data": data}
+
+
+@graph.get("/conflicts")
+async def conflict_queue(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    kind: str | None = Query(None, description="DIRECTION / DEFINITION"),
+    status: str = Query("OPEN", description="OPEN / RESOLVED / ALL"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    current_user: User = Depends(get_admin_user),
+):
+    """冲突队列（D6）：同条件极性矛盾与定义区间口径不一，只登记不删证。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    if status not in ("OPEN", "RESOLVED", "ALL"):
+        raise HTTPException(status_code=400, detail="status 必须是 OPEN / RESOLVED / ALL 之一")
+    if kind is not None and kind not in ("DIRECTION", "DEFINITION"):
+        raise HTTPException(status_code=400, detail="kind 必须是 DIRECTION / DEFINITION")
+    data = await GraphReviewService().conflicts(kb_id, kind=kind, status=status, page=page, page_size=page_size)
+    return {"success": True, "data": data}
+
+
+@graph.post("/conflicts/resolve")
+async def conflict_resolve(body: ConflictResolveBody, current_user: User = Depends(get_admin_user)):
+    """冲突裁决三态：SUPERSEDED（新代旧）/ CONTESTED（并陈）/ RECONCILED（条件互补）；不动证据行。"""
+    await _get_graph_kb_record(body.kb_id)
+    try:
+        data = await GraphReviewService().resolve_conflict(
+            body.kb_id,
+            body.conflict_id,
+            resolution=body.resolution,
+            actor_uid=str(current_user.uid),
+            note=body.note,
+        )
+    except ValueError as exc:
+        raise _review_error(exc)
+    return {"success": True, "data": data}
+
+
+@graph.post("/alias-promote")
+async def alias_promote(body: AliasPromoteBody, current_user: User = Depends(get_admin_user)):
+    """R4c 词典晋升：文档级别名升为 KB 级官方别名（决策 + 别名表 + 审计，幂等）。"""
+    await _get_graph_kb_record(body.kb_id)
+    try:
+        data = await GraphReviewService().promote_alias(
+            body.kb_id,
+            surface=body.surface,
+            resolved_name=body.resolved_name,
+            resolved_label=body.resolved_label,
+            actor_uid=str(current_user.uid),
+            source_doclex_id=body.source_doclex_id,
+            note=body.note,
+        )
+    except ValueError as exc:
+        raise _review_error(exc)
+    return {"success": True, "data": data}
+
+
+@graph.get("/shortcut-suspects")
+async def shortcut_suspects(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: User = Depends(get_admin_user),
+):
+    """R5c 可疑传递边报表：A→C 直连与 A→B→C 共存、且 A→C 引文不提及 B——LLM 脑补
+    传递推理的高危信号，供人工复核（运营工具，检索期不跑）。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    from yuxi.knowledge.graphs.shortcut_detector import detect_shortcut_edges
+
+    items = await detect_shortcut_edges(kb_id, limit=limit)
+    return {"success": True, "data": {"items": items, "total": len(items)}}
+
+
+class GoldenSampleBody(BaseModel):
+    kb_id: str
+    chunk_id: str
+    expected_triples: list[dict[str, str]] = Field(min_length=1, description="[{source, predicate, object}]")
+    note: str | None = None
+
+
+@graph.post("/golden-samples")
+async def golden_sample_register(body: GoldenSampleBody, current_user: User = Depends(get_admin_user)):
+    """R7b：注册 golden 抽检样本（人工标注的 chunk 期望三元组，晋升门禁标尺）。"""
+    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.storage.postgres.models_knowledge import KnowledgeGraphGoldenSample
+    from sqlalchemy.dialects.postgresql import insert
+
+    await _get_graph_kb_record(body.kb_id)
+    async with pg_manager.get_async_session_context() as session:
+        stmt = insert(KnowledgeGraphGoldenSample).values(
+            kb_id=body.kb_id,
+            chunk_id=body.chunk_id,
+            expected_triples=[
+                item.model_dump() if hasattr(item, "model_dump") else dict(item) for item in body.expected_triples
+            ],
+            note=body.note,
+            created_by=str(current_user.uid),
+        )
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["kb_id", "chunk_id"],
+                set_={"expected_triples": stmt.excluded.expected_triples, "note": stmt.excluded.note},
+            )
+        )
+    return {"success": True, "data": {"kb_id": body.kb_id, "chunk_id": body.chunk_id}}
+
+
+@graph.get("/golden-samples")
+async def golden_sample_list(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    current_user: User = Depends(get_admin_user),
+):
+    """R7b：列出 golden 样本。"""
+    del current_user
+    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.storage.postgres.models_knowledge import KnowledgeGraphGoldenSample
+
+    await _get_graph_kb_record(kb_id)
+    async with pg_manager.get_async_session_context() as session:
+        rows = (
+            (await session.execute(select(KnowledgeGraphGoldenSample).where(KnowledgeGraphGoldenSample.kb_id == kb_id)))
+            .scalars()
+            .all()
+        )
+    return {
+        "success": True,
+        "data": {
+            "items": [
+                {
+                    "chunk_id": row.chunk_id,
+                    "expected_triples": row.expected_triples,
+                    "note": row.note,
+                    "created_by": row.created_by,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ],
+            "total": len(rows),
+        },
+    }
+
+
+@graph.post("/golden-samples/evaluate")
+async def golden_sample_evaluate(body: dict, current_user: User = Depends(get_admin_user)):
+    """R7b：用当前锁定配置对 golden 样本重抽并比对 P/R/F1（不写图谱；样本上限 20）。"""
+    kb_id = str(body.get("kb_id") or "")
+    limit = max(1, min(int(body.get("limit") or 20), 20))
+    if not kb_id:
+        raise HTTPException(status_code=400, detail="kb_id is required")
+    await _get_graph_kb_record(kb_id)
+    service = MilvusGraphService()
+    graph_status = await service.get_status(kb_id)
+    if not graph_status.get("locked"):
+        raise HTTPException(status_code=400, detail="请先确认并锁定图谱抽取配置")
+    config = graph_status.get("config") or {}
+    from yuxi.knowledge.graphs.extractors import GraphExtractorFactory
+    from yuxi.knowledge.graphs.golden_evaluation import evaluate_golden_samples
+
+    extractor = GraphExtractorFactory.create(config.get("extractor_type"), config.get("extractor_options") or {})
+    try:
+        data = await evaluate_golden_samples(kb_id, extractor=extractor, limit=limit)
+    except ValueError as exc:
+        raise _review_error(exc)
     return {"success": True, "data": data}

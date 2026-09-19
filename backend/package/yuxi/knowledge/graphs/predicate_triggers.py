@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-TRIGGER_VERSION = "predicate_triggers_v1"
+TRIGGER_VERSION = "predicate_triggers_v2"
 
 PREDICATE_TRIGGERS: dict[str, tuple[str, ...]] = {
     "DIRECT_BINDING": ("bind", "interact", "associat", "complex with", "结合", "互作", "相互作用", "形成复合体"),
@@ -206,12 +206,46 @@ PREDICATE_TRIGGERS: dict[str, tuple[str, ...]] = {
     "RNAI_EFFECT": ("rnai", "knockdown", "knock-down", "silenc", "interference", "干扰", "敲低", "沉默"),
     "OVEREXPRESSION_EFFECT": ("overexpress", "over-express", "ectopic expression", "过表达", "异位表达"),
     "ALLELE_OF": ("allele", "mutant of", "mutation in", "mutant allele", "等位", "突变体", "突变"),
+    # ── 结构谓词（跨章节桥）：检索期为多跳服务，永不参与 claim 升格 ──
+    "OBSERVED_BY": (
+        "observed by",
+        "measured by",
+        "detected by",
+        "determined by",
+        "performed",
+        "using",
+        "analyzed by",
+        "examined by",
+        "visualized by",
+        "经",
+        "采用",
+        "使用",
+        "利用",
+        "通过",
+        "借助",
+    ),
+    "UNDER_CONDITION": (
+        "under",
+        "treated with",
+        "exposed to",
+        "in the presence of",
+        "grown under",
+        "subjected to",
+        "条件下",
+        "处理下",
+        "处理中",
+        "胁迫下",
+        "经.*处理",
+    ),
 }
 
 # 触发词可出现在 subject 之前（"Overexpression of GIF1 increased …"）
 _PERTURBATION_PREDICATES = frozenset({"KNOCKOUT_EFFECT", "CRISPR_EFFECT", "RNAI_EFFECT", "OVEREXPRESSION_EFFECT"})
 # 不判方向
 _SYMMETRIC_PREDICATES = frozenset({"COEXPRESSION", "DIRECT_BINDING"})
+# 结构谓词不判方向：方法/条件通常作为状语出现在句中任意位置，
+# 主句里 subject 与 Method/Condition 共现即认为桥接成立（G2 逐字门仍兜底）
+_DIRECTION_TOLERANT_PREDICATES = frozenset({"OBSERVED_BY", "UNDER_CONDITION"})
 _PASSIVE_MARKERS = (" by ", "被", "受", "由")
 
 
@@ -258,7 +292,7 @@ def check_predicate_trigger(
     hits.sort()
     first_trigger = hits[0][1]
 
-    if predicate in _SYMMETRIC_PREDICATES:
+    if predicate in _SYMMETRIC_PREDICATES or predicate in _DIRECTION_TOLERANT_PREDICATES:
         return TriggerCheck(matched=True, trigger=first_trigger, direction_ok=None)
 
     subject_pos = sentence.find(subject_surface)

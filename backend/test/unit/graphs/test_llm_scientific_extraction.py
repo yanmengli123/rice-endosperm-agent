@@ -167,7 +167,7 @@ def test_gates_accept_verbatim_entities_and_whitelisted_relation():
                     "subject": "Os03g0642100",
                     "predicate": "overexpression_effect",
                     "object": "grain weight",
-                    "evidence_quote": "increased grain weight",
+                    "evidence_quote": "Os03g0642100 (GIF1) increased grain weight",
                     "confidence": 1.7,
                     "hedge": "yes",
                     "context": {"cultivar": "Nipponbare", "direction": "null", "tissue": None},
@@ -214,7 +214,7 @@ def test_gates_reject_schema_violations_paraphrases_and_forged_identifiers():
                     "subject": "Os03g0642100",
                     "predicate": "REGULATES_PHENOTYPE",
                     "object": "grain weight",
-                    "evidence_quote": "increased grain weight",
+                    "evidence_quote": "Os03g0642100 (GIF1) increased grain weight",
                 },
             ],
         },
@@ -268,7 +268,10 @@ _RESPONSE = json.dumps(
                         "subject": "GIF1",
                         "predicate": "REQUIRED_FOR",
                         "object": "carbon partitioning",
-                        "evidence_quote": "required for carbon partitioning",
+                        "evidence_quote": (
+                            "GIF1 (GRAIN INCOMPLETE FILLING 1) encodes a cell-wall invertase "
+                            "required for carbon partitioning"
+                        ),
                         "confidence": 0.9,
                         "hedge": False,
                         "context": {"stage": "early grain filling", "direction": None},
@@ -564,13 +567,13 @@ def test_gates_mark_triggers_and_attach_entity_mention_quotes():
                     "subject": "Os03g0642100",
                     "predicate": "OVEREXPRESSION_EFFECT",
                     "object": "grain weight",
-                    "evidence_quote": "increased grain weight",
+                    "evidence_quote": "Os03g0642100 (GIF1) increased grain weight",
                 },
                 {
                     "subject": "Os03g0642100",
                     "predicate": "TRANSCRIPTIONAL_REPRESSION",
                     "object": "grain weight",
-                    "evidence_quote": "grain weight",
+                    "evidence_quote": "Os03g0642100 (GIF1) increased grain weight",
                 },
             ],
         }
@@ -587,7 +590,8 @@ def test_gates_mark_triggers_and_attach_entity_mention_quotes():
     assert G7_TRIGGER_UNVERIFIED not in outcome.stats.rejected
 
 
-def test_gates_strict_triggers_reject_unverified_relations():
+def test_gates_strict_triggers_route_unverified_relations_to_review():
+    """D4 三路由：strict 模式下 G7 未通过改判 REVIEW（人工裁决），不再静默丢弃。"""
     outcome = apply_gates(
         {
             "entities": [
@@ -599,7 +603,7 @@ def test_gates_strict_triggers_reject_unverified_relations():
                     "subject": "Os03g0642100",
                     "predicate": "TRANSCRIPTIONAL_REPRESSION",
                     "object": "grain weight",
-                    "evidence_quote": "grain weight",
+                    "evidence_quote": "Os03g0642100 (GIF1) increased grain weight",
                 }
             ],
         },
@@ -611,8 +615,11 @@ def test_gates_strict_triggers_reject_unverified_relations():
     )
 
     assert outcome.relations == []
-    assert outcome.stats.rejected == {G7_TRIGGER_UNVERIFIED: 1}
+    assert outcome.stats.rejected == {}
     assert outcome.stats.accepted_relations == 0
+    assert outcome.stats.review_routed == {G7_TRIGGER_UNVERIFIED: 1}
+    assert outcome.reviews and outcome.reviews[0]["gate_code"] == G7_TRIGGER_UNVERIFIED
+    assert outcome.reviews[0]["predicate"] == "TRANSCRIPTIONAL_REPRESSION"
 
 
 # ── 双模型复核 ──────────────────────────────────────────────────

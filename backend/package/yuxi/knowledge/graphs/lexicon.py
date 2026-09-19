@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-LEXICON_VERSION = "rice-scientific-v1"
+LEXICON_VERSION = "rice-scientific-v2"
 
 # ── 标识符（kind="identifier"）──────────────────────────────────
 # RAP: Os03g0642100（Os + 2位染色体 + g + 7位）；MSU: LOC_Os03g64210（g 后 5-7 位宽容）
@@ -106,11 +106,32 @@ _TISSUES = {
 _CONDITIONS = {
     "drought": ("drought stress", "drought", "干旱胁迫", "干旱"),
     "salt": ("salt stress", "salinity stress", "salt", "盐胁迫"),
-    "heat": ("heat stress", "heat", "高温胁迫", "高温"),
+    "heat": (
+        "heat stress",
+        "heat",
+        "high-temperature treatment",
+        "high temperature",
+        "HT treatment",
+        "HT",
+        "高温胁迫",
+        "高温",
+        "高温处理",
+    ),
     "cold": ("cold stress", "chilling", "cold", "低温胁迫", "冷胁迫"),
     "oxidative": ("oxidative stress", "氧化胁迫"),
     "nitrogen": ("nitrogen deficiency", "low nitrogen", "氮缺乏", "低氮"),
     "phosphorus": ("phosphorus deficiency", "low phosphorus", "低磷"),
+    # 常温对照（与高温处理配对出现；CT 作为独立缩写有 computed tomography 歧义，
+    # 但水稻闭集域内按词边界命中是安全的，检索期歧义由实体解析层兜底）
+    "control_temperature": (
+        "control temperature",
+        "control temperature treatment",
+        "CT treatment",
+        "CT",
+        "常温对照",
+        "常温处理",
+        "常温",
+    ),
 }
 # 发育期中的固定词；"N DAP/DAF" 模式单独匹配
 _STAGES = {
@@ -121,23 +142,43 @@ _STAGES = {
     "milk_ripe": ("milk-ripe stage", "milk ripe stage", "乳熟期"),
     "dough": ("dough stage", "成熟期", "蜡熟期"),
     "flowering": ("flowering", "anthesis", "开花期", "抽穗开花"),
+    # 灌浆分期：定义性断言的宿主词条（区间定义在 doclex 层解析，词典只负责识名）
+    "grain_filling_early": ("early grain filling stage", "灌浆前期", "灌浆初期"),
+    "grain_filling_middle": ("middle grain filling stage", "mid grain filling", "灌浆中期"),
+    "grain_filling_late": ("late grain filling stage", "灌浆后期"),
 }
+
+# 抽穗后天数缩写全称（DAH 系）：作为 DevelopmentStage 词典词条预标注，
+# 时间区间的结构化解析在 doclex.temporal_definitions 完成
+_HEADING_DAYS_TERMS = ("days after heading", "DAH", "dDAH", "抽穗后天数", "抽穗后")
+_FLOWERING_DAYS_TERMS = ("days after flowering", "DAF", "dDAF", "开花后天数", "开花后")
 
 DICTIONARY_LEXICONS: dict[str, dict[str, tuple[str, ...]]] = {
     "Condition": {**_HORMONES, **_CONDITIONS},
     "Cultivar": _CULTIVARS,
     "Method": _METHODS,
     "Tissue": _TISSUES,
-    "DevelopmentStage": _STAGES,
+    "DevelopmentStage": {
+        **_STAGES,
+        "days_after_heading": _HEADING_DAYS_TERMS,
+        "days_after_flowering": _FLOWERING_DAYS_TERMS,
+    },
+    # 鲜重/干重等度量：按可观测性状处理（闭集无独立 Measure 类型）
+    "Phenotype": {
+        "fresh_weight": ("fresh weight", "FW", "鲜重"),
+        "dry_weight": ("dry weight", "DW", "干重"),
+    },
 }
 
 # DAP/DAF 数值发育期："10 DAP"、"10 days after pollination" 的确定性锚定
-_DAP_PATTERN = re.compile(r"(?<![0-9])(\d{1,3})\s*(?:DAP|DAF|DDP)\b")
+_DAP_PATTERN = re.compile(r"(?<![0-9])(\d{1,3})\s*(?:DAP|DAF|DDP|DAH|dDAP|dDAF|dDAH)\b")
 _DAP_LONG_PATTERN = re.compile(
-    r"(?<![0-9])(\d{1,3})\s*(?:days?|d)\s+after\s+(?:pollination|fertilization|flowering)", re.IGNORECASE
+    r"(?<![0-9])(\d{1,3})\s*(?:days?|d)\s+after\s+(?:pollination|fertilization|flowering|heading)", re.IGNORECASE
 )
 
 # 闭集实体类型：对齐 managed_import_parser.NODE_TYPE_MAPPING 的内部 label（Gene 三态合一）
+# v2（R7c）：新增 Observation（表格观测记录）——由解析面确定性投影产生，
+# LLM 抽取默认不产此类型（prompt 指南限定表格行语义）
 SCIENTIFIC_ENTITY_TYPES: tuple[str, ...] = (
     "Gene",
     "AlleleMutant",
@@ -155,6 +196,7 @@ SCIENTIFIC_ENTITY_TYPES: tuple[str, ...] = (
     "Experiment",
     "Publication",
     "Method",
+    "Observation",
 )
 
 
@@ -174,15 +216,31 @@ _compiled_dictionary_cache: dict[str, Any] = {"revision": -1, "latin": [], "cjk"
 _dictionary_revision = 0
 
 
-def merge_lexicon_terms(label: str, terms: dict[str, tuple[str, ...]]) -> None:
+def merge_lexicon_terms(label: str, terms: dict[str, tuple[str, ...]]) -> set[str]:
     """注入外部词典种子（如托管导入实体/别名表），运行时扩充闭集词典。
 
-    不修改 LEXICON_VERSION——词典内容属于配置而非算法身份，统计口径
-    由抽取器在 metadata 中单独记录注入条数。
+    返回本次实际新增的键集合（已存在的键被覆盖不计入）——调用方构建结束后用
+    :func:`remove_lexicon_terms` 回滚，保证「KB 作用域装载、进程内不残留」。
+    内容变化会改变 :func:`lexicon_content_digest`，进而失效抽取缓存（R2a）。
     """
     global _dictionary_revision
     target = DICTIONARY_LEXICONS.setdefault(label, {})
+    added = {key for key in terms if key not in target}
     target.update(terms)
+    _dictionary_revision += 1
+    return added
+
+
+def remove_lexicon_terms(label: str, keys: set[str]) -> None:
+    """回滚 merge_lexicon_terms 的注入（KB 作用域词典装载的 finally 清理）。"""
+    if not keys:
+        return
+    global _dictionary_revision
+    target = DICTIONARY_LEXICONS.get(label)
+    if target is None:
+        return
+    for key in keys:
+        target.pop(key, None)
     _dictionary_revision += 1
 
 
@@ -339,3 +397,20 @@ def lexicon_snapshot() -> dict[str, Any]:
             label: sum(len(terms) for terms in groups.values()) for label, groups in DICTIONARY_LEXICONS.items()
         },
     }
+
+
+def lexicon_content_digest() -> str:
+    """词典内容 digest（R2a）：对全部词条内容做内容寻址哈希。
+
+    进抽取指纹（替代裸 LEXICON_VERSION 字符串）：``merge_lexicon_terms`` 运行时扩词
+    立即改变 digest → 缓存自动失效；merge 进来又移除同内容则 digest 不变（语义未变，
+    不触发无谓重抽）。词条顺序不敏感，增删敏感。
+    """
+    import hashlib
+
+    lines = [f"{LEXICON_VERSION}"]
+    for label in sorted(DICTIONARY_LEXICONS):
+        for key in sorted(DICTIONARY_LEXICONS[label]):
+            terms = "|".join(sorted(DICTIONARY_LEXICONS[label][key]))
+            lines.append(f"{label}:{key}:{terms}")
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:32]

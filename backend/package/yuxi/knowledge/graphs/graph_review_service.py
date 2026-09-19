@@ -19,11 +19,13 @@ from yuxi.knowledge.graphs.milvus_graph_service import (
     normalized_result_from_snapshot,
 )
 from yuxi.knowledge.graphs.review_overlay import (
+    ACTION_ALIAS_PROMOTE,
     ACTION_APPROVE,
     ACTION_REJECT,
     ACTION_RENAME,
     ACTION_RETYPE,
     ACTION_SUPERSEDE,
+    KIND_ALIAS,
     KIND_ENTITY,
     KIND_TRIPLE,
     STATUS_APPROVED,
@@ -36,12 +38,16 @@ from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
 from yuxi.repositories.knowledge_graph_repository import KnowledgeGraphRepository
 from yuxi.repositories.knowledge_graph_review_repository import (
+    CONFLICT_RESOLVE,
+    GATE_REVIEW_DISCARD,
+    GATE_REVIEW_PROMOTE,
     KnowledgeGraphReviewRepository,
     ReviewConflictError,
     ReviewTargetReadOnlyError,
 )
 from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.postgres.manager import pg_manager
+from yuxi.utils import hashstr
 
 AUDIT_ADD_RELATION = "ADD_RELATION"
 AUDIT_REEXTRACT_CHUNK = "REEXTRACT_CHUNK"
@@ -449,6 +455,243 @@ class GraphReviewService:
 
     async def audit(self, kb_id: str, *, target_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return await self.review_repo.list_audit(kb_id, target_id=target_id, limit=limit)
+
+    # ── 门禁送审队列（D4）与冲突队列（D6）────────────────────────
+
+    async def gate_reviews(
+        self,
+        kb_id: str,
+        *,
+        status: str = "PENDING",
+        gate_code: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        return await self.review_repo.list_gate_reviews(
+            kb_id, status=status, gate_code=gate_code, page=page, page_size=page_size
+        )
+
+    async def resolve_gate_review(
+        self,
+        kb_id: str,
+        review_id: str,
+        *,
+        action: str,
+        actor_uid: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """裁决门禁送审候选：PROMOTE 升格为 APPROVED 三元组（G2 逐字复核），DISCARD 关闭。
+
+        PROMOTE 与手动补关系走同一受控通道（引文必须仍是 chunk 原文子串、闭集谓词校验、
+        内容哈希身份、决策 + 审计 + Neo4j 投影），不另开旁门；幂等：已 RESOLVED 直接返回。
+        """
+        review = await self.review_repo.get_gate_review(review_id)
+        if review is None or review["kb_id"] != kb_id:
+            raise ValueError(f"门禁送审项 {review_id} 不存在")
+        if review["status"] == "RESOLVED":
+            return {"review_id": review_id, "unchanged": True, "resolution": review["resolution"]}
+
+        if action not in ("PROMOTE", "DISCARD"):
+            raise ValueError("action 必须是 PROMOTE 或 DISCARD")
+
+        if action == "DISCARD":
+            resolved = await self.review_repo.resolve_gate_review_row(
+                review_id, resolution="DISCARD", resolved_by=actor_uid
+            )
+            await self.review_repo.append_audit(
+                kb_id=kb_id,
+                tenant_id=await self._tenant_id(actor_uid),
+                target_kind="gate_review",
+                target_id=review_id,
+                action=GATE_REVIEW_DISCARD,
+                actor_uid=actor_uid,
+                before_snapshot={"gate_code": review["gate_code"], "candidate": review["candidate"]},
+                after_snapshot={"resolution": "DISCARD"},
+                reason=note,
+            )
+            return {"review_id": review_id, **resolved, "action": "DISCARD"}
+
+        candidate = review["candidate"] or {}
+        relation = str(candidate.get("predicate") or "").strip().upper()
+        await self._validate_relation_type(kb_id, relation)
+        quote = str(candidate.get("evidence_quote") or "").strip()
+        chunk = await self._load_chunk(kb_id, review["chunk_id"])
+        if not quote or quote not in (chunk.content or ""):
+            raise ValueError("候选引文已不在 chunk 原文中（chunk 可能已重抽），请改用 DISCARD")
+        subject = await self._entity_by_name(
+            kb_id, str(candidate.get("subject") or ""), str(candidate.get("subject_label") or "")
+        )
+        target = await self._entity_by_name(
+            kb_id, str(candidate.get("object") or ""), str(candidate.get("object_label") or "")
+        )
+        if subject is None or target is None:
+            raise ValueError("端点实体不存在于图谱（实体候选可能已被拒绝），请改用 DISCARD 或先手动建实体")
+
+        triple_id = compute_triple_id(
+            kb_id, subject["normalized_name"], subject["label"], relation, target["normalized_name"], target["label"]
+        )
+        triple = {
+            "triple_id": triple_id,
+            "kb_id": kb_id,
+            "source_entity_id": subject["entity_id"],
+            "target_entity_id": target["entity_id"],
+            "relation_type": relation,
+            "content": f"{subject['normalized_name']} → {relation} → {target['normalized_name']}",
+        }
+        payload = triple_snapshot(triple, subject, target)
+        kb = await self.kb_repo.get_by_kb_id(kb_id)
+        await self._materialize_snapshot(kb, chunk, payload, quote, extractor_type="manual", actor_uid=actor_uid)
+        await self.review_repo.save_decision(
+            kb_id=kb_id,
+            tenant_id=await self._tenant_id(actor_uid),
+            target_kind=KIND_TRIPLE,
+            target_id=triple_id,
+            action=ACTION_APPROVE,
+            actor_uid=actor_uid,
+            payload=payload,
+            pinned_chunk_id=review["chunk_id"],
+            pinned_quote=quote,
+            reason=note or f"gate review {review['gate_code']} PROMOTE",
+            cache_status=STATUS_APPROVED,
+            before_snapshot={"gate_code": review["gate_code"]},
+            after_snapshot={"review_status": STATUS_APPROVED, "triple": triple, "gate_promoted": True},
+            audit_action=GATE_REVIEW_PROMOTE,
+        )
+        await asyncio.to_thread(self.graph.apply_review_projection, kb_id, triple_status={triple_id: STATUS_APPROVED})
+        resolved = await self.review_repo.resolve_gate_review_row(
+            review_id, resolution=f"PROMOTED:{triple_id}", resolved_by=actor_uid
+        )
+        return {"review_id": review_id, "triple_id": triple_id, "action": "PROMOTE", **resolved}
+
+    async def conflicts(
+        self,
+        kb_id: str,
+        *,
+        kind: str | None = None,
+        status: str = "OPEN",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        return await self.review_repo.list_conflicts(kb_id, kind=kind, status=status, page=page, page_size=page_size)
+
+    async def resolve_conflict(
+        self,
+        kb_id: str,
+        conflict_id: str,
+        *,
+        resolution: str,
+        actor_uid: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """冲突裁决三态（SUPERSEDED/CONTESTED/RECONCILED）：只登记结论，绝不删除证据行。"""
+        if resolution not in ("SUPERSEDED", "CONTESTED", "RECONCILED"):
+            raise ValueError("resolution 必须是 SUPERSEDED / CONTESTED / RECONCILED 之一")
+        conflict = await self.review_repo.get_conflict(conflict_id)
+        if conflict is None or conflict["kb_id"] != kb_id:
+            raise ValueError(f"冲突 {conflict_id} 不存在")
+        if conflict["status"] == "RESOLVED":
+            return {"conflict_id": conflict_id, "unchanged": True, "resolution": conflict["resolution"]}
+        resolved = await self.review_repo.resolve_conflict_row(
+            conflict_id, resolution=resolution, note=note, resolved_by=actor_uid
+        )
+        if resolved is None:
+            raise ValueError(f"冲突 {conflict_id} 不存在")
+        await self.review_repo.append_audit(
+            kb_id=kb_id,
+            tenant_id=await self._tenant_id(actor_uid),
+            target_kind="conflict",
+            target_id=conflict_id,
+            action=CONFLICT_RESOLVE,
+            actor_uid=actor_uid,
+            before_snapshot={"kind": conflict["kind"], "detail": conflict["detail"]},
+            after_snapshot={"resolution": resolution, "note": note},
+            reason=note,
+        )
+        return {"conflict_id": conflict_id, **resolved}
+
+    async def promote_alias(
+        self,
+        kb_id: str,
+        *,
+        surface: str,
+        resolved_name: str,
+        resolved_label: str,
+        actor_uid: str,
+        source_doclex_id: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """R4c 词典晋升：文档级别名（doclex 候选）经人工审核升为 KB 级官方别名。
+
+        效果 v1 只落别名表（alias_type=DOCLEX_PROMOTED）——检索期 entity_resolver
+        立即可用、可撤销、租户隔离；下次图谱构建时 ``_load_kb_alias_lexicon`` 把它
+        装载进词法层（KB 作用域、构建结束回滚，digest 变化自动失效旧缓存）。
+        幂等：同 (surface, resolved) 的同 action 决策直接返回 unchanged。
+        """
+        surface = (surface or "").strip()
+        resolved_name = (resolved_name or "").strip()
+        if not surface or not resolved_name:
+            raise ValueError("surface 与 resolved_name 不能为空")
+        target_id = hashstr(f"alias:{surface.lower()}:{resolved_name.lower()}", length=32)
+        existing = await self.review_repo.get_decision(kb_id, KIND_ALIAS, target_id)
+        if existing and existing.get("action") == ACTION_ALIAS_PROMOTE:
+            return {"target_id": target_id, "unchanged": True}
+
+        entity = await self._entity_by_name(kb_id, resolved_name, resolved_label)
+        if entity is None:
+            raise ValueError(f"规范实体 {resolved_name}（{resolved_label}）不存在，请先确保实体已入图")
+
+        added = await self.review_repo.add_entity_aliases(
+            kb_id, entity["entity_id"], entity["name"], [surface], alias_type="DOCLEX_PROMOTED"
+        )
+        decision = await self.review_repo.save_decision(
+            kb_id=kb_id,
+            tenant_id=await self._tenant_id(actor_uid),
+            target_kind=KIND_ALIAS,
+            target_id=target_id,
+            action=ACTION_ALIAS_PROMOTE,
+            actor_uid=actor_uid,
+            payload={
+                "surface": surface,
+                "resolved_name": resolved_name,
+                "resolved_label": resolved_label,
+                "entity_id": entity["entity_id"],
+                "source_doclex_id": source_doclex_id,
+            },
+            reason=note,
+            audit_action=ACTION_ALIAS_PROMOTE,
+        )
+        return {"target_id": target_id, "entity_id": entity["entity_id"], "aliases_added": added, "decision": decision}
+
+    async def _entity_by_name(self, kb_id: str, surface: str, label: str) -> dict[str, Any] | None:
+        """按 (normalized_name, label) 查实体——门禁候选只带 surface，实体行由实体通道先行落库。"""
+        from sqlalchemy import select as sa_select
+
+        from yuxi.knowledge.graphs.graph_utils import normalize_entity_name
+        from yuxi.storage.postgres.models_knowledge import KnowledgeGraphEntity
+
+        normalized = normalize_entity_name(surface)
+        if not normalized or not label:
+            return None
+        async with pg_manager.get_async_session_context() as session:
+            row = (
+                await session.execute(
+                    sa_select(KnowledgeGraphEntity).where(
+                        KnowledgeGraphEntity.kb_id == kb_id,
+                        KnowledgeGraphEntity.normalized_name == normalized,
+                        KnowledgeGraphEntity.label == label,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return {
+                "entity_id": row.entity_id,
+                "normalized_name": row.normalized_name,
+                "label": row.label,
+                "name": row.name,
+                "attributes": row.attributes,
+                "review_status": row.review_status,
+            }
 
     # ── 内部 ────────────────────────────────────────────────────
 

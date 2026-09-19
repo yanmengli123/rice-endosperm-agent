@@ -9,6 +9,7 @@ from urllib.parse import quote, unquote
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
+from sqlalchemy import select
 from starlette.responses import StreamingResponse
 from yuxi import config
 from yuxi.knowledge.chunking.ragflow_like.presets import get_chunk_preset_options
@@ -1127,6 +1128,20 @@ async def index_graph_build(
             ((graph_status.get("config") or {}).get("extractor_options") or {}).get("model_spec") or ""
         ).strip()
 
+        # R7a 重抽成本闸门：指纹失效的缓存 chunk 数超阈值且未显式确认时拒绝构建，
+        # 防一次误改词典/模型烧掉全库 LLM 预算（threshold 默认 5000）
+        confirm_reextraction = bool(data.get("confirm_reextraction", False))
+        reextraction_threshold = max(100, int(data.get("reextraction_threshold") or 5000))
+        stale_count = await service.count_stale_cached_chunks(kb_id)
+        if stale_count > reextraction_threshold and not confirm_reextraction:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"当前抽取配置变更将触发 {stale_count} 个 chunk 重抽（超过阈值 {reextraction_threshold}）。"
+                    "如确认要执行，请在请求体携带 confirm_reextraction=true。"
+                ),
+            )
+
         async def run_graph_index(context: TaskContext):
             await context.set_message("任务初始化")
             await context.set_progress(5.0, "准备构建图谱")
@@ -1207,6 +1222,38 @@ async def revive_dead_graph_chunks(kb_id: str, current_user: User = Depends(get_
     except Exception as e:
         logger.error(f"复活图谱死信失败 {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"复活图谱死信失败: {e}")
+
+
+@knowledge.post("/databases/{kb_id}/doclex/prewarm")
+async def prewarm_doclex(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """R6b：手动预热 KB 文档词典（ACTIVATE 后也会自动入队；幂等，可重复调用）。"""
+    await _ensure_database_supports_documents(kb_id, "文档词典预热", None)
+    try:
+        from yuxi.knowledge.graphs.doclex.service import doclex_prewarm_job_id
+        from yuxi.services.run_queue_service import get_arq_pool
+        from yuxi.storage.postgres.manager import pg_manager
+        from yuxi.storage.postgres.models_knowledge import KnowledgeFile
+
+        async with pg_manager.get_async_session_context() as session:
+            revision_id = await session.scalar(
+                select(KnowledgeFile.active_parse_revision_id)
+                .where(KnowledgeFile.kb_id == kb_id, KnowledgeFile.active_parse_revision_id.is_not(None))
+                .order_by(KnowledgeFile.id.desc())
+                .limit(1)
+            )
+        job_key = revision_id or f"manual-{kb_id}"
+        queue = await get_arq_pool()
+        job = await queue.enqueue_job("prewarm_doclex_for_kb", kb_id, _job_id=doclex_prewarm_job_id(kb_id, job_key))
+        return {
+            "message": "文档词典预热任务已入队",
+            "status": "queued",
+            "job_id": getattr(job, "job_id", None),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"doclex 预热入队失败 {e}, {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"doclex 预热入队失败: {e}")
 
 
 @knowledge.get("/databases/{kb_id}/export")

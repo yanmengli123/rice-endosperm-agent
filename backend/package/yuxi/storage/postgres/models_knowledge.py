@@ -215,6 +215,11 @@ class KnowledgeChunk(Base):
     start_token_pos = Column(Integer)
     end_token_pos = Column(Integer)
     graph_indexed = Column(Boolean, default=False)
+    # 图谱构建死信（R2b）：累计尝试与最近错误跨 job 落库；graph_dead 置位后
+    # pending 查询不再选取，复活入口（revive/单 chunk 重抽）清零后重试。
+    graph_attempts = Column(Integer, nullable=False, default=0)
+    graph_last_error = Column(Text)
+    graph_dead = Column(Boolean, nullable=False, default=False)
     ent_ids = Column(JSON_VALUE)
     tags = Column(JSON_VALUE)
     # Immutable source locator/provenance.  Graph extraction owns
@@ -666,6 +671,8 @@ class KnowledgeGraphTriple(Base):
     literature_count = Column(Integer, nullable=False, default=0)
     best_evidence_level = Column(String(64))
     consensus_direction = Column(String(64), nullable=False, default="UNKNOWN")
+    # D6 冲突态：NONE 无冲突 / CONTESTED 同条件下极性矛盾已登记（裁决在 conflict 表）
+    conflict_status = Column(String(32), nullable=False, default="NONE")
     review_status = Column(String(16), nullable=False, default="CANDIDATE")
     review_version = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
@@ -681,6 +688,7 @@ class KnowledgeGraphTripleMention(Base):
         Index("ix_knowledge_graph_triple_mentions_kb_id", "kb_id"),
         Index("ix_knowledge_graph_triple_mentions_file_id", "file_id"),
         Index("ix_knowledge_graph_triple_mentions_chunk_id", "chunk_id"),
+        Index("ix_knowledge_graph_triple_mentions_condition", "condition_text"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -698,9 +706,222 @@ class KnowledgeGraphTripleMention(Base):
     trigger_verified = Column(Boolean)
     trigger_term = Column(String(128))
     verifier_confirmed = Column(Boolean)
+    # N 元组维度（D5，从 context 升级为一等列）：条件限定、基线、极性、幅度与对比组。
+    # condition_entity_id 是 Condition 实体的确定性内容哈希（无外键——实体可能尚未入图）。
+    condition_text = Column(String(512))
+    condition_entity_id = Column(String(64))
+    baseline_text = Column(String(512))
+    polarity = Column(String(16))
+    magnitude = Column(String(16))
+    comparison_group_id = Column(String(64))
     pinned_by = Column(String(64))
     pinned_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
+class KnowledgeGraphGateReview(Base):
+    """门禁 REVIEW 路由产物（D4）：不进图谱也不丢弃的可疑关系候选，人工裁决后闭环。
+
+    gate_code ∈ G7_TRIGGER_UNVERIFIED（strict 模式触发词未验）/ G9_NEGATION_REVIEW
+    （引文含否定而模型未标 negative）。review_id 为候选内容哈希，重抽幂等。
+    """
+
+    __tablename__ = "knowledge_graph_gate_reviews"
+    __table_args__ = (
+        UniqueConstraint("review_id", name="uq_graph_gate_review_id"),
+        Index("ix_graph_gate_reviews_kb_status", "kb_id", "status"),
+        Index("ix_graph_gate_reviews_chunk_id", "chunk_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    review_id = Column(String(64), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False)
+    chunk_id = Column(String(128), ForeignKey("knowledge_chunks.chunk_id", ondelete="CASCADE"), nullable=False)
+    gate_code = Column(String(32), nullable=False)
+    gate_version = Column(String(32))
+    candidate = Column(JSON_VALUE, nullable=False)
+    status = Column(String(16), nullable=False, default="PENDING")
+    resolved_by = Column(String(64))
+    resolution = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    resolved_at = Column(DateTime(timezone=True))
+
+
+class KnowledgeGraphConflict(Base):
+    """图谱冲突候选（D6）：同主体-谓词-客体的极性矛盾（DIRECTION）与
+    发育期定义区间互斥（DEFINITION）。只登记不裁决，人工处置后闭环。
+
+    冲突不删除任何证据行——科研认知演进保留时间线（SUPERSEDED 语义在
+    resolution 中由人工标注）。
+    """
+
+    __tablename__ = "knowledge_graph_conflicts"
+    __table_args__ = (
+        UniqueConstraint("conflict_id", name="uq_graph_conflict_id"),
+        Index("ix_graph_conflicts_kb_status", "kb_id", "status"),
+        Index("ix_graph_conflicts_subject", "kb_id", "subject_ref"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    conflict_id = Column(String(64), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String(32), nullable=False)
+    subject_ref = Column(String(128), nullable=False)
+    detail = Column(JSON_VALUE, nullable=False)
+    status = Column(String(16), nullable=False, default="OPEN")
+    resolved_by = Column(String(64))
+    resolution = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    resolved_at = Column(DateTime(timezone=True))
+
+
+class KnowledgeDoclexRevision(Base):
+    """文档词典修订（P0-c Stage B）：每文件按 (parse_revision, 算法指纹) 幂等构建一次。
+
+    产物（entries/definitions）随修订固化；词典算法升级 → 指纹变化 → 新修订重算，
+    与 parse_revision/index_revision 的内容寻址模式同构。无活跃解析修订的文件
+    不产 doclex（非科研 PDF 链路的普通文档）。
+    """
+
+    __tablename__ = "knowledge_doclex_revisions"
+    __table_args__ = (
+        UniqueConstraint("doclex_id", name="uq_knowledge_doclex_revisions_id"),
+        UniqueConstraint("file_id", "fingerprint", name="uq_knowledge_doclex_revisions_file_fingerprint"),
+        Index("ix_knowledge_doclex_revisions_kb_id", "kb_id"),
+        Index("ix_knowledge_doclex_revisions_status", "status"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    doclex_id = Column(String(64), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False)
+    parse_revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False
+    )
+    fingerprint = Column(String(64), nullable=False)
+    doclex_version = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="BUILDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text)
+    stats = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+class KnowledgeDoclexEntry(Base):
+    """文档词典条目：指代解析（该品种=秋田小町）、缩写展开（HT=高温处理）、
+    括号分诊产物（设备属性/条件参数等，kind 区分下游路由）。"""
+
+    __tablename__ = "knowledge_doclex_entries"
+    __table_args__ = (
+        UniqueConstraint("doclex_id", "entry_key", name="uq_knowledge_doclex_entry_key"),
+        Index("ix_knowledge_doclex_entries_kb_file", "kb_id", "file_id"),
+        Index("ix_knowledge_doclex_entries_kind", "entry_kind"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    doclex_id = Column(
+        String(64), ForeignKey("knowledge_doclex_revisions.doclex_id", ondelete="CASCADE"), nullable=False
+    )
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False)
+    entry_kind = Column(String(32), nullable=False)
+    entry_key = Column(String(512), nullable=False)
+    surface = Column(String(512), nullable=False)
+    resolved_name = Column(String(512))
+    resolved_label = Column(String(128))
+    expansion = Column(String(512))
+    quote = Column(Text)
+    quote_start = Column(Integer)
+    source = Column(String(16), nullable=False, default="RULE")
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class KnowledgeDoclexDefinition(Base):
+    """发育期定义断言（B3）：「灌浆中期 = 抽穗后 10-25 dDAH」的结构化区间。
+
+    定义不是别名：挂在实体名下的区间断言带逐字引文与文件出处；跨文献区间
+    互斥由冲突检测登记（kind=DEFINITION），回答可并陈两个文献口径。
+    """
+
+    __tablename__ = "knowledge_doclex_definitions"
+    __table_args__ = (
+        UniqueConstraint("definition_id", name="uq_knowledge_doclex_definition_id"),
+        Index("ix_knowledge_doclex_definitions_kb_entity", "kb_id", "entity_normalized"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    definition_id = Column(String(64), nullable=False)
+    doclex_id = Column(
+        String(64), ForeignKey("knowledge_doclex_revisions.doclex_id", ondelete="CASCADE"), nullable=False
+    )
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False)
+    entity_name = Column(String(512), nullable=False)
+    entity_normalized = Column(String(512), nullable=False)
+    entity_label = Column(String(128), nullable=False, default="DevelopmentStage")
+    interval_start = Column(Integer)
+    interval_end = Column(Integer)
+    interval_unit = Column(String(32))
+    ref_event = Column(String(64))
+    quote = Column(Text)
+    chunk_id = Column(String(128))
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class KnowledgeDoclexFigureMention(Base):
+    """图注 mention 索引（R6）：正文「（图 1）/ Fig. 5A」到 figure 实体的绑定。
+
+    设计取舍：图是 Authority Plane 证据资产，**不做图谱边**（MERGE 进 Neo4j 投影会
+    模糊「投影 ≠ 权威」边界）。「该 claim 的证据图」由本表与 entity_mentions 同
+    chunk 共现 join 得出；规范键与 caption_locator 同源（figure 5 / figure s8）。
+    """
+
+    __tablename__ = "knowledge_doclex_figure_mentions"
+    __table_args__ = (
+        UniqueConstraint("mention_id", name="uq_knowledge_doclex_figure_mention_id"),
+        Index("ix_knowledge_doclex_figure_mentions_kb_file", "kb_id", "file_id"),
+        Index("ix_knowledge_doclex_figure_mentions_chunk", "chunk_id"),
+        Index("ix_knowledge_doclex_figure_mentions_key", "kb_id", "canonical_key"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    mention_id = Column(String(64), nullable=False)
+    doclex_id = Column(
+        String(64), ForeignKey("knowledge_doclex_revisions.doclex_id", ondelete="CASCADE"), nullable=False
+    )
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False)
+    chunk_id = Column(String(128), nullable=False)
+    surface = Column(String(128), nullable=False)
+    canonical_key = Column(String(64), nullable=False)
+    figure_entity_id = Column(Integer)
+    start_char = Column(Integer)
+    quote = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class KnowledgeGraphGoldenSample(Base):
+    """golden 抽检样本（R7b）：人工标注的 (chunk, 期望三元组)，晋升导出前的质量门禁。
+
+    期望三元组形态：[{source, predicate, object}]（surface 级，评测时经同一
+    归一化比对）。样本集小（~50），评测走「当前配置重抽 + P/R/F1」，不写图谱。
+    """
+
+    __tablename__ = "knowledge_graph_golden_samples"
+    __table_args__ = (
+        UniqueConstraint("kb_id", "chunk_id", name="uq_graph_golden_sample_chunk"),
+        Index("ix_graph_golden_samples_kb", "kb_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    chunk_id = Column(String(128), ForeignKey("knowledge_chunks.chunk_id", ondelete="CASCADE"), nullable=False)
+    expected_triples = Column(JSON_VALUE, nullable=False)
+    note = Column(Text)
+    created_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class KnowledgeGraphImport(Base):

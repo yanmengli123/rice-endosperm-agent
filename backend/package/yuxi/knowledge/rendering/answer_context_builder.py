@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from yuxi.knowledge.graphs.graph_utils import TIER_C, predicate_tier
 from yuxi.knowledge.products.authority_gate import AuthorityGate
 from yuxi.knowledge.products.registry import is_derived_product
 from yuxi.knowledge.rendering.citation_channel import public_citations
@@ -129,15 +130,27 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         }
         for node in (graph_expansion.get("nodes") or [])[:30]
     ]
-    graph_edges = [
-        {
+    # R3 TIER_C 守卫：结构边（OBSERVED_BY/UNDER_CONDITION）降级为方法/条件附注，
+    # 永不进入主边列表——主边（edges）只承载 TIER_A/B 的事实性关系。
+    # 旧契约数据未带 tier 标注时按谓词分级实时判定（防御性过滤）。
+    _all_graph_edges = (graph_expansion.get("edges") or [])[:50]
+    graph_edges = []
+    structural_edges = []
+    for edge in _all_graph_edges:
+        relation_type = str(edge.get("type") or (edge.get("properties") or {}).get("type") or "")
+        tier = edge.get("predicate_tier") or predicate_tier(relation_type)
+        item = {
             "source_id": edge.get("source_id"),
             "target_id": edge.get("target_id"),
-            "type": edge.get("type") or (edge.get("properties") or {}).get("type"),
+            "type": relation_type,
             "kb_id": edge.get("kb_id"),
         }
-        for edge in (graph_expansion.get("edges") or [])[:40]
-    ]
+        if tier == TIER_C:
+            if len(structural_edges) < 10:
+                structural_edges.append(item)
+            continue
+        if len(graph_edges) < 40:
+            graph_edges.append(item)
     payload = {
         "intent": (contract.get("retrieval_plan") or {}).get("intent"),
         "query_mode": (contract.get("retrieval_plan") or {}).get("query_mode"),
@@ -175,6 +188,8 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
             "seeds": graph_expansion.get("seeds") or [],
             "nodes": graph_nodes,
             "edges": graph_edges,
+            # 方法桥/条件挂载：只作多跳中继的方法与条件附注，不得当作事实关系陈述
+            "structural_edges": structural_edges,
             "authority": "NEO4J_PROJECTION_CONTEXT_ONLY",
         },
     }

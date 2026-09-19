@@ -1445,6 +1445,18 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             )
         except Exception as cleanup_error:  # noqa: BLE001
             logger.warning(f"Scientific PDF stale index cleanup deferred: revision={revision_id}: {cleanup_error}")
+        # R6b：doclex 词典预热（尽力而为——Phase 0 兜底正确性，预热只优化首次构建时延）
+        try:
+            from yuxi.knowledge.graphs.doclex.service import doclex_prewarm_job_id
+
+            prewarm_queue = await get_arq_pool()
+            await prewarm_queue.enqueue_job(
+                "prewarm_doclex_for_kb",
+                revision.kb_id,
+                _job_id=doclex_prewarm_job_id(revision.kb_id, revision_id),
+            )
+        except Exception as prewarm_error:  # noqa: BLE001
+            logger.warning(f"doclex prewarm enqueue deferred: revision={revision_id}: {prewarm_error}")
         return {
             "revision_id": revision_id,
             "index_revision_id": index_revision_id,

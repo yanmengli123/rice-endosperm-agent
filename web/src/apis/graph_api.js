@@ -186,6 +186,56 @@ export const graphApi = {
       queryParams.set('target_id', target_id)
     }
     return await apiGet(`/api/graph/review/audit?${queryParams.toString()}`, {}, true)
+  },
+
+  // 门禁送审队列（D4）：G7 strict 未过 / G9 否定矛盾的关系候选，人工裁决后闭环
+  gateReviewQueue: async (params) => {
+    const { kb_id, status = 'PENDING', gate_code, page = 1, page_size = 20 } = params || {}
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({
+      kb_id,
+      status,
+      page: String(page),
+      page_size: String(page_size)
+    })
+    if (gate_code) {
+      queryParams.set('gate_code', gate_code)
+    }
+    return await apiGet(`/api/graph/gate-reviews?${queryParams.toString()}`, {}, true)
+  },
+
+  gateReviewResolve: async (payload) => {
+    if (!payload?.kb_id || !payload?.review_id || !payload?.action) {
+      throw new Error('kb_id, review_id and action are required')
+    }
+    return await apiPost('/api/graph/gate-reviews/resolve', payload, {}, true)
+  },
+
+  // 冲突队列（D6）：同条件极性矛盾（DIRECTION）与定义区间口径不一（DEFINITION）
+  conflictQueue: async (params) => {
+    const { kb_id, kind, status = 'OPEN', page = 1, page_size = 20 } = params || {}
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({
+      kb_id,
+      status,
+      page: String(page),
+      page_size: String(page_size)
+    })
+    if (kind) {
+      queryParams.set('kind', kind)
+    }
+    return await apiGet(`/api/graph/conflicts?${queryParams.toString()}`, {}, true)
+  },
+
+  conflictResolve: async (payload) => {
+    if (!payload?.kb_id || !payload?.conflict_id || !payload?.resolution) {
+      throw new Error('kb_id, conflict_id and resolution are required')
+    }
+    return await apiPost('/api/graph/conflicts/resolve', payload, {}, true)
   }
 }
 

@@ -1055,6 +1055,11 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0038_figure_asset_group_role", "_migration_0038_figure_asset_group_role"),
         ("0039_graph_mention_evidence", "_migration_0039_graph_mention_evidence"),
         ("0040_graph_review_overlay", "_migration_0040_graph_review_overlay"),
+        ("0041_graph_nary_doclex", "_migration_0041_graph_nary_doclex"),
+        ("0042_graph_dead_letter", "_migration_0042_graph_dead_letter"),
+        ("0043_custom_tools", "_migration_0043_custom_tools"),
+        ("0044_doclex_figure_mentions", "_migration_0044_doclex_figure_mentions"),
+        ("0045_graph_golden_samples", "_migration_0045_graph_golden_samples"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2508,6 +2513,130 @@ class PostgresManager(metaclass=SingletonMeta):
         for table in ("knowledge_graph_triple_mentions", "knowledge_graph_entity_mentions"):
             await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS pinned_by VARCHAR(64)"))
             await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ"))
+
+    async def _migration_0041_graph_nary_doclex(self, conn) -> None:
+        """N 元组列化 + 文档词典（doclex）+ 门禁审核队列 + 冲突登记（D3–D6/B1–B4）。
+
+        - knowledge_graph_triple_mentions 增加 N 元组维度列（condition/baseline/polarity/
+          magnitude/comparison_group），全部 nullable：旧 mention 无 N 元组语义，
+          不做猜测性回填，重抽后自然携带；
+        - knowledge_graph_triples 增加 conflict_status（NONE 默认只对新行生效，旧行
+          依赖表默认值回填 CONFLICT 检测前的 NONE 态）；
+        - 新表（gate_reviews / conflicts / doclex 三表）由 metadata.create_all 建立，
+          新表全部使用 aware UTC 时间列。
+        """
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_knowledge import (  # noqa: F401
+                KnowledgeDoclexDefinition,
+                KnowledgeDoclexEntry,
+                KnowledgeDoclexRevision,
+                KnowledgeGraphConflict,
+                KnowledgeGraphGateReview,
+            )
+
+            await conn.run_sync(KnowledgeBase.metadata.create_all)
+        statements = (
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_triple_mentions "
+                "ADD COLUMN IF NOT EXISTS condition_text VARCHAR(512)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_triple_mentions "
+                "ADD COLUMN IF NOT EXISTS condition_entity_id VARCHAR(64)"
+            ),
+            "ALTER TABLE IF EXISTS knowledge_graph_triple_mentions ADD COLUMN IF NOT EXISTS baseline_text VARCHAR(512)",
+            "ALTER TABLE IF EXISTS knowledge_graph_triple_mentions ADD COLUMN IF NOT EXISTS polarity VARCHAR(16)",
+            "ALTER TABLE IF EXISTS knowledge_graph_triple_mentions ADD COLUMN IF NOT EXISTS magnitude VARCHAR(16)",
+            (
+                "ALTER TABLE IF EXISTS knowledge_graph_triple_mentions "
+                "ADD COLUMN IF NOT EXISTS comparison_group_id VARCHAR(64)"
+            ),
+            "ALTER TABLE IF EXISTS knowledge_graph_triples ADD COLUMN IF NOT EXISTS conflict_status VARCHAR(32)",
+            "UPDATE knowledge_graph_triples SET conflict_status = 'NONE' WHERE conflict_status IS NULL",
+            "ALTER TABLE IF EXISTS knowledge_graph_triples ALTER COLUMN conflict_status SET NOT NULL",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_graph_triple_mentions_condition "
+                "ON knowledge_graph_triple_mentions(condition_text)"
+            ),
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+
+    async def _migration_0043_custom_tools(self, conn) -> None:
+        """自定义数据面工具（HTTP/OpenAPI 定义）控制面建表。
+
+        工具目录自此分为三平面：代码平面（@tool 注册表）、数据平面（本表）、
+        协议平面（MCP）。本表只存连接定义与参数契约，凭据仅存
+        user_mcp_credentials.id 引用；租户严格 NOT NULL（无全局共享语义）。
+        """
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS custom_tools ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+                "slug VARCHAR(100) NOT NULL, "
+                "name VARCHAR(100) NOT NULL, "
+                "description TEXT NOT NULL, "
+                "icon VARCHAR(50), "
+                "tags JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "tool_type VARCHAR(16) NOT NULL, "
+                "spec JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "args_schema JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "credential_id BIGINT REFERENCES user_mcp_credentials(id), "
+                "data_access_level VARCHAR(32) NOT NULL, "
+                "dependency_mode VARCHAR(32) NOT NULL, "
+                "lifecycle_status VARCHAR(16) NOT NULL, "
+                "enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "last_health JSONB, "
+                "created_by VARCHAR(100) NOT NULL, "
+                "updated_by VARCHAR(100), "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            )
+        )
+        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_custom_tools ON custom_tools(tenant_id, slug)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_custom_tools_tenant_id ON custom_tools(tenant_id)"))
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_custom_tools_lifecycle_status ON custom_tools(lifecycle_status)")
+        )
+
+    async def _migration_0042_graph_dead_letter(self, conn) -> None:
+        """图谱构建 chunk 级死信落库（R2b）：attempts/last_error/dead 三列。
+
+        旧行为 attempt 只存在调用栈内存，慢性坏 chunk 每次 job 重烧 3 次且运营不可见；
+        现累计尝试跨 job 落库，达到阈值（服务层 6 次）置 dead，pending 查询排除，
+        复活入口清零重试。列 nullable → 回填 → NOT NULL，不设默认值掩盖漏传。
+        """
+        statements = (
+            "ALTER TABLE IF EXISTS knowledge_chunks ADD COLUMN IF NOT EXISTS graph_attempts INTEGER",
+            "ALTER TABLE IF EXISTS knowledge_chunks ADD COLUMN IF NOT EXISTS graph_last_error TEXT",
+            "ALTER TABLE IF EXISTS knowledge_chunks ADD COLUMN IF NOT EXISTS graph_dead BOOLEAN",
+            "UPDATE knowledge_chunks SET graph_attempts = 0 WHERE graph_attempts IS NULL",
+            "UPDATE knowledge_chunks SET graph_dead = FALSE WHERE graph_dead IS NULL",
+            "ALTER TABLE IF EXISTS knowledge_chunks ALTER COLUMN graph_attempts SET NOT NULL",
+            "ALTER TABLE IF EXISTS knowledge_chunks ALTER COLUMN graph_dead SET NOT NULL",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+
+    async def _migration_0044_doclex_figure_mentions(self, conn) -> None:
+        """图注 mention 索引（R6）：正文「（图 1）」到 figure 实体的绑定表。
+
+        新表由 metadata.create_all 建立（aware UTC 时间列）；图是 Authority Plane
+        证据资产，不做图谱边——「该 claim 的证据图」由本表与 entity_mentions 同
+        chunk 共现 join 得出。
+        """
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_knowledge import KnowledgeDoclexFigureMention  # noqa: F401
+
+            await conn.run_sync(KnowledgeBase.metadata.create_all)
+
+    async def _migration_0045_graph_golden_samples(self, conn) -> None:
+        """golden 抽检样本表（R7b）：晋升导出质量门禁的人工标注集。"""
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_knowledge import KnowledgeGraphGoldenSample  # noqa: F401
+
+            await conn.run_sync(KnowledgeBase.metadata.create_all)
 
     async def _migration_0039_graph_mention_evidence(self, conn) -> None:
         """图谱 mention 级原文证据（「点开即见原文」不变式 I1/I2）。

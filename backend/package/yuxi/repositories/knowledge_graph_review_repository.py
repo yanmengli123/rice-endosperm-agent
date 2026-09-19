@@ -16,9 +16,12 @@ from yuxi.repositories.knowledge_graph_repository import build_extracted_alias_r
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeChunk,
+    KnowledgeFile,
+    KnowledgeGraphConflict,
     KnowledgeGraphEntity,
     KnowledgeGraphEntityAlias,
     KnowledgeGraphEntityMention,
+    KnowledgeGraphGateReview,
     KnowledgeGraphReviewAudit,
     KnowledgeGraphReviewDecision,
     KnowledgeGraphTriple,
@@ -28,6 +31,11 @@ from yuxi.utils import hashstr
 from yuxi.utils.datetime_utils import utc_now
 
 QUEUE_ORDERS = ("support_asc", "support_desc", "recent")
+
+# 门禁送审与冲突的裁决动作（写进审计账本的 action）
+GATE_REVIEW_PROMOTE = "GATE_PROMOTE"
+GATE_REVIEW_DISCARD = "GATE_DISCARD"
+CONFLICT_RESOLVE = "CONFLICT_RESOLVE"
 
 
 class ReviewConflictError(Exception):
@@ -222,6 +230,23 @@ class KnowledgeGraphReviewRepository:
                 .on_conflict_do_nothing(index_elements=["kb_id", "normalized_alias", "entity_id"])
             )
             return int(result.rowcount or 0)
+
+    async def list_promoted_aliases(self, kb_id: str) -> list[dict[str, Any]]:
+        """R4c：ALIAS_PROMOTE 晋升的 KB 级官方别名（带实体 label，供词法层装载）。"""
+        async with pg_manager.get_async_session_context() as session:
+            rows = (
+                await session.execute(
+                    select(KnowledgeGraphEntityAlias.id, KnowledgeGraphEntityAlias.alias, KnowledgeGraphEntity.label)
+                    .join(KnowledgeGraphEntity, KnowledgeGraphEntity.entity_id == KnowledgeGraphEntityAlias.entity_id)
+                    .where(
+                        KnowledgeGraphEntityAlias.kb_id == kb_id,
+                        KnowledgeGraphEntityAlias.alias_type == "DOCLEX_PROMOTED",
+                    )
+                )
+            ).all()
+        return [
+            {"alias_id": row[0], "alias": row[1], "label": row[2]} for row in rows if row[1] and str(row[1]).strip()
+        ]
 
     # ── 读取 ─────────────────────────────────────────────────────
 
@@ -582,6 +607,240 @@ class KnowledgeGraphReviewRepository:
             "orphan_triple_ids": orphan_triple_ids,
             "orphan_entity_ids": orphan_entity_ids,
         }
+
+    # ── 门禁送审队列（D4）与冲突队列（D6）────────────────────────
+
+    async def list_gate_reviews(
+        self,
+        kb_id: str,
+        *,
+        status: str = "PENDING",
+        gate_code: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """门禁 REVIEW 路由队列：join chunk 原文与文件名（「点开即见原文」），按状态分页。"""
+        async with pg_manager.get_async_session_context() as session:
+            conditions = [KnowledgeGraphGateReview.kb_id == kb_id]
+            if status and status != "ALL":
+                conditions.append(KnowledgeGraphGateReview.status == status)
+            if gate_code:
+                conditions.append(KnowledgeGraphGateReview.gate_code == gate_code)
+            total = await session.scalar(select(func.count()).select_from(KnowledgeGraphGateReview).where(*conditions))
+            rows = (
+                await session.execute(
+                    select(
+                        KnowledgeGraphGateReview,
+                        KnowledgeChunk.content,
+                        KnowledgeFile.filename,
+                        KnowledgeFile.original_filename,
+                    )
+                    .join(KnowledgeChunk, KnowledgeChunk.chunk_id == KnowledgeGraphGateReview.chunk_id)
+                    .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeGraphGateReview.file_id)
+                    .where(*conditions)
+                    .order_by(KnowledgeGraphGateReview.id.asc())
+                    .limit(max(1, page_size))
+                    .offset(max(0, (page - 1)) * max(1, page_size))
+                )
+            ).all()
+            counts_rows = (
+                await session.execute(
+                    select(KnowledgeGraphGateReview.status, KnowledgeGraphGateReview.gate_code, func.count())
+                    .where(KnowledgeGraphGateReview.kb_id == kb_id)
+                    .group_by(KnowledgeGraphGateReview.status, KnowledgeGraphGateReview.gate_code)
+                )
+            ).all()
+        grouped_counts: dict[str, dict[str, int]] = {}
+        for row_status, code, count in counts_rows:
+            bucket = grouped_counts.setdefault(row_status, {})
+            bucket[code] = bucket.get(code, 0) + int(count)
+            bucket["_total"] = bucket.get("_total", 0) + int(count)
+        return {
+            "items": [
+                {
+                    "review_id": row.review_id,
+                    "gate_code": row.gate_code,
+                    "gate_version": row.gate_version,
+                    "status": row.status,
+                    "candidate": row.candidate,
+                    "chunk_id": row.chunk_id,
+                    "file_id": row.file_id,
+                    "filename": original_filename or filename,
+                    "chunk_content": content,
+                    "resolution": row.resolution,
+                    "resolved_by": row.resolved_by,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+                }
+                for row, content, filename, original_filename in rows
+            ],
+            "total": int(total or 0),
+            "page": page,
+            "page_size": page_size,
+            "counts": grouped_counts,
+        }
+
+    async def get_gate_review(self, review_id: str) -> dict[str, Any] | None:
+        async with pg_manager.get_async_session_context() as session:
+            row = (
+                await session.execute(
+                    select(KnowledgeGraphGateReview).where(KnowledgeGraphGateReview.review_id == review_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return {
+                "review_id": row.review_id,
+                "kb_id": row.kb_id,
+                "file_id": row.file_id,
+                "chunk_id": row.chunk_id,
+                "gate_code": row.gate_code,
+                "status": row.status,
+                "candidate": row.candidate,
+                "resolution": row.resolution,
+                "resolved_by": row.resolved_by,
+            }
+
+    async def resolve_gate_review_row(
+        self, review_id: str, *, resolution: str, resolved_by: str
+    ) -> dict[str, Any] | None:
+        """幂等裁决：PENDING → RESOLVED；已 RESOLVED 同参返回 unchanged=True，不同参提示冲突。"""
+        async with pg_manager.get_async_session_context() as session:
+            row = (
+                await session.execute(
+                    select(KnowledgeGraphGateReview).where(KnowledgeGraphGateReview.review_id == review_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            if row.status == "RESOLVED":
+                return {
+                    "review_id": review_id,
+                    "status": "RESOLVED",
+                    "unchanged": row.resolution == resolution,
+                    "resolution": row.resolution,
+                }
+            row.status = "RESOLVED"
+            row.resolution = resolution
+            row.resolved_by = resolved_by
+            row.resolved_at = utc_now()
+            return {"review_id": review_id, "status": "RESOLVED", "unchanged": False, "resolution": resolution}
+
+    async def list_conflicts(
+        self,
+        kb_id: str,
+        *,
+        kind: str | None = None,
+        status: str = "OPEN",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """冲突队列：DIRECTION（极性矛盾）/ DEFINITION（定义区间口径不一），只登记不删证。"""
+        async with pg_manager.get_async_session_context() as session:
+            conditions = [KnowledgeGraphConflict.kb_id == kb_id]
+            if status and status != "ALL":
+                conditions.append(KnowledgeGraphConflict.status == status)
+            if kind:
+                conditions.append(KnowledgeGraphConflict.kind == kind)
+            total = await session.scalar(select(func.count()).select_from(KnowledgeGraphConflict).where(*conditions))
+            rows = (
+                (
+                    await session.execute(
+                        select(KnowledgeGraphConflict)
+                        .where(*conditions)
+                        .order_by(KnowledgeGraphConflict.id.asc())
+                        .limit(max(1, page_size))
+                        .offset(max(0, (page - 1)) * max(1, page_size))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            counts_rows = (
+                await session.execute(
+                    select(KnowledgeGraphConflict.kind, KnowledgeGraphConflict.status, func.count())
+                    .where(KnowledgeGraphConflict.kb_id == kb_id)
+                    .group_by(KnowledgeGraphConflict.kind, KnowledgeGraphConflict.status)
+                )
+            ).all()
+        grouped: dict[str, dict[str, int]] = {}
+        for conflict_kind, conflict_status, count in counts_rows:
+            bucket = grouped.setdefault(conflict_status, {})
+            bucket[conflict_kind] = bucket.get(conflict_kind, 0) + int(count)
+            bucket["_total"] = bucket.get("_total", 0) + int(count)
+        return {
+            "items": [
+                {
+                    "conflict_id": row.conflict_id,
+                    "kind": row.kind,
+                    "subject_ref": row.subject_ref,
+                    "detail": row.detail,
+                    "status": row.status,
+                    "resolution": row.resolution,
+                    "resolved_by": row.resolved_by,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+                }
+                for row in rows
+            ],
+            "total": int(total or 0),
+            "page": page,
+            "page_size": page_size,
+            "counts": grouped,
+        }
+
+    async def get_conflict(self, conflict_id: str) -> dict[str, Any] | None:
+        async with pg_manager.get_async_session_context() as session:
+            row = (
+                await session.execute(
+                    select(KnowledgeGraphConflict).where(KnowledgeGraphConflict.conflict_id == conflict_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return {
+                "conflict_id": row.conflict_id,
+                "kb_id": row.kb_id,
+                "kind": row.kind,
+                "subject_ref": row.subject_ref,
+                "detail": row.detail,
+                "status": row.status,
+            }
+
+    async def resolve_conflict_row(
+        self, conflict_id: str, *, resolution: str, note: str | None, resolved_by: str
+    ) -> dict[str, Any] | None:
+        """冲突裁决（SUPERSEDED/CONTESTED/RECONCILED）：只改冲突行与备注，绝不触碰证据行。"""
+        async with pg_manager.get_async_session_context() as session:
+            row = (
+                await session.execute(
+                    select(KnowledgeGraphConflict).where(KnowledgeGraphConflict.conflict_id == conflict_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            if row.status == "RESOLVED":
+                return {
+                    "conflict_id": conflict_id,
+                    "status": "RESOLVED",
+                    "unchanged": row.resolution == resolution,
+                    "resolution": row.resolution,
+                }
+            before = {"status": row.status, "resolution": row.resolution}
+            row.status = "RESOLVED"
+            row.resolution = resolution
+            row.resolved_by = resolved_by
+            row.resolved_at = utc_now()
+            if note:
+                existing = row.detail if isinstance(row.detail, dict) else {}
+                row.detail = {**existing, "resolution_note": note}
+            return {
+                "conflict_id": conflict_id,
+                "status": "RESOLVED",
+                "unchanged": False,
+                "resolution": resolution,
+                "before": before,
+            }
 
     @staticmethod
     async def _get_decision_row(session, kb_id: str, target_kind: str, target_id: str):

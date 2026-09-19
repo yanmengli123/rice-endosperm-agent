@@ -324,6 +324,8 @@ def _graph_build_service(chunk_repo, graph_vector_store):
         graph_repo=SimpleNamespace(upsert_chunk_graph=AsyncMock()),
         review_repo=SimpleNamespace(list_decisions=AsyncMock(return_value=[])),
         graph_vector_store=graph_vector_store,
+        # 单测无 DB：doclex 是增强层，注入假服务返回「无词典」载荷
+        doclex_service=SimpleNamespace(prepare_file=AsyncMock(return_value={"fingerprint": None, "entries": []})),
     )
     service._get_chunk_extraction_result = AsyncMock(return_value={"entities": [], "relations": [], "metadata": {}})
     service.write_chunk_graph = MagicMock(

@@ -239,6 +239,13 @@ def test_graph_migrations_are_registered_with_handlers():
     from yuxi.storage.postgres.manager import PostgresManager
 
     versions = [version for version, _ in PostgresManager._VERSIONED_MIGRATIONS]
-    assert versions[-2:] == ["0039_graph_mention_evidence", "0040_graph_review_overlay"]
-    assert callable(getattr(PostgresManager, "_migration_0039_graph_mention_evidence"))
-    assert callable(getattr(PostgresManager, "_migration_0040_graph_review_overlay"))
+    # 包含性断言（不假设列表末尾——工作树上可能有并行工作的更高版本迁移）
+    for expected in (
+        "0039_graph_mention_evidence",
+        "0040_graph_review_overlay",
+        "0041_graph_nary_doclex",
+        "0042_graph_dead_letter",
+    ):
+        assert expected in versions
+        handler = "_migration_" + expected
+        assert callable(getattr(PostgresManager, handler))

@@ -21,7 +21,11 @@ from typing import Any
 
 import json_repair
 
-from yuxi.knowledge.graphs.extraction_gates import GateStats, apply_gates
+from yuxi.knowledge.graphs.extraction_fingerprint import (
+    compute_extraction_fingerprint,
+    relation_types_version,
+)
+from yuxi.knowledge.graphs.extraction_gates import GATE_VERSION, GateStats, apply_gates
 from yuxi.knowledge.graphs.extraction_units import (
     EXTRACTION_UNIT_VERSION,
     ExtractionWindow,
@@ -32,6 +36,7 @@ from yuxi.knowledge.graphs.lexicon import (
     LEXICON_VERSION,
     SCIENTIFIC_ENTITY_TYPES,
     LexiconMatch,
+    lexicon_content_digest,
     lexicon_snapshot,
     pre_annotate,
 )
@@ -40,20 +45,31 @@ from yuxi.knowledge.graphs.managed_import_parser import (
     GENE_RELATION_TYPES,
     PERTURBATION_RELATION_TYPES,
 )
+from yuxi.knowledge.graphs.predicate_triggers import TRIGGER_VERSION
 from yuxi.models.chat import select_model
 
 from .base import GraphExtractor
 
-PROMPT_VERSION = "scientific_v1"
+PROMPT_VERSION = "scientific_v3"
+# 实体类型闭集版本（R5b/R7c）：类型集成员变化 → 进指纹 → 全量重抽
+SCIENTIFIC_ENTITY_TYPES_VERSION = "entity_types_v2"
 VERIFIER_PROMPT_VERSION = "verifier_v1"
 G8_VERIFIER_REJECTED = "G8_VERIFIER_REJECTED"
 DEFAULT_BATCH_SIZE = 8
 MAX_BATCH_SIZE = 32
 DEFAULT_CONTEXT_SENTENCES = 1
+# 每个抽取单元注入的文档词典条目上限（防 prompt 膨胀；条目按窗口相关性筛选）
+MAX_DOCLEX_HINTS_PER_WINDOW = 8
+# REVIEW 路由产物随 metadata 落库的每 chunk 上限（防异常输入撑爆 JSON 列）
+MAX_GATE_REVIEWS_PER_CHUNK = 50
 
 SCIENTIFIC_RELATION_TYPES: frozenset[str] = frozenset(
     GENE_RELATION_TYPES | ALLELE_RELATION_TYPES | PERTURBATION_RELATION_TYPES | {"ALLELE_OF"}
 )
+# 结构谓词（D5/B4）：跨章节方法桥与条件挂载。它们是检索期多跳的中继边，
+# 永不参与 claim 升格（graph_utils.is_structural_predicate 是权威判定）
+STRUCTURAL_RELATION_TYPES: frozenset[str] = frozenset({"OBSERVED_BY", "UNDER_CONDITION"})
+SCIENTIFIC_RELATION_TYPES = SCIENTIFIC_RELATION_TYPES | STRUCTURAL_RELATION_TYPES
 
 _ENTITY_TYPE_GUIDE = {
     "Gene": "基因（symbol 或 RAP/MSU 编号；蛋白以基因名指代时也记为 Gene）",
@@ -70,8 +86,9 @@ _ENTITY_TYPE_GUIDE = {
     "Condition": "处理/环境条件与激素处理（ABA 处理、干旱、高温）",
     "Cultivar": "品种/材料背景（Nipponbare、9311、ZH11）",
     "Experiment": "特定实验/试验体系",
-    "Publication": "文献（仅在句中以文献为主体时）",
+    "Publication": "文献（仅在句以文献为主体时）",
     "Method": "实验方法（qRT-PCR、CRISPR/Cas9、Y2H、EMSA）",
+    "Observation": "实验观测记录（表格中一行「某品种在某处理下的某性状测量值」；正文叙述的测量结果不用此类型）",
 }
 
 _RELATION_GUIDE = {
@@ -96,24 +113,37 @@ _RELATION_GUIDE = {
     "RNAI_EFFECT": "RNAi 干扰 subject 基因导致 object 改变",
     "OVEREXPRESSION_EFFECT": "过表达 subject 基因导致 object 改变",
     "ALLELE_OF": "subject 突变体/等位是 object 基因的等位",
+    "OBSERVED_BY": "subject（表型/过程/定位结果）由 object（实验方法）观察、测量或验证（结构桥，只连接不推理）",
+    "UNDER_CONDITION": "subject（基因/蛋白/过程）在 object（处理条件）下被考察（条件挂载，只连接不推理）",
 }
 
 _SYSTEM_RULES = """你是水稻分子生物学文献的实体与关系标注器。输入是若干抽取单元，每个单元有「主句」与「语境」。
 铁律（违反任一条的输出会被程序拒绝并计入错误率）：
 1. 实体 type 只能从 ENTITY_TYPES 枚举中选择；关系 predicate 只能从 RELATION_TYPES 枚举中选择，
    并遵守方向约定：subject 是施加方/调节因子/被扰动基因，object 是受动方/靶/结果。
+   OBSERVED_BY 与 UNDER_CONDITION 例外：subject 是被考察的对象，object 是方法或条件。
+   唯一例外：某个概念确实无法归入任何枚举类型时，type 填 "NEW_CONCEPT"（不要勉强归类），
+   该实体将被送人工审核定型，禁止把已有类型挪用为近似值。
 2. 只从「主句」抽取；「语境」仅用于理解指代，禁止从语境句抽取任何实体或关系。
 3. entity.surface 与 relation.evidence_quote 必须逐字复制主句原文的连续子串，禁止改写、翻译、补全、合并。
 4. 标识符类实体（RAP/MSU 基因编号、DOI、PMID）只能确认「预标注」中已列出的，不得新增。
 5. 只抽取主句中明确陈述的关系，禁止推断；含 may/might/suggest/possibly/可能/提示 等推测语气的关系照抽但 hedge=true。
 6. normalized_name 给出该实体的规范名（基因用官方 symbol，条件/组织用英文小写通名）；不确定就复制 surface。
 7. 不确定一律省略——漏标代价低于错标。空单元输出空数组。
+8. 条件限定（N 元组）：关系在特定实验条件下成立时，条件写入 context.condition（如 高温/ABA/drought），
+   对照基线写入 context.baseline；实验对比句（如常温低、高温高）拆成两条关系分别携带各自 condition。
+9. 否定与极性：主句明确陈述否定（not/无/未/不/failed to）时 polarity="negative"；
+   显著/极显著用 magnitude="significant"，轻微/略用 magnitude="slight"。禁止臆造主句没有的极性。
+10. 「文档词典」给出本文档内指代与缩写的标准解析（如 该品种=秋田小町）。主句中的指代词按词典解析
+   为规范实体名输出，surface 仍逐字抄主句原文。
 输出严格 JSON，不要输出解释：
 {"units": [{"unit": <单元编号>, "entities": [{"surface": str, "type": str, "normalized_name": str}],
   "relations": [{"subject": <实体surface>, "predicate": str, "object": <实体surface>, "evidence_quote": str,
   "confidence": 0~1, "hedge": bool,
   "context": {"direction": "activates|inhibits|null", "directness": "direct|indirect|null", "condition": str|null,
-  "tissue": str|null, "stage": str|null, "cultivar": str|null, "genetic_background": str|null}}]}]}"""
+  "tissue": str|null, "stage": str|null, "cultivar": str|null, "genetic_background": str|null,
+  "polarity": "positive|negative|neutral|null", "magnitude": "significant|moderate|slight|null",
+  "baseline": str|null}}]}]}"""
 
 _VERIFIER_RULES = """你是关系抽取复核器（独立第二模型）。对每条候选关系，只判断「主句是否明确陈述了该关系且方向正确」。
 规则：
@@ -178,13 +208,47 @@ class LLMScientificGraphExtractor(GraphExtractor):
         """温度默认锁 0：抽取是判别任务，可复现性优先于多样性。"""
         return {"temperature": 0, **(self.options.get("model_params") or {})}
 
+    def extraction_fingerprint(self, *, doclex_fingerprint: str | None = None) -> str:
+        """本抽取器全部语义组件的内容指纹（D3 缓存失效依据）。
+
+        并发数（concurrency_count）是执行层参数、不影响单 chunk 语义，不进指纹；
+        batch_size / context_sentences 会改变模型看到的窗口组成，进指纹。
+        """
+        return compute_extraction_fingerprint(
+            extractor_type=self.extractor_type,
+            algorithm_versions={
+                "prompt_version": PROMPT_VERSION,
+                "relation_types_version": relation_types_version(SCIENTIFIC_RELATION_TYPES),
+                # R2a：词典内容 digest（merge_lexicon_terms 运行时扩词立即失效缓存），
+                # 裸版本号只在 metadata 做审计展示
+                "lexicon_digest": lexicon_content_digest(),
+                "extraction_unit_version": EXTRACTION_UNIT_VERSION,
+                "gate_version": GATE_VERSION,
+                "trigger_version": TRIGGER_VERSION,
+                "entity_types_version": SCIENTIFIC_ENTITY_TYPES_VERSION,
+            },
+            runtime_options={
+                "model_spec": self.options["model_spec"],
+                "model_params": self.model_params(),
+                "context_sentences": self.context_sentences,
+                "batch_size": self.batch_size,
+                "strict_triggers": self.strict_triggers,
+                "verifier_model_spec": self.verifier_model_spec,
+            },
+            doclex_fingerprint=doclex_fingerprint,
+        )
+
     async def extract(self, text: str, *, chunk_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         self.validate_options()
+        metadata_extra = chunk_metadata or {}
+        doclex_entries = self._doclex_entries(metadata_extra)
+        doclex_fingerprint = metadata_extra.get("doclex_fingerprint")
         windows = build_extraction_windows(text, context_sentences=self.context_sentences)
         preannotations = {window.index: pre_annotate(window.main_text) for window in windows}
         stats = GateStats()
         accepted_entities: list[dict[str, Any]] = []
         accepted_relations: list[dict[str, Any]] = []
+        gate_reviews: list[dict[str, Any]] = []
         llm_calls = 0
         verifier_calls = 0
 
@@ -201,7 +265,7 @@ class LLMScientificGraphExtractor(GraphExtractor):
             )
             for start in range(0, len(windows), self.batch_size):
                 batch = windows[start : start + self.batch_size]
-                prompt = self.build_prompt(batch, preannotations)
+                prompt = self.build_prompt(batch, preannotations, doclex_entries)
                 response = await model.call(prompt, stream=False)
                 llm_calls += 1
                 units_by_index = self._parse_units(response.content if response else "")
@@ -218,6 +282,7 @@ class LLMScientificGraphExtractor(GraphExtractor):
                     stats.merge(outcome.stats)
                     accepted_entities.extend(outcome.entities)
                     batch_relations.extend((relation, window) for relation in outcome.relations)
+                    gate_reviews.extend(outcome.reviews)
                 if verifier is not None and batch_relations:
                     verifier_response = await verifier.call(self.build_verifier_prompt(batch_relations), stream=False)
                     verifier_calls += 1
@@ -242,10 +307,14 @@ class LLMScientificGraphExtractor(GraphExtractor):
             "prompt_version": PROMPT_VERSION,
             "lexicon_version": LEXICON_VERSION,
             "extraction_unit_version": EXTRACTION_UNIT_VERSION,
+            "gate_version": GATE_VERSION,
+            "trigger_version": TRIGGER_VERSION,
             "model_spec": self.options["model_spec"],
             "strict_triggers": self.strict_triggers,
             "verifier_model_spec": self.verifier_model_spec,
             "verifier_prompt_version": VERIFIER_PROMPT_VERSION if self.verifier_model_spec else None,
+            "extraction_fingerprint": self.extraction_fingerprint(doclex_fingerprint=doclex_fingerprint),
+            "doclex_fingerprint": doclex_fingerprint,
             "windows": len(windows),
             "llm_calls": llm_calls,
             "verifier_calls": verifier_calls,
@@ -253,7 +322,20 @@ class LLMScientificGraphExtractor(GraphExtractor):
             "lexicon": lexicon_snapshot(),
             "gates": stats.to_metadata(),
         }
+        if gate_reviews:
+            # REVIEW 路由产物随 metadata 落库（服务层读 metadata.gate_reviews 写审核队列表）
+            result["metadata"]["gate_reviews"] = gate_reviews[:MAX_GATE_REVIEWS_PER_CHUNK]
         return result
+
+    @staticmethod
+    def _doclex_entries(chunk_metadata: dict[str, Any]) -> list[dict[str, Any]]:
+        """服务层注入的文档词典条目（surface/resolved_name/resolved_label/kind）。"""
+        entries = chunk_metadata.get("doclex_entries")
+        return (
+            [entry for entry in entries if isinstance(entry, dict) and entry.get("surface")]
+            if isinstance(entries, list)
+            else []
+        )
 
     @staticmethod
     def build_verifier_prompt(batch_relations: list[tuple[dict[str, Any], ExtractionWindow]]) -> str:
@@ -289,9 +371,16 @@ class LLMScientificGraphExtractor(GraphExtractor):
                 confirmed.add(index)
         return confirmed
 
-    def build_prompt(self, batch: list[ExtractionWindow], preannotations: dict[int, list[LexiconMatch]]) -> str:
+    def build_prompt(
+        self,
+        batch: list[ExtractionWindow],
+        preannotations: dict[int, list[LexiconMatch]],
+        doclex_entries: list[dict[str, Any]] | None = None,
+    ) -> str:
         entity_lines = "\n".join(f"- {name}: {guide}" for name, guide in _ENTITY_TYPE_GUIDE.items())
         relation_lines = "\n".join(f"- {name}: {_RELATION_GUIDE[name]}" for name in sorted(SCIENTIFIC_RELATION_TYPES))
+        doclex_entries = doclex_entries or []
+        doclex_block = self._doclex_prompt_block(doclex_entries)
         unit_blocks = []
         for window in batch:
             hints = preannotations.get(window.index) or []
@@ -302,6 +391,7 @@ class LLMScientificGraphExtractor(GraphExtractor):
                 )
                 or "无"
             )
+            doclex_text = self._window_doclex_text(window, doclex_entries) or "无"
             context_before = window.context_before or "（无）"
             context_after = window.context_after or "（无）"
             unit_blocks.append(
@@ -309,14 +399,41 @@ class LLMScientificGraphExtractor(GraphExtractor):
                 f"语境（前）：{context_before}\n"
                 f"主句：{window.main_text}\n"
                 f"语境（后）：{context_after}\n"
-                f"预标注：{hint_text}"
+                f"预标注：{hint_text}\n"
+                f"文档词典（本单元相关）：{doclex_text}"
             )
         return (
             f"{_SYSTEM_RULES}\n\n"
             f"ENTITY_TYPES：\n{entity_lines}\n\n"
             f"RELATION_TYPES（方向约定）：\n{relation_lines}\n\n"
+            f"{doclex_block}"
             f"抽取单元（共 {len(batch)} 个，单元编号与输出 unit 字段一一对应）：\n\n" + "\n\n".join(unit_blocks)
         )
+
+    @staticmethod
+    def _doclex_prompt_block(doclex_entries: list[dict[str, Any]]) -> str:
+        """文档词典总览（全文级条目，少量；逐单元的相关条目另附在单元块内）。"""
+        if not doclex_entries:
+            return ""
+        lines = [
+            f"- {entry['surface']} = {entry.get('resolved_name') or '?'}"
+            f"（{entry.get('resolved_label') or entry.get('kind', '?')}）"
+            for entry in doclex_entries[: MAX_DOCLEX_HINTS_PER_WINDOW * 4]
+        ]
+        return "文档词典（本文档内指代/缩写的标准解析，指代词必须按此解析）：\n" + "\n".join(lines) + "\n\n"
+
+    @staticmethod
+    def _window_doclex_text(window: ExtractionWindow, doclex_entries: list[dict[str, Any]]) -> str:
+        """与本窗口语境相关的词典条目：surface 出现在窗口全文内（大小写不敏感）。"""
+        haystack = f"{window.context_before} {window.main_text} {window.context_after}".lower()
+        picked: list[str] = []
+        for entry in doclex_entries:
+            surface = str(entry.get("surface") or "")
+            if surface and surface.lower() in haystack:
+                picked.append(f"{surface}={entry.get('resolved_name') or '?'}")
+            if len(picked) >= MAX_DOCLEX_HINTS_PER_WINDOW:
+                break
+        return "；".join(picked)
 
     @staticmethod
     def _parse_units(content: str) -> dict[int, dict[str, Any]]:

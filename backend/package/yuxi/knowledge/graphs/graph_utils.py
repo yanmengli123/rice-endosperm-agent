@@ -13,6 +13,102 @@ from yuxi.utils import hashstr
 # 关系级证据属性（llm_scientific 轨）：从抽取结果一路透传到 knowledge_graph_triple_mentions 行
 RELATION_EVIDENCE_FIELDS = ("confidence", "hedge", "context", "trigger_verified", "trigger_term", "verifier_confirmed")
 
+# ── 谓词分级（D9 检索期剪枝依据）────────────────────────────────
+# TIER_A 因果/调控：回答「为什么/怎么调控」的主力边，检索期默认展开；
+# TIER_B 状态/表达：定位、表达、共现类陈述，检索期默认展开但排序靠后；
+# TIER_C 结构/元数据：方法桥与条件挂载，只作为多跳的中继边（拉方法参数/条件
+#   进 context），永不直接作为答案证据渲染，也永不参与 claim 升格。
+TIER_A = "TIER_A"
+TIER_B = "TIER_B"
+TIER_C = "TIER_C"
+
+STRUCTURAL_PREDICATES: frozenset[str] = frozenset({"OBSERVED_BY", "UNDER_CONDITION"})
+
+PREDICATE_TIERS: dict[str, str] = {
+    **{
+        predicate: TIER_A
+        for predicate in (
+            "DIRECT_BINDING",
+            "TRANSCRIPTIONAL_ACTIVATION",
+            "TRANSCRIPTIONAL_REPRESSION",
+            "TRANSCRIPTIONAL_REGULATION",
+            "PROTEIN_ACTIVITY_REGULATION",
+            "PROTEIN_DEGRADATION",
+            "REQUIRED_FOR",
+            "PROMOTES_PROCESS",
+            "INHIBITS_PROCESS",
+            "REGULATES_PROCESS",
+            "PROMOTES_PHENOTYPE",
+            "SUPPRESSES_PHENOTYPE",
+            "REGULATES_PHENOTYPE",
+            "MUTANT_EFFECT",
+            "KNOCKOUT_EFFECT",
+            "CRISPR_EFFECT",
+            "RNAI_EFFECT",
+            "OVEREXPRESSION_EFFECT",
+        )
+    },
+    **{predicate: TIER_B for predicate in ("EXPRESSION_IN", "COEXPRESSION", "ALLELE_OF")},
+    **{predicate: TIER_C for predicate in STRUCTURAL_PREDICATES},
+}
+
+
+def predicate_tier(relation_type: str) -> str:
+    """谓词分级；未知谓词（含托管导入的自由关系）按 TIER_B 对待——可用但不优先。"""
+    return PREDICATE_TIERS.get(relation_type, TIER_B)
+
+
+def is_structural_predicate(relation_type: str) -> bool:
+    """结构谓词永不参与 claim 升格 / 直接证据渲染（ADR-0001 权威边界的图谱侧延伸）。"""
+    return relation_type in STRUCTURAL_PREDICATES
+
+
+# ── mention 极性推导（D6 冲突聚合的判定基元）──────────────────────
+# 优先级：context.polarity（模型显式标注）> context.direction > 谓词语义先验。
+# 推导不出来的（None）不参与冲突判定——宁缺勿错。
+_NEGATIVE_SEMANTIC_PREDICATES = frozenset(
+    {
+        "TRANSCRIPTIONAL_REPRESSION",
+        "PROTEIN_DEGRADATION",
+        "INHIBITS_PROCESS",
+        "SUPPRESSES_PHENOTYPE",
+    }
+)
+_POSITIVE_SEMANTIC_PREDICATES = frozenset(
+    {
+        "TRANSCRIPTIONAL_ACTIVATION",
+        "PROMOTES_PROCESS",
+        "PROMOTES_PHENOTYPE",
+    }
+)
+
+
+def derive_mention_polarity(relation_type: str, context: dict[str, Any] | None) -> str | None:
+    """从 mention 语境推导极性：positive / negative / None（无法判定）。
+
+    冲突检测只对同一 (subject, predicate, object, condition) 下同时出现
+    positive 与 negative 的三元组登记 CONTESTED；推不出的 mention 不参与。
+    """
+    context = context or {}
+    polarity = str(context.get("polarity") or "").strip().lower()
+    if polarity in {"positive", "negative", "neutral"}:
+        return polarity
+    direction = str(context.get("direction") or "").strip().lower()
+    if direction == "inhibits":
+        return "negative"
+    if direction == "activates":
+        return "positive"
+    if relation_type in _NEGATIVE_SEMANTIC_PREDICATES:
+        return "negative"
+    if relation_type in _POSITIVE_SEMANTIC_PREDICATES:
+        return "positive"
+    return None
+
+
+def condition_key(condition_text: str | None) -> str:
+    """冲突聚合的条件维度键：condition 入键，「HT 下促 / CT 下抑」不是矛盾而是对比。"""
+    return normalize_entity_name(str(condition_text or "")) or "_"
+
 
 def normalize_entity_name(text: str) -> str:
     """统一实体名称：去首尾空白、小写化、压缩内部连续空白。"""

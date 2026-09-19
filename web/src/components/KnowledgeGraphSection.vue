@@ -127,6 +127,22 @@
                 >
                   <ClipboardCheck :size="16" />
                 </a-button>
+                <a-button
+                  v-if="isMilvus"
+                  class="action-btn"
+                  @click="showGateReviewQueue = true"
+                  title="门禁送审队列：G7/G9 送审候选的人工裁决"
+                >
+                  <ScanText :size="16" />
+                </a-button>
+                <a-button
+                  v-if="isMilvus"
+                  class="action-btn"
+                  @click="showConflictQueue = true"
+                  title="冲突队列：极性矛盾与定义口径不一的登记与处置"
+                >
+                  <Network :size="16" />
+                </a-button>
                 <a-button class="action-btn" @click="toggleSettingsPanel" title="设置">
                   <Settings :size="16" />
                 </a-button>
@@ -478,6 +494,8 @@
       @imported="handleGraphImported"
     />
     <GraphReviewQueue v-model:open="showReviewQueue" :kb-id="kbId" @reviewed="loadGraph" />
+    <GateReviewQueue v-model:open="showGateReviewQueue" :kb-id="kbId" @reviewed="loadGraph" />
+    <ConflictQueue v-model:open="showConflictQueue" :kb-id="kbId" @reviewed="loadGraph" />
   </div>
 </template>
 
@@ -503,6 +521,8 @@ import GraphCanvas from '@/components/GraphCanvas.vue'
 import GraphDetailPanel from '@/components/GraphDetailPanel.vue'
 import GraphImportModal from '@/components/GraphImportModal.vue'
 import GraphReviewQueue from '@/components/GraphReviewQueue.vue'
+import GateReviewQueue from '@/components/GateReviewQueue.vue'
+import ConflictQueue from '@/components/ConflictQueue.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
 import { getKbTypeLabel } from '@/utils/kb_utils'
 import { unifiedApi } from '@/apis/graph_api'
@@ -552,6 +572,8 @@ const graphBuildLoading = ref(false)
 const showGraphConfig = ref(false)
 const showGraphImport = ref(false)
 const showReviewQueue = ref(false)
+const showGateReviewQueue = ref(false)
+const showConflictQueue = ref(false)
 let buildStatusPollTimer = null
 let graphSettingsRequestSeq = 0
 let graphSettingsLoadPromise = null

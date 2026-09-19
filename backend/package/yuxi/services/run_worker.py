@@ -37,6 +37,7 @@ from yuxi.services.scientific_pdf_ingest_service import (
     recover_stale_scientific_pdf_ingests,
 )
 from yuxi.services.trace_service import purge_expired_trace_runs, relay_trace_outbox
+from yuxi.knowledge.graphs.doclex.service import prewarm_doclex_for_kb
 from yuxi.services.wiki_service import process_dynamic_wiki_build, reconcile_dynamic_wikis
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import AgentRun, Message, User
@@ -1055,7 +1056,7 @@ async def _worker_shutdown(ctx):
 
 
 class WorkerSettings:
-    functions = [process_agent_run, process_scientific_pdf_ingest, process_dynamic_wiki_build]
+    functions = [process_agent_run, process_scientific_pdf_ingest, process_dynamic_wiki_build, prewarm_doclex_for_kb]
     # 每 5 分钟清扫一次孤儿 run；worker 启动时也会立即执行一次。
     cron_jobs = [
         cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5))),

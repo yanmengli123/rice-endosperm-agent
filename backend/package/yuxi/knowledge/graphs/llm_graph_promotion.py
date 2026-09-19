@@ -32,7 +32,23 @@ class LLMGraphPromotionService:
     def __init__(self, graph_repo: KnowledgeGraphRepository | None = None):
         self.graph_repo = graph_repo or KnowledgeGraphRepository()
 
-    async def export(self, kb_id: str, *, min_support_count: int = 1, exported_by: str = "system") -> dict[str, Any]:
+    async def export(
+        self,
+        kb_id: str,
+        *,
+        min_support_count: int = 1,
+        exported_by: str = "system",
+        max_hallucination_rate: float = 0.2,
+    ) -> dict[str, Any]:
+        # R7b 质量门禁：库级幻觉率超阈值拒绝导出——高幻觉库的「共识」不可信，
+        # 先修抽取（词典/触发词/复核模型）再晋升。仓储无该能力（旧测试假件）时跳过。
+        hallucination_aggregator = getattr(self.graph_repo, "aggregate_hallucination_rate", None)
+        hallucination_rate = (await hallucination_aggregator(kb_id)) if hallucination_aggregator else None
+        if hallucination_rate is not None and hallucination_rate > max_hallucination_rate:
+            raise ValueError(
+                f"库级幻觉率 {hallucination_rate:.4f} 超过晋升阈值 {max_hallucination_rate}，"
+                "请先修复抽取质量（词典/触发词/复核模型）再导出"
+            )
         source = await self.graph_repo.list_promotion_source(kb_id, min_support_count=min_support_count)
         adapted = adapt_promotion_source(source)
         if not adapted["triples"]:

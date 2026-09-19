@@ -5,6 +5,7 @@ import json
 import weakref
 from typing import Any
 
+from yuxi.knowledge.graphs.doclex.service import DocLexService
 from yuxi.knowledge.graphs.extractors import GraphExtractor, GraphExtractorFactory, normalize_extraction_result
 from yuxi.knowledge.graphs.graph_utils import (
     RELATION_EVIDENCE_FIELDS,
@@ -16,6 +17,7 @@ from yuxi.knowledge.graphs.graph_utils import (
     cypher_merge_relation,
     normalize_entity_name,
 )
+from yuxi.knowledge.graphs.lexicon import merge_lexicon_terms, remove_lexicon_terms
 from yuxi.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
 from yuxi.knowledge.graphs.review_overlay import (
     KIND_ENTITY,
@@ -29,7 +31,7 @@ from yuxi.knowledge.graphs.review_overlay import (
 from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
-from yuxi.repositories.knowledge_graph_repository import KnowledgeGraphRepository
+from yuxi.repositories.knowledge_graph_repository import KnowledgeGraphRepository, upsert_gate_reviews
 from yuxi.repositories.knowledge_graph_review_repository import KnowledgeGraphReviewRepository
 from yuxi.storage.neo4j import (
     Neo4jConnectionManager,
@@ -44,6 +46,9 @@ from yuxi.utils.datetime_utils import utc_isoformat
 GRAPH_CONFIG_KEY = "graph_build_config"
 GRAPH_TASK_TYPE = "knowledge_graph_index"
 GRAPH_INDEX_MAX_ATTEMPTS = 3
+# 死信阈值（R2b）：累计失败达到该值（跨 job，落库在 knowledge_chunks.graph_attempts）
+# 置 graph_dead，pending 查询不再选取；revive / 单 chunk 重抽清零复活
+GRAPH_DEAD_ATTEMPT_THRESHOLD = 6
 NEO4J_QUERY_OFFLOAD_LIMIT = 8
 # 走聊天模型的抽取器：configure 需校验 chat 模型、并发数取 concurrency_count
 LLM_EXTRACTOR_TYPES = frozenset({"llm", "llm_scientific"})
@@ -268,6 +273,7 @@ class MilvusGraphService:
         graph_vector_store: MilvusGraphVectorStore | None = None,
         neo4j_connection: Neo4jConnectionManager | None = None,
         review_policy: str | None = None,
+        doclex_service: DocLexService | None = None,
     ):
         self.kb_id = kb_id
         self.kb_repo = kb_repo or KnowledgeBaseRepository()
@@ -276,6 +282,8 @@ class MilvusGraphService:
         self.review_repo = review_repo or KnowledgeGraphReviewRepository()
         self._graph_vector_store = graph_vector_store
         self._connection = neo4j_connection
+        # Stage B 文档词典（Pass 1）：build Phase 0 惰性准备，注入 Pass 2 抽取
+        self.doclex_service = doclex_service or DocLexService()
         # 图查询的审核策略：candidates_visible（默认，候选边显示 + 徽标）
         # / approved_only（主图与检索只含 APPROVED/CANONICAL）
         self.review_policy = review_policy
@@ -295,6 +303,27 @@ class MilvusGraphService:
     @property
     def driver(self):
         return self.connection.driver
+
+    async def _count_dead_chunks(self, kb_id: str) -> int:
+        """死信计数（兼容无该方法的测试假件）。"""
+        counter = getattr(self.chunk_repo, "count_graph_dead_by_kb_id", None)
+        if counter is None:
+            return 0
+        return int(await counter(kb_id))
+
+    async def revive_dead_chunks(self, kb_id: str) -> int:
+        """复活死信 chunk（配置修复后的运营入口）：清标志重试。"""
+        return await self.chunk_repo.revive_graph_chunks(kb_id)
+
+    async def count_stale_cached_chunks(self, kb_id: str) -> int:
+        """R7a 成本闸门：无指纹历史缓存计数（兼容无该方法的测试假件与 SQLite 方言）。"""
+        counter = getattr(self.chunk_repo, "count_stale_graph_cache_by_kb_id", None)
+        if counter is None:
+            return 0
+        try:
+            return int(await counter(kb_id))
+        except Exception:  # noqa: BLE001
+            return 0  # 预估信号查询失败不阻断构建入口
 
     async def get_status(self, kb_id: str, *, tasker: Any = None) -> dict[str, Any]:
         kb = await self._get_milvus_kb(kb_id)
@@ -338,6 +367,8 @@ class MilvusGraphService:
             "config": self._public_config(config),
             "total_chunks": total_chunks,
             "pending_chunks": pending_chunks,
+            "dead_chunks": await self._count_dead_chunks(kb_id),
+            "stale_cached_chunks": await self.count_stale_cached_chunks(kb_id),
             "indexed_chunks": indexed_chunks,
             "entity_count": entity_count,
             "relationship_count": relationship_count,
@@ -398,6 +429,40 @@ class MilvusGraphService:
         context=None,
         model_spec: str | None = None,
     ) -> dict[str, Any]:
+        """R4c KB 作用域词典装载：ALIAS_PROMOTE 晋升的官方别名注入词法层（进程内），
+        构建结束（含异常路径）finally 回滚——词典单例不残留、不影响其他 KB。"""
+        merged_keys = await self._load_kb_alias_lexicon(kb_id)
+        try:
+            return await self._build_pending_chunks(
+                kb_id, batch_size=batch_size, context=context, model_spec=model_spec
+            )
+        finally:
+            for label, keys in merged_keys.items():
+                remove_lexicon_terms(label, keys)
+
+    async def _load_kb_alias_lexicon(self, kb_id: str) -> dict[str, set[str]]:
+        """装载本 KB 人工晋升的别名（DOCLEX_PROMOTED）进闭集词典；返回回滚键集。
+
+        别名量级小（人工晋升产物）；装载让词法层预标注与 Pass1 指代解析认识它们，
+        检索期归一本来就走别名表（entity_resolver）。"""
+        loader = getattr(self.review_repo, "list_promoted_aliases", None)
+        rows = (await loader(kb_id)) if loader is not None else []
+        merged: dict[str, set[str]] = {}
+        for row in rows:
+            label = str(row.get("label") or "Entity")
+            keys = merge_lexicon_terms(label, {f"__kb_alias_{row['alias_id']}__": (str(row.get("alias") or ""),)})
+            if keys:
+                merged.setdefault(label, set()).update(keys)
+        return merged
+
+    async def _build_pending_chunks(
+        self,
+        kb_id: str,
+        *,
+        batch_size: int,
+        context=None,
+        model_spec: str | None = None,
+    ) -> dict[str, Any]:
         kb = await self._get_milvus_kb(kb_id)
         await self._require_graph_contract(kb_id)
         config = self._get_locked_config(kb.additional_params or {})
@@ -414,6 +479,10 @@ class MilvusGraphService:
         # 人工审核决策一次性加载进内存（不逐 chunk 打 PG），每 chunk 写入后幂等重放
         review_index = ReviewDecisionIndex(await self.review_repo.list_decisions(kb_id))
         review_replay: dict[str, int] = {"decisions_loaded": len(review_index)}
+        # Stage B 文档词典（Phase 0 惰性准备，每文件一次；词典构建在锁外、不阻断抽取）
+        doclex_by_file: dict[str, dict[str, Any]] = {}
+        doclex_stats: dict[str, Any] = {"files": 0, "with_dictionary": 0}
+        gate_review_stats: dict[str, int] = {"persisted": 0}
         write_lock = asyncio.Lock()
 
         while True:
@@ -453,7 +522,25 @@ class MilvusGraphService:
                         attempt_counts[chunk.chunk_id] = attempt_counts.get(chunk.chunk_id, 0) + 1
                         attempted_in_pass += 1
                         try:
-                            extraction_result = await self._get_chunk_extraction_result(kb_id, chunk, extractor)
+                            if chunk.file_id not in doclex_by_file:
+                                try:
+                                    doclex_by_file[chunk.file_id] = await self.doclex_service.prepare_file(
+                                        kb_id, chunk.file_id
+                                    )
+                                except Exception as doclex_exc:  # noqa: BLE001
+                                    # 词典是增强不是前置条件：doclex 故障降级为无词典抽取，
+                                    # 失败明细记录在 doclex 修订行上，不拖垮 chunk 构建
+                                    logger.warning(
+                                        "doclex 准备失败，降级为无词典抽取 file_id={}: {}",
+                                        chunk.file_id,
+                                        doclex_exc,
+                                    )
+                                    doclex_by_file[chunk.file_id] = {"fingerprint": None, "entries": []}
+                                doclex_stats["files"] += 1
+                                if doclex_by_file[chunk.file_id].get("fingerprint"):
+                                    doclex_stats["with_dictionary"] += 1
+                            doclex = doclex_by_file[chunk.file_id]
+                            extraction_result = await self._get_chunk_extraction_result(kb_id, chunk, extractor, doclex)
                             async with write_lock:
                                 entities, triples = await asyncio.to_thread(
                                     self.write_chunk_graph,
@@ -479,6 +566,17 @@ class MilvusGraphService:
                                     ent_ids=[entity["entity_id"] for entity in entities],
                                 )
                                 _merge_extraction_stats(extraction_stats, extraction_result.get("metadata") or {})
+                                chunk_metadata = extraction_result.get("metadata") or {}
+                                gate_reviews = chunk_metadata.get("gate_reviews") or []
+                                if gate_reviews:
+                                    persisted = await upsert_gate_reviews(
+                                        kb_id,
+                                        chunk.file_id,
+                                        chunk.chunk_id,
+                                        gate_reviews,
+                                        gate_version=(chunk_metadata.get("gates") or {}).get("gate_version"),
+                                    )
+                                    gate_review_stats["persisted"] += persisted
                                 replayed = await self.replay_review_for_chunk(
                                     kb, chunk, entities, triples, review_index
                                 )
@@ -488,6 +586,17 @@ class MilvusGraphService:
                             last_errors.pop(chunk.chunk_id, None)
                         except Exception as exc:
                             last_errors[chunk.chunk_id] = str(exc)
+                            # R2b 死信落库：失败尝试跨 job 累计（旧仓储无此方法时跳过，兼容测试假件）
+                            record_attempt = getattr(self.chunk_repo, "record_graph_attempt", None)
+                            if record_attempt is not None:
+                                try:
+                                    await record_attempt(
+                                        chunk.chunk_id,
+                                        str(exc),
+                                        dead_threshold=GRAPH_DEAD_ATTEMPT_THRESHOLD,
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    logger.warning("graph attempt 落库失败 chunk_id={}", chunk.chunk_id)
                             logger.error(
                                 "Chunk 图谱构建失败 chunk_id={} attempt={}/{}: {}",
                                 chunk.chunk_id,
@@ -523,9 +632,12 @@ class MilvusGraphService:
                     "success": processed,
                     "failed": 0,
                     "remaining": 0,
+                    "dead": await self._count_dead_chunks(kb_id),
                     "failure_attempts": sum(attempt_counts.values()) - processed,
                     "extraction_stats": extraction_stats,
                     "review_replay": review_replay,
+                    "doclex": doclex_stats,
+                    "gate_reviews": gate_review_stats,
                 }
             if attempted_in_pass == 0:
                 break
@@ -544,10 +656,13 @@ class MilvusGraphService:
             "success": processed,
             "failed": remaining,
             "remaining": remaining,
+            "dead": await self._count_dead_chunks(kb_id),
             "failure_attempts": sum(attempt_counts.values()) - processed,
             "failed_details": failed_details,
             "extraction_stats": extraction_stats,
             "review_replay": review_replay,
+            "doclex": doclex_stats,
+            "gate_reviews": gate_review_stats,
         }
         if context is not None:
             await context.set_result(result)
@@ -570,10 +685,26 @@ class MilvusGraphService:
         options.pop("prompt", None)
         return options
 
-    async def _get_chunk_extraction_result(self, kb_id: str, chunk, extractor: GraphExtractor) -> dict[str, Any]:
+    async def _get_chunk_extraction_result(
+        self,
+        kb_id: str,
+        chunk,
+        extractor: GraphExtractor,
+        doclex: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """抽取缓存命中判定（D3）：指纹一致才复用，stale 即重抽覆盖。
+
+        ``extraction_fingerprint`` 折叠了全部语义组件（prompt/谓词/词典/单元/门禁/
+        触发词/模型/参数/文档词典）——改任何一项，缓存自动失效，无需手工 reset。
+        抽取器不提供指纹（通用 llm 轨）时保持旧行为：有缓存即复用。
+        """
         extractor_type = extractor.extractor_type
+        doclex_fingerprint = (doclex or {}).get("fingerprint")
+        current_fingerprint = extractor.extraction_fingerprint(doclex_fingerprint=doclex_fingerprint)
         if chunk.extraction_result:
-            return normalize_extraction_result(chunk.extraction_result, extractor_type)
+            stored_fingerprint = (chunk.extraction_result.get("metadata") or {}).get("extraction_fingerprint")
+            if current_fingerprint is None or stored_fingerprint == current_fingerprint:
+                return normalize_extraction_result(chunk.extraction_result, extractor_type)
 
         extraction_result = await extractor.extract(
             chunk.content,
@@ -582,6 +713,8 @@ class MilvusGraphService:
                 "chunk_id": chunk.chunk_id,
                 "file_id": chunk.file_id,
                 "chunk_index": chunk.chunk_index,
+                "doclex_entries": (doclex or {}).get("entries") or [],
+                "doclex_fingerprint": doclex_fingerprint,
             },
         )
         normalized_result = normalize_extraction_result(extraction_result, extractor_type)
@@ -1223,6 +1356,44 @@ class MilvusGraphService:
             reverse=True,
         )
         return ranked[:top_k]
+
+    async def batch_query_node_degrees(self, kb_id: str, entity_ids: list[str]) -> dict[str, int]:
+        """R3 两段 hub 治理：一批实体的 Neo4j 全图真实度数（RELATION 边数）。"""
+        if not entity_ids:
+            return {}
+        label = safe_neo4j_label(kb_id)
+        cypher = (
+            f"MATCH (n:Entity:MilvusKB:`{label}` {{kb_id: $kb_id}}) "
+            "WHERE n.entity_id IN $entity_ids "
+            "RETURN n.entity_id AS entity_id, size((n)-[:RELATION]-()) AS degree"
+        )
+        records = await _run_neo4j_query_io(
+            neo4j_read, self.driver, cypher, kb_id=kb_id, entity_ids=list(dict.fromkeys(entity_ids))
+        )
+        return {str(record["entity_id"]): int(record["degree"]) for record in records}
+
+    async def query_tier_a_edges(self, kb_id: str, entity_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+        """R3 定向补查：hub 节点的 TIER_A（因果/调控）邻域边——第一段路径展开可能被
+        path_limit 截断，主力边在此回填（剪枝不丢证据主干）。"""
+        from yuxi.knowledge.graphs.graph_utils import PREDICATE_TIERS, TIER_A
+
+        tier_a_types = sorted(predicate for predicate, tier in PREDICATE_TIERS.items() if tier == TIER_A)
+        label = safe_neo4j_label(kb_id)
+        cypher = (
+            f"MATCH (n:Entity:MilvusKB:`{label}` {{kb_id: $kb_id, entity_id: $entity_id}})"
+            f"-[r:RELATION]-(m:Entity:MilvusKB:`{label}`) "
+            "WHERE r.type IN $types "
+            "RETURN n, r, m LIMIT $limit"
+        )
+        records = await _run_neo4j_query_io(
+            neo4j_read, self.driver, cypher, kb_id=kb_id, entity_id=entity_id, types=tier_a_types, limit=limit
+        )
+        edges = []
+        for record in records:
+            edge = self._normalize_edge(record["r"])
+            if edge:
+                edges.append(edge)
+        return edges
 
     async def get_labels(self, kb_id: str | None = None) -> list[str]:
         effective_kb_id = kb_id or self.kb_id
