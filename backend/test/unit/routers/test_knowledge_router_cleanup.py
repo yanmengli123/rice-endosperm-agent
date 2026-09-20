@@ -462,10 +462,14 @@ async def test_graph_index_task_snapshots_selected_model_in_payload(monkeypatch)
         async def get_status(self, kb_id: str):
             return {
                 "locked": True,
+                "pending_chunks": 3,
                 "config": {
                     "extractor_options": {"model_spec": "minimax-cn:MiniMax-M3"},
                 },
             }
+
+        async def count_stale_cached_chunks(self, kb_id: str) -> int:
+            return 0
 
         async def build_pending_chunks(self, kb_id, *, batch_size, context, model_spec):
             captured["build"] = {

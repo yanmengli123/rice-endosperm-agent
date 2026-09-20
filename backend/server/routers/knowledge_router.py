@@ -803,15 +803,37 @@ async def create_release(kb_id: str, current_user: User = Depends(get_admin_user
 
 
 @knowledge.post("/databases/{kb_id}/releases/{release_id}/publish")
-async def publish_release(release_id: str, kb_id: str, current_user: User = Depends(get_admin_user)):
-    """原子发布：切换 active_release_id 指针，治理状态置 PUBLISHED。"""
+async def publish_release(
+    release_id: str,
+    kb_id: str,
+    force: bool = False,
+    current_user: User = Depends(get_admin_user),
+):
+    """原子发布：切换 active_release_id 指针，治理状态置 PUBLISHED。
+
+    发布前执行 go/no-go 门禁（图谱治理）：完整性违规与 maker-checker 冲突
+    阻断（409），死信/门禁送审/开放冲突以 warning 披露；force=true 可越过
+    阻断项强制发布（审计仍完整记录）。
+    """
     await _ensure_database_supports_documents(kb_id, "发布", COMMAND_RELEASE_PUBLISH)
+    from yuxi.knowledge.graphs.graph_governance_service import GraphGovernanceService
     from yuxi.services.knowledge_release_service import publish_release
 
+    gates = await GraphGovernanceService().evaluate_publish_gates(kb_id, operator_uid=str(current_user.uid))
+    if not gates["go"] and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "发布被治理门禁阻断（可修复后重试，或 force=true 强制发布）",
+                "blockers": gates["blockers"],
+                "warnings": gates["warnings"],
+            },
+        )
     try:
         result = await publish_release(kb_id, release_id, current_user.uid)
     except ValueError as exc:
         raise _http_from_release_state(exc) from exc
+    result["gates"] = gates
     await _record_knowledge_audit(kb_id, "RELEASE_PUBLISHED", current_user.uid, result)
     return result
 
@@ -1146,6 +1168,13 @@ async def index_graph_build(
         graph_status = await service.get_status(kb_id)
         if not graph_status.get("locked"):
             raise HTTPException(status_code=400, detail="请先确认并锁定图谱抽取配置")
+        pending_count = int(graph_status.get("pending_chunks") or 0)
+        if pending_count <= 0:
+            return {
+                "message": "没有待构建段落，无需索引",
+                "status": "success",
+                "queued_count": 0,
+            }
         model_spec = str(
             ((graph_status.get("config") or {}).get("extractor_options") or {}).get("model_spec") or ""
         ).strip()
@@ -1188,7 +1217,12 @@ async def index_graph_build(
         )
         if not created:
             raise HTTPException(status_code=409, detail="该知识库已有正在运行的图谱构建任务")
-        return {"message": "图谱构建任务已提交", "status": "queued", "task_id": task.id}
+        return {
+            "message": "图谱构建任务已提交",
+            "status": "queued",
+            "task_id": task.id,
+            "queued_count": pending_count,
+        }
     except HTTPException:
         raise
     except ValueError as e:

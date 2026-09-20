@@ -12,6 +12,7 @@ import uuid
 from typing import Any
 
 from yuxi.knowledge.graphs.extractors.llm_scientific import SCIENTIFIC_RELATION_TYPES
+from yuxi.knowledge.graphs.graph_governance_service import invalidate_governance_summary
 from yuxi.knowledge.graphs.graph_utils import compute_triple_id
 from yuxi.knowledge.graphs.milvus_graph_service import (
     GRAPH_CONFIG_KEY,
@@ -123,6 +124,7 @@ class GraphReviewService:
             await asyncio.to_thread(
                 self.graph.apply_review_projection, kb_id, triple_status={target_id: STATUS_APPROVED}
             )
+        invalidate_governance_summary(kb_id)
         return {"decision": decision, "unchanged": False}
 
     async def reject(
@@ -165,6 +167,7 @@ class GraphReviewService:
                 await self.review_repo.set_review_status(KIND_TRIPLE, cascaded, STATUS_REJECTED)
             await asyncio.to_thread(self.graph.apply_review_projection, kb_id, reject_entity_ids=[target_id])
             await self.graph.graph_vector_store.delete_graph_records(kb_id, entity_ids=[target_id], triple_ids=cascaded)
+        invalidate_governance_summary(kb_id)
         return {"decision": decision, "cascaded_triple_ids": cascaded}
 
     async def batch(
@@ -207,11 +210,19 @@ class GraphReviewService:
                     )
                 else:
                     raise ValueError(f"批量操作不支持 {action}")
-                succeeded.append({"kind": kind, "id": target_id, "version": result["decision"]["version"]})
+                succeeded.append(
+                    {
+                        "kind": kind,
+                        "id": target_id,
+                        "version": result["decision"]["version"],
+                        "pinned_chunk_id": result["decision"].get("pinned_chunk_id"),
+                    }
+                )
             except ReviewConflictError as exc:
                 skipped.append({"kind": kind, "id": target_id, "reason": "version_conflict", "detail": str(exc)})
             except (ValueError, ReviewTargetReadOnlyError) as exc:
                 skipped.append({"kind": kind, "id": target_id, "reason": "invalid", "detail": str(exc)})
+        invalidate_governance_summary(kb_id)
         return {"batch_id": batch_id, "succeeded": succeeded, "skipped": skipped}
 
     # ── 编辑 ─────────────────────────────────────────────────────
@@ -453,8 +464,30 @@ class GraphReviewService:
         listing["counts"] = await self.review_repo.count_statuses(kb_id)
         return listing
 
-    async def audit(self, kb_id: str, *, target_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        return await self.review_repo.list_audit(kb_id, target_id=target_id, limit=limit)
+    async def audit(
+        self,
+        kb_id: str,
+        *,
+        target_id: str | None = None,
+        limit: int = 50,
+        page: int = 1,
+        page_size: int = 20,
+        actor_uid: str | None = None,
+        action: str | None = None,
+        batch_id: str | None = None,
+    ) -> dict[str, Any]:
+        """审计账本分页查询；limit 兼容旧调用方（无 page 时按 limit 取一页）。"""
+        if page <= 1 and limit != 50:
+            page_size = max(1, min(limit, 200))
+        return await self.review_repo.list_audit(
+            kb_id,
+            target_id=target_id,
+            page=page,
+            page_size=page_size,
+            actor_uid=actor_uid,
+            action=action,
+            batch_id=batch_id,
+        )
 
     # ── 门禁送审队列（D4）与冲突队列（D6）────────────────────────
 
@@ -561,6 +594,7 @@ class GraphReviewService:
         resolved = await self.review_repo.resolve_gate_review_row(
             review_id, resolution=f"PROMOTED:{triple_id}", resolved_by=actor_uid
         )
+        invalidate_governance_summary(kb_id)
         return {"review_id": review_id, "triple_id": triple_id, "action": "PROMOTE", **resolved}
 
     async def conflicts(
@@ -607,6 +641,7 @@ class GraphReviewService:
             after_snapshot={"resolution": resolution, "note": note},
             reason=note,
         )
+        invalidate_governance_summary(kb_id)
         return {"conflict_id": conflict_id, **resolved}
 
     async def promote_alias(
@@ -762,7 +797,10 @@ class GraphReviewService:
 
 
 def _pick_pinned_mention(mentions: list[dict[str, Any]], pinned_chunk_id: str | None) -> dict[str, Any] | None:
-    """审核人指定的 chunk 优先；否则已 pinned 的；否则第一条有引文的。"""
+    """审核人指定的 chunk 优先；否则已 pinned 的；否则引文仍逐字命中的；最后才退回第一条有引文的。
+
+    引文漂移（DEGRADED）的 mention 不再被默认固定——批准必须固定仍可回验的证据。
+    """
     with_quote = [m for m in mentions if (m.get("quote") or "").strip()]
     if pinned_chunk_id:
         chosen = next((m for m in with_quote if m["chunk_id"] == pinned_chunk_id), None)
@@ -770,4 +808,7 @@ def _pick_pinned_mention(mentions: list[dict[str, Any]], pinned_chunk_id: str | 
             raise ValueError(f"chunk {pinned_chunk_id} 不是该对象的原文来源")
         return chosen
     pinned = next((m for m in with_quote if m.get("pinned_by")), None)
-    return pinned or (with_quote[0] if with_quote else None)
+    if pinned is not None:
+        return pinned
+    verified = next((m for m in with_quote if (m.get("quote") or "") in (m.get("chunk_content") or "")), None)
+    return verified or (with_quote[0] if with_quote else None)

@@ -1061,6 +1061,9 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0044_doclex_figure_mentions", "_migration_0044_doclex_figure_mentions"),
         ("0045_graph_golden_samples", "_migration_0045_graph_golden_samples"),
         ("0046_evaluation_item_status", "_migration_0046_evaluation_item_status"),
+        ("0047_graph_governance_settings", "_migration_0047_graph_governance_settings"),
+        ("0048_graph_collaboration", "_migration_0048_graph_collaboration"),
+        ("0049_graph_release_decisions", "_migration_0049_graph_release_decisions"),
         ("0050_source_asset_catalog", "_migration_0050_source_asset_catalog"),
         ("0051_contract_digest_refresh_graph_v11", "_migration_0051_contract_digest_refresh_graph_v11"),
         ("0052_managed_graph_v11_upgrade", "_migration_0052_managed_graph_v11_upgrade"),
@@ -2661,6 +2664,68 @@ class PostgresManager(metaclass=SingletonMeta):
         )
         await conn.execute(text("ALTER TABLE evaluation_run_items ALTER COLUMN eval_status SET NOT NULL"))
 
+    async def _migration_0047_graph_governance_settings(self, conn) -> None:
+        """图谱治理设置独立成列（review_policy 治理化）。
+
+        - knowledge_bases 增加 graph_governance_settings JSONB（review_policy /
+          batch_admission / maker_checker / review_sla_hours 的权威存储）；
+        - 显式 backfill：存量 graph_view_settings.review_policy 迁入治理设置，
+          随后从显示设置中移除该键——迁移瞬间检索行为不变（治理端点读取顺序
+          已保证），显示设置从此只管画布；
+        - 变更治理设置必须走治理端点（写审计），PUT /graph/settings 不再受理。
+        """
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS graph_governance_settings JSONB")
+        )
+        await conn.execute(
+            text(
+                "UPDATE knowledge_bases SET graph_governance_settings = "
+                "jsonb_build_object('review_policy', graph_view_settings->'review_policy') "
+                "WHERE graph_governance_settings IS NULL "
+                "AND graph_view_settings IS NOT NULL "
+                "AND jsonb_exists(graph_view_settings, 'review_policy')"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE knowledge_bases SET graph_view_settings = graph_view_settings - 'review_policy' "
+                "WHERE graph_view_settings IS NOT NULL AND jsonb_exists(graph_view_settings, 'review_policy')"
+            )
+        )
+
+    async def _migration_0048_graph_collaboration(self, conn) -> None:
+        """图谱协作（P1）：KB 级能力表 + 审核任务领取表 + 三元组物化风险分。
+
+        - knowledge_base_members：share_config 管可见性、本表管能力
+          （viewer/reviewer/publisher），一人一库一行，新表由 metadata.create_all 建立；
+        - knowledge_graph_review_tasks：轻量领取记录（claim 才落行，完成以决策行为准）；
+        - knowledge_graph_triples.risk_score：nullable 加列（NULL=未计算，
+          构建后按 mention 聚合回填），不设默认值掩盖漏算。
+        """
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_knowledge import (  # noqa: F401
+                KnowledgeBaseMember,
+                KnowledgeGraphReviewTask,
+            )
+
+            await conn.run_sync(KnowledgeBase.metadata.create_all)
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_graph_triples ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION")
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_knowledge_graph_triples_risk ON knowledge_graph_triples(risk_score)")
+        )
+
+    async def _migration_0049_graph_release_decisions(self, conn) -> None:
+        """发布冻结的图谱决策清单（P2）：回答「生产用的是哪一版人工审核图谱」。
+
+        新表 knowledge_graph_release_decisions 由 metadata.create_all 建立；
+        pinned_quote 只存 sha 前 16 位，原文经 chunk 可回溯，append-only。
+        """
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_knowledge import KnowledgeGraphReleaseDecision  # noqa: F401
+
+            await conn.run_sync(KnowledgeBase.metadata.create_all)
 
     async def _migration_0050_source_asset_catalog(self, conn) -> None:
         """统一源资产目录：契约知识库上传源文件的登记与文件管理统一视图。
@@ -2804,7 +2869,6 @@ class PostgresManager(metaclass=SingletonMeta):
             ),
             {"version": v11.version, "digest": contract_digest(v11)},
         )
-
 
     async def _migration_0039_graph_mention_evidence(self, conn) -> None:
         """图谱 mention 级原文证据（「点开即见原文」不变式 I1/I2）。

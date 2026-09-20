@@ -12,7 +12,8 @@ def _router_dependencies(router):
 
 
 def test_graph_and_evaluation_routers_install_knowledge_guard():
-    assert knowledge_access.authorize_knowledge_path in _router_dependencies(graph_router.graph)
+    # 图谱路由使用能力感知守卫（accessible/manageable ∪ KB 成员能力），评估路由沿用原守卫
+    assert knowledge_access.authorize_graph_path in _router_dependencies(graph_router.graph)
     assert knowledge_access.authorize_knowledge_path in _router_dependencies(knowledge_eval_router.evaluation)
 
 

@@ -238,17 +238,19 @@ def test_normalized_result_from_snapshot_rebuilds_same_identity():
 
 
 def test_filter_edges_by_policy_hides_candidates_only_in_approved_only_mode():
+    """approved_only 可见性（fail-closed）：显式状态或托管导入标记，缺属性一律隐藏。"""
     result = {
         "nodes": [{"id": "a"}],
         "edges": [
             {"id": "1", "properties": {"review_status": "CANDIDATE"}},
             {"id": "2", "properties": {"review_status": "APPROVED"}},
-            {"id": "3", "properties": {}},  # 托管导入投影无属性 → CANONICAL 可见
+            {"id": "3", "properties": {}},  # 缺状态属性的脏边 → 隐藏（I7 计数暴露）
+            {"id": "4", "properties": {"managed_projection": True}},  # 托管导入显式标记 → 可见
         ],
     }
 
     assert filter_edges_by_policy(result, REVIEW_POLICY_CANDIDATES_VISIBLE) is result
-    assert [edge["id"] for edge in filter_edges_by_policy(result, REVIEW_POLICY_APPROVED_ONLY)["edges"]] == ["2", "3"]
+    assert [edge["id"] for edge in filter_edges_by_policy(result, REVIEW_POLICY_APPROVED_ONLY)["edges"]] == ["2", "4"]
 
 
 def test_status_update_never_touches_canonical_rows():

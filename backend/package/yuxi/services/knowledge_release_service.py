@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from yuxi.storage.postgres.manager import pg_manager
@@ -26,6 +27,9 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_now
+
+if TYPE_CHECKING:
+    from yuxi.storage.postgres.models_knowledge import KnowledgeGraphReleaseDecision
 
 CAPABILITY_LEVEL_RANK = {"FULL": 3, "PARTIAL": 2, "UNSUPPORTED": 1, "REJECTED": 0, None: -1}
 
@@ -41,6 +45,126 @@ def _manifest_hash(manifest: dict) -> str:
             json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
     )
+
+
+async def _build_graph_release_section(session, kb) -> tuple[dict[str, Any], list[KnowledgeGraphReleaseDecision]]:
+    """冻结图谱治理段（P2）：抽取配置指纹、决策水位与逐条决策清单行。
+
+    manifest.graph 只存水位与哈希（体积可控）；完整决策清单落
+    knowledge_graph_release_decisions（append-only），pinned_quote 只存
+    sha 前 16 位，原文经 kb_id+target_id+pinned_chunk_id 可回溯。
+    """
+    from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_CONFIG_KEY
+    from yuxi.repositories.knowledge_graph_review_repository import KnowledgeGraphReviewRepository
+    from yuxi.storage.postgres.models_knowledge import (
+        KnowledgeGraphReleaseDecision,
+        KnowledgeGraphReviewDecision,
+    )
+
+    review_repo = KnowledgeGraphReviewRepository()
+    from yuxi.knowledge.graphs.graph_governance_service import GraphGovernanceService
+
+    try:
+        settings = await GraphGovernanceService(kb_repo=None, review_repo=review_repo).get_settings(kb.kb_id)
+        review_policy = settings.get("review_policy")
+    except ValueError:
+        review_policy = None
+
+    decision_rows = (
+        (
+            await session.execute(
+                select(KnowledgeGraphReviewDecision).where(KnowledgeGraphReviewDecision.kb_id == kb.kb_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    counts_by_kind_action: dict[str, int] = {}
+    max_version = 0
+    manifest_lines: list[str] = []
+    release_decision_rows: list[KnowledgeGraphReleaseDecision] = []
+    for row in sorted(decision_rows, key=lambda r: (r.target_kind, r.target_id)):
+        key = f"{row.target_kind}:{row.action}"
+        counts_by_kind_action[key] = counts_by_kind_action.get(key, 0) + 1
+        max_version = max(max_version, int(row.version or 0))
+        manifest_lines.append(f"{row.target_kind}|{row.target_id}|{row.action}|{row.version}")
+        release_decision_rows.append(
+            KnowledgeGraphReleaseDecision(
+                release_id="",  # 由调用方回填 release_id 后统一 flush
+                kb_id=kb.kb_id,
+                tenant_id=kb.tenant_id,
+                target_kind=row.target_kind,
+                target_id=row.target_id,
+                action=row.action,
+                version=int(row.version or 0),
+                actor_uid=row.actor_uid,
+                pinned_chunk_id=row.pinned_chunk_id,
+                pinned_quote_sha=(
+                    hashlib.sha256((row.pinned_quote or "").encode("utf-8")).hexdigest()[:16]
+                    if row.pinned_quote
+                    else None
+                ),
+            )
+        )
+    decisions_manifest_sha = (
+        hashlib.sha256("\n".join(manifest_lines).encode("utf-8")).hexdigest() if manifest_lines else None
+    )
+
+    config = ((kb.additional_params or {}) if hasattr(kb, "additional_params") else {}).get(GRAPH_CONFIG_KEY) or {}
+    integrity = await review_repo.integrity_counts(kb.kb_id)
+    integrity.pop("rejected_triple_ids", None)
+    graph_section = {
+        "review_policy": review_policy,
+        "extraction": {
+            "extractor_type": config.get("extractor_type"),
+            "model_spec": (config.get("extractor_options") or {}).get("model_spec"),
+            "config_created_at": config.get("created_at"),
+            "config_created_by": config.get("created_by"),
+        },
+        "decisions_watermark": {
+            "total": len(decision_rows),
+            "counts_by_kind_action": counts_by_kind_action,
+            "max_version": max_version,
+            "manifest_sha256": decisions_manifest_sha,
+        },
+        "integrity_snapshot": integrity,
+        "frozen_at": utc_now().isoformat(),
+    }
+    return graph_section, release_decision_rows
+
+
+async def _ensure_graph_policy_revision(session, kb, policy_json: dict, operator_id: str | None) -> str | None:
+    """为图谱策略创建/复用检索策略修订（幂等：同 hash 复用最新修订）。"""
+    policy_hash = _manifest_hash(policy_json)
+    existing = (
+        (
+            await session.execute(
+                select(KnowledgeRetrievalPolicyRevision)
+                .where(
+                    KnowledgeRetrievalPolicyRevision.kb_id == kb.kb_id,
+                    KnowledgeRetrievalPolicyRevision.policy_hash == policy_hash,
+                )
+                .order_by(KnowledgeRetrievalPolicyRevision.id.desc())
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if existing is not None:
+        return existing.revision_id
+    revision_id = f"rp_{uuid.uuid4().hex[:24]}"
+    session.add(
+        KnowledgeRetrievalPolicyRevision(
+            revision_id=revision_id,
+            kb_id=kb.kb_id,
+            tenant_id=kb.tenant_id,
+            policy_json=policy_json,
+            policy_hash=policy_hash,
+            created_by=operator_id,
+        )
+    )
+    return revision_id
 
 
 async def build_release(kb_id: str, operator_id: str | None) -> dict:
@@ -86,17 +210,35 @@ async def build_release(kb_id: str, operator_id: str | None) -> dict:
         if not sources:
             raise ReleaseStateError("知识库没有可发布的已处理来源（需要至少一个已解析/已入库文件）")
 
+        graph_section: dict[str, Any] | None = None
+        graph_decision_rows: list = []
+        if (kb.kb_type or "").lower() == "milvus":
+            graph_section, graph_decision_rows = await _build_graph_release_section(session, kb)
+
         manifest = {
             "kb_id": kb_id,
             "contract": spec.contract_ref,
             "sources": sources,
             "built_at": utc_now().isoformat(),
         }
+        retrieval_policy_revision_id = None
+        if graph_section is not None:
+            manifest["graph"] = graph_section
+            retrieval_policy_revision_id = await _ensure_graph_policy_revision(
+                session,
+                kb,
+                {
+                    "graph_review_policy": graph_section.get("review_policy"),
+                    "decisions_manifest_sha256": graph_section.get("decisions_watermark", {}).get("manifest_sha256"),
+                },
+                operator_id,
+            )
         release = KnowledgeRelease(
             release_id=f"rel_{uuid.uuid4().hex[:24]}",
             kb_id=kb_id,
             tenant_id=kb.tenant_id,
             contract_ref=spec.contract_ref,
+            retrieval_policy_revision_id=retrieval_policy_revision_id,
             manifest_json=manifest,
             manifest_hash=_manifest_hash(manifest),
             status="STAGED",
@@ -104,12 +246,17 @@ async def build_release(kb_id: str, operator_id: str | None) -> dict:
             created_by=operator_id,
         )
         session.add(release)
+        await session.flush()  # release_id 已定，回填决策清单行
+        for decision_row in graph_decision_rows:
+            decision_row.release_id = release.release_id
+            session.add(decision_row)
         return {
             "release_id": release.release_id,
             "status": release.status,
             "contract_ref": release.contract_ref,
             "source_count": release.source_count,
             "manifest_hash": release.manifest_hash,
+            "graph_decisions_frozen": len(graph_decision_rows),
             "manifest": manifest,
         }
 
@@ -243,6 +390,7 @@ async def list_releases(kb_id: str, limit: int = 50) -> dict:
                 "source_count": row.source_count,
                 "manifest_hash": row.manifest_hash,
                 "previous_release_id": row.previous_release_id,
+                "graph": (row.manifest_json or {}).get("graph") or None,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "published_at": row.published_at.isoformat() if row.published_at else None,
             }

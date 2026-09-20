@@ -51,6 +51,10 @@ class KnowledgeBase(Base):
     governance_status = Column(String(32), nullable=False, default="DRAFT", index=True)
     active_release_id = Column(String(64), index=True)
     graph_view_settings = Column(JSON_VALUE)
+    # 图谱治理设置（review_policy / batch_admission / maker_checker / review_sla_hours）：
+    # 生产检索策略与协作约束的权威存储；变更必须走治理端点并写审计，
+    # 与纯展示的 graph_view_settings 分离（防止「改显示设置」误改生产行为）。
+    graph_governance_settings = Column(JSON_VALUE)
     share_config = Column(JSON_VALUE)
     mindmap = Column(JSON_VALUE)
     mindmap_file_ids = Column(JSON_VALUE)
@@ -675,6 +679,8 @@ class KnowledgeGraphTriple(Base):
     conflict_status = Column(String(32), nullable=False, default="NONE")
     review_status = Column(String(16), nullable=False, default="CANDIDATE")
     review_version = Column(Integer, nullable=False, default=0)
+    # 物化风险分（构建/重算时按 mention 聚合更新，队列 risk_desc 排序用；NULL=未计算）
+    risk_score = Column(Float)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
@@ -1184,6 +1190,84 @@ class KnowledgeGraphReviewAudit(Base):
     reason = Column(Text)
     batch_id = Column(String(64))
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class KnowledgeBaseMember(Base):
+    """知识库级协作能力（P1）：share_config 管「能否看见」，本表管「能做什么」。
+
+    capability ∈ viewer（只读治理视图）/ reviewer（人工审核裁决）/ publisher（发布）。
+    admin/superadmin 具备全部能力（向后兼容）；本表用于把普通用户提升为
+    某个 KB 的审核者/发布者，或把 admin 限制为只读。一人一库一行。
+    """
+
+    __tablename__ = "knowledge_base_members"
+    __table_args__ = (
+        UniqueConstraint("kb_id", "uid", name="uq_knowledge_base_members_kb_uid"),
+        Index("ix_knowledge_base_members_uid", "uid"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    uid = Column(String(64), nullable=False)
+    capability = Column(String(32), nullable=False)
+    created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class KnowledgeGraphReviewTask(Base):
+    """审核任务领取记录（轻量持久化）：队列候选被 claim 时才落行，完成以决策行为准。
+
+    queue_kind ∈ CANDIDATE / GATE / CONFLICT；状态由 claim/release 与
+    claimed_at + SLA 推导（UNASSIGNED→CLAIMED→DONE），不与知识真实性
+    （review_status）混在同一字段。任务行不删除，超时由服务端按
+    claimed_at + review_sla_hours 判定。
+    """
+
+    __tablename__ = "knowledge_graph_review_tasks"
+    __table_args__ = (
+        UniqueConstraint("kb_id", "queue_kind", "target_id", name="uq_graph_review_task_target"),
+        Index("ix_graph_review_tasks_claimed", "kb_id", "assignee_uid"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    queue_kind = Column(String(16), nullable=False)
+    target_id = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, default="CLAIMED")
+    assignee_uid = Column(String(64), nullable=False)
+    claimed_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    released_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class KnowledgeGraphReleaseDecision(Base):
+    """发布时冻结的图谱决策清单（P2）：回答「生产用的是哪一版人工审核图谱」。
+
+    pinned_quote 只存内容哈希前 16 位（版权与体积），原文经 kb_id+target_id+
+    pinned_chunk_id 可回溯；本表随 release 不可变，append-only。
+    """
+
+    __tablename__ = "knowledge_graph_release_decisions"
+    __table_args__ = (
+        UniqueConstraint("release_id", "target_kind", "target_id", name="uq_graph_release_decision_target"),
+        Index("ix_graph_release_decisions_release", "release_id"),
+        Index("ix_graph_release_decisions_kb", "kb_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    release_id = Column(String(64), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    tenant_id = Column(BigInteger, index=True)
+    target_kind = Column(String(16), nullable=False)
+    target_id = Column(String(64), nullable=False)
+    action = Column(String(16), nullable=False)
+    version = Column(Integer, nullable=False)
+    actor_uid = Column(String(64), nullable=False)
+    pinned_chunk_id = Column(String(128))
+    pinned_quote_sha = Column(String(16))
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeRetrievalRun(Base):

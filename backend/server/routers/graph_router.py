@@ -1,18 +1,27 @@
+import csv
+import io
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from yuxi.knowledge.graphs.extractors.llm_scientific import SCIENTIFIC_RELATION_TYPES
 from yuxi.knowledge.graphs.graph_evidence_service import GraphEvidenceService
+from yuxi.knowledge.graphs.graph_governance_service import GraphGovernanceService
 from yuxi.knowledge.graphs.graph_review_service import GraphReviewService
 from yuxi.knowledge.graphs.lexicon import SCIENTIFIC_ENTITY_TYPES
 from yuxi.knowledge.graphs.milvus_graph_service import (
     GRAPH_TASK_TYPE,
-    REVIEW_POLICY_CANDIDATES_VISIBLE,
+    REVIEW_POLICIES,
     MilvusGraphService,
 )
-from yuxi.knowledge.graphs.review_overlay import ACTION_REJECT, KIND_TRIPLE, REVIEW_STATUSES
+from yuxi.knowledge.graphs.review_overlay import (
+    ACTION_REJECT,
+    KIND_TRIPLE,
+    REASON_CODES,
+    REVIEW_STATUSES,
+    compose_reason,
+)
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.repositories.knowledge_graph_review_repository import (
@@ -23,28 +32,28 @@ from yuxi.repositories.knowledge_graph_review_repository import (
 )
 from yuxi.services.task_service import TaskContext, tasker
 from yuxi.storage.postgres.models_business import User
+from yuxi.utils.datetime_utils import utc_now
 from yuxi.utils.logging_config import logger
 
-from server.utils.auth_middleware import get_admin_user
-from server.utils.knowledge_access import authorize_knowledge_path
+from server.utils.auth_middleware import get_admin_user, get_authenticated_user
+from server.utils.knowledge_access import authorize_graph_path
 
 graph = APIRouter(
     prefix="/graph",
     tags=["graph"],
-    dependencies=[Depends(authorize_knowledge_path)],
+    dependencies=[Depends(authorize_graph_path)],
 )
 graph_kb_repository = KnowledgeBaseRepository()
 ACTIVE_GRAPH_BUILD_STATUSES = {"pending", "running"}
+_CAPABILITY_LEVELS = ("viewer", "reviewer", "publisher")
 
 
 class GraphViewSettings(BaseModel):
-    """知识库级图谱视图参数。"""
+    """知识库级图谱视图参数（纯显示，不含生产治理策略——review_policy 走治理端点）。"""
 
     max_nodes: int = Field(default=100, ge=10, le=1000)
     max_depth: int = Field(default=2, ge=1, le=5)
     exclude_chunk: bool = True
-    # 审核策略：候选边显示（默认）/ 只显示 APPROVED 与 CANONICAL（企业严格模式，检索侧同样生效）
-    review_policy: Literal["candidates_visible", "approved_only"] = REVIEW_POLICY_CANDIDATES_VISIBLE
 
 
 def normalize_graph_view_settings(value: object) -> dict:
@@ -65,7 +74,7 @@ async def _get_graph_kb_record(kb_id: str):
     return record
 
 
-async def _get_graph_service(kb_id: str) -> MilvusGraphService:
+async def _get_graph_service(kb_id: str, *, review_policy: str | None = None) -> MilvusGraphService:
     db_info = await knowledge_base.get_database_info(kb_id)
     if not db_info:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
@@ -74,11 +83,11 @@ async def _get_graph_service(kb_id: str) -> MilvusGraphService:
     if kb_type != "milvus":
         raise HTTPException(status_code=404, detail="Graph API only supports Milvus knowledge bases")
 
-    return MilvusGraphService(kb_id=kb_id)
+    return MilvusGraphService(kb_id=kb_id, review_policy=review_policy)
 
 
 @graph.get("/vocabulary")
-async def get_graph_vocabulary(current_user: User = Depends(get_admin_user)):
+async def get_graph_vocabulary(current_user: User = Depends(get_authenticated_user)):
     """科研闭集词表（编辑/补关系表单的谓词与实体类型下拉），与抽取器、G7 触发词门同源。"""
     del current_user
     return {
@@ -91,7 +100,7 @@ async def get_graph_vocabulary(current_user: User = Depends(get_admin_user)):
 
 
 @graph.get("/list")
-async def get_graphs(current_user: User = Depends(get_admin_user)):
+async def get_graphs(current_user: User = Depends(get_authenticated_user)):
     """获取支持图谱能力的 Milvus 知识库列表"""
     try:
         databases = (await knowledge_base.get_databases_by_uid(current_user.uid)).get("databases", [])
@@ -121,15 +130,24 @@ async def get_subgraph(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
     node_label: str = Query("*", description="节点标签或查询关键词"),
     max_depth: int = Query(2, description="最大深度", ge=1, le=5),
-    max_nodes: int = Query(100, description="最大节点数", ge=1, le=1000),
+    max_nodes: int = Query(100, description="节点数", ge=1, le=1000),
     exclude_chunk: bool = Query(False, description="是否排除 Chunk 节点"),
     full_graph: bool = Query(False, description="全图模式：不做抽样/深度/预算截断，仅受硬安全上限保护"),
-    current_user: User = Depends(get_admin_user),
+    review_policy: str | None = Query(
+        None,
+        description="画布会话级显示过滤（candidates_visible/approved_only）；仅影响本查询显示，"
+        "绝不影响 Graph-RAG 检索（检索策略由治理设置决定）",
+    ),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """查询 Milvus 知识库图谱子图"""
     try:
-        logger.info(f"Querying subgraph - kb_id: {kb_id}, label: {node_label}, full_graph: {full_graph}")
-        service = await _get_graph_service(kb_id)
+        policy = review_policy if review_policy in REVIEW_POLICIES else None
+        logger.info(
+            f"Querying subgraph - kb_id: {kb_id}, label: {node_label}, full_graph: {full_graph}, "
+            f"session_policy: {policy}"
+        )
+        service = await _get_graph_service(kb_id, review_policy=policy)
         if full_graph:
             result_data = await service.query_full_graph(exclude_chunk=exclude_chunk)
         else:
@@ -150,7 +168,7 @@ async def get_subgraph(
 @graph.get("/settings")
 async def get_graph_view_settings(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """读取当前知识库全局共享的图谱显示设置。"""
     del current_user
@@ -162,7 +180,7 @@ async def get_graph_view_settings(
 async def update_graph_view_settings(
     settings: GraphViewSettings,
     kb_id: str = Query(..., description="Milvus 知识库ID"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """持久化当前知识库全局共享的图谱显示设置。"""
     del current_user
@@ -177,7 +195,7 @@ async def update_graph_view_settings(
 @graph.get("/labels")
 async def get_graph_labels(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """获取 Milvus 知识库图谱的所有标签"""
     try:
@@ -194,7 +212,7 @@ async def get_graph_labels(
 @graph.get("/stats")
 async def get_graph_stats(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """获取 Milvus 知识库图谱统计信息"""
     try:
@@ -212,7 +230,7 @@ async def get_graph_stats(
 async def get_triple_evidence(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
     triple_id: str = Query(..., description="三元组 ID（Neo4j 边属性 triple_id）"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """边的原文证据：该三元组在 PostgreSQL 规范层的全部逐字引文（显示时逐条重验）。"""
     del current_user
@@ -228,7 +246,7 @@ async def get_triple_evidence(
 async def get_entity_evidence(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
     entity_id: str = Query(..., description="实体 ID（Neo4j 节点属性 entity_id）"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """节点的原文证据：定义语句（派生）+ 该实体出现的全部逐字主句。"""
     del current_user
@@ -244,7 +262,7 @@ async def get_entity_evidence(
 async def get_graph_integrity(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
     limit: int = Query(5000, ge=100, le=50000, description="逐条重验引文的上限（每类）"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """「点开即见原文」完整性审计：无 mention 的边 / 无引文的节点 / 引文漂移计数，任一非零即 VIOLATION。"""
     del current_user
@@ -269,6 +287,7 @@ class ReviewTargetBody(BaseModel):
     target_id: str
     pinned_chunk_id: str | None = None
     note: str | None = None
+    reason_code: str | None = Field(default=None, description="标准原因代码（闭集），与说明一起进审计")
     if_version: int | None = None
 
 
@@ -277,6 +296,7 @@ class ReviewRejectBody(BaseModel):
     target_kind: Literal["TRIPLE", "ENTITY"] = KIND_TRIPLE
     target_id: str
     reason: str = Field(min_length=1)
+    reason_code: str | None = Field(default=None, description="标准原因代码（闭集），与说明一起进审计")
     if_version: int | None = None
 
 
@@ -292,6 +312,7 @@ class ReviewBatchBody(BaseModel):
     action: Literal["APPROVE", "REJECT"]
     targets: list[ReviewBatchTarget] = Field(min_length=1, max_length=500)
     reason: str | None = None
+    reason_code: str | None = Field(default=None, description="标准原因代码（闭集），与说明一起进审计")
 
 
 class ReviewEditTripleBody(BaseModel):
@@ -335,6 +356,7 @@ class GateReviewResolveBody(BaseModel):
     review_id: str
     action: Literal["PROMOTE", "DISCARD"]
     note: str | None = None
+    reason_code: str | None = Field(default=None, description="标准原因代码（闭集），与说明一起进审计")
 
 
 class ConflictResolveBody(BaseModel):
@@ -342,6 +364,7 @@ class ConflictResolveBody(BaseModel):
     conflict_id: str
     resolution: Literal["SUPERSEDED", "CONTESTED", "RECONCILED"]
     note: str | None = None
+    reason_code: str | None = Field(default=None, description="标准原因代码（闭集），与说明一起进审计")
 
 
 class AliasPromoteBody(BaseModel):
@@ -362,8 +385,15 @@ def _review_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=404 if "不存在" in message else 400, detail=message)
 
 
+def _reason(code: str | None, note: str | None) -> str:
+    """组合原因代码与说明进审计；非法代码直接 400（闭集校验前置）。"""
+    if code and code.strip().upper() not in REASON_CODES:
+        raise HTTPException(status_code=400, detail=f"reason_code 必须是 {sorted(REASON_CODES)} 之一")
+    return compose_reason(code, note)
+
+
 @graph.post("/review/approve")
-async def review_approve(body: ReviewTargetBody, current_user: User = Depends(get_admin_user)):
+async def review_approve(body: ReviewTargetBody, current_user: User = Depends(get_authenticated_user)):
     """验证：记 APPROVE 决策并 pin 审核人看着的原文；重复验证幂等。"""
     await _get_graph_kb_record(body.kb_id)
     try:
@@ -373,7 +403,7 @@ async def review_approve(body: ReviewTargetBody, current_user: User = Depends(ge
             body.target_id,
             actor_uid=str(current_user.uid),
             pinned_chunk_id=body.pinned_chunk_id,
-            note=body.note,
+            note=_reason(body.reason_code, body.note),
             if_version=body.if_version,
         )
     except (ReviewConflictError, ValueError) as exc:
@@ -382,7 +412,7 @@ async def review_approve(body: ReviewTargetBody, current_user: User = Depends(ge
 
 
 @graph.post("/review/reject")
-async def review_reject(body: ReviewRejectBody, current_user: User = Depends(get_admin_user)):
+async def review_reject(body: ReviewRejectBody, current_user: User = Depends(get_authenticated_user)):
     """拒绝（理由必填）：缓存 REJECTED，删 Neo4j 投影与 Milvus 向量；拒绝实体级联其三元组。"""
     await _get_graph_kb_record(body.kb_id)
     try:
@@ -391,7 +421,7 @@ async def review_reject(body: ReviewRejectBody, current_user: User = Depends(get
             body.target_kind,
             body.target_id,
             actor_uid=str(current_user.uid),
-            reason=body.reason,
+            reason=_reason(body.reason_code, body.reason),
             if_version=body.if_version,
         )
     except (ReviewConflictError, ValueError) as exc:
@@ -400,23 +430,24 @@ async def review_reject(body: ReviewRejectBody, current_user: User = Depends(get
 
 
 @graph.post("/review/batch")
-async def review_batch(body: ReviewBatchBody, current_user: User = Depends(get_admin_user)):
-    """批量验证/拒绝：逐条执行，版本冲突或校验失败的条目跳过并返回明细。"""
+async def review_batch(body: ReviewBatchBody, current_user: User = Depends(get_authenticated_user)):
+    """批量验证/拒绝：逐条执行，版本冲突或校验失败的条目跳过并返回明细（含各自 pinned 证据）。"""
     await _get_graph_kb_record(body.kb_id)
-    if body.action == ACTION_REJECT and not (body.reason or "").strip():
+    reason = _reason(body.reason_code, body.reason)
+    if body.action == ACTION_REJECT and not (reason or "").strip():
         raise HTTPException(status_code=400, detail="批量拒绝必须填写理由")
     data = await GraphReviewService().batch(
         body.kb_id,
         body.action,
         [target.model_dump() for target in body.targets],
         actor_uid=str(current_user.uid),
-        reason=body.reason,
+        reason=reason,
     )
     return {"success": True, "data": data}
 
 
 @graph.patch("/review/triple")
-async def review_edit_triple(body: ReviewEditTripleBody, current_user: User = Depends(get_admin_user)):
+async def review_edit_triple(body: ReviewEditTripleBody, current_user: User = Depends(get_authenticated_user)):
     """编辑谓词/翻转方向 = SUPERSEDE：旧三元组自动拒绝，新三元组以 manual 创建并验证。"""
     await _get_graph_kb_record(body.kb_id)
     try:
@@ -436,7 +467,7 @@ async def review_edit_triple(body: ReviewEditTripleBody, current_user: User = De
 
 
 @graph.patch("/review/entity")
-async def review_edit_entity(body: ReviewEditEntityBody, current_user: User = Depends(get_admin_user)):
+async def review_edit_entity(body: ReviewEditEntityBody, current_user: User = Depends(get_authenticated_user)):
     """实体展示覆盖（RENAME/RETYPE）：改显示名/别名/类型，不改内容哈希身份。"""
     await _get_graph_kb_record(body.kb_id)
     try:
@@ -456,7 +487,7 @@ async def review_edit_entity(body: ReviewEditEntityBody, current_user: User = De
 
 
 @graph.post("/review/triple")
-async def review_add_triple(body: ReviewAddTripleBody, current_user: User = Depends(get_admin_user)):
+async def review_add_triple(body: ReviewAddTripleBody, current_user: User = Depends(get_authenticated_user)):
     """手动补关系：引文必须是 chunk 原文逐字子串（G2），闭集库谓词必须在白名单，直接 APPROVED。"""
     await _get_graph_kb_record(body.kb_id)
     try:
@@ -476,7 +507,7 @@ async def review_add_triple(body: ReviewAddTripleBody, current_user: User = Depe
 
 
 @graph.post("/review/reextract")
-async def review_reextract_chunk(body: ReviewReextractBody, current_user: User = Depends(get_admin_user)):
+async def review_reextract_chunk(body: ReviewReextractBody, current_user: User = Depends(get_authenticated_user)):
     """单 chunk 重抽：清该块未 pinned 的图元素与投影、重置抽取缓存，然后复用图谱构建任务只处理该块。"""
     await _get_graph_kb_record(body.kb_id)
     database = await knowledge_base.get_database_info(body.kb_id)
@@ -531,7 +562,7 @@ async def review_queue(
     page_size: int = Query(20, ge=1, le=200),
     file_id: str | None = Query(None),
     order: str = Query("support_asc"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """审核队列：按审核态分页列出三元组（两端实体、引文预览、佐证/文献数、推测/触发词/复核徽标）+ 各状态计数。"""
     del current_user
@@ -550,14 +581,83 @@ async def review_queue(
 async def review_audit(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
     target_id: str | None = Query(None, description="triple_id / entity_id / chunk_id"),
-    limit: int = Query(50, ge=1, le=500),
-    current_user: User = Depends(get_admin_user),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=500, description="兼容旧调用方：无分页语义时的一页大小"),
+    actor_uid: str | None = Query(None, description="按操作者过滤"),
+    action: str | None = Query(None, description="按动作过滤（APPROVE/REJECT/GOVERNANCE_SETTINGS_UPDATE…）"),
+    batch_id: str | None = Query(None, description="按批次过滤"),
+    current_user: User = Depends(get_authenticated_user),
 ):
-    """审核操作历史（append-only 账本，倒序）。"""
+    """审核操作历史（append-only 账本，倒序，分页 + 过滤）。"""
     del current_user
     await _get_graph_kb_record(kb_id)
-    data = await GraphReviewService().audit(kb_id, target_id=target_id, limit=limit)
+    data = await GraphReviewService().audit(
+        kb_id,
+        target_id=target_id,
+        limit=limit,
+        page=page,
+        page_size=page_size,
+        actor_uid=actor_uid,
+        action=action,
+        batch_id=batch_id,
+    )
     return {"success": True, "data": data}
+
+
+@graph.get("/review/audit/export")
+async def review_audit_export(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    target_id: str | None = Query(None),
+    actor_uid: str | None = Query(None),
+    action: str | None = Query(None),
+    batch_id: str | None = Query(None),
+    max_rows: int = Query(5000, ge=100, le=20000, description="导出行数上限（合规导出用）"),
+    current_user: User = Depends(get_authenticated_user),
+):
+    """审计账本 CSV 导出（utf-8-sig 便于 Excel 打开；只读，不写任何数据）。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    repo = KnowledgeGraphReviewRepository()
+    rows: list[dict] = []
+    page = 1
+    while len(rows) < max_rows:
+        chunk = await repo.list_audit(
+            kb_id,
+            target_id=target_id,
+            page=page,
+            page_size=200,
+            actor_uid=actor_uid,
+            action=action,
+            batch_id=batch_id,
+        )
+        rows.extend(chunk.get("items") or [])
+        if len(chunk.get("items") or []) < 200 or page > 100:
+            break
+        page += 1
+    rows = rows[:max_rows]
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["id", "created_at", "actor_uid", "action", "target_kind", "target_id", "reason", "batch_id"])
+    for row in rows:
+        writer.writerow(
+            [
+                row.get("id"),
+                row.get("created_at"),
+                row.get("actor_uid"),
+                row.get("action"),
+                row.get("target_kind"),
+                row.get("target_id"),
+                row.get("reason"),
+                row.get("batch_id"),
+            ]
+        )
+    filename = f"graph-audit-{kb_id}-{utc_now().strftime('%Y%m%d%H%M%S')}.csv"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @graph.get("/gate-reviews")
@@ -567,7 +667,7 @@ async def gate_review_queue(
     gate_code: str | None = Query(None, description="G7_TRIGGER_UNVERIFIED / G9_NEGATION_REVIEW 等"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """门禁送审队列（D4）：G7 strict 未过与 G9 否定矛盾的关系候选，人工裁决后闭环。"""
     del current_user
@@ -581,7 +681,7 @@ async def gate_review_queue(
 
 
 @graph.post("/gate-reviews/resolve")
-async def gate_review_resolve(body: GateReviewResolveBody, current_user: User = Depends(get_admin_user)):
+async def gate_review_resolve(body: GateReviewResolveBody, current_user: User = Depends(get_authenticated_user)):
     """裁决门禁送审候选：PROMOTE 升格为 APPROVED 三元组（引文逐字复核），DISCARD 关闭；幂等。"""
     await _get_graph_kb_record(body.kb_id)
     try:
@@ -590,7 +690,7 @@ async def gate_review_resolve(body: GateReviewResolveBody, current_user: User = 
             body.review_id,
             action=body.action,
             actor_uid=str(current_user.uid),
-            note=body.note,
+            note=_reason(body.reason_code, body.note),
         )
     except ValueError as exc:
         raise _review_error(exc)
@@ -604,7 +704,7 @@ async def conflict_queue(
     status: str = Query("OPEN", description="OPEN / RESOLVED / ALL"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """冲突队列（D6）：同条件极性矛盾与定义区间口径不一，只登记不删证。"""
     del current_user
@@ -618,7 +718,7 @@ async def conflict_queue(
 
 
 @graph.post("/conflicts/resolve")
-async def conflict_resolve(body: ConflictResolveBody, current_user: User = Depends(get_admin_user)):
+async def conflict_resolve(body: ConflictResolveBody, current_user: User = Depends(get_authenticated_user)):
     """冲突裁决三态：SUPERSEDED（新代旧）/ CONTESTED（并陈）/ RECONCILED（条件互补）；不动证据行。"""
     await _get_graph_kb_record(body.kb_id)
     try:
@@ -627,7 +727,7 @@ async def conflict_resolve(body: ConflictResolveBody, current_user: User = Depen
             body.conflict_id,
             resolution=body.resolution,
             actor_uid=str(current_user.uid),
-            note=body.note,
+            note=_reason(body.reason_code, body.note),
         )
     except ValueError as exc:
         raise _review_error(exc)
@@ -635,7 +735,7 @@ async def conflict_resolve(body: ConflictResolveBody, current_user: User = Depen
 
 
 @graph.post("/alias-promote")
-async def alias_promote(body: AliasPromoteBody, current_user: User = Depends(get_admin_user)):
+async def alias_promote(body: AliasPromoteBody, current_user: User = Depends(get_authenticated_user)):
     """R4c 词典晋升：文档级别名升为 KB 级官方别名（决策 + 别名表 + 审计，幂等）。"""
     await _get_graph_kb_record(body.kb_id)
     try:
@@ -657,7 +757,7 @@ async def alias_promote(body: AliasPromoteBody, current_user: User = Depends(get
 async def shortcut_suspects(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
     limit: int = Query(200, ge=1, le=1000),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """R5c 可疑传递边报表：A→C 直连与 A→B→C 共存、且 A→C 引文不提及 B——LLM 脑补
     传递推理的高危信号，供人工复核（运营工具，检索期不跑）。"""
@@ -677,7 +777,7 @@ class GoldenSampleBody(BaseModel):
 
 
 @graph.post("/golden-samples")
-async def golden_sample_register(body: GoldenSampleBody, current_user: User = Depends(get_admin_user)):
+async def golden_sample_register(body: GoldenSampleBody, current_user: User = Depends(get_authenticated_user)):
     """R7b：注册 golden 抽检样本（人工标注的 chunk 期望三元组，晋升门禁标尺）。"""
     from yuxi.storage.postgres.manager import pg_manager
     from yuxi.storage.postgres.models_knowledge import KnowledgeGraphGoldenSample
@@ -706,7 +806,7 @@ async def golden_sample_register(body: GoldenSampleBody, current_user: User = De
 @graph.get("/golden-samples")
 async def golden_sample_list(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """R7b：列出 golden 样本。"""
     del current_user
@@ -739,7 +839,7 @@ async def golden_sample_list(
 
 
 @graph.post("/golden-samples/evaluate")
-async def golden_sample_evaluate(body: dict, current_user: User = Depends(get_admin_user)):
+async def golden_sample_evaluate(body: dict, current_user: User = Depends(get_authenticated_user)):
     """R7b：用当前锁定配置对 golden 样本重抽并比对 P/R/F1（不写图谱；样本上限 20）。"""
     kb_id = str(body.get("kb_id") or "")
     limit = max(1, min(int(body.get("limit") or 20), 20))
@@ -760,3 +860,211 @@ async def golden_sample_evaluate(body: dict, current_user: User = Depends(get_ad
     except ValueError as exc:
         raise _review_error(exc)
     return {"success": True, "data": data}
+
+
+# ── 图谱治理（P0/P1/P2）：设置审计化、聚合总览、批量准入、协作、发布门禁 ──
+
+
+def _governance_service() -> GraphGovernanceService:
+    return GraphGovernanceService()
+
+
+class GovernanceSettingsBody(BaseModel):
+    kb_id: str
+    review_policy: str | None = Field(default=None, description="candidates_visible / approved_only（生产检索策略）")
+    batch_admission: str | None = Field(default=None, description="strict / standard / relaxed（批量批准准入档位）")
+    maker_checker: bool | None = Field(default=None, description="审核人与发布人不得为同一人")
+    review_sla_hours: float | None = Field(default=None, description="审核任务 SLA（小时，null 清除）")
+    summary_cache_ttl_seconds: int | None = Field(default=None, ge=5, le=300)
+
+
+class BatchPreviewBody(BaseModel):
+    kb_id: str
+    targets: list[ReviewBatchTarget] = Field(min_length=1, max_length=500)
+
+
+class MemberUpsertBody(BaseModel):
+    kb_id: str
+    uid: str = Field(min_length=1)
+    capability: Literal["viewer", "reviewer", "publisher"]
+
+
+class TaskClaimBody(BaseModel):
+    kb_id: str
+    queue_kind: Literal["CANDIDATE", "GATE", "CONFLICT"] = "CANDIDATE"
+    targets: list[dict] = Field(min_length=1, max_length=100, description="[{id}] 或 [{review_id}/{conflict_id}]")
+
+
+class TaskReleaseBody(BaseModel):
+    kb_id: str
+    queue_kind: Literal["CANDIDATE", "GATE", "CONFLICT"] = "CANDIDATE"
+    target_id: str = Field(min_length=1)
+
+
+@graph.get("/governance/settings")
+async def governance_get_settings(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    current_user: User = Depends(get_authenticated_user),
+):
+    """读取治理设置（review_policy / batch_admission / maker_checker / SLA / 缓存 TTL）。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    try:
+        data = await _governance_service().get_settings(kb_id)
+    except ValueError as exc:
+        raise _review_error(exc)
+    return {"success": True, "data": data}
+
+
+@graph.put("/governance/settings")
+async def governance_update_settings(
+    body: GovernanceSettingsBody,
+    current_user: User = Depends(get_admin_user),
+):
+    """更新治理设置（admin）：变更写 append-only 审计（GOVERNANCE_SETTINGS_UPDATE）。
+
+    review_policy 直接决定生产 Graph-RAG 消费的关系范围，因此本端点要求
+    管理员权限且全量审计——与纯显示设置（PUT /graph/settings）彻底分离。
+    """
+    await _get_graph_kb_record(body.kb_id)
+    changes = {
+        key: value
+        for key, value in (
+            ("review_policy", body.review_policy),
+            ("batch_admission", body.batch_admission),
+            ("maker_checker", body.maker_checker),
+            ("review_sla_hours", body.review_sla_hours),
+            ("summary_cache_ttl_seconds", body.summary_cache_ttl_seconds),
+        )
+        if value is not None or key == "review_sla_hours"
+    }
+    try:
+        data = await _governance_service().update_settings(body.kb_id, actor_uid=str(current_user.uid), changes=changes)
+    except ValueError as exc:
+        raise _review_error(exc)
+    return {"success": True, "data": data}
+
+
+@graph.get("/governance/summary")
+async def governance_summary(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    refresh: bool = Query(False, description="跳过缓存强制重算"),
+    current_user: User = Depends(get_authenticated_user),
+):
+    """治理头聚合总览：队列/门禁/冲突/死信/构建/轻量完整性/发布指针（TTL 缓存）。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    try:
+        data = await _governance_service().summary(kb_id, refresh=refresh)
+    except ValueError as exc:
+        raise _review_error(exc)
+    return {"success": True, "data": data}
+
+
+@graph.post("/governance/batch-preview")
+async def governance_batch_preview(body: BatchPreviewBody, current_user: User = Depends(get_authenticated_user)):
+    """批量批准预检：按准入档位逐条判定并给出默认 pin 的证据 chunk（不写数据）。"""
+    del current_user
+    await _get_graph_kb_record(body.kb_id)
+    try:
+        data = await _governance_service().batch_preview(body.kb_id, [target.model_dump() for target in body.targets])
+    except ValueError as exc:
+        raise _review_error(exc)
+    return {"success": True, "data": data}
+
+
+@graph.get("/governance/publish-gates")
+async def governance_publish_gates(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    current_user: User = Depends(get_authenticated_user),
+):
+    """发布 go/no-go 评估：完整性违规阻断，死信/门禁送审/开放冲突披露，maker-checker 校验。"""
+    await _get_graph_kb_record(kb_id)
+    data = await _governance_service().evaluate_publish_gates(kb_id, operator_uid=str(current_user.uid))
+    return {"success": True, "data": data}
+
+
+@graph.get("/governance/members")
+async def governance_list_members(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    current_user: User = Depends(get_admin_user),
+):
+    """列出 KB 协作成员（admin；share_config 管可见性，本表管能力）。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    data = await KnowledgeGraphReviewRepository().list_members(kb_id)
+    return {"success": True, "data": {"items": data, "total": len(data)}}
+
+
+@graph.put("/governance/members")
+async def governance_upsert_member(body: MemberUpsertBody, current_user: User = Depends(get_admin_user)):
+    """授予/更新 KB 协作能力（admin）：viewer 只读治理视图，reviewer 可裁决，publisher 可发布。"""
+    await _get_graph_kb_record(body.kb_id)
+    if body.capability not in _CAPABILITY_LEVELS:
+        raise HTTPException(status_code=400, detail=f"capability 必须是 {list(_CAPABILITY_LEVELS)} 之一")
+    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.storage.postgres.manager import pg_manager
+
+    async with pg_manager.get_async_session_context() as session:
+        tenant_id = await resolve_tenant_id(session, str(current_user.uid))
+    data = await KnowledgeGraphReviewRepository().upsert_member(
+        kb_id=body.kb_id,
+        tenant_id=tenant_id,
+        uid=body.uid,
+        capability=body.capability,
+        created_by=str(current_user.uid),
+    )
+    return {"success": True, "data": data}
+
+
+@graph.delete("/governance/members")
+async def governance_delete_member(
+    kb_id: str = Query(..., description="Milvus 知识库ID"),
+    uid: str = Query(..., description="要移除的成员 uid"),
+    current_user: User = Depends(get_admin_user),
+):
+    """移除 KB 协作成员（admin）。"""
+    del current_user
+    await _get_graph_kb_record(kb_id)
+    removed = await KnowledgeGraphReviewRepository().delete_member(kb_id, uid)
+    return {"success": True, "data": {"kb_id": kb_id, "uid": uid, "removed": removed}}
+
+
+@graph.post("/governance/tasks/claim")
+async def governance_claim_tasks(body: TaskClaimBody, current_user: User = Depends(get_authenticated_user)):
+    """领取审核任务（幂等；同目标已被他人领取时返回 already_claimed_by_other）。"""
+    await _get_graph_kb_record(body.kb_id)
+    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.storage.postgres.manager import pg_manager
+
+    async with pg_manager.get_async_session_context() as session:
+        tenant_id = await resolve_tenant_id(session, str(current_user.uid))
+    repo = KnowledgeGraphReviewRepository()
+    results = []
+    for target in body.targets:
+        target_id = str(target.get("id") or target.get("review_id") or target.get("conflict_id") or "")
+        if not target_id:
+            continue
+        results.append(
+            await repo.claim_task(
+                kb_id=body.kb_id,
+                tenant_id=tenant_id,
+                queue_kind=body.queue_kind,
+                target_id=target_id,
+                assignee_uid=str(current_user.uid),
+            )
+        )
+    return {"success": True, "data": {"items": results, "claimed": sum(1 for r in results if not r["unchanged"])}}
+
+
+@graph.post("/governance/tasks/release")
+async def governance_release_task(body: TaskReleaseBody, current_user: User = Depends(get_authenticated_user)):
+    """释放审核任务（仅领取人本人可释放）。"""
+    await _get_graph_kb_record(body.kb_id)
+    released = await KnowledgeGraphReviewRepository().release_task(
+        kb_id=body.kb_id,
+        queue_kind=body.queue_kind,
+        target_id=body.target_id,
+        assignee_uid=str(current_user.uid),
+    )
+    return {"success": True, "data": {"released": released}}

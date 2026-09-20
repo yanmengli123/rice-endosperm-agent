@@ -213,15 +213,25 @@ def normalized_result_from_snapshot(
     }
 
 
+def edge_visible_under_approved_only(edge: dict[str, Any]) -> bool:
+    """approved_only 可见性（fail-closed）：显式 review_status ∈ {APPROVED, CANONICAL}，
+    或托管导入投影的显式标记 managed_projection=true。
+
+    缺 review_status 不再推断为 CANONICAL——任何写入路径丢属性的脏边一律隐藏，
+    由 integrity I7 计数暴露（宁可少显示不可错显示）。
+    """
+    properties = edge.get("properties") or {}
+    status = properties.get("review_status")
+    if status in _VISIBLE_UNDER_APPROVED_ONLY:
+        return True
+    return properties.get("managed_projection") is True
+
+
 def filter_edges_by_policy(result: dict[str, Any], policy: str) -> dict[str, Any]:
-    """approved_only 下隐藏 CANDIDATE 边；缺 review_status 属性的边（托管导入投影）视为 CANONICAL 可见。"""
+    """approved_only 下隐藏 CANDIDATE 边与缺状态属性的边（托管导入按显式标记放行）。"""
     if policy != REVIEW_POLICY_APPROVED_ONLY:
         return result
-    edges = [
-        edge
-        for edge in result.get("edges") or []
-        if ((edge.get("properties") or {}).get("review_status") or STATUS_CANONICAL) in _VISIBLE_UNDER_APPROVED_ONLY
-    ]
+    edges = [edge for edge in result.get("edges") or [] if edge_visible_under_approved_only(edge)]
     return {**result, "edges": edges}
 
 
@@ -430,7 +440,10 @@ class MilvusGraphService:
         model_spec: str | None = None,
     ) -> dict[str, Any]:
         """R4c KB 作用域词典装载：ALIAS_PROMOTE 晋升的官方别名注入词法层（进程内），
-        构建结束（含异常路径）finally 回滚——词典单例不残留、不影响其他 KB。"""
+        构建结束（含异常路径）finally 回滚——词典单例不残留、不影响其他 KB。
+
+        构建结束（含部分失败）顺带全量重算三元组风险分（P1 risk_desc 排序的物化基础）。
+        """
         merged_keys = await self._load_kb_alias_lexicon(kb_id)
         try:
             return await self._build_pending_chunks(
@@ -439,6 +452,12 @@ class MilvusGraphService:
         finally:
             for label, keys in merged_keys.items():
                 remove_lexicon_terms(label, keys)
+            recompute = getattr(self.review_repo, "recompute_risk_scores_for_kb", None)
+            if recompute is not None:
+                try:
+                    await recompute(kb_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"风险分回填失败（不影响构建结果）kb_id={kb_id}: {exc}")
 
     async def _load_kb_alias_lexicon(self, kb_id: str) -> dict[str, set[str]]:
         """装载本 KB 人工晋升的别名（DOCLEX_PROMOTED）进闭集词典；返回回滚键集。
@@ -855,6 +874,25 @@ class MilvusGraphService:
         result = neo4j_read(self.driver, cypher, kb_id=kb_id, triple_ids=triple_ids)
         return int(result[0]["edge_count"]) if result else 0
 
+    def count_edges_missing_status(self, kb_id: str) -> int:
+        """I7 审计：Neo4j 投影中既无 review_status 又非托管导入标记的边数。
+
+        fail-closed 过滤上线后这类边在 approved_only 下被隐藏；计数 >0 说明
+        存在绕过正常写入路径的脏边（或旧投影未重建），需要运营介入。
+        """
+        label = safe_neo4j_label(kb_id)
+        cypher = (
+            f"MATCH (:Entity:MilvusKB:`{label}`)-[r:RELATION {{kb_id: $kb_id}}]->(:Entity:MilvusKB:`{label}`) "
+            "WHERE r.review_status IS NULL AND coalesce(r.managed_projection, false) <> true "
+            "RETURN count(r) AS edge_count"
+        )
+        try:
+            result = neo4j_read(self.driver, cypher, kb_id=kb_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"I7 缺状态边计数查询失败（按 0 处理）: {exc}")
+            return 0
+        return int(result[0]["edge_count"]) if result else 0
+
     def delete_chunk_graph_from_neo4j(self, kb_id: str, chunk_id: str) -> None:
         """单 chunk 重抽前清掉该 chunk 的平行边、MENTIONS 与孤儿实体节点（重建时按需再生）。"""
         label = safe_neo4j_label(kb_id)
@@ -877,12 +915,19 @@ class MilvusGraphService:
         neo4j_write(self.driver, query)
 
     async def resolve_review_policy(self, kb_id: str) -> str:
-        """图查询的审核策略：显式注入 > 知识库 graph_view_settings.review_policy > candidates_visible。"""
+        """生产检索审核策略（Graph-RAG 消费）：显式注入 > 知识库治理设置
+        graph_governance_settings.review_policy > 旧 graph_view_settings.review_policy > 默认。
+
+        注意：显式注入仅供画布等展示端点的会话级过滤使用；检索路径（PPR 等）
+        永远不注入，保证生产行为只由治理设置决定。
+        """
         if self.review_policy:
             return self.review_policy
         record = await self.kb_repo.get_by_kb_id(kb_id)
-        settings = getattr(record, "graph_view_settings", None) or {}
-        policy = settings.get("review_policy") if isinstance(settings, dict) else None
+        governance = getattr(record, "graph_governance_settings", None)
+        policy = governance.get("review_policy") if isinstance(governance, dict) else None
+        if policy not in REVIEW_POLICIES and isinstance(getattr(record, "graph_view_settings", None), dict):
+            policy = record.graph_view_settings.get("review_policy")
         return policy if policy in REVIEW_POLICIES else REVIEW_POLICY_CANDIDATES_VISIBLE
 
     def write_chunk_graph(
@@ -1472,9 +1517,9 @@ class MilvusGraphService:
         """LLM 自动图谱构建的源契约写门禁。
 
         managed_graph 契约禁止普通 LLM graph-build（设计第七节：规范图谱
-        与自动抽取图必须隔离）；pdf_evidence / csv_* 严格契约同样拒绝；
-        generic_document 只生成非权威导航投影，legacy 契约保留旧行为。
-        仅在产生新抽取内容的写入口调用。
+        与自动抽取图必须隔离）；csv_* / pdf_evidence 生成的图谱是派生导航
+        投影（非权威、不进证据通道），随 allowed_commands 放行；legacy
+        契约保留旧行为。仅在产生新抽取内容的写入口调用。
         """
         from yuxi.knowledge.source_contracts import (
             COMMAND_LLM_GRAPH_BUILD,

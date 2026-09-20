@@ -263,3 +263,33 @@ def cypher_merge_relation(db_label: str) -> str:
         r.extractor_type = $extractor_type,
         r.review_status = coalesce(r.review_status, 'CANDIDATE')
     """
+
+
+def compute_triple_risk_score(
+    *,
+    hedge_any: bool,
+    machine_verified_any: bool,
+    confidence_max: float | None,
+    literature_count: int,
+    conflict_status: str,
+) -> float:
+    """候选三元组的机器证据风险分（越高越该先被人看）。
+
+    只用已物化的 mention 聚合信号（hedge/触发词或双模型验证/置信度/文献数）
+    与冲突态——与人工决策状态无关（那是审核结果不是审核难度）。纯函数，构建
+    末尾批量回填进 knowledge_graph_triples.risk_score，队列 risk_desc 排序用。
+    """
+    risk = 1.0
+    if hedge_any:
+        risk += 1.5  # 推测性表述（may/might 等）
+    if confidence_max is not None and confidence_max < 0.7:
+        risk += 1.5  # 模型自己都不太确定
+    if int(literature_count or 0) < 2:
+        risk += 1.0  # 单源或零源
+    if not machine_verified_any:
+        risk += 1.0  # 触发词与双模型复核都没过
+    if (conflict_status or "NONE") == "CONTESTED":
+        risk += 2.0  # 已登记极性矛盾
+    if machine_verified_any and confidence_max is not None and confidence_max >= 0.9:
+        risk -= 0.5  # 双保险高置信，轻微降权
+    return round(max(risk, 0.0), 2)

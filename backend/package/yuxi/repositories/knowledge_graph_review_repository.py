@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import delete, exists, func, or_, select, update
+from sqlalchemy import Integer, cast, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from yuxi.knowledge.graphs.review_overlay import KIND_ENTITY, KIND_TRIPLE, STATUS_CANONICAL
 from yuxi.repositories.knowledge_graph_repository import build_extracted_alias_rows, refresh_triple_support_statement
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeBaseMember,
     KnowledgeChunk,
     KnowledgeFile,
     KnowledgeGraphConflict,
@@ -24,13 +25,18 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeGraphGateReview,
     KnowledgeGraphReviewAudit,
     KnowledgeGraphReviewDecision,
+    KnowledgeGraphReviewTask,
     KnowledgeGraphTriple,
     KnowledgeGraphTripleMention,
 )
 from yuxi.utils import hashstr
 from yuxi.utils.datetime_utils import utc_now
 
-QUEUE_ORDERS = ("support_asc", "support_desc", "recent")
+QUEUE_ORDERS = ("support_asc", "support_desc", "recent", "risk_desc", "risk_asc")
+
+# 批量批准准入档位（治理设置 batch_admission）：
+# strict 机器验证·多源佐证 + 引文逐字 OK；standard 任一机器验证 + OK；relaxed 仅要求 OK 引文
+BATCH_ADMISSION_LEVELS = frozenset({"strict", "standard", "relaxed"})
 
 # 门禁送审与冲突的裁决动作（写进审计账本的 action）
 GATE_REVIEW_PROMOTE = "GATE_PROMOTE"
@@ -168,31 +174,75 @@ class KnowledgeGraphReviewRepository:
                 )
             )
 
-    async def list_audit(self, kb_id: str, *, target_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    async def list_audit(
+        self,
+        kb_id: str,
+        *,
+        target_id: str | None = None,
+        limit: int = 50,
+        page: int = 1,
+        page_size: int = 20,
+        actor_uid: str | None = None,
+        action: str | None = None,
+        batch_id: str | None = None,
+    ) -> dict[str, Any]:
+        """审计账本分页查询（append-only，倒序）：支持按目标/操作者/动作/批次过滤。"""
+        page = max(1, page)
+        page_size = max(1, min(page_size, 200))
+        conditions = [KnowledgeGraphReviewAudit.kb_id == kb_id]
+        if target_id:
+            conditions.append(KnowledgeGraphReviewAudit.target_id == target_id)
+        if actor_uid:
+            conditions.append(KnowledgeGraphReviewAudit.actor_uid == actor_uid)
+        if action:
+            conditions.append(KnowledgeGraphReviewAudit.action == action)
+        if batch_id:
+            conditions.append(KnowledgeGraphReviewAudit.batch_id == batch_id)
         async with pg_manager.get_async_session_context() as session:
-            stmt = select(KnowledgeGraphReviewAudit).where(KnowledgeGraphReviewAudit.kb_id == kb_id)
-            if target_id:
-                stmt = stmt.where(KnowledgeGraphReviewAudit.target_id == target_id)
+            total = await session.scalar(select(func.count()).select_from(KnowledgeGraphReviewAudit).where(*conditions))
             rows = (
-                (await session.execute(stmt.order_by(KnowledgeGraphReviewAudit.id.desc()).limit(max(1, limit))))
+                (
+                    await session.execute(
+                        select(KnowledgeGraphReviewAudit)
+                        .where(*conditions)
+                        .order_by(KnowledgeGraphReviewAudit.id.desc())
+                        .offset((page - 1) * page_size)
+                        .limit(page_size)
+                    )
+                )
                 .scalars()
                 .all()
             )
-            return [
-                {
-                    "id": row.id,
-                    "target_kind": row.target_kind,
-                    "target_id": row.target_id,
-                    "action": row.action,
-                    "actor_uid": row.actor_uid,
-                    "before_snapshot": row.before_snapshot,
-                    "after_snapshot": row.after_snapshot,
-                    "reason": row.reason,
-                    "batch_id": row.batch_id,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                }
-                for row in rows
-            ]
+            return {
+                "items": [
+                    {
+                        "id": row.id,
+                        "target_kind": row.target_kind,
+                        "target_id": row.target_id,
+                        "action": row.action,
+                        "actor_uid": row.actor_uid,
+                        "before_snapshot": row.before_snapshot,
+                        "after_snapshot": row.after_snapshot,
+                        "reason": row.reason,
+                        "batch_id": row.batch_id,
+                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                    }
+                    for row in rows
+                ],
+                "total": int(total or 0),
+                "page": page,
+                "page_size": page_size,
+            }
+
+    async def last_audit_at(self, kb_id: str) -> str | None:
+        async with pg_manager.get_async_session_context() as session:
+            value = await session.scalar(
+                select(KnowledgeGraphReviewAudit.created_at)
+                .where(KnowledgeGraphReviewAudit.kb_id == kb_id)
+                .order_by(KnowledgeGraphReviewAudit.id.desc())
+                .limit(1)
+            )
+        return value.isoformat() if value else None
 
     # ── 缓存状态 / pinned ────────────────────────────────────────
 
@@ -460,6 +510,10 @@ class KnowledgeGraphReviewRepository:
             ordering = (KnowledgeGraphTriple.support_count.desc(), KnowledgeGraphTriple.id.asc())
         elif order == "recent":
             ordering = (KnowledgeGraphTriple.updated_at.desc(), KnowledgeGraphTriple.id.desc())
+        elif order == "risk_desc":
+            ordering = (KnowledgeGraphTriple.risk_score.desc().nullslast(), KnowledgeGraphTriple.id.asc())
+        elif order == "risk_asc":
+            ordering = (KnowledgeGraphTriple.risk_score.asc().nullsfirst(), KnowledgeGraphTriple.id.asc())
         else:
             ordering = (KnowledgeGraphTriple.support_count.asc(), KnowledgeGraphTriple.id.asc())
         async with pg_manager.get_async_session_context() as session:
@@ -501,14 +555,32 @@ class KnowledgeGraphReviewRepository:
                 if triple_ids
                 else []
             )
+            task_rows = (
+                (
+                    await session.execute(
+                        select(KnowledgeGraphReviewTask).where(
+                            KnowledgeGraphReviewTask.kb_id == kb_id,
+                            KnowledgeGraphReviewTask.queue_kind == "CANDIDATE",
+                            KnowledgeGraphReviewTask.target_id.in_(triple_ids),
+                            KnowledgeGraphReviewTask.status == "CLAIMED",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+                if triple_ids
+                else []
+            )
         entity_by_id = {row.entity_id: _entity_dict(row) for row in entities}
         mentions_by_triple: dict[str, list[Any]] = {}
         for mention in mentions:
             mentions_by_triple.setdefault(mention.triple_id, []).append(mention)
+        task_by_target = {row.target_id: row for row in task_rows}
         items = []
         for triple in triples:
             triple_mentions = mentions_by_triple.get(triple.triple_id, [])
             preview = next((m.text for m in triple_mentions if m.text), None)
+            task = task_by_target.get(triple.triple_id)
             items.append(
                 {
                     **_triple_dict(triple),
@@ -524,6 +596,14 @@ class KnowledgeGraphReviewRepository:
                         (float(m.confidence) for m in triple_mentions if m.confidence is not None), default=None
                     ),
                     "pinned_any": any(bool(m.pinned_by) for m in triple_mentions),
+                    "task": (
+                        {
+                            "assignee_uid": task.assignee_uid,
+                            "claimed_at": task.claimed_at.isoformat() if task.claimed_at else None,
+                        }
+                        if task is not None
+                        else None
+                    ),
                 }
             )
         return {"items": items, "total": int(total or 0), "page": page, "page_size": page_size}
@@ -842,6 +922,181 @@ class KnowledgeGraphReviewRepository:
                 "before": before,
             }
 
+    async def list_decision_actors(self, kb_id: str) -> set[str]:
+        """本库现行决策的 actor 集合（maker-checker：发布人不得在内）。"""
+        async with pg_manager.get_async_session_context() as session:
+            rows = (
+                await session.execute(
+                    select(KnowledgeGraphReviewDecision.actor_uid).where(KnowledgeGraphReviewDecision.kb_id == kb_id)
+                )
+            ).scalars()
+            return {str(row) for row in rows}
+
+    # ── 风险分回填（P1：risk_desc 排序的物化基础）────────────────
+
+    async def recompute_risk_scores_for_kb(self, kb_id: str) -> int:
+        """按 mention 聚合全量重算本库三元组风险分（构建末尾调用一次）。
+
+        计算是纯函数 compute_triple_risk_score；这里只做聚合读取与批量 UPDATE，
+        分批（500）避免超长 IN 列表。返回更新行数。
+        """
+        from yuxi.knowledge.graphs.graph_utils import compute_triple_risk_score
+
+        async with pg_manager.get_async_session_context() as session:
+            triple_rows = (
+                await session.execute(
+                    select(
+                        KnowledgeGraphTriple.triple_id,
+                        KnowledgeGraphTriple.literature_count,
+                        KnowledgeGraphTriple.conflict_status,
+                    ).where(KnowledgeGraphTriple.kb_id == kb_id)
+                )
+            ).all() or []
+            if not triple_rows:
+                return 0
+            mention_rows = (
+                await session.execute(
+                    select(
+                        KnowledgeGraphTripleMention.triple_id,
+                        func.max(KnowledgeGraphTripleMention.confidence),
+                        func.max(cast(KnowledgeGraphTripleMention.hedge, Integer)),
+                        func.max(cast(KnowledgeGraphTripleMention.trigger_verified, Integer)),
+                        func.max(cast(KnowledgeGraphTripleMention.verifier_confirmed, Integer)),
+                    )
+                    .where(KnowledgeGraphTripleMention.kb_id == kb_id)
+                    .group_by(KnowledgeGraphTripleMention.triple_id)
+                )
+            ).all()
+        mention_by_triple = {row[0]: row for row in mention_rows}
+        updated = 0
+        async with pg_manager.get_async_session_context() as session:
+            for start in range(0, len(triple_rows), 500):
+                chunk_rows = triple_rows[start : start + 500]
+                for triple_id, literature_count, conflict_status in chunk_rows:
+                    mention = mention_by_triple.get(triple_id)
+                    score = compute_triple_risk_score(
+                        hedge_any=bool(mention[2]) if mention else False,
+                        machine_verified_any=bool(mention[3] or mention[4]) if mention else False,
+                        confidence_max=float(mention[1]) if mention and mention[1] is not None else None,
+                        literature_count=int(literature_count or 0),
+                        conflict_status=conflict_status or "NONE",
+                    )
+                    await session.execute(
+                        update(KnowledgeGraphTriple)
+                        .where(KnowledgeGraphTriple.triple_id == triple_id)
+                        .values(risk_score=score)
+                    )
+                    updated += 1
+        return updated
+
+    # ── KB 级协作能力（P1：viewer/reviewer/publisher）────────────
+
+    async def list_members(self, kb_id: str) -> list[dict[str, Any]]:
+        async with pg_manager.get_async_session_context() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(KnowledgeBaseMember)
+                        .where(KnowledgeBaseMember.kb_id == kb_id)
+                        .order_by(KnowledgeBaseMember.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                {
+                    "uid": row.uid,
+                    "capability": row.capability,
+                    "created_by": row.created_by,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+
+    async def get_member_capability(self, kb_id: str, uid: str) -> str | None:
+        async with pg_manager.get_async_session_context() as session:
+            value = await session.scalar(
+                select(KnowledgeBaseMember.capability).where(
+                    KnowledgeBaseMember.kb_id == kb_id, KnowledgeBaseMember.uid == uid
+                )
+            )
+        return str(value) if value else None
+
+    async def upsert_member(
+        self, *, kb_id: str, tenant_id: int, uid: str, capability: str, created_by: str
+    ) -> dict[str, Any]:
+        async with pg_manager.get_async_session_context() as session:
+            stmt = (
+                insert(KnowledgeBaseMember)
+                .values(kb_id=kb_id, tenant_id=tenant_id, uid=uid, capability=capability, created_by=created_by)
+                .on_conflict_do_update(
+                    index_elements=["kb_id", "uid"], set_={"capability": capability, "created_by": created_by}
+                )
+            )
+            await session.execute(stmt)
+        return {"kb_id": kb_id, "uid": uid, "capability": capability}
+
+    async def delete_member(self, kb_id: str, uid: str) -> int:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                delete(KnowledgeBaseMember).where(KnowledgeBaseMember.kb_id == kb_id, KnowledgeBaseMember.uid == uid)
+            )
+            return int(result.rowcount or 0)
+
+    # ── 审核任务领取（P1：claim 才落行，完成以决策行为准）──────────
+
+    async def claim_task(
+        self, *, kb_id: str, tenant_id: int, queue_kind: str, target_id: str, assignee_uid: str
+    ) -> dict[str, Any]:
+        """领取任务：幂等插入（同目标已有 CLAIMED 行且同 assignee → unchanged）。"""
+        async with pg_manager.get_async_session_context() as session:
+            existing = (
+                await session.execute(
+                    select(KnowledgeGraphReviewTask).where(
+                        KnowledgeGraphReviewTask.kb_id == kb_id,
+                        KnowledgeGraphReviewTask.queue_kind == queue_kind,
+                        KnowledgeGraphReviewTask.target_id == target_id,
+                        KnowledgeGraphReviewTask.status == "CLAIMED",
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return {
+                    "target_id": target_id,
+                    "unchanged": True,
+                    "assignee_uid": existing.assignee_uid,
+                    "already_claimed_by_other": existing.assignee_uid != assignee_uid,
+                }
+            session.add(
+                KnowledgeGraphReviewTask(
+                    kb_id=kb_id,
+                    tenant_id=tenant_id,
+                    queue_kind=queue_kind,
+                    target_id=target_id,
+                    status="CLAIMED",
+                    assignee_uid=assignee_uid,
+                )
+            )
+            await session.flush()
+            return {"target_id": target_id, "unchanged": False, "assignee_uid": assignee_uid}
+
+    async def release_task(self, *, kb_id: str, queue_kind: str, target_id: str, assignee_uid: str) -> int:
+        """释放任务（仅本人可释放）：CLAIMED → RELEASED。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                update(KnowledgeGraphReviewTask)
+                .where(
+                    KnowledgeGraphReviewTask.kb_id == kb_id,
+                    KnowledgeGraphReviewTask.queue_kind == queue_kind,
+                    KnowledgeGraphReviewTask.target_id == target_id,
+                    KnowledgeGraphReviewTask.status == "CLAIMED",
+                    KnowledgeGraphReviewTask.assignee_uid == assignee_uid,
+                )
+                .values(status="RELEASED", released_at=utc_now())
+            )
+            return int(result.rowcount or 0)
+
     @staticmethod
     async def _get_decision_row(session, kb_id: str, target_kind: str, target_id: str):
         return (
@@ -922,6 +1177,8 @@ def _triple_dict(row: KnowledgeGraphTriple) -> dict[str, Any]:
         "content": row.content,
         "support_count": row.support_count,
         "literature_count": row.literature_count,
+        "conflict_status": row.conflict_status,
+        "risk_score": row.risk_score,
         "review_status": row.review_status,
         "review_version": row.review_version,
     }

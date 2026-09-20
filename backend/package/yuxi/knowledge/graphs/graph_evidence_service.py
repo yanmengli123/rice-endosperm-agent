@@ -76,6 +76,10 @@ class GraphEvidenceService:
                     self.graph_service.count_projected_edges, kb_id, rejected_triple_ids
                 )
                 review_counts["I4_rejected_edges_projected"] = projected
+            if self.graph_service is not None:
+                review_counts["I7_edges_missing_status"] = await asyncio.to_thread(
+                    self.graph_service.count_edges_missing_status, kb_id
+                )
             for key, value in review_counts.items():
                 report["counts"][key] = value
                 if key.startswith("I"):
@@ -109,6 +113,8 @@ def build_triple_evidence(source: dict[str, Any]) -> dict[str, Any]:
         "trust_tier": trust_tier(mentions, literature_count),
         "review_status": triple.get("review_status"),
         "review_version": triple.get("review_version"),
+        "conflict_status": triple.get("conflict_status"),
+        "risk_score": triple.get("risk_score"),
         "mentions": mentions,
         "verification_summary": _verification_summary(mentions),
     }
