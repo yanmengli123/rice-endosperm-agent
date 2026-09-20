@@ -1069,6 +1069,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0052_managed_graph_v11_upgrade", "_migration_0052_managed_graph_v11_upgrade"),
         ("0053_contract_refreeze", "_migration_0053_contract_refreeze"),
         ("0054_kb_creation_integrity", "_migration_0054_kb_creation_integrity"),
+        ("0055_csv_contract_v11_upgrade", "_migration_0055_csv_contract_v11_upgrade"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2890,17 +2891,10 @@ class PostgresManager(metaclass=SingletonMeta):
         from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
 
         rows = (
-            (
-                await conn.execute(
-                    text(
-                        "SELECT kb_id, contract_key, contract_version FROM knowledge_bases "
-                        "WHERE contract_key IS NOT NULL"
-                    )
-                )
+            await conn.execute(
+                text("SELECT kb_id, contract_key, contract_version FROM knowledge_bases WHERE contract_key IS NOT NULL")
             )
-            .all()
-            or []
-        )
+        ).all() or []
         for row in rows:
             try:
                 spec = resolve_contract(row.contract_key, row.contract_version)
@@ -2918,6 +2912,36 @@ class PostgresManager(metaclass=SingletonMeta):
                 },
             )
 
+    async def _migration_0055_csv_contract_v11_upgrade(self, conn) -> None:
+        """csv_record / csv_qa@1.0.0 → 1.1.0 显式升级（additive：dataset_delete）。
+
+        1.0.0 把 _DOCUMENT_LIFECYCLE 整组禁掉时误伤了删除：CSV 原件按设计
+        「走 KnowledgeFile 生命周期以便删除/审计」，文件管理区的删除被 422
+        拒绝。1.1.0 以独立命令 dataset_delete 放行删除（解析/入库/移动仍禁），
+        文档删除端点按契约分派命令。升级同时刷新 digest 与 snapshot
+        （沿用 0053 的口径，避免重蹈 0052 漏刷 snapshot 的覆辙）。
+        """
+        import json
+
+        from yuxi.knowledge.source_contracts.registry import resolve_contract
+        from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
+
+        for key in ("csv_record", "csv_qa"):
+            spec = resolve_contract(key, "1.1.0")
+            await conn.execute(
+                text(
+                    "UPDATE knowledge_bases SET contract_version = :version, contract_digest = :digest, "
+                    "contract_snapshot = :snapshot "
+                    "WHERE contract_key = :key AND contract_version = '1.0.0'"
+                ),
+                {
+                    "version": spec.version,
+                    "digest": contract_digest(spec),
+                    "snapshot": json.dumps(spec_to_api_dict(spec), ensure_ascii=False),
+                    "key": key,
+                },
+            )
+
     async def _migration_0054_kb_creation_integrity(self, conn) -> None:
         """建库完整性（B4）：幂等键唯一列 + 租户内名称唯一约束。
 
@@ -2927,21 +2951,13 @@ class PostgresManager(metaclass=SingletonMeta):
           以 `#id` 后缀写入 normalized_name 保持唯一（用户可见名称不变）。
         """
         await conn.execute(
-            text(
-                "ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS "
-                "creation_idempotency_key VARCHAR(64)"
-            )
+            text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS creation_idempotency_key VARCHAR(64)")
         )
         await conn.execute(
-            text(
-                "ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS normalized_name VARCHAR(512)"
-            )
+            text("ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS normalized_name VARCHAR(512)")
         )
         await conn.execute(
-            text(
-                "UPDATE knowledge_bases SET normalized_name = lower(trim(name)) "
-                "WHERE normalized_name IS NULL"
-            )
+            text("UPDATE knowledge_bases SET normalized_name = lower(trim(name)) WHERE normalized_name IS NULL")
         )
         # 同租户重名的存量行：normalized_name 追加 #id 消歧（显示名不动）
         await conn.execute(

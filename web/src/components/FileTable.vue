@@ -389,7 +389,7 @@
 
                   <!-- Parse Action -->
                   <a-button
-                    v-if="canParseFile(row)"
+                    v-if="canParseFile(row) && !contractManagedLifecycle"
                     type="text"
                     block
                     @click="handleParseFile(row)"
@@ -401,7 +401,10 @@
 
                   <!-- Index Action -->
                   <a-button
-                    v-if="getFilePrimaryAction(row)?.type === FILE_ACTIONS.INDEX"
+                    v-if="
+                      getFilePrimaryAction(row)?.type === FILE_ACTIONS.INDEX &&
+                      !contractManagedLifecycle
+                    "
                     type="text"
                     block
                     @click="handleIndexFile(row)"
@@ -413,7 +416,7 @@
 
                   <!-- Reindex Action -->
                   <a-button
-                    v-if="canReindexFile(row)"
+                    v-if="canReindexFile(row) && !contractManagedLifecycle"
                     type="text"
                     block
                     @click="handleReindexFile(row)"
@@ -694,6 +697,12 @@ const fileBreadcrumbItems = computed(() =>
 const isFilteredView = computed(() => Boolean(store.fileBrowser.recursive))
 const refreshing = computed(() => store.state.databaseLoading || store.fileBrowser.loading)
 const lock = computed(() => store.state.lock)
+// 契约托管分块（csv_record/csv_qa/managed_graph）：解析与入库由 Canonical Import
+// 托管，文件操作只保留删除（dataset_delete）/下载/预览——隐藏必然被契约
+// 门禁 422 拒绝的文档生命周期按钮
+const contractManagedLifecycle = computed(() =>
+  ['csv_record', 'csv_qa', 'managed_graph'].includes(store.database?.contract_key)
+)
 const batchDeleting = computed(() => store.state.batchDeleting)
 const batchParsing = computed(() => store.state.chunkLoading)
 const batchIndexing = computed(() => store.state.chunkLoading)

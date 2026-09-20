@@ -17,12 +17,14 @@ GOLDEN_DIGESTS = {
     # 存量 KB 的冻结 digest 前滚对齐（drift 盘点 ready_for_strict=True）。
     "pdf_evidence@1.0.0": "sha256:13f9637f7f08ec05aa44e955c33097714958feceb82b982406f859cb1e489055",
     "csv_record@1.0.0": "sha256:206fed49ff760adbfffe846eb07b1caa0b7e3868af0eb1cc60f281f91e2396cc",
+    "csv_record@1.1.0": "sha256:5a08a40d786a4f6b0caec5f36aa93ec3a1309f5f6ba3218566237cc447b79db7",
     "csv_qa@1.0.0": "sha256:d582f66f63d155971773d4cc3408ff3556f04097a3f69500b916862a5cba16ca",
+    "csv_qa@1.1.0": "sha256:8d343e8313e6e5e66e4c09d9395698de4c6566bdd8c0775be43140480f62b720",
     "managed_graph@1.0.0": "sha256:5835d95c337fd85b70601a66548510c4a68e582320dfbbe9283b0d2b90c4fb60",
     "managed_graph@1.1.0": "sha256:b1108aef6d668af9fc60fc4cc8bcfcc5ed6e314ade56715da11a6eabd071478e",
     "generic_document@1.0.0": "sha256:5feb59c3dc2c30bc7a019012beb2b069e2d8110c9800ce442f01bad8b31fc9cf",
-    "legacy_generic@0": "sha256:949a215f50d350d000e6a1fdc5897f5ef4475e9af56d592ed5002547eb0b7b0c",
-    "legacy_mixed@0": "sha256:2989a9d5b613f57da46fdccc92c7cd44c6652e30fbf856516da67b14bc38948b",
+    "legacy_generic@0": "sha256:90e20da5804040d6061936e4f61245dd77026fb032df501e0b4f14296ebd747c",
+    "legacy_mixed@0": "sha256:7157b336bf989eeb2a116e08fc80c0119404da08d52ac496670f22fac9dcc0b5",
 }
 
 
@@ -74,3 +76,24 @@ def test_digest_strict_mode_is_opt_in():
             os.environ.pop("YUXI_CONTRACT_DIGEST_ENFORCE", None)
         else:
             os.environ["YUXI_CONTRACT_DIGEST_ENFORCE"] = old
+
+
+def test_csv_v11_is_additive_over_v10():
+    """csv 1.1.0 只新增 dataset_delete；文档生命周期其余命令仍禁止。"""
+    for key in ("csv_record", "csv_qa"):
+        v10 = resolve_contract(key, "1.0.0")
+        v11 = resolve_contract(key, "1.1.0")
+        assert set(v10.allowed_commands) <= set(v11.allowed_commands)
+        added = set(v11.allowed_commands) - set(v10.allowed_commands)
+        assert added == {"dataset_delete"}, f"{key} 1.1.0 新增命令超出预期: {added}"
+        assert v11.authority_policy == v10.authority_policy
+        assert v11.required_provenance == v10.required_provenance
+        # 文档语义（上传/解析/入库/移动）对 CSV 数据集仍然不适用
+        for command in ("document_upload", "document_parse", "document_index", "document_move", "document_delete"):
+            assert command in v11.forbidden_commands
+        assert v11.forbidden_commands == v10.forbidden_commands
+
+
+def test_latest_csv_version_is_v11():
+    assert resolve_contract("csv_record").version == "1.1.0"
+    assert resolve_contract("csv_qa").version == "1.1.0"

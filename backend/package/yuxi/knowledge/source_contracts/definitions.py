@@ -39,6 +39,7 @@ COMMAND_STATS_REPAIR = "stats_repair"
 COMMAND_SAMPLE_QUESTIONS = "sample_questions"
 COMMAND_DATASET_PREVIEW = "dataset_preview"
 COMMAND_DATASET_IMPORT = "dataset_import"
+COMMAND_DATASET_DELETE = "dataset_delete"
 COMMAND_RELEASE_CREATE = "release_create"
 COMMAND_RELEASE_PUBLISH = "release_publish"
 COMMAND_RELEASE_ROLLBACK = "release_rollback"
@@ -68,6 +69,7 @@ ALL_COMMANDS: tuple[str, ...] = (
     COMMAND_SAMPLE_QUESTIONS,
     COMMAND_DATASET_PREVIEW,
     COMMAND_DATASET_IMPORT,
+    COMMAND_DATASET_DELETE,
     COMMAND_RELEASE_CREATE,
     COMMAND_RELEASE_PUBLISH,
     COMMAND_RELEASE_ROLLBACK,
@@ -290,6 +292,85 @@ CSV_QA = SourceContractSpec(
         "chunking": "问答对投影 · 一行一问一答，由规范记录确定性生成",
         "ingest": "上传 → 列映射预检（必须确认 question/answer 列）→ Canonical Commit → 建索引",
         "strict_validation": "空问题/空答案不进入有效集并计入报告；存在致命数据问题时不得发布",
+    },
+)
+
+
+# =============================================================================
+# === csv_record / csv_qa@1.1.0：新增数据集删除（additive） ===
+# =============================================================================
+# 1.0.0 把 _DOCUMENT_LIFECYCLE 整组禁掉时误伤了删除：CSV 原件按设计"走
+# KnowledgeFile 生命周期以便删除/审计"（import_csv_dataset 注释），文件管理
+# 区的删除按钮因此被 422 拒绝。1.1.0 以独立命令 dataset_delete 放行删除
+# 语义（区别于文档生命周期的 document_delete），文档解析/入库/移动仍禁止。
+
+CSV_RECORD_V1_1 = SourceContractSpec(
+    contract_key="csv_record",
+    version="1.1.0",
+    product_category="authority_source",
+    display=SourceContractDisplay(
+        label="CSV 结构化数据集 · 结构化记录",
+        card_description=(
+            "一行一条记录，保留行级来源；规范记录（Canonical Record）落在 "
+            "PostgreSQL，检索投影由规范记录确定性生成，可回溯到行号与业务主键。"
+            "1.1：支持删除已导入的数据集（原件 + 规范记录 + 投影级联清理）。"
+        ),
+        operator_description="供查询结构化实验记录/属性表的数据集。",
+        entry_mode="primary",
+    ),
+    allowed_commands=(
+        *_DATASET,
+        COMMAND_DATASET_DELETE,
+        *_RELEASE,
+        *_LLM_GRAPH,
+        COMMAND_MINDMAP_GENERATE,
+    ),
+    forbidden_commands=_CSV_SHARED_FORBIDDEN,
+    accepted_media=CSV_RECORD.accepted_media,
+    authority_policy=CSV_RECORD.authority_policy,
+    required_provenance=CSV_RECORD.required_provenance,
+    base_capabilities=CSV_RECORD.base_capabilities,
+    processing_policy={
+        **CSV_RECORD.processing_policy,
+        "delete": (
+            "dataset_delete：删除 CSV 原件与文件行，规范修订与 canonical records 经外键级联清理，"
+            "检索投影（chunks）随文件删除移除；重导入同一文件生成全新修订"
+        ),
+    },
+)
+
+CSV_QA_V1_1 = SourceContractSpec(
+    contract_key="csv_qa",
+    version="1.1.0",
+    product_category="authority_source",
+    display=SourceContractDisplay(
+        label="CSV 结构化数据集 · 标准问答",
+        card_description=(
+            "question/answer 两列的标准问答集；列映射必须由用户预检确认，"
+            "严禁默认取前两列、拼行或把 Markdown header 当问答。"
+            "1.1：支持删除已导入的数据集（原件 + 规范记录 + 投影级联清理）。"
+        ),
+        operator_description="供标准问答检索的 QA 对数据集。",
+        entry_mode="primary",
+    ),
+    allowed_commands=(
+        *_DATASET,
+        COMMAND_DATASET_DELETE,
+        *_RELEASE,
+        *_LLM_GRAPH,
+        COMMAND_MINDMAP_GENERATE,
+    ),
+    forbidden_commands=_CSV_SHARED_FORBIDDEN,
+    accepted_media=CSV_QA.accepted_media,
+    authority_policy=CSV_QA.authority_policy,
+    required_provenance=CSV_QA.required_provenance,
+    base_capabilities=CSV_QA.base_capabilities,
+    processing_policy={
+        **CSV_QA.processing_policy,
+        "delete": (
+            "dataset_delete：删除 CSV 原件与文件行，规范修订与 canonical records 经外键级联清理，"
+            "检索投影（chunks）随文件删除移除；重导入同一文件生成全新修订"
+        ),
     },
 )
 

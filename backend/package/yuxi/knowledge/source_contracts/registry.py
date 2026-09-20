@@ -10,7 +10,9 @@ from __future__ import annotations
 from yuxi.knowledge.source_contracts.definitions import (
     ALL_COMMANDS,
     CSV_QA,
+    CSV_QA_V1_1,
     CSV_RECORD,
+    CSV_RECORD_V1_1,
     GENERIC_DOCUMENT,
     LEGACY_GENERIC,
     LEGACY_MIXED,
@@ -40,7 +42,9 @@ _REGISTRY: dict[tuple[str, str], SourceContractSpec] = {
     for spec in (
         PDF_EVIDENCE,
         CSV_RECORD,
+        CSV_RECORD_V1_1,
         CSV_QA,
+        CSV_QA_V1_1,
         MANAGED_GRAPH,
         MANAGED_GRAPH_V1_1,
         GENERIC_DOCUMENT,

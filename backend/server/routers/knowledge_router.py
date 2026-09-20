@@ -23,6 +23,7 @@ from yuxi.knowledge.parser.unified import SUPPORTED_FILE_EXTENSIONS, Parser, is_
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.knowledge.source_contracts import (
     COMMAND_ARCHIVE,
+    COMMAND_DATASET_DELETE,
     COMMAND_DATASET_IMPORT,
     COMMAND_DATASET_PREVIEW,
     COMMAND_DOCUMENT_ADD,
@@ -233,6 +234,22 @@ async def _ensure_database_supports_documents(kb_id: str, operation: str, comman
 
 def _http_from_contract_error(exc: SourceContractError) -> HTTPException:
     return HTTPException(status_code=exc.http_status, detail=f"[{exc.error_code}] {exc}")
+
+
+async def _gate_kb_file_deletion(kb_id: str, operation: str) -> None:
+    """文件删除门禁：csv 契约的数据集删除走 dataset_delete，其余走 document_delete。
+
+    csv_record/csv_qa 的 CSV 原件按设计走 KnowledgeFile 生命周期（以便删除/
+    审计，见 import_csv_dataset），但文档生命周期的 parse/index/move 语义不
+    适用；1.1.0 起删除以独立命令 dataset_delete 放行。删除级联：文件行 →
+    dataset_revisions → canonical_records（外键 CASCADE）+ 检索投影 chunks。
+    """
+    try:
+        spec = await load_kb_contract(kb_id)
+    except SourceContractError as exc:
+        raise _http_from_contract_error(exc) from exc
+    command = COMMAND_DATASET_DELETE if spec.contract_key in {"csv_record", "csv_qa"} else COMMAND_DOCUMENT_DELETE
+    await _ensure_database_supports_documents(kb_id, operation, command)
 
 
 async def _record_knowledge_audit(
@@ -2463,7 +2480,7 @@ async def batch_delete_documents(
 ):
     """批量删除文档或文件夹"""
     logger.debug(f"BATCH DELETE documents {file_ids} in {kb_id}")
-    await _ensure_database_supports_documents(kb_id, "批量文档删除", COMMAND_DOCUMENT_DELETE)
+    await _gate_kb_file_deletion(kb_id, "批量删除")
 
     deleted_count = 0
     failed_items = []
@@ -2515,7 +2532,7 @@ async def batch_delete_documents(
 async def delete_document(kb_id: str, doc_id: str, current_user: User = Depends(get_admin_user)):
     """删除文档或文件夹"""
     logger.debug(f"DELETE document {doc_id} info in {kb_id}")
-    await _ensure_database_supports_documents(kb_id, "文档删除", COMMAND_DOCUMENT_DELETE)
+    await _gate_kb_file_deletion(kb_id, "删除")
     try:
         file_meta_info = await knowledge_base.get_file_basic_info(kb_id, doc_id)
 

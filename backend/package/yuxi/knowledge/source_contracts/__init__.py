@@ -19,6 +19,7 @@
 from yuxi.knowledge.source_contracts.definitions import (  # noqa: F401
     ALL_COMMANDS,
     COMMAND_ARCHIVE,
+    COMMAND_DATASET_DELETE,
     COMMAND_DATASET_IMPORT,
     COMMAND_DATASET_PREVIEW,
     COMMAND_DOCUMENT_ADD,
@@ -73,6 +74,7 @@ from yuxi.knowledge.source_contracts.specs import (
 __all__ = [
     "ALL_COMMANDS",
     "COMMAND_ARCHIVE",
+    "COMMAND_DATASET_DELETE",
     "COMMAND_DATASET_IMPORT",
     "COMMAND_DATASET_PREVIEW",
     "COMMAND_DOCUMENT_ADD",
