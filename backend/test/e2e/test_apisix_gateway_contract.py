@@ -36,6 +36,8 @@ REQUIRED_ROUTES: dict[str, set[str]] = {
     "/api/auth/sessions/:family_id": {"DELETE"},
     # 协议能力快照（公开）：连接阶段 fail-fast 的前置兼容判断。
     "/api/agent/protocol": {"GET"},
+    # 证据平面（citation_ready v2 图卡取图）：仅 GET，鉴权与归属由上游承担。
+    "/api/knowledge/databases/:kb_id/documents/:file_id/revisions/:revision_id/assets/*": {"GET"},
 }
 
 
@@ -135,6 +137,30 @@ async def test_live_agent_protocol_endpoint_reachable_without_auth() -> None:
             assert body["service"] == "yuxi"
             assert body["protocol_version"]
             assert isinstance(body["capabilities"], list)
+    except httpx.ConnectError:
+        pytest.skip(f"网关不可达：{GATEWAY_URL}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e
+async def test_live_knowledge_asset_route_hits_upstream_auth_not_404() -> None:
+    """经网关实测：图卡资产路由未带凭证应得上游 401，网关级 404 说明路由未放行。
+
+    上游对已鉴权但缺失/越权的资产刻意返回 404（防枚举），因此本探测只断言
+    「不是网关 404」且落在鉴权拒绝区间。
+    """
+    try:
+        async with httpx.AsyncClient(base_url=GATEWAY_URL, timeout=10.0) as client:
+            response = await client.get(
+                "/api/knowledge/databases/probe-kb/documents/probe-file"
+                "/revisions/probe-rev/assets/probe-figure.png"
+            )
+            assert response.status_code != 404, (
+                "知识库资产路由经网关 404：apisix.yaml 未放行或容器未重建（改配置必须 force-recreate）"
+            )
+            assert response.status_code in (401, 403), (
+                f"未带凭证的资产请求意外状态 {response.status_code}"
+            )
     except httpx.ConnectError:
         pytest.skip(f"网关不可达：{GATEWAY_URL}")
 
