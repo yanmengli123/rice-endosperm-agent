@@ -255,6 +255,7 @@
           </div>
           <div style="display: flex; gap: 2px">
             <a-button
+              v-if="!contractManagedLifecycle"
               type="link"
               @click="handleBatchParse"
               :loading="batchParsing"
@@ -264,6 +265,7 @@
               批量解析
             </a-button>
             <a-button
+              v-if="!contractManagedLifecycle"
               type="link"
               @click="handleBatchIndex"
               :loading="batchIndexing"

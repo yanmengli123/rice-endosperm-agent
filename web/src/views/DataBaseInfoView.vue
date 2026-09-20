@@ -87,27 +87,36 @@
               <div class="file-management-info">
                 <div class="file-info-title">
                   <div class="file-info-title-row">
-                    <button
-                      type="button"
-                      class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
-                      @click="showAddFilesModal()"
-                    >
-                      <FileUp :size="14" />
-                      <span>上传</span>
-                    </button>
-                    <button
-                      type="button"
-                      class="lucide-icon-btn extension-panel-action extension-panel-action-secondary"
-                      @click="showCreateFolderModal"
-                    >
-                      <FolderPlus :size="14" />
-                      <span>新建文件夹</span>
-                    </button>
+                    <template v-if="isCsvContractKb">
+                      <!-- CSV 契约：上传/解析/入库由「数据集导入」面板托管（dataset_import），
+                           文档生命周期的 document_upload/folder_create 对本契约禁用 -->
+                      <span class="contract-managed-hint">
+                        CSV 数据集经「数据集导入」标签页上传、映射与导入
+                      </span>
+                    </template>
+                    <template v-else>
+                      <button
+                        type="button"
+                        class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
+                        @click="showAddFilesModal()"
+                      >
+                        <FileUp :size="14" />
+                        <span>上传</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="lucide-icon-btn extension-panel-action extension-panel-action-secondary"
+                        @click="showCreateFolderModal"
+                      >
+                        <FolderPlus :size="14" />
+                        <span>新建文件夹</span>
+                      </button>
+                    </template>
                   </div>
                 </div>
                 <div class="file-panel-status">
                   <button
-                    v-if="pendingParseCount > 0"
+                    v-if="pendingParseCount > 0 && !isCsvContractKb"
                     type="button"
                     class="file-stat-card file-stat-action file-stat-summary"
                     :disabled="store.state.chunkLoading"
@@ -120,7 +129,7 @@
                     </div>
                   </button>
                   <button
-                    v-if="pendingIndexCount > 0"
+                    v-if="pendingIndexCount > 0 && !isCsvContractKb"
                     type="button"
                     class="file-stat-card file-stat-action file-stat-summary"
                     :disabled="store.state.chunkLoading"
@@ -149,7 +158,7 @@
                   <button
                     type="button"
                     class="file-stat-card file-stat-summary file-stat-repair"
-                    :disabled="statsRepairing"
+                    :disabled="statsRepairing || isCsvContractKb"
                     :aria-busy="statsRepairing"
                     aria-label="修复缺失的 Chunk/Token 统计"
                     title="修复缺失的 Chunk/Token 统计"
@@ -165,7 +174,7 @@
                   <button
                     type="button"
                     class="file-stat-card file-stat-summary file-stat-repair"
-                    :disabled="statsRepairing"
+                    :disabled="statsRepairing || isCsvContractKb"
                     :aria-busy="statsRepairing"
                     aria-label="修复缺失的 Chunk/Token 统计"
                     title="修复缺失的 Chunk/Token 统计"
@@ -1246,6 +1255,11 @@ onMounted(() => {
 .file-panel-desc {
   font-size: 12px;
   color: var(--gray-500);
+}
+
+.contract-managed-hint {
+  font-size: 12px;
+  color: var(--gray-600);
 }
 
 .file-panel-status {
