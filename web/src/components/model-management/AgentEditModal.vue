@@ -13,6 +13,7 @@ import {
 } from '@lucide/vue'
 
 import { userApi } from '@/apis/user_api'
+import { agentApi } from '@/apis/agent_api'
 import AgentRuntimeConfigForm from '@/components/AgentRuntimeConfigForm.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
@@ -51,6 +52,48 @@ const agentForm = reactive({
   icon: ''
 })
 
+// 协作模式：新建主智能体时可选一份配方，创建后自动预填编排提示词与子智能体白名单
+const collaborationModes = ref([])
+const collaborationTemplatesLoading = ref(false)
+const collaborationTemplatesLoaded = ref(false)
+const selectedCollaborationModeId = ref(null)
+
+const collaborationModeOptions = computed(() =>
+  collaborationModes.value.map((mode) => ({ label: mode.name, value: mode.id }))
+)
+const selectedCollaborationMode = computed(
+  () =>
+    collaborationModes.value.find((mode) => mode.id === selectedCollaborationModeId.value) || null
+)
+
+const loadCollaborationTemplates = async () => {
+  if (collaborationTemplatesLoaded.value || collaborationTemplatesLoading.value) return
+  collaborationTemplatesLoading.value = true
+  try {
+    const response = await agentApi.getCollaborationTemplates()
+    collaborationModes.value = Array.isArray(response?.modes) ? response.modes : []
+    collaborationTemplatesLoaded.value = true
+  } catch (error) {
+    console.warn('加载协作模式模板失败:', error)
+  } finally {
+    collaborationTemplatesLoading.value = false
+  }
+}
+
+const handleCollaborationModeChange = (modeId) => {
+  const mode = collaborationModes.value.find((item) => item.id === modeId)
+  if (!mode) return
+  if (!agentForm.name.trim()) agentForm.name = mode.name
+  if (!agentForm.description.trim()) agentForm.description = mode.prefill?.description || ''
+}
+
+const buildCollaborationContext = (mode) => {
+  const context = { ...(mode?.config_context || {}) }
+  const systemPrompt = mode?.prefill?.system_prompt
+  if (systemPrompt) context.system_prompt = systemPrompt
+  return Object.keys(context).length ? context : null
+}
+
 const normalizeAgent = (agent) => {
   const agentId = agent?.agent_id || agent?.slug || agent?.id
   return agentId
@@ -77,6 +120,9 @@ const runtimeConfigSegment = computed(() =>
 const isRuntimeAgentModalTab = (key) => runtimeAgentModalTabs.includes(key)
 const getDefaultBackendId = () => DEFAULT_AGENT_BACKEND_ID
 const isSubAgentBackend = (backendId) => backendId === SUB_AGENT_BACKEND_ID
+const showCollaborationModePicker = computed(
+  () => !editingAgentId.value && !isSubAgentBackend(agentForm.backend_id)
+)
 
 const getInitialShareConfig = () => ({
   access_level: userStore.isAdmin ? 'global' : 'user',
@@ -143,9 +189,11 @@ const handleAgentModalAfterOpenChange = (open) => {
 const openCreate = () => {
   editingAgentId.value = null
   agentModalActiveTab.value = 'basic'
+  selectedCollaborationModeId.value = null
   resetAgentForm()
   agentStore.resetAgentConfig()
   showAgentModal.value = true
+  loadCollaborationTemplates()
 }
 
 const openEdit = async (agent) => {
@@ -267,7 +315,22 @@ const saveAgent = async () => {
       emit('saved', { mode: 'edit', agent: updated })
       message.success('智能体已保存')
     } else {
-      const created = await agentStore.createAgent(payload)
+      let created = await agentStore.createAgent(payload)
+      const collaborationContext = showCollaborationModePicker.value
+        ? buildCollaborationContext(selectedCollaborationMode.value)
+        : null
+      if (created?.id && collaborationContext) {
+        try {
+          created = await agentStore.updateAgentProfile(created.id, {
+            config_json: { context: collaborationContext }
+          })
+          if (!created.is_subagent) await agentStore.selectAgent(created.id)
+        } catch (error) {
+          message.warning(
+            `智能体已创建，但协作模式配置未能应用：${error.message || '请在编辑页手动配置'}`
+          )
+        }
+      }
       emit('saved', { mode: 'create', agent: normalizeAgent(created) })
       message.success('智能体已创建')
     }
@@ -414,6 +477,24 @@ defineExpose({
             </div>
           </div>
           <div class="modal-form">
+            <div v-if="showCollaborationModePicker" class="form-label full-width">
+              <span>协作模式（可选）</span>
+              <a-select
+                v-model:value="selectedCollaborationModeId"
+                class="collaboration-mode-select"
+                :options="collaborationModeOptions"
+                :loading="collaborationTemplatesLoading"
+                placeholder="从协作模式开始：创建后自动预填编排提示词与子智能体白名单"
+                allow-clear
+                @change="handleCollaborationModeChange"
+              />
+              <div v-if="selectedCollaborationMode" class="collaboration-mode-hint">
+                <p>{{ selectedCollaborationMode.description }}</p>
+                <ul v-if="selectedCollaborationMode.hints?.length">
+                  <li v-for="hint in selectedCollaborationMode.hints" :key="hint">{{ hint }}</li>
+                </ul>
+              </div>
+            </div>
             <label class="form-label full-width">
               <span>描述</span>
               <a-textarea
@@ -943,6 +1024,26 @@ defineExpose({
 
 .full-width {
   grid-column: 1 / -1;
+}
+
+.collaboration-mode-hint {
+  padding: 10px 12px;
+  border: 1px dashed var(--main-300);
+  border-radius: 8px;
+  background: var(--main-30);
+  color: var(--gray-700);
+  font-size: 12px;
+  line-height: 1.6;
+
+  p {
+    margin: 0;
+  }
+
+  ul {
+    margin: 6px 0 0;
+    padding-left: 16px;
+    color: var(--gray-600);
+  }
 }
 
 .spinning {

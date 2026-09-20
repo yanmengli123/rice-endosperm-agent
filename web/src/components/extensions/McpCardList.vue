@@ -337,7 +337,9 @@ const handleImportSubmit = async () => {
     }
   } catch (err) {
     // JSON 解析错误给出本地提示；接口错误透传后端原因（含策略拒绝说明）
-    message.error(err instanceof SyntaxError ? `JSON 解析失败：${err.message}` : err.message || '导入失败')
+    message.error(
+      err instanceof SyntaxError ? `JSON 解析失败：${err.message}` : err.message || '导入失败'
+    )
   } finally {
     importLoading.value = false
   }

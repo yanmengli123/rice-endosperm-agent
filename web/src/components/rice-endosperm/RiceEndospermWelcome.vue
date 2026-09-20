@@ -1,10 +1,6 @@
 <template>
   <section class="rice-welcome" aria-labelledby="rice-welcome-title">
-    <img
-      class="rice-welcome__avatar"
-      src="/brand/rice-endosperm/avatar.svg"
-      alt="稻芯智析智能体"
-    />
+    <img class="rice-welcome__avatar" src="/brand/rice-endosperm/avatar.svg" alt="稻芯智析智能体" />
 
     <div class="rice-welcome__heading">
       <p>Rice Endosperm Intelligence</p>

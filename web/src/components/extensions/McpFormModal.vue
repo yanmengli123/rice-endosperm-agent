@@ -50,7 +50,9 @@
             placeholder="无认证，或选择已加密凭据"
             :options="credentialOptions"
           />
-          <small class="field-hint">密钥只保存在服务端密文仓库，MCP 配置仅保存 credential_id。</small>
+          <small class="field-hint"
+            >密钥只保存在服务端密文仓库，MCP 配置仅保存 credential_id。</small
+          >
         </a-form-item>
         <a-form-item label="非敏感 HTTP 请求头" class="form-item">
           <a-textarea

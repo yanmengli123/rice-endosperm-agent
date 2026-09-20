@@ -97,7 +97,18 @@ export const agentApi = {
 
   updateAgent: (agentId, payload) => apiPut(`/api/agent/${agentId}`, payload),
 
-  deleteAgent: (agentId) => apiDelete(`/api/agent/${agentId}`),
+  /**
+   * 删除智能体。被主智能体引用的子智能体会返回 409（detail.code === 'subagent_referenced'），
+   * superadmin 可传 force 强制删除。
+   */
+  deleteAgent: (agentId, { force = false } = {}) =>
+    apiDelete(force ? `/api/agent/${agentId}?force=true` : `/api/agent/${agentId}`),
+
+  /** 列出把该子智能体挂进协作白名单的主智能体（count 为真实总数，references 仅含可见项）。 */
+  getAgentReferences: (agentId) => apiGet(`/api/agent/${agentId}/references`),
+
+  /** 协作模式配方与模板（编排骨架 / 专家简报 / 调度决策表），供「从模式新建」预填。 */
+  getCollaborationTemplates: () => apiGet('/api/agent/collaboration-templates'),
 
   /**
    * 创建异步运行任务（Run）

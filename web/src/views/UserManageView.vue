@@ -66,7 +66,12 @@ async function loadUsers() {
 async function toggleUser(user) {
   const action = user.is_disabled ? 'enable' : 'disable'
   const verb = user.is_disabled ? '启用' : '停用'
-  if (!window.confirm(`确定${verb}用户 ${user.username}（${user.uid}）吗？停用会立即冻结其全部 API Key。`)) return
+  if (
+    !window.confirm(
+      `确定${verb}用户 ${user.username}（${user.uid}）吗？停用会立即冻结其全部 API Key。`
+    )
+  )
+    return
   try {
     await authApi.setManagedUserEnabled(user.uid, action === 'enable')
     message.success(`${verb}成功`)
@@ -336,7 +341,8 @@ async function resetMemberPassword() {
   try {
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
     let generated = ''
-    for (let i = 0; i < 12; i += 1) generated += alphabet[Math.floor(Math.random() * alphabet.length)]
+    for (let i = 0; i < 12; i += 1)
+      generated += alphabet[Math.floor(Math.random() * alphabet.length)]
     await authApi.resetManagedUserPassword(detailDrawer.uid, generated)
     onboardingCard.open = true
     onboardingCard.username = detailDrawer.username
@@ -357,23 +363,25 @@ onMounted(() => {
 
 <template>
   <div class="user-manage-view">
-    <PageHeader title="用户与权限管理" description="企业级成员治理：开户、停用、配额与模型偏好入口。">
+    <PageHeader
+      title="用户与权限管理"
+      description="企业级成员治理：开户、停用、配额与模型偏好入口。"
+    >
       <template #actions>
         <a-button type="primary" @click="createModal.open = true">+ 创建用户</a-button>
       </template>
     </PageHeader>
 
-    <a-table
-      :data-source="users"
-      :loading="loading"
-      row-key="uid"
-      :pagination="{ pageSize: 15 }"
-    >
+    <a-table :data-source="users" :loading="loading" row-key="uid" :pagination="{ pageSize: 15 }">
       <a-table-column title="用户" data-index="username" />
       <a-table-column title="登录 ID" data-index="uid" />
       <a-table-column title="角色" data-index="role">
         <template #default="{ record }">
-          <a-tag :color="record.role === 'superadmin' ? 'red' : record.role === 'admin' ? 'orange' : 'green'">
+          <a-tag
+            :color="
+              record.role === 'superadmin' ? 'red' : record.role === 'admin' ? 'orange' : 'green'
+            "
+          >
             {{ record.role }}
           </a-tag>
         </template>
@@ -405,14 +413,16 @@ onMounted(() => {
               size="small"
               :disabled="record.uid === userStore.uid || (!isSuperAdmin && record.role !== 'user')"
               @click="openQuota(record)"
-            >配额</a-button>
+              >配额</a-button
+            >
             <a-button
               size="small"
               type="primary"
               ghost
               :disabled="record.uid === userStore.uid || (!isSuperAdmin && record.role !== 'user')"
               @click="openDetailDrawer(record)"
-            >详情</a-button>
+              >详情</a-button
+            >
             <a-button size="small" @click="openQaDrawer(record)">问答</a-button>
           </a-space>
         </template>
@@ -425,14 +435,26 @@ onMounted(() => {
       @ok="saveQuota"
       @cancel="quotaModal.open = false"
     >
-      <p class="quota-hint">每日次数用于滥用防护；月度额度只统计企业平台模型。用户 BYOK 独立计量，不占平台 Token。</p>
+      <p class="quota-hint">
+        每日次数用于滥用防护；月度额度只统计企业平台模型。用户 BYOK 独立计量，不占平台 Token。
+      </p>
       <label class="quota-field">
         <span>每日运行次数上限</span>
-        <a-input-number v-model:value="quotaModal.dailyRunLimit" :min="1" placeholder="不限制" style="width: 100%" />
+        <a-input-number
+          v-model:value="quotaModal.dailyRunLimit"
+          :min="1"
+          placeholder="不限制"
+          style="width: 100%"
+        />
       </label>
       <label class="quota-field">
         <span>每月平台模型 Token 上限</span>
-        <a-input-number v-model:value="quotaModal.monthlyTokenLimit" :min="1" placeholder="不限制" style="width: 100%" />
+        <a-input-number
+          v-model:value="quotaModal.monthlyTokenLimit"
+          :min="1"
+          placeholder="不限制"
+          style="width: 100%"
+        />
       </label>
       <label class="quota-field">
         <span>个人模型接入策略</span>
@@ -442,7 +464,9 @@ onMounted(() => {
           <a-select-option value="platform_only">仅允许企业平台模型</a-select-option>
         </a-select>
       </label>
-      <p v-if="quotaModal.modelAccessPolicy !== 'platform_only'" class="quota-hint">平台额度耗尽后，用户可在桌面端“设置与连接”中导入自己的模型并继续问答。</p>
+      <p v-if="quotaModal.modelAccessPolicy !== 'platform_only'" class="quota-hint">
+        平台额度耗尽后，用户可在桌面端“设置与连接”中导入自己的模型并继续问答。
+      </p>
     </a-modal>
 
     <a-modal
@@ -466,7 +490,9 @@ onMounted(() => {
           <a-select-option v-if="isSuperAdmin" value="admin">部门管理员</a-select-option>
         </a-select>
       </label>
-      <p class="quota-hint">创建成功后将随机生成该用户的桌面端访问密钥（90 天有效），明文仅展示一次。</p>
+      <p class="quota-hint">
+        创建成功后将随机生成该用户的桌面端访问密钥（90 天有效），明文仅展示一次。
+      </p>
     </a-modal>
 
     <a-modal
@@ -481,9 +507,13 @@ onMounted(() => {
         <p><b>登录显示名：</b>{{ onboardingCard.username }}</p>
         <p><b>登录 ID：</b>{{ onboardingCard.uid }}</p>
         <p><b>初始密码：</b>{{ onboardingCard.password }}</p>
-        <p class="onboarding-key"><b>桌面端访问密钥（90 天有效）：</b><br /><code>{{ onboardingCard.apiKeySecret }}</code></p>
+        <p class="onboarding-key">
+          <b>桌面端访问密钥（90 天有效）：</b><br /><code>{{ onboardingCard.apiKeySecret }}</code>
+        </p>
         <a-button type="primary" @click="copyOnboardingCard">复制全部信息</a-button>
-        <p class="quota-hint">明文仅此一次展示，关闭后无法再次查看。请通过安全渠道交付给用户；到期后可在列表中重新签发。</p>
+        <p class="quota-hint">
+          明文仅此一次展示，关闭后无法再次查看。请通过安全渠道交付给用户；到期后可在列表中重新签发。
+        </p>
       </div>
     </a-modal>
 
@@ -498,12 +528,16 @@ onMounted(() => {
           size="small"
           :loading="exportingUid === qaDrawer.uid"
           @click="exportUserConversations(qaDrawer.uid, qaDrawer.username)"
-        >导出全部问答</a-button>
+          >导出全部问答</a-button
+        >
       </template>
       <div class="qa-layout">
         <div class="qa-conversations">
           <a-spin :spinning="qaDrawer.conversationsLoading">
-            <a-empty v-if="!qaDrawer.conversations.length && !qaDrawer.conversationsLoading" description="该用户暂无会话" />
+            <a-empty
+              v-if="!qaDrawer.conversations.length && !qaDrawer.conversationsLoading"
+              description="该用户暂无会话"
+            />
             <ul class="qa-list">
               <li
                 v-for="conv in qaDrawer.conversations"
@@ -519,8 +553,16 @@ onMounted(() => {
         </div>
         <div class="qa-messages">
           <a-spin :spinning="qaDrawer.messagesLoading">
-            <a-empty v-if="!qaDrawer.messages.length && !qaDrawer.messagesLoading" description="选择左侧会话查看问答" />
-            <div v-for="(msg, index) in qaDrawer.messages" :key="index" class="qa-message" :class="msg.role">
+            <a-empty
+              v-if="!qaDrawer.messages.length && !qaDrawer.messagesLoading"
+              description="选择左侧会话查看问答"
+            />
+            <div
+              v-for="(msg, index) in qaDrawer.messages"
+              :key="index"
+              class="qa-message"
+              :class="msg.role"
+            >
               <span class="qa-role">{{ msg.role === 'user' ? '用户' : '助手' }}</span>
               <div class="qa-content">{{ msg.content }}</div>
             </div>
@@ -538,16 +580,35 @@ onMounted(() => {
         <a-tab-pane key="account" tab="账户信息">
           <a-descriptions v-if="detailDrawer.info" :column="1" bordered size="small">
             <a-descriptions-item label="登录 ID">{{ detailDrawer.info.uid }}</a-descriptions-item>
-            <a-descriptions-item label="显示名">{{ detailDrawer.info.username }}</a-descriptions-item>
+            <a-descriptions-item label="显示名">{{
+              detailDrawer.info.username
+            }}</a-descriptions-item>
             <a-descriptions-item label="角色">
-              <a-tag :color="detailDrawer.info.role === 'superadmin' ? 'red' : detailDrawer.info.role === 'admin' ? 'orange' : 'green'">{{ detailDrawer.info.role }}</a-tag>
+              <a-tag
+                :color="
+                  detailDrawer.info.role === 'superadmin'
+                    ? 'red'
+                    : detailDrawer.info.role === 'admin'
+                      ? 'orange'
+                      : 'green'
+                "
+                >{{ detailDrawer.info.role }}</a-tag
+              >
             </a-descriptions-item>
-            <a-descriptions-item label="部门">{{ detailDrawer.info.department_name || '—' }}</a-descriptions-item>
+            <a-descriptions-item label="部门">{{
+              detailDrawer.info.department_name || '—'
+            }}</a-descriptions-item>
             <a-descriptions-item label="状态">
-              <a-tag :color="detailDrawer.info.is_disabled ? 'red' : 'green'">{{ detailDrawer.info.is_disabled ? '已停用' : '正常' }}</a-tag>
+              <a-tag :color="detailDrawer.info.is_disabled ? 'red' : 'green'">{{
+                detailDrawer.info.is_disabled ? '已停用' : '正常'
+              }}</a-tag>
             </a-descriptions-item>
-            <a-descriptions-item label="创建时间">{{ (detailDrawer.info.created_at || '').slice(0, 19).replace('T', ' ') }}</a-descriptions-item>
-            <a-descriptions-item label="最近登录">{{ detailDrawer.info.last_login || "从未" }}</a-descriptions-item>
+            <a-descriptions-item label="创建时间">{{
+              (detailDrawer.info.created_at || '').slice(0, 19).replace('T', ' ')
+            }}</a-descriptions-item>
+            <a-descriptions-item label="最近登录">{{
+              detailDrawer.info.last_login || '从未'
+            }}</a-descriptions-item>
           </a-descriptions>
           <a-space style="margin-top: 16px">
             <a-button @click="resetMemberPassword">重置初始密码（生成随机密码）</a-button>
@@ -555,26 +616,45 @@ onMounted(() => {
         </a-tab-pane>
         <a-tab-pane key="keys" tab="API Keys">
           <a-spin :spinning="detailDrawer.keysLoading">
-            <a-empty v-if="!detailDrawer.keys.length && !detailDrawer.keysLoading" description="暂无密钥" />
-            <a-table v-if="detailDrawer.keys.length" :data-source="detailDrawer.keys" row-key="id" :pagination="false" size="small">
+            <a-empty
+              v-if="!detailDrawer.keys.length && !detailDrawer.keysLoading"
+              description="暂无密钥"
+            />
+            <a-table
+              v-if="detailDrawer.keys.length"
+              :data-source="detailDrawer.keys"
+              row-key="id"
+              :pagination="false"
+              size="small"
+            >
               <a-table-column title="前缀" data-index="key_prefix" />
               <a-table-column title="名称" data-index="name" />
               <a-table-column title="用途" data-index="purpose" />
               <a-table-column title="状态" key="status">
                 <template #default="{ record }">
-                  <a-tag :color="record.status === 'enabled' ? 'green' : 'red'">{{ record.status === 'enabled' ? '启用' : '禁用' }}</a-tag>
+                  <a-tag :color="record.status === 'enabled' ? 'green' : 'red'">{{
+                    record.status === 'enabled' ? '启用' : '禁用'
+                  }}</a-tag>
                 </template>
               </a-table-column>
               <a-table-column title="过期时间" key="expires_at">
-                <template #default="{ record }">{{ record.expires_at ? record.expires_at.slice(0, 10) : "永久" }}</template>
+                <template #default="{ record }">{{
+                  record.expires_at ? record.expires_at.slice(0, 10) : '永久'
+                }}</template>
               </a-table-column>
               <a-table-column title="操作" key="ops" width="200">
                 <template #default="{ record }">
                   <a-space>
-                    <a-popconfirm title="重置后将签发新密钥，旧密钥立即失效？" @confirm="resetManagedKey(record)">
+                    <a-popconfirm
+                      title="重置后将签发新密钥，旧密钥立即失效？"
+                      @confirm="resetManagedKey(record)"
+                    >
                       <a-button size="small">重置</a-button>
                     </a-popconfirm>
-                    <a-popconfirm title="确定物理删除该密钥？设备码会话关联将被断开。" @confirm="deleteManagedKey(record)">
+                    <a-popconfirm
+                      title="确定物理删除该密钥？设备码会话关联将被断开。"
+                      @confirm="deleteManagedKey(record)"
+                    >
                       <a-button size="small" danger>删除</a-button>
                     </a-popconfirm>
                   </a-space>
@@ -590,14 +670,19 @@ onMounted(() => {
               placeholder="选择会话"
               @change="selectConversationInDetail({ thread_id: $event })"
             >
-              <a-select-option v-for="conv in detailDrawer.conversations" :key="conv.thread_id" :value="conv.thread_id">
+              <a-select-option
+                v-for="conv in detailDrawer.conversations"
+                :key="conv.thread_id"
+                :value="conv.thread_id"
+              >
                 {{ conv.title || conv.thread_id }}
               </a-select-option>
             </a-select>
             <a-button
               :loading="exportingUid === detailDrawer.uid"
               @click="exportUserConversations(detailDrawer.uid, detailDrawer.username)"
-            >导出全部问答</a-button>
+              >导出全部问答</a-button
+            >
           </div>
           <a-empty
             v-if="!detailDrawer.conversationsLoading && !detailDrawer.conversations.length"
@@ -614,11 +699,15 @@ onMounted(() => {
             table-layout="fixed"
           >
             <a-table-column title="时间" data-index="created_at" :width="180">
-              <template #default="{ record }">{{ (record.created_at || '').slice(0, 19).replace('T', ' ') }}</template>
+              <template #default="{ record }">{{
+                (record.created_at || '').slice(0, 19).replace('T', ' ')
+              }}</template>
             </a-table-column>
             <a-table-column title="角色" data-index="role" :width="90">
               <template #default="{ record }">
-                <a-tag :color="record.role === 'user' ? 'blue' : 'green'">{{ record.role === 'user' ? '提问' : '回答' }}</a-tag>
+                <a-tag :color="record.role === 'user' ? 'blue' : 'green'">{{
+                  record.role === 'user' ? '提问' : '回答'
+                }}</a-tag>
               </template>
             </a-table-column>
             <a-table-column title="内容" data-index="content">
@@ -632,13 +721,38 @@ onMounted(() => {
           <a-spin :spinning="detailDrawer.statsLoading">
             <template v-if="detailDrawer.stats">
               <a-row :gutter="12" class="monitor-cards">
-                <a-col :span="6"><a-card size="small"><a-statistic title="总运行次数" :value="detailDrawer.stats.total_runs" /></a-card></a-col>
-                <a-col :span="6"><a-card size="small"><a-statistic title="平台 Token" :value="detailDrawer.stats.platform_tokens" /></a-card></a-col>
-                <a-col :span="6"><a-card size="small"><a-statistic title="BYOK 自费 Token" :value="detailDrawer.stats.byok_tokens" /></a-card></a-col>
-                <a-col :span="6"><a-card size="small"><a-statistic title="接入策略" :value="detailDrawer.stats.entitlement.credential_policy" /></a-card></a-col>
+                <a-col :span="6"
+                  ><a-card size="small"
+                    ><a-statistic
+                      title="总运行次数"
+                      :value="detailDrawer.stats.total_runs" /></a-card
+                ></a-col>
+                <a-col :span="6"
+                  ><a-card size="small"
+                    ><a-statistic
+                      title="平台 Token"
+                      :value="detailDrawer.stats.platform_tokens" /></a-card
+                ></a-col>
+                <a-col :span="6"
+                  ><a-card size="small"
+                    ><a-statistic
+                      title="BYOK 自费 Token"
+                      :value="detailDrawer.stats.byok_tokens" /></a-card
+                ></a-col>
+                <a-col :span="6"
+                  ><a-card size="small"
+                    ><a-statistic
+                      title="接入策略"
+                      :value="detailDrawer.stats.entitlement.credential_policy" /></a-card
+                ></a-col>
               </a-row>
               <h4 style="margin: 12px 0 8px; font-weight: 600">按日趋势</h4>
-              <a-table :data-source="detailDrawer.stats.daily" row-key="date" :pagination="false" size="small">
+              <a-table
+                :data-source="detailDrawer.stats.daily"
+                row-key="date"
+                :pagination="false"
+                size="small"
+              >
                 <a-table-column title="日期" data-index="date" />
                 <a-table-column title="运行次数" data-index="runs" />
                 <a-table-column title="Token 用量" data-index="tokens" />
@@ -648,7 +762,6 @@ onMounted(() => {
         </a-tab-pane>
       </a-tabs>
     </a-drawer>
-
   </div>
 </template>
 

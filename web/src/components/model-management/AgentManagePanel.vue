@@ -7,6 +7,7 @@ import { useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
 import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
 import { isBuiltinAgent, useAgentStore } from '@/stores/agent'
+import { useUserStore } from '@/stores/user'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
@@ -14,6 +15,7 @@ import ExtensionCardGrid from '@/components/extensions/ExtensionCardGrid.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
 
 const agentStore = useAgentStore()
+const userStore = useUserStore()
 const router = useRouter()
 const agentLoading = ref(false)
 const searchQuery = ref('')
@@ -114,24 +116,61 @@ const refreshAgentLists = async () => {
   await Promise.all([loadAgents(), agentStore.fetchAgents()])
 }
 
+const describeReferences = (references) => {
+  const names = (references?.references || []).map((item) => `${item.name}（${item.slug}）`)
+  const hiddenCount = references?.hidden_count || 0
+  const parts = [...names]
+  if (hiddenCount > 0) parts.push(`另有 ${hiddenCount} 个你不可见的智能体`)
+  return parts.join('、')
+}
+
 const deleteAgent = async (agent) => {
   if (isBuiltinAgent(agent)) {
     message.warning('内置智能体不能删除')
     return
   }
+
+  // 子智能体删除前先看引用关系：被引用时运行期会静默剔除，配置期必须显式拦截
+  let references = null
+  if (agent.is_subagent) {
+    try {
+      references = await agentApi.getAgentReferences(agent.id)
+    } catch (error) {
+      console.warn('读取子智能体引用关系失败:', error)
+    }
+  }
+  const referenceCount = references?.count || 0
+
+  if (referenceCount > 0 && !userStore.isSuperAdmin) {
+    Modal.warning({
+      title: `无法删除 ${agent.name}`,
+      content: `该子智能体仍被 ${referenceCount} 个主智能体引用：${describeReferences(references)}。请先从这些智能体的子智能体白名单中移除，再删除。`,
+      okText: '知道了'
+    })
+    return
+  }
+
+  const forceDelete = referenceCount > 0
   Modal.confirm({
-    title: `删除 ${agent.name}`,
-    content: '删除后不可恢复，已绑定该智能体的历史对话仍保留原始绑定信息。',
-    okText: '删除',
+    title: forceDelete ? `强制删除 ${agent.name}` : `删除 ${agent.name}`,
+    content: forceDelete
+      ? `该子智能体仍被 ${referenceCount} 个主智能体引用：${describeReferences(references)}。强制删除后这些智能体的委派能力会静默降级，确定继续？`
+      : '删除后不可恢复，已绑定该智能体的历史对话仍保留原始绑定信息。',
+    okText: forceDelete ? '强制删除' : '删除',
     okType: 'danger',
     cancelText: '取消',
     async onOk() {
       try {
-        await agentApi.deleteAgent(agent.id)
+        await agentApi.deleteAgent(agent.id, { force: forceDelete })
         await refreshAgentLists()
         message.success('智能体已删除')
       } catch (error) {
-        message.error(error.message || '删除智能体失败')
+        const detail = error?.response?.data?.detail
+        message.error(
+          detail?.code === 'subagent_referenced'
+            ? detail.message
+            : error.message || '删除智能体失败'
+        )
       }
     }
   })

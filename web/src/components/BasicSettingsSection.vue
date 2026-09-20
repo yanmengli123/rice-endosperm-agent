@@ -82,7 +82,8 @@
                   <a-tag v-if="mineruConfig.is_default" color="blue">当前默认</a-tag>
                 </div>
                 <p class="mineru-card-description">
-                  全局配置一次，知识库上传和附件解析都会使用同一 Token。Token 仅保存在服务端，页面不会回显。
+                  全局配置一次，知识库上传和附件解析都会使用同一 Token。Token
+                  仅保存在服务端，页面不会回显。
                 </p>
               </div>
               <a
@@ -124,11 +125,7 @@
               </div>
               <div class="mineru-actions">
                 <a-button :loading="mineruTesting" @click="testMineruConnection">测试连接</a-button>
-                <a-button
-                  type="primary"
-                  :loading="mineruSaving"
-                  @click="saveMineruAsDefault"
-                >
+                <a-button type="primary" :loading="mineruSaving" @click="saveMineruAsDefault">
                   保存并设为默认
                 </a-button>
               </div>

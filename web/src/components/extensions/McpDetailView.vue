@@ -238,7 +238,9 @@
                   </div>
                   <div class="info-item">
                     <label>生命周期</label>
-                    <span><a-tag>{{ server.lifecycle_status || 'UNKNOWN' }}</a-tag></span>
+                    <span
+                      ><a-tag>{{ server.lifecycle_status || 'UNKNOWN' }}</a-tag></span
+                    >
                   </div>
                   <div class="info-item">
                     <label>运行形态</label>
@@ -253,7 +255,9 @@
                   </div>
                   <div class="info-item" v-if="server.runtime_artifact">
                     <label>运行产物</label>
-                    <pre class="code-pre">{{ JSON.stringify(server.runtime_artifact, null, 2) }}</pre>
+                    <pre class="code-pre">{{
+                      JSON.stringify(server.runtime_artifact, null, 2)
+                    }}</pre>
                   </div>
                   <div
                     class="info-item"
@@ -720,7 +724,9 @@ const handleSetServerEnabled = async (srv, enabled) => {
     if (enabled && srv.lifecycle_status !== 'READY') {
       const verification = await mcpApi.testMcpServer(srv.slug)
       if (!verification.success) {
-        message.error(verification.message || `MCP 当前为 ${srv.lifecycle_status || 'UNKNOWN'}，不能启用`)
+        message.error(
+          verification.message || `MCP 当前为 ${srv.lifecycle_status || 'UNKNOWN'}，不能启用`
+        )
         return
       }
     }

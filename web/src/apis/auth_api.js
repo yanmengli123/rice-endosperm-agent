@@ -119,7 +119,9 @@ async function createManagedUser(payload) {
 }
 
 async function setManagedUserEnabled(uid, enabled) {
-  return apiAdminPost(`/api/user/manage/${encodeURIComponent(uid)}/${enabled ? 'enable' : 'disable'}`)
+  return apiAdminPost(
+    `/api/user/manage/${encodeURIComponent(uid)}/${enabled ? 'enable' : 'disable'}`
+  )
 }
 
 async function getManagedUserQuota(uid) {
@@ -143,11 +145,7 @@ async function listManagedUserMessages(uid, threadId) {
 }
 
 async function exportManagedUserConversations(uid) {
-  return apiAdminGet(
-    `/api/user/manage/${encodeURIComponent(uid)}/conversations-export`,
-    {},
-    'blob'
-  )
+  return apiAdminGet(`/api/user/manage/${encodeURIComponent(uid)}/conversations-export`, {}, 'blob')
 }
 async function listManagedApiKeys(uid) {
   const data = await apiAdminGet(`/api/user/manage/${encodeURIComponent(uid)}/api-keys`)
@@ -155,9 +153,7 @@ async function listManagedApiKeys(uid) {
 }
 
 async function resetManagedApiKey(uid, keyId) {
-  return apiAdminPost(
-    `/api/user/manage/${encodeURIComponent(uid)}/api-keys/${keyId}/reset`
-  )
+  return apiAdminPost(`/api/user/manage/${encodeURIComponent(uid)}/api-keys/${keyId}/reset`)
 }
 
 async function deleteManagedApiKey(uid, keyId) {

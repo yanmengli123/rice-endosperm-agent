@@ -16,6 +16,7 @@ import {
   summarizeBatchPreview,
   edgeReviewStatus,
   edgeStyleByReviewStatus,
+  shouldShowGraphConfigEmpty,
   normalizeBuildStatus,
   buildStatusSummary,
   buildTaskLabel
@@ -112,6 +113,56 @@ test('准入档位与图例均为冻结结构', () => {
   assert.deepEqual(Object.keys(BATCH_ADMISSION_META).sort(), ['relaxed', 'standard', 'strict'])
   assert.ok(EDGE_STATUS_LEGEND.length >= 4)
   assert.ok(EDGE_STATUS_LEGEND.every((item) => item.label && item.pattern))
+})
+
+test('新库空态不能卸载抽取器配置工作区', () => {
+  const unconfigured = { build: { configured: false } }
+  assert.equal(
+    shouldShowGraphConfigEmpty({
+      mode: 'workbench',
+      activeWorkspace: 'review',
+      isManagedGraph: false,
+      summary: unconfigured
+    }),
+    true
+  )
+  assert.equal(
+    shouldShowGraphConfigEmpty({
+      mode: 'workbench',
+      activeWorkspace: 'build',
+      isManagedGraph: false,
+      summary: unconfigured
+    }),
+    false,
+    '构建工作区必须可达，否则空态 CTA 会形成状态死锁'
+  )
+  assert.equal(
+    shouldShowGraphConfigEmpty({
+      mode: 'workbench',
+      activeWorkspace: 'review',
+      isManagedGraph: true,
+      summary: unconfigured
+    }),
+    false
+  )
+  assert.equal(
+    shouldShowGraphConfigEmpty({
+      mode: 'workbench',
+      activeWorkspace: 'review',
+      isManagedGraph: false,
+      summary: null
+    }),
+    false
+  )
+  assert.equal(
+    shouldShowGraphConfigEmpty({
+      mode: 'workbench',
+      activeWorkspace: 'review',
+      isManagedGraph: false,
+      summary: { build: { configured: true } }
+    }),
+    false
+  )
 })
 
 test('构建状态规范化：空值与负值安全归零', () => {

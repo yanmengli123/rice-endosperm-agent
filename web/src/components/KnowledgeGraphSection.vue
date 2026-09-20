@@ -98,6 +98,7 @@ import QualityWorkbench from '@/components/graph/QualityWorkbench.vue'
 import BuildPublishWorkbench from '@/components/graph/BuildPublishWorkbench.vue'
 import AuditWorkbench from '@/components/graph/AuditWorkbench.vue'
 import { getKbTypeLabel } from '@/utils/kb_utils'
+import { shouldShowGraphConfigEmpty } from '@/utils/graph/reviewMeta'
 
 const MILVUS_KB_TYPE = 'milvus'
 
@@ -124,15 +125,18 @@ const mode = computed(() => governance.mode)
 const setClassic = () => governance.setMode('classic')
 const setWorkbench = () => governance.setMode('workbench')
 
-// 未配置抽取器（工作台模式）：只显示引导，不渲染各工作区。
+// 未配置抽取器（工作台模式）：数据工作区显示引导，但「构建与发布」必须始终可达。
 // managed_graph 规范图谱库不走 LLM 抽取（build.configured 恒为 false），
 // 不显示该阻断空态，直接进入工作区（审核/质量/发布/审计均可用）。
 const isManagedGraph = computed(() => store.database?.contract_key === 'managed_graph')
-const showConfigEmpty = computed(() => {
-  if (isManagedGraph.value) return false
-  const build = governance.summary?.build
-  return mode.value === 'workbench' && governance.summary !== null && build && !build.configured
-})
+const showConfigEmpty = computed(() =>
+  shouldShowGraphConfigEmpty({
+    mode: mode.value,
+    activeWorkspace: activeWorkspace.value,
+    isManagedGraph: isManagedGraph.value,
+    summary: governance.summary
+  })
+)
 
 const onChanged = () => {
   governance.invalidate()

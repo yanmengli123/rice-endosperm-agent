@@ -178,6 +178,24 @@ export const EDGE_STATUS_LEGEND = Object.freeze([
   { key: 'CONFLICT', label: '冲突中', pattern: '点线' }
 ])
 
+/**
+ * 新库未配置抽取器时的工作台空态判定。
+ *
+ * 「构建与发布」承载抽取器配置，是解除空态的唯一必达路径，不能再被空态本身卸载；
+ * managed_graph 由契约托管图谱，也不进入 LLM 抽取配置引导。
+ */
+export function shouldShowGraphConfigEmpty({
+  mode,
+  activeWorkspace,
+  isManagedGraph,
+  summary
+} = {}) {
+  if (mode !== 'workbench' || activeWorkspace === 'build' || isManagedGraph || summary == null) {
+    return false
+  }
+  return Boolean(summary.build && !summary.build.configured)
+}
+
 // ---- 图谱构建状态规范化（getStatus 返回 → 统一展示模型） ----
 // 后端权威字段：total_chunks / indexed_chunks / pending_chunks / dead_chunks /
 // stale_cached_chunks / build_task_{status,progress,message,error}

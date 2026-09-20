@@ -19,7 +19,10 @@ export const useGraphGovernanceStore = defineStore('graphGovernance', {
     summaryError: null,
     settings: null,
     mode: localStorage.getItem(MODE_STORAGE_KEY) === 'classic' ? 'classic' : 'workbench',
-    _pollTimer: null
+    _pollTimer: null,
+    _refreshPending: false,
+    _refreshPendingWithSettings: false,
+    _refreshPendingForce: false
   }),
 
   getters: {
@@ -76,39 +79,65 @@ export const useGraphGovernanceStore = defineStore('graphGovernance', {
       }
     },
 
-    async refresh({ withSettings = false } = {}) {
-      if (!this.kbId || !this.active || this.summaryLoading) return
+    async refresh({ withSettings = false, force = false } = {}) {
+      if (!this.kbId || !this.active) return
+      if (this.summaryLoading) {
+        // 写操作失效或切库可能与在途请求重叠；合并成一次后继请求，不能静默丢弃。
+        this._refreshPending = true
+        this._refreshPendingWithSettings ||= withSettings
+        this._refreshPendingForce ||= force
+        return
+      }
+      const requestedKbId = this.kbId
       this.summaryLoading = true
       try {
-        const response = await graphApi.governanceSummary(this.kbId)
+        const response = await graphApi.governanceSummary(requestedKbId, { refresh: force })
+        // 切库期间旧请求可以完成，但绝不能污染新库状态。
+        if (requestedKbId !== this.kbId || !this.active) return
         this.summary = response?.data || null
         this.summaryError = null
         if (this.summary?.settings) {
           this.settings = this.summary.settings
         }
       } catch (error) {
-        this.summaryError = error?.response?.data?.detail || error?.message || '治理总览加载失败'
+        if (requestedKbId === this.kbId) {
+          this.summaryError = error?.response?.data?.detail || error?.message || '治理总览加载失败'
+        }
       } finally {
+        if (withSettings && requestedKbId === this.kbId && !this.settings) {
+          await this.loadSettings(requestedKbId)
+        }
         this.summaryLoading = false
-      }
-      if (withSettings && !this.settings) {
-        await this.loadSettings()
+
+        const pending = this._refreshPending
+        const pendingWithSettings = this._refreshPendingWithSettings
+        const pendingForce = this._refreshPendingForce
+        this._refreshPending = false
+        this._refreshPendingWithSettings = false
+        this._refreshPendingForce = false
+        if (pending && this.kbId && this.active) {
+          await this.refresh({ withSettings: pendingWithSettings, force: pendingForce })
+        }
       }
     },
 
-    async loadSettings() {
-      if (!this.kbId) return
+    async loadSettings(requestedKbId = this.kbId) {
+      if (!requestedKbId) return
       try {
-        const response = await graphApi.governanceSettings(this.kbId)
-        this.settings = response?.data || null
+        const response = await graphApi.governanceSettings(requestedKbId)
+        if (requestedKbId === this.kbId) {
+          this.settings = response?.data || null
+        }
       } catch {
-        this.settings = null
+        if (requestedKbId === this.kbId) {
+          this.settings = null
+        }
       }
     },
 
     /** 写操作后立即失效并重取（后端写路径也会失效自己的缓存） */
     invalidate() {
-      this.refresh({ withSettings: true })
+      return this.refresh({ withSettings: true, force: true })
     }
   }
 })

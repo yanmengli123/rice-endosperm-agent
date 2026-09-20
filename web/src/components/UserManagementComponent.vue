@@ -272,10 +272,10 @@
           show-icon
         />
         <div class="onboarding-grid">
-          <span>用户名</span><strong>{{ onboardingCard.username }}</strong>
-          <span>登录 ID</span><code>{{ onboardingCard.uid }}</code>
-          <span>初始密码</span><code>{{ onboardingCard.password }}</code>
-          <span>桌面端 API Key</span><code class="onboarding-secret">{{ onboardingCard.apiKeySecret }}</code>
+          <span>用户名</span><strong>{{ onboardingCard.username }}</strong> <span>登录 ID</span
+          ><code>{{ onboardingCard.uid }}</code> <span>初始密码</span
+          ><code>{{ onboardingCard.password }}</code> <span>桌面端 API Key</span
+          ><code class="onboarding-secret">{{ onboardingCard.apiKeySecret }}</code>
           <span>有效期至</span><strong>{{ onboardingCard.apiKeyExpiresAt || '90 天后' }}</strong>
         </div>
         <a-button type="primary" block class="copy-onboarding-btn" @click="copyOnboardingCard">

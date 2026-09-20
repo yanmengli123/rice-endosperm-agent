@@ -79,7 +79,9 @@
         :aria-label="`${database.shortName}：${database.description}（在新标签页打开）`"
       >
         <div class="card-topline">
-          <span class="resource-mark" aria-hidden="true">{{ getResourceMark(database.shortName) }}</span>
+          <span class="resource-mark" aria-hidden="true">{{
+            getResourceMark(database.shortName)
+          }}</span>
           <span :class="['status-badge', `is-${database.status}`]">
             {{ statusDetails[database.status].label }}
           </span>

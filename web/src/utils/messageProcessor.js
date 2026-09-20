@@ -294,11 +294,11 @@ export class MessageProcessor {
     const split = splitReasoningText(message?.content)
     const hasReasoning = Boolean(
       message?.reasoning_state === 'thinking' ||
-        message?.additional_kwargs?.reasoning_state === 'thinking' ||
-        message?.reasoning_content ||
-        message?.additional_kwargs?.reasoning_content ||
-        split.hadReasoning ||
-        split.reasoningOpen
+      message?.additional_kwargs?.reasoning_state === 'thinking' ||
+      message?.reasoning_content ||
+      message?.additional_kwargs?.reasoning_content ||
+      split.hadReasoning ||
+      split.reasoningOpen
     )
     return {
       content: split.visible.trim(),

@@ -283,12 +283,18 @@
                   <TraceTimelinePanel :trace="displayedTrace" />
                 </div>
               </section>
-              <div v-if="currentVerifiedCitation" class="state-locator-chip" aria-label="答案定位证据">
+              <div
+                v-if="currentVerifiedCitation"
+                class="state-locator-chip"
+                aria-label="答案定位证据"
+              >
                 <span class="state-locator-chip__status">定位已验证</span>
                 <span class="state-locator-chip__meta">
                   {{ currentVerifiedCitation.filename || currentVerifiedCitation.file_id }}
                   · 第{{ currentVerifiedCitation.page }}页
-                  <template v-if="currentVerifiedCitation.zone === 'SUPPORTING_INFO'">· 补充材料</template>
+                  <template v-if="currentVerifiedCitation.zone === 'SUPPORTING_INFO'"
+                    >· 补充材料</template
+                  >
                 </span>
               </div>
               <FigureCardGroup
@@ -1272,7 +1278,9 @@ const currentEvidenceProjectionStatus = computed(
   () => currentChatId.value && chatState.threadStates[currentChatId.value]?.evidenceProjectionStatus
 )
 const currentVerifiedCitation = computed(() => {
-  const citation = currentChatId.value ? chatState.threadStates[currentChatId.value]?.verifiedCitation : null
+  const citation = currentChatId.value
+    ? chatState.threadStates[currentChatId.value]?.verifiedCitation
+    : null
   return citation && citation.status === 'VERIFIED' ? citation : null
 })
 // 本轮已发布的论文原图（与定位芯片同区展示；数据只来自后端 citation_ready.figures）
@@ -1393,7 +1401,9 @@ const displayedEvidenceProjectionStatus = computed(() =>
     : currentEvidenceProjectionStatus.value
 )
 const currentRetrievalCandidates = computed(() => {
-  const candidates = currentChatId.value ? chatState.threadStates[currentChatId.value]?.retrievalCandidates : null
+  const candidates = currentChatId.value
+    ? chatState.threadStates[currentChatId.value]?.retrievalCandidates
+    : null
   return Array.isArray(candidates) ? candidates : []
 })
 const displayedRetrievalCandidates = computed(() => {
@@ -1405,7 +1415,9 @@ const currentLocatorStatusReason = computed(
   () => currentChatId.value && chatState.threadStates[currentChatId.value]?.locatorStatusReason
 )
 const displayedLocatorStatusReason = computed(() =>
-  focusedRunId.value ? focusedArchiveEntry.value?.locatorStatusReason : currentLocatorStatusReason.value
+  focusedRunId.value
+    ? focusedArchiveEntry.value?.locatorStatusReason
+    : currentLocatorStatusReason.value
 )
 // H3 状态标题多计数：「已验证 X · 候选 Y」——定位失败时不再把三种数量压成一个 0
 const evidenceHeaderCount = computed(() => {

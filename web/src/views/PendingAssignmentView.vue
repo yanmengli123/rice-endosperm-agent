@@ -64,11 +64,27 @@ function logout() {
   background: var(--gray-0);
   box-shadow: var(--shadow-2);
 
-  img { width: 96px; height: 96px; object-fit: contain; }
-  h1 { margin: 18px 0 10px; }
-  p { color: var(--gray-600); line-height: 1.7; }
+  img {
+    width: 96px;
+    height: 96px;
+    object-fit: contain;
+  }
+  h1 {
+    margin: 18px 0 10px;
+  }
+  p {
+    color: var(--gray-600);
+    line-height: 1.7;
+  }
 }
 
-.status-text { color: var(--main-color); }
-.actions { display: flex; justify-content: center; gap: 12px; margin-top: 24px; }
+.status-text {
+  color: var(--main-color);
+}
+.actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 24px;
+}
 </style>

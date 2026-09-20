@@ -67,10 +67,7 @@
 
           <div class="hero-visual" aria-label="水稻胚乳知识网络示意图">
             <div class="visual-frame">
-              <img
-                src="/brand/rice-endosperm/indexlogo.png"
-                alt="水稻胚乳科研智能体徽章"
-              />
+              <img src="/brand/rice-endosperm/indexlogo.png" alt="水稻胚乳科研智能体徽章" />
             </div>
           </div>
         </section>
@@ -158,9 +155,7 @@ const brandName = computed(() => infoStore.organization?.name || '稻芯智析')
 const brandLogo = computed(
   () => infoStore.organization?.logo || '/brand/rice-endosperm/logo-mark.svg'
 )
-const heroTitle = computed(
-  () => infoStore.branding?.title || '从基因到证据，理解水稻胚乳发育'
-)
+const heroTitle = computed(() => infoStore.branding?.title || '从基因到证据，理解水稻胚乳发育')
 const heroTitleParts = computed(() => {
   const parts = heroTitle.value.split(/[，,]/, 2)
   return parts.length === 2 ? [`${parts[0]}，`, parts[1]] : [heroTitle.value]
@@ -254,7 +249,11 @@ onMounted(loadData)
   min-height: 100vh;
   color: var(--rice-text);
   background:
-    radial-gradient(circle at 88% 9%, color-mix(in srgb, var(--rice-gold) 10%, transparent), transparent 26%),
+    radial-gradient(
+      circle at 88% 9%,
+      color-mix(in srgb, var(--rice-gold) 10%, transparent),
+      transparent 26%
+    ),
     var(--rice-page-bg);
 }
 

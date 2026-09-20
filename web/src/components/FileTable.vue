@@ -86,7 +86,11 @@
         </a-descriptions>
         <div v-if="latestEvidenceRevision?.stages?.length" class="evidence-stages">
           <div class="evidence-section-title">处理阶段</div>
-          <div v-for="stage in latestEvidenceRevision.stages" :key="stage.stage" class="evidence-stage-row">
+          <div
+            v-for="stage in latestEvidenceRevision.stages"
+            :key="stage.stage"
+            class="evidence-stage-row"
+          >
             <span>{{ getEvidenceStageLabel(stage.stage) }}</span>
             <a-tag :color="getEvidenceStageColor(stage.status)">{{ stage.status }}</a-tag>
             <span class="evidence-stage-attempt">第 {{ stage.attempt || 0 }} 次</span>
@@ -322,7 +326,10 @@
                 <component :is="getStatusIcon(text)" />
               </span>
               <span>{{ getStatusText(text) }}</span>
-              <a-tag v-if="row.evidence_status" :color="getEvidenceStatusView(row.evidence_status).color">
+              <a-tag
+                v-if="row.evidence_status"
+                :color="getEvidenceStatusView(row.evidence_status).color"
+              >
                 {{ getEvidenceStatusView(row.evidence_status).label }}
               </a-tag>
             </button>
@@ -331,7 +338,10 @@
                 <component :is="getStatusIcon(text)" />
               </span>
               <span>{{ getStatusText(text) }}</span>
-              <a-tag v-if="row.evidence_status" :color="getEvidenceStatusView(row.evidence_status).color">
+              <a-tag
+                v-if="row.evidence_status"
+                :color="getEvidenceStatusView(row.evidence_status).color"
+              >
                 {{ getEvidenceStatusView(row.evidence_status).label }}
               </a-tag>
             </span>

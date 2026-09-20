@@ -111,9 +111,7 @@
               </strong>
             </span>
             <span v-if="completeness(resultContent).uncited_exact_relation_count">
-              {{
-                completeness(resultContent).uncited_exact_relation_count
-              }}
+              {{ completeness(resultContent).uncited_exact_relation_count }}
               条关系仅完成扫描，未形成可引用 Claim
             </span>
           </div>
