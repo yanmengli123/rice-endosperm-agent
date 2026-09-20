@@ -1,10 +1,8 @@
 <template>
-  <a-drawer
-    :open="open"
-    title="冲突队列"
-    width="860"
-    destroy-on-close
-    @close="$emit('update:open', false)"
+  <component
+    :is="embedded ? 'div' : 'a-drawer'"
+    v-bind="embedded ? { class: 'queue-embedded' } : { open, title: '冲突队列', width: '860', destroyOnClose: true }"
+    v-on="embedded ? {} : { close: () => $emit('update:open', false) }"
   >
     <div class="queue-header">
       <a-radio-group v-model:value="status" size="small" @change="reload">
@@ -12,7 +10,14 @@
         <a-radio-button value="RESOLVED">已处置 {{ counts.RESOLVED?._total || 0 }}</a-radio-button>
         <a-radio-button value="ALL">全部</a-radio-button>
       </a-radio-group>
-      <a-select v-model:value="kind" size="small" style="width: 200px" allow-clear placeholder="按类型过滤" @change="reload">
+      <a-select
+        v-model:value="kind"
+        size="small"
+        style="width: 200px"
+        allow-clear
+        placeholder="按类型过滤"
+        @change="reload"
+      >
         <a-select-option value="DIRECTION">极性矛盾（DIRECTION）</a-select-option>
         <a-select-option value="DEFINITION">定义口径不一（DEFINITION）</a-select-option>
       </a-select>
@@ -39,7 +44,11 @@
         </template>
         <template v-else-if="column.key === 'detail'">
           <div v-if="record.kind === 'DEFINITION'" class="detail-block">
-            <div v-for="(interval, index) in definitionIntervals(record)" :key="index" class="interval-line">
+            <div
+              v-for="(interval, index) in definitionIntervals(record)"
+              :key="index"
+              class="interval-line"
+            >
               <span class="interval">{{ interval.label }}</span>
               <span class="file">{{ interval.file }}</span>
             </div>
@@ -53,7 +62,9 @@
               <a-tag color="red" size="small">负</a-tag>
               <span class="quote">{{ polarityQuote(record, 'negative') }}</span>
             </div>
-            <div v-if="conditionLabel(record)" class="condition">条件：{{ conditionLabel(record) }}</div>
+            <div v-if="conditionLabel(record)" class="condition">
+              条件：{{ conditionLabel(record) }}
+            </div>
           </div>
         </template>
         <template v-else-if="column.key === 'status'">
@@ -86,7 +97,7 @@
         </template>
       </template>
     </a-table>
-  </a-drawer>
+  </component>
 </template>
 
 <script setup>
@@ -96,7 +107,8 @@ import { graphApi } from '@/apis/graph_api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
-  kbId: { type: String, required: true }
+  kbId: { type: String, required: true },
+  embedded: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:open', 'reviewed'])
 
@@ -127,7 +139,9 @@ const pagination = computed(() => ({
 }))
 
 const subjectLabel = (record) =>
-  record.kind === 'DEFINITION' ? record.detail?.entity || record.subject_ref : record.detail?.content || record.subject_ref
+  record.kind === 'DEFINITION'
+    ? record.detail?.entity || record.subject_ref
+    : record.detail?.content || record.subject_ref
 
 const definitionIntervals = (record) =>
   (record.detail?.definitions || []).map((definition) => ({
@@ -202,6 +216,13 @@ watch(
   () => props.open,
   (value) => {
     if (value) reload()
+  }
+)
+
+watch(
+  () => props.kbId,
+  () => {
+    if (props.embedded || props.open) reload()
   }
 )
 </script>

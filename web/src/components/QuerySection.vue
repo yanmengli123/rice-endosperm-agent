@@ -145,6 +145,7 @@
               <span class="suggestion-text">{{ example }}</span>
             </button>
             <button
+              v-if="!isManagedGraph"
               type="button"
               class="suggestion-row"
               @click="() => generateSampleQuestions(false)"
@@ -152,6 +153,13 @@
               <RefreshCw class="suggestion-icon" />
               <span class="suggestion-text">重新生成</span>
             </button>
+          </div>
+
+          <div v-else-if="isManagedGraph" class="suggestions-empty">
+            <div class="managed-graph-hint">
+              规范图谱库不支持基于文件列表的示例问题生成；请在上方输入查询直接进行图谱通道检索测试
+              （实体名、关系问题或路径问题）。
+            </div>
           </div>
 
           <div v-else class="suggestions-empty">
@@ -214,6 +222,10 @@ const visibleQueryExamples = ref([])
 const loadingQuestions = ref(false)
 const generatingQuestions = ref(false)
 
+// 契约感知：规范图谱库（managed_graph）无文档文件，禁止 sample_questions 命令；
+// 检索测试走统一检索入口的图谱通道，直接手动输入查询。
+const isManagedGraph = computed(() => store.database?.contract_key === 'managed_graph')
+
 const updateQueryExamples = (questions = []) => {
   queryExamples.value = questions
   const shuffledQuestions = [...questions]
@@ -229,6 +241,10 @@ const updateQueryExamples = (questions = []) => {
 // 加载示例问题
 const loadSampleQuestions = async () => {
   if (!store.database?.kb_id) return
+  if (isManagedGraph.value) {
+    updateQueryExamples()
+    return
+  }
 
   try {
     loadingQuestions.value = true
@@ -263,6 +279,12 @@ const clearQuestions = () => {
 // 生成示例问题
 const generateSampleQuestions = async (silent = false) => {
   if (!store.database?.kb_id) return
+  if (isManagedGraph.value) {
+    if (!silent) {
+      message.info('规范图谱库不支持示例问题生成；请直接输入查询进行图谱通道检索测试')
+    }
+    return
+  }
 
   try {
     generatingQuestions.value = true
@@ -676,6 +698,16 @@ defineExpose({
   justify-content: center;
   color: var(--gray-500);
   font-size: 13px;
+}
+
+.managed-graph-hint {
+  max-width: 520px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--color-info-50, rgba(22, 119, 255, 0.06));
+  color: var(--gray-600);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .suggestions-loading {

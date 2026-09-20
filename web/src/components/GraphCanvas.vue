@@ -25,7 +25,11 @@
             </button>
           </div>
           <div class="panel-body">
-            <div class="type-stats-hint">点击类型可在图中高亮对应{{ activeStatsPanel === 'node' ? '实体' : '关系' }}，再次点击取消</div>
+            <div class="type-stats-hint">
+              点击类型可在图中高亮对应{{
+                activeStatsPanel === 'node' ? '实体' : '关系'
+              }}，再次点击取消
+            </div>
             <div class="type-stats-list">
               <div
                 v-for="item in activeTypeStats"
@@ -47,25 +51,36 @@
             class="stat-item"
             :class="{ active: activeStatsPanel === 'node', 'stat-truncated': truncated }"
             type="button"
-            :title="truncated ? '已达显示/安全上限，画布内容被截断；可点右上「上限」按钮调整展示数目，或在图谱设置中开启全图模式' : undefined"
+            :title="
+              truncated
+                ? '已达显示/安全上限，画布内容被截断；可点右上「上限」按钮调整展示数目，或在图谱设置中开启全图模式'
+                : undefined
+            "
             @click="toggleStatsPanel('node')"
           >
             <span class="stat-label">实体</span>
             <span class="stat-value">
-              {{ visibleEntityCount }}<span v-if="totalEntities != null" class="stat-total">/{{ totalEntities }}</span>
+              {{ visibleEntityCount
+              }}<span v-if="totalEntities != null" class="stat-total">/{{ totalEntities }}</span>
             </span>
           </button>
           <button
             class="stat-item"
             :class="{ active: activeStatsPanel === 'edge', 'stat-truncated': truncated }"
             type="button"
-            :title="truncated ? '已达显示/安全上限，画布内容被截断；可点右上「上限」按钮调整展示数目，或在图谱设置中开启全图模式' : undefined"
+            :title="
+              truncated
+                ? '已达显示/安全上限，画布内容被截断；可点右上「上限」按钮调整展示数目，或在图谱设置中开启全图模式'
+                : undefined
+            "
             @click="toggleStatsPanel('edge')"
           >
             <span class="stat-label">关系</span>
             <span class="stat-value">
               {{ visibleRelationshipCount
-              }}<span v-if="totalRelationships != null" class="stat-total">/{{ totalRelationships }}</span>
+              }}<span v-if="totalRelationships != null" class="stat-total"
+                >/{{ totalRelationships }}</span
+              >
             </span>
           </button>
           <a-popover
@@ -109,9 +124,30 @@
                     size="small"
                     style="width: 110px"
                   />
-                  <a-button size="small" type="primary" @click="applyDisplayLimit(customLimitValue)">应用</a-button>
+                  <a-button size="small" type="primary" @click="applyDisplayLimit(customLimitValue)"
+                    >应用</a-button
+                  >
                 </div>
                 <div class="limit-popover-hint">需要全库渲染时，请在图谱设置中开启「全图模式」</div>
+              </div>
+            </template>
+          </a-popover>
+          <a-popover trigger="click" placement="rightTop" overlay-class-name="graph-legend-popover">
+            <button class="stat-item" type="button" title="图例：关系审核状态线型与实体类型颜色">
+              <span class="stat-label">图例</span>
+            </button>
+            <template #content>
+              <div class="legend-popover">
+                <div class="legend-title">关系审核状态（线型 + 文字，不依赖颜色）</div>
+                <div v-for="item in edgeLegend" :key="item.key" class="legend-row">
+                  <span class="legend-line" :class="`legend-line--${item.key.toLowerCase()}`"></span>
+                  <span class="legend-label">{{ item.label }}</span>
+                  <span class="legend-pattern">{{ item.pattern }}</span>
+                </div>
+                <div class="legend-title legend-title--second">实体类型（颜色）</div>
+                <div class="legend-hint">
+                  点击左下「实体 / 关系」统计可查看各类型颜色分布并在图中高亮；Chunk 节点固定灰色。
+                </div>
               </div>
             </template>
           </a-popover>
@@ -128,6 +164,7 @@
 import { Graph } from '@antv/g6'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
+import { EDGE_STATUS_LEGEND, edgeStyleByReviewStatus } from '@/utils/graph/reviewMeta'
 
 const props = defineProps({
   graphData: {
@@ -331,6 +368,7 @@ const selectedTypeHighlight = ref(null) // { dimension: 'node'|'edge', name }
 const limitPresets = [50, 100, 200, 300, 500, 1000]
 const limitPopoverOpen = ref(false)
 const customLimitValue = ref(props.displayLimit)
+const edgeLegend = EDGE_STATUS_LEGEND
 
 watch(
   () => props.displayLimit,
@@ -341,7 +379,9 @@ watch(
 
 function isTypeSelected(item) {
   const selection = selectedTypeHighlight.value
-  return Boolean(selection && selection.dimension === activeStatsPanel.value && selection.name === item.name)
+  return Boolean(
+    selection && selection.dimension === activeStatsPanel.value && selection.name === item.name
+  )
 }
 
 function onTypeRowClick(item) {
@@ -377,7 +417,8 @@ async function applyTypeHighlight() {
       if (match) highlightedNodes.add(node.id)
     })
     edges.forEach((edge) => {
-      const bothEndsHighlighted = highlightedNodes.has(edge.source) && highlightedNodes.has(edge.target)
+      const bothEndsHighlighted =
+        highlightedNodes.has(edge.source) && highlightedNodes.has(edge.target)
       updates[edge.id] = bothEndsHighlighted ? [] : ['inactive']
     })
   } else {
@@ -443,6 +484,8 @@ function formatData() {
       label: e.type ?? '',
       visualLabel: getEdgeVisualLabel(e),
       color: getEdgeColor(e),
+      // 审核状态线型编码（AI 候选虚线 / 人工批准实线加粗 / 规范层长划线 / 冲突点线）
+      statusStyle: edgeStyleByReviewStatus(e),
       original: e // 保存原始数据
     }
   }))
@@ -514,7 +557,15 @@ function initGraph() {
           opacity: 1
         },
         // 类型高亮：未命中元素压暗
-        inactive: { opacity: 0.12 }
+        inactive: { opacity: 0.12 },
+        // 搜索关键词命中（此前状态未定义样式，高亮链路断裂）
+        highlighted: {
+          lineWidth: 3,
+          stroke: '#f27c7c',
+          halo: true,
+          haloStroke: '#f27c7c',
+          opacity: 1
+        }
       },
       palette: props.nodeStyleOptions.palette
     },
@@ -526,14 +577,16 @@ function initGraph() {
         labelBackground: true,
         labelBackgroundFill: getCSSVariable('--gray-100'),
         stroke: (d) => d.data.color,
-        opacity: 0.8,
-        lineWidth: 1.2,
+        opacity: (d) => d.data.statusStyle?.opacity ?? 0.8,
+        lineWidth: (d) => d.data.statusStyle?.lineWidth ?? 1.2,
+        lineDash: (d) => d.data.statusStyle?.lineDash,
         endArrow: true,
         ...(props.edgeStyleOptions.style || {})
       },
       state: {
         highlight: { lineWidth: 2.6, opacity: 1 },
-        inactive: { opacity: 0.04 }
+        inactive: { opacity: 0.04 },
+        highlighted: { lineWidth: 2.6, opacity: 1 }
       },
       palette: props.edgeStyleOptions.palette
     },
@@ -1081,7 +1134,67 @@ defineExpose({
 </style>
 
 <style lang="less">
-// 上限 popover 渲染在 body 下，需要全局样式
+// 上限/图例 popover 渲染在 body 下，需要全局样式
+.graph-legend-popover {
+  .legend-popover {
+    width: 260px;
+  }
+
+  .legend-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--gray-800, #333);
+    margin-bottom: 8px;
+
+    &--second {
+      margin-top: 10px;
+    }
+  }
+
+  .legend-row {
+    display: grid;
+    grid-template-columns: 44px 72px 1fr;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 12px;
+  }
+
+  .legend-line {
+    height: 0;
+    border-top: 2px solid var(--gray-500, #6b7280);
+    background: transparent;
+
+    &--candidate {
+      border-top-style: dashed;
+    }
+
+    &--approved {
+      border-top-style: solid;
+      border-top-width: 3px;
+    }
+
+    &--canonical {
+      border-top-style: dashed;
+      border-top-width: 3px;
+    }
+
+    &--conflict {
+      border-top-style: dotted;
+    }
+  }
+
+  .legend-pattern {
+    color: var(--gray-500, #6b7280);
+  }
+
+  .legend-hint {
+    font-size: 11px;
+    color: var(--gray-500, #6b7280);
+    line-height: 1.5;
+  }
+}
+
 .graph-limit-popover {
   .limit-popover {
     width: 218px;

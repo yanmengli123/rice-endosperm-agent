@@ -485,6 +485,30 @@ export const graphExportApi = {
 }
 
 // =============================================================================
+// === 知识库发布治理（Release Manifest：冻结文件修订 + 图谱决策清单）===
+// =============================================================================
+
+export const kbReleaseApi = {
+  list: async (kbId) => apiAdminGet(`/api/knowledge/databases/${kbId}/releases`),
+
+  build: async (kbId) => apiAdminPost(`/api/knowledge/databases/${kbId}/releases`, {}),
+
+  publish: async (kbId, releaseId, { force = false } = {}) => {
+    const params = new URLSearchParams()
+    if (force) {
+      params.set('force', 'true')
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return apiAdminPost(
+      `/api/knowledge/databases/${kbId}/releases/${releaseId}/publish${suffix}`,
+      {}
+    )
+  },
+
+  rollback: async (kbId) => apiAdminPost(`/api/knowledge/databases/${kbId}/releases/rollback`, {})
+}
+
+// =============================================================================
 // === 思维导图分组 ===
 // =============================================================================
 

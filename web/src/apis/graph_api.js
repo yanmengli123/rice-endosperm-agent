@@ -1,4 +1,4 @@
-import { apiGet, apiPatch, apiPost, apiPut } from './base'
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from './base'
 
 export const graphApi = {
   getGraphs: async () => {
@@ -12,7 +12,8 @@ export const graphApi = {
       max_depth = 2,
       max_nodes = 100,
       exclude_chunk = false,
-      full_graph = false
+      full_graph = false,
+      review_policy
     } = params
 
     if (!kb_id) {
@@ -28,6 +29,10 @@ export const graphApi = {
     })
     if (full_graph) {
       queryParams.set('full_graph', 'true')
+    }
+    // 画布会话级显示过滤：仅影响本查询，绝不影响 Graph-RAG 检索（检索策略在治理设置）
+    if (review_policy) {
+      queryParams.set('review_policy', review_policy)
     }
 
     return await apiGet(`/api/graph/subgraph?${queryParams.toString()}`, {}, true)
@@ -177,15 +182,56 @@ export const graphApi = {
   },
 
   reviewAudit: async (params) => {
-    const { kb_id, target_id, limit = 50 } = params || {}
+    const {
+      kb_id,
+      target_id,
+      limit = 50,
+      page = 1,
+      page_size = 20,
+      actor_uid,
+      action,
+      batch_id
+    } = params || {}
     if (!kb_id) {
       throw new Error('kb_id is required')
     }
-    const queryParams = new URLSearchParams({ kb_id, limit: String(limit) })
+    const queryParams = new URLSearchParams({
+      kb_id,
+      limit: String(limit),
+      page: String(page),
+      page_size: String(page_size)
+    })
     if (target_id) {
       queryParams.set('target_id', target_id)
     }
+    if (actor_uid) {
+      queryParams.set('actor_uid', actor_uid)
+    }
+    if (action) {
+      queryParams.set('action', action)
+    }
+    if (batch_id) {
+      queryParams.set('batch_id', batch_id)
+    }
     return await apiGet(`/api/graph/review/audit?${queryParams.toString()}`, {}, true)
+  },
+
+  reviewAuditExportUrl: (kb_id, filters = {}) => {
+    const queryParams = new URLSearchParams({ kb_id })
+    for (const key of ['target_id', 'actor_uid', 'action', 'batch_id']) {
+      if (filters[key]) {
+        queryParams.set(key, filters[key])
+      }
+    }
+    return `/api/graph/review/audit/export?${queryParams.toString()}`
+  },
+
+  // 审计账本 CSV 导出（blob 下载；审计表 append-only，导出只读）
+  reviewAuditExport: async (kb_id, filters = {}) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    return await apiGet(graphApi.reviewAuditExportUrl(kb_id, filters), {}, true, 'blob')
   },
 
   // 门禁送审队列（D4）：G7 strict 未过 / G9 否定矛盾的关系候选，人工裁决后闭环
@@ -236,6 +282,118 @@ export const graphApi = {
       throw new Error('kb_id, conflict_id and resolution are required')
     }
     return await apiPost('/api/graph/conflicts/resolve', payload, {}, true)
+  },
+
+  // ── 图谱治理（设置审计化 / 聚合总览 / 批量准入 / 协作 / 发布门禁）──
+
+  governanceSettings: async (kb_id) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({ kb_id })
+    return await apiGet(`/api/graph/governance/settings?${queryParams.toString()}`, {}, true)
+  },
+
+  updateGovernanceSettings: async (payload) => {
+    if (!payload?.kb_id) {
+      throw new Error('kb_id is required')
+    }
+    return await apiPut('/api/graph/governance/settings', payload, {}, true)
+  },
+
+  governanceSummary: async (kb_id, { refresh = false } = {}) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({ kb_id })
+    if (refresh) {
+      queryParams.set('refresh', 'true')
+    }
+    return await apiGet(`/api/graph/governance/summary?${queryParams.toString()}`, {}, true)
+  },
+
+  governanceBatchPreview: async (payload) => {
+    if (!payload?.kb_id || !Array.isArray(payload?.targets)) {
+      throw new Error('kb_id and targets are required')
+    }
+    return await apiPost('/api/graph/governance/batch-preview', payload, {}, true)
+  },
+
+  governancePublishGates: async (kb_id) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({ kb_id })
+    return await apiGet(`/api/graph/governance/publish-gates?${queryParams.toString()}`, {}, true)
+  },
+
+  governanceMembers: async (kb_id) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({ kb_id })
+    return await apiGet(`/api/graph/governance/members?${queryParams.toString()}`, {}, true)
+  },
+
+  updateGovernanceMember: async (payload) => {
+    if (!payload?.kb_id || !payload?.uid || !payload?.capability) {
+      throw new Error('kb_id, uid and capability are required')
+    }
+    return await apiPut('/api/graph/governance/members', payload, {}, true)
+  },
+
+  deleteGovernanceMember: async (kb_id, uid) => {
+    if (!kb_id || !uid) {
+      throw new Error('kb_id and uid are required')
+    }
+    const queryParams = new URLSearchParams({ kb_id, uid })
+    return await apiDelete(`/api/graph/governance/members?${queryParams.toString()}`, {}, true)
+  },
+
+  claimReviewTasks: async (payload) => {
+    if (!payload?.kb_id || !Array.isArray(payload?.targets)) {
+      throw new Error('kb_id and targets are required')
+    }
+    return await apiPost('/api/graph/governance/tasks/claim', payload, {}, true)
+  },
+
+  releaseReviewTask: async (payload) => {
+    if (!payload?.kb_id || !payload?.target_id) {
+      throw new Error('kb_id and target_id are required')
+    }
+    return await apiPost('/api/graph/governance/tasks/release', payload, {}, true)
+  },
+
+  // ── golden 抽检与可疑传递边（质量治理工作区）──
+
+  goldenSamples: async (kb_id) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({ kb_id })
+    return await apiGet(`/api/graph/golden-samples?${queryParams.toString()}`, {}, true)
+  },
+
+  registerGoldenSample: async (payload) => {
+    if (!payload?.kb_id || !payload?.chunk_id) {
+      throw new Error('kb_id and chunk_id are required')
+    }
+    return await apiPost('/api/graph/golden-samples', payload, {}, true)
+  },
+
+  evaluateGoldenSamples: async (kb_id, limit = 20) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    return await apiPost('/api/graph/golden-samples/evaluate', { kb_id, limit }, {}, true)
+  },
+
+  shortcutSuspects: async (kb_id, limit = 200) => {
+    if (!kb_id) {
+      throw new Error('kb_id is required')
+    }
+    const queryParams = new URLSearchParams({ kb_id, limit: String(limit) })
+    return await apiGet(`/api/graph/shortcut-suspects?${queryParams.toString()}`, {}, true)
   }
 }
 

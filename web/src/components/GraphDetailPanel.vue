@@ -96,7 +96,7 @@
             </div>
             <template v-else-if="evidence">
               <div v-if="evidence.decision?.reason" class="evidence-hint decision-reason">
-                最近决策：{{ evidence.decision.action }}（{{ evidence.decision.actor_uid }}）—
+                最近决策：{{ historyActionLabel(evidence.decision.action) }}（{{ evidence.decision.actor_uid }}）—
                 {{ evidence.decision.reason }}
               </div>
               <div v-if="type === 'edge'" class="evidence-meta">
@@ -131,17 +131,27 @@
                 v-for="(mention, index) in evidence.mentions"
                 :key="mentionKey(mention, index)"
                 class="evidence-mention"
+                :class="{ 'evidence-mention--selected': isPinnedSelected(mention) }"
               >
                 <div class="mention-badges">
+                  <a-radio
+                    v-if="mention.quote && reviewStatus !== 'CANONICAL'"
+                    :checked="isPinnedSelected(mention)"
+                    :title="`选择该引文作为本次人工决策的固定证据（${mention.verification}）`"
+                    class="mention-pin-radio"
+                    @change="selectedPinnedChunkId = mention.chunk_id"
+                  >
+                    固定此引文
+                  </a-radio>
                   <a-tag v-if="mention.verification !== 'OK'" size="small" color="orange">
                     {{ verificationLabel(mention.verification) }}
                   </a-tag>
                   <a-tag v-if="mention.hedge" size="small" color="gold">推测性表述</a-tag>
-                  <a-tag v-if="mention.trigger_verified" size="small" color="green"
-                    >触发词验证</a-tag
+                  <a-tag v-if="mention.trigger_verified" size="small" color="cyan"
+                    >机器校验·触发词</a-tag
                   >
-                  <a-tag v-if="mention.verifier_confirmed" size="small" color="green"
-                    >双模型复核</a-tag
+                  <a-tag v-if="mention.verifier_confirmed" size="small" color="cyan"
+                    >机器校验·双模型复核</a-tag
                   >
                   <a-tag v-if="mention.pinned_by" size="small" color="blue">已固定</a-tag>
                   <span v-if="typeof mention.confidence === 'number'" class="mention-confidence">
@@ -202,7 +212,7 @@
                 :loading="reviewBusy"
                 @click="approveTarget"
               >
-                ✓ 验证（固定当前引文）
+                ✓ 人工批准（固定所选引文）
               </a-button>
               <a-button size="small" :loading="reviewBusy" class="review-btn" @click="openEdit">
                 ✎ 编辑
@@ -224,8 +234,19 @@
                 class="review-btn"
                 @click="rejectOpen = true"
               >
-                ✗ {{ reviewStatus === 'APPROVED' ? '撤销验证' : '拒绝' }}
+                ✗ {{ reviewStatus === 'APPROVED' ? '撤销批准' : '人工拒绝' }}
               </a-button>
+            </div>
+            <div
+              v-if="reviewStatus !== 'APPROVED' && evidence?.mentions?.some((m) => m.quote)"
+              class="pin-selection-hint"
+            >
+              将固定证据：
+              <a-tag v-if="selectedPinnedMention" size="small" color="blue">
+                {{ selectedPinnedMention.filename || selectedPinnedMention.chunk_id }}
+                {{ selectedPinnedMention.verification === 'OK' ? '' : '（引文非 OK，建议换一条）' }}
+              </a-tag>
+              <span v-else>无可固定的引文</span>
             </div>
           </div>
 
@@ -247,17 +268,54 @@
       <!-- 拒绝理由（必填，审计可查） -->
       <a-modal
         v-model:open="rejectOpen"
-        :title="reviewStatus === 'APPROVED' ? '撤销验证（填写理由）' : '拒绝（填写理由）'"
+        :title="reviewStatus === 'APPROVED' ? '撤销批准（填写理由）' : '人工拒绝（填写理由）'"
         :confirm-loading="reviewBusy"
         :ok-type="reviewStatus === 'APPROVED' ? 'default' : 'danger'"
         ok-text="确认"
         @ok="rejectTarget"
       >
-        <a-textarea
-          v-model:value="rejectReason"
-          :rows="3"
-          placeholder="必填：如「方向反了，句子说的是 B 抑制 A」"
-        />
+        <a-form layout="vertical">
+          <a-form-item label="原因代码（结构化，便于统计检索）">
+            <a-select
+              v-model:value="rejectReasonCode"
+              :options="reasonCodeOptions"
+              allow-clear
+              placeholder="选择原因代码（可选）"
+            />
+          </a-form-item>
+          <a-form-item label="说明（必填）">
+            <a-textarea
+              v-model:value="rejectReason"
+              :rows="3"
+              placeholder="必填：如「方向反了，句子说的是 B 抑制 A」"
+            />
+          </a-form-item>
+        </a-form>
+      </a-modal>
+
+      <!-- 乐观并发冲突：他人已更新该对象（409），展示最新决策而非只报错 -->
+      <a-modal
+        v-model:open="conflictModal.open"
+        title="该项已被其他审核人更新"
+        ok-text="加载最新后重试"
+        cancel-text="关闭"
+        @ok="reloadAfterConflict"
+      >
+        <a-alert type="warning" show-icon :message="conflictModal.detail" style="margin-bottom: 10px" />
+        <template v-if="conflictModal.latestAudit">
+          <div class="conflict-latest">
+            <div class="conflict-latest-title">对方最新的决定：</div>
+            <div>
+              {{ formatTime(conflictModal.latestAudit.created_at) }} ·
+              {{ conflictModal.latestAudit.actor_uid }} ·
+              {{ historyActionLabel(conflictModal.latestAudit.action) }}
+              <template v-if="conflictModal.latestAudit.reason">
+                — {{ conflictModal.latestAudit.reason }}
+              </template>
+            </div>
+          </div>
+        </template>
+        <div v-else class="conflict-latest">未能拉取到最新决策记录，可直接重载证据后重试。</div>
       </a-modal>
 
       <!-- 编辑：边 = SUPERSEDE（旧 ID 自动拒绝，新 ID 验证）；节点 = 展示覆盖（不改身份） -->
@@ -373,9 +431,21 @@
 
 <script setup>
 import { computed, reactive, ref, watch, defineComponent, h } from 'vue'
-import { message } from 'ant-design-vue'
+import { Modal, message } from 'ant-design-vue'
 import { X } from '@lucide/vue'
 import { graphApi } from '@/apis/graph_api'
+import {
+  REASON_CODES,
+  REVIEW_STATUS_META,
+  TRUST_META,
+  auditActionLabel,
+  composeReason,
+  reviewStatusColor,
+  reviewStatusLabel,
+  trustColor,
+  trustHint,
+  trustLabel
+} from '@/utils/graph/reviewMeta'
 
 const STACK_THRESHOLD = 50
 const TRUNCATE_LIMIT = 100
@@ -483,46 +553,7 @@ const addForm = reactive({
 const addCandidates = ref([])
 const vocabulary = ref({ entity_types: [], relation_types: [] })
 
-const TRUST_META = {
-  VERIFIED_CORROBORATED: {
-    label: '已验证 · 多文献',
-    color: 'green',
-    hint: '触发词或双模型验证通过，且有 ≥2 篇文献佐证'
-  },
-  VERIFIED_SINGLE: {
-    label: '已验证 · 单源',
-    color: 'blue',
-    hint: '触发词或双模型验证通过，仅单一来源'
-  },
-  CANDIDATE: {
-    label: 'AI 候选',
-    color: 'default',
-    hint: '仅通过逐字校验，尚未经语义验证或人工审定'
-  }
-}
-const REVIEW_STATUS_META = {
-  CANDIDATE: { label: '候选', color: 'default' },
-  APPROVED: { label: '已验证', color: 'green' },
-  REJECTED: { label: '已拒绝', color: 'red' },
-  CANONICAL: { label: '规范层', color: 'purple' }
-}
-
-const trustLabel = (tier) => TRUST_META[tier]?.label || tier
-const trustColor = (tier) => TRUST_META[tier]?.color || 'default'
-const trustHint = (tier) => TRUST_META[tier]?.hint || ''
-const reviewStatusLabel = (status) => REVIEW_STATUS_META[status]?.label || status
-const reviewStatusColor = (status) => REVIEW_STATUS_META[status]?.color || 'default'
-const historyActionLabel = (action) =>
-  ({
-    APPROVE: '验证',
-    REJECT: '拒绝',
-    SUPERSEDE: '编辑（取代）',
-    RENAME: '改名/别名',
-    RETYPE: '改类型',
-    ADD_RELATION: '手动补关系',
-    REEXTRACT_CHUNK: '重抽段落',
-    REJECT_CASCADE: '级联拒绝'
-  })[action] || action
+const historyActionLabel = auditActionLabel
 const verificationLabel = (status) =>
   status === 'DEGRADED' ? '引文与当前原文不一致' : status === 'MISSING' ? '无引文' : status
 const mentionKey = (mention, index) => `${mention.chunk_id || 'chunk'}-${index}`
@@ -554,6 +585,25 @@ const entityOptions = computed(() =>
   (vocabulary.value.entity_types || []).map((t) => ({ value: t, label: t }))
 )
 const firstQuotedMention = computed(() => evidence.value?.mentions?.find((m) => m.quote) || null)
+// 显式证据选择：批准前必须看到将固定哪条引文（默认最优：已固定 > 排序最前的 OK 引文）
+const selectedPinnedChunkId = ref(null)
+const reasonCodeOptions = REASON_CODES.map((item) => ({ value: item.value, label: item.label }))
+const rejectReasonCode = ref(null)
+const conflictModal = reactive({ open: false, detail: '', latestAudit: null })
+
+const defaultPinnedChunkId = (mentions) => {
+  const withQuote = (mentions || []).filter((m) => m.quote)
+  const pinned = withQuote.find((m) => m.pinned_by && m.verification === 'OK')
+  if (pinned) return pinned.chunk_id
+  const ok = withQuote.find((m) => m.verification === 'OK')
+  return ok?.chunk_id || withQuote[0]?.chunk_id || null
+}
+
+const selectedPinnedMention = computed(
+  () => evidence.value?.mentions?.find((m) => m.chunk_id === selectedPinnedChunkId.value) || null
+)
+const isPinnedSelected = (mention) =>
+  Boolean(mention.chunk_id && mention.chunk_id === selectedPinnedChunkId.value)
 const selectedAddMention = computed(
   () => evidence.value?.mentions?.find((m) => m.chunk_id === addForm.chunk_id) || null
 )
@@ -577,6 +627,7 @@ const loadEvidence = async () => {
         ? await graphApi.getTripleEvidence(props.kbId, reviewTargetId.value)
         : await graphApi.getEntityEvidence(props.kbId, reviewTargetId.value)
     evidence.value = response?.data || null
+    selectedPinnedChunkId.value = defaultPinnedChunkId(evidence.value?.mentions)
   } catch (e) {
     evidenceError.value = e?.response?.data?.detail || e?.message || '原文加载失败'
   } finally {
@@ -593,10 +644,37 @@ const loadHistory = async () => {
       target_id: reviewTargetId.value,
       limit: 20
     })
-    history.value = res?.data || []
+    history.value = res?.data?.items || []
   } catch {
     history.value = []
   }
+}
+
+/** 乐观并发冲突（409）：展示他人最新决策并提供一键重载，而不是只弹错误 */
+const handleReviewError = async (e, fallback) => {
+  if (e?.response?.status === 409) {
+    conflictModal.detail = e?.response?.data?.detail || '该项已被其他审核人更新'
+    conflictModal.latestAudit = null
+    conflictModal.open = true
+    try {
+      const res = await graphApi.reviewAudit({
+        kb_id: props.kbId,
+        target_id: reviewTargetId.value,
+        limit: 1
+      })
+      conflictModal.latestAudit = res?.data?.items?.[0] || null
+    } catch {
+      /* 最新决策拉取失败不阻塞提示 */
+    }
+    return
+  }
+  message.error(e?.response?.data?.detail || e?.message || fallback)
+}
+
+const reloadAfterConflict = async () => {
+  conflictModal.open = false
+  await loadEvidence()
+  await loadHistory()
 }
 
 const ensureVocabulary = async () => {
@@ -623,16 +701,16 @@ const approveTarget = async () => {
       kb_id: props.kbId,
       target_kind: reviewKind.value,
       target_id: reviewTargetId.value,
-      pinned_chunk_id: firstQuotedMention.value?.chunk_id,
+      pinned_chunk_id: selectedPinnedChunkId.value || firstQuotedMention.value?.chunk_id,
       if_version: evidence.value?.review_version || undefined
     })
     await afterReview(
       res?.data?.unchanged
-        ? '已是验证状态（幂等，未重复记录）'
-        : '已验证：决策与 pinned 证据已记录，重抽/重建后自动恢复'
+        ? '已是人工批准状态（幂等，未重复记录）'
+        : '已人工批准：决策与 pinned 证据已记录，重抽/重建后自动恢复'
     )
   } catch (e) {
-    message.error(e?.response?.data?.detail || e?.message || '验证失败')
+    await handleReviewError(e, '批准失败')
   } finally {
     reviewBusy.value = false
   }
@@ -649,14 +727,15 @@ const rejectTarget = async () => {
       kb_id: props.kbId,
       target_kind: reviewKind.value,
       target_id: reviewTargetId.value,
-      reason: rejectReason.value,
+      reason: composeReason(rejectReasonCode.value, rejectReason.value),
       if_version: evidence.value?.review_version || undefined
     })
     rejectOpen.value = false
     rejectReason.value = ''
-    await afterReview('已拒绝：图上投影与向量已清理，审计可查')
+    rejectReasonCode.value = null
+    await afterReview('已人工拒绝：图上投影与向量已清理，审计可查')
   } catch (e) {
-    message.error(e?.response?.data?.detail || e?.message || '拒绝失败')
+    await handleReviewError(e, '拒绝失败')
   } finally {
     reviewBusy.value = false
   }
@@ -709,7 +788,7 @@ const submitEdit = async () => {
     }
     editOpen.value = false
   } catch (e) {
-    message.error(e?.response?.data?.detail || e?.message || '编辑失败')
+    await handleReviewError(e, '编辑失败')
   } finally {
     reviewBusy.value = false
   }
@@ -1066,6 +1145,38 @@ const filteredEdgeProperties = computed(() => {
 
   .review-btn {
     margin-left: 0;
+  }
+}
+
+.pin-selection-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--gray-600);
+}
+
+.evidence-mention {
+  &--selected {
+    background: var(--main-color-bg-hover, rgba(22, 119, 255, 0.08));
+    border-radius: 6px;
+    padding: 4px 6px;
+    margin: 0 -6px;
+  }
+
+  .mention-pin-radio {
+    margin-right: 4px;
+    font-size: 12px;
+  }
+}
+
+.conflict-latest {
+  font-size: 13px;
+  color: var(--gray-700);
+  line-height: 1.6;
+
+  .conflict-latest-title {
+    font-weight: 600;
+    color: var(--gray-900);
+    margin-bottom: 4px;
   }
 }
 

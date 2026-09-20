@@ -1,10 +1,8 @@
 <template>
-  <a-drawer
-    :open="open"
-    title="门禁送审队列"
-    width="860"
-    destroy-on-close
-    @close="$emit('update:open', false)"
+  <component
+    :is="embedded ? 'div' : 'a-drawer'"
+    v-bind="embedded ? { class: 'queue-embedded' } : { open, title: '门禁送审队列', width: '860', destroyOnClose: true }"
+    v-on="embedded ? {} : { close: () => $emit('update:open', false) }"
   >
     <div class="queue-header">
       <a-radio-group v-model:value="status" size="small" @change="reload">
@@ -26,8 +24,8 @@
     </div>
 
     <div class="queue-hint">
-      门禁 REVIEW 路由的候选：PROMOTE 升格为已验证三元组（引文逐字复核），
-      DISCARD 关闭。裁决幂等，审计可查。
+      门禁 REVIEW 路由的候选：PROMOTE 升格为人工批准三元组（引文逐字复核）， DISCARD
+      关闭。裁决幂等，审计可查。
     </div>
 
     <a-table
@@ -64,10 +62,20 @@
         </template>
         <template v-else-if="column.key === 'actions'">
           <a-space v-if="record.status === 'PENDING'">
-            <a-button size="small" type="primary" :loading="actingId === record.review_id" @click="resolve(record, 'PROMOTE')">
+            <a-button
+              size="small"
+              type="primary"
+              :loading="actingId === record.review_id"
+              @click="resolve(record, 'PROMOTE')"
+            >
               采纳
             </a-button>
-            <a-button size="small" danger :loading="actingId === record.review_id" @click="resolve(record, 'DISCARD')">
+            <a-button
+              size="small"
+              danger
+              :loading="actingId === record.review_id"
+              @click="resolve(record, 'DISCARD')"
+            >
               丢弃
             </a-button>
           </a-space>
@@ -75,7 +83,7 @@
         </template>
       </template>
     </a-table>
-  </a-drawer>
+  </component>
 </template>
 
 <script setup>
@@ -85,7 +93,8 @@ import { graphApi } from '@/apis/graph_api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
-  kbId: { type: String, required: true }
+  kbId: { type: String, required: true },
+  embedded: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:open', 'reviewed'])
 
@@ -166,7 +175,7 @@ const resolve = async (record, action) => {
     if (res?.data?.unchanged) {
       message.info('该项已被裁决（幂等，未重复记录）')
     } else if (action === 'PROMOTE') {
-      message.success('已升格为已验证三元组（决策 + 审计 + 投影同步）')
+      message.success('已升格为人工批准三元组（决策 + 审计 + 投影同步）')
     } else {
       message.success('已丢弃，审计可查')
     }
@@ -183,6 +192,13 @@ watch(
   () => props.open,
   (value) => {
     if (value) reload()
+  }
+)
+
+watch(
+  () => props.kbId,
+  () => {
+    if (props.embedded || props.open) reload()
   }
 )
 </script>
