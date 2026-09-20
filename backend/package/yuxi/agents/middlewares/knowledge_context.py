@@ -42,6 +42,32 @@ _KNOWLEDGE_SOURCE_TOOLS = {
 _WEB_SOURCE_TOOLS = {"tavily_search", "web_search", "search_web"}
 
 
+def _mention_directive_prompt(context) -> str | None:
+    """mention.v2 执行指令：把冻结的执行者类提及变成模型的硬约束声明。
+
+    @subagent 的指令由子智能体中间件在其 system prompt 中注入（收窄可用集后
+    点名），此处只负责 @mcp 与 @skill 的运行时指令。措辞与 Run 创建时的
+    服务端鉴权结论一致：声明"用户指定了什么"，不声明"只能用什么"。
+    """
+    resolution = getattr(context, "_mention_resolution", None)
+    if not isinstance(resolution, dict) or str(resolution.get("status") or "").upper() not in {"RESOLVED", "DEGRADED"}:
+        return None
+    mcp_slugs = [str(value) for value in resolution.get("mcp_slugs") or [] if str(value).strip()]
+    skill_slugs = [str(value) for value in resolution.get("skill_slugs") or [] if str(value).strip()]
+    if not mcp_slugs and not skill_slugs:
+        return None
+    lines = ["<USER_MENTIONS>", "用户在本轮显式选择了以下资源（服务端已鉴权并冻结）："]
+    if mcp_slugs:
+        lines.append(
+            f"- MCP 服务器：{', '.join(mcp_slugs)}。涉及相应数据库/工具事实时必须优先调用这些服务器的"
+            "工具核验，不得凭记忆作答；指定不排除其他已配置工具。"
+        )
+    if skill_slugs:
+        lines.append(f"- 技能：{', '.join(skill_slugs)}。已按用户要求预先激活，严格遵循其规范执行。")
+    lines.append("</USER_MENTIONS>")
+    return "\n".join(lines)
+
+
 def _turn_plan_prompt(plan: TurnExecutionPlan) -> str:
     return (
         "<AUTHORITATIVE_TURN_EXECUTION_PLAN>\n"
@@ -360,6 +386,9 @@ class KnowledgeContextMiddleware(AgentMiddleware):
         system_message = request.system_message
         if plan is not None:
             system_message = append_to_system_message(system_message, _turn_plan_prompt(plan))
+        mention_directive = _mention_directive_prompt(context)
+        if mention_directive:
+            system_message = append_to_system_message(system_message, mention_directive)
         if isinstance(scope, dict) and (
             plan is None
             or SourceClass.LOCAL_DOCUMENT in plan.source.allowed_sources

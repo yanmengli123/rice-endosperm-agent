@@ -619,6 +619,7 @@ async def prepare_knowledge_context(
     request_id: str | None,
     retrieval_id: str | None = None,
     image_bytes: bytes | None = None,
+    mention_resolution: dict | None = None,
 ) -> dict[str, Any]:
     retrieval_id = retrieval_id or f"kr_{uuid.uuid4().hex}"
     started_at = utc_now_naive()
@@ -658,6 +659,7 @@ async def prepare_knowledge_context(
     from yuxi.knowledge.evidence.quote_locator import (
         LOCATOR_KIND_FIGURE,
         LOCATOR_KIND_QUOTE,
+        SUB_INTENT_LOCATOR,
         detect_locator_intent,
     )
 
@@ -675,7 +677,51 @@ async def prepare_knowledge_context(
     if document_scope.status != SCOPE_NONE:
         _emit_document_scope_trace(retrieval_id, document_scope)
 
+    # mention.v2（P0）：Run 创建时冻结的文献硬约束对「所有文档检索」生效，
+    # 不再只约束定位链。与文本通道结论取并集（两者都来自用户显式引用），
+    # 但仍受知识范围限制；来源随 contract 落库审计。
+    frozen_mention = mention_resolution if isinstance(mention_resolution, dict) else {}
+    frozen_document_ids = [
+        str(value).strip() for value in frozen_mention.get("document_ids") or [] if str(value).strip()
+    ]
+    narrowing_source = "TEXT_CHANNEL" if scope_file_ids else None
+    if frozen_document_ids:
+        scope_file_ids = list(dict.fromkeys([*frozen_document_ids, *(scope_file_ids or [])]))
+        narrowing_source = "MENTION_FROZEN"
+    contract["document_narrowing"] = {
+        "source": narrowing_source,
+        "file_ids": list(scope_file_ids or []),
+        "locator_only": False,
+    }
+
     locator_intent = detect_locator_intent(locator_question)
+    frozen_figure_labels = [str(value) for value in frozen_mention.get("figure_labels") or [] if str(value)]
+    frozen_table_labels = [str(value) for value in frozen_mention.get("table_labels") or [] if str(value)]
+    try:
+        frozen_pages = sorted({int(value) for value in frozen_mention.get("pages") or []})
+    except (TypeError, ValueError):
+        frozen_pages = []
+    mention_label = next(iter([*frozen_figure_labels, *frozen_table_labels]), None)
+    if mention_label and not locator_intent.get("figure_label"):
+        # mention 冻结的图表编号是第四种确定性定位入口（"见编号即定位"的提及版）：
+        # 文本无定位信号也进 FIGURE_LOCATOR 链，caption 通道按 canonical label
+        # 硬约束裁决——Figure 5 不可能冒充 Figure 4。
+        locator_intent["figure_label"] = mention_label
+        if locator_intent.get("kind") is None:
+            locator_intent["kind"] = LOCATOR_KIND_FIGURE
+            locator_intent["sub_intents"] = list(
+                dict.fromkeys([*(locator_intent.get("sub_intents") or []), SUB_INTENT_LOCATOR])
+            )
+    if frozen_pages:
+        # @page 是范围约束（不是页码发现命令）；第二刀接入 verbatim SQL 与
+        # 证据行级过滤前，先随定位意图与 contract 审计下传。
+        locator_intent["page_filter"] = frozen_pages
+    if mention_label or frozen_pages:
+        contract["mention_locator"] = {
+            "figure_labels": frozen_figure_labels,
+            "table_labels": frozen_table_labels,
+            "pages": frozen_pages,
+        }
     if scope_file_ids:
         locator_intent["file_ids"] = list(scope_file_ids)
     contract["locator_intent"] = locator_intent
@@ -1037,6 +1083,7 @@ async def prepare_knowledge_context(
                 scope_snapshot=raw_scope_snapshot,
                 top_k=top_k,
                 verbatim=verbatim_config,
+                file_ids=scope_file_ids or None,
             )
             expansion_terms = list(
                 dict.fromkeys(

@@ -753,3 +753,94 @@ def test_merge_subagent_runs_keeps_new_run_on_same_child_thread() -> None:
             "created_at": "2026-05-31T02:00:00Z",
         },
     ]
+
+
+def _pinned_middleware(pinned, *, available=("worker", "reviewer")):
+    parent_context = SimpleNamespace(
+        thread_id="parent-thread",
+        uid="user-1",
+        run_id="parent-run",
+        _mention_resolution={"subagent_slugs": list(pinned)} if pinned else None,
+    )
+    # 模拟工厂层收窄（create_subagent_task_middleware 的交集逻辑）
+    subagents = [
+        SimpleNamespace(
+            slug=slug,
+            name=slug,
+            description="work on scoped tasks",
+            backend_id=SUB_AGENT_BACKEND_ID,
+            config_json={},
+        )
+        for slug in available
+    ]
+    if pinned:
+        pinned_set = set(pinned)
+        subagents = [item for item in subagents if item.slug in pinned_set] or subagents
+    return YuxiSubAgentMiddleware(
+        parent_context=parent_context,
+        subagents=subagents,
+        pinned_slugs=list(pinned or []) or None,
+    )
+
+
+def test_pinned_subagents_narrow_available_set_and_add_directive():
+    middleware = _pinned_middleware(["reviewer"])
+    assert set(middleware.subagents) == {"reviewer"}
+    assert "用户指定子智能体" in middleware.system_prompt
+    assert "reviewer" in middleware.system_prompt
+    assert "worker" not in middleware.system_prompt
+
+
+def test_unpinned_subagents_keep_full_set_without_directive():
+    middleware = _pinned_middleware(None)
+    assert set(middleware.subagents) == {"worker", "reviewer"}
+    assert "用户指定子智能体" not in middleware.system_prompt
+
+
+def test_pinned_slug_outside_available_set_is_not_directed():
+    """运行中被撤权（交集空）：保持原可用集，指令不点名不可能委派的目标。"""
+    middleware = _pinned_middleware(["ghost"])
+    assert set(middleware.subagents) == {"worker", "reviewer"}
+    assert "用户指定子智能体" not in middleware.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_create_task_middleware_narrows_to_pinned_subagents(monkeypatch) -> None:
+    """工厂层收窄：@subagent 只保留交集，永不扩大。"""
+
+    class _UserRepository:
+        async def get_by_uid_with_db(self, _db, uid):
+            return SimpleNamespace(uid="user-1", role="user")
+
+    class _AgentRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_visible_by_slug(self, *, slug, user, kind="main"):
+            del user, kind
+            return SimpleNamespace(
+                slug=slug,
+                name=slug,
+                description="d",
+                backend_id=SUB_AGENT_BACKEND_ID,
+                config_json={},
+            )
+
+        async def list_visible_subagents(self, *, user):
+            del user
+            raise AssertionError("pinned path should resolve by slug")
+
+    _patch_session(monkeypatch)
+    monkeypatch.setattr(subagent_task_middleware, "UserRepository", _UserRepository)
+    monkeypatch.setattr(subagent_task_middleware, "AgentRepository", _AgentRepository)
+
+    middleware = await subagent_task_middleware.create_subagent_task_middleware(
+        SimpleNamespace(
+            thread_id="parent-thread",
+            uid="user-1",
+            subagents=["worker", "reviewer"],
+            _mention_resolution={"subagent_slugs": ["reviewer"]},
+        ),
+    )
+    assert isinstance(middleware, YuxiSubAgentMiddleware)
+    assert set(middleware.subagents) == {"reviewer"}

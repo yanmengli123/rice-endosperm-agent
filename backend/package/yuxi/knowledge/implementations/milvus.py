@@ -772,6 +772,26 @@ class MilvusKB(KnowledgeBase):
         joined_ids = '", "'.join(escaped_ids)
         return f'file_id in ["{joined_ids}"]'
 
+    @staticmethod
+    def _build_file_ids_expr(file_ids: object) -> str | None:
+        """mention.v2 文献硬约束：按 file_id 精确集合过滤。
+
+        调用方（scope_gateway）已把 file_ids 按成员库拆分；表达式只作用于当前库
+        的 collection，跨库 ID 天然不命中。空集合返回 None（不过滤）。
+        """
+        values: list[str] = []
+        for value in file_ids or []:
+            text = str(value or "").strip()
+            if text:
+                values.append(text)
+        if not values:
+            return None
+        escaped = [value.replace('"', '\\"') for value in dict.fromkeys(values)]
+        if len(escaped) == 1:
+            return f'file_id == "{escaped[0]}"'
+        joined_ids = '", "'.join(escaped)
+        return f'file_id in ["{joined_ids}"]'
+
     def _reject_legacy_rewrite_for_revision_managed_file(
         self, kb_id: str, file_id: str, file_meta: dict, operator_id: str | None
     ) -> None:
@@ -1115,6 +1135,9 @@ class MilvusKB(KnowledgeBase):
                 recall_top_k = final_top_k
 
             file_expr = await self._build_file_name_expr(kb_id, merged_kwargs.get("file_name"))
+            ids_expr = self._build_file_ids_expr(merged_kwargs.get("file_ids"))
+            if ids_expr:
+                file_expr = f"{file_expr} and {ids_expr}" if file_expr else ids_expr
             if file_expr:
                 logger.debug(f"Using filter expression: {file_expr}")
 

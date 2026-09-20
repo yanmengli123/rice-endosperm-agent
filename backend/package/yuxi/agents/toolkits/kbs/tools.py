@@ -162,6 +162,15 @@ class QueryKnowledgeScopeInput(BaseModel):
     top_k: int = Field(default=12, ge=1, le=50, description="全局去重和重排后最多返回的证据数量")
 
 
+def _mention_document_file_ids(context) -> list[str] | None:
+    """Run 创建时冻结的 @doc 文献硬约束（mention.v2）；对本 Run 所有检索工具一致生效。"""
+    resolution = getattr(context, "_mention_resolution", None)
+    if not isinstance(resolution, dict):
+        return None
+    ids = [str(value).strip() for value in resolution.get("document_ids") or [] if str(value).strip()]
+    return ids or None
+
+
 @tool(category="knowledge", tags=["知识库", "Graph-RAG"], args_schema=QueryKnowledgeScopeInput)
 async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolRuntime = None) -> Any:
     """在当前运行已冻结的知识范围中统一检索文档、图谱和结构化科研证据。
@@ -198,6 +207,11 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
 
     run_id = str(getattr(context, "run_id", "") or "") or None
     request_id = str(getattr(context, "request_id", "") or "") or None
+    # mention.v2：MODEL_DECIDES 路径同样施加 Run 创建时冻结的文献硬约束与
+    # 页/图/表定位锚（@doc 不因模型自发检索而失效）。
+    mention_resolution = getattr(context, "_mention_resolution", None)
+    if not isinstance(mention_resolution, dict):
+        mention_resolution = None
     async with pg_manager.get_async_session_context() as db:
         frozen_contract = await prepare_knowledge_context(
             db,
@@ -205,6 +219,7 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
             scope_snapshot={**snapshot, "knowledge_strategy": "KNOWLEDGE_FIRST", "allow_web": False},
             run_id=run_id,
             request_id=request_id,
+            mention_resolution=mention_resolution,
         )
         setattr(context, "_knowledge_contract", frozen_contract)
 
@@ -220,6 +235,7 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
                     "type": "MODEL_SELECTED_KNOWLEDGE_SOURCE",
                     "tool": "query_knowledge_scope",
                     "reason": "MODEL_DECIDES_POLICY",
+                    "mention_document_scope": bool((mention_resolution or {}).get("document_ids")),
                 }
             )
             manifest_payload = manifest.model_dump(mode="json")
@@ -285,6 +301,7 @@ async def deepen_evidence(
         query_text=anchored_query,
         scope_snapshot={**snapshot, "allow_web": False, "retrieval_mode": "KB_ONLY"},
         top_k=top_k,
+        file_ids=_mention_document_file_ids(context),
     )
     result["retrieval_kind"] = "SECONDARY_EVIDENCE_DEEPENING"
     result["parent_retrieval_id"] = contract.get("retrieval_id")
@@ -327,6 +344,7 @@ async def grep_evidence(
         scope_snapshot=snapshot,
         patterns=[literal],
         top_k=top_k,
+        file_ids=_mention_document_file_ids(context),
     )
     result["retrieval_kind"] = "VERBATIM_GREP"
     return result

@@ -335,13 +335,13 @@ async def test_short_patterns_and_empty_scope_fail_closed(span_session):
 
 @pytest.mark.asyncio
 async def test_gateway_verbatim_channel_end_to_end(monkeypatch: pytest.MonkeyPatch):
-    async def no_documents(member, query_text):
+    async def no_documents(member, query_text, *, file_ids=None):
         return [], None
 
     async def no_graph(member, query_text, *, limit):
         return [], None
 
-    async def verbatim_source(members, query_text, *, verbatim, limit):
+    async def verbatim_source(members, query_text, *, verbatim, limit, file_ids=None):
         spans = [
             {
                 "span_id": "es_1",
@@ -397,7 +397,7 @@ async def test_gateway_verbatim_channel_end_to_end(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_gateway_without_verbatim_config_keeps_legacy_shape(monkeypatch: pytest.MonkeyPatch):
-    async def no_documents(member, query_text):
+    async def no_documents(member, query_text, *, file_ids=None):
         return [], None
 
     async def no_graph(member, query_text, *, limit):

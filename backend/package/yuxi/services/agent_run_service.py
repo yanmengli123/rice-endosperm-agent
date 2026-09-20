@@ -30,6 +30,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.models import resolve_chat_model_spec
+from yuxi.knowledge.planning.mention_protocol import (
+    MentionType,
+    load_mention_authorizer,
+    mention_public_error,
+    parse_mention_tokens,
+    requested_mention_types,
+    resolve_mentions,
+)
 from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
@@ -656,6 +664,57 @@ async def _enforce_user_quota(
     return quota_snapshot
 
 
+_DOCUMENT_TYPE_ALIASES = {"document", "doc", "paper"}
+
+
+def _payload_document_ids(mentions: list[dict[str, Any]] | None) -> list[str]:
+    """从结构化 payload 里取出文献 ID（供 authorizer 只查这批文献）。"""
+    return [
+        str(item.get("resource_id") or "").strip()
+        for item in (mentions or [])
+        if str(item.get("type") or "").strip().casefold() in _DOCUMENT_TYPE_ALIASES
+    ]
+
+
+async def _resolve_run_mentions(
+    *,
+    db: AsyncSession,
+    current_uid: str,
+    agent_config: Any,
+    query_raw: str,
+    mentions: list[dict[str, Any]] | None,
+):
+    """服务端唯一 mention 解析器（mention.v2）。
+
+    文本 token 与结构化 payload 互校 + 服务端鉴权；结论是确定性的：
+    同一 (query_raw, mentions, 服务端事实) 必然得到同一计划。客户端提交的
+    ID 在这里全部重新鉴权，绝不透传。
+    """
+    from yuxi.repositories.user_repository import UserRepository
+
+    user = await UserRepository().get_by_uid_with_db(db, current_uid)
+    if user is None:
+        raise HTTPException(status_code=401, detail="用户不存在或已停用")
+
+    mentions = [dict(item) for item in (mentions or []) if isinstance(item, dict)] or None
+    # 文献身份装载取「结构化 payload ∪ 文本 token」并集：UI 插入的 token 是
+    # file_id，手打的可能是文件名——两者都交给 authorizer 按 file_id / 精确
+    # 文件名装载（重名 → AMBIGUOUS 拒绝并列候选，无命中 → 保持拒绝）。
+    document_ids = _payload_document_ids(mentions)
+    document_ids.extend(
+        str(token["value"]) for token in parse_mention_tokens(query_raw) if token["type"] == MentionType.DOCUMENT
+    )
+    document_ids = list(dict.fromkeys(item for item in document_ids if item))
+    authorizer = await load_mention_authorizer(
+        db=db,
+        user=user,
+        agent_config=agent_config,
+        document_ids=document_ids,
+        mention_types=sorted(requested_mention_types(mentions, query_raw), key=str),
+    )
+    return resolve_mentions(query_raw=query_raw, mentions=mentions, authorizer=authorizer)
+
+
 async def create_agent_run_view(
     *,
     input_message: AgentRunInputMessage | None,
@@ -667,6 +726,7 @@ async def create_agent_run_view(
     model_spec: str | None = None,
     resume: object | None = None,
     created_by_run_id: str | None = None,
+    mentions: list[dict[str, Any]] | None = None,
 ) -> dict:
     """创建 chat/resume run 的 HTTP 入口，输入正文由 Message 承载，run 只登记运行元数据。"""
     meta = meta or {}
@@ -694,6 +754,40 @@ async def create_agent_run_view(
     )
     if scope.existing_run:
         return _build_run_response(scope.existing_run)
+
+    # mention.v2（P0）：Run 创建时就完成提及的服务端解析与鉴权，尽早把
+    # MISMATCH / 越权 / 不可用 / 歧义返回给用户；结论冻结进 input_payload，
+    # Worker 只消费、不再放大。Resume 沿用父运行冻结的结论，不重复解析。
+    mention_resolution_audit: dict[str, Any] | None = None
+    mention_session_kb_ids: list[str] | None = None
+    if run_type == "resume":
+        parent_mention_payload = scope.parent_run.input_payload if scope.parent_run is not None else None
+        frozen_mentions = (
+            parent_mention_payload.get("mention_resolution") if isinstance(parent_mention_payload, dict) else None
+        )
+        if isinstance(frozen_mentions, dict) and frozen_mentions.get("status"):
+            mention_resolution_audit = dict(frozen_mentions)
+            knowledge_ids = frozen_mentions.get("knowledge_ids")
+            mention_session_kb_ids = [str(value) for value in knowledge_ids or []] or None
+    else:
+        mention_outcome = await _resolve_run_mentions(
+            db=db,
+            current_uid=current_uid,
+            agent_config=getattr(scope.agent_item, "config_json", None),
+            query_raw=input_message.content if input_message is not None else "",
+            mentions=mentions,
+        )
+        if mention_outcome.rejected:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "mention_rejected",
+                    **(mention_public_error(mention_outcome) or {}),
+                    "mentions": mention_outcome.public_dict()["mentions"],
+                },
+            )
+        mention_resolution_audit = mention_outcome.audit_dict()
+        mention_session_kb_ids = mention_outcome.session_kb_ids
 
     # 幂等命中不重复消耗配额。先锁定权益并执行每日门禁；模型来源确定后，
     # 只有平台凭据运行才进入月度平台 token 门禁。
@@ -774,6 +868,8 @@ async def create_agent_run_view(
             db=db,
             user=scope.current_user,
             agent_slug=agent_slug,
+            # @knowledge 提及 → 现有 SessionNarrowing（只能缩小，永不扩大）
+            session_kb_ids=mention_session_kb_ids,
         )
 
     run_input_message = _prepare_run_input_message(
@@ -800,6 +896,9 @@ async def create_agent_run_view(
     }
     if user_credential_ref:
         input_payload["user_credential"] = user_credential_ref
+    if mention_resolution_audit is not None:
+        # 冻结的提及解析结论（含 query_raw / clean_question / 每条提及的解析状态）
+        input_payload["mention_resolution"] = mention_resolution_audit
 
     run, created = await persist_agent_run_record(
         agent_slug=agent_slug,

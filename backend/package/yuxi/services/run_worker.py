@@ -645,6 +645,7 @@ async def process_agent_run(ctx, run_id: str):
         "attachment_file_ids": input_metadata.get("attachment_file_ids") or [],
         "model_spec": payload.get("model_spec"),
         "knowledge_scope_snapshot": payload.get("knowledge_scope_snapshot"),
+        "mention_resolution": payload.get("mention_resolution"),
         "user_credential": payload.get("user_credential"),
         "policy_version": payload.get("policy_version"),
         "run_type": run_type,

@@ -109,6 +109,17 @@ class AgentRunCreate(BaseModel):
     model_spec: str | None = Field(None, description="可选，对话级模型覆盖，优先级高于智能体配置")
     resume: Any | None = Field(None, description="可选，恢复时传给 LangGraph 的输入载荷，非布尔值")
     created_by_run_id: str | None = Field(None, description="可选，创建本 run 的父 run ID；resume 时为被恢复的 run ID")
+    mention_protocol: str | None = Field(
+        None,
+        description="可选，结构化提及协议版本；当前仅支持 mention.v2",
+    )
+    mentions: list[dict] | None = Field(
+        None,
+        description=(
+            "可选，结构化资源提及（mention.v2）。与 query 中的 @ token 必须描述同一组资源，"
+            "由服务端统一解析、鉴权并冻结；不一致返回 422 mention_rejected。"
+        ),
+    )
 
 
 def _backend_info(info: dict) -> dict:
@@ -472,6 +483,11 @@ async def create_agent_run(
     input_message = None
     if payload.resume is None and payload.query:
         input_message = build_chat_input_message(payload.query, payload.image_content)
+    if payload.mentions and payload.mention_protocol and payload.mention_protocol != "mention.v2":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "mention_protocol_unsupported", "message": f"不支持的提及协议：{payload.mention_protocol}"},
+        )
     return await create_agent_run_view(
         input_message=input_message,
         agent_slug=payload.agent_slug,
@@ -482,6 +498,7 @@ async def create_agent_run(
         db=db,
         resume=payload.resume,
         created_by_run_id=payload.created_by_run_id,
+        mentions=payload.mentions,
     )
 
 

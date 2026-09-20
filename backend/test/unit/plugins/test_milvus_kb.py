@@ -739,3 +739,13 @@ def test_collection_supports_bm25_requires_analyzed_content_sparse_field_and_fun
     collection = type("Collection", (), {"schema": schema})()
 
     assert kb._collection_supports_bm25(collection)
+
+
+def test_build_file_ids_expr_builds_escaped_set_filter():
+    """mention.v2 文献硬约束：file_id 集合过滤表达式（去重、引号转义、空集不过滤）。"""
+    assert MilvusKB._build_file_ids_expr(None) is None
+    assert MilvusKB._build_file_ids_expr([]) is None
+    assert MilvusKB._build_file_ids_expr(["", "   "]) is None
+    assert MilvusKB._build_file_ids_expr(["only"]) == 'file_id == "only"'
+    expr = MilvusKB._build_file_ids_expr(["f1", 'f"2', "f1", " "])
+    assert expr == 'file_id in ["f1", "f\\"2"]'

@@ -232,10 +232,20 @@ class SkillsMiddleware(AgentMiddleware):
         """包装模型调用，处理 skills 提示词注入、动态激活和依赖展开"""
         runtime_context = request.runtime.context
 
+        # mention.v2 服务端预激活：Run 创建时冻结的 @skill 在这里确定性生效——
+        # 不依赖模型读取 SKILL.md；readable 过滤保证运行中被撤权时失败关闭。
+        mention_pinned: list[str] = []
+        mention_resolution = getattr(runtime_context, "_mention_resolution", None)
+        if isinstance(mention_resolution, dict):
+            mention_pinned = normalize_string_list(mention_resolution.get("skill_slugs") or [])
+
         if self.enable_skills_prompt:
             prompt_skills = getattr(runtime_context, "_prompt_skills", None)
             if isinstance(prompt_skills, list):
                 prompt_skills = normalize_string_list(prompt_skills)
+                if mention_pinned:
+                    # 预激活的 Skill 指令同样注入提示词（确定性加载，而非等模型读文件）
+                    prompt_skills = list(dict.fromkeys([*mention_pinned, *prompt_skills]))
                 if prompt_skills:
                     skills_meta = self._collect_prompt_metadata(prompt_skills, runtime_context)
                     skills_section = self._build_skills_section(skills_meta)
@@ -246,6 +256,8 @@ class SkillsMiddleware(AgentMiddleware):
         activated = state.get("activated_skills", []) or []
         if not isinstance(activated, list):
             activated = []
+        if mention_pinned:
+            activated = list(dict.fromkeys([*mention_pinned, *activated]))
 
         readable_skills = self._get_readable_skills(runtime_context)
         activated = [slug for slug in normalize_string_list(activated) if slug in readable_skills]

@@ -53,7 +53,7 @@ from yuxi.services.langfuse_service import (
 )
 from yuxi.services.subagent_run_service import serialize_subagent_run_state
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Agent, MCPCallAudit, User
+from yuxi.storage.postgres.models_business import Agent, AgentRun, MCPCallAudit, User
 from yuxi.utils.guard import content_guard
 from yuxi.utils.logging_config import logger
 from yuxi.utils.markdown_tables import normalize_markdown_tables
@@ -341,6 +341,28 @@ def _bind_knowledge_scope_to_context(context, snapshot: dict | None) -> None:
         setattr(context, "_effective_knowledge_scope", snapshot)
 
 
+def _model_query_message(message: Any, model_query: str) -> Any:
+    """送给模型的文本剥离控制 token（mention.v2）；历史落库仍用原始问题。"""
+    from langchain_core.messages import HumanMessage
+
+    additional_kwargs = dict(getattr(message, "additional_kwargs", None) or {})
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append({**part, "text": model_query})
+            else:
+                parts.append(part)
+        return HumanMessage(content=parts, additional_kwargs=additional_kwargs)
+    return HumanMessage(content=model_query, additional_kwargs=additional_kwargs)
+
+
+def _frozen_mention_resolution(meta: dict | None) -> dict[str, Any]:
+    value = (meta or {}).get("mention_resolution")
+    return value if isinstance(value, dict) else {}
+
+
 def _knowledge_contract_messages(
     contract: dict[str, Any], *, query: str, message_id: str
 ) -> tuple[AIMessage, ToolMessage]:
@@ -615,15 +637,66 @@ async def _persist_turn_runtime(
     await db.flush()
 
 
+def _pinned_mention_items(mention_resolution: dict | None, mention_type: str) -> list[tuple[str, str]]:
+    """从冻结结论提取已解析的执行者类提及：[(resource_id, strength)]。"""
+    if not isinstance(mention_resolution, dict):
+        return []
+    items: list[tuple[str, str]] = []
+    for item in mention_resolution.get("mentions") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type")) != mention_type or str(item.get("status")) != "RESOLVED":
+            continue
+        resource_id = str(item.get("resource_id") or "").strip()
+        if resource_id:
+            items.append((resource_id, str(item.get("strength") or "REQUIRED").upper()))
+    return items
+
+
+def _record_mention_fulfillment(
+    manifest: RunSourceManifest,
+    *,
+    mention_type: str,
+    resource_id: str,
+    strength: str,
+    fulfilled: bool,
+    reason_code: str | None,
+) -> None:
+    """后验回写（缺口 B 语义）：FULFILLED 记账；未兑现按强度分级——
+
+    REQUIRED → amendment + manifest.status 降级 DEGRADED（run 级可观测）；
+    PREFERRED → 仅审计记 MENTION_PREFERRED_NOT_USED，不打扰用户（防"狼来了"）。
+    """
+    manifest.amendments.append(
+        {
+            "type": "MENTION_FULFILLED" if fulfilled else "MENTION_UNFULFILLED",
+            "mention_type": mention_type,
+            "resource_id": resource_id,
+            "strength": strength,
+            "reason_code": reason_code,
+        }
+    )
+    if not fulfilled and strength == "REQUIRED" and manifest.status == "COMPLETED":
+        manifest.status = "DEGRADED"
+
+
 async def _finalize_mcp_manifest(
     db,
     *,
     run_id: str | None,
     plan: TurnExecutionPlan,
     manifest: RunSourceManifest,
+    mention_resolution: dict | None = None,
 ) -> bool:
-    """Return True only when a successful, capability-matched MCP call exists."""
-    if not plan.requires_mcp or not run_id:
+    """Return True only when a successful, capability-matched MCP call exists.
+
+    mention.v2 逐服务器后验与 ``requires_mcp`` 解耦：AUTO 策略下用户 @ 的
+    MCP 服务器同样要核对"实际成功调用过"，等价能力的服务器不能替代指定项。
+    """
+    pinned_mcps = _pinned_mention_items(mention_resolution, "mcp")
+    if not plan.requires_mcp and not pinned_mcps:
+        return True
+    if not run_id:
         return True
     audits = list(
         (await db.execute(select(MCPCallAudit).where(MCPCallAudit.run_id == str(run_id)).order_by(MCPCallAudit.id)))
@@ -650,10 +723,102 @@ async def _finalize_mcp_manifest(
             for audit in matched
         ]
         manifest.used_planes = list(dict.fromkeys([*manifest.used_planes, *matched_planes]))
+    if pinned_mcps:
+        successful_servers = {str(audit.server_slug) for audit in audits if str(audit.status).lower() == "success"}
+        for slug, strength in pinned_mcps:
+            _record_mention_fulfillment(
+                manifest,
+                mention_type="mcp",
+                resource_id=slug,
+                strength=strength,
+                fulfilled=slug in successful_servers,
+                reason_code=None if slug in successful_servers else "MENTION_MCP_NOT_INVOKED",
+            )
+    if matched:
         return True
-    manifest.status = "SOURCE_UNAVAILABLE"
-    manifest.error_code = "SOURCE_UNAVAILABLE"
+    if plan.requires_mcp:
+        manifest.status = "SOURCE_UNAVAILABLE"
+        manifest.error_code = "SOURCE_UNAVAILABLE"
+        return False
+    return True
+
+
+async def _finalize_mention_subagents(
+    db,
+    *,
+    run_id: str | None,
+    manifest: RunSourceManifest,
+    mention_resolution: dict | None,
+) -> None:
+    """子智能体后验：@subagent 指定项必须在本轮产生对应子运行（created_by_run_id 血缘）。"""
+    pinned = _pinned_mention_items(mention_resolution, "subagent")
+    if not pinned or not run_id:
+        return
+    child_slugs = set(
+        (await db.execute(select(AgentRun.agent_slug).where(AgentRun.created_by_run_id == str(run_id)))).scalars().all()
+    )
+    for slug, strength in pinned:
+        _record_mention_fulfillment(
+            manifest,
+            mention_type="subagent",
+            resource_id=slug,
+            strength=strength,
+            fulfilled=slug in child_slugs,
+            reason_code=None if slug in child_slugs else "MENTION_SUBAGENT_NOT_DELEGATED",
+        )
+
+
+def _settle_source_manifest_status(
+    plan: TurnExecutionPlan, manifest: RunSourceManifest, mcp_source_valid: bool
+) -> bool:
+    """``requires_mcp`` 成功路径收敛 manifest 状态。
+
+    返回 True 表示来源门禁失败、调用方应替换为计划失败答复。注意（P0-2）：
+    mention 后验写入的 ``DEGRADED`` 不能被能力级 ``COMPLETED`` 覆写——
+    「等价能力的其他服务器成功过」不等于「用户指定的服务器被调用过」。
+    """
+    if plan.requires_mcp and not mcp_source_valid:
+        return True
+    if plan.requires_mcp and manifest.status != "DEGRADED":
+        manifest.status = "COMPLETED"
     return False
+
+
+def _finalize_mention_skills(
+    manifest: RunSourceManifest,
+    *,
+    mention_resolution: dict | None,
+    readable_skills: list[str] | None,
+) -> None:
+    """技能兑现回写：预激活是确定性后端行为——slug 仍在可读闭包内即 FULFILLED。
+
+    readable 集不可得时按 Run 创建时的鉴权结论记 FULFILLED（创建时已验证
+    available ∩ Agent 配置）；运行中被撤权 → UNFULFILLED（SKILL_REVOKED_MIDRUN），
+    强度语义与其他执行者一致。
+    """
+    pinned = _pinned_mention_items(mention_resolution, "skill")
+    if not pinned:
+        return
+    readable = {str(slug) for slug in (readable_skills or [])}
+    for slug, strength in pinned:
+        if not readable or slug in readable:
+            _record_mention_fulfillment(
+                manifest,
+                mention_type="skill",
+                resource_id=slug,
+                strength=strength,
+                fulfilled=True,
+                reason_code="SKILL_PREACTIVATED",
+            )
+        else:
+            _record_mention_fulfillment(
+                manifest,
+                mention_type="skill",
+                resource_id=slug,
+                strength=strength,
+                fulfilled=False,
+                reason_code="SKILL_REVOKED_MIDRUN",
+            )
 
 
 def _stream_message_key(metadata: dict | None, namespace: list[str], thread_id: str | None) -> tuple[str, str]:
@@ -1413,8 +1578,11 @@ async def stream_agent_chat(
 
     query = input_message.content
     image_content = input_message.image_content
-    human_message = input_message.require_langchain_message()
+    raw_human_message = input_message.require_langchain_message()
     message_type = input_message.message_type
+    # mention.v2（P0）：送给模型的文本剥离控制 token；历史/前端展示仍用原始问题。
+    model_query = str(_frozen_mention_resolution(meta).get("clean_question") or "").strip() or query
+    human_message = raw_human_message if model_query == query else _model_query_message(raw_human_message, model_query)
 
     if conf.enable_content_guard and await content_guard.check(query):
         yield make_chunk(
@@ -1479,8 +1647,11 @@ async def stream_agent_chat(
     _apply_model_override(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
+    # mention.v2：把冻结的提及解析结论绑定到 runtime，供 MODEL_DECIDES 路径的
+    # 统一检索工具同样施加文献硬约束（@doc 不再只约束定位链）。
+    input_context["_mention_resolution"] = _frozen_mention_resolution(meta)
     turn_plan = plan_turn(
-        query,
+        model_query,
         has_knowledge_scope=bool(knowledge_scope_snapshot.get("effective_kb_ids") or []),
         configured_mcps=list(input_context.get("mcps") or []),
         knowledge_strategy=str(knowledge_scope_snapshot.get("knowledge_strategy") or "MODEL_DECIDES"),
@@ -1562,7 +1733,7 @@ async def stream_agent_chat(
                     message_type=message_type,
                     image_content=image_content,
                     extra_metadata={
-                        "raw_message": human_message.model_dump(),
+                        "raw_message": raw_human_message.model_dump(),
                         "request_id": meta.get("request_id"),
                         "attachments": request_attachments,
                         "turn_execution_plan": turn_plan.public_dict(),
@@ -1626,6 +1797,7 @@ async def stream_agent_chat(
                 request_id=meta.get("request_id"),
                 retrieval_id=retrieval_id,
                 image_bytes=_decode_image_bytes(image_content),
+                mention_resolution=_frozen_mention_resolution(meta) or None,
             )
             input_context["_knowledge_contract"] = knowledge_contract
             setattr(context, "_knowledge_contract", knowledge_contract)
@@ -1836,16 +2008,27 @@ async def stream_agent_chat(
                     thread_id=chunk_thread_id,
                 )
 
+        frozen_mention_resolution = _frozen_mention_resolution(meta)
         mcp_source_valid = await _finalize_mcp_manifest(
             db,
             run_id=meta.get("run_id"),
             plan=turn_plan,
             manifest=source_manifest,
+            mention_resolution=frozen_mention_resolution,
         )
-        if turn_plan.requires_mcp and not mcp_source_valid:
+        await _finalize_mention_subagents(
+            db,
+            run_id=meta.get("run_id"),
+            manifest=source_manifest,
+            mention_resolution=frozen_mention_resolution,
+        )
+        _finalize_mention_skills(
+            source_manifest,
+            mention_resolution=frozen_mention_resolution,
+            readable_skills=getattr(context, "_readable_skills", None),
+        )
+        if _settle_source_manifest_status(turn_plan, source_manifest, mcp_source_valid):
             accumulated_content = [_plan_failure_answer(turn_plan)]
-        elif turn_plan.requires_mcp:
-            source_manifest.status = "COMPLETED"
         if (
             not turn_plan.requires_document_retrieval
             and turn_plan.source.policy.value in {"MCP_ONLY", "WEB_ONLY", "BIBLIOGRAPHY_ONLY"}

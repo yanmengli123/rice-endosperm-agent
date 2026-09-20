@@ -251,8 +251,8 @@ async def test_document_source_uses_hybrid_scientific_retrieval_for_milvus(monke
 
 @pytest.mark.asyncio
 async def test_scope_timeout_keeps_successful_graph_evidence(monkeypatch: pytest.MonkeyPatch):
-    async def slow_document(member, query_text):
-        del member, query_text
+    async def slow_document(member, query_text, *, file_ids=None):
+        del member, query_text, file_ids
         await asyncio.sleep(60)
         return [], None
 

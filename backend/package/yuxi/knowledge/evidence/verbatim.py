@@ -137,13 +137,16 @@ def _span_row(span: EvidenceSpanRecord, *, match_tier: str, matched_value: str) 
     }
 
 
-def _scope_filters(tenant_id: int, kb_ids: list[str]) -> list[Any]:
-    """租户 + 成员库 + 在役解析版本三重过滤（SQL 内强制）。"""
-    return [
+def _scope_filters(tenant_id: int, kb_ids: list[str], file_ids: list[str] | None = None) -> list[Any]:
+    """租户 + 成员库 + 在役解析版本三重过滤（SQL 内强制）；``file_ids`` 为文献硬约束。"""
+    filters = [
         EvidenceSpanRecord.tenant_id == int(tenant_id),
         EvidenceSpanRecord.kb_id.in_(kb_ids),
         KnowledgeFile.active_parse_revision_id == EvidenceSpanRecord.parse_revision_id,
     ]
+    if file_ids:
+        filters.append(EvidenceSpanRecord.file_id.in_(file_ids))
+    return filters
 
 
 def _collect(
@@ -168,6 +171,7 @@ async def query_verbatim_evidence(
     kb_ids: list[str],
     question: str,
     patterns: list[str] | None = None,
+    file_ids: list[str] | None = None,
     limit: int = MAX_VERBATIM_HITS,
 ) -> dict[str, Any]:
     """在冻结成员库的 evidence_spans 上执行 L1/L2/L3 三层字面量检索。
@@ -198,7 +202,7 @@ async def query_verbatim_evidence(
             .join(KnowledgeFile, KnowledgeFile.file_id == EvidenceSpanRecord.file_id)
             .where(
                 EvidenceSpanRecord.quote.ilike(f"%{escape_like(pattern)}%", escape="/"),
-                *_scope_filters(tenant_id, kb_ids),
+                *_scope_filters(tenant_id, kb_ids, file_ids),
             )
             .order_by(EvidenceSpanRecord.sentence_index)
             .limit(limit)
@@ -233,7 +237,7 @@ async def query_verbatim_evidence(
                 ScientificLexicalIndexRecord.kb_id.in_(kb_ids),
                 ScientificLexicalIndexRecord.lex_type == lex_type,
                 ScientificLexicalIndexRecord.lex_value_folded == folded,
-                *_scope_filters(tenant_id, kb_ids),
+                *_scope_filters(tenant_id, kb_ids, file_ids),
             )
             .order_by(EvidenceSpanRecord.sentence_index)
             .limit(limit - len(collected))
@@ -255,7 +259,7 @@ async def query_verbatim_evidence(
         stmt = (
             select(EvidenceSpanRecord)
             .join(KnowledgeFile, KnowledgeFile.file_id == EvidenceSpanRecord.file_id)
-            .where(or_(*like_filters), *_scope_filters(tenant_id, kb_ids))
+            .where(or_(*like_filters), *_scope_filters(tenant_id, kb_ids, file_ids))
             .order_by(EvidenceSpanRecord.sentence_index)
             .limit(limit)
         )
@@ -293,7 +297,7 @@ async def query_verbatim_evidence(
             stmt = (
                 select(EvidenceSpanRecord)
                 .join(KnowledgeFile, KnowledgeFile.file_id == EvidenceSpanRecord.file_id)
-                .where(and_(*like_filters), *_scope_filters(tenant_id, kb_ids))
+                .where(and_(*like_filters), *_scope_filters(tenant_id, kb_ids, file_ids))
                 .order_by(EvidenceSpanRecord.sentence_index)
                 .limit(limit - len(collected))
             )

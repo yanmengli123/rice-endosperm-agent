@@ -385,3 +385,46 @@ def test_read_file_denies_skill_outside_readable_scope() -> None:
     updated = middleware._process_tool_call_result(result, request)
 
     assert updated is result
+
+
+@pytest.mark.asyncio
+async def test_awrap_model_call_preactivates_mention_pinned_skills(monkeypatch):
+    """mention.v2 预激活：@skill 冻结后不依赖 state/模型读文件，依赖工具确定性放出。"""
+    monkeypatch.setattr(
+        skills_middleware,
+        "get_all_tool_instances",
+        lambda: [SimpleNamespace(name="tool-a"), SimpleNamespace(name="tool-b")],
+    )
+
+    class FakeRequest:
+        def __init__(self, tools=None):
+            self.runtime = SimpleNamespace(
+                context=SimpleNamespace(
+                    _readable_skills=["alpha"],
+                    _runtime_skill_dependency_map={
+                        "alpha": {"tools": ["tool-a"], "mcps": [], "skills": []},
+                        "beta": {"tools": ["tool-b"], "mcps": [], "skills": []},
+                    },
+                    mcps=[],
+                    _mention_resolution={"skill_slugs": ["alpha"]},
+                )
+            )
+            self.state = {}
+            self.tools = tools or []
+
+        def override(self, **kwargs):
+            new_request = FakeRequest(tools=kwargs.get("tools"))
+            new_request.runtime = self.runtime
+            new_request.state = self.state
+            return new_request
+
+    captured = {}
+
+    async def handler(request):
+        captured["tools"] = [tool.name for tool in request.tools]
+        return "ok"
+
+    result = await SkillsMiddleware().awrap_model_call(FakeRequest(), handler)
+
+    assert result == "ok"
+    assert captured["tools"] == ["tool-a"]

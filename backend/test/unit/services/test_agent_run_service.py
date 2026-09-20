@@ -26,8 +26,47 @@ def no_user_byok_credential(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def stub_mention_authorizer(monkeypatch):
+    """run 创建链路会装载 @mention 鉴权事实（内部查库）。
+
+    本文件的单测均为无提及场景：注入空授权器（MentionAuthorizer 全字段
+    默认空集合 = 一律拒绝），隔离真实 IO；提及解析本身由
+    test_mention_fulfillment / test_mention_protocol 覆盖。
+    """
+
+    async def _fake_load(**kwargs):
+        from yuxi.knowledge.planning.mention_protocol import MentionAuthorizer
+
+        return MentionAuthorizer()
+
+    monkeypatch.setattr(agent_run_service, "load_mention_authorizer", _fake_load)
+
+
 def _chat_input(content: str, image_content: str | None = None):
     return build_chat_input_message(content, image_content)
+
+
+def _assert_run_input_payload(payload: dict, *, clean_question: str) -> None:
+    """input_payload 精确断言：稳定键全量相等 + mention_resolution 冻结审计。
+
+    @mention 特性起，run 创建会把解析结论冻结进 input_payload（无提及场景
+    也有审计快照）；枚举 str 与协议版本不硬编码，断言语义字段。
+    """
+    stable = {
+        "model_spec": "agent-default-model",
+        "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
+        "policy_version": 1,
+        "credential_policy": "byok_optional",
+        "credential_source": "platform",
+    }
+    assert {key: payload[key] for key in stable} == stable
+    assert set(payload) == {*stable, "mention_resolution"}
+    mention_audit = payload["mention_resolution"]
+    assert mention_audit["mentions"] == []
+    assert mention_audit["errors"] == []
+    assert mention_audit["document_ids"] == []
+    assert mention_audit["clean_question"] == clean_question
 
 
 def _sse_data(chunk: str) -> dict:
@@ -810,13 +849,7 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
     dispatch = next(item for item in db.added if item.__class__.__name__ == "AgentRunDispatchOutbox")
     assert dispatch.run_id == db.created_run.id
     assert db.enqueued == [("process_agent_run", db.created_run.id, f"run:{db.created_run.id}")]
-    assert db.created_run_kwargs["input_payload"] == {
-        "model_spec": "agent-default-model",
-        "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
-        "policy_version": 1,
-        "credential_policy": "byok_optional",
-        "credential_source": "platform",
-    }
+    _assert_run_input_payload(db.created_run_kwargs["input_payload"], clean_question="hello")
     assert "model_spec" not in db.added[0].extra_metadata
     assert db.added[0].extra_metadata["raw_message"]["type"] == "human"
     assert db.added[0].extra_metadata["raw_message"]["content"] == "hello"
@@ -1706,13 +1739,7 @@ async def test_create_chat_run_with_image_persists_multimodal_message_type(monke
         db=db,
     )
 
-    assert db.created_run_kwargs["input_payload"] == {
-        "model_spec": "agent-default-model",
-        "knowledge_scope_snapshot": {"scope_version": 7, "effective_kb_ids": ["kb-rice"]},
-        "policy_version": 1,
-        "credential_policy": "byok_optional",
-        "credential_source": "platform",
-    }
+    _assert_run_input_payload(db.created_run_kwargs["input_payload"], clean_question="看图")
     assert db.added[0].message_type == "multimodal_image"
     assert db.added[0].image_content == "base64-image"
     raw_message = db.added[0].extra_metadata["raw_message"]

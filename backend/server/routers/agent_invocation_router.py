@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.services.agent_invocation_service import (
@@ -30,6 +30,14 @@ class AgentCallRunCreate(BaseModel):
     request_id: str | None = Field(None, description="可选请求幂等 ID，不传则自动生成")
     model_spec: str | None = Field(None, description="可选模型覆盖")
     async_mode: bool = Field(False, description="是否只创建运行并立即返回 run_id")
+    mention_protocol: str | None = Field(None, description="可选，结构化提及协议版本；当前仅支持 mention.v2")
+    mentions: list[dict[str, Any]] | None = Field(
+        None,
+        description=(
+            "可选，结构化资源提及（mention.v2）。与消息文本中的 @ token 必须描述同一组资源，"
+            "由服务端统一解析、鉴权并冻结；不一致返回 422 mention_rejected。"
+        ),
+    )
 
 
 class AgentCallRunResultRequest(BaseModel):
@@ -72,6 +80,11 @@ async def create_agent_call_run(
     db: AsyncSession = Depends(get_db),
 ):
     """创建外部系统 Agent 调用 run，并按 async_mode 决定是否等待最终结果。"""
+    if payload.mentions and payload.mention_protocol and payload.mention_protocol != "mention.v2":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "mention_protocol_unsupported", "message": f"不支持的提及协议：{payload.mention_protocol}"},
+        )
     return await create_agent_call_run_view(
         agent_slug=payload.agent_slug,
         messages=payload.messages,
@@ -81,6 +94,7 @@ async def create_agent_call_run(
         model_spec=payload.model_spec,
         async_mode=payload.async_mode,
         stream=payload.stream,
+        mentions=payload.mentions,
         current_user=current_user,
         db=db,
     )

@@ -120,16 +120,46 @@ async def create_subagent_task_middleware(parent_context) -> YuxiSubAgentMiddlew
 
     if not subagents:
         return None
-    return YuxiSubAgentMiddleware(parent_context=parent_context, subagents=subagents)
+    # mention.v2：用户显式 @ 的子智能体收窄可用委派集（交集，永不扩大）。
+    # 交集为空（运行中被撤权）时保持原集，由运行后验披露 UNFULFILLED——
+    # 移除整个工具面会让"必须委派"的指令变成不可能任务。
+    pinned_subagents: list[str] = []
+    mention_resolution = getattr(parent_context, "_mention_resolution", None)
+    if isinstance(mention_resolution, dict):
+        pinned_subagents = [
+            str(value).strip() for value in mention_resolution.get("subagent_slugs") or [] if str(value).strip()
+        ]
+    if pinned_subagents:
+        pinned_set = set(pinned_subagents)
+        narrowed = [agent for agent in subagents if agent.slug in pinned_set]
+        subagents = narrowed or subagents
+    if not subagents:
+        return None
+    return YuxiSubAgentMiddleware(
+        parent_context=parent_context,
+        subagents=subagents,
+        pinned_slugs=pinned_subagents or None,
+    )
 
 
 class YuxiSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
-    def __init__(self, *, parent_context, subagents: list[Agent]) -> None:
+    def __init__(self, *, parent_context, subagents: list[Agent], pinned_slugs: list[str] | None = None) -> None:
         super().__init__()
         self.parent_context = parent_context
         self.subagents = {agent.slug: agent for agent in subagents}
         available_agents = "\n".join(f"- {agent.slug}: {agent.description or agent.name}" for agent in subagents)
         self.system_prompt = TASK_SYSTEM_PROMPT.format(available_agents=available_agents)
+        # mention.v2：指令只列「pinned ∩ 实际可用」——收窄后不在可用集里的
+        # pinned 项不可能被委派，指令里点名只会诱导模型伪造委派。
+        effective_pins = [slug for slug in (pinned_slugs or []) if slug in self.subagents]
+        if effective_pins:
+            pinned_list = ", ".join(effective_pins)
+            self.system_prompt += (
+                "\n\n## 用户指定子智能体（mention.v2）\n\n"
+                f"本轮用户显式指定了子智能体：{pinned_list}。"
+                "相关任务必须经 `task` / `subagent_start` 委派给指定子智能体处理，"
+                "不得由主智能体自行作答；简单确认类问题除外。"
+            )
         self.tools = [self._build_task_tool(available_agents), *self._build_async_subagent_tools(available_agents)]
 
     def wrap_model_call(

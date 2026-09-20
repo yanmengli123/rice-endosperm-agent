@@ -68,7 +68,7 @@ def _patch_unlocated_pipeline(
 ):
     """图片定位失败 + 普通检索仍命中（不相关第 18 页内容）的最小现场。"""
 
-    async def fake_gateway(*, query_text, scope_snapshot, top_k=12, verbatim=None):
+    async def fake_gateway(*, query_text, scope_snapshot, top_k=12, verbatim=None, file_ids=None):
         return {
             "evidence": [
                 {

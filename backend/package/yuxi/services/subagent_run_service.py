@@ -352,6 +352,17 @@ class SubagentRunService:
         if isinstance(parent_scope, dict):
             child_scope = narrow_child_scope_to_parent(child_scope, parent_scope)
         input_payload["knowledge_scope_snapshot"] = child_scope
+        # mention.v2（缺口 A）：子运行继承**范围类**提及（@doc 文献硬约束、页/图/表）。
+        # 只继承范围不继承执行者——@mcp/@skill/@subagent 是父轮的执行指令，
+        # 随血缘下传会迫使子智能体委派给父轮指定的子智能体。不传则子检索
+        # 不受父轮 @doc 约束，子通道会静默放大文献范围。
+        from yuxi.knowledge.planning.mention_protocol import scope_only_mention_resolution
+
+        inherited_mentions = scope_only_mention_resolution(
+            creator_payload.get("mention_resolution") if isinstance(creator_payload, dict) else None
+        )
+        if inherited_mentions is not None:
+            input_payload["mention_resolution"] = inherited_mentions
         subagent_input_message = input_message.with_metadata(
             {
                 "request_id": request_id,

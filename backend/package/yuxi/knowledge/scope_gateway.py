@@ -189,7 +189,12 @@ def _normalize_document_results(
     return normalized
 
 
-async def _query_document_source(member: dict[str, Any], query_text: str) -> tuple[list[dict[str, Any]], str | None]:
+async def _query_document_source(
+    member: dict[str, Any],
+    query_text: str,
+    *,
+    file_ids: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
     if not member.get("document_enabled"):
         return [], None
     from yuxi.knowledge.runtime import knowledge_base
@@ -204,15 +209,20 @@ async def _query_document_source(member: dict[str, Any], query_text: str) -> tup
         return [], "DOCUMENT_RETRIEVER_UNAVAILABLE"
     try:
         retriever = target["retriever"]
-        retrieval_kwargs = {}
-        if _member_kb_type(member, target) == "milvus":
+        kb_type = _member_kb_type(member, target)
+        retrieval_kwargs: dict[str, Any] = {}
+        if file_ids:
+            # mention.v2 文献硬约束：不支持按 file_id 收窄的通道必须失败关闭，
+            # 绝不能忽略过滤条件后返回全库命中（那等于静默扩大范围）。
+            if kb_type != "milvus":
+                return [], "DOCUMENT_SCOPE_NARROWING_UNSUPPORTED"
+            retrieval_kwargs["file_ids"] = [str(value) for value in file_ids]
+        if kb_type == "milvus":
             # The answer plane needs lexical recall for exact scientific symbols
             # (for example SANT/OsMYB73) and vector recall for natural-language
             # paraphrases. Raw PDF chunks remain the authoritative evidence source.
-            retrieval_kwargs = {
-                "search_mode": "hybrid",
-                "scientific_pdf_diversity": True,
-            }
+            retrieval_kwargs.setdefault("search_mode", "hybrid")
+            retrieval_kwargs.setdefault("scientific_pdf_diversity", True)
         result = retriever(query_text, **retrieval_kwargs)
         if inspect.isawaitable(result):
             result = await result
@@ -558,6 +568,7 @@ async def _query_verbatim_scope_source(
     *,
     verbatim: dict[str, Any],
     limit: int,
+    file_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """对冻结成员库执行一次跨库 VERBATIM 查询（单次 PG 往返，不分成员 fan-out）。"""
     from yuxi.knowledge.evidence.verbatim import MAX_VERBATIM_HITS, query_verbatim_evidence
@@ -574,6 +585,7 @@ async def _query_verbatim_scope_source(
                 kb_ids=kb_ids,
                 question=query_text,
                 patterns=verbatim.get("patterns") or None,
+                file_ids=[str(value) for value in (file_ids or [])] or None,
                 limit=max(1, min(int(limit or MAX_VERBATIM_HITS), MAX_VERBATIM_HITS)),
             )
     except Exception as exc:  # noqa: BLE001
@@ -631,6 +643,7 @@ async def query_verbatim_for_scope(
     patterns: list[str] | None = None,
     question_types: list[str] | None = None,
     top_k: int = 12,
+    file_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """直接在冻结范围内执行 VERBATIM 通道（不跑 Milvus/图谱）。
 
@@ -649,7 +662,13 @@ async def query_verbatim_for_scope(
             "retrieval_summary": {"verbatim_hit_count": 0},
         }
     verbatim = {"tenant_id": int(tenant_id), "patterns": patterns or [], "question_types": question_types or []}
-    rows, error = await _query_verbatim_scope_source(members, query_text, verbatim=verbatim, limit=top_k)
+    rows, error = await _query_verbatim_scope_source(
+        members,
+        query_text,
+        verbatim=verbatim,
+        limit=top_k,
+        file_ids=[str(value).strip() for value in (file_ids or []) if str(value).strip()] or None,
+    )
     if error:
         return {
             "evidence": [],
@@ -884,12 +903,33 @@ def _compact_evidence(row: dict[str, Any], *, query_text: str | None = None) -> 
     return {key: value for key, value in compact.items() if value not in (None, "", [], {}) or isinstance(value, bool)}
 
 
+async def _partition_document_ids_by_kb(file_ids: list[str] | None) -> dict[str, list[str]]:
+    """把文献硬约束按 kb 归属拆分（单次 PK 查询；未知 file_id 不会命中任何库）。"""
+    from sqlalchemy import select
+
+    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.storage.postgres.models_knowledge import KnowledgeFile
+
+    ids = [str(value).strip() for value in (file_ids or []) if str(value).strip()]
+    if not ids:
+        return {}
+    async with pg_manager.get_async_session_context() as db:
+        rows = (
+            await db.execute(select(KnowledgeFile.file_id, KnowledgeFile.kb_id).where(KnowledgeFile.file_id.in_(ids)))
+        ).all()
+    partition: dict[str, list[str]] = {}
+    for file_id, kb_id in rows:
+        partition.setdefault(str(kb_id or ""), []).append(str(file_id))
+    return partition
+
+
 async def query_knowledge_scope_gateway(
     *,
     query_text: str,
     scope_snapshot: dict[str, Any],
     top_k: int = 12,
     verbatim: dict[str, Any] | None = None,
+    file_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     members = [member for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
     top_k = min(max(int(top_k), 1), 12)
@@ -899,6 +939,14 @@ async def query_knowledge_scope_gateway(
     verbatim_members = [
         member for member in members if member.get("document_enabled") and not _member_is_derived(member)
     ]
+    # mention.v2 文献硬约束（@doc）：对所有证据通道生效——文档通道按 file_id 收窄，
+    # 图谱/结构化通道（无文献粒度）直接排除并记录状态，绝不静默忽略过滤条件。
+    document_scope_files = [str(value).strip() for value in (file_ids or []) if str(value).strip()]
+    files_by_kb = await _partition_document_ids_by_kb(document_scope_files)
+    verbatim_member_kb_ids = {str(member["kb_id"]) for member in verbatim_members}
+    verbatim_file_ids = [
+        file_id for kb_id, ids in files_by_kb.items() if kb_id in verbatim_member_kb_ids for file_id in ids
+    ]
     # VERBATIM 通道只在调用方携带字面信号（patterns/题型）且租户可解析时启用；
     # 单次跨库任务（本地 PG 查询），不随成员数放大往返。
     verbatim_active = bool(
@@ -907,6 +955,7 @@ async def query_knowledge_scope_gateway(
         and (verbatim.get("patterns") or verbatim.get("question_types"))
         and verbatim_members
     )
+    scope_excluded_kbs: list[str] = []
     for member in members:
         kb_id = member["kb_id"]
         if _member_is_derived(member):
@@ -914,23 +963,33 @@ async def query_knowledge_scope_gateway(
             # Wiki Navigator 单独供给 navigation_hits（P4）。
             logger.warning(f"Scope member {kb_id} is a derived product; evidence channels skipped")
             continue
-        tasks.extend(
-            [
-                _query_source_with_timeout(
-                    _query_document_source(member, query_text),
-                    kb_id=kb_id,
-                    source_type="DOCUMENT",
-                    timeout_seconds=KNOWLEDGE_DOCUMENT_SOURCE_TIMEOUT_SECONDS,
-                ),
-                _query_source_with_timeout(
-                    _query_managed_graph_source(member, query_text, limit=per_source_limit),
-                    kb_id=kb_id,
-                    source_type="GRAPH_STRUCTURED",
-                    timeout_seconds=KNOWLEDGE_GRAPH_SOURCE_TIMEOUT_SECONDS,
-                ),
-            ]
+        member_document_ids = files_by_kb.get(str(kb_id)) or []
+        if document_scope_files and not member_document_ids:
+            # 该库在文献硬约束下不可能有命中：文档任务不开，图谱任务排除。
+            scope_excluded_kbs.append(str(kb_id))
+            continue
+        tasks.append(
+            _query_source_with_timeout(
+                _query_document_source(member, query_text, file_ids=member_document_ids or None),
+                kb_id=kb_id,
+                source_type="DOCUMENT",
+                timeout_seconds=KNOWLEDGE_DOCUMENT_SOURCE_TIMEOUT_SECONDS,
+            )
         )
-        task_labels.extend([(kb_id, "DOCUMENT"), (kb_id, "GRAPH_STRUCTURED")])
+        task_labels.append((kb_id, "DOCUMENT"))
+        if document_scope_files:
+            # 图谱/结构化证据不带文献粒度：文献硬约束生效时整通道排除（失败关闭）。
+            scope_excluded_kbs.append(str(kb_id))
+            continue
+        tasks.append(
+            _query_source_with_timeout(
+                _query_managed_graph_source(member, query_text, limit=per_source_limit),
+                kb_id=kb_id,
+                source_type="GRAPH_STRUCTURED",
+                timeout_seconds=KNOWLEDGE_GRAPH_SOURCE_TIMEOUT_SECONDS,
+            )
+        )
+        task_labels.append((kb_id, "GRAPH_STRUCTURED"))
     if verbatim_active:
         tasks.append(
             _query_source_with_timeout(
@@ -939,6 +998,7 @@ async def query_knowledge_scope_gateway(
                     query_text,
                     verbatim=verbatim,
                     limit=per_source_limit,
+                    file_ids=verbatim_file_ids or None,
                 ),
                 kb_id="__scope__",
                 source_type="VERBATIM",
@@ -1065,6 +1125,12 @@ async def query_knowledge_scope_gateway(
         if verbatim_active and member["kb_id"] in verbatim_member_kb_ids:
             # VERBATIM 状态只在通道实际运行的 Run 里出现（contract 1.1 增量字段）。
             status_row["verbatim_status"] = "UNAVAILABLE" if verbatim_error else "AVAILABLE"
+        if document_scope_files:
+            # 文献硬约束审计：图谱/结构化通道被排除；本库无指定文献时文档通道也不执行。
+            status_row["graph_status"] = "DOCUMENT_SCOPE_EXCLUDED"
+            status_row["structured_status"] = "DOCUMENT_SCOPE_EXCLUDED"
+            if not (files_by_kb.get(member["kb_id"]) or []):
+                status_row["document_status"] = "NO_MATCHING_DOCUMENT"
         knowledge_source_status.append(status_row)
     verbatim_hit_count = sum(
         1 for item in evidence if item.get("retrieval_channel") == "VERBATIM" or item.get("verbatim_hit")
@@ -1095,6 +1161,8 @@ async def query_knowledge_scope_gateway(
         },
         "sources_used": sources_used,
         "knowledge_source_status": knowledge_source_status,
+        "document_scope_files": document_scope_files,
+        "document_scope_excluded_kbs": scope_excluded_kbs,
         "retrieval_summary": {
             "query": query_text,
             "raw_hits": len(all_rows),

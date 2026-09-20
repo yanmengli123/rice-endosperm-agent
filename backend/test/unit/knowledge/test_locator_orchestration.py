@@ -53,7 +53,7 @@ def _patch_pipeline(
     citations: list[dict],
     direct_locator: dict | None = None,
 ):
-    async def fake_gateway(*, query_text, scope_snapshot, top_k=12, verbatim=None):
+    async def fake_gateway(*, query_text, scope_snapshot, top_k=12, verbatim=None, file_ids=None):
         # 引用池由冻结证据行构建：每条 citation 的物理证据 id 必须能回指一条
         # 已冻结的 gateway 证据行（Locator Authority 出口不变量的前提）。
         return {
@@ -752,3 +752,24 @@ async def test_ac15_failed_locator_still_allows_visual_explanation(monkeypatch: 
     assert "〔引文定位" not in guarded
     assert policy["required_disclosure"] in guarded
     assert "panel" in guarded  # 视觉描述保留
+
+
+@pytest.mark.asyncio
+async def test_mention_figure_label_is_deterministic_locator_entry(monkeypatch: pytest.MonkeyPatch):
+    """mention 冻结的图表编号是第四种确定性定位入口：文本无定位信号也进定位链。"""
+    _patch_pipeline(monkeypatch, citations=[_citation("E1", 8, "Unrelated GFP nucleus content.")])
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question="帮我解释一下结果",
+        scope_snapshot=_SCOPE,
+        run_id="run-1",
+        request_id="req-1",
+        mention_resolution={"document_ids": ["file-a"], "figure_labels": ["figure:4"], "pages": [12]},
+    )
+    assert contract["locator_intent"]["kind"] == "FIGURE_LOCATOR"
+    assert contract["locator_intent"]["figure_label"] == "figure:4"
+    assert contract["locator_intent"]["page_filter"] == [12]
+    assert contract["mention_locator"] == {"figure_labels": ["figure:4"], "table_labels": [], "pages": [12]}
+    assert contract["retrieval_plan"]["retrieval_required"] is True
+    assert contract["document_narrowing"]["source"] == "MENTION_FROZEN"
+    assert contract["document_narrowing"]["file_ids"] == ["file-a"]
