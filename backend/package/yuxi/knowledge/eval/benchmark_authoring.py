@@ -344,12 +344,23 @@ def next_external_id(existing_ids: Any, prefix: str = "item") -> str:
 
 
 def apply_review(
-    item_metadata: dict[str, Any] | None, *, action: str, reason: str, operator: str, at: str
+    item_metadata: dict[str, Any] | None,
+    *,
+    action: str,
+    reason: str,
+    operator: str,
+    at: str,
+    self_review: bool = False,
 ) -> dict[str, Any]:
-    """把一次审核动作写入 item_metadata（保留最近 MAX_REVIEW_HISTORY 条历史）。"""
+    """把一次审核动作写入 item_metadata（保留最近 MAX_REVIEW_HISTORY 条历史）。
+
+    self_review：批准人即数据集创建者（maker-checker 软标记，审计可检索）。
+    """
     metadata = dict(item_metadata or {})
     history = [entry for entry in (metadata.get("review_history") or []) if isinstance(entry, dict)]
     entry: dict[str, Any] = {"action": action, "by": operator, "at": at}
+    if self_review:
+        entry["self_review"] = True
     if reason:
         entry["reason"] = reason
     history.append(entry)

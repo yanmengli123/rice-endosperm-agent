@@ -472,16 +472,46 @@ class Tasker:
     async def _load_state(self) -> None:
         records = await self._repo.list_all()
         interrupted = 0
+        recovered = 0
+        from yuxi.services.task_recovery import get_recovery_factory
+
         for record in records:
             task = Task.from_dict(record.to_dict())
             if task.status not in TERMINAL_STATUSES:
-                # 进程重启后内存队列已丢失，无法续跑，统一标记为失败
-                task.message = "服务重启时任务中断" if task.status == "running" else "服务重启时任务未继续执行"
+                # 可恢复任务（B5）：执行体可从持久化 payload 重建且阶段幂等——
+                # 重启后重新入队续跑，而非把用户的长任务直接判死。
+                factory = get_recovery_factory(task.type)
+                if factory is not None:
+                    try:
+                        coroutine = factory(task.payload or {})
+                        task.status = "pending"
+                        task.progress = min(float(task.progress or 0.0), 99.0)
+                        task.message = "服务重启后恢复执行"
+                        task.updated_at = utc_isoformat()
+                        await self._persist_task(task)
+                        self._tasks[task.id] = task
+                        await self._queue.put((task.id, coroutine, self._resolve_timeout_seconds(None)))
+                        recovered += 1
+                        continue
+                    except Exception as recovery_error:  # noqa: BLE001
+                        logger.error(
+                            "任务恢复工厂执行失败，按中断处理 task_id={} type={}: {}",
+                            task.id,
+                            task.type,
+                            recovery_error,
+                        )
+                task.message = (
+                    "服务重启时任务中断（该类型暂不支持自动恢复）"
+                    if task.status == "running"
+                    else "服务重启时任务未继续执行"
+                )
                 task.status = "failed"
                 task.updated_at = utc_isoformat()
                 await self._persist_task(task)
                 interrupted += 1
             self._tasks[task.id] = task
+        if recovered:
+            logger.info("Recovered {} interrupted tasks for re-execution", recovered)
         if interrupted:
             logger.info("Marked {} interrupted tasks as failed", interrupted)
         stale_ids = self._collect_stale_terminal_ids()

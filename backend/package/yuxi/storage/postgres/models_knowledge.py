@@ -55,6 +55,10 @@ class KnowledgeBase(Base):
     # 生产检索策略与协作约束的权威存储；变更必须走治理端点并写审计，
     # 与纯展示的 graph_view_settings 分离（防止「改显示设置」误改生产行为）。
     graph_governance_settings = Column(JSON_VALUE)
+    # 建库完整性（0054）：幂等键（同键重试返回首次结果）与租户内名称唯一约束的归一键。
+    # normalized_name 仅作唯一性判定的内部键（存量重名以 #id 后缀消歧），显示名不变。
+    creation_idempotency_key = Column(String(64))
+    normalized_name = Column(String(512))
     share_config = Column(JSON_VALUE)
     mindmap = Column(JSON_VALUE)
     mindmap_file_ids = Column(JSON_VALUE)

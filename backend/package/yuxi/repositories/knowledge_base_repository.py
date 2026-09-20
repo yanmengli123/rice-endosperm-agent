@@ -19,6 +19,29 @@ class KnowledgeBaseRepository:
             result = await session.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id))
             return result.scalar_one_or_none()
 
+    async def get_by_idempotency_key(self, creation_idempotency_key: str) -> KnowledgeBase | None:
+        """幂等重放查询：同 Idempotency-Key 的建库请求返回首次结果，不重复创建。"""
+        if not creation_idempotency_key:
+            return None
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(KnowledgeBase).where(KnowledgeBase.creation_idempotency_key == creation_idempotency_key)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_by_tenant_normalized_name(self, tenant_id: int | None, normalized_name: str) -> KnowledgeBase | None:
+        """名称唯一约束的读侧查询（应用层友好提示用；硬约束在数据库 0054 唯一索引）。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(KnowledgeBase).where(
+                    KnowledgeBase.normalized_name == normalized_name,
+                    KnowledgeBase.tenant_id == tenant_id
+                    if tenant_id is not None
+                    else KnowledgeBase.tenant_id.is_(None),
+                )
+            )
+            return result.scalar_one_or_none()
+
     async def create(self, data: dict[str, Any]) -> KnowledgeBase:
         from yuxi.services.principal import resolve_tenant_id
 

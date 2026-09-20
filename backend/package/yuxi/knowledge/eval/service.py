@@ -655,6 +655,10 @@ class EvaluationService:
         if not items:
             raise ValueError("没有可审核的题目")
         at = format_utc_datetime(utc_now())
+        # maker-checker 软标记（企业可追责）：批准人即数据集创建者时在审核历史
+        # 条目上记 self_review，供合规审计检索；不做硬阻断（单管理员工作流
+        # 不应被锁死，硬性 maker-checker 归入成员能力表的后续接入）。
+        self_review = action == "approve" and operator == (getattr(row, "created_by", None) or "")
         updates = [
             (
                 item.item_id,
@@ -666,13 +670,14 @@ class EvaluationService:
                         reason=(reason or "").strip(),
                         operator=operator,
                         at=at,
+                        self_review=self_review,
                     ),
                 },
             )
             for item in items
         ]
         updated = await self.eval_repo.update_dataset_items(updates)
-        return {"updated": updated, "status": status_map[action]}
+        return {"updated": updated, "status": status_map[action], "self_review": self_review}
 
     async def import_dataset_items(self, dataset_id: str, content: str, *, operator: str) -> dict[str, Any]:
         """向 draft 基准追加导入 JSONL：合法行入库（草稿态），非法行逐行报错，互不阻塞。"""
@@ -747,6 +752,8 @@ class EvaluationService:
                 "finalized_by": operator,
                 "finalized_at": format_utc_datetime(utc_now()),
                 "finalize_warnings": [warning["code"] for warning in report["warnings"]],
+                # maker-checker 软标记：定版人即创建者（合规审计可检索）
+                "self_finalized": operator == (getattr(row, "created_by", None) or ""),
             }
         )
         flags = dataset_flags(items)

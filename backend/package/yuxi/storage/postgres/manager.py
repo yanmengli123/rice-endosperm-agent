@@ -1068,6 +1068,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0051_contract_digest_refresh_graph_v11", "_migration_0051_contract_digest_refresh_graph_v11"),
         ("0052_managed_graph_v11_upgrade", "_migration_0052_managed_graph_v11_upgrade"),
         ("0053_contract_refreeze", "_migration_0053_contract_refreeze"),
+        ("0054_kb_creation_integrity", "_migration_0054_kb_creation_integrity"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2916,6 +2917,53 @@ class PostgresManager(metaclass=SingletonMeta):
                     "kb_id": row.kb_id,
                 },
             )
+
+    async def _migration_0054_kb_creation_integrity(self, conn) -> None:
+        """建库完整性（B4）：幂等键唯一列 + 租户内名称唯一约束。
+
+        - creation_idempotency_key：网络超时重试防半提交（同键重试返回首次结果）；
+        - normalized_name + (tenant_id, normalized_name) 唯一索引：名称冲突从
+          应用层预检查升级为数据库硬约束。存量重名（跨租户正常、同租户历史脏数据）
+          以 `#id` 后缀写入 normalized_name 保持唯一（用户可见名称不变）。
+        """
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS "
+                "creation_idempotency_key VARCHAR(64)"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS normalized_name VARCHAR(512)"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE knowledge_bases SET normalized_name = lower(trim(name)) "
+                "WHERE normalized_name IS NULL"
+            )
+        )
+        # 同租户重名的存量行：normalized_name 追加 #id 消歧（显示名不动）
+        await conn.execute(
+            text(
+                "UPDATE knowledge_bases k SET normalized_name = k.normalized_name || '#' || k.id::text "
+                "WHERE k.normalized_name IS NOT NULL AND EXISTS ("
+                "  SELECT 1 FROM knowledge_bases s WHERE s.normalized_name = k.normalized_name "
+                "  AND COALESCE(s.tenant_id, -1) = COALESCE(k.tenant_id, -1) AND s.id < k.id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_bases_idempotency_key "
+                "ON knowledge_bases(creation_idempotency_key) WHERE creation_idempotency_key IS NOT NULL"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_bases_tenant_normalized_name "
+                "ON knowledge_bases(tenant_id, normalized_name) WHERE normalized_name IS NOT NULL"
+            )
+        )
 
     async def _migration_0039_graph_mention_evidence(self, conn) -> None:
         """图谱 mention 级原文证据（「点开即见原文」不变式 I1/I2）。

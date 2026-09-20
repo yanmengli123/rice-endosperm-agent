@@ -6,10 +6,13 @@ import time
 import traceback
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from starlette.responses import StreamingResponse
 from yuxi import config
 from yuxi.knowledge.chunking.ragflow_like.presets import get_chunk_preset_options
@@ -392,12 +395,16 @@ async def get_databases(current_user: User = Depends(get_admin_user)):
 async def create_database(
     data: CreateDatabaseRequest,
     current_user: User = Depends(get_admin_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     """创建知识库（Source Contract 治理版）。
 
-    - source_contract 显式给出时 fail-closed 解析，冻结 key/version/digest/snapshot；
-    - 未给出时映射显式 legacy_generic@0 并写弃用审计（绝不按上传内容推断升级）；
-    - 权限未指定时按租户默认策略，兜底 Private（仅创建者可见）。
+    - source_contract 显式给出时 fail-closed 解析，冻结 key/version/digest/snapshot
+      （key 缺版本由后端解析为最新版本）；未给出时映射显式 legacy_generic@0 并写
+      弃用审计（绝不按上传内容推断升级）；
+    - 权限未指定时按租户默认策略，兜底 Private（仅创建者可见）；
+    - 幂等（B4）：携带 Idempotency-Key 头时，网络超时重试返回首次创建结果
+      （idempotent_replay=true），不重复建库；租户内名称唯一由数据库约束兜底。
     """
     database_name = data.database_name
     kb_type = data.kb_type
@@ -409,7 +416,18 @@ async def create_database(
         f"share_config {data.share_config}"
     )
     try:
-        # 先检查名称是否已存在
+        # 幂等重放先于一切检查（重放请求与首次请求同名，名称预检会误 409）
+        if idempotency_key:
+            from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
+            existing = await KnowledgeBaseRepository().get_by_idempotency_key(idempotency_key.strip())
+            if existing is not None:
+                replay_info = await knowledge_base.get_database_info(existing.kb_id)
+                if replay_info:
+                    replay_info["idempotent_replay"] = True
+                    return replay_info
+
+        # 先检查名称是否已存在（应用层友好提示；并发窗口由 0054 唯一索引兜底）
         if await knowledge_base.database_name_exists(database_name, uid=current_user.uid):
             raise HTTPException(
                 status_code=409,
@@ -461,7 +479,32 @@ async def create_database(
             "content_domain": (data.content_domain or "").strip() or None,
             "tool_description": (data.tool_description or "").strip() or None,
             "governance_status": "DRAFT",
+            # 建库完整性（B4）：唯一键与幂等键随同一条 INSERT 落库；
+            # pdf_evidence 的默认检索参数也在这里覆盖（见下方 query_params 注入），
+            # 杜绝「库已建、参数更新失败」的半提交。
+            "normalized_name": database_name.strip().lower(),
         }
+        if idempotency_key and idempotency_key.strip():
+            contract_fields["creation_idempotency_key"] = idempotency_key.strip()
+
+        if contract_spec.contract_key == "pdf_evidence":
+            from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository  # noqa: F401
+
+            reranker_model = getattr(config, "reranker", None)
+            query_options = {
+                "search_mode": "hybrid",
+                "recall_top_k": 50,
+                "final_top_k": 12,
+                "similarity_threshold": 0.15,
+                "vector_weight": 0.7,
+                "bm25_weight": 0.3,
+                "scientific_pdf_diversity": True,
+                "use_reranker": bool(reranker_model),
+            }
+            if reranker_model:
+                query_options["reranker_model"] = reranker_model
+            # 与建库同一事务写入（_persist_kb 的 record_fields 白名单放行 query_params）
+            contract_fields["query_params"] = {"options": query_options}
 
         # 契约托管分块展示值随建库入参一次写入（normalize 保留显式合法值）：真正的分块在服务端流水线
         # 固定（pdf→academic 流水线注入、csv→separator 在 Canonical Import 内写死），用户传入值一律被托管策略覆盖
@@ -485,40 +528,38 @@ async def create_database(
 
         share_config = await _resolve_default_share_config(current_user, data.share_config)
 
-        database_info = await knowledge_base.create_database(
-            database_name,
-            data.description or "",
-            kb_type=kb_type,
-            embedding_model_spec=embedding_model_spec,
-            llm_model_spec=data.llm_model_spec,
-            share_config=share_config,
-            created_by=current_user.uid,
-            created_by_department_id=current_user.department_id,
-            contract_fields=contract_fields,
-            **additional_params,
-        )
-
-        if contract_spec.contract_key == "pdf_evidence":
+        try:
+            database_info = await knowledge_base.create_database(
+                database_name,
+                data.description or "",
+                kb_type=kb_type,
+                embedding_model_spec=embedding_model_spec,
+                llm_model_spec=data.llm_model_spec,
+                share_config=share_config,
+                created_by=current_user.uid,
+                created_by_department_id=current_user.department_id,
+                contract_fields=contract_fields,
+                **additional_params,
+            )
+        except IntegrityError as integrity_error:
+            # 并发窗口兜底（0054 唯一索引）：幂等键撞车→重放；名称撞车→409
             from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
-            reranker_model = getattr(config, "reranker", None)
-            query_options = {
-                "search_mode": "hybrid",
-                "recall_top_k": 50,
-                "final_top_k": 12,
-                "similarity_threshold": 0.15,
-                "vector_weight": 0.7,
-                "bm25_weight": 0.3,
-                "scientific_pdf_diversity": True,
-                "use_reranker": bool(reranker_model),
-            }
-            if reranker_model:
-                query_options["reranker_model"] = reranker_model
-            await KnowledgeBaseRepository().update(
-                database_info["kb_id"],
-                {"query_params": {"options": query_options}},
-            )
-            database_info["query_params"] = {"options": query_options}
+            if idempotency_key:
+                existing = await KnowledgeBaseRepository().get_by_idempotency_key(idempotency_key.strip())
+                if existing is not None:
+                    replay_info = await knowledge_base.get_database_info(existing.kb_id)
+                    if replay_info:
+                        replay_info["idempotent_replay"] = True
+                        return replay_info
+            logger.warning(f"建库唯一约束冲突: {integrity_error}")
+            raise HTTPException(
+                status_code=409,
+                detail=f"知识库名称 '{database_name}' 已存在（并发创建），请使用其他名称",
+            ) from integrity_error
+
+        if contract_spec.contract_key == "pdf_evidence":
+            database_info["query_params"] = contract_fields["query_params"]
 
         if legacy_fallback:
             await _record_knowledge_audit(
@@ -540,10 +581,17 @@ async def create_database(
                 },
             )
 
-        # 需要重新加载所有智能体，因为工具刷新了
-        from yuxi.agents.buildin import agent_manager
+        # Agent 工具刷新移出响应路径（B4）：reload 失败不得把已完整落库的建库
+        # 拖成"前端 500、库里已成功"的半提交——后台执行，失败仅告警下次访问自愈。
+        async def _reload_agents_background() -> None:
+            try:
+                from yuxi.agents.buildin import agent_manager
 
-        await agent_manager.reload_all()
+                await agent_manager.reload_all()
+            except Exception as reload_error:  # noqa: BLE001
+                logger.warning(f"[kb_create] Agent reload 后台执行失败（不影响建库结果）: {reload_error}")
+
+        asyncio.create_task(_reload_agents_background())
 
         return database_info
     except HTTPException:
@@ -2578,14 +2626,57 @@ async def download_document(kb_id: str, doc_id: str, current_user: User = Depend
 # =============================================================================
 
 
+class KnowledgeQueryBody(BaseModel):
+    """检索测试/查询的服务端参数白名单与界限（快赢项：裸 str/dict → 受控模型）。
+
+    请求形状与既有前端一致（{query, meta}）；越界参数返回标准 422。
+    执行期失败仍沿用 200+status=failed（前端依赖，完整错误语义化单列 backlog）。
+    """
+
+    query: str = Field(min_length=1, max_length=2000)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("meta")
+    @classmethod
+    def _validate_meta(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(value) > 32:
+            raise ValueError("meta 键数过多（≤32）")
+        for key, item in value.items():
+            if not isinstance(key, str) or len(key) > 64:
+                raise ValueError("meta 键必须是不超过 64 字符的字符串")
+            if isinstance(item, (list, dict)) and len(str(item)) > 2000:
+                raise ValueError(f"meta[{key}] 结构过大")
+        for top_k_key, upper in (("top_k", 100), ("final_top_k", 100), ("recall_top_k", 200)):
+            raw = value.get(top_k_key)
+            if raw is None:
+                continue
+            try:
+                top_k = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{top_k_key} 必须是整数") from exc
+            if not 1 <= top_k <= upper:
+                raise ValueError(f"{top_k_key} 必须在 1-{upper} 之间")
+            value[top_k_key] = top_k
+        for weight_key in ("vector_weight", "bm25_weight"):
+            raw = value.get(weight_key)
+            if raw is None:
+                continue
+            try:
+                weight = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{weight_key} 必须是数值") from exc
+            if not 0.0 <= weight <= 1.0:
+                raise ValueError(f"{weight_key} 必须在 0-1 之间")
+            value[weight_key] = weight
+        return value
+
+
 @knowledge.post("/databases/{kb_id}/query")
-async def query_knowledge_base(
-    kb_id: str, query: str = Body(...), meta: dict = Body(...), current_user: User = Depends(get_admin_user)
-):
+async def query_knowledge_base(kb_id: str, body: KnowledgeQueryBody, current_user: User = Depends(get_admin_user)):
     """查询知识库"""
-    logger.debug(f"Query knowledge base {kb_id}: {query}")
+    logger.debug(f"Query knowledge base {kb_id}: {body.query}")
     try:
-        result = await knowledge_base.aquery(query, kb_id=kb_id, **meta)
+        result = await knowledge_base.aquery(body.query, kb_id=kb_id, **body.meta)
         return {"result": result, "status": "success"}
     except Exception as e:
         logger.error(f"知识库查询失败 {e}, {traceback.format_exc()}")
@@ -2593,16 +2684,15 @@ async def query_knowledge_base(
 
 
 @knowledge.post("/databases/{kb_id}/query-test")
-async def query_test(
-    kb_id: str, query: str = Body(...), meta: dict = Body(...), current_user: User = Depends(get_admin_user)
-):
+async def query_test(kb_id: str, body: KnowledgeQueryBody, current_user: User = Depends(get_admin_user)):
     """测试查询知识库（与正式问答同源的单库统一检索入口：文档库走文档通道，规范图谱库走图谱通道）"""
-    logger.debug(f"Query test in {kb_id}: {query}")
+    logger.debug(f"Query test in {kb_id}: {body.query}")
     try:
         from yuxi.knowledge.scope_gateway import query_single_kb_unified
 
-        top_k = int((meta or {}).get("top_k") or (meta or {}).get("final_top_k") or 10)
-        result = await query_single_kb_unified(kb_id=kb_id, query_text=query, retrieval_params=meta or {}, top_k=top_k)
+        meta = body.meta or {}
+        top_k = int(meta.get("top_k") or meta.get("final_top_k") or 10)
+        result = await query_single_kb_unified(kb_id=kb_id, query_text=body.query, retrieval_params=meta, top_k=top_k)
         return result
     except Exception as e:
         logger.error(f"测试查询失败 {e}, {traceback.format_exc()}")

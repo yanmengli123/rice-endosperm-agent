@@ -1648,6 +1648,12 @@ class KnowledgeBase(ABC):
             allowed_fields = {
                 "share_config",
                 "created_by",
+                # 建库完整性（0054）：幂等键与租户内名称唯一键随首次 INSERT 一起落库；
+                # query_params 允许经 record_fields 覆盖默认值（pdf_evidence 的
+                # 默认检索参数与建库同一事务，杜绝"库已建、参数更新失败"的半提交）
+                "creation_idempotency_key",
+                "normalized_name",
+                "query_params",
                 # Source Contract 冻结字段（0029）：白名单漏掉会导致契约静默丢失，
                 # 且 manager.create_database 仍把契约回显进响应，门禁只能回落 legacy 全命令
                 "contract_key",
