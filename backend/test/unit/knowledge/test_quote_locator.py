@@ -354,3 +354,72 @@ def test_figure_display_intent_routes_to_figure_locator(question, compound):
 def test_no_figure_no_locator_still_none():
     assert detect_locator_intent("今天天气怎么样")["kind"] is None
     assert detect_locator_intent("帮我总结这篇文献的方法")["kind"] is None
+
+
+# ---- 正文引文含 Figure 编号 → 不限制为题注载体 ----
+
+
+@pytest.mark.asyncio
+async def test_quote_with_figure_mention_matches_sentence_span(locator_session):
+    """正文句恰好提到 "(Figure 1)" + 问哪页 → 引文匹配不应被编号限制为只搜题注。
+    回归：2026-09 CF-MS 事故（正文句含 Figure 1 → no_normalized_match）。"""
+    session = locator_session
+    from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator
+
+    # 建一个正文 sentence span（含 Figure 1 字样但不是题注）
+    long_quote = (
+        "We used the CF\u2013MS approach, coupled with biological replicates of SEC and IEX "
+        "fractionations, to profile endogenous protein complexes in the aleurone of "
+        "developing rice seeds (Figure 1)."
+    )
+    _seed(session, row_id=80, file_id="file_a", revision="pr_a", page=1)
+    session.add(
+        EvidenceSpanRecord(
+            id=90,
+            tenant_id=1,
+            parse_revision_id="pr_a",
+            kb_id="kb-a",
+            file_id="file_a",
+            span_id="es_fig_mention",
+            anchor_id="ea_fig_mention",
+            sentence_index=0,
+            quote=long_quote,
+            quote_hash=hashlib.sha256(long_quote.encode()).hexdigest(),
+            page_number=3,
+            evidence_type="sentence",
+            document_partition="MAIN_TEXT",
+            partition_confidence=1.0,
+            evidence_id="evs_fig_mention",
+        )
+    )
+    session.add(
+        EvidenceAnchorRecord(
+            id=90,
+            anchor_id="ea_fig_mention",
+            parse_revision_id="pr_a",
+            page=3,
+            bbox=[50.0, 300.0, 500.0, 380.0],
+            word_start=0,
+            word_end=20,
+            quote_hash=hashlib.sha256(long_quote.encode()).hexdigest(),
+            prefix_hash="p",
+            suffix_hash="s",
+            quote=long_quote,
+            fragments=[{"page_index": 2, "bbox": [50.0, 300.0, 500.0, 380.0]}],
+            anchor_type="text",
+            locator_quality="HIGH",
+            confidence=1.0,
+            locatable=True,
+            source="mineru",
+            document_partition="MAIN_TEXT",
+        )
+    )
+    await session.commit()
+
+    question = f"{long_quote}\n\u5728\u54ea\u7bc7\u6587\u732e\u54ea\u4e00\u9875\uff0c\u662f\u4ec0\u4e48\u610f\u601d"
+    result = await resolve_quote_locator(session, question=question, kb_ids=["kb-a"])
+    assert result["status"] == "VERIFIED", (
+        f"expected VERIFIED, got {result.get('status')} reason={result.get('reason')}"
+    )
+    assert result["page"] == 3
+    assert result["anchor_id"] == "ea_fig_mention"

@@ -453,6 +453,13 @@ async def resolve_quote_locator(
             "reason": "no_extractable_quote",
         }
 
+    # 正文引文恰好提到 "(Figure N)" 时 figure_label 非空，会把后续匹配限制为
+    # "只搜题注载体"（_is_caption_carrier）——把本可命中的 sentence span 全部
+    # 过滤掉（2026-09 CF-MS 事故：正文句含 Figure 1 → no_normalized_match）。
+    # 题注通道已在上方独立执行并失败；引文匹配不应被编号限定载体类型。
+    if intent["kind"] == LOCATOR_KIND_QUOTE:
+        figure_label = None
+
     quote_norm = normalize_for_match(quote_text)
     prefilter_tokens = _prefilter_tokens(quote_norm)
     if not prefilter_tokens:
