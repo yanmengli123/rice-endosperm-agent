@@ -40,6 +40,7 @@ COMMAND_SAMPLE_QUESTIONS = "sample_questions"
 COMMAND_DATASET_PREVIEW = "dataset_preview"
 COMMAND_DATASET_IMPORT = "dataset_import"
 COMMAND_DATASET_DELETE = "dataset_delete"
+COMMAND_DATASET_SAMPLE_QUESTIONS = "dataset_sample_questions"
 COMMAND_RELEASE_CREATE = "release_create"
 COMMAND_RELEASE_PUBLISH = "release_publish"
 COMMAND_RELEASE_ROLLBACK = "release_rollback"
@@ -70,6 +71,7 @@ ALL_COMMANDS: tuple[str, ...] = (
     COMMAND_DATASET_PREVIEW,
     COMMAND_DATASET_IMPORT,
     COMMAND_DATASET_DELETE,
+    COMMAND_DATASET_SAMPLE_QUESTIONS,
     COMMAND_RELEASE_CREATE,
     COMMAND_RELEASE_PUBLISH,
     COMMAND_RELEASE_ROLLBACK,
@@ -373,6 +375,86 @@ CSV_QA_V1_1 = SourceContractSpec(
         ),
     },
 )
+
+# =============================================================================
+# === csv_record / csv_qa@1.2.0：数据集原生示例问题（additive） ===
+# =============================================================================
+# 检索测试页的示例问题此前只有文档实现（LLM 凭文件名猜内容，命令
+# sample_questions），csv 契约按文档语义禁用后 422。1.2.0 以独立命令放行
+# 数据集原生实现：从 canonical records 确定性采样（csv_qa 取真实问题列，
+# csv_record 取 identity 列值/记录键），零 LLM、可复现，且必然命中行投影。
+
+CSV_RECORD_V1_2 = SourceContractSpec(
+    contract_key="csv_record",
+    version="1.2.0",
+    product_category="authority_source",
+    display=SourceContractDisplay(
+        label="CSV 结构化数据集 · 结构化记录",
+        card_description=(
+            "一行一条记录，保留行级来源；规范记录（Canonical Record）落在 "
+            "PostgreSQL，检索投影由规范记录确定性生成，可回溯到行号与业务主键。"
+            "1.1：数据集删除；1.2：数据集原生示例问题（确定性，来自规范记录）。"
+        ),
+        operator_description="供查询结构化实验记录/属性表的数据集。",
+        entry_mode="primary",
+    ),
+    allowed_commands=(
+        *_DATASET,
+        COMMAND_DATASET_DELETE,
+        COMMAND_DATASET_SAMPLE_QUESTIONS,
+        *_RELEASE,
+        *_LLM_GRAPH,
+        COMMAND_MINDMAP_GENERATE,
+    ),
+    forbidden_commands=_CSV_SHARED_FORBIDDEN,
+    accepted_media=CSV_RECORD.accepted_media,
+    authority_policy=CSV_RECORD.authority_policy,
+    required_provenance=CSV_RECORD.required_provenance,
+    base_capabilities=CSV_RECORD.base_capabilities,
+    processing_policy={
+        **CSV_RECORD_V1_1.processing_policy,
+        "sample_questions": (
+            "dataset_sample_questions：从 canonical records 确定性采样生成检索测试示例问题"
+            "（identity 列值/记录键 + 字段名模板），零 LLM，不写证据通道"
+        ),
+    },
+)
+
+CSV_QA_V1_2 = SourceContractSpec(
+    contract_key="csv_qa",
+    version="1.2.0",
+    product_category="authority_source",
+    display=SourceContractDisplay(
+        label="CSV 结构化数据集 · 标准问答",
+        card_description=(
+            "question/answer 两列的标准问答集；列映射必须由用户预检确认，"
+            "严禁默认取前两列、拼行或把 Markdown header 当问答。"
+            "1.1：数据集删除；1.2：数据集原生示例问题（直接采样真实问题列）。"
+        ),
+        operator_description="供标准问答检索的 QA 对数据集。",
+        entry_mode="primary",
+    ),
+    allowed_commands=(
+        *_DATASET,
+        COMMAND_DATASET_DELETE,
+        COMMAND_DATASET_SAMPLE_QUESTIONS,
+        *_RELEASE,
+        *_LLM_GRAPH,
+        COMMAND_MINDMAP_GENERATE,
+    ),
+    forbidden_commands=_CSV_SHARED_FORBIDDEN,
+    accepted_media=CSV_QA.accepted_media,
+    authority_policy=CSV_QA.authority_policy,
+    required_provenance=CSV_QA.required_provenance,
+    base_capabilities=CSV_QA.base_capabilities,
+    processing_policy={
+        **CSV_QA_V1_1.processing_policy,
+        "sample_questions": (
+            "dataset_sample_questions：从 canonical records 的真实问题列采样示例问题，零 LLM，必然命中对应问答投影块"
+        ),
+    },
+)
+
 
 # =============================================================================
 # === managed_graph@1.0.0：规范科研知识图谱 ===

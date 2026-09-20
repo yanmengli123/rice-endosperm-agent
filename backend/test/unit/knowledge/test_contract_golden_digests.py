@@ -18,13 +18,18 @@ GOLDEN_DIGESTS = {
     "pdf_evidence@1.0.0": "sha256:13f9637f7f08ec05aa44e955c33097714958feceb82b982406f859cb1e489055",
     "csv_record@1.0.0": "sha256:206fed49ff760adbfffe846eb07b1caa0b7e3868af0eb1cc60f281f91e2396cc",
     "csv_record@1.1.0": "sha256:5a08a40d786a4f6b0caec5f36aa93ec3a1309f5f6ba3218566237cc447b79db7",
+    "csv_record@1.2.0": "sha256:01699055f1a777b2bc4ad348362b0e9098e159a2aacc0a083a461aa0e8b21ee6",
     "csv_qa@1.0.0": "sha256:d582f66f63d155971773d4cc3408ff3556f04097a3f69500b916862a5cba16ca",
     "csv_qa@1.1.0": "sha256:8d343e8313e6e5e66e4c09d9395698de4c6566bdd8c0775be43140480f62b720",
+    "csv_qa@1.2.0": "sha256:4c75add16ca76cd31fa44caa4add2317af340b03dcfda00d35dd94731da12f03",
     "managed_graph@1.0.0": "sha256:5835d95c337fd85b70601a66548510c4a68e582320dfbbe9283b0d2b90c4fb60",
     "managed_graph@1.1.0": "sha256:b1108aef6d668af9fc60fc4cc8bcfcc5ed6e314ade56715da11a6eabd071478e",
     "generic_document@1.0.0": "sha256:5feb59c3dc2c30bc7a019012beb2b069e2d8110c9800ce442f01bad8b31fc9cf",
-    "legacy_generic@0": "sha256:90e20da5804040d6061936e4f61245dd77026fb032df501e0b4f14296ebd747c",
-    "legacy_mixed@0": "sha256:7157b336bf989eeb2a116e08fc80c0119404da08d52ac496670f22fac9dcc0b5",
+    # legacy@0 特例：allowed_commands=ALL_COMMANDS（允许一切的兼容契约），全局
+    # 命令表增长时 digest 合法前滚——语义正确（legacy 库自动获得新命令），
+    # 与冻结纪律不冲突。其余任何契约 digest 漂移都是违规。
+    "legacy_generic@0": "sha256:059dac85dde118ac0d282718cd1724844de73d1adb26a827f30e52043244f659",
+    "legacy_mixed@0": "sha256:d70ed99f0d65fdf2cead26caf2bbb9f78669f0f291f7fbb3e7c2c8831a6bfc33",
 }
 
 
@@ -94,6 +99,23 @@ def test_csv_v11_is_additive_over_v10():
         assert v11.forbidden_commands == v10.forbidden_commands
 
 
-def test_latest_csv_version_is_v11():
-    assert resolve_contract("csv_record").version == "1.1.0"
-    assert resolve_contract("csv_qa").version == "1.1.0"
+def test_latest_csv_version_is_v12():
+    assert resolve_contract("csv_record").version == "1.2.0"
+    assert resolve_contract("csv_qa").version == "1.2.0"
+
+
+def test_csv_v12_is_additive_over_v11():
+    """csv 1.2.0 只新增 dataset_sample_questions；文档语义命令仍禁止。"""
+    for key in ("csv_record", "csv_qa"):
+        v11 = resolve_contract(key, "1.1.0")
+        v12 = resolve_contract(key, "1.2.0")
+        assert set(v11.allowed_commands) <= set(v12.allowed_commands)
+        added = set(v12.allowed_commands) - set(v11.allowed_commands)
+        assert added == {"dataset_sample_questions"}, f"{key} 1.2.0 新增命令超出预期: {added}"
+        assert v12.forbidden_commands == v11.forbidden_commands
+        assert "sample_questions" in v12.forbidden_commands
+
+
+def test_latest_csv_version_is_v12():
+    assert resolve_contract("csv_record").version == "1.2.0"
+    assert resolve_contract("csv_qa").version == "1.2.0"

@@ -26,6 +26,7 @@ from yuxi.knowledge.source_contracts import (
     COMMAND_DATASET_DELETE,
     COMMAND_DATASET_IMPORT,
     COMMAND_DATASET_PREVIEW,
+    COMMAND_DATASET_SAMPLE_QUESTIONS,
     COMMAND_DOCUMENT_ADD,
     COMMAND_DOCUMENT_DELETE,
     COMMAND_DOCUMENT_INDEX,
@@ -72,6 +73,7 @@ from yuxi.knowledge.utils.sample_question_utils import (
 from yuxi.knowledge.utils.url_fetcher import fetch_url_content
 from yuxi.models.providers.cache import model_cache
 from yuxi.services.task_service import TaskContext, tasker
+from yuxi.services.csv_dataset_service import generate_csv_dataset_sample_questions
 from yuxi.services.scientific_pdf_ingest_service import (
     create_or_reuse_scientific_pdf_ingest,
     get_scientific_pdf_index_lineage,
@@ -2805,10 +2807,28 @@ async def generate_sample_questions(
     request_body: dict = Body(...),
     current_user: User = Depends(get_admin_user),
 ):
-    """AI生成针对知识库的测试问题。"""
+    """生成针对知识库的测试问题（按契约分派实现）。"""
+    count = request_body.get("count", 10)
+    # csv 契约：数据集原生示例问题——从 canonical records 确定性采样（零 LLM），
+    # 走 dataset_sample_questions 命令（1.2.0）；文档实现（LLM 凭文件名）的
+    # sample_questions 命令对 csv 契约按文档语义禁用。
+    try:
+        spec = await load_kb_contract(kb_id)
+    except SourceContractError as exc:
+        raise _http_from_contract_error(exc) from exc
+    if spec.contract_key in {"csv_record", "csv_qa"}:
+        try:
+            await require_contract_command(kb_id, COMMAND_DATASET_SAMPLE_QUESTIONS)
+            return await generate_csv_dataset_sample_questions(kb_id, count=count)
+        except SourceContractError as exc:
+            raise _http_from_contract_error(exc) from exc
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"生成数据集示例问题失败: {e}, {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"生成问题失败: {str(e)}")
     await _ensure_database_supports_documents(kb_id, "示例问题生成", COMMAND_SAMPLE_QUESTIONS)
     try:
-        count = request_body.get("count", 10)
         return await generate_database_sample_questions(kb_id, count=count)
     except HTTPException:
         raise

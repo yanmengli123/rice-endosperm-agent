@@ -1070,6 +1070,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0053_contract_refreeze", "_migration_0053_contract_refreeze"),
         ("0054_kb_creation_integrity", "_migration_0054_kb_creation_integrity"),
         ("0055_csv_contract_v11_upgrade", "_migration_0055_csv_contract_v11_upgrade"),
+        ("0056_csv_contract_v12_upgrade", "_migration_0056_csv_contract_v12_upgrade"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2909,6 +2910,35 @@ class PostgresManager(metaclass=SingletonMeta):
                     "digest": contract_digest(spec),
                     "snapshot": json.dumps(spec_to_api_dict(spec), ensure_ascii=False),
                     "kb_id": row.kb_id,
+                },
+            )
+
+    async def _migration_0056_csv_contract_v12_upgrade(self, conn) -> None:
+        """csv_record / csv_qa → 1.2.0 显式升级（additive：dataset_sample_questions）。
+
+        检索测试页的示例问题此前只有文档实现（sample_questions，LLM 凭文件名），
+        csv 契约按文档语义禁用后 422。1.2.0 放行数据集原生实现：从 canonical
+        records 确定性采样。0055 已把存量升到 1.1.0；本迁移继续前滚并兼容
+        仍处 1.0.0 的行（同批刷新 digest + snapshot）。
+        """
+        import json
+
+        from yuxi.knowledge.source_contracts.registry import resolve_contract
+        from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
+
+        for key in ("csv_record", "csv_qa"):
+            spec = resolve_contract(key, "1.2.0")
+            await conn.execute(
+                text(
+                    "UPDATE knowledge_bases SET contract_version = :version, contract_digest = :digest, "
+                    "contract_snapshot = :snapshot "
+                    "WHERE contract_key = :key AND contract_version IN ('1.0.0', '1.1.0')"
+                ),
+                {
+                    "version": spec.version,
+                    "digest": contract_digest(spec),
+                    "snapshot": json.dumps(spec_to_api_dict(spec), ensure_ascii=False),
+                    "key": key,
                 },
             )
 

@@ -477,3 +477,145 @@ async def import_csv_dataset(
         "index_status": index_status,
         "status": "COMMITTED",
     }
+
+
+# =============================================================================
+# === 数据集原生示例问题（csv@1.2.0：dataset_sample_questions） ===
+# =============================================================================
+
+_RECORD_QUESTION_TEMPLATES = (
+    "查询{identity_label}为{record_key}的记录",
+    "{record_key}的字段值是什么？",
+    "数据集中与{record_key}相关的记录有哪些？",
+)
+
+
+def build_dataset_sample_questions(
+    *,
+    contract_key: str,
+    dataset_title: str,
+    records: list[dict],
+    columns: list[str],
+    identity_column: str | None,
+    count: int = 10,
+) -> list[str]:
+    """从规范记录确定性构建检索测试示例问题（零 LLM，可复现）。
+
+    - csv_qa：直接采样真实问题列——问题本身就是检索查询，必然命中问答投影块；
+    - csv_record：identity 列值（业务主键）或首个非空字段值 + 模板交替；
+      记录不足 count 时用字段名模板补齐。
+    """
+    count = max(int(count or 10), 1)
+    questions: list[str] = []
+
+    if contract_key == "csv_qa":
+        pool = [str(record.get("fields", {}).get("__question__", "")).strip() for record in records]
+        pool = [question for question in pool if question]
+    else:
+        identity_label = identity_column or "记录键"
+        finished: list[str] = []
+        key_pool: list[str] = []
+        for record in records:
+            fields = record.get("fields") or {}
+            record_key = str(record.get("record_key") or "").strip()
+            if record_key.startswith("row:"):
+                # 行号策略没有业务主键：用首个非空字段值构造完整问题，不再进模板轮换
+                value = next((str(v).strip() for v in fields.values() if str(v).strip()), "")
+                if value:
+                    finished.append(f"包含{value}的记录有哪些字段？")
+            elif record_key:
+                key_pool.append(record_key)
+        # 业务主键走模板轮换，避免全部同一句式
+        for index, record_key in enumerate(key_pool):
+            template = _RECORD_QUESTION_TEMPLATES[index % len(_RECORD_QUESTION_TEMPLATES)]
+            finished.append(template.format(identity_label=identity_label, record_key=record_key))
+        pool = finished
+
+    # 均匀采样：跨记录铺开，而不是只取前 N 条
+    if pool:
+        step = max(len(pool) // count, 1)
+        questions.extend(pool[::step][:count])
+
+    # csv_record 记录不足时用字段名模板补齐
+    if len(questions) < count and contract_key != "csv_qa" and columns:
+        used = set(questions)
+        for column in columns:
+            if len(questions) >= count:
+                break
+            candidate = f"数据集{dataset_title}中{column}字段有哪些取值？"
+            if candidate not in used:
+                questions.append(candidate)
+                used.add(candidate)
+
+    return questions[:count]
+
+
+async def generate_csv_dataset_sample_questions(kb_id: str, count: int = 10) -> dict:
+    """dataset_sample_questions 的服务实现：从 canonical records 生成并持久化示例问题。
+
+    前置条件（由路由门禁保证）：契约允许 dataset_sample_questions，即 csv_record/csv_qa。
+    """
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+    from yuxi.storage.postgres.manager import pg_manager
+
+    kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
+    if kb is None:
+        raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
+    db_name = kb.name or kb_id
+
+    async with pg_manager.get_async_session_context() as session:
+        revisions = list(
+            (
+                await session.execute(
+                    select(KnowledgeDatasetRevision)
+                    .where(KnowledgeDatasetRevision.kb_id == kb_id, KnowledgeDatasetRevision.status == "COMMITTED")
+                    .order_by(KnowledgeDatasetRevision.created_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not revisions:
+            raise HTTPException(status_code=400, detail="知识库中没有已提交的数据集，请先完成数据集导入")
+        revision = revisions[0]
+        record_rows = list(
+            (
+                await session.execute(
+                    select(KnowledgeCanonicalRecord)
+                    .where(KnowledgeCanonicalRecord.revision_id == revision.revision_id)
+                    .order_by(KnowledgeCanonicalRecord.row_number.asc())
+                    .limit(300)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    records = [{"record_key": row.record_key, "fields": dict(row.fields_json or {})} for row in record_rows]
+    questions = build_dataset_sample_questions(
+        contract_key=revision.contract_key,
+        dataset_title=revision.source_filename or db_name,
+        records=records,
+        columns=list(revision.columns_json or []),
+        identity_column=(revision.column_mapping or {}).get("identity_column"),
+        count=count,
+    )
+    if not questions:
+        raise HTTPException(status_code=400, detail="数据集中没有可用于生成示例问题的记录")
+
+    try:
+        await KnowledgeBaseRepository().update(kb_id, {"sample_questions": questions})
+        logger.info(f"数据集原生示例问题已生成 {len(questions)} 个: kb={kb_id}, revision={revision.revision_id}")
+    except Exception as save_error:  # noqa: BLE001 - 保存失败不阻断返回
+        logger.error(f"保存数据集示例问题失败: {save_error}")
+
+    return {
+        "message": "success",
+        "questions": questions,
+        "count": len(questions),
+        "kb_id": kb_id,
+        "db_name": db_name,
+    }
