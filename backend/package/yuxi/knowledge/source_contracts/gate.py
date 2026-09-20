@@ -50,6 +50,11 @@ def _digest_enforcement_mode() -> str:
     return os.getenv("YUXI_CONTRACT_DIGEST_ENFORCE", "warn").strip().lower()
 
 
+def digest_enforcement_mode() -> str:
+    """公开读口（治理端点用）：当前 digest 漂移处置模式 warn/strict。"""
+    return _digest_enforcement_mode()
+
+
 class ContractMediaRejected(SourceContractError):
     """文件媒体类型不被契约接受。"""
 

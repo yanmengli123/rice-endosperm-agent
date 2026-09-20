@@ -622,8 +622,114 @@ async def _resolve_default_share_config(current_user: User, share_config: dict |
 
 @knowledge.get("/source-contracts")
 async def list_source_contracts(current_user: User = Depends(get_required_user)):
-    """已注册知识源契约的只读快照（前端选型卡与策略面板的数据源）。"""
+    """已注册知识源契约的只读快照（前端选型卡与策略面板的数据源）。
+
+    每项附 latest_version：前端按 key 选择契约时必须锚定它（或干脆只传 key
+    由后端权威解析最新），禁止依赖注册顺序取首条。
+    """
     return {"contracts": contract_registry_snapshot(), "message": "success"}
+
+
+@knowledge.get("/source-contracts/digest-drift")
+async def contract_digest_drift_inventory(current_user: User = Depends(get_admin_user)):
+    """digest 漂移盘点（strict 切换的前置检查，B3）。
+
+    逐库比对冻结 digest 与当前代码 digest，返回漂移/未知契约清单与计数；
+    全部归零后即可在生产启用 YUXI_CONTRACT_DIGEST_ENFORCE=strict。
+    """
+    del current_user
+    from yuxi.knowledge.source_contracts.gate import digest_enforcement_mode
+    from yuxi.knowledge.source_contracts.registry import resolve_contract
+    from yuxi.knowledge.source_contracts.specs import contract_digest
+    from yuxi.storage.postgres.models_knowledge import KnowledgeBase
+
+    from yuxi.storage.postgres.manager import pg_manager
+
+    async with pg_manager.get_async_session_context() as session:
+        rows = (
+            await session.execute(
+                select(
+                    KnowledgeBase.kb_id,
+                    KnowledgeBase.name,
+                    KnowledgeBase.contract_key,
+                    KnowledgeBase.contract_version,
+                    KnowledgeBase.contract_digest,
+                ).where(KnowledgeBase.contract_key.is_not(None))
+            )
+        ).all() or []
+    drifted, unknown, matched = [], [], 0
+    for kb_id, name, key, version, stored_digest in rows:
+        try:
+            spec = resolve_contract(key, version)
+        except Exception:  # noqa: BLE001
+            unknown.append({"kb_id": kb_id, "name": name, "contract": f"{key}@{version}"})
+            continue
+        current_digest = contract_digest(spec)
+        if stored_digest != current_digest:
+            drifted.append(
+                {
+                    "kb_id": kb_id,
+                    "name": name,
+                    "contract": f"{key}@{version}",
+                    "stored_digest": stored_digest,
+                    "code_digest": current_digest,
+                }
+            )
+        else:
+            matched += 1
+    return {
+        "enforcement_mode": digest_enforcement_mode(),
+        "matched": matched,
+        "drifted_count": len(drifted),
+        "drifted": drifted[:200],
+        "unknown_contracts": unknown,
+        "ready_for_strict": not drifted and not unknown,
+    }
+
+
+@knowledge.post("/source-contracts/refreeze")
+async def refreeze_contract_digests(current_user: User = Depends(get_admin_user)):
+    """契约再冻结（B3）：把每库 contract_digest/contract_snapshot 对齐当前代码。
+
+    语义有意演进（如命令集修正）后的前滚动作（0053 迁移的运维端点版）；
+    strict 模式下拒绝——漂移在 strict 下必须显式迁移处置，不允许静默前滚。
+    写审计事件 CONTRACT_REFREEZE。
+    """
+    from yuxi.knowledge.source_contracts.gate import digest_enforcement_mode
+    from yuxi.knowledge.source_contracts.registry import resolve_contract
+    from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
+    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.storage.postgres.models_knowledge import KnowledgeBase
+
+    if digest_enforcement_mode() == "strict":
+        raise HTTPException(
+            status_code=409,
+            detail="strict 模式下禁止在线再冻结：请通过版本化迁移处置 digest 漂移",
+        )
+    refreshed = 0
+    skipped: list[str] = []
+    async with pg_manager.get_async_session_context() as session:
+        rows = (
+            (await session.execute(select(KnowledgeBase).where(KnowledgeBase.contract_key.is_not(None))))
+            .scalars()
+            .all()
+        )
+        for kb in rows:
+            try:
+                spec = resolve_contract(kb.contract_key, kb.contract_version)
+            except Exception:  # noqa: BLE001
+                skipped.append(f"{kb.contract_key}@{kb.contract_version}")
+                continue
+            kb.contract_digest = contract_digest(spec)
+            kb.contract_snapshot = spec_to_api_dict(spec)
+            refreshed += 1
+    await _record_knowledge_audit(
+        "global",
+        "CONTRACT_REFREEZE",
+        current_user.uid,
+        {"refreshed": refreshed, "skipped": skipped},
+    )
+    return {"refreshed": refreshed, "skipped_unknown": skipped, "message": "契约再冻结完成"}
 
 
 @knowledge.get("/source-contracts/{contract_key}/versions/{version}")

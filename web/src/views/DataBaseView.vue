@@ -662,6 +662,7 @@ import InfoCard from '@/components/shared/InfoCard.vue'
 import dayjs, { parseToShanghai } from '@/utils/time'
 import AiTextarea from '@/components/AiTextarea.vue'
 import { getKbTypeLabel, getKbTypeIcon, getKbTypeColor, kbUtils } from '@/utils/kb_utils'
+import { pickLatestContract } from '@/utils/kbContract'
 
 const route = useRoute()
 const router = useRouter()
@@ -961,8 +962,10 @@ const GENERIC_DOCUMENT_PARENT = {
   nextStep: '上传通用文档 → 解析与质量校验 → 建立检索索引'
 }
 
-const contractByKey = (key) =>
-  state.sourceContracts.find((contract) => contract.contract_key === key) || null
+// 按 key 取契约必须锚定 latest_version（后端快照提供；旧后端回退客户端 semver 取最大）。
+// 禁止 find() 取注册顺序首条——曾把 managed_graph 新库冻结到 1.0.0，
+// 造成 1.1 独有的图谱导图入口可见但被契约拒绝。
+const contractByKey = (key) => pickLatestContract(state.sourceContracts, key)
 
 const selectedContract = computed(() => contractByKey(state.selectedContractKey))
 
@@ -1247,10 +1250,11 @@ const buildRequestData = () => {
   requestData.tool_description = newDatabase.tool_description?.trim() || ''
 
   if (state.selectedContractKey) {
-    // 契约路径：分块/解析/检索参数由系统托管，前端不传处理参数
+    // 契约路径：分块/解析/检索参数由系统托管，前端不传处理参数。
+    // 只提交 key 不提交版本——后端 resolve_contract 权威解析为该 key 的
+    // 最新版本，杜绝前端版本选择与注册中心漂移。
     requestData.source_contract = {
-      key: state.selectedContractKey,
-      version: contractVersion.value
+      key: state.selectedContractKey
     }
     return requestData
   }

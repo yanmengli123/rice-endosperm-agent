@@ -10,11 +10,16 @@ from yuxi.knowledge.source_contracts.registry import registered_contracts, resol
 from yuxi.knowledge.source_contracts.specs import contract_digest
 
 GOLDEN_DIGESTS = {
+    # 2026-09-20 契约矛盾更正（allowed∩forbidden≠∅ 缺陷修复）后更新四项金 digest：
+    # csv_record/csv_qa 移除 allowed 中误入的 5 个文档生命周期命令；managed_graph
+    # 两版从 forbidden 剔除已放行的 stats_repair。运行时门禁以 allowed 为准，
+    # managed_graph 行为不变；CSV 侧堵住的是本就不该放行的命令。0053 迁移已将
+    # 存量 KB 的冻结 digest 前滚对齐（drift 盘点 ready_for_strict=True）。
     "pdf_evidence@1.0.0": "sha256:13f9637f7f08ec05aa44e955c33097714958feceb82b982406f859cb1e489055",
-    "csv_record@1.0.0": "sha256:f62201414e31b5292abe0fea2ee15f505a8c284aa5c4ef9e716cb136eb155538",
-    "csv_qa@1.0.0": "sha256:b6ae0d07c9cf9d940f4b23bca32696909710bcdf9788e1344f3d536d88c9c81b",
-    "managed_graph@1.0.0": "sha256:2506dd046a2f80535dfac83a33818b5a35798c51aa9e454ef5b39fb7a671017d",
-    "managed_graph@1.1.0": "sha256:509d96266ba23c6d427af934e69567a297babcbba09e1f3be4b8dd074f65daa4",
+    "csv_record@1.0.0": "sha256:206fed49ff760adbfffe846eb07b1caa0b7e3868af0eb1cc60f281f91e2396cc",
+    "csv_qa@1.0.0": "sha256:d582f66f63d155971773d4cc3408ff3556f04097a3f69500b916862a5cba16ca",
+    "managed_graph@1.0.0": "sha256:5835d95c337fd85b70601a66548510c4a68e582320dfbbe9283b0d2b90c4fb60",
+    "managed_graph@1.1.0": "sha256:b1108aef6d668af9fc60fc4cc8bcfcc5ed6e314ade56715da11a6eabd071478e",
     "generic_document@1.0.0": "sha256:5feb59c3dc2c30bc7a019012beb2b069e2d8110c9800ce442f01bad8b31fc9cf",
     "legacy_generic@0": "sha256:949a215f50d350d000e6a1fdc5897f5ef4475e9af56d592ed5002547eb0b7b0c",
     "legacy_mixed@0": "sha256:2989a9d5b613f57da46fdccc92c7cd44c6652e30fbf856516da67b14bc38948b",

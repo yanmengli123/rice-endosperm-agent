@@ -426,6 +426,7 @@ import {
 } from '@lucide/vue'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
+import { contractAllows } from '@/utils/kbContract'
 import FileTable from '@/components/FileTable.vue'
 import GraphSourceAssets from '@/components/GraphSourceAssets.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
@@ -481,6 +482,10 @@ const isCsvContractKb = computed(
 )
 const isPdfEvidenceKb = computed(() => kbContractKey.value === 'pdf_evidence')
 const isGraphContractKb = computed(() => kbContractKey.value === 'managed_graph')
+// 契约能力判定（fail-closed）：以建库时冻结的 contract_snapshot.allowed_commands
+// 为准，而非 contract_key——managed_graph@1.0.0 不含 graph_mindmap_generate，
+// 不应显示图谱导图入口（曾出现入口可见但调用被 1.0.0 契约拒绝的版本断层）。
+const canGraphMindmap = computed(() => contractAllows(database.value, 'graph_mindmap_generate'))
 const isContractManagedChunking = computed(
   () => isCsvContractKb.value || isPdfEvidenceKb.value || isGraphContractKb.value
 )
@@ -523,13 +528,15 @@ const tabs = computed(() => {
       milvusTabs.splice(1, 0, { key: 'dataset', label: '数据集导入', icon: Table })
     }
     if (isGraphContractKb.value) {
-      // 规范图谱契约（managed_graph@1.1.0）：检索测试走图谱通道、导图由图谱
-      // 快照派生（graph_mindmap_generate）；RAG 评估/文档基准基于
-      // knowledge_chunks 实现，对图谱库不适用——功能可见性由契约能力而非
-      // kb_type 决定。
-      return milvusTabs.filter((tab) =>
-        ['filetable', 'query', 'graph', 'mindmap'].includes(tab.key)
-      )
+      // 规范图谱契约：检索测试走图谱通道；导图由图谱快照派生，且仅当
+      // 契约版本放行 graph_mindmap_generate（1.1+）时可见；RAG 评估/文档基准
+      // 基于 knowledge_chunks 实现，对图谱库不适用——功能可见性由契约能力
+      // 而非 kb_type/contract_key 决定。
+      const allowedTabs = ['filetable', 'query', 'graph']
+      if (canGraphMindmap.value) {
+        allowedTabs.push('mindmap')
+      }
+      return milvusTabs.filter((tab) => allowedTabs.includes(tab.key))
     }
     return milvusTabs
   }

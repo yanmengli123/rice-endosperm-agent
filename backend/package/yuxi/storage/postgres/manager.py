@@ -1067,6 +1067,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0050_source_asset_catalog", "_migration_0050_source_asset_catalog"),
         ("0051_contract_digest_refresh_graph_v11", "_migration_0051_contract_digest_refresh_graph_v11"),
         ("0052_managed_graph_v11_upgrade", "_migration_0052_managed_graph_v11_upgrade"),
+        ("0053_contract_refreeze", "_migration_0053_contract_refreeze"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2869,6 +2870,52 @@ class PostgresManager(metaclass=SingletonMeta):
             ),
             {"version": v11.version, "digest": contract_digest(v11)},
         )
+
+    async def _migration_0053_contract_refreeze(self, conn) -> None:
+        """契约整体再冻结：全库 contract_digest + contract_snapshot 对齐当前代码 spec。
+
+        背景（两处漂移源）：
+        1. 0052 升级 managed_graph 版本指针时未刷新 contract_snapshot，升级库的
+           allowed_commands 仍是 1.0 快照——能力驱动 UI 会误判 1.1 独有能力；
+        2. 契约命令集语义修正（CSV/managed_graph 的 allowed∩forbidden 清理）改变
+           全部契约 digest。
+        本迁移是「先迁移后 strict」切换序列的既定动作（0051 已示范 digest 前滚）：
+        语义有意演进时冻结面随之前滚，之后启用 YUXI_CONTRACT_DIGEST_ENFORCE=strict。
+        幂等：重跑收敛到当前代码。
+        """
+        import json
+
+        from yuxi.knowledge.source_contracts.registry import resolve_contract
+        from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
+
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT kb_id, contract_key, contract_version FROM knowledge_bases "
+                        "WHERE contract_key IS NOT NULL"
+                    )
+                )
+            )
+            .all()
+            or []
+        )
+        for row in rows:
+            try:
+                spec = resolve_contract(row.contract_key, row.contract_version)
+            except Exception:  # noqa: BLE001
+                continue  # 未知契约（自定义/异常数据）保持原冻结，交由漂移报告披露
+            await conn.execute(
+                text(
+                    "UPDATE knowledge_bases SET contract_digest = :digest, contract_snapshot = :snapshot "
+                    "WHERE kb_id = :kb_id"
+                ),
+                {
+                    "digest": contract_digest(spec),
+                    "snapshot": json.dumps(spec_to_api_dict(spec), ensure_ascii=False),
+                    "kb_id": row.kb_id,
+                },
+            )
 
     async def _migration_0039_graph_mention_evidence(self, conn) -> None:
         """图谱 mention 级原文证据（「点开即见原文」不变式 I1/I2）。

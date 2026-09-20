@@ -186,6 +186,19 @@ _CSV_SHARED_FORBIDDEN = (
     *_GRAPH_IMPORT,
 )
 
+# managed_graph 的禁止集 = 文档生命周期减去 stats_repair（规范图谱的合法运维命令，
+# 在 allowed 中显式放行；此前 *_DOCUMENT_LIFECYCLE 整组展开导致 allowed∩forbidden≠∅）。
+# 文档版 mindmap_generate 基于文件列表，对图谱库无意义；图谱导图必须走
+# graph_mindmap_generate（从规范图谱快照派生，仅 1.1 放行）。
+_MANAGED_GRAPH_FORBIDDEN = (
+    *(command for command in _DOCUMENT_LIFECYCLE if command != COMMAND_STATS_REPAIR),
+    COMMAND_FETCH_URL,
+    *_LLM_GRAPH,
+    COMMAND_MINDMAP_GENERATE,
+    *_DATASET,
+    COMMAND_SAMPLE_QUESTIONS,
+)
+
 CSV_RECORD = SourceContractSpec(
     contract_key="csv_record",
     version="1.0.0",
@@ -199,16 +212,13 @@ CSV_RECORD = SourceContractSpec(
         operator_description="供查询结构化实验记录/属性表的数据集。",
         entry_mode="primary",
     ),
+    # CSV 数据集无文档生命周期：document_delete/move、folder_create、
+    # sample_questions、stats_repair 均属 _CSV_SHARED_FORBIDDEN（此前误入 allowed）
     allowed_commands=(
         *_DATASET,
         *_RELEASE,
         *_LLM_GRAPH,
         COMMAND_MINDMAP_GENERATE,
-        COMMAND_DOCUMENT_DELETE,
-        COMMAND_DOCUMENT_MOVE,
-        COMMAND_FOLDER_CREATE,
-        COMMAND_STATS_REPAIR,
-        COMMAND_SAMPLE_QUESTIONS,
     ),
     forbidden_commands=_CSV_SHARED_FORBIDDEN,
     accepted_media=(
@@ -301,14 +311,7 @@ MANAGED_GRAPH = SourceContractSpec(
         entry_mode="primary",
     ),
     allowed_commands=(*_GRAPH_IMPORT, *_RELEASE, COMMAND_STATS_REPAIR),
-    forbidden_commands=(
-        *_DOCUMENT_LIFECYCLE,
-        COMMAND_FETCH_URL,
-        *_LLM_GRAPH,
-        COMMAND_MINDMAP_GENERATE,
-        *_DATASET,
-        COMMAND_SAMPLE_QUESTIONS,
-    ),
+    forbidden_commands=_MANAGED_GRAPH_FORBIDDEN,
     accepted_media=(
         SourceContractMediaRule(
             role="nodes",
@@ -364,16 +367,7 @@ MANAGED_GRAPH_V1_1 = SourceContractSpec(
         entry_mode="primary",
     ),
     allowed_commands=(*_GRAPH_IMPORT, *_RELEASE, COMMAND_STATS_REPAIR, COMMAND_GRAPH_MINDMAP_GENERATE),
-    forbidden_commands=(
-        *_DOCUMENT_LIFECYCLE,
-        COMMAND_FETCH_URL,
-        *_LLM_GRAPH,
-        # 文档版 mindmap_generate 基于文件列表，对图谱库无意义；
-        # 图谱导图必须走 graph_mindmap_generate（从规范图谱快照派生）
-        COMMAND_MINDMAP_GENERATE,
-        *_DATASET,
-        COMMAND_SAMPLE_QUESTIONS,
-    ),
+    forbidden_commands=_MANAGED_GRAPH_FORBIDDEN,
     accepted_media=MANAGED_GRAPH.accepted_media,
     authority_policy={
         "canonical_store": "postgresql",
