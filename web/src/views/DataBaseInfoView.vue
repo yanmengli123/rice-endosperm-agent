@@ -79,103 +79,109 @@
 
         <main class="database-tab-content">
           <div v-if="isMilvus" v-show="activeTab === 'filetable'" class="tab-panel file-panel">
-            <div class="file-management-info">
-              <div class="file-info-title">
-                <div class="file-info-title-row">
+            <template v-if="isGraphContractKb">
+              <!-- 规范图谱契约：文件管理展示源资产目录（不走普通文档上传/解析） -->
+              <GraphSourceAssets v-if="kbId" :kb-id="kbId" />
+            </template>
+            <template v-else>
+              <div class="file-management-info">
+                <div class="file-info-title">
+                  <div class="file-info-title-row">
+                    <button
+                      type="button"
+                      class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
+                      @click="showAddFilesModal()"
+                    >
+                      <FileUp :size="14" />
+                      <span>上传</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="lucide-icon-btn extension-panel-action extension-panel-action-secondary"
+                      @click="showCreateFolderModal"
+                    >
+                      <FolderPlus :size="14" />
+                      <span>新建文件夹</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="file-panel-status">
+                  <button
+                    v-if="pendingParseCount > 0"
+                    type="button"
+                    class="file-stat-card file-stat-action file-stat-summary"
+                    :disabled="store.state.chunkLoading"
+                    @click="confirmBatchParse"
+                  >
+                    <FileText :size="16" />
+                    <div class="file-stat-inline">
+                      <strong>{{ pendingParseCount }}</strong>
+                      <span>待解析</span>
+                    </div>
+                  </button>
+                  <button
+                    v-if="pendingIndexCount > 0"
+                    type="button"
+                    class="file-stat-card file-stat-action file-stat-summary"
+                    :disabled="store.state.chunkLoading"
+                    @click="confirmBatchIndex"
+                  >
+                    <DatabaseIcon :size="16" />
+                    <div class="file-stat-inline">
+                      <strong>{{ pendingIndexCount }}</strong>
+                      <span>待入库</span>
+                    </div>
+                  </button>
+                  <div class="file-stat-card file-stat-summary">
+                    <FileText :size="16" />
+                    <div class="file-stat-inline">
+                      <strong>{{ fileStats.count }}</strong>
+                      <span>文件</span>
+                    </div>
+                  </div>
+                  <div v-if="fileStats.sizeText" class="file-stat-card file-stat-summary">
+                    <DatabaseIcon :size="16" />
+                    <div class="file-stat-inline">
+                      <strong>{{ fileStats.sizeText }}</strong>
+                      <span>总大小</span>
+                    </div>
+                  </div>
                   <button
                     type="button"
-                    class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
-                    @click="showAddFilesModal()"
+                    class="file-stat-card file-stat-summary file-stat-repair"
+                    :disabled="statsRepairing"
+                    :aria-busy="statsRepairing"
+                    aria-label="修复缺失的 Chunk/Token 统计"
+                    title="修复缺失的 Chunk/Token 统计"
+                    @click="repairDatabaseStats"
                   >
-                    <FileUp :size="14" />
-                    <span>上传</span>
+                    <LoaderCircle v-if="statsRepairing" :size="16" class="file-stat-spinner" />
+                    <DatabaseIcon v-else :size="16" />
+                    <div class="file-stat-inline">
+                      <strong>{{ fileStats.chunkText }}</strong>
+                      <span>Chunks</span>
+                    </div>
                   </button>
                   <button
                     type="button"
-                    class="lucide-icon-btn extension-panel-action extension-panel-action-secondary"
-                    @click="showCreateFolderModal"
+                    class="file-stat-card file-stat-summary file-stat-repair"
+                    :disabled="statsRepairing"
+                    :aria-busy="statsRepairing"
+                    aria-label="修复缺失的 Chunk/Token 统计"
+                    title="修复缺失的 Chunk/Token 统计"
+                    @click="repairDatabaseStats"
                   >
-                    <FolderPlus :size="14" />
-                    <span>新建文件夹</span>
+                    <LoaderCircle v-if="statsRepairing" :size="16" class="file-stat-spinner" />
+                    <Hash v-else :size="16" />
+                    <div class="file-stat-inline">
+                      <strong>{{ fileStats.tokenText }}</strong>
+                      <span>Tokens</span>
+                    </div>
                   </button>
                 </div>
               </div>
-              <div class="file-panel-status">
-                <button
-                  v-if="pendingParseCount > 0"
-                  type="button"
-                  class="file-stat-card file-stat-action file-stat-summary"
-                  :disabled="store.state.chunkLoading"
-                  @click="confirmBatchParse"
-                >
-                  <FileText :size="16" />
-                  <div class="file-stat-inline">
-                    <strong>{{ pendingParseCount }}</strong>
-                    <span>待解析</span>
-                  </div>
-                </button>
-                <button
-                  v-if="pendingIndexCount > 0"
-                  type="button"
-                  class="file-stat-card file-stat-action file-stat-summary"
-                  :disabled="store.state.chunkLoading"
-                  @click="confirmBatchIndex"
-                >
-                  <DatabaseIcon :size="16" />
-                  <div class="file-stat-inline">
-                    <strong>{{ pendingIndexCount }}</strong>
-                    <span>待入库</span>
-                  </div>
-                </button>
-                <div class="file-stat-card file-stat-summary">
-                  <FileText :size="16" />
-                  <div class="file-stat-inline">
-                    <strong>{{ fileStats.count }}</strong>
-                    <span>文件</span>
-                  </div>
-                </div>
-                <div v-if="fileStats.sizeText" class="file-stat-card file-stat-summary">
-                  <DatabaseIcon :size="16" />
-                  <div class="file-stat-inline">
-                    <strong>{{ fileStats.sizeText }}</strong>
-                    <span>总大小</span>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  class="file-stat-card file-stat-summary file-stat-repair"
-                  :disabled="statsRepairing"
-                  :aria-busy="statsRepairing"
-                  aria-label="修复缺失的 Chunk/Token 统计"
-                  title="修复缺失的 Chunk/Token 统计"
-                  @click="repairDatabaseStats"
-                >
-                  <LoaderCircle v-if="statsRepairing" :size="16" class="file-stat-spinner" />
-                  <DatabaseIcon v-else :size="16" />
-                  <div class="file-stat-inline">
-                    <strong>{{ fileStats.chunkText }}</strong>
-                    <span>Chunks</span>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  class="file-stat-card file-stat-summary file-stat-repair"
-                  :disabled="statsRepairing"
-                  :aria-busy="statsRepairing"
-                  aria-label="修复缺失的 Chunk/Token 统计"
-                  title="修复缺失的 Chunk/Token 统计"
-                  @click="repairDatabaseStats"
-                >
-                  <LoaderCircle v-if="statsRepairing" :size="16" class="file-stat-spinner" />
-                  <Hash v-else :size="16" />
-                  <div class="file-stat-inline">
-                    <strong>{{ fileStats.tokenText }}</strong>
-                    <span>Tokens</span>
-                  </div>
-                </button>
-              </div>
-            </div>
-            <FileTable ref="fileTableRef" />
+              <FileTable ref="fileTableRef" />
+            </template>
           </div>
 
           <div
@@ -421,6 +427,7 @@ import {
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import FileTable from '@/components/FileTable.vue'
+import GraphSourceAssets from '@/components/GraphSourceAssets.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
 import FileUploadModal from '@/components/FileUploadModal.vue'
 import KnowledgeGraphSection from '@/components/KnowledgeGraphSection.vue'
@@ -514,6 +521,15 @@ const tabs = computed(() => {
     ]
     if (isCsvContractKb.value) {
       milvusTabs.splice(1, 0, { key: 'dataset', label: '数据集导入', icon: Table })
+    }
+    if (isGraphContractKb.value) {
+      // 规范图谱契约（managed_graph@1.1.0）：检索测试走图谱通道、导图由图谱
+      // 快照派生（graph_mindmap_generate）；RAG 评估/文档基准基于
+      // knowledge_chunks 实现，对图谱库不适用——功能可见性由契约能力而非
+      // kb_type 决定。
+      return milvusTabs.filter((tab) =>
+        ['filetable', 'query', 'graph', 'mindmap'].includes(tab.key)
+      )
     }
     return milvusTabs
   }

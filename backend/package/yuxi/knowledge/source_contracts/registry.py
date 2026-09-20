@@ -14,6 +14,7 @@ from yuxi.knowledge.source_contracts.definitions import (
     LEGACY_GENERIC,
     LEGACY_MIXED,
     MANAGED_GRAPH,
+    MANAGED_GRAPH_V1_1,
     PDF_EVIDENCE,
 )
 from yuxi.knowledge.source_contracts.specs import SourceContractSpec, spec_to_api_dict
@@ -40,6 +41,7 @@ _REGISTRY: dict[tuple[str, str], SourceContractSpec] = {
         CSV_RECORD,
         CSV_QA,
         MANAGED_GRAPH,
+        MANAGED_GRAPH_V1_1,
         GENERIC_DOCUMENT,
         LEGACY_GENERIC,
         LEGACY_MIXED,

@@ -60,6 +60,32 @@ async def generate_answer_if_needed(
         return ""
 
 
+def _numeric_metric_count(metrics: dict[str, Any]) -> int:
+    return sum(1 for value in metrics.values() if isinstance(value, bool | int | float))
+
+
+def resolve_eval_status(
+    *,
+    retrieved_chunks: list[dict[str, Any]],
+    generated_answer: str,
+    current_metrics: dict[str, Any],
+    retrieval_config: dict[str, Any],
+) -> tuple[str, str | None]:
+    """区分「得分为 0」与「不可评估」：无上下文且无答案、或未产生任何
+    有效指标时判 NOT_EVALUABLE；只要产出了有效指标就是 OK（0 分是真实结果），
+    部分信号缺失（如答案生成失败）记入 reason 但不改变可评估性。"""
+    reasons: list[str] = []
+    if not retrieved_chunks:
+        reasons.append("无检索召回")
+    if not generated_answer:
+        reasons.append("未生成答案" + ("（answer_llm 未配置）" if not retrieval_config.get("answer_llm") else ""))
+    if _numeric_metric_count(current_metrics) == 0:
+        if reasons:
+            return "NOT_EVALUABLE", "; ".join(reasons)
+        return "NOT_EVALUABLE", "未产生任何有效指标"
+    return "OK", "; ".join(reasons) if reasons else None
+
+
 async def evaluate_question(
     *,
     kb_instance: Any,
@@ -71,9 +97,19 @@ async def evaluate_question(
     judge_llm: Any | None,
     select_model_fn: Callable[..., Any],
     ragas_engine: Any | None = None,
+    contract_key: str | None = None,
 ) -> dict[str, Any]:
+    from yuxi.knowledge.scope_gateway import query_single_kb_unified
+
     query = question_data["query"]
-    query_result = await kb_instance.aquery(query, kb_id, **retrieval_config)
+    # 评估与检索测试/正式问答共用单库统一检索入口，保证通道一致
+    # （managed_graph 库没有文档 chunk，必须走图谱通道才可评估）
+    query_result = await query_single_kb_unified(
+        kb_id=kb_id,
+        query_text=query,
+        retrieval_params=retrieval_config,
+        contract_key=contract_key,
+    )
     generated_answer, retrieved_chunks = normalize_query_result(query_result)
     generated_answer = await generate_answer_if_needed(
         query=query,
@@ -115,6 +151,13 @@ async def evaluate_question(
         )
         current_metrics.update(ragas_scores)
 
+    eval_status, eval_status_reason = resolve_eval_status(
+        retrieved_chunks=retrieved_chunks,
+        generated_answer=generated_answer,
+        current_metrics=current_metrics,
+        retrieval_config=retrieval_config,
+    )
+
     return {
         "detail": {
             "query_text": query,
@@ -123,6 +166,8 @@ async def evaluate_question(
             "generated_answer": generated_answer,
             "retrieved_chunks": retrieved_chunks,
             "metrics": current_metrics,
+            "eval_status": eval_status,
+            "eval_status_reason": eval_status_reason,
         },
         "retrieval_scores": retrieval_scores,
         "answer_scores": answer_scores,
@@ -141,12 +186,26 @@ def aggregate_metrics(
     overall_metrics = {}
 
     if retrieval_metrics_list:
-        keys = retrieval_metrics_list[0].keys()
-        for key in keys:
-            overall_metrics[key] = sum(m.get(key, 0) for m in retrieval_metrics_list) / len(retrieval_metrics_list)
+        # key 并集 + 分母只计该指标实际存在的题：缺指标既不能按 0 稀释，
+        # 也不能因首项缺 key 而整列丢失。
+        keys: set[str] = set()
+        for metrics in retrieval_metrics_list:
+            keys.update(metrics.keys())
+        for key in sorted(keys):
+            values = [
+                float(metrics[key])
+                for metrics in retrieval_metrics_list
+                if isinstance(metrics.get(key), bool | int | float)
+            ]
+            if values:
+                overall_metrics[key] = sum(values) / len(values)
 
     if answer_metrics_list:
-        scores = [m.get("score", 0) for m in answer_metrics_list]
+        scores = [
+            float(metrics["score"])
+            for metrics in answer_metrics_list
+            if isinstance(metrics.get("score"), bool | int | float)
+        ]
         overall_metrics["answer_correctness"] = sum(scores) / len(scores) if scores else 0.0
 
     ragas_overall = None

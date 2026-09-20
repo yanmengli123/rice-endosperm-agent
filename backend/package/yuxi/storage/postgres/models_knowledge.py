@@ -981,6 +981,43 @@ class KnowledgeGraphEntitySource(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
 
 
+class KnowledgeSourceAsset(Base):
+    """统一源资产目录：契约知识库（managed_graph 等）的上传源文件登记。
+
+    普通文档仍走 knowledge_files，不迁移入本表；文件管理返回「普通文档 +
+    契约源资产」的统一视图。图谱源资产不单独删除，只随导入批次回滚
+    （lifecycle_status 跟随批次状态）。backfilled 标记 0047 迁移回填行
+    （原始文件名/大小/MIME 在 knowledge_graph_imports 中不存在，用批次名近似）。
+    """
+
+    __tablename__ = "knowledge_source_assets"
+    __table_args__ = (
+        UniqueConstraint("asset_id", name="uq_knowledge_source_assets_asset_id"),
+        UniqueConstraint("tenant_id", "kb_id", "import_id", "role", name="uq_source_asset_import_role"),
+        Index("ix_source_assets_kb_kind", "kb_id", "asset_kind"),
+        Index("ix_source_assets_import", "import_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    asset_id = Column(String(80), nullable=False)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
+    contract_ref = Column(String(128))
+    asset_kind = Column(String(32), nullable=False)
+    role = Column(String(32), nullable=False)
+    import_id = Column(String(64), nullable=False)
+    parse_revision_id = Column(String(64))
+    original_filename = Column(String(512))
+    content_type = Column(String(128))
+    size_bytes = Column(BigInteger)
+    sha256 = Column(String(64), nullable=False)
+    object_key = Column(String(1024), nullable=False)
+    lifecycle_status = Column(String(32), nullable=False, default="ACTIVE")
+    backfilled = Column(Boolean, nullable=False, default=False)
+    created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
 class KnowledgeGraphTripleSource(Base):
     """规范三元组与导入来源的多对多关系。"""
 
@@ -1303,6 +1340,10 @@ class EvaluationRunItem(Base):
     generated_answer = Column(Text)
     retrieved_chunks = Column(JSON_VALUE)
     metrics = Column(JSON_VALUE)
+    # OK=完成评估（0 分是真实结果）/ NOT_EVALUABLE=无上下文无答案或无有效指标
+    # / FAILED=该题调用或计算失败 / PENDING=尚未评估
+    eval_status = Column(String(32), nullable=False, default="PENDING")
+    eval_status_reason = Column(Text)
     # 运行时从题目 item_metadata.tags 快照，供按标签切片聚合与导出透视
     item_tags = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)

@@ -134,7 +134,8 @@ class EvaluationMetricsCalculator:
     ) -> float | None:
         """综合得分：有答案准确率则用准确率，否则用 recall@10。"""
         if answer_metrics_list:
-            scores = [m.get("score", 0.0) for m in answer_metrics_list]
+            # 评判失败（score=None）的题不进综合分分母
+            scores = [float(m["score"]) for m in answer_metrics_list if isinstance(m.get("score"), bool | int | float)]
             return sum(scores) / len(scores) if scores else None
 
         recalls = [m["recall@10"] for m in retrieval_metrics_list if m and "recall@10" in m]

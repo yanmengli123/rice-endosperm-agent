@@ -34,6 +34,22 @@ class ContractCommandForbidden(SourceContractError):
     error_code = "SOURCE_CONTRACT_VIOLATION"
 
 
+class ContractDigestDriftError(SourceContractError):
+    """KB 行上冻结的契约 digest 与当前代码不一致（strict 模式 fail closed）。"""
+
+    http_status = 422
+    error_code = "SOURCE_CONTRACT_DIGEST_DRIFT"
+
+
+def _digest_enforcement_mode() -> str:
+    """digest 漂移处置：warn（默认，仅告警）/ strict（fail closed）。
+
+    strict 是灰度开关：必须先运行 digest 刷新迁移（把所有 KB 行的
+    contract_digest 对齐到当前代码），再切换，否则存量行会全线被拒。
+    """
+    return os.getenv("YUXI_CONTRACT_DIGEST_ENFORCE", "warn").strip().lower()
+
+
 class ContractMediaRejected(SourceContractError):
     """文件媒体类型不被契约接受。"""
 
@@ -56,10 +72,14 @@ async def load_kb_contract(kb_id: str) -> SourceContractSpec:
     spec = resolve_contract(contract_key, contract_version or None)
     stored_digest = (kb.contract_digest or "").strip()
     if stored_digest and stored_digest != contract_digest(spec):
-        logger.warning(
+        drift_message = (
             f"[ContractGate] KB {kb_id} 冻结契约 digest={stored_digest} 与当前代码 "
-            f"{spec.contract_ref} digest={contract_digest(spec)} 不一致，按当前代码语义执行"
+            f"{spec.contract_ref} digest={contract_digest(spec)} 不一致"
         )
+        if _digest_enforcement_mode() == "strict":
+            # 冻结契约的语义漂移必须 fail closed：先跑 digest 刷新迁移再开 strict
+            raise ContractDigestDriftError(f"{drift_message}；strict 模式拒绝按漂移语义执行")
+        logger.warning(f"{drift_message}，按当前代码语义执行")
     return spec
 
 

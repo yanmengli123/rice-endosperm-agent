@@ -91,6 +91,27 @@ async def upload_graph_import(
             relationships_bytes=relationships_bytes,
             cypher_bytes=cypher_bytes,
             created_by=current_user.uid,
+            file_metas={
+                "nodes": {
+                    "filename": nodes_file.filename,
+                    "content_type": nodes_file.content_type,
+                    "size": len(nodes_bytes),
+                },
+                "relationships": {
+                    "filename": relationships_file.filename,
+                    "content_type": relationships_file.content_type,
+                    "size": len(relationships_bytes),
+                },
+                "audit": (
+                    {
+                        "filename": cypher_file.filename,
+                        "content_type": cypher_file.content_type,
+                        "size": len(cypher_bytes),
+                    }
+                    if cypher_file and cypher_bytes is not None
+                    else None
+                ),
+            },
         )
         return {"data": result, "deduplicated": deduplicated}
     except ValueError as exc:
@@ -105,6 +126,14 @@ async def list_graph_imports(kb_id: str, current_user: User = Depends(get_admin_
     repository = ManagedGraphImportService().repository
     records = await repository.list(kb_id)
     return {"items": [repository.import_to_dict(record) for record in records]}
+
+
+@graph_import.get("/databases/{kb_id}/source-assets")
+async def list_source_assets(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """统一源资产目录：契约知识库上传源文件（按导入批次 × role 展开）。"""
+    from yuxi.knowledge.graphs.source_asset_catalog import list_source_assets as list_assets
+
+    return {"items": await list_assets(kb_id)}
 
 
 @graph_import.get("/databases/{kb_id}/graph-export")

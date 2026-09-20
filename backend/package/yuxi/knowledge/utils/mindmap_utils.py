@@ -658,3 +658,229 @@ async def batch_remove_files_from_mindmap(kb_id: str, removals: list[tuple[str, 
         logger.info(f"思维导图批量清理完成: {kb_id}, 移除 {len(stale_filenames)} 个文件")
     except Exception as e:
         logger.error(f"从思维导图批量移除文件失败: {e}")
+
+
+GRAPH_MINDMAP_SYSTEM_PROMPT = """你是一个专业的知识整理助手。
+
+你的任务是分析一个规范科研知识图谱的结构统计快照，生成层次分明的思维导图。
+
+要求：
+1. 思维导图要有清晰的层级结构（2-4层）
+2. 根节点是知识库名称
+3. 第一层按关系类型大类组织（如：调控关系、互作关系、表达变化等）
+4. 第二层是子分类或代表性实体分组
+5. **叶子节点必须是具体实体名称或"实体A —关系→ 实体B"形式的三元组摘要**
+6. 优先呈现关系数量多、证据充分（有 PMID/DOI）的实体与关系
+7. 冲突关系单独归入"⚠️ 存在冲突证据"分类
+8. 使用合适的emoji图标增强可读性
+9. 返回JSON格式，遵循以下结构：
+
+```json
+{
+  "content": "知识库名称",
+  "children": [
+    {
+      "content": "🧬 调控关系",
+      "children": [
+        {"content": "GeneA —正向调控→ GeneB（PMID: 12345678）", "children": []},
+        {"content": "GeneC —负向调控→ GeneD", "children": []}
+      ]
+    },
+    {
+      "content": "🔗 高连接度实体",
+      "children": [
+        {"content": "GeneX（28 条关系）", "children": []}
+      ]
+    }
+  ]
+}
+```
+
+**重要约束：**
+- 每个实体/三元组在整个JSON中只能出现一次
+- 只使用快照中真实存在的实体、关系与引用，不得编造
+- 分类名称要简洁明了，使用emoji增强视觉效果
+"""
+
+
+async def _load_managed_graph_snapshot(kb_id: str) -> dict[str, Any]:
+    """从 PostgreSQL 规范事实源读取图谱结构快照（有界统计，供导图生成）。"""
+    from sqlalchemy import desc, func, select
+
+    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.storage.postgres.models_knowledge import (
+        KnowledgeGraphEntity,
+        KnowledgeGraphRelationEvidence,
+        KnowledgeGraphTriple,
+    )
+
+    async with pg_manager.get_async_session_context() as session:
+        entity_count = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(KnowledgeGraphEntity).where(KnowledgeGraphEntity.kb_id == kb_id)
+                )
+            ).scalar()
+            or 0
+        )
+        triple_count = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(KnowledgeGraphTriple).where(KnowledgeGraphTriple.kb_id == kb_id)
+                )
+            ).scalar()
+            or 0
+        )
+        evidence_count = int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(KnowledgeGraphRelationEvidence)
+                    .where(KnowledgeGraphRelationEvidence.kb_id == kb_id)
+                )
+            ).scalar()
+            or 0
+        )
+        relation_types = [
+            {"relation_type": row[0], "count": int(row[1])}
+            for row in (
+                await session.execute(
+                    select(KnowledgeGraphTriple.relation_type, func.count())
+                    .where(KnowledgeGraphTriple.kb_id == kb_id)
+                    .group_by(KnowledgeGraphTriple.relation_type)
+                    .order_by(desc(func.count()))
+                    .limit(20)
+                )
+            ).all()
+        ]
+        source_entity = KnowledgeGraphEntity
+        top_entities = [
+            {"name": row[0], "relation_count": int(row[1])}
+            for row in (
+                await session.execute(
+                    select(
+                        source_entity.name,
+                        func.count(),
+                    )
+                    .join(
+                        KnowledgeGraphTriple,
+                        (KnowledgeGraphTriple.source_entity_id == source_entity.entity_id)
+                        | (KnowledgeGraphTriple.target_entity_id == source_entity.entity_id),
+                    )
+                    .where(KnowledgeGraphTriple.kb_id == kb_id)
+                    .group_by(source_entity.name)
+                    .order_by(desc(func.count()))
+                    .limit(24)
+                )
+            ).all()
+        ]
+        sample_rows = (
+            await session.execute(
+                select(
+                    KnowledgeGraphTriple.relation_type,
+                    KnowledgeGraphTriple.content,
+                    KnowledgeGraphTriple.conflict_status,
+                    KnowledgeGraphRelationEvidence.pmid,
+                    KnowledgeGraphRelationEvidence.doi,
+                )
+                .join(
+                    KnowledgeGraphRelationEvidence,
+                    KnowledgeGraphRelationEvidence.triple_id == KnowledgeGraphTriple.triple_id,
+                )
+                .where(KnowledgeGraphTriple.kb_id == kb_id)
+                .order_by(desc(KnowledgeGraphTriple.support_count))
+                .limit(40)
+            )
+        ).all()
+        sample_triples = [
+            {
+                "content": row[1],
+                "relation_type": row[0],
+                "conflict": row[2] == "CONTESTED",
+                "pmid": row[3],
+                "doi": row[4],
+            }
+            for row in sample_rows
+        ]
+    return {
+        "entity_count": entity_count,
+        "triple_count": triple_count,
+        "evidence_count": evidence_count,
+        "relation_types": relation_types,
+        "top_entities": top_entities,
+        "sample_triples": sample_triples,
+    }
+
+
+async def generate_graph_mindmap(kb_id: str, user_prompt: str = "") -> dict[str, Any]:
+    """规范图谱原生导图：由 PostgreSQL 图谱快照派生（导航产品，不回流证据通道）。"""
+    kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
+    if kb is None:
+        raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
+
+    snapshot = await _load_managed_graph_snapshot(kb_id)
+    if not snapshot["triple_count"]:
+        raise HTTPException(status_code=400, detail="规范图谱为空，请先完成托管图谱导入")
+
+    db_name = kb.name or "规范图谱"
+    stats_text = json.dumps(snapshot, ensure_ascii=False, indent=1)
+    snapshot_line = (
+        f"规范图谱结构快照（实体 {snapshot['entity_count']} 个、关系 {snapshot['triple_count']} 条、"
+        f"关系证据 {snapshot['evidence_count']} 条）："
+    )
+    user_content = textwrap.dedent(
+        f"""\
+        知识库名称：{db_name}
+        {snapshot_line}
+        {stats_text}
+
+        请基于以上快照生成思维导图结构。
+        {("用户补充要求：" + user_prompt) if user_prompt else ""}"""
+    )
+
+    model = select_model(model_spec=config.default_model)
+    response = await model.call(
+        [
+            {"role": "system", "content": GRAPH_MINDMAP_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        stream=False,
+    )
+    content = response.content if hasattr(response, "content") else str(response)
+
+    try:
+        mindmap_data = parse_mindmap_content(content)
+    except ValueError as e:
+        logger.error(f"图谱导图 AI 返回 JSON 解析失败: {e}, 原始内容: {content}")
+        raise HTTPException(status_code=500, detail=f"AI返回格式错误: {str(e)}") from e
+
+    now = datetime.now(UTC).isoformat()
+    metadata = {
+        "generated_at": now,
+        "source": "managed_graph",
+        "file_count": 0,
+        "incremental": False,
+        "graph_snapshot": {
+            "entity_count": snapshot["entity_count"],
+            "triple_count": snapshot["triple_count"],
+            "evidence_count": snapshot["evidence_count"],
+        },
+    }
+    try:
+        await KnowledgeBaseRepository().update(
+            kb_id,
+            {"mindmap": mindmap_data, "mindmap_file_ids": {}, "mindmap_metadata": metadata},
+        )
+        logger.info(f"规范图谱导图生成成功: {kb_id}")
+    except Exception as save_error:
+        logger.error(f"保存规范图谱导图失败: {save_error}")
+
+    return {
+        "message": "success",
+        "mindmap": mindmap_data,
+        "kb_id": kb_id,
+        "slug": kb_id,
+        "db_name": db_name,
+        "no_ai_needed": False,
+        "graph_snapshot": metadata["graph_snapshot"],
+    }

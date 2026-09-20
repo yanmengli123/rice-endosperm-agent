@@ -1060,6 +1060,10 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0043_custom_tools", "_migration_0043_custom_tools"),
         ("0044_doclex_figure_mentions", "_migration_0044_doclex_figure_mentions"),
         ("0045_graph_golden_samples", "_migration_0045_graph_golden_samples"),
+        ("0046_evaluation_item_status", "_migration_0046_evaluation_item_status"),
+        ("0050_source_asset_catalog", "_migration_0050_source_asset_catalog"),
+        ("0051_contract_digest_refresh_graph_v11", "_migration_0051_contract_digest_refresh_graph_v11"),
+        ("0052_managed_graph_v11_upgrade", "_migration_0052_managed_graph_v11_upgrade"),
     ]
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
@@ -2637,6 +2641,170 @@ class PostgresManager(metaclass=SingletonMeta):
             from yuxi.storage.postgres.models_knowledge import KnowledgeGraphGoldenSample  # noqa: F401
 
             await conn.run_sync(KnowledgeBase.metadata.create_all)
+
+    async def _migration_0046_evaluation_item_status(self, conn) -> None:
+        """评估逐题状态：区分「得分为 0」与「不可评估」。
+
+        存量回填口径与 resolve_eval_status 一致：metrics 中存在数值型指标的
+        题标 OK，否则标 NOT_EVALUABLE（历史行不存在 FAILED 中间态）。
+        """
+        await conn.execute(text("ALTER TABLE evaluation_run_items ADD COLUMN IF NOT EXISTS eval_status VARCHAR(32)"))
+        await conn.execute(text("ALTER TABLE evaluation_run_items ADD COLUMN IF NOT EXISTS eval_status_reason TEXT"))
+        await conn.execute(
+            text(
+                "UPDATE evaluation_run_items SET eval_status = CASE "
+                "WHEN EXISTS (SELECT 1 FROM jsonb_each(COALESCE(metrics, '{}'::jsonb)) AS entry "
+                "WHERE jsonb_typeof(entry.value) = 'number') THEN 'OK' "
+                "ELSE 'NOT_EVALUABLE' END "
+                "WHERE eval_status IS NULL"
+            )
+        )
+        await conn.execute(text("ALTER TABLE evaluation_run_items ALTER COLUMN eval_status SET NOT NULL"))
+
+
+    async def _migration_0050_source_asset_catalog(self, conn) -> None:
+        """统一源资产目录：契约知识库上传源文件的登记与文件管理统一视图。
+
+        存量回填：knowledge_graph_imports 按批次 × role（nodes/relationships/
+        audit）展开登记；不复制 MinIO 对象，object_key/sha256 直接引用导入行。
+        导入表没有原始文件名/大小/MIME，回填行以批次名 + role 近似并标记
+        backfilled=True；新上传由 create_upload 携带真实文件元数据登记。
+        """
+        import hashlib
+
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_knowledge import KnowledgeSourceAsset  # noqa: F401
+
+            await conn.run_sync(KnowledgeBase.metadata.create_all)
+
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT i.import_id, i.kb_id, i.name, i.status, i.created_by, i.created_at, "
+                        "kb.tenant_id, i.nodes_object_name, i.nodes_sha256, "
+                        "i.relationships_object_name, i.relationships_sha256, "
+                        "i.cypher_object_name, i.cypher_sha256 "
+                        "FROM knowledge_graph_imports i "
+                        "JOIN knowledge_bases kb ON kb.kb_id = i.kb_id"
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        for row in rows:
+            roles = (
+                ("graph_nodes", "nodes", "text/csv", row["nodes_object_name"], row["nodes_sha256"]),
+                (
+                    "graph_relationships",
+                    "relationships",
+                    "text/csv",
+                    row["relationships_object_name"],
+                    row["relationships_sha256"],
+                ),
+                ("graph_audit", "audit", "text/plain", row["cypher_object_name"], row["cypher_sha256"]),
+            )
+            lifecycle = "ROLLED_BACK" if str(row["status"]) == "ROLLED_BACK" else "ACTIVE"
+            for asset_kind, role, content_type, object_key, sha256 in roles:
+                if not object_key or not sha256:
+                    continue
+                asset_id = f"ksa_{hashlib.sha256(f'{row["import_id"]}:{role}'.encode()).hexdigest()[:40]}"
+                await conn.execute(
+                    text(
+                        "INSERT INTO knowledge_source_assets "
+                        "(asset_id, tenant_id, kb_id, contract_ref, asset_kind, role, import_id, "
+                        "original_filename, content_type, size_bytes, sha256, object_key, "
+                        "lifecycle_status, backfilled, created_by, created_at) "
+                        "VALUES (:asset_id, :tenant_id, :kb_id, :contract_ref, :asset_kind, :role, :import_id, "
+                        ":original_filename, :content_type, NULL, :sha256, :object_key, "
+                        ":lifecycle_status, TRUE, :created_by, :created_at) "
+                        "ON CONFLICT (tenant_id, kb_id, import_id, role) DO NOTHING"
+                    ),
+                    {
+                        "asset_id": asset_id,
+                        "tenant_id": row["tenant_id"],
+                        "kb_id": row["kb_id"],
+                        "contract_ref": "managed_graph@1.0.0",
+                        "asset_kind": asset_kind,
+                        "role": role,
+                        "import_id": row["import_id"],
+                        "original_filename": f"{row['name']} · {role}",
+                        "content_type": content_type,
+                        "sha256": sha256,
+                        "object_key": object_key,
+                        "lifecycle_status": lifecycle,
+                        "created_by": row["created_by"],
+                        "created_at": row["created_at"],
+                    },
+                )
+
+    async def _migration_0051_contract_digest_refresh_graph_v11(self, conn) -> None:
+        """契约 digest 刷新 + managed_graph@1.0.0 → 1.1.0 显式升级。
+
+        部署顺序约束：本迁移必须与包含 managed_graph@1.1.0 注册项的代码同批
+        发布（先代码后迁移或同容器启动）。两步：
+        1. 全量刷新 KB 行 contract_digest 到当前代码计算值——这是把
+           YUXI_CONTRACT_DIGEST_ENFORCE=strict 灰度切换打开的前置条件；
+        2. managed_graph@1.0.0 升 1.1.0（additive：仅新增 graph_mindmap_generate
+           派生产品命令，权威写入边界不变）。无法解析的漂移行跳过并告警，
+           strict 模式会显式拒绝它们。
+        """
+        from yuxi.knowledge.source_contracts.registry import resolve_contract
+        from yuxi.knowledge.source_contracts.specs import contract_digest
+        from yuxi.utils.logging_config import logger as migration_logger
+
+        rows = (
+            (await conn.execute(text("SELECT kb_id, contract_key, contract_version FROM knowledge_bases")))
+            .mappings()
+            .all()
+        )
+        for row in rows:
+            key = str(row["contract_key"] or "").strip()
+            version = str(row["contract_version"] or "").strip() or None
+            if not key:
+                continue
+            try:
+                spec = resolve_contract(key, version)
+            except Exception as exc:  # noqa: BLE001 - 漂移行跳过，留给 strict 模式显式暴露
+                migration_logger.warning(
+                    f"[0051] KB {row['kb_id']} 契约 {key}@{version} 无法解析，digest 保持原值: {exc}"
+                )
+                continue
+            digest = contract_digest(spec)
+            await conn.execute(
+                text(
+                    "UPDATE knowledge_bases SET contract_digest = :digest, "
+                    "contract_version = :version "
+                    "WHERE kb_id = :kb_id AND contract_key = :key"
+                ),
+                {
+                    "digest": digest,
+                    "version": spec.version,
+                    "kb_id": row["kb_id"],
+                    "key": key,
+                },
+            )
+
+    async def _migration_0052_managed_graph_v11_upgrade(self, conn) -> None:
+        """managed_graph@1.0.0 → 1.1.0 显式升级（additive：新增图谱导图派生命令）。
+
+        0051 只刷新了各行在自身版本上的 digest；本迁移执行版本指针升级。
+        新旧 spec 的 allowed_commands 满足超集关系（金 digest 测试锁定），
+        权威写入边界不变。
+        """
+        from yuxi.knowledge.source_contracts.registry import resolve_contract
+        from yuxi.knowledge.source_contracts.specs import contract_digest
+
+        v11 = resolve_contract("managed_graph", "1.1.0")
+        await conn.execute(
+            text(
+                "UPDATE knowledge_bases SET contract_version = :version, contract_digest = :digest "
+                "WHERE contract_key = 'managed_graph' AND contract_version = '1.0.0'"
+            ),
+            {"version": v11.version, "digest": contract_digest(v11)},
+        )
+
 
     async def _migration_0039_graph_mention_evidence(self, conn) -> None:
         """图谱 mention 级原文证据（「点开即见原文」不变式 I1/I2）。

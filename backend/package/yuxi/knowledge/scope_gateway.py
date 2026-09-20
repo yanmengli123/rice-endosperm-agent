@@ -1108,3 +1108,85 @@ async def query_knowledge_scope_gateway(
             "仅引用 claim_eligible=true 的 evidence_id；按 evidence_package 分层并保留条件、材料和冲突。"
         ),
     }
+
+
+async def query_single_kb_unified(
+    *,
+    kb_id: str,
+    query_text: str,
+    retrieval_params: dict[str, Any] | None = None,
+    contract_key: str | None = None,
+    top_k: int = 10,
+) -> list[dict[str, Any]]:
+    """单库统一检索入口：检索测试与评估必须和正式问答走同一套通道实现。
+
+    - 文档契约库：文档通道（kb aquery，检索参数全量透传），行为与直连一致；
+    - managed_graph 契约库：复用 scope gateway 的规范图谱通道
+      （PostgreSQL 事实源 + 结构化证据），命中以文档 chunk 同构形状返回，
+      triple_id/evidence_id 保留在 metadata 与 raw_graph_hit 中，转换过程
+      不丢失规范身份。
+
+    返回 list[dict]，文档命中与图谱命中同构：content/score/metadata。
+    """
+    from yuxi.knowledge.runtime import knowledge_base
+    from yuxi.knowledge.source_contracts.gate import load_kb_contract
+
+    if contract_key is None:
+        contract_key = (await load_kb_contract(kb_id)).contract_key
+    results: list[dict[str, Any]] = []
+
+    if contract_key != "managed_graph":
+        doc_hits = await knowledge_base.aquery(query_text, kb_id=kb_id, **(retrieval_params or {}))
+        if isinstance(doc_hits, dict):
+            doc_hits = doc_hits.get("retrieved_chunks") or []
+        for hit in doc_hits or []:
+            metadata = dict(hit.get("metadata") or {})
+            metadata.setdefault("retrieval_channel", "DOCUMENT")
+            results.append({**hit, "metadata": metadata})
+        return results
+
+    member = {
+        "kb_id": kb_id,
+        "kb_name": kb_id,
+        "graph_enabled": True,
+        "structured_enabled": True,
+        "document_enabled": False,
+        # 与 knowledge_scope_service 的默认成员策略一致
+        "evidence_supporting": True,
+        "evidence_candidate": False,
+        "priority": 100,
+    }
+    graph_hits, error = await _query_managed_graph_source(member, query_text, limit=max(int(top_k), 8))
+    if error:
+        logger.warning(f"Unified graph channel unavailable: kb={kb_id}, error={error}")
+    for row in graph_hits:
+        provenance = (row.get("provenance") or [{}])[0]
+        triple_id = provenance.get("triple_id")
+        subject = row.get("subject") or {}
+        target = row.get("object") or {}
+        headline = f"{subject.get('name')} —{row.get('predicate')}→ {target.get('name')}"
+        quote = str(row.get("evidence_quote") or row.get("content") or "").strip()
+        content = f"{headline}\n{quote}" if quote else headline
+        results.append(
+            {
+                "content": content,
+                "score": float(row.get("raw_score") or 0.0),
+                "metadata": {
+                    "chunk_id": triple_id or row.get("evidence_id"),
+                    "file_id": None,
+                    "chunk_index": None,
+                    "source": f"规范图谱 · {row.get('source_type')}",
+                    "retrieval_channel": row.get("source_type") or "GRAPH_STRUCTURED",
+                    "triple_id": triple_id,
+                    "evidence_id": row.get("evidence_id"),
+                    "entity_source_id": subject.get("id"),
+                    "entity_target_id": target.get("id"),
+                    "evidence_status": row.get("evidence_status"),
+                    "pmid": row.get("pmid"),
+                    "doi": row.get("doi"),
+                },
+                "raw_graph_hit": row,
+            }
+        )
+    results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+    return results[: max(int(top_k), 1)]

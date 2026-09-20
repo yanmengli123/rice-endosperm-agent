@@ -449,6 +449,9 @@ export const graphImportApi = {
 
   list: async (kbId) => apiAdminGet(graphImportUrl(kbId)),
 
+  // 统一源资产目录（契约知识库上传源文件，按导入批次 × role 展开）
+  listSourceAssets: async (kbId) => apiAdminGet(`/api/knowledge/databases/${kbId}/source-assets`),
+
   get: async (kbId, importId) => apiAdminGet(graphImportUrl(kbId, importId)),
 
   validate: async (kbId, importId, resolutions = {}) =>

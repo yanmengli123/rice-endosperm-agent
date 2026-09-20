@@ -15,6 +15,9 @@ class _EmptySelectResult:
     def scalars(self):
         return self
 
+    def mappings(self):
+        return self
+
     def scalar_one_or_none(self):
         return None
 

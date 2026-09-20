@@ -134,6 +134,95 @@ def _chunker_fingerprint(parse_revision_id: str, chunking: dict[str, Any]) -> st
     return _digest(json.dumps({"parse_revision_id": parse_revision_id, **chunking}, sort_keys=True, ensure_ascii=False))
 
 
+async def inspect_file_index_lineage(
+    *,
+    file_id: str,
+    index_revision_id: str,
+    expected_chunk_count: int | None = None,
+) -> dict[str, Any]:
+    """对一个索引版本在 PostgreSQL 落库的 chunk 做血缘对账。
+
+    matched = chunk_id 携带该索引版本的 rev token；stale = 同文件下不属于该
+    版本的 chunk（legacy 无版本或其它 token）。stale chunk 在激活成功后会由
+    cleanup_inactive_file_index_revisions 物理清理，因此不算闸门失败，但审计
+    报告必须暴露（存量悬空 stale 正是激活指针与 chunk 血缘不一致的现场）。
+    """
+    from yuxi.knowledge.implementations.milvus import MilvusKB
+    from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+
+    token = MilvusKB._index_revision_token(index_revision_id)
+    marker = f"_rev_{token}_"
+    chunks = await KnowledgeChunkRepository().list_by_file_id(file_id)
+    matched = 0
+    stale_chunk_ids: list[str] = []
+    provenance_mismatch_chunk_ids: list[str] = []
+    for chunk in chunks:
+        chunk_id = str(chunk.chunk_id or "")
+        if marker not in chunk_id:
+            stale_chunk_ids.append(chunk_id)
+            continue
+        matched += 1
+        provenance = dict(chunk.source_provenance or {})
+        if str(provenance.get("index_revision_id") or "") != str(index_revision_id):
+            provenance_mismatch_chunk_ids.append(chunk_id)
+
+    problems: list[str] = []
+    if not chunks:
+        problems.append("文件在 PostgreSQL 中没有任何 chunk")
+    elif matched == 0:
+        problems.append(f"没有任何 chunk 携带索引版本标记 {marker}")
+    if expected_chunk_count is not None and expected_chunk_count > 0 and matched != expected_chunk_count:
+        problems.append(f"版本化 chunk 数 {matched} 与索引结果 chunk_count={expected_chunk_count} 不一致")
+    if provenance_mismatch_chunk_ids:
+        problems.append(f"{len(provenance_mismatch_chunk_ids)} 个版本化 chunk 的 source_provenance 未指向该索引版本")
+    return {
+        "file_id": file_id,
+        "index_revision_id": index_revision_id,
+        "rev_token": token,
+        "total_chunks": len(chunks),
+        "matched_chunks": matched,
+        "stale_chunks": len(stale_chunk_ids),
+        "stale_chunk_ids_sample": stale_chunk_ids[:10],
+        "provenance_mismatch_chunk_ids": provenance_mismatch_chunk_ids[:10],
+        "expected_chunk_count": expected_chunk_count,
+        "problems": problems,
+    }
+
+
+async def get_scientific_pdf_index_lineage(*, kb_id: str, file_id: str) -> dict[str, Any]:
+    """索引血缘对账探针：报告文件激活指针与 PG 实际 chunk 的一致性。
+
+    审计口径比激活闸更严：只要激活版本下存在不属于它的 chunk（悬空血缘）
+    就判 inconsistent——这正是 legacy 手动重建索引留下的现场。
+    """
+    async with pg_manager.get_async_session_context() as session:
+        file_row = (
+            await session.execute(
+                select(KnowledgeFile).where(KnowledgeFile.file_id == file_id, KnowledgeFile.kb_id == kb_id)
+            )
+        ).scalar_one_or_none()
+        if file_row is None:
+            raise ValueError("文档不存在")
+        active_index_revision_id = str(file_row.active_index_revision_id or "")
+        if not active_index_revision_id:
+            return {
+                "kb_id": kb_id,
+                "file_id": file_id,
+                "managed": False,
+                "consistent": False,
+                "problems": ["文件没有激活索引版本指针（非科研 PDF 证据托管文件）"],
+            }
+    report = await inspect_file_index_lineage(
+        file_id=file_id,
+        index_revision_id=active_index_revision_id,
+        expected_chunk_count=None,
+    )
+    problems = list(report["problems"])
+    if report["stale_chunks"] > 0:
+        problems.append(f"{report['stale_chunks']} 个 chunk 不属于激活索引版本（悬空血缘）")
+    return {**report, "kb_id": kb_id, "managed": True, "consistent": not problems, "problems": problems}
+
+
 def _ingest_job_id(revision_id: str, attempt: int) -> str:
     """Keep concurrent submissions idempotent while allowing a failed attempt to be retried."""
     return f"scientific-pdf:{revision_id}:{max(int(attempt or 0), 0)}"
@@ -229,9 +318,34 @@ async def create_or_reuse_scientific_pdf_ingest(
                         )
                     )
                 ).scalar_one_or_none()
-            if active_index is None or active_index.chunker_fingerprint != desired_fingerprint:
+            lineage_broken_reasons: list[str] = []
+            if active_index is not None and active_index.chunker_fingerprint == desired_fingerprint:
+                # 指纹一致还不够：激活索引的 chunk 血缘必须真实存在（防 legacy
+                # 手动重建索引写入无版本 chunk 后留下悬空激活指针的存量态）。
+                lineage_report = await inspect_file_index_lineage(
+                    file_id=file_id,
+                    index_revision_id=active_index.revision_id,
+                    expected_chunk_count=int(active_index.chunk_count or 0) or None,
+                )
+                lineage_broken_reasons = list(lineage_report["problems"])
+                if lineage_report["stale_chunks"] > 0:
+                    lineage_broken_reasons.append(
+                        f"{lineage_report['stale_chunks']} 个 chunk 不属于激活索引版本（悬空血缘）"
+                    )
+            if (
+                active_index is None
+                or active_index.chunker_fingerprint != desired_fingerprint
+                or lineage_broken_reasons
+            ):
                 # Parser artifacts are immutable and reusable. Re-open only the
-                # durable index stages when chunker code/config changes.
+                # durable index stages when chunker code/config changes — or when
+                # the active index lineage is broken and must be rebuilt in shadow.
+                if lineage_broken_reasons:
+                    logger.warning(
+                        "激活索引血缘损坏，重开持久化索引阶段: "
+                        f"file={file_id}, index_revision={active_index.revision_id if active_index else 'none'}, "
+                        f"problems={'; '.join(lineage_broken_reasons)}"
+                    )
                 revision.status = "PENDING"
                 revision.completed_at = None
                 revision.error_message = None
@@ -1382,6 +1496,19 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 "_parse_revision_id": revision_id,
             },
         )
+        # 激活闸：候选索引版本必须先证明自己在 PG 中完整落库（版本化 chunk
+        # 数量与血缘一致），才允许切换激活指针；失败走统一异常路径，旧激活
+        # 态由 previous_activation 恢复逻辑保护。
+        lineage_report = await inspect_file_index_lineage(
+            file_id=revision.file_id,
+            index_revision_id=index_revision_id,
+            expected_chunk_count=int(index_result.get("chunk_count") or 0),
+        )
+        if lineage_report["problems"]:
+            raise RuntimeError(
+                f"激活前索引血缘校验失败（index_revision={index_revision_id}）: "
+                + "; ".join(lineage_report["problems"])
+            )
         await _set_stage_status(revision_id, "INDEX", "SUCCEEDED", worker_id=worker_id)
         await _set_stage_status(revision_id, "ACTIVATE", "RUNNING", worker_id=worker_id)
         now = _workflow_now()

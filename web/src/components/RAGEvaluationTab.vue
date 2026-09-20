@@ -401,11 +401,24 @@
                 </span>
               </template>
               <span v-if="evaluationStats.totalQuestions" class="compact-metric">
-                答案准确率：<strong
+                答案准确率（{{ evaluationStats.evaluableQuestions ?? 0 }}/{{
+                  evaluationStats.totalQuestions
+                }}
+                题可评估）：<strong
                   :style="{ color: getScoreColor(evaluationStats.answerAccuracy) }"
                 >
                   {{ (evaluationStats.answerAccuracy * 100).toFixed(1) }}%
                 </strong>
+              </span>
+              <span
+                v-if="evaluationStats.notEvaluableQuestions"
+                class="compact-metric eval-status-note"
+                title="无检索召回、无答案或无有效指标的题目，不计入准确率与指标均值"
+              >
+                不可评估：{{ evaluationStats.notEvaluableQuestions }} 题
+              </span>
+              <span v-if="evaluationStats.failedQuestions" class="compact-metric eval-status-note">
+                评估失败：{{ evaluationStats.failedQuestions }} 题
               </span>
             </div>
             <a-switch
@@ -541,8 +554,15 @@
                 </div>
               </template>
               <template v-else-if="column.key === 'retrieval_score'">
+                <div v-if="isNotEvaluableRow(record)" class="row-eval-status">
+                  <a-tooltip :title="record.eval_status_reason || '未产生有效评估指标'">
+                    <a-tag :color="rowEvalStatus(record) === 'FAILED' ? 'red' : 'orange'">
+                      {{ rowEvalStatus(record) === 'FAILED' ? '评估失败' : '不可评估' }}
+                    </a-tag>
+                  </a-tooltip>
+                </div>
                 <div
-                  v-if="record.metrics && Object.keys(record.metrics).some(isEvalMetricKey)"
+                  v-else-if="record.metrics && Object.keys(record.metrics).some(isEvalMetricKey)"
                   class="retrieval-metrics"
                 >
                   <template v-for="(val, key) in record.metrics" :key="key">
@@ -767,11 +787,12 @@ const resultColumns = computed(() => {
     }
   ]
 
-  // 检查是否有评估指标数据（检索指标或 RAGAS 指标）
-  const hasRetrievalMetrics = detailedResults.value.some((item) => {
-    if (!item.metrics) return false
-    return Object.keys(item.metrics).some(isEvalMetricKey)
-  })
+  // 检查是否有评估指标数据（检索指标或 RAGAS 指标）；全部不可评估时也要展示状态列
+  const hasRetrievalMetrics =
+    detailedResults.value.some((item) => {
+      if (!item.metrics) return false
+      return Object.keys(item.metrics).some(isEvalMetricKey)
+    }) || detailedResults.value.some((item) => isNotEvaluableRow(item))
 
   // 如果有评估指标数据，添加评估指标列
   if (hasRetrievalMetrics) {
@@ -1239,6 +1260,19 @@ const loadEvaluationHistory = async (silent = false) => {
 }
 
 // 计算评估统计信息
+const hasNumericEvalMetric = (metrics) =>
+  !!metrics &&
+  Object.keys(metrics).some((key) => isEvalMetricKey(key) && typeof metrics[key] === 'number')
+
+// 行级评估状态：服务端 eval_status 优先，旧数据按「存在数值指标」回退判定
+const rowEvalStatus = (item) =>
+  item.eval_status || (hasNumericEvalMetric(item.metrics) ? 'OK' : 'NOT_EVALUABLE')
+
+const isNotEvaluableRow = (record) => {
+  const status = rowEvalStatus(record)
+  return status === 'NOT_EVALUABLE' || status === 'FAILED'
+}
+
 const calculateEvaluationStats = (results) => {
   if (!results || results.length === 0) {
     return {}
@@ -1246,6 +1280,9 @@ const calculateEvaluationStats = (results) => {
 
   const stats = {
     totalQuestions: results.length,
+    evaluableQuestions: 0,
+    notEvaluableQuestions: 0,
+    failedQuestions: 0,
     retrievalMetrics: {},
     answerAccuracy: 0,
     correctAnswers: 0,
@@ -1257,15 +1294,30 @@ const calculateEvaluationStats = (results) => {
   const metricCounts = {}
 
   results.forEach((item) => {
-    // 答案准确率
-    if (item.metrics && item.metrics.score !== undefined) {
-      if (item.metrics.score > 0.5) {
-        stats.correctAnswers++
-      }
+    const status = rowEvalStatus(item)
+    if (status === 'NOT_EVALUABLE') {
+      stats.notEvaluableQuestions++
+      return
     }
+    if (status === 'FAILED') {
+      stats.failedQuestions++
+      return
+    }
+    stats.evaluableQuestions++
 
-    // 评估指标统计（检索 + RAGAS）
+    // 答案准确率：score 模式看 metrics.score，RAGAS-only 模式看 ragas_answer_correctness
     if (item.metrics) {
+      if (typeof item.metrics.score === 'number') {
+        if (item.metrics.score > 0.5) {
+          stats.correctAnswers++
+        }
+      } else if (typeof item.metrics.ragas_answer_correctness === 'number') {
+        if (item.metrics.ragas_answer_correctness > 0.5) {
+          stats.correctAnswers++
+        }
+      }
+
+      // 评估指标统计（检索 + RAGAS）：分母只计该指标实际存在的可评估题
       Object.keys(item.metrics).forEach((key) => {
         if (isEvalMetricKey(key) && typeof item.metrics[key] === 'number') {
           if (!metricSums[key]) {
@@ -1284,8 +1336,9 @@ const calculateEvaluationStats = (results) => {
     stats.retrievalMetrics[key] = metricSums[key] / metricCounts[key]
   })
 
-  // 计算答案准确率
-  stats.answerAccuracy = stats.totalQuestions > 0 ? stats.correctAnswers / stats.totalQuestions : 0
+  // 答案准确率分母 = 可评估题数；0.0% 只在真实得分为 0 时出现
+  stats.answerAccuracy =
+    stats.evaluableQuestions > 0 ? stats.correctAnswers / stats.evaluableQuestions : 0
 
   return stats
 }
@@ -2163,6 +2216,15 @@ onUnmounted(() => {
 
 .compact-metric {
   white-space: nowrap;
+}
+
+.eval-status-note {
+  color: var(--color-text-secondary);
+}
+
+.row-eval-status {
+  display: flex;
+  align-items: center;
 }
 
 .ragas-radar-panel {

@@ -85,8 +85,24 @@
                   </div>
 
                   <div class="result-metadata">
+                    <span
+                      v-if="
+                        chunk.metadata?.retrieval_channel &&
+                        chunk.metadata.retrieval_channel !== 'DOCUMENT'
+                      "
+                      class="metadata-item channel-badge"
+                      :class="`channel-${String(chunk.metadata.retrieval_channel).toLowerCase()}`"
+                    >
+                      {{ channelLabel(chunk.metadata.retrieval_channel) }}
+                    </span>
                     <span v-if="chunk.metadata?.source" class="metadata-item">
                       <strong>来源:</strong> {{ chunk.metadata.source }}
+                    </span>
+                    <span v-if="chunk.metadata?.triple_id" class="metadata-item">
+                      <strong>三元组:</strong> {{ chunk.metadata.triple_id }}
+                    </span>
+                    <span v-if="chunk.metadata?.evidence_id" class="metadata-item">
+                      <strong>证据:</strong> {{ chunk.metadata.evidence_id }}
                     </span>
                     <span v-if="chunk.metadata?.file_id" class="metadata-item">
                       <strong>文件ID:</strong> {{ chunk.metadata.file_id }}
@@ -179,6 +195,15 @@ const searchLoading = computed(() => store.state.searchLoading)
 const queryResult = ref('')
 const showRawData = ref(false)
 const showQuerySuggestions = computed(() => !searchLoading.value && !queryResult.value)
+
+// 检索通道徽标（统一检索入口：文档 chunk / 规范图谱三元组 / 结构化证据）
+const channelLabel = (channel) =>
+  ({
+    STRUCTURED: '结构化证据',
+    GRAPH: '规范图谱',
+    GRAPH_STRUCTURED: '图谱/结构化',
+    VERBATIM: '原文逐字'
+  })[channel] || channel
 
 // 查询测试
 const queryText = ref('')
@@ -601,6 +626,15 @@ defineExpose({
             font-weight: 500;
             margin-right: 4px;
           }
+        }
+
+        .channel-badge {
+          padding: 0 8px;
+          border-radius: 10px;
+          border: 1px solid var(--gray-300);
+          background: var(--gray-25, #fafafa);
+          color: var(--gray-600);
+          font-size: 12px;
         }
       }
     }

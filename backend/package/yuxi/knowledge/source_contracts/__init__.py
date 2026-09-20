@@ -33,6 +33,7 @@ from yuxi.knowledge.source_contracts.definitions import (  # noqa: F401
     COMMAND_GRAPH_IMPORT_ROLLBACK,
     COMMAND_GRAPH_IMPORT_UPLOAD,
     COMMAND_GRAPH_IMPORT_VALIDATE,
+    COMMAND_GRAPH_MINDMAP_GENERATE,
     COMMAND_LLM_GRAPH_BUILD,
     COMMAND_LLM_GRAPH_CONFIG,
     COMMAND_LLM_GRAPH_RESET,
@@ -47,6 +48,7 @@ from yuxi.knowledge.source_contracts.definitions import (  # noqa: F401
 )
 from yuxi.knowledge.source_contracts.gate import (
     ContractCommandForbidden,
+    ContractDigestDriftError,
     ContractMediaRejected,
     classify_legacy_kb,
     load_kb_contract,
@@ -85,6 +87,7 @@ __all__ = [
     "COMMAND_GRAPH_IMPORT_ROLLBACK",
     "COMMAND_GRAPH_IMPORT_UPLOAD",
     "COMMAND_GRAPH_IMPORT_VALIDATE",
+    "COMMAND_GRAPH_MINDMAP_GENERATE",
     "COMMAND_LLM_GRAPH_BUILD",
     "COMMAND_LLM_GRAPH_CONFIG",
     "COMMAND_LLM_GRAPH_RESET",
@@ -97,6 +100,7 @@ __all__ = [
     "COMMAND_SCIENTIFIC_PDF_RETRY",
     "COMMAND_STATS_REPAIR",
     "ContractCommandForbidden",
+    "ContractDigestDriftError",
     "ContractMediaRejected",
     "SourceContractDisplay",
     "SourceContractError",

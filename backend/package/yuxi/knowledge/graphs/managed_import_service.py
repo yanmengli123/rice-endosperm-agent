@@ -68,6 +68,7 @@ class ManagedGraphImportService:
         cypher_bytes: bytes | None,
         created_by: str,
         mapping_config: dict[str, Any] | None = None,
+        file_metas: dict[str, dict[str, Any] | None] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         await self._require_milvus_kb(kb_id)
         mapping_config = mapping_config or {}
@@ -122,6 +123,25 @@ class ManagedGraphImportService:
                 "mapping_config": mapping_config,
                 "created_by": created_by,
             }
+        )
+        from yuxi.knowledge.graphs.source_asset_catalog import register_graph_import_assets
+
+        # 登记统一源资产目录（新上传携带真实文件名/MIME/大小；失败不阻断导入）
+        await register_graph_import_assets(
+            kb_id=kb_id,
+            import_id=import_id,
+            checksums={
+                "nodes": checksums["nodes"],
+                "relationships": checksums["relationships"],
+                "audit": checksums["cypher"],
+            },
+            object_keys={
+                "nodes": nodes_object,
+                "relationships": relationships_object,
+                "audit": cypher_object,
+            },
+            file_metas=file_metas,
+            created_by=created_by,
         )
         report = await self.validate(import_id, {})
         refreshed = await self.repository.get(import_id)
@@ -261,6 +281,10 @@ class ManagedGraphImportService:
                 import_id,
                 {"status": "ROLLED_BACK", "result": result, "completed_at": _utc_now(), "error_message": None},
             )
+            from yuxi.knowledge.graphs.source_asset_catalog import mark_import_assets_lifecycle
+
+            # 图谱源资产不单独删除，生命周期随导入批次回滚
+            await mark_import_assets_lifecycle(import_id, "ROLLED_BACK")
             await _progress(context, 100, "导入批次已安全回滚")
             if context:
                 await context.set_result(result)

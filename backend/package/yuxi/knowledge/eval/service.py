@@ -137,6 +137,25 @@ def build_evaluation_run_name(started_at=None, hash_value: str | None = None) ->
     return f"eval-{date_part}-{hash_part}"
 
 
+def _failed_question_result(question_data: dict[str, Any], exc: BaseException) -> dict[str, Any]:
+    """单题调用/计算失败的占位结果：FAILED 状态 + 原因，不拖垮整个 run。"""
+    return {
+        "detail": {
+            "query_text": question_data.get("query") or "",
+            "gold_chunk_ids": question_data.get("gold_chunk_ids") or [],
+            "gold_answer": question_data.get("gold_answer"),
+            "generated_answer": "",
+            "retrieved_chunks": [],
+            "metrics": {},
+            "eval_status": "FAILED",
+            "eval_status_reason": f"{type(exc).__name__}: {exc}",
+        },
+        "retrieval_scores": {},
+        "answer_scores": {},
+        "ragas_scores": {},
+    }
+
+
 class EvaluationService:
     """RAG评估服务"""
 
@@ -187,10 +206,15 @@ class EvaluationService:
             "generated_answer": item.generated_answer,
             "retrieved_chunks": item.retrieved_chunks,
             "metrics": item.metrics or {},
+            "eval_status": getattr(item, "eval_status", None) or "PENDING",
+            "eval_status_reason": getattr(item, "eval_status_reason", None),
             "tags": getattr(item, "item_tags", None) or [],
         }
 
     def _is_error_run_item(self, item) -> bool:
+        eval_status = getattr(item, "eval_status", None)
+        if eval_status in {"NOT_EVALUABLE", "FAILED"}:
+            return True
         metrics = item.metrics or {}
         if metrics.get("score", 1.0) <= 0.5:
             return True
@@ -1251,6 +1275,19 @@ class EvaluationService:
             logger.error(f"启动评估失败: {e}")
             raise
 
+    async def _detect_stale_gold_ids(self, dataset_items) -> dict[int, list[str]]:
+        """逐题找出已不在库中的 gold chunk ID（基准失联 = 基准过期的信号）。"""
+        all_gold_ids = sorted({str(gid) for item in dataset_items for gid in (item.gold_chunk_ids or [])})
+        if not all_gold_ids:
+            return {}
+        existing_ids = {str(row.chunk_id) for row in await self.chunk_repo.list_by_chunk_ids(all_gold_ids)}
+        stale: dict[int, list[str]] = {}
+        for index, item in enumerate(dataset_items):
+            missing = [str(gid) for gid in (item.gold_chunk_ids or []) if str(gid) not in existing_ids]
+            if missing:
+                stale[index] = missing
+        return stale
+
     async def _run_evaluation_task(self, context: TaskContext):
         try:
             payload = context.payload
@@ -1268,9 +1305,20 @@ class EvaluationService:
             if not dataset_items:
                 raise ValueError("Dataset has no items")
 
+            # 基准失联检测：gold chunk 物理 ID 已不在库中（重切分/重索引后变更），
+            # 评估前先标记，避免把「基准过期」算成「召回为 0」。
+            stale_gold_map = await self._detect_stale_gold_ids(dataset_items)
+            if stale_gold_map:
+                logger.warning(f"评估数据集存在失联 gold chunk（{len(stale_gold_map)} 题受影响，基准可能已过期）")
+
             kb_instance = await knowledge_base.aget_kb(kb_id)
             if not kb_instance:
                 raise ValueError(f"Knowledge Base {kb_id} not found")
+
+            # 评估检索与检索测试/正式问答共用统一入口：契约类型决定检索通道
+            from yuxi.knowledge.source_contracts.gate import load_kb_contract
+
+            kb_contract_key = (await load_kb_contract(kb_id)).contract_key
 
             eval_mode = retrieval_config.get("eval_mode", "simple")
             ragas_engine = None
@@ -1366,7 +1414,7 @@ class EvaluationService:
                 }
 
             async def evaluate_item(index: int, item) -> dict[str, Any]:
-                return await evaluate_question(
+                question_result = await evaluate_question(
                     kb_instance=kb_instance,
                     kb_id=kb_id,
                     question_data=question_data_of(item),
@@ -1376,7 +1424,30 @@ class EvaluationService:
                     judge_llm=judge_llm,
                     select_model_fn=select_model,
                     ragas_engine=ragas_engine,
+                    contract_key=kb_contract_key,
                 )
+                detail = question_result["detail"]
+                missing_gold = stale_gold_map.get(index) or []
+                if missing_gold:
+                    gold_ids = {str(gid) for gid in (question_data_of(item).get("gold_chunk_ids") or [])}
+                    if (
+                        gold_ids
+                        and gold_ids <= {str(gid) for gid in missing_gold}
+                        and not (question_result["answer_scores"] or question_result["ragas_scores"])
+                    ):
+                        # 全部 gold 失联且无其它指标来源：检索指标失去意义，整题不可评估
+                        detail["eval_status"] = "NOT_EVALUABLE"
+                        detail["eval_status_reason"] = (
+                            f"基准 gold chunks 已全部失联（{len(missing_gold)} 个，数据变更后基准过期，需重新生成）"
+                        )
+                        detail["metrics"] = {}
+                        question_result["retrieval_scores"] = {}
+                    else:
+                        prefix = f"{detail.get('eval_status_reason')}; " if detail.get("eval_status_reason") else ""
+                        detail["eval_status_reason"] = (
+                            f"{prefix}{len(missing_gold)} 个 gold chunk 已失联（基准部分过期）"
+                        )
+                return question_result
 
             async def persist_item_result(index: int, item, question_result: dict[str, Any]) -> None:
                 await self.eval_repo.upsert_run_item(
@@ -1388,6 +1459,12 @@ class EvaluationService:
                         **question_result["detail"],
                     },
                 )
+
+            status_counts: dict[str, int] = {"OK": 0, "NOT_EVALUABLE": 0, "FAILED": 0}
+
+            def count_item_status(question_result: dict[str, Any]) -> None:
+                status = str((question_result["detail"].get("eval_status")) or "OK")
+                status_counts[status] = status_counts.get(status, 0) + 1
 
             ragas_concurrency = (
                 min(max(int(retrieval_config.get("ragas_concurrency", 4)), 1), MAX_RAGAS_CONCURRENCY)
@@ -1404,8 +1481,18 @@ class EvaluationService:
                         f"评估 {chunk_start + 1}-{chunk_end}/{total_items}",
                     )
                     chunk = [(index, dataset_items[index]) for index in range(chunk_start, chunk_end)]
-                    results = await asyncio.gather(*(evaluate_item(index, item) for index, item in chunk))
+                    results = await asyncio.gather(
+                        *(evaluate_item(index, item) for index, item in chunk), return_exceptions=True
+                    )
                     for (index, item), question_result in zip(chunk, results):
+                        if isinstance(question_result, BaseException):
+                            if isinstance(question_result, asyncio.CancelledError):
+                                raise question_result
+                            logger.error(f"评估第 {index + 1} 题失败: {question_result}")
+                            question_result = _failed_question_result(question_data_of(item), question_result)
+                            status_counts["FAILED"] += 1
+                        else:
+                            count_item_status(question_result)
                         accumulate_scores(
                             question_data_of(item), question_result, item_tags(getattr(item, "item_metadata", None))
                         )
@@ -1427,7 +1514,13 @@ class EvaluationService:
                     progress = 10 + (index / total_items) * 80
                     await context.set_progress(progress, f"评估 {index + 1}/{total_items}")
 
-                    question_result = await evaluate_item(index, item)
+                    try:
+                        question_result = await evaluate_item(index, item)
+                        count_item_status(question_result)
+                    except Exception as exc:  # noqa: BLE001 - 单题失败不拖垮整个 run
+                        logger.error(f"评估第 {index + 1} 题失败: {exc}")
+                        question_result = _failed_question_result(question_data_of(item), exc)
+                        status_counts["FAILED"] += 1
                     accumulate_scores(
                         question_data_of(item), question_result, item_tags(getattr(item, "item_metadata", None))
                     )
@@ -1454,7 +1547,10 @@ class EvaluationService:
                 ragas_weights,
                 include_overall_score=True,
             )
-            metrics_meta = {"eval_mode": eval_mode}
+            metrics_meta = {
+                "eval_mode": eval_mode,
+                "items": {"total": total_items, **status_counts},
+            }
             if tag_buckets:
                 by_tag: dict[str, Any] = {}
                 for tag, (retrieval_list, answer_list, ragas_list) in sorted(tag_buckets.items()):

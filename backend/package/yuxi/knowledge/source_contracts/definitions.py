@@ -34,6 +34,7 @@ COMMAND_GRAPH_IMPORT_VALIDATE = "graph_import_validate"
 COMMAND_GRAPH_IMPORT_EXECUTE = "graph_import_execute"
 COMMAND_GRAPH_IMPORT_ROLLBACK = "graph_import_rollback"
 COMMAND_MINDMAP_GENERATE = "mindmap_generate"
+COMMAND_GRAPH_MINDMAP_GENERATE = "graph_mindmap_generate"
 COMMAND_STATS_REPAIR = "stats_repair"
 COMMAND_SAMPLE_QUESTIONS = "sample_questions"
 COMMAND_DATASET_PREVIEW = "dataset_preview"
@@ -62,6 +63,7 @@ ALL_COMMANDS: tuple[str, ...] = (
     COMMAND_GRAPH_IMPORT_EXECUTE,
     COMMAND_GRAPH_IMPORT_ROLLBACK,
     COMMAND_MINDMAP_GENERATE,
+    COMMAND_GRAPH_MINDMAP_GENERATE,
     COMMAND_STATS_REPAIR,
     COMMAND_SAMPLE_QUESTIONS,
     COMMAND_DATASET_PREVIEW,
@@ -343,6 +345,49 @@ MANAGED_GRAPH = SourceContractSpec(
         "chunking": "不适用（图谱契约不走文档分块）",
         "ingest": "上传 → 完整性验证 → Canonical Commit → 双投影 → ID 对账",
         "rollback": "按导入批次回滚，投影经 Outbox 异步对账",
+    },
+)
+
+
+MANAGED_GRAPH_V1_1 = SourceContractSpec(
+    contract_key="managed_graph",
+    version="1.1.0",
+    product_category="authority_source",
+    display=SourceContractDisplay(
+        label="规范科研知识图谱",
+        card_description=(
+            "节点 CSV + 关系 CSV + 审计 cypher；PostgreSQL 为规范事实源，"
+            "Neo4j/Milvus 仅作遍历/语义投影。禁止普通文档上传与 LLM 自动抽图。"
+            "1.1：检索测试走统一检索入口（图谱通道），知识导图由已发布图谱快照派生。"
+        ),
+        operator_description="供精确枚举、关系结论与证据审计的规范图谱。",
+        entry_mode="primary",
+    ),
+    allowed_commands=(*_GRAPH_IMPORT, *_RELEASE, COMMAND_STATS_REPAIR, COMMAND_GRAPH_MINDMAP_GENERATE),
+    forbidden_commands=(
+        *_DOCUMENT_LIFECYCLE,
+        COMMAND_FETCH_URL,
+        *_LLM_GRAPH,
+        # 文档版 mindmap_generate 基于文件列表，对图谱库无意义；
+        # 图谱导图必须走 graph_mindmap_generate（从规范图谱快照派生）
+        COMMAND_MINDMAP_GENERATE,
+        *_DATASET,
+        COMMAND_SAMPLE_QUESTIONS,
+    ),
+    accepted_media=MANAGED_GRAPH.accepted_media,
+    authority_policy={
+        "canonical_store": "postgresql",
+        "neo4j_role": "navigation_projection",
+        "milvus_role": "semantic_projection",
+        "llm_extraction": "forbidden",
+    },
+    required_provenance=MANAGED_GRAPH.required_provenance,
+    base_capabilities=MANAGED_GRAPH.base_capabilities,
+    processing_policy={
+        "chunking": "不适用（图谱契约不走文档分块）",
+        "ingest": "上传 → 完整性验证 → Canonical Commit → 双投影 → ID 对账",
+        "rollback": "按导入批次回滚，投影经 Outbox 异步对账",
+        "mindmap": "知识导图 = 导航派生产品：由规范图谱快照生成，只写 kb 演示字段，不回流证据通道",
     },
 )
 

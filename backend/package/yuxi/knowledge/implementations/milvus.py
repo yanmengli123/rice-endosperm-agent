@@ -772,6 +772,24 @@ class MilvusKB(KnowledgeBase):
         joined_ids = '", "'.join(escaped_ids)
         return f'file_id in ["{joined_ids}"]'
 
+    def _reject_legacy_rewrite_for_revision_managed_file(
+        self, kb_id: str, file_id: str, file_meta: dict, operator_id: str | None
+    ) -> None:
+        """带激活修订指针的文件禁止 legacy 全量重写（会破坏索引版本血缘）。"""
+        active_parse = str(file_meta.get("active_parse_revision_id") or "")
+        active_index = str(file_meta.get("active_index_revision_id") or "")
+        if not active_parse and not active_index:
+            return
+        message = (
+            f"文件 {file_id} 已由科研 PDF 证据流水线托管"
+            f"（active_parse_revision_id={active_parse or 'none'}, "
+            f"active_index_revision_id={active_index or 'none'}），"
+            f"禁止手动重建索引/重新解析：legacy 路径会写入无版本血缘的 chunk 并留下悬空激活指针。"
+            f"请改用科研 PDF 证据重试（kb={kb_id}, 操作者={operator_id or 'unknown'}）"
+        )
+        logger.warning(f"[index-revision-guard] {message}")
+        raise ValueError(message)
+
     async def index_file(
         self, kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None
     ) -> dict:
@@ -790,6 +808,16 @@ class MilvusKB(KnowledgeBase):
         if kb_id not in self.databases_meta:
             raise ValueError(f"Database {kb_id} not found")
 
+        file_meta = await self._load_file_meta(kb_id, file_id)
+        requested_params = dict(params or {})
+        shadow_revision_id = str(requested_params.get("_index_revision_id") or "")
+        parse_revision_id = str(requested_params.get("_parse_revision_id") or "")
+        if not shadow_revision_id:
+            # 双写者防线：带激活修订指针的文件只允许影子索引（_index_revision_id）
+            # 写入；legacy 全量替换会写入无版本血缘的 chunk 并留下悬空激活指针，
+            # 使检索结果被 _filter_active_index_chunks 全部过滤。
+            self._reject_legacy_rewrite_for_revision_managed_file(kb_id, file_id, file_meta, operator_id)
+
         # Get/Create collection
         collection = await self._get_milvus_collection(kb_id)
         if not collection:
@@ -798,16 +826,12 @@ class MilvusKB(KnowledgeBase):
         embedding_model_spec = self.databases_meta[kb_id].get("embedding_model_spec")
         embedding_function = self._get_embedding_function(embedding_model_spec)
 
-        file_meta = await self._load_file_meta(kb_id, file_id)
         allowed_statuses = {
             FileStatus.PARSED,
             FileStatus.ERROR_INDEXING,
             FileStatus.INDEXED,
             "done",
         }
-        requested_params = dict(params or {})
-        shadow_revision_id = str(requested_params.get("_index_revision_id") or "")
-        parse_revision_id = str(requested_params.get("_parse_revision_id") or "")
         params = resolve_processing_params(
             kb_additional_params=self.databases_meta.get(kb_id, {}).get("metadata"),
             file_processing_params=file_meta.get("processing_params"),
@@ -964,6 +988,9 @@ class MilvusKB(KnowledgeBase):
                 continue
 
             try:
+                # 重新解析同样属于 legacy 全量重写，先过修订指针守卫
+                self._reject_legacy_rewrite_for_revision_managed_file(kb_id, file_id, file_meta, None)
+
                 # 更新状态为处理中
                 resolved_params = resolve_processing_params(
                     kb_additional_params=self.databases_meta.get(kb_id, {}).get("metadata"),

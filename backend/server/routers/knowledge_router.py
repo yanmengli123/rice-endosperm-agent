@@ -29,6 +29,7 @@ from yuxi.knowledge.source_contracts import (
     COMMAND_DOCUMENT_UPLOAD,
     COMMAND_FETCH_URL,
     COMMAND_FOLDER_CREATE,
+    COMMAND_GRAPH_MINDMAP_GENERATE,
     COMMAND_LLM_GRAPH_BUILD,
     COMMAND_LLM_GRAPH_CONFIG,
     COMMAND_LLM_GRAPH_RESET,
@@ -43,6 +44,8 @@ from yuxi.knowledge.source_contracts import (
     SourceContractError,
     UnknownSourceContractError,
     contract_registry_snapshot,
+    load_kb_contract,
+    require_contract_command,
     resolve_contract,
     validate_contract_media,
 )
@@ -50,6 +53,7 @@ from yuxi.knowledge.utils import calculate_content_hash, is_minio_url, parse_min
 from yuxi.knowledge.utils.mindmap_utils import (
     batch_remove_files_from_mindmap,
     generate_database_mindmap,
+    generate_graph_mindmap,
     get_database_mindmap_data,
     get_mindmap_database_files,
     get_mindmap_databases_overview,
@@ -65,6 +69,7 @@ from yuxi.models.providers.cache import model_cache
 from yuxi.services.task_service import TaskContext, tasker
 from yuxi.services.scientific_pdf_ingest_service import (
     create_or_reuse_scientific_pdf_ingest,
+    get_scientific_pdf_index_lineage,
     get_scientific_pdf_status,
     rebuild_figure_index_for_file,
 )
@@ -937,6 +942,23 @@ async def generate_mindmap(
     current_user: User = Depends(get_admin_user),
 ):
     """使用 AI 分析知识库文件，生成思维导图结构。支持增量更新模式。"""
+    # 规范图谱契约：导图由图谱快照派生（导航产品，不回流证据通道），走独立
+    # 命令与实现；增量语义不适用（无文件列表），统一按全量重新生成。
+    try:
+        contract_spec = await load_kb_contract(kb_id)
+    except SourceContractError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=f"[{exc.error_code}] {exc}") from exc
+    if contract_spec.contract_key == "managed_graph":
+        try:
+            await require_contract_command(kb_id, COMMAND_GRAPH_MINDMAP_GENERATE)
+            return await generate_graph_mindmap(kb_id, user_prompt)
+        except SourceContractError as exc:
+            raise HTTPException(status_code=exc.http_status, detail=f"[{exc.error_code}] {exc}") from exc
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"生成规范图谱导图失败: {e}, {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"生成规范图谱导图失败: {str(e)}")
     await _ensure_database_supports_documents(kb_id, "思维导图生成", COMMAND_MINDMAP_GENERATE)
     try:
         return await generate_database_mindmap(kb_id, file_ids, user_prompt, incremental)
@@ -1343,6 +1365,21 @@ async def scientific_pdf_evidence_status(
     if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
         raise HTTPException(status_code=404, detail="Database not found")
     return await get_scientific_pdf_status(kb_id=kb_id, file_id=file_id)
+
+
+@knowledge.get("/databases/{kb_id}/documents/{file_id}/index-lineage")
+async def scientific_pdf_index_lineage(
+    kb_id: str,
+    file_id: str,
+    current_user: User = Depends(get_admin_user),
+):
+    """索引血缘对账探针：激活指针与 PG 实际 chunk 的一致性报告。"""
+    if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
+        raise HTTPException(status_code=404, detail="Database not found")
+    try:
+        return await get_scientific_pdf_index_lineage(kb_id=kb_id, file_id=file_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @knowledge.post("/databases/{kb_id}/documents/{file_id}/figure-index/rebuild")
@@ -2419,10 +2456,13 @@ async def query_knowledge_base(
 async def query_test(
     kb_id: str, query: str = Body(...), meta: dict = Body(...), current_user: User = Depends(get_admin_user)
 ):
-    """测试查询知识库"""
+    """测试查询知识库（与正式问答同源的单库统一检索入口：文档库走文档通道，规范图谱库走图谱通道）"""
     logger.debug(f"Query test in {kb_id}: {query}")
     try:
-        result = await knowledge_base.aquery(query, kb_id=kb_id, **meta)
+        from yuxi.knowledge.scope_gateway import query_single_kb_unified
+
+        top_k = int((meta or {}).get("top_k") or (meta or {}).get("final_top_k") or 10)
+        result = await query_single_kb_unified(kb_id=kb_id, query_text=query, retrieval_params=meta or {}, top_k=top_k)
         return result
     except Exception as e:
         logger.error(f"测试查询失败 {e}, {traceback.format_exc()}")
