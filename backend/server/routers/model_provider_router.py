@@ -229,7 +229,7 @@ async def get_v2_models(
                     "batch_size": m.batch_size,
                 }
                 for m in models
-            ]
+            ],
         }
 
     return {"success": True, "data": result}

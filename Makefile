@@ -61,6 +61,10 @@ lock:
 lock-check:
 	$(UV_DOCKER) uv lock --check
 
+# 导出 FastAPI OpenAPI 契约工件（跨端单一真源；改 pydantic 模型后执行）
+contract-openapi:
+	cd backend && docker compose exec -T api uv run --no-sync python test/tools/export_openapi.py
+
 ######################
 # LINTING AND FORMATTING
 ######################

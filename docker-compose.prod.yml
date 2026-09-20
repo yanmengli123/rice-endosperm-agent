@@ -15,6 +15,8 @@ x-api-worker-env: &api-worker-env
   JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env.prod}
   YUXI_INSTANCE_ID: ${YUXI_INSTANCE_ID:?Set YUXI_INSTANCE_ID in .env.prod}
   POSTGRES_URL: ${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}@postgres:5432/${POSTGRES_DB:-yuxi}}
+  # LangGraph checkpointer 存储：prod 固定 postgres，构建失败直接终止启动（fail-closed）。
+  LANGGRAPH_CHECKPOINTER_BACKEND: ${LANGGRAPH_CHECKPOINTER_BACKEND:-postgres}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   RUN_CANCEL_KEY_TTL_SECONDS: ${RUN_CANCEL_KEY_TTL_SECONDS:-1800}
   RUN_EVENTS_STREAM_TTL_SECONDS: ${RUN_EVENTS_STREAM_TTL_SECONDS:-7200}
@@ -299,8 +301,12 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}
       - POSTGRES_DB=${POSTGRES_DB:-yuxi}
       - TZ=${TZ:-Asia/Shanghai}
+      # RLS 角色引导（仅 initdb 执行；不改变运行时连接，激活见 docs/ops/rls-activation-runbook.md）
+      - YUXI_MIGRATOR_PASSWORD=${YUXI_MIGRATOR_PASSWORD:?Set YUXI_MIGRATOR_PASSWORD in .env.prod}
+      - YUXI_APP_PASSWORD=${YUXI_APP_PASSWORD:?Set YUXI_APP_PASSWORD in .env.prod}
     volumes:
       - ./docker/volumes/postgresql:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-yuxi} || exit 1"]
       interval: 5s

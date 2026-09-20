@@ -38,6 +38,8 @@ from yuxi.repositories.knowledge_retrieval_repository import (
     KnowledgeRetrievalRepository,
     serialize_retrieval_run,
 )
+from yuxi.services.agent_protocol import AGENT_RUN_PROTOCOL_VERSION
+from yuxi.services.error_registry import http_error as _registry_error
 from yuxi.services.input_message_service import (
     AgentRunInputMessage,
     build_resume_input_message,
@@ -75,7 +77,6 @@ SSE_POLL_INTERVAL_SECONDS = float(os.getenv("RUN_SSE_POLL_INTERVAL_SECONDS", "1.
 RUN_PROGRESS_RECENT_EVENT_SCAN_LIMIT = 100
 RUN_PROGRESS_MESSAGE_LIMIT = 3
 RUN_PROGRESS_CONTENT_MAX_CHARS = 800
-AGENT_RUN_PROTOCOL_VERSION = "1.4"  # 1.4：执行轨迹改用独立、可补偿的持久化 SSE 端点
 
 
 def _public_knowledge_scope(snapshot: object) -> dict[str, Any]:
@@ -311,31 +312,33 @@ def _compact_tool_stream_event(event: dict) -> dict:
     return compact
 
 
+# verbose=false 时 chunk 顶层白名单：不在此列的字段会被静默剥离。
+# 这是独立于 pydantic 请求模型的「第二份 schema」——新增字段必须同步：
+#   1) 这里；2) test/fixtures/agent_run_contract 契约语料；3) 消费端（Web/桌面）。
+# 历史事故：figures 曾因漏加白名单被静默剥离。
+COMPACT_CHUNK_FIELDS: tuple[str, ...] = (
+    "status",
+    "run_id",
+    "message",
+    "error_type",
+    "error_message",
+    "retryable",
+    "job_try",
+    "questions",
+    "interrupt_info",
+    "source",
+    "agent_state",
+    "compression",
+    "citation",
+    # 图卡投影（citation_ready.figures）
+    "figures",
+    # 跨文献歧义时的候选文献清单（locator_candidates 事件，只含文档身份）
+    "candidates",
+)
+
+
 def _compact_stream_chunk(chunk: dict) -> dict:
-    compact = {
-        key: chunk[key]
-        for key in (
-            "status",
-            "run_id",
-            "message",
-            "error_type",
-            "error_message",
-            "retryable",
-            "job_try",
-            "questions",
-            "interrupt_info",
-            "source",
-            "agent_state",
-            "compression",
-            "citation",
-            # 图卡投影（citation_ready.figures）：默认 verbose=false 的前端/桌面端只收到
-            # 本白名单字段，漏加即被静默剥离
-            "figures",
-            # 跨文献歧义时的候选文献清单（locator_candidates 事件，只含文档身份）
-            "candidates",
-        )
-        if chunk.get(key) is not None and chunk.get(key) != ""
-    }
+    compact = {key: chunk[key] for key in COMPACT_CHUNK_FIELDS if chunk.get(key) is not None and chunk.get(key) != ""}
     if isinstance(chunk.get("msg"), dict):
         compact["msg"] = _compact_message_dict(chunk["msg"])
     if isinstance(chunk.get("stream_event"), dict):
@@ -510,11 +513,13 @@ async def _get_user_model_pref(*, db: AsyncSession, uid: str) -> str | None:
 
 
 def _quota_detail(*, code: str, message: str, action: str | None = None) -> dict[str, str]:
-    """Return a stable error contract while keeping FastAPI's ``detail`` envelope."""
-    detail = {"code": code, "message": message}
-    if action:
+    """兼容壳：稳定错误契约统一走 error_registry，新代码直接用 ``http_error``。"""
+    from yuxi.services.error_registry import error_detail
+
+    detail = error_detail(code, message=message)
+    if action is not None:
         detail["action"] = action
-    return detail
+    return dict(detail)  # type: ignore[return-value]
 
 
 async def _enforce_platform_token_quota(
@@ -546,15 +551,11 @@ async def _enforce_platform_token_quota(
         )
     ).scalar() or 0
     if int(used_tokens) >= int(monthly_platform_token_limit):
-        raise HTTPException(
-            status_code=429,
-            detail=_quota_detail(
-                code="platform_token_quota_exceeded",
-                message=(
-                    f"本月平台模型 token 用量已达配额（{monthly_platform_token_limit}）。"
-                    "请在设置中配置并选择自己的模型继续使用，或联系管理员调整平台额度"
-                ),
-                action="configure_byok",
+        raise _registry_error(
+            "platform_token_quota_exceeded",
+            message=(
+                f"本月平台模型 token 用量已达配额（{monthly_platform_token_limit}）。"
+                "请在设置中配置并选择自己的模型继续使用，或联系管理员调整平台额度"
             ),
         )
 
@@ -580,14 +581,7 @@ async def _enforce_platform_token_quota(
         not isinstance(payload, dict) or not payload.get("user_credential") for payload in active_payloads
     )
     if has_active_platform_run:
-        raise HTTPException(
-            status_code=429,
-            detail=_quota_detail(
-                code="platform_token_quota_reservation_busy",
-                message="当前已有平台模型运行正在计量；请等待该运行结束后重试",
-                action="wait_for_active_run",
-            ),
-        )
+        raise _registry_error("platform_token_quota_reservation_busy")
 
 
 async def _enforce_user_quota(
@@ -637,13 +631,9 @@ async def _enforce_user_quota(
             )
         ).scalar() or 0
         if int(used_runs) >= int(entitlement.daily_run_limit):
-            raise HTTPException(
-                status_code=429,
-                detail=_quota_detail(
-                    code="daily_run_quota_exceeded",
-                    message=f"今日运行次数已达配额（{entitlement.daily_run_limit} 次），请联系管理员调整",
-                    action="contact_admin",
-                ),
+            raise _registry_error(
+                "daily_run_quota_exceeded",
+                message=f"今日运行次数已达配额（{entitlement.daily_run_limit} 次），请联系管理员调整",
             )
 
     quota_snapshot = {
@@ -727,14 +717,7 @@ async def create_agent_run_view(
         if resolved_model_spec.startswith(custom_prefixes):
             custom_model_specs = await list_active_custom_model_specs(db, current_uid)
             if resolved_model_spec not in custom_model_specs:
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "code": "custom_model_credential_unavailable",
-                        "message": "该会话使用的自有模型凭据已撤销或被替换，请重新配置后再继续",
-                        "action": "configure_byok",
-                    },
-                )
+                raise _registry_error("custom_model_credential_unavailable")
     else:
         user_model_spec = await _get_user_model_pref(db=db, uid=current_uid)
         requested_model_spec = model_spec.strip() if isinstance(model_spec, str) else ""
@@ -760,26 +743,15 @@ async def create_agent_run_view(
     )
     is_custom_model = resolved_model_spec in custom_model_specs
     if is_custom_model and effective_policy == "platform_only":
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "byok_not_allowed",
-                "message": "当前账号未启用自有模型，请联系管理员将模型策略设为 BYOK 可选",
-                "action": "contact_admin",
-            },
-        )
+        raise _registry_error("byok_not_allowed")
     if provider_id and effective_policy != "platform_only":
         credential = await get_active_user_credential(db=db, uid=current_uid, provider_id=provider_id)
         if credential is not None:
             user_credential_ref = {"credential_id": credential.id, "provider_id": provider_id}
         elif effective_policy == "byok_required":
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "byok_required",
-                    "message": "该智能体要求使用您自己的模型密钥，请先在设置中配置后再发起对话",
-                    "action": "configure_byok",
-                },
+            raise _registry_error(
+                "byok_required",
+                message="该智能体要求使用您自己的模型密钥，请先在设置中配置后再发起对话",
             )
 
     credential_source = "user_byok" if user_credential_ref else "platform"
@@ -910,16 +882,13 @@ def _same_run_request_scope(
 
 
 def _run_busy_exception(*, active_run, agent_slug: str, conversation_thread_id: str) -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail={
-            "code": "run_busy",
-            "message": "该智能体线程正在运行，请等待、查询或取消当前运行后再继续",
-            "active_run_id": active_run.id,
-            "active_run_status": active_run.status,
-            "agent_slug": agent_slug,
-            "thread_id": conversation_thread_id,
-        },
+    return _registry_error(
+        "run_busy",
+        message="该智能体线程正在运行，请等待、查询或取消当前运行后再继续",
+        active_run_id=active_run.id,
+        active_run_status=active_run.status,
+        agent_slug=agent_slug,
+        thread_id=conversation_thread_id,
     )
 
 

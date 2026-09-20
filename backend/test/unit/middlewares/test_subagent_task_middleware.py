@@ -53,6 +53,7 @@ def _patch_subagent_run_service(monkeypatch, service_class) -> None:
         lambda: SimpleNamespace(
             SubagentRunService=service_class,
             SubagentRunBusy=subagent_run_service.SubagentRunBusy,
+            SubagentRunConcurrencyLimit=subagent_run_service.SubagentRunConcurrencyLimit,
             serialize_subagent_run_state=subagent_run_service.serialize_subagent_run_state,
             subagent_run_urls=subagent_run_service.subagent_run_urls,
         ),

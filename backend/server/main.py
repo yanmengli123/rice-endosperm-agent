@@ -72,7 +72,7 @@ def _build_cors_options(origins: list[str] | None = None) -> dict[str, object]:
         "allow_credentials": True,
         "allow_methods": list(EXPLICIT_CORS_METHODS),
         "allow_headers": list(EXPLICIT_CORS_HEADERS),
-        "expose_headers": ["Content-Disposition", "X-Lock-Remaining"],
+        "expose_headers": ["Content-Disposition", "X-Lock-Remaining", "X-Export-Evidence-Summary"],
     }
 
 

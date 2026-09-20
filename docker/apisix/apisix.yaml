@@ -757,6 +757,43 @@ routes:
 
   # 桌面端与 Web 端共用原生 Conversation + AgentRun 契约。
   # 这些边界路由只开放问答所需的最小集合；身份与资源归属仍由 Yuxi 校验。
+  # 协议能力快照（公开）：桌面端连接阶段读取，用于前置版本兼容判断（fail-fast）。
+  - id: yuxi-desktop-agent-protocol
+    name: yuxi-desktop-agent-protocol
+    uri: /api/agent/protocol
+    methods:
+      - GET
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
   - id: yuxi-desktop-default-agent
     name: yuxi-desktop-default-agent
     uri: /api/agent/default
@@ -1099,6 +1136,10 @@ routes:
               type: string
               minLength: 1
               maxLength: 200
+            # 与服务端 AgentRunCreate 对齐（base64 图片输入）；闭集 schema
+            # 漏声明会被网关 400（由 test_apisix_gateway_contract 漂移检查锁定）。
+            image_content:
+              type: string
             # 中断恢复（P1）：载荷结构由 LangGraph 定义，网关只做存在性放行，
             # 字段校验由上游 AgentRunCreate（agent_router.py）承担。
             resume: {}

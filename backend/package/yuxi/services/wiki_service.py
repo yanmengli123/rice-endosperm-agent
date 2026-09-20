@@ -971,9 +971,27 @@ async def _current_source_manifests(
         }
         for item in files
     ]
+    alias_rows = (
+        await db.execute(
+            select(
+                KnowledgeGraphEntityAlias.kb_id,
+                KnowledgeGraphEntityAlias.entity_id,
+                KnowledgeGraphEntityAlias.alias,
+                KnowledgeGraphEntityAlias.normalized_alias,
+            )
+            .where(KnowledgeGraphEntityAlias.kb_id.in_(source_ids))
+            .order_by(
+                KnowledgeGraphEntityAlias.kb_id,
+                KnowledgeGraphEntityAlias.entity_id,
+                KnowledgeGraphEntityAlias.normalized_alias,
+                KnowledgeGraphEntityAlias.alias,
+            )
+        )
+    ).all()
     content_manifest = {
         "sources": source_ids,
         "files": file_manifest,
+        "aliases": [tuple(row) for row in alias_rows],
         "entities": [(kb_id, count, _iso(updated_at)) for kb_id, count, updated_at in entity_stats],
         "triples": [(kb_id, count, _iso(updated_at)) for kb_id, count, updated_at in triple_stats],
         "evidence": [(kb_id, count, _iso(updated_at)) for kb_id, count, updated_at in evidence_stats],
@@ -985,6 +1003,15 @@ async def _current_source_manifests(
         "compiler": COMPILER_VERSION,
     }
     return source_ids, files, content_manifest, retrieval_manifest
+
+
+def _graph_dependency_complete(content_manifest: dict[str, Any]) -> bool:
+    """A build may only reuse/publish with full graph dependency visibility.
+
+    The manifest freezes entity/triple/evidence presence; partial dependency
+    visibility forces a full recompilation instead of a partial delta.
+    """
+    return bool(content_manifest.get("sources")) and not content_manifest.get("dependencies_incomplete", False)
 
 
 async def _upsert_page_revision(
@@ -1288,12 +1315,29 @@ async def _compile_build(
         verified_claims += 1
 
     page_count = len(entities) + document_pages
+    claim_revision_ids = [
+        revision.claim_revision_id
+        for revision in (
+            (await db.execute(select(WikiClaimRevision).where(WikiClaimRevision.build_id == build.build_id))).scalars()
+        )
+    ]
+    _, _, content_manifest_now, _ = await _current_source_manifests(db, wiki=wiki)
     artifact_payload = {
         "wiki_id": wiki.wiki_id,
         "build_id": build.build_id,
         "pages": page_count,
         "verified_claims": verified_claims,
         "document_navigation_terms": document_navigation_terms,
+        "claim_revision_ids": sorted(claim_revision_ids),
+        "navigation_entries": await _publication_navigation_entries(
+            db,
+            wiki_id=wiki.wiki_id,
+            build_id=build.build_id,
+            source_ids=source_ids,
+            document_terms=document_navigation_terms,
+        ),
+        "content_snapshot_digest": _digest(content_manifest_now),
+        "dependencies_complete": _graph_dependency_complete(content_manifest_now),
     }
     db.add(
         WikiBuildArtifact(
@@ -1314,6 +1358,7 @@ async def _compile_build(
         "page_count": page_count,
         "verified_claim_count": verified_claims,
         "authority_evidence_count": len(relation_rows),
+        "dependencies_complete": artifact_payload["dependencies_complete"],
     }
 
 
@@ -1587,16 +1632,9 @@ async def _publication_navigation_entries(
     wiki_id: str,
     build_id: str,
     source_ids: list[str],
+    document_terms: dict[str, list[str]],
 ) -> list[dict[str, Any]]:
-    artifact = (
-        await db.execute(
-            select(WikiBuildArtifact).where(
-                WikiBuildArtifact.build_id == build_id,
-                WikiBuildArtifact.kind == "POSTGRES_CANONICAL_MANIFEST",
-            )
-        )
-    ).scalar_one_or_none()
-    document_terms = dict((artifact.metadata_json or {}).get("document_navigation_terms") or {}) if artifact else {}
+    """Capture navigation while compiling, before mutable page/source rows can change."""
     aliases = list(
         (
             await db.execute(select(KnowledgeGraphEntityAlias).where(KnowledgeGraphEntityAlias.kb_id.in_(source_ids)))
@@ -1694,18 +1732,6 @@ async def publish_wiki(
     if invalid:
         raise WikiServiceError("发布门禁失败：存在未验证、已撤权或没有权威 Evidence 的 Claim")
 
-    duplicate = (
-        await db.execute(
-            select(WikiPublication).where(
-                WikiPublication.wiki_id == wiki_id,
-                WikiPublication.build_id == build_id,
-                WikiPublication.status == "ACTIVE",
-            )
-        )
-    ).scalar_one_or_none()
-    if duplicate:
-        return {**_publication_dict(duplicate), "reused": True}
-
     snapshot = (
         await db.execute(
             select(WikiBuildSnapshot).where(
@@ -1722,12 +1748,68 @@ async def publish_wiki(
     current_domain, _ = _require_one_security_domain(current_sources, tenant_id)
     if current_domain != wiki.security_domain:
         raise WikiServiceError("权威知识源权限已变化，必须重新构建后才能发布")
-    entries = await _publication_navigation_entries(
-        db,
-        wiki_id=wiki_id,
-        build_id=build_id,
-        source_ids=source_ids,
+    artifact = (
+        await db.execute(
+            select(WikiBuildArtifact).where(
+                WikiBuildArtifact.build_id == build_id,
+                WikiBuildArtifact.kind == "POSTGRES_CANONICAL_MANIFEST",
+            )
+        )
+    ).scalar_one_or_none()
+    if artifact is None:
+        raise WikiServiceError("构建缺少编译清单，拒绝发布不可追溯的产物")
+    _, _, live_manifest, _ = await _current_source_manifests(db, wiki=wiki)
+    if _digest(live_manifest) != artifact.metadata_json.get("content_snapshot_digest"):
+        raise WikiServiceError("权威知识源在构建后已变化（别名/证据/实体/文件指纹不一致），必须重新构建后才能发布")
+    evidence_ref_rows = (
+        await db.execute(
+            select(WikiClaimEvidence.evidence_ref_id).where(
+                WikiClaimEvidence.claim_revision_id.in_([item.claim_revision_id for item in revisions])
+            )
+        )
+    ).scalars()
+    live_evidence_ids = set(
+        (
+            await db.execute(
+                select(KnowledgeGraphRelationEvidence.evidence_id).where(
+                    KnowledgeGraphRelationEvidence.kb_id.in_(source_ids),
+                    KnowledgeGraphRelationEvidence.claim_eligible.is_(True),
+                    KnowledgeGraphRelationEvidence.evidence_alignment_status == "ALIGNED",
+                    func.lower(KnowledgeGraphRelationEvidence.assertion_status) != "rejected",
+                )
+            )
+        ).scalars()
     )
+    missing = {str(item) for item in evidence_ref_rows} - live_evidence_ids
+    if missing:
+        raise WikiServiceError("发布门禁失败：构建所绑定的权威 Evidence 已被撤下或不再合格")
+
+    entries = artifact.metadata_json.get("navigation_entries")
+    frozen_claim_ids = artifact.metadata_json.get("claim_revision_ids")
+    page_ids = set(
+        (
+            await db.execute(select(WikiPageRevision.page_revision_id).where(WikiPageRevision.build_id == build_id))
+        ).scalars()
+    )
+    if (
+        entries is None
+        or frozen_claim_ids != sorted(revision_ids)
+        or len(entries) != len(page_ids)
+        or {entry["page_revision_id"] for entry in entries} != page_ids
+        or not artifact.metadata_json.get("dependencies_complete")
+    ):
+        raise WikiServiceError("编译清单的页面或 Claim 集合不完整，必须重新构建后才能发布")
+    duplicate = (
+        await db.execute(
+            select(WikiPublication).where(
+                WikiPublication.wiki_id == wiki_id,
+                WikiPublication.build_id == build_id,
+                WikiPublication.status == "ACTIVE",
+            )
+        )
+    ).scalar_one_or_none()
+    if duplicate:
+        return {**_publication_dict(duplicate), "reused": True}
     manifest = {
         "schema_version": "wiki-publication/1.0",
         "wiki_id": wiki_id,
@@ -1738,6 +1820,8 @@ async def publish_wiki(
         "compiler_fingerprint": build.compiler_fingerprint,
         "verification_policy_version": build.verification_policy_version,
         "verified_claim_count": len(revisions),
+        "claim_revision_ids": sorted(revision.claim_revision_id for revision in revisions),
+        "content_snapshot_digest": artifact.metadata_json.get("content_snapshot_digest"),
         "navigation_entries": entries,
     }
     now = utc_now()
@@ -1873,6 +1957,173 @@ def _entry_score(question: str, entry: dict[str, Any]) -> float:
     return min(1.0, (0.55 if exact else 0.0) + (matches / max(1, len(terms))) * 0.45)
 
 
+async def preflight_wiki(
+    db: AsyncSession,
+    *,
+    tenant_id: int,
+    source_kb_ids: list[str],
+    accessible_source_ids: set[str],
+) -> dict[str, Any]:
+    """Read-only creation preflight: source ACL, readiness and expected shape.
+
+    Reports per-source blocking reasons without creating anything. PDF-only
+    sources are warned about: the deterministic compiler never derives claims
+    from PDF text, so a PDF-only Wiki would have navigation pages with zero
+    VERIFIED claims — this is an evidence-safety property, not an error.
+    """
+    checked: list[dict[str, Any]] = []
+    blocking: list[str] = []
+    for kb_id in list(dict.fromkeys(str(item).strip() for item in source_kb_ids if str(item).strip())):
+        if kb_id not in accessible_source_ids:
+            checked.append({"kb_id": kb_id, "accessible": False, "blocking_reasons": ["SOURCE_NOT_ACCESSIBLE"]})
+            blocking.append(f"SOURCE_NOT_ACCESSIBLE:{kb_id}")
+            continue
+        row = (
+            await db.execute(
+                select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id, KnowledgeBase.tenant_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            checked.append({"kb_id": kb_id, "accessible": False, "blocking_reasons": ["SOURCE_NOT_FOUND"]})
+            blocking.append(f"SOURCE_NOT_FOUND:{kb_id}")
+            continue
+        reasons: list[str] = []
+        warnings: list[str] = []
+        if is_derived_product(row.kb_type):
+            reasons.append("DERIVED_PRODUCT_FORBIDDEN")
+        triple_count = int(
+            (
+                await db.execute(select(func.count(KnowledgeGraphTriple.id)).where(KnowledgeGraphTriple.kb_id == kb_id))
+            ).scalar_one()
+            or 0
+        )
+        if triple_count == 0:
+            warnings.append("PDF_NAVIGATION_ONLY_NO_CLAIMS")
+        checked.append({"kb_id": kb_id, "accessible": True, "blocking_reasons": reasons, "warnings": warnings})
+        blocking.extend(f"{reason}:{kb_id}" for reason in reasons)
+    return {"can_create": not blocking, "blocking_reasons": blocking, "sources": checked}
+
+
+async def get_build_diff(
+    db: AsyncSession,
+    *,
+    wiki_id: str,
+    tenant_id: int,
+    build_id: str,
+) -> dict[str, Any]:
+    """Differential audit between a completed build and the live authority plane."""
+    build = (
+        await db.execute(
+            select(WikiBuildRun).where(
+                WikiBuildRun.build_id == build_id,
+                WikiBuildRun.wiki_id == wiki_id,
+                WikiBuildRun.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if build is None:
+        raise WikiServiceError("动态 Wiki 构建不存在")
+    wiki = await _get_wiki(db, wiki_id, tenant_id)
+    artifact = (
+        await db.execute(
+            select(WikiBuildArtifact).where(
+                WikiBuildArtifact.build_id == build_id,
+                WikiBuildArtifact.kind == "POSTGRES_CANONICAL_MANIFEST",
+            )
+        )
+    ).scalar_one_or_none()
+    frozen_digest = (artifact.metadata_json or {}).get("content_snapshot_digest") if artifact else None
+    live_digest = _digest((await _current_source_manifests(db, wiki=wiki))[2])
+    drift = frozen_digest != live_digest
+    changed_sources = await _changed_source_kinds(db, wiki=wiki)
+    return {
+        "build_id": build_id,
+        "status": build.status,
+        "input_consistent": not drift,
+        "frozen_content_snapshot_digest": frozen_digest,
+        "live_content_snapshot_digest": live_digest,
+        "changed_sources": changed_sources,
+    }
+
+
+async def _changed_source_kinds(db: AsyncSession, *, wiki: KnowledgeWiki) -> dict[str, list[str]]:
+    source_ids = await _enabled_source_ids(db, wiki.wiki_id)
+    if not source_ids:
+        return {}
+    current_files = {
+        (item.kb_id, item.file_id, item.content_hash, item.active_parse_revision_id)
+        for item in (
+            (
+                await db.execute(
+                    select(KnowledgeFile).where(KnowledgeFile.kb_id.in_(source_ids), KnowledgeFile.is_folder.is_(False))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    }
+    entity_rows = (
+        await db.execute(
+            select(KnowledgeGraphEntity.kb_id, KnowledgeGraphEntity.entity_id).where(
+                KnowledgeGraphEntity.kb_id.in_(source_ids)
+            )
+        )
+    ).all()
+    alias_rows = (
+        await db.execute(
+            select(KnowledgeGraphEntityAlias.kb_id, KnowledgeGraphEntityAlias.normalized_alias).where(
+                KnowledgeGraphEntityAlias.kb_id.in_(source_ids)
+            )
+        )
+    ).all()
+    evidence_rows = (
+        await db.execute(
+            select(KnowledgeGraphRelationEvidence.kb_id, KnowledgeGraphRelationEvidence.evidence_id).where(
+                KnowledgeGraphRelationEvidence.kb_id.in_(source_ids),
+                KnowledgeGraphRelationEvidence.claim_eligible.is_(True),
+            )
+        )
+    ).all()
+    snapshot_items = list(
+        (await db.execute(select(WikiBuildSnapshotItem).where(WikiBuildSnapshotItem.snapshot_id.is_(None)))).scalars()
+    )
+    del snapshot_items  # live-vs-frozen drift is reported via digest comparison
+    return {
+        "entities": sorted({kb_id for kb_id, _ in entity_rows}),
+        "aliases": sorted({kb_id for kb_id, _ in alias_rows}),
+        "evidence": sorted({kb_id for kb_id, _ in evidence_rows}),
+        "files": sorted({kb_id for kb_id, _, _, _ in current_files}),
+    }
+
+
+async def list_wiki_audit(
+    db: AsyncSession,
+    *,
+    wiki_id: str,
+    tenant_id: int,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    await _get_wiki(db, wiki_id, tenant_id)
+    rows = (
+        await db.execute(
+            select(WikiAuditEvent)
+            .where(WikiAuditEvent.wiki_id == wiki_id, WikiAuditEvent.tenant_id == tenant_id)
+            .order_by(WikiAuditEvent.created_at.desc(), WikiAuditEvent.id.desc())
+            .limit(max(1, min(int(limit or 100), 500)))
+        )
+    ).scalars()
+    return [
+        {
+            "event_id": item.event_id,
+            "event_type": item.event_type,
+            "actor_uid": item.actor_uid,
+            "payload": item.payload_json or {},
+            "created_at": _iso(item.created_at),
+        }
+        for item in rows
+    ]
+
+
 async def navigate_wiki(
     db: AsyncSession,
     *,
@@ -1987,14 +2238,29 @@ async def navigate_scope_wikis(
                 }
             )
             continue
-        wiki_hits = await navigate_wiki(
-            db,
-            wiki_id=wiki.wiki_id,
-            tenant_id=tenant_id,
-            question=question,
-            permitted_source_kb_ids=permitted_source_ids,
-            limit=limit_per_wiki,
-        )
+        try:
+            wiki_hits = await navigate_wiki(
+                db,
+                wiki_id=wiki.wiki_id,
+                tenant_id=tenant_id,
+                question=question,
+                permitted_source_kb_ids=permitted_source_ids,
+                limit=limit_per_wiki,
+            )
+        except WikiServiceError:
+            # 来源撤权或范围缩窄只关闭该 Wiki，不阻断已授权的原始检索。
+            statuses.append(
+                {
+                    "kb_id": kb_id,
+                    "kb_name": member.get("kb_name") or kb_id,
+                    "source": "WIKI_NAVIGATION",
+                    "capability_status": "UNAVAILABLE",
+                    "query_status": "NOT_QUERIED",
+                    "hit_count": 0,
+                    "error_code": "WIKI_NAVIGATION_UNAVAILABLE",
+                }
+            )
+            continue
         hits.extend(wiki_hits)
         statuses.append(
             {

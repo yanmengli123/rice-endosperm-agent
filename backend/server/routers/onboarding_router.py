@@ -1,6 +1,5 @@
 """P5 开户编排路由：管理员签发一次性激活凭证；公开端点供桌面端激活换会话。"""
 
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -79,9 +78,7 @@ async def get_invitation(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(OnboardingActivation).where(OnboardingActivation.id == activation_id)
-    )
+    result = await db.execute(select(OnboardingActivation).where(OnboardingActivation.id == activation_id))
     activation = result.scalar_one_or_none()
     if activation is None:
         raise HTTPException(status_code=404, detail="激活记录不存在")

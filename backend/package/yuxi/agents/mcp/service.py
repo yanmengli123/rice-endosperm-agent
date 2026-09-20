@@ -143,6 +143,29 @@ _DEFAULT_MCP_SERVERS = {
             "https://github.com/florensiawidjaja/BioinfoMCP@7ada7918b9e515604d3c0ae264d3a9af10bf6e54#mcp_fastqc"
         ),
     },
+    # Rice Source KB：水稻 MSU / Oryzabase / RAP-DB 34 张无损源表的只读访问，后端是
+    # Rice Research Agent 的 rice-kb-gateway（按调用方 token、只读事务、8s 语句超时、
+    # rice-source-envelope-v1.1 行级 provenance 信封）。走进程内 stdio（同 bio-mcp 路径），
+    # 不需要 BioinfoMCP 式 docker 隔离：它不执行用户文件，只是一个 HTTP 客户端。
+    # 凭据只保存 ${} 引用；RICE_KB_GATEWAY_URL 缺省时脚本回落到共享网络别名。
+    "ricekb": {
+        "name": "Rice Source KB",
+        "command": "/usr/local/bin/ricekb-mcp",
+        "args": [],
+        "transport": "stdio",
+        "description": "水稻源知识库：仅从 MSU、Oryzabase、RAP-DB 34 张无损源表解析标识符并检索记录，"
+        "每条事实附源库/源表/源行/内容哈希/导入运行 ID；机器状态 FOUND / PARTIAL / CONFLICT / "
+        "NO_EVIDENCE / NOT_FOUND / AMBIGUOUS / INVALID_IDENTIFIER。来源 Rice Research Agent rice-kb-gateway 2.2",
+        "icon": "🌾",
+        "tags": ["内置", "水稻", "源数据库"],
+        "timeout": 60,
+        "env": {
+            "RICE_KB_GATEWAY_URL": "${RICE_KB_GATEWAY_URL}",
+            "RICE_KB_API_TOKEN": "${RICE_KB_API_TOKEN}",
+        },
+        "source_type": SOURCE_TYPE_BUILTIN,
+        "source_ref": "rice-research-agent:rice-kb-gateway/mcp/ricekb_mcp.py@gateway-2.2.0",
+    },
 }
 # BioinfoMCP 其余 37 个工具：由 bioinfomcp_catalog.py 生成（固定上游提交，
 # 每工具一个隔离镜像 + 统一受控启动器），镜像构建后即可在管理页启用。

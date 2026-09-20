@@ -7,11 +7,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
+from yuxi.agents.collaboration_templates import get_collaboration_templates
 from yuxi.agents.context import filter_config_by_role
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.agent_repository import (
+    ADMIN_ROLES,
+    DEFAULT_SHARE_CONFIG,
+    PLATFORM_BUILTIN_AGENT_SLUGS,
+    SUB_AGENT_BACKEND_ID,
     AgentRepository,
     is_builtin_agent,
+    normalize_agent_share_config,
     resolve_creator_department,
     user_can_access_agent,
     user_can_manage_agent,
@@ -20,6 +26,17 @@ from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.knowledge_retrieval_repository import (
     KnowledgeRetrievalRepository,
     serialize_retrieval_run,
+)
+from yuxi.services.agent_collaboration_service import (
+    AgentCollaborationError,
+    extract_subagent_slugs,
+    list_referencing_agents,
+    validate_subagent_collaboration,
+)
+from yuxi.services.agent_protocol import (
+    AGENT_RUN_PROTOCOL_VERSION,
+    ensure_client_protocol_supported,
+    protocol_capability_snapshot,
 )
 from yuxi.services.agent_run_service import (
     cancel_agent_run_view,
@@ -30,6 +47,7 @@ from yuxi.services.agent_run_service import (
     stream_agent_run_events,
 )
 from yuxi.services.input_message_service import build_chat_input_message
+from yuxi.services.principal import resolve_tenant_id
 from yuxi.services.trace_service import (
     get_run_trace_snapshot,
     list_run_trace_events,
@@ -124,6 +142,40 @@ async def _serialize_agent(
     return data
 
 
+def _share_config_as_repo_would_store(share_config: dict | None, actor: User) -> dict:
+    """按 AgentRepository.create/update 的同一套规则归一化 share_config，供保存前校验使用。"""
+    return normalize_agent_share_config(
+        share_config,
+        user_uid=str(actor.uid),
+        department_id=actor.department_id,
+        force_private=actor.role not in ADMIN_ROLES,
+    )
+
+
+async def _validate_collaboration_or_422(
+    db: AsyncSession,
+    *,
+    config_json: dict | None,
+    share_config: dict | None,
+    created_by: str | None,
+    tenant_id: Any,
+) -> None:
+    try:
+        await validate_subagent_collaboration(
+            db,
+            parent_config_json=config_json,
+            parent_share_config=share_config,
+            parent_created_by=created_by,
+            parent_tenant_id=tenant_id,
+        )
+    except AgentCollaborationError as exc:
+        raise HTTPException(status_code=422, detail=exc.payload) from exc
+
+
+def _reference_summary(agent) -> dict:
+    return {"slug": agent.slug, "name": agent.name, "access_level": (agent.share_config or {}).get("access_level")}
+
+
 @agent_router.get("/backends")
 async def list_agent_backends(current_user: User = Depends(get_required_user)):
     infos = await agent_manager.get_agents_info(include_configurable_items=False)
@@ -142,6 +194,12 @@ async def get_agent_backend(
     return _backend_info(await backend.get_info(user_role=current_user.role, db=db, user=current_user))
 
 
+@agent_router.get("/collaboration-templates")
+async def get_agent_collaboration_templates(current_user: User = Depends(get_required_user)):
+    """协作模式配方与模板（编排骨架 / 专家简报 / 调度决策表），供「从模式新建」预填。"""
+    return get_collaboration_templates()
+
+
 @agent_router.get("")
 async def list_agents(
     include_subagents: bool = Query(False),
@@ -154,6 +212,16 @@ async def list_agents(
     backend_info_cache: dict[tuple[str, bool, str], dict] = {}
     agents = [await _serialize_agent(repo, item, current_user, backend_info_cache=backend_info_cache) for item in items]
     return {"agents": agents}
+
+
+@agent_router.get("/protocol")
+async def get_agent_protocol():
+    """AgentRun 协议能力快照（公开端点）。
+
+    桌面端连接阶段读取本端点做前置兼容判断（fail-fast），替代运行中段
+    才发现契约不符。不鉴权：内容非敏感，且需要在登录前提示版本不匹配。
+    """
+    return protocol_capability_snapshot()
 
 
 @agent_router.get("/default")
@@ -187,6 +255,18 @@ async def create_agent(
             "department_ids": [current_user.department_id],
             "user_uids": [],
         }
+    if payload.backend_id != SUB_AGENT_BACKEND_ID and extract_subagent_slugs(payload.config_json):
+        try:
+            share_for_validation = _share_config_as_repo_would_store(effective_share_config, current_user)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        await _validate_collaboration_or_422(
+            db,
+            config_json=payload.config_json,
+            share_config=share_for_validation,
+            created_by=str(current_user.uid),
+            tenant_id=await resolve_tenant_id(db, str(current_user.uid)),
+        )
     try:
         item = await repo.create(
             name=payload.name,
@@ -233,6 +313,27 @@ async def update_agent(
     if not user_can_manage_agent(current_user, item, creator_department_id=creator_dept):
         raise HTTPException(status_code=403, detail="不能编辑非自己创建的智能体")
 
+    if not item.is_subagent:
+        # 以「保存后的真实形态」校验：新配置/新共享范围缺省时沿用现值，共享范围按仓储同一规则归一化
+        effective_config = payload.config_json if payload.config_json is not None else item.config_json
+        if extract_subagent_slugs(effective_config):
+            if payload.share_config is None:
+                effective_share = item.share_config
+            elif is_builtin_agent(item):
+                effective_share = DEFAULT_SHARE_CONFIG.copy()
+            else:
+                try:
+                    effective_share = _share_config_as_repo_would_store(payload.share_config, current_user)
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+            await _validate_collaboration_or_422(
+                db,
+                config_json=effective_config,
+                share_config=effective_share,
+                created_by=item.created_by,
+                tenant_id=item.tenant_id,
+            )
+
     try:
         fields_set = payload.model_fields_set
         if "description" in fields_set and payload.description is None:
@@ -259,9 +360,41 @@ async def update_agent(
     return {"agent": await _serialize_agent(repo, updated, current_user, include_configurable_items=True)}
 
 
+@agent_router.get("/{agent_id}/references")
+async def get_agent_references(
+    agent_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出把该子智能体挂进协作白名单的主智能体。
+
+    ``count`` 是租户内真实引用总数（删除保护使用同一口径），``references``
+    只展示当前用户可见的引用方，``hidden_count`` 提示还有看不到的引用方存在。
+    """
+    repo = AgentRepository(db)
+    item = await repo.get_visible_by_slug(slug=agent_id, user=current_user, kind="any")
+    if not item:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    if not item.is_subagent:
+        return {"references": [], "count": 0, "hidden_count": 0}
+
+    referencing = await list_referencing_agents(db, item.slug)
+    if current_user.role != "superadmin":
+        referencing = [agent for agent in referencing if agent.tenant_id == item.tenant_id]
+    visible = [agent for agent in referencing if user_can_access_agent(current_user, agent)]
+    return {
+        "references": [_reference_summary(agent) for agent in visible],
+        "count": len(referencing),
+        "hidden_count": len(referencing) - len(visible),
+    }
+
+
 @agent_router.delete("/{agent_id}")
 async def delete_agent(
-    agent_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+    agent_id: str,
+    force: bool = Query(default=False, description="superadmin 专用：忽略引用保护强制删除子智能体"),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
 ):
     repo = AgentRepository(db)
     agent_slug = agent_id  # 兼容既有路径参数名；这里实际是 Agent.slug。
@@ -273,6 +406,28 @@ async def delete_agent(
         raise HTTPException(status_code=403, detail="不能删除非自己创建的智能体")
     if is_builtin_agent(item):
         raise HTTPException(status_code=409, detail="内置智能体不能删除")
+    if item.slug in PLATFORM_BUILTIN_AGENT_SLUGS:
+        raise HTTPException(status_code=409, detail="平台内置智能体由系统维护，不能删除")
+
+    if item.is_subagent:
+        referencing = await list_referencing_agents(db, item.slug)
+        if referencing and not (force and current_user.role == "superadmin"):
+            names = "、".join(f"{agent.name}（{agent.slug}）" for agent in referencing[:5])
+            more = f" 等 {len(referencing)} 个" if len(referencing) > 5 else ""
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "subagent_referenced",
+                    "message": (
+                        f"该子智能体仍被主智能体引用：{names}{more}。请先从这些智能体的子智能体白名单中移除，再删除。"
+                    ),
+                    "references": [
+                        _reference_summary(agent) for agent in referencing if user_can_access_agent(current_user, agent)
+                    ],
+                    "count": len(referencing),
+                    "force_allowed": current_user.role == "superadmin",
+                },
+            )
     await repo.delete(agent=item)
     return {"success": True}
 
@@ -300,7 +455,20 @@ async def create_agent_run(
     payload: AgentRunCreate,
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
+    x_client_protocol: str | None = Header(default=None, alias="X-Yuxi-Protocol-Version"),
+    x_client_version: str | None = Header(default=None),
 ):
+    from yuxi.utils.logging_config import logger
+
+    # major 不一致直接 426：把破坏性变更的失败从「运行中段」提前到「创建请求」。
+    ensure_client_protocol_supported(x_client_protocol)
+    # 版本偏斜观测：服务端据此统计客户端安装基数，为弃用窗口提供数据。
+    logger.info(
+        "agent_run_create_client_telemetry "
+        f"uid={current_user.uid} client_version={x_client_version or 'unknown'} "
+        f"client_protocol={x_client_protocol or 'undeclared'} "
+        f"server_protocol={AGENT_RUN_PROTOCOL_VERSION} resume={payload.resume is not None}"
+    )
     input_message = None
     if payload.resume is None and payload.query:
         input_message = build_chat_input_message(payload.query, payload.image_content)
@@ -418,10 +586,11 @@ async def get_agent_run_evidence(
     if isinstance(source_manifest, dict):
         if not source_manifest.get("document_evidence_requested"):
             assembled["projection_status"] = "NOT_REQUESTED"
-        elif (
-            assembled.get("projection_status") == "NO_RETRIEVAL"
-            and source_manifest.get("status") in {"PLAN_REJECTED", "SOURCE_UNAVAILABLE", "DEGRADED"}
-        ):
+        elif assembled.get("projection_status") == "NO_RETRIEVAL" and source_manifest.get("status") in {
+            "PLAN_REJECTED",
+            "SOURCE_UNAVAILABLE",
+            "DEGRADED",
+        }:
             assembled["projection_status"] = "EVIDENCE_UNAVAILABLE"
     return assembled
 

@@ -521,13 +521,17 @@ async def list_mcp_call_audit_route(
 ):
     principal = await _request_principal(db, current_user)
     rows = (
-        await db.execute(
-            select(MCPCallAudit)
-            .where(MCPCallAudit.tenant_id == principal.tenant_id)
-            .order_by(MCPCallAudit.id.desc())
-            .limit(max(1, min(limit, 500)))
+        (
+            await db.execute(
+                select(MCPCallAudit)
+                .where(MCPCallAudit.tenant_id == principal.tenant_id)
+                .order_by(MCPCallAudit.id.desc())
+                .limit(max(1, min(limit, 500)))
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {
         "success": True,
         "data": [
@@ -660,9 +664,7 @@ async def test_mcp_server(
     try:
         principal = await _request_principal(db, current_user)
         await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
-        token = set_mcp_execution_context(
-            McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid)
-        )
+        token = set_mcp_execution_context(McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid))
         try:
             health = await probe_mcp_server(
                 slug,
@@ -761,9 +763,7 @@ async def get_mcp_server_tools(
 
         try:
             # 获取所有工具（不过滤 disabled_tools）
-            token = set_mcp_execution_context(
-                McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid)
-            )
+            token = set_mcp_execution_context(McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid))
             try:
                 tools = await get_all_mcp_tools(slug)
             finally:
@@ -823,9 +823,7 @@ async def refresh_mcp_capabilities_route(
 ):
     principal = await _request_principal(db, current_user)
     await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid)
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid))
     try:
         snapshot = await discover_mcp_capabilities(slug, db=db)
     except (ValueError, McpHostError) as exc:
@@ -844,9 +842,7 @@ async def read_mcp_resource_route(
 ):
     principal = await _request_principal(db, current_user)
     await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid)
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid))
     try:
         result = await read_mcp_resource(slug, request.uri, db=db)
     finally:
@@ -864,9 +860,7 @@ async def render_mcp_prompt_route(
 ):
     principal = await _request_principal(db, current_user)
     await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid)
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid))
     try:
         result = await render_mcp_prompt(slug, prompt_name, request.arguments, db=db)
     finally:
@@ -887,9 +881,7 @@ async def refresh_mcp_server_tools(
 
         try:
             # 获取所有工具（不过滤 disabled_tools）
-            token = set_mcp_execution_context(
-                McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid)
-            )
+            token = set_mcp_execution_context(McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid))
             try:
                 tools = await get_all_mcp_tools(slug)
             finally:

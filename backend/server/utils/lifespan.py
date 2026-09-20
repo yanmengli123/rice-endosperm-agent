@@ -191,9 +191,14 @@ async def lifespan(app: FastAPI):
     # =========================================================
     # 2. 核心修复：在这里执行一次 setup()，建完表就拉倒
     # =========================================================
-    checkpointer = AsyncPostgresSaver(pg_manager.langgraph_pool)
-    await checkpointer.setup()
-    print("LangGraph Checkpoint tables verified/created!")
+    # 与 agents/base.py 的 backend 选择共用同一开关：只有显式 postgres 时才建
+    # PG checkpoint 表，消除「lifespan 建 PG 表、runtime 用 sqlite」的配置分叉。
+    if os.getenv("LANGGRAPH_CHECKPOINTER_BACKEND", "sqlite").strip().lower() == "postgres":
+        checkpointer = AsyncPostgresSaver(pg_manager.langgraph_pool)
+        await checkpointer.setup()
+        logger.info("LangGraph checkpointer backend=postgres：checkpoint 表已验证/创建")
+    else:
+        logger.info("LangGraph checkpointer backend=sqlite：跳过 Postgres checkpoint 表初始化")
 
     await tasker.start()
     logger.info(f"""

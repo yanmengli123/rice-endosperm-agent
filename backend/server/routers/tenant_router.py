@@ -32,8 +32,5 @@ async def list_tenant_members(
         )
         .order_by(TenantMembership.created_at.asc())
     )
-    members = [
-        {"uid": uid, "username": username, "membership_role": role}
-        for uid, role, username in result.all()
-    ]
+    members = [{"uid": uid, "username": username, "membership_role": role} for uid, role, username in result.all()]
     return {"tenant_id": principal.tenant_id, "members": members}

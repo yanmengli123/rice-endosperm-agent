@@ -189,6 +189,20 @@ _LITERATURE = re.compile(
     re.I,
 )
 
+# Rice Source KB (builtin MCP "ricekb"): a concrete rice source identifier in the
+# question is a deterministic signal that the authoritative database applies.
+# RAP-DB locus/transcript (Os06g0101600, Os06t0101600-01), MSU locus/model
+# (LOC_Os06g01210, LOC_Os06g01210.1), optionally namespaced (RAP:, MSU:,
+# ORYZABASE:). Deliberately excludes bare symbols such as "Wx"; those still
+# need an explicit source phrase.
+RICE_SOURCE_MCP = "ricekb"
+_RICE_SOURCE_IDENTIFIER = re.compile(
+    r"(?<![A-Za-z0-9_])(?:RAP:|MSU:|ORYZABASE:)?"
+    r"(?:Os(?:0[1-9]|1[0-2])[gt]\d{7}(?:-\d{2})?|LOC_Os(?:0[1-9]|1[0-2])g\d{5}(?:\.\d+)?)"
+    r"(?![A-Za-z0-9_])",
+    re.I,
+)
+
 
 def plan_turn(
     question: str,
@@ -346,6 +360,21 @@ def plan_turn(
             has_knowledge_scope and knowledge_enabled and source_policy != SourcePolicy.NO_EXTERNAL_SOURCE
         )
         capabilities = [Capability.DOCUMENT_QA] if evidence_required else []
+
+    # AUTO turn that names a concrete rice source identifier while the agent has
+    # the Rice Source KB configured: admit STRUCTURED_DATABASE so the ricekb tools
+    # stay visible to the model. The policy remains AUTO (knowledge sources keep
+    # whatever they already had) and any explicit "no MCP" veto still wins.
+    if (
+        source_policy == SourcePolicy.AUTO
+        and RICE_SOURCE_MCP in (configured_mcps or [])
+        and SourceClass.STRUCTURED_DATABASE not in forbidden
+        and _RICE_SOURCE_IDENTIFIER.search(text)
+    ):
+        allowed.append(SourceClass.STRUCTURED_DATABASE)
+        capabilities.append(Capability.GENE_RECORD_LOOKUP)
+        target_type = "GENE"
+        reason_codes.append("RICE_SOURCE_IDENTIFIER_ROUTING")
 
     # Explicit MCP cannot satisfy document page/quote authority through the
     # current trusted capability registry.  Fail before any source is called.

@@ -16,6 +16,10 @@ DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT = 300
 DEFAULT_SUMMARY_L2_TRIGGER_RATIO = 0.4
 DEFAULT_MAX_EXECUTION_STEPS = 300
 DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS = 3
+# 单个父 run 允许同时运行的子智能体数量；每个子 run 都是完整 AgentRun（模型/工具/队列），
+# 无上限的并行派发会直接打穿配额与全局 worker 队列。
+DEFAULT_MAX_CONCURRENT_SUBAGENT_RUNS = 3
+HARD_MAX_CONCURRENT_SUBAGENT_RUNS = 8
 DEFAULT_YUXI_SUMMARY_PROMPT = """你是对话上下文压缩助手。
 你的任务是把下面的对话历史压缩成后续智能体继续工作所需的高价值上下文。
 
@@ -428,13 +432,23 @@ def _resource_fields_requiring_available_keys(normalized: dict, resource_fields:
     return fields_to_load
 
 
-def _resource_option(key: Any, name: Any = None, description: Any = None) -> dict[str, str]:
+def _resource_option(
+    key: Any,
+    name: Any = None,
+    description: Any = None,
+    *,
+    opt_in_only: bool = False,
+) -> dict[str, str]:
     key_value = str(key)
-    return {
+    option = {
         "key": key_value,
         "name": str(name or key_value),
         "description": str(description or ""),
     }
+    if opt_in_only:
+        # 仅显式勾选生效；context 对应字段为 null 的「全选」展开会跳过此类条目
+        option["opt_in_only"] = True
+    return option
 
 
 async def resolve_agent_resource_options(
@@ -457,6 +471,21 @@ async def resolve_agent_resource_options(
             for tool in get_tool_metadata(category="buildin")
             if tool.get("slug")
         ]
+        # 自定义数据面工具（DB 定义）：列出全部已定义工具供显式勾选（运行时按
+        # READY+enabled 门控）；带 opt_in_only 标记——tools:null 的「全选」语义
+        # 不自动带上外部 HTTP 工具（可能携带凭据），必须显式勾选。
+        # 目录查询失败只降级为本租户无自定义工具，不允许阻断 Agent 配置解析。
+        try:
+            from yuxi.agents.toolkits.custom.service import list_custom_tool_options
+            from yuxi.services.principal import resolve_tenant_id
+
+            custom_tenant_id = await resolve_tenant_id(db, getattr(user, "uid", None))
+            options["tools"].extend(
+                _resource_option(item["key"], item["name"], item["description"], opt_in_only=True)
+                for item in await list_custom_tool_options(db, tenant_id=custom_tenant_id)
+            )
+        except Exception as error:
+            logger.warning(f"Failed to merge custom tool options: {type(error).__name__}: {error}")
     if "knowledges" in fields_to_load:
         from yuxi.knowledge.runtime import knowledge_base
 
@@ -514,17 +543,17 @@ async def normalize_agent_context_config(
         return normalized
 
     resource_options = await resolve_agent_resource_options(fields_to_load, db=db, user=user)
-    available = {
-        field_name: [option["key"] for option in field_options]
-        for field_name, field_options in resource_options.items()
-    }
 
-    for field_name, available_keys in available.items():
+    for field_name, field_options in resource_options.items():
+        # 显式勾选允许全部 key（含 opt_in_only）；null 的「全选」展开只取默认项，
+        # 自定义 HTTP 工具等需要显式勾选的能力不会静默进入未配置的 Agent。
+        all_keys = [option["key"] for option in field_options]
+        default_keys = [option["key"] for option in field_options if not option.get("opt_in_only")]
         current = normalized.get(field_name)
         if current is None:
-            normalized[field_name] = available_keys
+            normalized[field_name] = default_keys
         else:
-            normalized[field_name] = _normalize_selected_resource_keys(current, available_keys)
+            normalized[field_name] = _normalize_selected_resource_keys(current, all_keys)
 
     return normalized
 

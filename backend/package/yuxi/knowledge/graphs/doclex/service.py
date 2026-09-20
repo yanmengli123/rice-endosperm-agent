@@ -338,18 +338,16 @@ async def prewarm_doclex_for_kb(ctx: dict[str, Any], kb_id: str) -> dict[str, An
     del ctx
     async with pg_manager.get_async_session_context() as session:
         file_ids = list(
-
-                (
-                    await session.execute(
-                        sa_select(KnowledgeFile.file_id).where(
-                            KnowledgeFile.kb_id == kb_id,
-                            KnowledgeFile.active_parse_revision_id.is_not(None),
-                        )
+            (
+                await session.execute(
+                    sa_select(KnowledgeFile.file_id).where(
+                        KnowledgeFile.kb_id == kb_id,
+                        KnowledgeFile.active_parse_revision_id.is_not(None),
                     )
                 )
-                .scalars()
-                .all()
-
+            )
+            .scalars()
+            .all()
         )
     service = DocLexService()
     semaphore = asyncio.Semaphore(2)

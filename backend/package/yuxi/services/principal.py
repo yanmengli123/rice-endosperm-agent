@@ -70,11 +70,13 @@ class PrincipalContext:
     department_id: int | None
 
 
-async def apply_tenant_rls_context(db: AsyncSession, tenant_id: int) -> None:
-    """Set the transaction-local tenant GUC used by PostgreSQL RLS policies.
+async def apply_tenant_rls_context(db: AsyncSession, tenant_id: int, uid: str | None = None) -> None:
+    """Set the transaction-local GUCs used by PostgreSQL RLS policies.
 
     SQLite and lightweight unit-test sessions intentionally no-op.  The value is
     derived from the authenticated membership and is never accepted from a body.
+    ``yuxi.uid``（0006 的 conversations/agent_runs 策略）只在真实用户上下文设置：
+    system/空 uid 不设置，worker 的跨用户 reconciler 路径的可见性另行设计。
     """
     get_bind = getattr(db, "get_bind", None)
     if not callable(get_bind):
@@ -89,6 +91,12 @@ async def apply_tenant_rls_context(db: AsyncSession, tenant_id: int) -> None:
         text("SELECT set_config('yuxi.tenant_id', :tenant_id, true)"),
         {"tenant_id": str(int(tenant_id))},
     )
+    effective_uid = str(uid or "").strip()
+    if effective_uid and effective_uid != "system":
+        await db.execute(
+            text("SELECT set_config('yuxi.uid', :uid, true)"),
+            {"uid": effective_uid},
+        )
 
 
 async def ensure_tenant_membership(
@@ -152,14 +160,14 @@ async def resolve_tenant_id(db: AsyncSession, uid: str | None) -> int:
         tenant_id = DEFAULT_TENANT_ID
     else:
         tenant_id = int((await _resolve_active_membership(db, str(uid))).tenant_id)
-    await apply_tenant_rls_context(db, tenant_id)
+    await apply_tenant_rls_context(db, tenant_id, uid=uid)
     return tenant_id
 
 
 async def resolve_principal(db: AsyncSession, user: User) -> PrincipalContext:
     """由已认证 User 构造服务端权威身份上下文。"""
     membership = await _resolve_active_membership(db, str(user.uid))
-    await apply_tenant_rls_context(db, int(membership.tenant_id))
+    await apply_tenant_rls_context(db, int(membership.tenant_id), uid=str(user.uid))
     return PrincipalContext(
         tenant_id=int(membership.tenant_id),
         uid=str(user.uid),

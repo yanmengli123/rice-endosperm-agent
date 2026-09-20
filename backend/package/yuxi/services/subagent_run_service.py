@@ -19,6 +19,11 @@ from typing import Any
 import yuxi.services.agent_run_service as agent_run_service
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from yuxi.agents.context import (
+    DEFAULT_MAX_CONCURRENT_SUBAGENT_RUNS,
+    HARD_MAX_CONCURRENT_SUBAGENT_RUNS,
+)
+from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.subagent_thread_repository import SubagentThreadRepository
@@ -53,6 +58,37 @@ class SubagentRunBusy(Exception):
         }
 
 
+@dataclass(frozen=True)
+class SubagentRunConcurrencyLimit(Exception):
+    """父 run 同时运行的子智能体数量已达上限；语义与 busy 同类：可恢复、不算失败。"""
+
+    limit: int
+    active_run_ids: tuple[str, ...]
+
+    def to_payload(self) -> dict:
+        return {
+            "status": "concurrency_limit",
+            "limit": self.limit,
+            "active_run_ids": list(self.active_run_ids),
+            "message": (
+                f"已达并发子智能体上限（{self.limit}），当前有 {len(self.active_run_ids)} 个子任务仍在运行。"
+                "请先用 subagent_await 或 subagent_status 等待并收割现有子任务，再派发新的子任务；不要重试刷屏。"
+            ),
+        }
+
+
+def resolve_max_concurrent_subagent_runs(parent_agent: Agent | None) -> int:
+    """从父智能体配置读取并发上限，缺省或非法时回退默认值，并钳制到硬上限内。"""
+    config = getattr(parent_agent, "config_json", None)
+    context = config.get("context") if isinstance(config, dict) else None
+    raw = context.get("max_concurrent_subagent_runs") if isinstance(context, dict) else None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CONCURRENT_SUBAGENT_RUNS
+    return max(1, min(value, HARD_MAX_CONCURRENT_SUBAGENT_RUNS))
+
+
 def subagent_run_urls(run_id: str) -> dict[str, str]:
     """生成子智能体 run 对外暴露的事件流和结果查询 URL。"""
     return {
@@ -65,6 +101,7 @@ _SCOPE_CAPABILITY_FLAGS = (
     "document_enabled",
     "graph_enabled",
     "structured_enabled",
+    "wiki_navigation_enabled",
     "evidence_strict",
     "evidence_supporting",
     "evidence_candidate",
@@ -94,6 +131,11 @@ def narrow_child_scope_to_parent(child_scope: dict[str, Any], parent_scope: dict
         if parent_member:
             for flag in _SCOPE_CAPABILITY_FLAGS:
                 merged[flag] = bool(item.get(flag, False)) and bool(parent_member.get(flag, False))
+            for field in ("wiki_id", "publication_id", "manifest_hash", "snapshot_id", "wiki_source_kb_ids"):
+                merged.pop(field, None)
+                if parent_member.get(field) is not None:
+                    value = parent_member[field]
+                    merged[field] = list(value) if isinstance(value, list) else value
         child_members.append(merged)
     narrowed["members"] = child_members
     narrowed["allow_web"] = bool(child_scope.get("allow_web")) and bool(parent_scope.get("allow_web"))
@@ -170,6 +212,8 @@ class SubagentRunService:
                 tool_call_id,
             )
 
+        await self._enforce_concurrency_limit(creator_run=creator_run, uid=uid, child_thread_id=child_thread_id)
+
         # 1. 确保子线程有对应 conversation，必要时创建 subagent 对话
         # 2. 确保父子线程关系存在，必要时创建 SubagentThread 记录；relation 是后台子 run 的线程归属来源
         relation = await self._ensure_thread_relation(
@@ -215,6 +259,22 @@ class SubagentRunService:
             continuing=continuing,
             relation=relation,
         )
+
+    async def _enforce_concurrency_limit(self, *, creator_run: AgentRun, uid: str, child_thread_id: str) -> None:
+        """在创建子 run 前检查父 run 的并发子智能体数量。
+
+        只统计其它子线程上的活跃 run：同线程续跑撞上活跃 run 由既有 busy 语义处理，
+        两者语义都是「可恢复的排队受限」而不是失败。
+        """
+        parent_agent = await AgentRepository(self.db).get_by_slug(creator_run.agent_slug)
+        limit = resolve_max_concurrent_subagent_runs(parent_agent)
+        active_runs = await self.run_repo.list_active_child_runs_for_user(creator_run.id, uid)
+        other_thread_runs = [run for run in active_runs if run.conversation_thread_id != child_thread_id]
+        if len(other_thread_runs) >= limit:
+            raise SubagentRunConcurrencyLimit(
+                limit=limit,
+                active_run_ids=tuple(str(run.id) for run in other_thread_runs),
+            )
 
     async def get_run_for_creator(self, *, uid: str, created_by_run_id: str, run_id: str) -> AgentRun:
         """在父 run 作用域内读取子智能体 run，防止工具访问其它对话的子任务。"""

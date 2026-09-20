@@ -17,6 +17,7 @@ from starlette.responses import StreamingResponse
 from yuxi import config
 from yuxi.knowledge.chunking.ragflow_like.presets import get_chunk_preset_options
 from yuxi.knowledge.factory import KnowledgeBaseFactory
+from yuxi.knowledge.graphs.graph_governance_service import invalidate_governance_summary
 from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_TASK_TYPE, MilvusGraphService
 from yuxi.knowledge.parser.unified import SUPPORTED_FILE_EXTENSIONS, Parser, is_supported_file_extension
 from yuxi.knowledge.runtime import knowledge_base
@@ -1292,6 +1293,7 @@ async def configure_graph_build(
             extractor_options=data.get("extractor_options") or {},
             created_by=current_user.uid,
         )
+        invalidate_governance_summary(kb_id)
         return {"message": "图谱抽取配置已锁定", "status": "success", "config": config}
     except ValueError as e:
         status_code = 409 if "已锁定" in str(e) else 400
@@ -1398,11 +1400,13 @@ async def reset_graph_build(
         if await _has_running_graph_build_task(kb_id):
             raise HTTPException(status_code=409, detail="该知识库存在正在运行的图谱构建任务，无法重置")
 
-        return await MilvusGraphService().reset(
+        result = await MilvusGraphService().reset(
             kb_id,
             clear_extraction_result=bool(data.get("clear_extraction_result", True)),
             clear_config=bool(data.get("clear_config", False)),
         )
+        invalidate_governance_summary(kb_id)
+        return result
     except HTTPException:
         raise
     except ValueError as e:
@@ -1420,6 +1424,7 @@ async def revive_dead_graph_chunks(kb_id: str, current_user: User = Depends(get_
         if await _has_running_graph_build_task(kb_id):
             raise HTTPException(status_code=409, detail="该知识库存在正在运行的图谱构建任务，无法复活")
         revived = await MilvusGraphService().revive_dead_chunks(kb_id)
+        invalidate_governance_summary(kb_id)
         return {
             "message": f"已复活 {revived} 个死信 Chunk（重新计入待索引）",
             "status": "success",

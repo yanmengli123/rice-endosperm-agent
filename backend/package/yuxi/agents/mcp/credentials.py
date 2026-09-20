@@ -124,6 +124,33 @@ async def open_mcp_credential(
     return credential.auth_type, secret, dict(credential.metadata_json or {})
 
 
+async def open_mcp_credential_by_id(
+    db: AsyncSession,
+    *,
+    tenant_id: int,
+    credential_id: int,
+) -> tuple[str, str, dict] | None:
+    """按 id + 租户解密凭据（不要求调用方知道属主 uid）。
+
+    供数据面工具（custom tools）在运行期解析 ``credential_id`` 引用；
+    AAD 仍从凭据行自身的 (tenant, uid, name) 重建，加密契约不变。
+    """
+    credential = await db.scalar(
+        select(MCPUserCredential).where(
+            MCPUserCredential.id == credential_id,
+            MCPUserCredential.tenant_id == tenant_id,
+            MCPUserCredential.status == "active",
+        )
+    )
+    if credential is None:
+        return None
+    secret = decrypt_secret(
+        credential.secret_ciphertext,
+        _aad(tenant_id, credential.uid, credential.name),
+    )
+    return credential.auth_type, secret, dict(credential.metadata_json or {})
+
+
 def inject_credential(config: dict, opened: tuple[str, str, dict]) -> dict:
     """Materialize auth only in memory immediately before opening a session."""
     auth_type, secret, metadata = opened
@@ -152,7 +179,8 @@ __all__ = [
     "SUPPORTED_AUTH_TYPES",
     "create_mcp_credential",
     "list_mcp_credentials",
-    "revoke_mcp_credential",
     "open_mcp_credential",
+    "open_mcp_credential_by_id",
+    "revoke_mcp_credential",
     "inject_credential",
 ]

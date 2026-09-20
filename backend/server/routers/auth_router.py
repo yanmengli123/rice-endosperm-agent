@@ -67,8 +67,7 @@ auth = APIRouter(prefix="/auth", tags=["authentication"])
 ADMIN_ISSUED_KEY_TTL_DAYS = 90
 
 DUMMY_PASSWORD_HASH = (
-    "$argon2id$v=19$m=65536,t=3,p=4$SDj0/iiy9nalX9mDvqU25A$"
-    "KKlDtRXMd/aecDyi04DAM/YiMJWhksK9xoi7A8EKchk"
+    "$argon2id$v=19$m=65536,t=3,p=4$SDj0/iiy9nalX9mDvqU25A$KKlDtRXMd/aecDyi04DAM/YiMJWhksK9xoi7A8EKchk"
 )
 
 
@@ -388,11 +387,7 @@ async def login_desktop_client(
 
     key_hash = hashlib.sha256(raw_api_key.encode()).hexdigest()
     key_row = (
-        await db.execute(
-            select(APIKey, User)
-            .join(User, User.id == APIKey.user_id)
-            .filter(APIKey.key_hash == key_hash)
-        )
+        await db.execute(select(APIKey, User).join(User, User.id == APIKey.user_id).filter(APIKey.key_hash == key_hash))
     ).one_or_none()
     api_key, key_owner = key_row if key_row is not None else (None, None)
 
@@ -503,9 +498,7 @@ async def get_register_config():
     """返回非敏感注册开关与可选部门列表，供注册页渲染。"""
     departments: list[dict] = []
     async with pg_manager.get_async_session_context() as session:
-        rows = (
-            await session.execute(select(Department).order_by(Department.id))
-        ).scalars().all()
+        rows = (await session.execute(select(Department).order_by(Department.id))).scalars().all()
         departments = [{"id": d.id, "name": d.name} for d in rows]
     return {
         "enabled": _register_enabled(),
@@ -550,9 +543,7 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
         conflict = "登录标识" if existing.uid == data.uid else "显示名称"
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"该{conflict}已被使用")
 
-    department = (
-        await db.execute(select(Department).filter(Department.id == data.department_id))
-    ).scalar_one_or_none()
+    department = (await db.execute(select(Department).filter(Department.id == data.department_id))).scalar_one_or_none()
     if department is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选部门不存在")
 
@@ -1180,9 +1171,7 @@ async def update_user(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="手机号格式不正确")
         if user_data.phone_number:
             existing_phone = (
-                await db.execute(
-                    select(User).filter(User.phone_number == user_data.phone_number, User.id != user_id)
-                )
+                await db.execute(select(User).filter(User.phone_number == user_data.phone_number, User.id != user_id))
             ).scalar_one_or_none()
             if existing_phone:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="手机号已被使用")
@@ -1219,8 +1208,10 @@ async def update_user(
                 )
 
         enabled_keys = (
-            await db.execute(select(APIKey).filter(APIKey.user_id == user.id, APIKey.is_enabled.is_(True)))
-        ).scalars().all()
+            (await db.execute(select(APIKey).filter(APIKey.user_id == user.id, APIKey.is_enabled.is_(True))))
+            .scalars()
+            .all()
+        )
         for api_key in enabled_keys:
             api_key.is_enabled = False
 

@@ -34,6 +34,8 @@ REQUIRED_ROUTES: dict[str, set[str]] = {
     "/api/user/usage": {"GET"},
     "/api/auth/sessions": {"GET"},
     "/api/auth/sessions/:family_id": {"DELETE"},
+    # 协议能力快照（公开）：连接阶段 fail-fast 的前置兼容判断。
+    "/api/agent/protocol": {"GET"},
 }
 
 
@@ -92,6 +94,49 @@ def test_gateway_has_no_catch_all_route() -> None:
         uri = route["uri"]
         assert "*" not in uri or uri.count("*") == 1 and uri.endswith("/*"), f"可疑通配路由 {uri}"
         assert uri != "/*", "禁止 catch-all：所有路由必须显式声明"
+
+
+def test_run_create_gateway_schema_matches_pydantic_model() -> None:
+    """网关闭集 schema 与服务端 pydantic 模型的漂移检查（单一真源守护）。
+
+    网关 schema 手写在 apisix.yaml，与服务端 AgentRunCreate 是两份声明；
+    字段集合漂移（一边加了字段另一边没加）会让请求被网关 400 或被上游 422，
+    这里强制两者保持一致。
+    """
+    routes = _load_routes()
+    schema = _run_create_schema(routes)
+    try:
+        from server.routers.agent_router import AgentRunCreate
+    except ImportError:  # pragma: no cover - 容器外环境无 server 包
+        pytest.skip("当前环境导入不了 server.routers.agent_router")
+
+    model_fields = set(AgentRunCreate.model_fields)
+    gateway_fields = set(schema["properties"])
+    assert gateway_fields == model_fields, (
+        f"网关与 pydantic 字段漂移：仅网关有 {gateway_fields - model_fields}，"
+        f"仅 pydantic 有 {model_fields - gateway_fields}"
+    )
+    # 网关必填是 pydantic 必填（agent_slug/thread_id）+ 网关治理要求（meta）。
+    assert set(schema["required"]) == {"agent_slug", "thread_id", "meta"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.e2e
+async def test_live_agent_protocol_endpoint_reachable_without_auth() -> None:
+    """经网关实测：协议能力端点公开可达，桌面端登录前即可做版本兼容判断。"""
+    try:
+        async with httpx.AsyncClient(base_url=GATEWAY_URL, timeout=10.0) as client:
+            response = await client.get("/api/agent/protocol")
+            assert response.status_code == 200, (
+                f"/api/agent/protocol 经网关返回 {response.status_code}："
+                "apisix.yaml 未放行或容器未重建（改配置必须 force-recreate）"
+            )
+            body = response.json()
+            assert body["service"] == "yuxi"
+            assert body["protocol_version"]
+            assert isinstance(body["capabilities"], list)
+    except httpx.ConnectError:
+        pytest.skip(f"网关不可达：{GATEWAY_URL}")
 
 
 @pytest.mark.asyncio

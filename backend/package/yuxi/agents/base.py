@@ -361,11 +361,19 @@ class BaseAgent:
         backend = os.getenv("LANGGRAPH_CHECKPOINTER_BACKEND", "sqlite").strip().lower()
 
         if backend == "postgres":
+            # 显式 postgres 失败关闭：checkpointer 是 resume/计费基线的权威状态，
+            # 构建失败不允许静默回退 sqlite/内存（会与 lifespan 的 PG 建表意图分叉）。
             checkpointer = await self._create_postgres_checkpointer()
+            if checkpointer is None:
+                raise RuntimeError(
+                    "LANGGRAPH_CHECKPOINTER_BACKEND=postgres 但 checkpointer 构建失败，拒绝回退；"
+                    "请检查 POSTGRES_URL 与 langgraph-checkpoint-postgres 依赖"
+                )
 
         if checkpointer is None:
             try:
                 checkpointer = AsyncSqliteSaver(await self.get_async_conn())
+                logger.info(f"{self.name} 使用 sqlite checkpointer（backend={backend}）")
             except Exception as e:
                 logger.error(f"构建 sqlite checkpointer 失败: {e}, 尝试使用内存存储")
                 checkpointer = InMemorySaver()
@@ -376,23 +384,20 @@ class BaseAgent:
     async def _create_postgres_checkpointer(self):
         postgres_url = os.getenv("POSTGRES_URL")
         if not postgres_url:
-            logger.warning("POSTGRES_URL 未配置，无法启用 postgres checkpointer，回退 sqlite")
-            return None
+            raise RuntimeError("LANGGRAPH_CHECKPOINTER_BACKEND=postgres 但 POSTGRES_URL 未配置，拒绝回退 sqlite")
 
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore
         except Exception as e:
-            logger.warning(f"langgraph postgres checkpointer 不可用，回退 sqlite: {e}")
-            return None
+            raise RuntimeError(f"langgraph postgres checkpointer 依赖不可用: {e}") from e
 
         try:
             saver = AsyncPostgresSaver(pg_manager.langgraph_pool)
 
-            logger.info(f"{self.name} 使用 postgres checkpointer")
+            logger.info(f"{self.name} 使用 postgres checkpointer（backend=postgres）")
             return saver
         except Exception as e:
-            logger.warning(f"初始化 postgres checkpointer 失败，回退 sqlite: {e}")
-            return None
+            raise RuntimeError(f"初始化 postgres checkpointer 失败: {e}") from e
 
     async def get_async_conn(self) -> aiosqlite.Connection:
         """获取异步数据库连接"""

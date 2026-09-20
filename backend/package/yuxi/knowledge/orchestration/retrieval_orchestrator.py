@@ -41,21 +41,44 @@ def _merge_gateway_results(
     *,
     limit: int,
 ) -> dict[str, Any]:
-    """Merge raw retrieval paths while keeping Wiki hits outside evidence."""
+    """Merge raw retrieval paths while keeping Wiki hits outside evidence.
+
+    Baseline 行保留原字段与首位排名；重复 evidence 记录两条路径与各自排名，
+    融合是稳定的（先 baseline 后 guided），不重排原始证据。
+    """
     if not guided:
         return baseline
     merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    index_by_key: dict[str, int] = {}
     for path, result in (("BASELINE", baseline), ("WIKI_GUIDED", guided)):
-        for row in result.get("evidence") or []:
+        for rank, row in enumerate(result.get("evidence") or [], start=1):
             key = str(row.get("evidence_id") or row.get("chunk_id") or "") or _hash_contract(row)
-            if key in seen:
+            existing_index = index_by_key.get(key)
+            if existing_index is not None:
+                merged[existing_index].setdefault("retrieval_paths", []).append(path)
+                merged[existing_index].setdefault("retrieval_ranks", {})[path] = rank
                 continue
-            seen.add(key)
             copied = dict(row)
             copied["retrieval_path"] = path
+            copied["retrieval_paths"] = [path]
+            copied["retrieval_ranks"] = {path: rank}
+            index_by_key[key] = len(merged)
             merged.append(copied)
-    merged = merged[: max(1, min(int(limit), 24))]
+    wiki_rows = [row for row in guided.get("evidence") or []]
+    wiki_keys = {str(row.get("evidence_id") or row.get("chunk_id") or "") or _hash_contract(row) for row in wiki_rows}
+    baseline_keys = {
+        str(row.get("evidence_id") or row.get("chunk_id") or "") or _hash_contract(row)
+        for row in baseline.get("evidence") or []
+    }
+    unique_ids = wiki_keys - baseline_keys
+    # Reciprocal rank fusion cannot displace the best baseline evidence. Ties
+    # preserve first-seen order; no model reranker or evidence field rewriting.
+    first = merged[:1] if baseline_keys else []
+    remainder = merged[1:] if first else merged
+    remainder.sort(key=lambda row: -sum(1 / (60 + rank) for rank in row["retrieval_ranks"].values()))
+    merged = (first + remainder)[: max(1, min(int(limit), 24))]
+    retained_count = sum(row["retrieval_paths"] == ["WIKI_GUIDED"] for row in merged)
+    overlap_count = len(wiki_keys & baseline_keys)
     warnings = list(dict.fromkeys([*(baseline.get("warnings") or []), *(guided.get("warnings") or [])]))
     sources: dict[str, dict[str, Any]] = {}
     for result in (baseline, guided):
@@ -79,6 +102,9 @@ def _merge_gateway_results(
             "baseline_hits": len(baseline.get("evidence") or []),
             "wiki_guided_hits": len(guided.get("evidence") or []),
             "deduplicated_hits": len(merged),
+            "wiki_guided_unique_candidates": len(unique_ids),
+            "wiki_guided_unique_retained": retained_count,
+            "wiki_overlap_count": overlap_count,
         },
     }
 

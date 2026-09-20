@@ -3,10 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
-
 import yuxi.services.agent_run_service as agent_run_service
 import yuxi.services.subagent_run_service as service_module
+from fastapi import HTTPException
 from yuxi.services.input_message_service import build_chat_input_message
 from yuxi.services.subagent_run_service import (
     SubagentRunBusy,
@@ -122,7 +121,13 @@ def _agent(slug: str = "worker"):
 
 
 def _parent_run():
-    return SimpleNamespace(id="parent-run", conversation_thread_id="parent-thread", conversation_id=10, run_type="chat")
+    return SimpleNamespace(
+        id="parent-run",
+        conversation_thread_id="parent-thread",
+        conversation_id=10,
+        run_type="chat",
+        agent_slug="orchestrator",
+    )
 
 
 def _relation(
@@ -174,6 +179,11 @@ def _patch_repos(
         async def get_run_for_user(self, run_id: str, uid: str):
             assert uid == "user-1"
             return {"parent-run": parent_run, "child-run": child_run}.get(run_id)
+
+        async def list_active_child_runs_for_user(self, created_by_run_id: str, uid: str):
+            assert uid == "user-1"
+            captured["active_child_runs_lookup"] = created_by_run_id
+            return []
 
         async def get_subagent_run_for_creator(self, *, uid: str, created_by_run_id: str, run_id: str):
             assert uid == "user-1"
@@ -248,9 +258,20 @@ def _patch_repos(
             assert uid == "user-1"
             return relation_by_id
 
+    class ParentAgentRepo:
+        """并发上限读取父智能体配置；这里返回无自定义上限的父智能体，走默认值。"""
+
+        def __init__(self, _db):
+            pass
+
+        async def get_by_slug(self, slug: str):
+            captured["parent_agent_lookup"] = slug
+            return SimpleNamespace(slug=slug, config_json={"context": {}})
+
     monkeypatch.setattr(service_module, "AgentRunRepository", RunRepo)
     monkeypatch.setattr(service_module, "ConversationRepository", ConvRepo)
     monkeypatch.setattr(service_module, "SubagentThreadRepository", ThreadRepo)
+    monkeypatch.setattr(service_module, "AgentRepository", ParentAgentRepo)
 
 
 def _patch_run_record_creation(
@@ -532,7 +553,12 @@ async def test_subagent_run_service_rejects_parent_run_without_conversation_befo
     _patch_repos(
         monkeypatch,
         captured=captured,
-        parent_run=SimpleNamespace(id="parent-run", conversation_thread_id="parent-thread", conversation_id=None),
+        parent_run=SimpleNamespace(
+            id="parent-run",
+            conversation_thread_id="parent-thread",
+            conversation_id=None,
+            agent_slug="orchestrator",
+        ),
     )
 
     with pytest.raises(ValueError, match="缺少 conversation_id"):

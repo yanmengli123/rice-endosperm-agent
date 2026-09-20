@@ -44,7 +44,45 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
         source_class="BIBLIOGRAPHY",
         citation_semantics="BIBLIOGRAPHIC_PROVENANCE",
     ),
+    # Rice Source KB (builtin MCP "ricekb"): every tool returns rows from the 34
+    # lossless MSU / Oryzabase / RAP-DB source tables with row-level provenance
+    # (source, schema, table, row_ref, content_sha256, import_run_id). The three
+    # sequence tools return the same 34-table snapshot's FASTA/GFF records
+    # (bases + sequence_sha256, 1-based inclusive intervals); they are source
+    # records too, not a separate evidence plane. Citations are data provenance,
+    # never bibliographic; the gateway's machine states
+    # (FOUND / NO_EVIDENCE / ...) are authoritative and must not be reinterpreted.
+    **{
+        name: ToolCapabilityProfile(
+            capabilities=frozenset({Capability.GENE_RECORD_LOOKUP}),
+            source_class="AUTHORITATIVE_DATABASE",
+            authority_level="PRIMARY_DATABASE",
+        )
+        for name in (
+            "ricekb_resolve",
+            "ricekb_entity",
+            "ricekb_compare",
+            "ricekb_annotations",
+            "ricekb_support",
+            "ricekb_evidence",
+            "ricekb_references",
+            "ricekb_regulators",
+            "ricekb_targets",
+            "ricekb_candidates",
+            "ricekb_source",
+            "ricekb_sequence",
+            "ricekb_region",
+            "ricekb_genome",
+        )
+    },
+    "ricekb_search": ToolCapabilityProfile(
+        capabilities=frozenset({Capability.GENE_RECORD_LOOKUP, Capability.VERBATIM_SEARCH}),
+        source_class="AUTHORITATIVE_DATABASE",
+        authority_level="PRIMARY_DATABASE",
+    ),
 }
+
+RICEKB_TOOL_NAMES: frozenset[str] = frozenset(name for name in _TRUSTED_PROFILES if name.startswith("ricekb_"))
 
 
 def profile_for_tool(tool: Any) -> ToolCapabilityProfile | None:
@@ -64,4 +102,10 @@ def is_mcp_tool(tool: Any) -> bool:
     return bool(metadata.get("mcp_tool_name") and metadata.get("server"))
 
 
-__all__ = ["ToolCapabilityProfile", "is_mcp_tool", "profile_for_protocol_name", "profile_for_tool"]
+__all__ = [
+    "RICEKB_TOOL_NAMES",
+    "ToolCapabilityProfile",
+    "is_mcp_tool",
+    "profile_for_protocol_name",
+    "profile_for_tool",
+]

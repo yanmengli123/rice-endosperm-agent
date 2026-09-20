@@ -115,6 +115,23 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
         selected_tools.append(tool)
         selected_tool_names.add(tool_name)
 
+    # 自定义数据面工具（DB 定义，tenant 隔离）：内置目录未命中的名字交给
+    # custom 服务解析；仅 READY+enabled 的定义会被装配，其余与内置工具缺失
+    # 同等对待（告警跳过；REQUIRED/AUTHORITATIVE 在 custom 服务内 fail-closed）。
+    from yuxi.agents.toolkits.custom.service import load_custom_tools_for_runtime
+
+    custom_candidates = [
+        name
+        for name in getattr(context, "tools", None) or []
+        if isinstance(name, str) and name not in selected_tool_names
+    ]
+    # uid 用于无 McpExecutionContext 的会话（custom-only 轮次）解析租户；解析不出则 fail-closed
+    for tool in await load_custom_tools_for_runtime(custom_candidates, uid=getattr(context, "uid", None)):
+        if tool.name in selected_tool_names:
+            continue
+        selected_tools.append(tool)
+        selected_tool_names.add(tool.name)
+
     selected_mcp_servers: set[str] = set()
     ordered_mcp_servers: list[str] = []
     for server_name in getattr(context, "mcps", None) or []:

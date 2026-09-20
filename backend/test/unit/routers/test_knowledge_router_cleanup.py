@@ -32,6 +32,39 @@ async def test_upload_file_does_not_expose_legacy_allow_jsonl_query():
     assert "allow_jsonl" not in signature(knowledge_router.upload_file).parameters
 
 
+async def test_configure_graph_build_invalidates_governance_summary(monkeypatch):
+    invalidated = []
+
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None) -> None:
+        assert (kb_id, operation) == ("kb_1", "图谱抽取配置")
+
+    class FakeGraphService:
+        async def configure(self, kb_id: str, extractor_type: str, extractor_options: dict, created_by: str):
+            assert kb_id == "kb_1"
+            assert extractor_type == "llm"
+            assert extractor_options == {"model_spec": "provider/model"}
+            assert created_by == "admin_1"
+            return {"locked": True, "extractor_type": extractor_type}
+
+    monkeypatch.setattr(
+        knowledge_router,
+        "_ensure_database_supports_documents",
+        fake_ensure_database_supports_documents,
+    )
+    monkeypatch.setattr(knowledge_router, "MilvusGraphService", FakeGraphService)
+    monkeypatch.setattr(knowledge_router, "invalidate_governance_summary", invalidated.append)
+
+    result = await knowledge_router.configure_graph_build(
+        "kb_1",
+        {"extractor_type": "llm", "extractor_options": {"model_spec": "provider/model"}},
+        current_user=SimpleNamespace(uid="admin_1"),
+    )
+
+    assert result["status"] == "success"
+    assert result["config"]["locked"] is True
+    assert invalidated == ["kb_1"]
+
+
 async def test_document_file_exists_returns_boolean_for_relative_path(monkeypatch):
     captured = {}
 

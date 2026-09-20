@@ -240,7 +240,11 @@ async def resolve_effective_knowledge_scope(
         session_kb_ids=narrowed_ids,
     )
 
+    filtered_out = []
     effective_members: list[dict[str, Any]] = []
+    raw_ids = {
+        kb_id for kb_id in effective_ids if not is_derived_product(str(accessible_by_id[kb_id].get("kb_type") or ""))
+    }
     for kb_id in effective_ids:
         member = enabled_members.get(kb_id)
         policy = serialize_member(member) if member else _default_policy(kb_id, accessible_by_id[kb_id])
@@ -248,6 +252,13 @@ async def resolve_effective_knowledge_scope(
         policy["kb_name"] = accessible_by_id[kb_id].get("name") or kb_id
         policy["kb_type"] = accessible_by_id[kb_id].get("kb_type")
         policy["included_via"] = "GLOBAL" if kb_id in global_ids else "CUSTOM"
+        if is_derived_product(str(policy.get("kb_type") or "")):
+            closure = await _wiki_navigation_closure(db, tenant_id=tenant_id, kb_id=kb_id, raw_ids=raw_ids)
+            if closure is None:
+                # 缺失的发布来源不能补入 scope；只排除无法闭合的 Wiki。
+                filtered_out.append({"kb_id": kb_id, "reason": "WIKI_NAVIGATION_UNAVAILABLE"})
+                continue
+            policy.update(closure)
         effective_members.append(policy)
     effective_members.sort(key=lambda item: (int(item.get("priority") or 100), item["kb_id"]))
 
@@ -259,7 +270,6 @@ async def resolve_effective_knowledge_scope(
     if retrieval_mode == "KB_ONLY":
         allow_web = False
 
-    filtered_out = []
     for kb_id in sorted(base_ids - accessible_ids):
         filtered_out.append({"kb_id": kb_id, "reason": "NO_ACCESS"})
     if narrowed_ids is not None:
@@ -283,6 +293,33 @@ async def resolve_effective_knowledge_scope(
         "members": effective_members,
         "filtered_out": filtered_out,
         "resolved_at": utc_now_naive().isoformat(),
+    }
+
+
+async def _wiki_navigation_closure(
+    db: AsyncSession, *, tenant_id: int, kb_id: str, raw_ids: set[str]
+) -> dict[str, Any] | None:
+    """冻结 Wiki 成员的发布版本身份；闭包/ACL 校验失败返回 None（filtered_out）。"""
+    from yuxi.services.wiki_runtime_service import authorized_publication
+
+    try:
+        wiki, publication = await authorized_publication(
+            db,
+            tenant_id=tenant_id,
+            member={"kb_id": kb_id, "wiki_navigation_enabled": True},
+            permitted_source_ids=raw_ids,
+            freeze=True,
+        )
+    except ValueError:
+        return None
+    return {
+        "wiki_id": wiki.wiki_id,
+        "publication_id": publication.publication_id,
+        "manifest_hash": publication.manifest_hash,
+        "snapshot_id": publication.snapshot_id,
+        "wiki_source_kb_ids": sorted(
+            str(item) for item in (publication.manifest_json or {}).get("source_kb_ids") or []
+        ),
     }
 
 

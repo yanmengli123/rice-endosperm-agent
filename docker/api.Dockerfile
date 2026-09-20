@@ -53,7 +53,10 @@ COPY backend/package /app/package
 # 如果网络还是不好，可以在后面添加 --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 # --locked 而非 --frozen：--frozen 不校验 uv.lock 与 pyproject 的漂移，改了依赖声明但忘记
 # uv lock 时会静默漏装（yuxi[ragas] 曾因此在运行期才报"ragas 未安装"）；--locked 让漂移直接构建失败。
-RUN uv sync --no-cache --group test --no-dev --locked
+# 下载缓存挂载 + 放宽单请求超时：torch/igraph 等 GB 级 wheel 在抖动网络下反复全量重下会导致
+# 构建必然失败；缓存挂在重试间保留已完成下载，镜像内容不受影响（缓存只用于下载，不进层）。
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_HTTP_TIMEOUT=180 uv sync --group test --no-dev --locked
 
 # 依赖装配自检：走 ragas_adapter 的真实导入路径（含 langchain v1 兼容垫片），
 # 装了 ragas 但导不进来（如 langchain 升级破坏垫片）同样在构建期暴露，而不是留到用户点击 RAG 评估。
@@ -74,3 +77,9 @@ RUN chmod 0755 /usr/local/bin/yuxi-bioinfomcp-fastqc
 # BioinfoMCP 其余工具的统一受控启动器（slug 白名单制）
 COPY docker/mcp/run-bioinfomcp-tool.sh /usr/local/bin/yuxi-bioinfomcp-tool
 RUN chmod 0755 /usr/local/bin/yuxi-bioinfomcp-tool
+
+# Rice Source KB MCP：进程内 stdio，只读 HTTP 客户端 → rice-kb-gateway。不走 docker 隔离：
+# 它不执行用户文件，安全边界由网关承担（按调用方 token、只读事务、8s 语句超时、
+# provenance 信封）。脚本从 Rice Research Agent 仓库字节一致 vendoring，见 docker/mcp/ricekb/VENDOR.md。
+COPY docker/mcp/ricekb/ricekb_mcp.py /usr/local/bin/ricekb-mcp
+RUN chmod 0755 /usr/local/bin/ricekb-mcp

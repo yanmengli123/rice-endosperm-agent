@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from yuxi.knowledge.orchestration import retrieval_orchestrator
 
 from yuxi.knowledge.orchestration.retrieval_orchestrator import _merge_gateway_results
 from yuxi.services.wiki_service import (
@@ -12,6 +17,71 @@ from yuxi.services.wiki_service import (
     _source_access_allowed,
 )
 from yuxi.storage.postgres.models_knowledge import KnowledgeWiki, WikiBuildSnapshot, WikiPublication
+
+
+@pytest.mark.parametrize(
+    ("navigation_error", "expected_status", "baseline_calls"),
+    [(None, "COMPLETED", 1), ("domain", "COMPLETED", 1), ("infrastructure", "FAILED", 0)],
+)
+async def test_navigation_domain_failure_preserves_authorized_baseline(
+    monkeypatch, navigation_error, expected_status, baseline_calls
+):
+    from yuxi.services import wiki_service
+
+    source = {"kb_id": "source-a", "kb_type": "milvus"}
+    wiki_member = {"kb_id": "wiki-a", "kb_type": "llmwiki", "wiki_navigation_enabled": True}
+    wiki = SimpleNamespace(wiki_id="wiki-a", current_publication_id="publication-a")
+    db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: wiki)))
+    gateway = AsyncMock(return_value={"evidence": [], "sources_used": [], "warnings": []})
+    error = {
+        None: None,
+        "domain": wiki_service.WikiServiceError("source access denied"),
+        "infrastructure": RuntimeError("database unavailable"),
+    }[navigation_error]
+    navigator = AsyncMock(return_value=[], side_effect=error)
+    monkeypatch.setattr(wiki_service, "navigate_wiki", navigator)
+    monkeypatch.setattr(
+        retrieval_orchestrator,
+        "plan_knowledge_query",
+        lambda *args, **kwargs: {"retrieval_required": True, "intent": "GENERAL_KNOWLEDGE_QUERY"},
+    )
+    monkeypatch.setattr(retrieval_orchestrator, "_persist_audit", AsyncMock())
+    monkeypatch.setattr(
+        "yuxi.knowledge.planning.document_scope.resolve_document_scope",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                status="NONE", constraint_file_ids=[], clean_question="普通资料检索", public_dict=lambda: {}
+            )
+        ),
+    )
+    monkeypatch.setattr("yuxi.knowledge.evidence.quote_locator.detect_locator_intent", lambda question: {})
+    monkeypatch.setattr("yuxi.knowledge.scope_gateway.query_knowledge_scope_gateway", gateway)
+    monkeypatch.setattr(
+        "yuxi.knowledge.rendering.citation_channel.build_citations_for_contract", AsyncMock(return_value=[])
+    )
+
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        db,
+        question="普通资料检索",
+        scope_snapshot={"tenant_id": 7, "members": [source, wiki_member]},
+        run_id=None,
+        request_id=None,
+    )
+
+    assert contract["status"] == expected_status
+    assert gateway.await_count == baseline_calls
+    assert navigator.await_args.kwargs["permitted_source_kb_ids"] == {"source-a"}
+    if baseline_calls:
+        assert gateway.await_args.kwargs["scope_snapshot"]["members"] == [source]
+    if navigation_error == "domain":
+        status = next(item for item in contract["knowledge_source_status"] if item["source"] == "WIKI_NAVIGATION")
+        assert status["capability_status"] == "UNAVAILABLE"
+        assert status["query_status"] == "NOT_QUERIED"
+        assert status["error_code"] == "WIKI_NAVIGATION_UNAVAILABLE"
+        assert contract["wiki_navigation_hits"] == []
+        assert contract.get("error_code") is None
+    elif navigation_error == "infrastructure":
+        assert contract["error_code"] == "CANONICAL_SOURCE_ERROR"
 
 
 def test_security_domain_is_order_independent_but_acl_sensitive():

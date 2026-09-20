@@ -4,6 +4,7 @@ import pytest
 
 from yuxi.knowledge.planning.turn_execution_plan import (
     Capability,
+    SourceClass,
     SourcePolicy,
     TaskIntent,
     plan_turn,
@@ -140,3 +141,63 @@ def test_bibliography_only_without_provider_fails_closed():
 
     assert plan.satisfiable is False
     assert plan.error_code == "SOURCE_UNAVAILABLE"
+
+
+# --- Rice Source KB identifier routing (builtin MCP "ricekb") ---------------
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "LOC_Os06g01210 是什么基因？",
+        "Os06g0101600 的注释有哪些",
+        "RAP:Os01g0100100 在三个源库里的记录一致吗",
+        "转录本 Os06t0101600-01 对应哪个 MSU model？LOC_Os06g01210.1 吗",
+    ],
+)
+def test_rice_identifier_admits_structured_database_when_ricekb_configured(question):
+    for scope in (False, True):
+        plan = plan_turn(question, has_knowledge_scope=scope, configured_mcps=["ricekb"])
+        assert plan.source.policy == SourcePolicy.AUTO
+        assert SourceClass.STRUCTURED_DATABASE in plan.source.allowed_sources
+        assert SourceClass.STRUCTURED_DATABASE not in plan.source.forbidden_sources
+        assert Capability.GENE_RECORD_LOOKUP in plan.required_capabilities
+        assert plan.task.target_type == "GENE"
+        assert "RICE_SOURCE_IDENTIFIER_ROUTING" in plan.reason_codes
+        assert plan.satisfiable is True
+    # Knowledge sources keep whatever AUTO already granted.
+    scoped = plan_turn(question, has_knowledge_scope=True, configured_mcps=["ricekb"])
+    assert SourceClass.LOCAL_DOCUMENT in scoped.source.allowed_sources
+
+
+def test_rice_identifier_routing_requires_ricekb_to_be_configured():
+    plan = plan_turn("LOC_Os06g01210 是什么基因？", has_knowledge_scope=False, configured_mcps=["bioinfo-mcp"])
+    assert SourceClass.STRUCTURED_DATABASE not in plan.source.allowed_sources
+    assert "RICE_SOURCE_IDENTIFIER_ROUTING" not in plan.reason_codes
+
+
+def test_bare_symbol_or_unrelated_text_does_not_trigger_rice_routing():
+    for question in (
+        "Wx 基因对应哪个 RAP locus？",
+        "OsMADS3 的功能",
+        "Os13g0100100 不存在的染色体",
+        "LOC_Os06g0121 位数不对",
+    ):
+        plan = plan_turn(question, has_knowledge_scope=False, configured_mcps=["ricekb"])
+        assert "RICE_SOURCE_IDENTIFIER_ROUTING" not in plan.reason_codes, question
+        assert SourceClass.STRUCTURED_DATABASE not in plan.source.allowed_sources, question
+
+
+def test_explicit_no_mcp_veto_beats_rice_identifier_routing():
+    plan = plan_turn("不要调用 MCP，LOC_Os06g01210 是什么基因？", has_knowledge_scope=True, configured_mcps=["ricekb"])
+    assert SourceClass.STRUCTURED_DATABASE in plan.source.forbidden_sources
+    assert SourceClass.STRUCTURED_DATABASE not in plan.source.allowed_sources
+    assert "RICE_SOURCE_IDENTIFIER_ROUTING" not in plan.reason_codes
+
+
+def test_explicit_mcp_phrasing_with_rice_identifier_keeps_mcp_only():
+    plan = plan_turn("通过 MCP 查询 LOC_Os06g01210 是什么基因？", has_knowledge_scope=True, configured_mcps=["ricekb"])
+    assert plan.source.policy == SourcePolicy.MCP_ONLY
+    assert plan.source.allowed_sources == [SourceClass.STRUCTURED_DATABASE]
+    assert plan.required_capabilities == [Capability.GENE_RECORD_LOOKUP]
+    assert "RICE_SOURCE_IDENTIFIER_ROUTING" not in plan.reason_codes

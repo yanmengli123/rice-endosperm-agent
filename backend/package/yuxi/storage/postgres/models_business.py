@@ -1096,6 +1096,63 @@ class MCPCallAudit(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
 
 
+class CustomTool(Base):
+    """租户级自定义数据面工具（HTTP/OpenAPI 定义），运行时由 toolkits 装配。
+
+    与 ``@tool`` 代码注册表互斥并存：本表只承载可治理的连接定义（URL/方法/
+    参数契约），凭据只存 ``user_mcp_credentials.id`` 引用，密文永不落本表。
+    """
+
+    __tablename__ = "custom_tools"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    slug = Column(String(100), nullable=False)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=False)
+    icon = Column(String(50), nullable=True)
+    tags = Column(JSON, nullable=False, default=list)
+    tool_type = Column(String(16), nullable=False, default="http")
+    spec = Column(JSON, nullable=False, default=dict)
+    args_schema = Column(JSON, nullable=False, default=dict)
+    credential_id = Column(BigInteger, ForeignKey("user_mcp_credentials.id"), nullable=True)
+    data_access_level = Column(String(32), nullable=False, default="PUBLIC")
+    dependency_mode = Column(String(32), nullable=False, default="OPTIONAL")
+    lifecycle_status = Column(String(16), nullable=False, default="DRAFT", index=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+    last_health = Column(JSON, nullable=True)
+    created_by = Column(String(100), nullable=False)
+    updated_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (Index("uq_custom_tools", "tenant_id", "slug", unique=True),)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "slug": self.slug,
+            "name": self.name,
+            "description": self.description,
+            "icon": self.icon,
+            "tags": self.tags or [],
+            "tool_type": self.tool_type,
+            "spec": self.spec or {},
+            "args_schema": self.args_schema or {},
+            "credential_id": self.credential_id,
+            "data_access_level": self.data_access_level,
+            "dependency_mode": self.dependency_mode,
+            "lifecycle_status": self.lifecycle_status,
+            "enabled": bool(self.enabled),
+            "last_health": self.last_health or {},
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
+
+
 class ModelProvider(Base):
     """模型供应商配置，存储 provider 基础信息、模型端点和可用模型。"""
 

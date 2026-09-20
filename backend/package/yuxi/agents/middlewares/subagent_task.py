@@ -51,6 +51,8 @@ TASK_SYSTEM_PROMPT = """## `task`（子智能体任务工具）
   `subagent_await` 在明确需要结果时等待。
 - `thread_id` 是子智能体长期上下文 ID；同一个 `thread_id` 完成后可以继续创建新的 run。
   若同线程已有运行中 run，会返回 busy，不会隐藏排队。
+- 同时运行的子智能体数量有上限；返回 concurrency_limit 时先用 `subagent_await` / `subagent_status`
+  收割现有子任务再派发新的，不要重试刷屏。
 - 短任务且父智能体必须立刻依赖结果时继续使用 `task`。
 
 Available subagent slugs:
@@ -442,6 +444,8 @@ class YuxiSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     model_spec=self._subagent_model_override(agent_item),
                 )
         except subagent_service.SubagentRunBusy as exc:
+            return None, _json_tool_command(exc.to_payload(), runtime.tool_call_id)
+        except subagent_service.SubagentRunConcurrencyLimit as exc:
             return None, _json_tool_command(exc.to_payload(), runtime.tool_call_id)
         except ValueError as exc:
             return None, str(exc)

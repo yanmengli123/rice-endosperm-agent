@@ -190,9 +190,7 @@ async def get_evaluation_dataset(
             raise HTTPException(status_code=400, detail="每页大小必须在1-100之间")
 
         service = EvaluationService()
-        dataset = await service.get_dataset_detail(
-            kb_id, dataset_id, page, page_size, status=status, keyword=keyword
-        )
+        dataset = await service.get_dataset_detail(kb_id, dataset_id, page, page_size, status=status, keyword=keyword)
         return {"message": "success", "data": dataset}
     except HTTPException:
         raise
@@ -367,9 +365,7 @@ async def update_evaluation_dataset_item(
 
 
 @evaluation.delete("/datasets/{dataset_id}/items/{item_id}")
-async def delete_evaluation_dataset_item(
-    dataset_id: str, item_id: str, current_user: User = Depends(get_admin_user)
-):
+async def delete_evaluation_dataset_item(dataset_id: str, item_id: str, current_user: User = Depends(get_admin_user)):
     """删除一条题目（仅 draft 态；删除后行序留空位不复用）"""
     service = EvaluationService()
     await _authorize_dataset(service, dataset_id, current_user, manage=True)
@@ -405,7 +401,10 @@ async def review_evaluation_dataset_items(
     await _authorize_dataset(service, dataset_id, current_user, manage=True)
     try:
         result = await service.review_dataset_items(
-            dataset_id, item_ids=request.item_ids, action=request.action, reason=request.reason,
+            dataset_id,
+            item_ids=request.item_ids,
+            action=request.action,
+            reason=request.reason,
             operator=current_user.uid,
         )
         return {"message": "success", "data": result}
@@ -462,9 +461,7 @@ async def list_kb_chunks_for_picker(
 
 
 @evaluation.post("/datasets/{dataset_id}/gold-chunks/check")
-async def check_evaluation_dataset_gold_chunks(
-    dataset_id: str, current_user: User = Depends(get_admin_user)
-):
+async def check_evaluation_dataset_gold_chunks(dataset_id: str, current_user: User = Depends(get_admin_user)):
     """失效参考块检测：gold_chunk_ids 引用的块已不存在时逐题报告"""
     service = EvaluationService()
     await _authorize_dataset(service, dataset_id, current_user, manage=False)

@@ -309,14 +309,10 @@ async def delete_api_key(
     api_key = await get_accessible_api_key(db, api_key_id, current_user)
 
     await db.execute(
-        CLIAuthSession.__table__.update()
-        .where(CLIAuthSession.api_key_id == api_key.id)
-        .values(api_key_id=None)
+        CLIAuthSession.__table__.update().where(CLIAuthSession.api_key_id == api_key.id).values(api_key_id=None)
     )
     key_prefix = api_key.key_prefix
-    owner_uid_result = await db.execute(
-        select(User.uid).where(User.id == api_key.user_id)
-    )
+    owner_uid_result = await db.execute(select(User.uid).where(User.id == api_key.user_id))
     owner_uid = owner_uid_result.scalar_one_or_none()
     await db.delete(api_key)
     await db.commit()
@@ -394,6 +390,7 @@ async def update_agent_env(
     # 直接返回刚写入的 env/now，避免身份映射中的旧实例属性导致返回陈旧值
     return AgentEnvResponse(env=env, updated_at=format_utc_datetime(now))
 
+
 # =============================================================================
 # === 企业级用户管理（管理员） ===
 # =============================================================================
@@ -430,13 +427,17 @@ async def disable_user(uid: str, current_user: User = Depends(get_required_user)
     target.is_disabled = True
     target.auth_version += 1
     active_runs = (
-        await db.execute(
-            select(AgentRun).filter(
-                AgentRun.uid == target.uid,
-                AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
+        (
+            await db.execute(
+                select(AgentRun).filter(
+                    AgentRun.uid == target.uid,
+                    AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for run in active_runs:
         run.status = "cancel_requested"
         run.updated_at = utc_now_naive()
@@ -556,11 +557,7 @@ async def list_managed_api_keys(
 ):
     """列出目标用户的全部 API Keys（含已撤销，供管理与对账）。"""
     target_user = await _load_manage_target(db, uid, current_user)
-    rows = await db.execute(
-        select(APIKey)
-        .where(APIKey.user_id == target_user.id)
-        .order_by(APIKey.created_at.desc())
-    )
+    rows = await db.execute(select(APIKey).where(APIKey.user_id == target_user.id).order_by(APIKey.created_at.desc()))
     return {
         "keys": [
             {
@@ -586,9 +583,7 @@ async def reset_managed_api_key(
 ):
     """重置目标用户的指定 Key：轮换哈希并返回新明文（仅此一次）。"""
     target_user = await _load_manage_target(db, uid, current_user)
-    row_result = await db.execute(
-        select(APIKey).where(APIKey.id == key_id, APIKey.user_id == target_user.id)
-    )
+    row_result = await db.execute(select(APIKey).where(APIKey.id == key_id, APIKey.user_id == target_user.id))
     api_key = row_result.scalar_one_or_none()
     if api_key is None:
         raise HTTPException(status_code=404, detail="密钥不存在")
@@ -600,8 +595,11 @@ async def reset_managed_api_key(
     await db.commit()
 
     await log_operation(
-        db, current_user.id, "重置用户 API Key",
-        f"目标 uid={uid}, prefix={key_prefix}", None,
+        db,
+        current_user.id,
+        "重置用户 API Key",
+        f"目标 uid={uid}, prefix={key_prefix}",
+        None,
     )
     return {"secret": full_key, "key_prefix": key_prefix}
 
@@ -615,25 +613,24 @@ async def delete_managed_api_key(
 ):
     """真·删除目标用户的指定 Key：先断开设备码会话引用再物理删除。"""
     target_user = await _load_manage_target(db, uid, current_user)
-    row_result = await db.execute(
-        select(APIKey).where(APIKey.id == key_id, APIKey.user_id == target_user.id)
-    )
+    row_result = await db.execute(select(APIKey).where(APIKey.id == key_id, APIKey.user_id == target_user.id))
     api_key = row_result.scalar_one_or_none()
     if api_key is None:
         raise HTTPException(status_code=404, detail="密钥不存在")
 
     await db.execute(
-        CLIAuthSession.__table__.update()
-        .where(CLIAuthSession.api_key_id == api_key.id)
-        .values(api_key_id=None)
+        CLIAuthSession.__table__.update().where(CLIAuthSession.api_key_id == api_key.id).values(api_key_id=None)
     )
     key_prefix = api_key.key_prefix
     await db.delete(api_key)
     await db.commit()
 
     await log_operation(
-        db, current_user.id, "删除用户 API Key",
-        f"目标 uid={uid}, prefix={key_prefix}", None,
+        db,
+        current_user.id,
+        "删除用户 API Key",
+        f"目标 uid={uid}, prefix={key_prefix}",
+        None,
     )
     return {"success": True, "message": "密钥已删除"}
 
@@ -658,9 +655,7 @@ async def reset_managed_password(
     from yuxi.storage.postgres.models_business import DeviceSession
 
     await db.execute(
-        DeviceSession.__table__.update()
-        .where(DeviceSession.uid == target_user.uid)
-        .values(status="revoked")
+        DeviceSession.__table__.update().where(DeviceSession.uid == target_user.uid).values(status="revoked")
     )
     await db.commit()
 
@@ -694,19 +689,12 @@ async def get_managed_user_stats(
             .order_by(func.date(AgentRun.created_at))
         )
     ).all()
-    daily = [
-        {"date": row.day.isoformat(), "runs": int(row.runs), "tokens": int(row.tokens)}
-        for row in daily_rows
-    ]
+    daily = [{"date": row.day.isoformat(), "runs": int(row.runs), "tokens": int(row.tokens)} for row in daily_rows]
 
-    total_runs_row = (
-        await db.execute(select(func.count(AgentRun.id)).where(AgentRun.uid == target_user.uid))
-    ).scalar()
+    total_runs_row = (await db.execute(select(func.count(AgentRun.id)).where(AgentRun.uid == target_user.uid))).scalar()
     total_tokens_row = (
         await db.execute(
-            select(func.coalesce(func.sum(AgentRun.total_tokens), 0)).where(
-                AgentRun.uid == target_user.uid
-            )
+            select(func.coalesce(func.sum(AgentRun.total_tokens), 0)).where(AgentRun.uid == target_user.uid)
         )
     ).scalar()
     byok_tokens_row = (
@@ -1169,15 +1157,11 @@ class QuotaUpdate(BaseModel):
     daily_run_limit: int | None = Field(None, ge=1)
     monthly_token_limit: int | None = Field(None, ge=1)
     model_access_policy: str | None = Field(None, description="platform_only / byok_optional / byok_required")
-    byok_platform_token_exempt: bool | None = Field(
-        None, description="自有密钥流量是否豁免平台月度 token 限额"
-    )
+    byok_platform_token_exempt: bool | None = Field(None, description="自有密钥流量是否豁免平台月度 token 限额")
 
 
 @user_router.get("/manage/{uid}/quota")
-async def get_user_quota(
-    uid: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
-):
+async def get_user_quota(uid: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
     target = await _load_target_user(db, uid)
     _admin_guard(current_user, target)
     from yuxi.services.principal import resolve_entitlement, resolve_tenant_id

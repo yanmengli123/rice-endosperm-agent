@@ -14,6 +14,9 @@ x-api-worker-env: &api-worker-env
   YUXI_BIOCOMPUTE_BROKER_TOKEN: ${YUXI_BIOCOMPUTE_BROKER_TOKEN:-}
   # DBs and other services
   POSTGRES_URL: ${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yuxi}}
+  # LangGraph checkpointer 存储：compose 默认 postgres（与 lifespan 的 PG 建表一致）；
+  # 显式 postgres 构建失败会让 agent 编译直接失败（fail-closed），不再静默回退 sqlite。
+  LANGGRAPH_CHECKPOINTER_BACKEND: ${LANGGRAPH_CHECKPOINTER_BACKEND:-postgres}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   NEO4J_URI: ${NEO4J_URI:-bolt://graph:7687}
   NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
@@ -72,6 +75,7 @@ services:
       - "5050:5050"
     networks:
       - app-network
+      - rice-kb-consumers
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
@@ -147,6 +151,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - app-network
+      - rice-kb-consumers
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
@@ -682,8 +687,12 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_DB=${POSTGRES_DB:-yuxi}
       - TZ=${TZ:-Asia/Shanghai}
+      # RLS 角色引导（仅 initdb 执行；不改变运行时连接，激活见 docs/ops/rls-activation-runbook.md）
+      - YUXI_MIGRATOR_PASSWORD=${YUXI_MIGRATOR_PASSWORD:-yuxi_migrator}
+      - YUXI_APP_PASSWORD=${YUXI_APP_PASSWORD:-yuxi_app}
     volumes:
       - ./docker/volumes/postgresql:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-yuxi} || exit 1"]
       interval: 5s
@@ -786,3 +795,9 @@ networks:
   app-network:
     driver: bridge
     name: ${APP_DOCKER_NETWORK:-yuxi-know_app-network}
+  # 与 Rice Research Agent 的 rice-kb-gateway 共享的专用消费者网段（internal，无外网出口，
+  # 不含其数据库）。由 Rice 仓库的 rice-kb-gateway/scripts/bootstrap.ps1 创建；
+  # 只有 api / worker（stdio MCP 进程所在容器）加入，用于解析 http://rice-kb-gateway:8080。
+  rice-kb-consumers:
+    external: true
+    name: ${RICE_KB_CONSUMERS_NETWORK:-rice-kb-consumers}
