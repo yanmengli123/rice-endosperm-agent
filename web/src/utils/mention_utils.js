@@ -136,6 +136,56 @@ export const getMentionDisplayLabel = (type, value, displayLabels = {}) => {
   return String(value ?? '').trim() || type
 }
 
+// 从最终发送文本里的 token 构造 mention.v2 结构化提及（与后端 mention_protocol.py 互校）。
+// 只从 token 派生，保证「文本与 payload 描述同一组资源」；mentionConfig 提供
+// 名称 → 稳定 ID 的映射（知识库名 → kb_id 等），映射不到时原值透传，由服务端鉴权裁决。
+export const buildStructuredMentions = (text = '', mentionConfig = null) => {
+  const segments = parseMentionText(String(text || '')).filter((segment) => segment.kind === 'mention')
+  if (!segments.length) return null
+
+  const knowledgeBases = mentionConfig?.knowledgeBases || []
+  const mcps = mentionConfig?.mcps || []
+  const skills = mentionConfig?.skills || []
+  const subagents = mentionConfig?.subagents || []
+  const documents = mentionConfig?.documents || []
+
+  const findByDisplayField = (list, value) =>
+    list.find((item) =>
+      [item.name, item.label, item.slug, item.id, item.value].some(
+        (field) => String(field || '') === value
+      )
+    ) || null
+
+  return segments.map((segment, index) => {
+    const type = segment.type
+    const displayLabel = segment.value
+    let resourceId = segment.value
+    if (type === 'knowledge') {
+      const kb = findByDisplayField(knowledgeBases, displayLabel) ||
+        knowledgeBases.find((kb) => kb?.kb_id === displayLabel)
+      resourceId = kb?.kb_id || displayLabel
+    } else if (type === 'doc') {
+      resourceId = documents.find((doc) => doc?.file_id === displayLabel)?.file_id || displayLabel
+    } else if (type === 'mcp') {
+      const mcp = findByDisplayField(mcps, displayLabel) || mcps.find((m) => m?.slug === displayLabel)
+      resourceId = mcp?.slug || displayLabel
+    } else if (type === 'skill') {
+      const skill = findByDisplayField(skills, displayLabel) || skills.find((s) => s?.slug === displayLabel)
+      resourceId = skill?.slug || displayLabel
+    } else if (type === 'subagent') {
+      const subagent =
+        findByDisplayField(subagents, displayLabel) || subagents.find((s) => s?.id === displayLabel)
+      resourceId = subagent?.id || displayLabel
+    }
+    return {
+      mention_id: `m${index + 1}`,
+      type,
+      resource_id: resourceId,
+      display_label: displayLabel
+    }
+  })
+}
+
 export const findActiveMentionQuery = (text = '', rawCaretOffset = 0) => {
   const value = String(text || '')
   const offset = Math.max(0, Math.min(rawCaretOffset, value.length))

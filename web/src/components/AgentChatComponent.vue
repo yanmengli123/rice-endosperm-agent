@@ -773,7 +773,7 @@ import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import { extractCitationReadyFromHistory, inlineFiguresForMessage } from '@/utils/figureCard'
-import { formatMentionToken } from '@/utils/mention_utils'
+import { buildStructuredMentions, formatMentionToken } from '@/utils/mention_utils'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
@@ -3056,6 +3056,10 @@ const handleSendMessage = async ({ image } = {}) => {
   // 仅在用户手动选择过模型时覆盖后端配置；否则由后端使用智能体默认模型。
   const modelSpec = selectedModelSpec.value || null
 
+  // mention.v2：从最终文本的 token 构造结构化提及（只派生自 token，保证与文本一致），
+  // 服务端解析鉴权后冻结；无提及时不发送该字段（后端走文本 token 兼容层）。
+  const structuredMentions = buildStructuredMentions(text, mentionConfigWithDocuments.value)
+
   userInput.value = ''
 
   await nextTick()
@@ -3101,7 +3105,9 @@ const handleSendMessage = async ({ image } = {}) => {
         attachment_file_ids: pendingAttachmentFileIds
       },
       image_content: imageContent,
-      model_spec: modelSpec
+      model_spec: modelSpec,
+      mention_protocol: structuredMentions ? 'mention.v2' : null,
+      mentions: structuredMentions
     })
     const runId = runResp?.run_id
     if (!runId) {
