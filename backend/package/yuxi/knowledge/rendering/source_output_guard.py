@@ -15,6 +15,7 @@ _ANCHOR_ID = re.compile(r"\b(?:ea|ev|evs)_[0-9a-f]{12,64}\b", re.I)
 _PAGE = re.compile(r"第\s*\d{1,4}\s*页|\bp\.\s*\d{1,4}\b|\bpages?\s+\d{1,4}\b", re.I)
 _REFERENCE_BLOCK = re.compile(r"\n*【证据引用】[^\n]*\n(?:-\s*E\d+[^\n]*(?:\n|$))*", re.IGNORECASE)
 _SOURCE_ONLY = re.compile(r"数据模式\s*[：:]\s*SOURCE-ONLY", re.I)
+_SOURCE_ONLY_LINE = re.compile(r"^[ \t]*数据模式[ \t]*[：:][ \t]*SOURCE-ONLY[ \t]*$", re.I | re.M)
 _FACT_MARKER = re.compile(r"\[MCP-F:(\d+):(f_[0-9a-f]{16})\]", re.I)
 _FACT_LEDGER_BLOCK = re.compile(r"\s*<YUXI_MCP_FACT_LEDGER>.*?</YUXI_MCP_FACT_LEDGER>\s*", re.S)
 # 基因标识符提示（宽松形态，仅用于 AUTO 轮判定"该行是否携带可核验主张"）：
@@ -88,7 +89,9 @@ def _line_requires_fact_marker(line: str, *, relaxed: bool = False) -> bool:
         return False
     if stripped.startswith("#") or re.fullmatch(r"[| :\-]+", stripped):
         return False
-    if stripped.endswith(("：", ":")) and len(stripped) <= 80:
+    if not _FACT_MARKER.search(stripped) and stripped.endswith(("：", ":")) and len(stripped) <= 80:
+        # 冒号结尾豁免仅限无标记的标签/结构行（"来源："）；带标记行仍承载
+        # 事实主张，其中的数字必须照常核验（残留 2a：此前带标记也豁免）。
         return False
     if stripped.startswith("|") and any(
         label in stripped
@@ -274,12 +277,27 @@ def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: 
     return "\n".join(lines)
 
 
+def _strip_source_only_attestation(text: str) -> str:
+    """OFF 轮误声明清理：剥除 SOURCE-ONLY 声明行与同轮必无效的 MCP-F 标记。
+
+    只用于「plan 未要求 MCP 且本轮无 adopted MCP 源」的轮次——此时声明是模型
+    对格式契约的误用而非越权承诺；标记因 catalog 为空必然全部无效，一并剥除，
+    剩余内容照常发布。
+    """
+    stripped = _SOURCE_ONLY_LINE.sub("", str(text or ""))
+    stripped = _FACT_MARKER.sub("", stripped)
+    stripped = re.sub(r"[ \t]+\n", "\n", stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    return stripped.strip()
+
+
 def guard_answer_for_evidence_level(
     text: str,
     *,
     evidence_level: EvidenceLevel | str,
     source_uses: list[Any] | None = None,
     source_policy: str | None = None,
+    requires_mcp: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """Enforce answer affordances from the frozen evidence level and source ledger.
 
@@ -304,6 +322,16 @@ def guard_answer_for_evidence_level(
 
     source_only_declared = bool(_SOURCE_ONLY.search(source))
     adopted_sources = _adopted_mcp_sources(source_uses)
+    source_only_stripped = False
+    if source_only_declared and not adopted_sources and not requires_mcp:
+        # OFF 轮（plan 未要求 MCP 且本轮无 adopted MCP 源）：剥除误声明后照常发布，
+        # 绝不整答替换。STRICT/AUTO_MIXED 轮（requires_mcp 或已有 adopted 源）的
+        # 声明承载真实核验义务：只能核验通过或整答拒绝，绝不可剥标签放行。
+        stripped_source = _strip_source_only_attestation(source)
+        if stripped_source:
+            source = stripped_source
+            source_only_declared = False
+            source_only_stripped = True
     source_only_verified = not source_only_declared or bool(adopted_sources)
     relaxed = str(source_policy or "").strip().upper() == "AUTO"
     fact_grounding = _validate_fact_grounding(source, source_uses, relaxed=relaxed)
@@ -320,6 +348,8 @@ def guard_answer_for_evidence_level(
         "document_affordance_guard": document_guard,
         "source_only_declared": source_only_declared,
         "source_only_verified": source_only_verified,
+        "source_only_stripped": source_only_stripped,
+        "requires_mcp": bool(requires_mcp),
         "fact_grounding": fact_grounding,
         "status": "PASSED" if source_only_verified and fact_grounding_verified else "REJECTED",
     }

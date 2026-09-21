@@ -100,3 +100,26 @@ async def test_unnamed_plan_keeps_capability_level_semantics():
     )
 
     assert valid is True
+
+
+async def test_error_status_audit_never_counts_as_fulfilled_source():
+    plan = plan_turn(
+        "通过 MCP 查 Wx 基因信息",
+        has_knowledge_scope=True,
+        configured_mcps=["ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+    manifest = _initial_source_manifest(plan)
+    # RC5 manifest 层回归锁：host 结构化错误判定落地后，超时/报错调用以 error
+    # 落审计——不得计入成功来源、不得出现在 mcp_servers，MCP_ONLY 轮必须显式
+    # 不可用而非假成功。
+    valid = await _finalize_mcp_manifest(
+        _FakeDB([_audit(4, server="ricekb", status="error")]), run_id="r1", plan=plan, manifest=manifest
+    )
+
+    assert valid is False
+    assert manifest.status == "SOURCE_UNAVAILABLE"
+    assert manifest.error_code == "SOURCE_UNAVAILABLE"
+    assert manifest.successful_mcp_call_count == 0
+    assert manifest.mcp_servers == []
+    assert all(item.adopted is False for item in manifest.source_uses)

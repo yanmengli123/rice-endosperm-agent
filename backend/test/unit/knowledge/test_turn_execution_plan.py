@@ -317,6 +317,41 @@ def test_named_unbound_builtin_server_fails_explicitly_without_silent_substituti
     assert "MCP_SERVER_NOT_CONFIGURED" in plan.reason_codes
 
 
+# ── 六问 golden：非 MCP 题永不触发 MCP 义务（MCP 混乱回归锁）─────────────
+
+
+def test_skills_glossary_and_locator_questions_never_require_mcp():
+    skills_q = plan_turn(
+        "你有哪些skills",
+        has_knowledge_scope=True,
+        configured_mcps=["ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+    assert skills_q.source.policy == SourcePolicy.AUTO
+    assert skills_q.requires_mcp is False
+    assert skills_q.required_server is None
+    assert skills_q.required_server_missing is None
+
+    glossary_q = plan_turn(
+        "Oryza sativa是什么意思",
+        has_knowledge_scope=True,
+        configured_mcps=["ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+    assert glossary_q.task.primary_intent == TaskIntent.GLOSSARY_LOOKUP
+    assert glossary_q.requires_mcp is False
+
+    locator_q = plan_turn(
+        "Figure 4 在哪一页，是什么意思",
+        has_knowledge_scope=True,
+        configured_mcps=["ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+    assert locator_q.source.policy == SourcePolicy.LOCAL_DOCUMENT_ONLY
+    assert locator_q.evidence.level == EvidenceLevel.VERBATIM_LOCATOR
+    assert locator_q.requires_mcp is False
+
+
 def test_plain_mcp_mention_without_server_name_keeps_capability_semantics():
     plan = plan_turn(
         "通过 MCP 查 Wx 基因信息",

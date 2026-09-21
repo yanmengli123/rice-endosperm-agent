@@ -29,6 +29,7 @@ def test_source_only_attestation_requires_adopted_successful_ricekb_call():
         "数据模式：SOURCE-ONLY\nWx 位于第 3 页。",
         evidence_level="E1_DATA_PROVENANCE",
         source_uses=[],
+        requires_mcp=True,
     )
 
     assert "Wx 位于" not in guarded
@@ -304,3 +305,111 @@ def test_auto_relaxation_keeps_gene_identifier_lines_strict():
     )
     # 基因标识符是可核验主张：叙述豁免不覆盖标识符行
     assert relaxed["status"] == "REJECTED"
+
+
+# ── OFF 轮误声明剥标签（P0 残留 1）与冒号行核验收窄（P0 残留 2a）───────────
+
+
+def test_off_turn_misdeclared_source_only_is_stripped_not_rejected():
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n当前可用技能：rice-source-agent、knowledge-base。[MCP-F:99:f_0000000000000000]",
+        evidence_level="E3_CLAIM_EVIDENCE",
+        source_uses=[],
+        source_policy="AUTO",
+        requires_mcp=False,
+    )
+    # OFF 轮（无 adopted 源、plan 未要求 MCP）：声明与必无效标记被剥除，内容照常发布
+    assert "SOURCE-ONLY" not in guarded
+    assert "[MCP-F:" not in guarded
+    assert "rice-source-agent" in guarded
+    assert audit["status"] == "PASSED"
+    assert audit["source_only_stripped"] is True
+
+
+def test_off_turn_without_declaration_is_untouched():
+    text = "Oryza sativa 是栽培稻的学名。"
+    guarded, audit = guard_answer_for_evidence_level(
+        text, evidence_level="E3_CLAIM_EVIDENCE", source_uses=[], source_policy="AUTO"
+    )
+    assert guarded == text
+    assert audit["status"] == "PASSED"
+    assert audit["source_only_stripped"] is False
+
+
+def test_strict_turn_misdeclared_source_only_still_rejected():
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\nWx 的结构化记录。",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=[],
+        source_policy="MCP_ONLY",
+        requires_mcp=True,
+    )
+    # STRICT 轮的声明承载真实核验义务：剥标签等于放行未核验数据，必须保持整杀
+    assert "未通过 MCP 事实级核验" in guarded
+    assert audit["status"] == "REJECTED"
+    assert audit["source_only_stripped"] is False
+
+
+def test_off_turn_declaration_only_answer_falls_back_to_rejection():
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=[],
+        requires_mcp=False,
+    )
+    # 剥除后无任何实质内容：没有可发布的东西，退回拒绝文案而非发布空白
+    assert "未通过 MCP 事实级核验" in guarded
+    assert audit["status"] == "REJECTED"
+
+
+def test_marker_bearing_label_line_loses_colon_exemption():
+    uses = _fact_source_uses({"id": "f_1234567890abcdef", "path": "/data/length", "numeric_value": 98})
+    _, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n区间长度 3 bp 的来源见标记 [MCP-F:42:f_1234567890abcdef]：",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=uses,
+        source_policy="MCP_ONLY",
+        requires_mcp=True,
+    )
+    # 带标记的冒号结尾行不再走结构行豁免：行内数字 3 不在所引事实（98）内 → 必拒
+    assert audit["fact_grounding"]["passed"] is False
+    assert {"line": 2, "value": "3"} in audit["fact_grounding"]["unsupported_numbers"]
+
+
+def test_markerless_label_line_keeps_colon_exemption():
+    uses = _fact_source_uses({"id": "f_1234567890abcdef", "path": "/gene/symbol", "string_value": "Wx"})
+    _, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n基因符号：Wx [MCP-F:42:f_1234567890abcdef]\n各字段来源：",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=uses,
+        source_policy="MCP_ONLY",
+        requires_mcp=True,
+    )
+    assert audit["fact_grounding"]["passed"] is True
+    assert audit["status"] == "PASSED"
+
+
+def test_degraded_sheet_excludes_error_status_calls():
+    uses = [
+        {
+            "source_use_id": "mcp:7",
+            "provider_id": "ricekb",
+            "operation": "ricekb_support",
+            "status": "ERROR",
+            "adopted": False,
+            "provenance": {
+                "mcp_call_audit_id": 7,
+                "fact_manifest": {
+                    "facts": [
+                        {
+                            "id": "f_2bad2a455e6d117a",
+                            "path": "/0",
+                            "string_value": "Error executing tool ricekb_support: gateway timed out after 20s",
+                        }
+                    ]
+                },
+            },
+        }
+    ]
+    # RC5 回归锁：error 状态的调用不进 adopted 集，错误文本不得出现在降级事实清单
+    assert render_degraded_fact_sheet(uses) is None

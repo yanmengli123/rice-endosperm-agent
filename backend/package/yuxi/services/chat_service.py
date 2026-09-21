@@ -968,10 +968,15 @@ async def _finalize_guarded_source_text(
     source_uses: list[Any],
     repair_model_spec: str | None = None,
     source_policy: str | None = None,
+    requires_mcp: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """终态门禁 + 有界修复 + 确定性降级：修复失败绝不发布未核验内容。"""
     guarded, validation = guard_answer_for_evidence_level(
-        draft, evidence_level=evidence_level, source_uses=source_uses, source_policy=source_policy
+        draft,
+        evidence_level=evidence_level,
+        source_uses=source_uses,
+        source_policy=source_policy,
+        requires_mcp=requires_mcp,
     )
     attempts: list[dict[str, Any]] = []
 
@@ -990,7 +995,11 @@ async def _finalize_guarded_source_text(
                 # 原因会连续返回 None，同样快速放行到降级渲染。
                 continue
             guarded, validation = guard_answer_for_evidence_level(
-                repaired, evidence_level=evidence_level, source_uses=source_uses, source_policy=source_policy
+                repaired,
+                evidence_level=evidence_level,
+                source_uses=source_uses,
+                source_policy=source_policy,
+                requires_mcp=requires_mcp,
             )
             logger.info(
                 "Source fact grounding repair round finished; "
@@ -2514,6 +2523,7 @@ async def stream_agent_chat(
                     source_uses=source_manifest.source_uses,
                     repair_model_spec=meta.get("model_spec"),
                     source_policy=turn_plan.source.policy.value,
+                    requires_mcp=turn_plan.requires_mcp,
                 )
             accumulated_content = [guarded_source_text]
             source_manifest.validation_results.append(source_output_validation)
