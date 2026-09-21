@@ -79,7 +79,7 @@ def build_filename(title: str | None, moment: datetime) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")[:60].strip()
     if not cleaned:
         cleaned = "未命名会话"
-    return f"语析对话_{cleaned}_{moment:%Y%m%d-%H%M}.html"
+    return f"语析对话_{cleaned}_{moment:%Y%m%d-%H%M%S}.html"
 
 
 def render_conversation_html(
@@ -212,9 +212,12 @@ def _attachment_summaries(question: dict) -> list[tuple[str, str]]:
 
 
 def _render_markdown(text: str) -> str:
-    tokens = _MD.parse(text)
+    repaired = _repair_flattened_fences(text)
+    repaired = _repair_flattened_tables(repaired)
+    tokens = _MD.parse(repaired)
     _sanitize_tokens(tokens)
-    return _MD.renderer.render(tokens, _MD.options, {})
+    html = _MD.renderer.render(tokens, _MD.options, {})
+    return _stylize_evidence_markers(html)
 
 
 def _render_fence(self, tokens, idx, options, env) -> str:  # noqa: ANN001
@@ -288,6 +291,190 @@ def _safe_href(value: str) -> bool:
         return False
     scheme = urlparse(candidate).scheme.lower()
     return scheme in _ALLOWED_HREF_SCHEMES or scheme == ""
+
+
+# ── 上游保真修复（幂等：规范多行结构不触发，只修被问答流水线压扁的形态） ────
+# 实测（docs/vibe/2026-09-21）：answer 流水线会把表格/代码块的换行 join 成单行，
+# 段落间换行保留。上游根治前，导出侧按 GFM 语义重排；上游修复后本层自动变 no-op。
+
+
+_FLATTENED_FENCE_RE = re.compile(r"^([^`]*)```([\w+#.-]*)\s+(.+?)\s*```([^`]*)$")
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_SEPARATOR_CELL_RE = re.compile(r"^:?\s*(?:-+|–+|—+)\s*:?$")
+
+
+def _repair_flattened_fences(content: str) -> str:
+    """把压扁在一行的 ```lang … ``` 重排为标准围栏代码块。"""
+    lines = []
+    for line in content.split("\n"):
+        match = _FLATTENED_FENCE_RE.match(line)
+        if not match:
+            lines.append(line)
+            continue
+        pre, lang, code, post = match.groups()
+        if pre.strip():
+            lines.append(pre.rstrip())
+            lines.append("")
+        lines.append(f"```{lang}")
+        lines.append(code)
+        lines.append("```")
+        if post.strip():
+            lines.append("")
+            lines.append(post.lstrip())
+    return "\n".join(lines)
+
+
+def _fence_mask(lines) -> list[bool]:  # noqa: ANN001
+    """标记真实围栏（```/~~~）覆盖的行，围栏内容不参与表格修复。"""
+    masked = [False] * len(lines)
+    active_char = ""
+    for idx, line in enumerate(lines):
+        match = _FENCE_OPEN_RE.match(line)
+        masked[idx] = bool(active_char) or match is not None
+        if match and not active_char:
+            active_char = match.group(1)[0]
+        elif match and active_char == match.group(1)[0] and not line[match.end() :].strip():
+            active_char = ""
+    return masked
+
+
+def _split_pipe_row(text: str) -> list[str]:
+    """按竖线（含全角｜）切分单元格；反引号代码跨度、转义竖线与〔〕证据标记内的竖线不切。"""
+    source = text.strip()
+    cells = []
+    current = ""
+    backtick_run = 0
+    bracket_depth = 0
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if char == "\\" and index + 1 < len(source) and source[index + 1] in "|｜":
+            current += char + source[index + 1]
+            index += 2
+            continue
+        if char == "`":
+            end = index
+            while end < len(source) and source[end] == "`":
+                end += 1
+            run = end - index
+            if backtick_run == 0:
+                backtick_run = run
+            elif backtick_run == run:
+                backtick_run = 0
+            current += source[index:end]
+            index = end
+            continue
+        if char == "〔":
+            bracket_depth += 1
+        elif char == "〕" and bracket_depth > 0:
+            bracket_depth -= 1
+        if char in "|｜" and backtick_run == 0 and bracket_depth == 0:
+            cells.append(current.strip())
+            current = ""
+        else:
+            current += char
+        index += 1
+    cells.append(current.strip())
+    if cells and cells[0] == "":
+        cells.pop(0)
+    if cells and cells[-1] == "":
+        cells.pop()
+    return cells
+
+
+def _repair_flattened_tables(content: str) -> str:
+    """把压扁成单行的 GFM 表格（表头|分隔行|数据行全在一行，行间以空单元格分隔）重排为多行。
+
+    仅在「同一行内出现 ≥2 个连续分隔单元格（---）且有表头与数据」这一无歧义形态下触发；
+    规范的多行表格每行只含一行数据，永不匹配（幂等）。
+    """
+    lines = content.split("\n")
+    masked = _fence_mask(lines)
+    rebuilt = []
+    for idx, line in enumerate(lines):
+        if masked[idx] or ("|" not in line and "｜" not in line):
+            rebuilt.append(line)
+            continue
+        rebuilt.append(_rebuild_single_line_table(line))
+    return "\n".join(rebuilt)
+
+
+def _rebuild_single_line_table(line: str) -> str:
+    cells = _split_pipe_row(line)
+    separator_run = None
+    index = 0
+    while index < len(cells):
+        if _SEPARATOR_CELL_RE.match(cells[index]):
+            end = index
+            while end < len(cells) and _SEPARATOR_CELL_RE.match(cells[end]):
+                end += 1
+            if end - index >= 2 and separator_run is None:
+                separator_run = (index, end)
+            index = end
+        else:
+            index += 1
+    if separator_run is None:
+        return line
+    sep_start, sep_end = separator_run
+    header = cells[:sep_start]
+    while header and header[-1] == "":
+        header.pop()
+    separators = cells[sep_start:sep_end]
+    if len(header) < 2:
+        return line
+
+    rows = []
+    current = []
+    for cell in cells[sep_end:]:
+        if cell == "":
+            if current:
+                rows.append(current)
+                current = []
+        else:
+            current.append(cell)
+    if current:
+        rows.append(current)
+    if not rows:
+        return line
+
+    width = max([len(header), len(separators), 2] + [len(row) for row in rows])
+
+    def render_row(row: list[str], fill: str = "") -> str:
+        padded = row[:width] + [fill] * (width - len(row))
+        return "| " + " | ".join(padded) + " |"
+
+    rebuilt = [render_row(header), render_row(separators, "---")]
+    rebuilt.extend(render_row(row) for row in rows)
+    return "\n".join(rebuilt)
+
+
+# ── 证据标记的导出形态（对已渲染 HTML 后处理，内容已转义，不再二次转义） ─────
+
+
+_EVIDENCE_CHIP_RE = re.compile(r"〔证据(E\d+)(?:[｜|]([^｜|〕]*))?(?:[｜|]([^〕]*))?〕")
+_EVIDENCE_LIST_LABEL = "【证据引用】（后端渲染，页码来自证据锚点）"
+_NOTE_RE = re.compile(r"（注：[^）]{0,400}）")
+
+
+def _stylize_evidence_markers(html: str) -> str:
+    """〔证据E#｜定位｜描述〕→ 徽章、后端证据引用标签 → 样式化标签、未定位注记 → 提示条。"""
+
+    def chip(match) -> str:  # noqa: ANN001
+        evidence_id, locator, description = match.group(1), match.group(2) or "", match.group(3) or ""
+        title = f' title="证据 {evidence_id} · {description}"' if description.strip() else ""
+        label = f"{evidence_id} · {locator.strip()}" if locator.strip() else evidence_id
+        return f'<span class="evidence-chip"{title}>{label}</span>'
+
+    html = _EVIDENCE_CHIP_RE.sub(chip, html)
+    html = html.replace(_EVIDENCE_LIST_LABEL, '<span class="evidence-list-label">证据引用</span>')
+
+    def note(match) -> str:  # noqa: ANN001
+        inner = match.group(0)
+        if "未在原文中定位" in inner or "请谨慎采信" in inner:
+            return f'<span class="answer-note">{inner}</span>'
+        return inner
+
+    return _NOTE_RE.sub(note, html)
 
 
 # ── 时间与尺寸格式化 ─────────────────────────────────────────────────────────
@@ -700,6 +887,39 @@ body {
   border: 1px solid #ffe58f;
   border-radius: 6px;
   font-size: 13px;
+  color: var(--warn-text);
+}
+
+.evidence-chip {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 0 6px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.evidence-list-label {
+  display: inline-block;
+  margin: 2px 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ink-secondary);
+}
+
+.answer-note {
+  display: block;
+  margin: 4px 0;
+  padding: 8px 12px;
+  background: var(--warn-bg);
+  border: 1px solid #ffe58f;
+  border-radius: 6px;
+  font-size: 12.5px;
   color: var(--warn-text);
 }
 

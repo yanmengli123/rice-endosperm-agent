@@ -25,6 +25,17 @@ async def resolve_operator_tenant_id(db: AsyncSession, user_id: int | None) -> i
         return None
 
 
+def _client_ip(request: Request | None) -> str | None:
+    """经 APISIX / Web 代理时 request.client.host 是代理容器地址；取 X-Forwarded-For
+    首跳作为真实来源，无代理头时回落直连地址。注意：直连 API 端口的调用方可伪造
+    该头，生产部署应保证 API 只对受信代理暴露。"""
+    if request is None or request.client is None:
+        return None
+    forwarded = request.headers.get("x-forwarded-for", "")
+    first_hop = forwarded.split(",")[0].strip() if forwarded else ""
+    return first_hop or request.client.host
+
+
 async def log_operation(
     db: AsyncSession,
     user_id: int | None,
@@ -33,7 +44,7 @@ async def log_operation(
     request: Request | None = None,
 ) -> None:
     try:
-        ip_address = request.client.host if request and request.client else None
+        ip_address = _client_ip(request)
         tenant_id = await resolve_operator_tenant_id(db, user_id)
         db.add(
             OperationLog(
