@@ -63,14 +63,28 @@ def plan_knowledge_query(question: str, *, strategy: str, scope_nonempty: bool) 
     }
 
     effective_strategy = str(strategy or "MODEL_DECIDES").upper()
-    if effective_strategy == "DISABLED" or not scope_nonempty:
-        return {**base, "intent": "NO_RETRIEVAL", "reason": "SCOPE_OR_STRATEGY_DISABLED"}
     if not text or _matches(_SOCIAL_PATTERNS, text):
         return {**base, "intent": "SOCIAL", "reason": "SOCIAL_TURN"}
     if _matches(_IDENTITY_PATTERNS, lowered):
         return {**base, "intent": "IDENTITY", "reason": "IDENTITY_TURN"}
     if _matches(_TRANSLATION_PATTERNS, lowered):
         return {**base, "intent": "TRANSFORMATION", "reason": "PURE_TRANSFORMATION"}
+
+    # Glossary authority has first-class MISS/UNAVAILABLE semantics.  It must
+    # still execute with an empty/disabled scope so the orchestrator can publish
+    # UNAVAILABLE instead of silently falling back to model memory.
+    early_intent = classify_task(text)
+    if early_intent == "GLOSSARY_LOOKUP":
+        return {
+            **base,
+            "intent": early_intent,
+            "question_types": detect_question_types(text),
+            "retrieval_required": True,
+            "answer_mode": "DETERMINISTIC_GLOSSARY",
+            "reason": "GLOSSARY_AUTHORITY_REQUIRED",
+        }
+    if effective_strategy == "DISABLED" or not scope_nonempty:
+        return {**base, "intent": "NO_RETRIEVAL", "reason": "SCOPE_OR_STRATEGY_DISABLED"}
 
     target = _enumeration_target(text)
     enumeration_marker = bool(
@@ -88,14 +102,20 @@ def plan_knowledge_query(question: str, *, strategy: str, scope_nonempty: bool) 
             "reason": "DETERMINISTIC_ENUMERATION_RULE",
         }
 
-    intent = classify_task(text)
+    intent = early_intent
     question_types = detect_question_types(text)
 
     return {
         **base,
         "intent": intent,
         "question_types": question_types,
-        "retrieval_required": effective_strategy == "KNOWLEDGE_FIRST",
-        "answer_mode": "DETERMINISTIC_STRUCTURED" if intent == "ENTITY_LOOKUP" else base["answer_mode"],
+        "retrieval_required": intent == "GLOSSARY_LOOKUP" or effective_strategy == "KNOWLEDGE_FIRST",
+        "answer_mode": (
+            "DETERMINISTIC_GLOSSARY"
+            if intent == "GLOSSARY_LOOKUP"
+            else "DETERMINISTIC_STRUCTURED"
+            if intent == "ENTITY_LOOKUP"
+            else base["answer_mode"]
+        ),
         "reason": "KNOWLEDGE_FIRST_DEFAULT" if effective_strategy == "KNOWLEDGE_FIRST" else "MODEL_DECIDES",
     }

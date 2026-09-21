@@ -35,11 +35,11 @@ def test_llmwiki_is_declared_as_navigation_only_derived_product():
     assert spec.capabilities.supports_rollback is True
 
 
-def test_unknown_kb_types_fall_back_to_authority_source():
+def test_unknown_kb_types_fail_closed_until_registered():
     spec = get_product_spec("milvus-plus")
-    assert spec.category == "authority_source"
-    assert spec.capabilities.supports_upload is True
-    assert spec.capabilities.supports_raw_evidence is True
+    assert spec.category == "unregistered"
+    assert spec.capabilities.supports_upload is False
+    assert spec.capabilities.supports_raw_evidence is False
 
 
 def test_registry_snapshot_exposes_both_categories():
@@ -96,6 +96,17 @@ def test_to_evidence_envelope_accepts_authority_rows():
     assert isinstance(envelope, EvidenceEnvelope)
     assert envelope.origin == "DOCUMENT"
     assert envelope.claim_eligible is False
+
+
+def test_to_evidence_envelope_rejects_unregistered_product_rows():
+    with pytest.raises(AuthorityGateError, match="not registered as an evidence authority"):
+        to_evidence_envelope(
+            {
+                "evidence_id": "ev_unknown",
+                "content": "unregistered connector result",
+                "kb_type": "custom-unknown",
+            }
+        )
 
 
 def test_gate_evidence_drops_derived_rows_and_keeps_authority_rows():

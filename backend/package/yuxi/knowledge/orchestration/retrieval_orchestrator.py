@@ -17,7 +17,7 @@ from yuxi.knowledge.contracts.schemas import (
 from yuxi.knowledge.evidence.verbatim import extract_verbatim_patterns
 from yuxi.knowledge.planning.entity_resolver import ENTITY_RESOLVER_VERSION, resolve_entities
 from yuxi.knowledge.planning.query_planner import PLANNER_VERSION, plan_knowledge_query
-from yuxi.knowledge.products.registry import is_derived_product
+from yuxi.knowledge.products.registry import is_derived_product, is_evidence_authority
 from yuxi.knowledge.rendering.structured_renderer import render_structured_rows
 from yuxi.knowledge.retrieval.canonical_graph_retriever import (
     extract_gene_identifiers,
@@ -624,7 +624,9 @@ async def prepare_knowledge_context(
     retrieval_id = retrieval_id or f"kr_{uuid.uuid4().hex}"
     started_at = utc_now_naive()
     members = [member for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
-    raw_members = [member for member in members if not is_derived_product(str(member.get("kb_type") or ""))]
+    raw_members = [
+        member for member in members if is_evidence_authority(str(member.get("kb_type") or ""))
+    ]
     wiki_members = [
         member
         for member in members
@@ -653,6 +655,74 @@ async def prepare_knowledge_context(
         },
         "warnings": [],
     }
+    if plan.get("intent") == "GLOSSARY_LOOKUP":
+        from yuxi.knowledge.evidence.glossary import extract_glossary_terms, query_glossary_for_scope
+
+        glossary_result = await query_glossary_for_scope(
+            db,
+            scope_snapshot=scope_snapshot,
+            terms=extract_glossary_terms(question),
+        )
+        outcome = str(glossary_result.get("outcome") or "UNAVAILABLE")
+        evidence = list(glossary_result.get("evidence") or [])
+        contract["status"] = "DEGRADED" if outcome == "UNAVAILABLE" else "COMPLETED"
+        contract["evidence"] = evidence
+        contract["context_evidence"] = evidence
+        contract["retrieval_plan"] = {
+            **plan,
+            "answer_mode": "DETERMINISTIC_GLOSSARY",
+            "authority_outcome": outcome,
+        }
+        contract["authority_decision"] = {
+            "claim_id": "claim:primary",
+            "authority_kind": "GLOSSARY",
+            "outcome": outcome,
+            "coverage_semantics": "CLOSED_WORLD_ACTIVE_REVISION",
+            "evidence_ids": [item.get("evidence_id") for item in evidence if item.get("evidence_id")],
+            "reason_code": glossary_result.get("reason_code"),
+            "revision_ids": glossary_result.get("revision_ids") or [],
+            "lookup_terms": glossary_result.get("terms") or [],
+        }
+        disclosure_by_outcome = {
+            "MISS": "当前运行范围内的活动术语词典版本未收录该术语。",
+            "UNAVAILABLE": "当前运行没有可用且已发布的术语词典，系统未使用文献或模型记忆代答。",
+            "AMBIGUOUS": "活动术语词典返回多个候选，请保留候选并提示用户消歧。",
+            "CONFLICT": "活动术语词典存在冲突记录，请分来源呈现，不得静默融合。",
+        }
+        contract["answer_policy"] = {
+            "mode": f"GLOSSARY_{outcome}",
+            "evidence_level": "E1_DATA_PROVENANCE",
+            "document_citations_allowed": False,
+            "original_text_allowed": False,
+            "model_knowledge_fallback_allowed": False,
+            "required_disclosure": disclosure_by_outcome.get(outcome),
+        }
+        contract["completeness"] = {
+            "status": f"GLOSSARY_{outcome}",
+            "returned_evidence_count": len(evidence),
+        }
+        if outcome in disclosure_by_outcome:
+            contract["warnings"] = [disclosure_by_outcome[outcome]]
+        contract["retrieval_summary"] = {
+            "query": question,
+            "claim_count": 0,
+            "evidence_count": len(evidence),
+            "glossary_outcome": outcome,
+            "web_call_count": 0,
+        }
+        contract["contract_hash"] = _hash_contract(contract)
+        await _persist_audit(
+            db,
+            retrieval_id=retrieval_id,
+            run_id=run_id,
+            request_id=request_id,
+            snapshot=scope_snapshot,
+            plan=contract["retrieval_plan"],
+            contract=contract,
+            started_at=started_at,
+        )
+        _emit_knowledge_trace(retrieval_id, contract, started_at)
+        return contract
     # 原句定位（单一证据集原则）：常规召回负责解释上下文，确定性定位器负责
     # 把精确 ``span + anchor`` 补成一条正式 evidence row；随后统一冻结引用池，
     # 页码裁决和状态模块投影都只读取该集合。定位器不能绕开集合直接回答。

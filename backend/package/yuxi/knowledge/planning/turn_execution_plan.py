@@ -16,11 +16,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from yuxi.knowledge.evidence.quote_locator import detect_locator_intent
-from yuxi.knowledge.planning.task_classifier import classify_task, detect_question_types
+from yuxi.knowledge.planning.task_classifier import classify_task, detect_question_types, is_glossary_question
 
-TURN_EXECUTION_PLAN_SCHEMA_VERSION = "turn-execution-plan.v2"
-TURN_EXECUTION_PLANNER_VERSION = "2.0"
-RUN_SOURCE_MANIFEST_SCHEMA_VERSION = "run-source-manifest.v1"
+TURN_EXECUTION_PLAN_SCHEMA_VERSION = "turn-execution-plan.v3"
+TURN_EXECUTION_PLANNER_VERSION = "3.0"
+RUN_SOURCE_MANIFEST_SCHEMA_VERSION = "run-source-manifest.v2"
 
 
 class TaskIntent(StrEnum):
@@ -37,6 +37,7 @@ class TaskIntent(StrEnum):
     TRANSFORMATION = "TRANSFORMATION"
     SOCIAL = "SOCIAL"
     GENERAL_QA = "GENERAL_QA"
+    GLOSSARY_LOOKUP = "GLOSSARY_LOOKUP"
 
 
 class SourcePolicy(StrEnum):
@@ -58,6 +59,7 @@ class Capability(StrEnum):
     NUMERIC_EVIDENCE = "NUMERIC_EVIDENCE"
     BIBLIOGRAPHIC_SEARCH = "BIBLIOGRAPHIC_SEARCH"
     GENERIC_MCP = "GENERIC_MCP"
+    CANONICAL_LOOKUP = "CANONICAL_LOOKUP"
 
 
 class SourceClass(StrEnum):
@@ -66,6 +68,65 @@ class SourceClass(StrEnum):
     STRUCTURED_DATABASE = "STRUCTURED_DATABASE"
     BIBLIOGRAPHY = "BIBLIOGRAPHY"
     WEB = "WEB"
+    CANONICAL_RECORD = "CANONICAL_RECORD"
+
+
+class EvidenceLevel(StrEnum):
+    """The strongest evidence obligation a claim requires.
+
+    Levels are intentionally semantic rather than ordinal at authorization
+    boundaries: a bibliographic record (E2) cannot satisfy a database fact
+    (E1), and neither can satisfy a document-content claim (E3/E4).
+    """
+
+    NONE = "E0_NONE"
+    DATA_PROVENANCE = "E1_DATA_PROVENANCE"
+    BIBLIOGRAPHIC = "E2_BIBLIOGRAPHIC"
+    CLAIM_EVIDENCE = "E3_CLAIM_EVIDENCE"
+    VERBATIM_LOCATOR = "E4_VERBATIM_LOCATOR"
+
+
+class CitationPolicy(StrEnum):
+    NONE = "NONE"
+    DATA_PROVENANCE_ONLY = "DATA_PROVENANCE_ONLY"
+    BIBLIOGRAPHIC_ONLY = "BIBLIOGRAPHIC_ONLY"
+    VERIFIED_CLAIMS_ONLY = "VERIFIED_CLAIMS_ONLY"
+    VERIFIED_LOCATOR_ONLY = "VERIFIED_LOCATOR_ONLY"
+
+
+class AuthorityOutcome(StrEnum):
+    PLANNED = "PLANNED"
+    HIT = "HIT"
+    MISS = "MISS"
+    UNAVAILABLE = "UNAVAILABLE"
+    AMBIGUOUS = "AMBIGUOUS"
+    CONFLICT = "CONFLICT"
+
+
+class SourceUseRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_use_id: str
+    source_class: SourceClass
+    evidence_level: EvidenceLevel
+    provider_id: str
+    operation: str
+    status: str
+    request_digest: str | None = None
+    result_digest: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    adopted: bool = False
+
+
+class AuthorityDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str
+    outcome: AuthorityOutcome
+    evidence_level: EvidenceLevel
+    evidence_ids: list[str] = Field(default_factory=list)
+    reason_code: str | None = None
 
 
 class TaskSpec(BaseModel):
@@ -92,6 +153,20 @@ class EvidenceSpec(BaseModel):
     exact_locator_required: bool = False
     allowed_evidence_types: list[str] = Field(default_factory=list)
     forbidden_evidence_types: list[str] = Field(default_factory=list)
+    level: EvidenceLevel = EvidenceLevel.NONE
+    original_text_required: bool = False
+
+
+class ClaimObligation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str
+    intent: TaskIntent
+    evidence_level: EvidenceLevel
+    allowed_sources: list[SourceClass] = Field(default_factory=list)
+    original_text_required: bool = False
+    citation_required: bool = False
+    fallback_policy: str = "DISCLOSE_AND_STOP"
 
 
 class AnswerSpec(BaseModel):
@@ -99,6 +174,9 @@ class AnswerSpec(BaseModel):
 
     mode: str = "FREEFORM"
     citation_policy: str = "NONE"
+    evidence_level: EvidenceLevel = EvidenceLevel.NONE
+    original_text_required: bool = False
+    source_section: str = "NONE"
 
 
 class TurnExecutionPlan(BaseModel):
@@ -112,6 +190,7 @@ class TurnExecutionPlan(BaseModel):
     required_capabilities: list[Capability] = Field(default_factory=list)
     evidence: EvidenceSpec
     answer: AnswerSpec
+    claim_obligations: list[ClaimObligation] = Field(default_factory=list)
     risk_class: str = "NORMAL"
     confidence: float = 1.0
     reason_codes: list[str] = Field(default_factory=list)
@@ -120,17 +199,28 @@ class TurnExecutionPlan(BaseModel):
 
     @property
     def requires_document_retrieval(self) -> bool:
-        return self.evidence.required and SourceClass.LOCAL_DOCUMENT in self.source.allowed_sources
+        return (
+            self.evidence.level in {EvidenceLevel.CLAIM_EVIDENCE, EvidenceLevel.VERBATIM_LOCATOR}
+            and SourceClass.LOCAL_DOCUMENT in self.source.allowed_sources
+        )
 
     @property
     def requires_mcp(self) -> bool:
         # 现阶段 BIBLIOGRAPHY plane 由受信 MCP 文献检索能力提供；后续若接入
         # 独立 Provider，应新增 provider requirement，而不是放宽此门禁。
-        return self.source.policy in {
+        policy_requires_mcp = self.source.policy in {
             SourcePolicy.MCP_ONLY,
             SourcePolicy.HYBRID_EXPLICIT,
             SourcePolicy.BIBLIOGRAPHY_ONLY,
         }
+        auto_database_obligation = (
+            SourceClass.STRUCTURED_DATABASE in self.source.allowed_sources
+            and any(
+                capability in {Capability.GENE_RECORD_LOOKUP, Capability.GENERIC_MCP}
+                for capability in self.required_capabilities
+            )
+        )
+        return policy_requires_mcp or auto_database_obligation
 
     @property
     def buffers_output(self) -> bool:
@@ -165,6 +255,9 @@ class RunSourceManifest(BaseModel):
     knowledge_retrieval_count: int = 0
     error_code: str | None = None
     amendments: list[dict[str, Any]] = Field(default_factory=list)
+    source_uses: list[SourceUseRecord] = Field(default_factory=list)
+    authority_outcomes: list[AuthorityDecision] = Field(default_factory=list)
+    validation_results: list[dict[str, Any]] = Field(default_factory=list)
 
 
 _MCP_POSITIVE = re.compile(r"(?:通过|使用|只用|仅用|调用|走)\s*MCP|MCP\s*(?:查询|查|检索|获取|调用)", re.I)
@@ -179,13 +272,19 @@ _WEB_NEGATIVE = re.compile(r"(?:不要|不用|禁止|别)\s*(?:联网|上网|网
 _WEB_ONLY = re.compile(r"(?:只|仅)(?:通过|用|查)?\s*(?:联网|网络|web|网页)", re.I)
 _HYBRID = re.compile(
     r"MCP.{0,20}(?:结合|验证|核验|对照).{0,12}(?:论文|文献|知识库)|"
-    r"(?:论文|文献|知识库).{0,20}(?:结合|验证|核验|对照).{0,12}MCP",
+    r"(?:论文|文献|知识库).{0,20}(?:结合|验证|核验|对照).{0,12}MCP|"
+    r"(?:结合|联合使用|同时使用|综合).{0,16}(?:论文|文献|知识库).{0,8}(?:和|与|及|、).{0,8}MCP|"
+    r"(?:结合|联合使用|同时使用|综合).{0,16}MCP.{0,8}(?:和|与|及|、).{0,8}(?:论文|文献|知识库)",
     re.I,
 )
 _SOCIAL = re.compile(r"^(?:hi|hello|hey|你好|您好|嗨|谢谢|感谢|再见)[!！。.，,\s]*$", re.I)
 _TRANSFORM = re.compile(r"^(?:请)?(?:翻译|改写|润色|校对|translate|rewrite|polish|proofread)\b", re.I)
 _LITERATURE = re.compile(
     r"(?:找|搜索|检索|推荐|有哪些).{0,12}(?:论文|文献|文章)|literature|papers?\s+(?:about|on)",
+    re.I,
+)
+_MECHANISM_OR_LITERATURE_CLAIM = re.compile(
+    r"(?:机制|调控|影响|导致|证明|证据|论文|文献|原文|mechanism|regulat|affect|evidence|paper)",
     re.I,
 )
 
@@ -244,7 +343,12 @@ def plan_turn(
 
     if hybrid:
         source_policy = SourcePolicy.HYBRID_EXPLICIT
-        allowed = [SourceClass.STRUCTURED_DATABASE, SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH]
+        allowed = [
+            SourceClass.STRUCTURED_DATABASE,
+            SourceClass.CANONICAL_RECORD,
+            SourceClass.LOCAL_DOCUMENT,
+            SourceClass.KNOWLEDGE_GRAPH,
+        ]
         reason_codes.append("EXPLICIT_HYBRID_SOURCE")
     elif mcp_positive:
         source_policy = SourcePolicy.MCP_ONLY
@@ -256,7 +360,7 @@ def plan_turn(
         reason_codes.append("EXPLICIT_LOCAL_DOCUMENT_ONLY")
     elif kb_positive:
         source_policy = SourcePolicy.KB_ONLY
-        allowed = [SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH]
+        allowed = [SourceClass.CANONICAL_RECORD, SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH]
         reason_codes.append("EXPLICIT_KB_ONLY")
     elif web_only:
         source_policy = SourcePolicy.WEB_ONLY
@@ -265,7 +369,7 @@ def plan_turn(
     else:
         source_policy = SourcePolicy.AUTO
         allowed = (
-            [SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH]
+            [SourceClass.CANONICAL_RECORD, SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH]
             if has_knowledge_scope and knowledge_enabled
             else []
         )
@@ -273,7 +377,13 @@ def plan_turn(
     forbidden: list[SourceClass] = []
     if source_policy == SourcePolicy.MCP_ONLY:
         forbidden.extend(
-            [SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH, SourceClass.BIBLIOGRAPHY, SourceClass.WEB]
+            [
+                SourceClass.CANONICAL_RECORD,
+                SourceClass.LOCAL_DOCUMENT,
+                SourceClass.KNOWLEDGE_GRAPH,
+                SourceClass.BIBLIOGRAPHY,
+                SourceClass.WEB,
+            ]
         )
     if source_policy in {SourcePolicy.KB_ONLY, SourcePolicy.LOCAL_DOCUMENT_ONLY}:
         forbidden.extend([SourceClass.STRUCTURED_DATABASE, SourceClass.WEB])
@@ -281,7 +391,7 @@ def plan_turn(
         forbidden.append(SourceClass.STRUCTURED_DATABASE)
         reason_codes.append("EXPLICIT_NO_MCP")
     if _KB_NEGATIVE.search(text):
-        forbidden.extend([SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH])
+        forbidden.extend([SourceClass.CANONICAL_RECORD, SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH])
         allowed = [item for item in allowed if item not in forbidden]
         reason_codes.append("EXPLICIT_NO_KB")
     if _WEB_NEGATIVE.search(text):
@@ -290,6 +400,7 @@ def plan_turn(
 
     capabilities: list[Capability] = []
     evidence_required = False
+    evidence_level = EvidenceLevel.NONE
     exact_locator = False
     secondary: list[TaskIntent] = []
     target_type = (
@@ -303,6 +414,7 @@ def plan_turn(
         # 不走普通 Top-K 自由回答（2026-09 设计基线：Stage A 定位不得被 Stage B 改写）。
         exact_locator = True
         evidence_required = True
+        evidence_level = EvidenceLevel.VERBATIM_LOCATOR
         capabilities = [Capability.VERBATIM_SEARCH, Capability.PDF_LOCATOR, Capability.DOCUMENT_QA]
         intent = TaskIntent.FIGURE_LOCATOR
         target_type = "FIGURE_IMAGE"
@@ -313,6 +425,7 @@ def plan_turn(
     elif locator.get("kind"):
         exact_locator = True
         evidence_required = True
+        evidence_level = EvidenceLevel.VERBATIM_LOCATOR
         capabilities = [Capability.VERBATIM_SEARCH, Capability.PDF_LOCATOR]
         if locator.get("compound"):
             intent = TaskIntent.DOCUMENT_INTERPRETATION
@@ -339,26 +452,42 @@ def plan_turn(
     elif hybrid:
         intent = TaskIntent.HYBRID_VERIFICATION
         evidence_required = True
+        evidence_level = EvidenceLevel.CLAIM_EVIDENCE
         capabilities = [Capability.GENE_RECORD_LOOKUP, Capability.DOCUMENT_QA]
     elif _LITERATURE.search(text):
         intent = TaskIntent.LITERATURE_DISCOVERY
+        evidence_level = EvidenceLevel.BIBLIOGRAPHIC
         capabilities = [Capability.BIBLIOGRAPHIC_SEARCH]
         if source_policy == SourcePolicy.AUTO:
             source_policy = SourcePolicy.BIBLIOGRAPHY_ONLY
             allowed = [SourceClass.BIBLIOGRAPHY]
+    elif is_glossary_question(text):
+        intent = TaskIntent.GLOSSARY_LOOKUP
+        target_type = "TERM"
+        evidence_level = EvidenceLevel.DATA_PROVENANCE
+        capabilities = [Capability.CANONICAL_LOOKUP]
+        if SourceClass.CANONICAL_RECORD not in forbidden:
+            allowed.append(SourceClass.CANONICAL_RECORD)
+        reason_codes.append("DETERMINISTIC_GLOSSARY_RULE")
     elif "NUMERIC" in question_types and re.search(r"(?:是否|是不是|核验|验证|原文|文中)", text, re.I):
         intent = TaskIntent.NUMERIC_VERIFICATION
         evidence_required = True
+        evidence_level = EvidenceLevel.VERBATIM_LOCATOR
         capabilities = [Capability.VERBATIM_SEARCH, Capability.NUMERIC_EVIDENCE]
     elif mcp_positive:
         intent = TaskIntent.ENTITY_PROFILE
+        evidence_level = EvidenceLevel.DATA_PROVENANCE
         capabilities = [Capability.GENE_RECORD_LOOKUP if target_type == "GENE" else Capability.GENERIC_MCP]
     else:
         legacy_intent = classify_task(text)
         intent = TaskIntent.ENTITY_PROFILE if legacy_intent == "ENTITY_LOOKUP" else TaskIntent.KB_EVIDENCE_QA
         evidence_required = (
-            has_knowledge_scope and knowledge_enabled and source_policy != SourcePolicy.NO_EXTERNAL_SOURCE
+            has_knowledge_scope
+            and knowledge_enabled
+            and SourceClass.LOCAL_DOCUMENT in allowed
+            and source_policy != SourcePolicy.NO_EXTERNAL_SOURCE
         )
+        evidence_level = EvidenceLevel.CLAIM_EVIDENCE if evidence_required else EvidenceLevel.NONE
         capabilities = [Capability.DOCUMENT_QA] if evidence_required else []
 
     # AUTO turn that names a concrete rice source identifier while the agent has
@@ -375,6 +504,11 @@ def plan_turn(
         capabilities.append(Capability.GENE_RECORD_LOOKUP)
         target_type = "GENE"
         reason_codes.append("RICE_SOURCE_IDENTIFIER_ROUTING")
+        if not _MECHANISM_OR_LITERATURE_CLAIM.search(text):
+            intent = TaskIntent.ENTITY_PROFILE
+            evidence_required = False
+            evidence_level = EvidenceLevel.DATA_PROVENANCE
+            capabilities = [Capability.GENE_RECORD_LOOKUP]
 
     # Explicit MCP cannot satisfy document page/quote authority through the
     # current trusted capability registry.  Fail before any source is called.
@@ -392,11 +526,14 @@ def plan_turn(
         satisfiable = False
         error_code = "SOURCE_UNAVAILABLE"
         reason_codes.append("NO_CONFIGURED_MCP")
-    elif evidence_required and not has_knowledge_scope:
+    elif evidence_level in {EvidenceLevel.CLAIM_EVIDENCE, EvidenceLevel.VERBATIM_LOCATOR} and not has_knowledge_scope:
         satisfiable = False
         error_code = "SOURCE_UNAVAILABLE"
         reason_codes.append("NO_LOCAL_DOCUMENT_SCOPE")
-    elif evidence_required and SourceClass.LOCAL_DOCUMENT not in allowed:
+    elif (
+        evidence_level in {EvidenceLevel.CLAIM_EVIDENCE, EvidenceLevel.VERBATIM_LOCATOR}
+        and SourceClass.LOCAL_DOCUMENT not in allowed
+    ):
         satisfiable = False
         error_code = "SOURCE_UNAVAILABLE"
         reason_codes.append("DOCUMENT_EVIDENCE_SOURCE_FORBIDDEN")
@@ -404,15 +541,64 @@ def plan_turn(
         satisfiable = False
         error_code = "SOURCE_UNAVAILABLE"
         reason_codes.append("KNOWLEDGE_STRATEGY_DISABLED")
+    elif intent == TaskIntent.GLOSSARY_LOOKUP and SourceClass.CANONICAL_RECORD not in allowed:
+        satisfiable = False
+        error_code = "SOURCE_UNAVAILABLE"
+        reason_codes.append("GLOSSARY_AUTHORITY_FORBIDDEN")
 
     if exact_locator:
         answer_mode = "STRUCTURED_EVIDENCE_QA" if locator.get("compound") else "DETERMINISTIC_LOCATOR"
-    elif evidence_required:
+    elif evidence_level == EvidenceLevel.CLAIM_EVIDENCE:
         answer_mode = "STRUCTURED_EVIDENCE_QA"
-    elif source_policy == SourcePolicy.MCP_ONLY:
+    elif evidence_level == EvidenceLevel.DATA_PROVENANCE:
         answer_mode = "STRUCTURED_DATA_ANSWER"
+    elif evidence_level == EvidenceLevel.BIBLIOGRAPHIC:
+        answer_mode = "BIBLIOGRAPHIC_ANSWER"
     else:
         answer_mode = "FREEFORM"
+
+    citation_policy = {
+        EvidenceLevel.NONE: CitationPolicy.NONE,
+        EvidenceLevel.DATA_PROVENANCE: CitationPolicy.DATA_PROVENANCE_ONLY,
+        EvidenceLevel.BIBLIOGRAPHIC: CitationPolicy.BIBLIOGRAPHIC_ONLY,
+        EvidenceLevel.CLAIM_EVIDENCE: CitationPolicy.VERIFIED_CLAIMS_ONLY,
+        EvidenceLevel.VERBATIM_LOCATOR: CitationPolicy.VERIFIED_LOCATOR_ONLY,
+    }[evidence_level]
+    source_section = {
+        EvidenceLevel.NONE: "NONE",
+        EvidenceLevel.DATA_PROVENANCE: "DATA_SOURCES",
+        EvidenceLevel.BIBLIOGRAPHIC: "REFERENCES",
+        EvidenceLevel.CLAIM_EVIDENCE: "EVIDENCE",
+        EvidenceLevel.VERBATIM_LOCATOR: "ORIGINAL_TEXT",
+    }[evidence_level]
+
+    obligations = [
+        ClaimObligation(
+            claim_id="claim:primary",
+            intent=intent,
+            evidence_level=evidence_level,
+            allowed_sources=list(dict.fromkeys(allowed)),
+            original_text_required=evidence_level == EvidenceLevel.VERBATIM_LOCATOR,
+            citation_required=evidence_level != EvidenceLevel.NONE,
+        )
+    ]
+    if intent == TaskIntent.HYBRID_VERIFICATION:
+        obligations = [
+            ClaimObligation(
+                claim_id="claim:database",
+                intent=TaskIntent.ENTITY_PROFILE,
+                evidence_level=EvidenceLevel.DATA_PROVENANCE,
+                allowed_sources=[SourceClass.STRUCTURED_DATABASE],
+                citation_required=True,
+            ),
+            ClaimObligation(
+                claim_id="claim:literature",
+                intent=TaskIntent.DOCUMENT_INTERPRETATION,
+                evidence_level=EvidenceLevel.CLAIM_EVIDENCE,
+                allowed_sources=[SourceClass.LOCAL_DOCUMENT],
+                citation_required=True,
+            ),
+        ]
 
     raw_identity = json.dumps(
         {
@@ -442,12 +628,24 @@ def plan_turn(
             exact_locator_required=exact_locator,
             allowed_evidence_types=["sentence", "caption", "paragraph"] if evidence_required else [],
             forbidden_evidence_types=["toc_line"] if exact_locator else [],
+            level=evidence_level,
+            original_text_required=evidence_level == EvidenceLevel.VERBATIM_LOCATOR,
         ),
         answer=AnswerSpec(
             mode=answer_mode,
-            citation_policy="VERIFIED_ONLY" if evidence_required else "NONE",
+            citation_policy=citation_policy,
+            evidence_level=evidence_level,
+            original_text_required=evidence_level == EvidenceLevel.VERBATIM_LOCATOR,
+            source_section=source_section,
         ),
-        risk_class="HIGH_DETERMINISM" if exact_locator else "SOURCE_CONSTRAINED" if explicit else "NORMAL",
+        claim_obligations=obligations,
+        risk_class=(
+            "HIGH_DETERMINISM"
+            if exact_locator or intent == TaskIntent.GLOSSARY_LOOKUP
+            else "SOURCE_CONSTRAINED"
+            if explicit
+            else "NORMAL"
+        ),
         confidence=1.0 if explicit or exact_locator else 0.9,
         reason_codes=reason_codes or ["DEFAULT_POLICY"],
         satisfiable=satisfiable,
@@ -456,12 +654,20 @@ def plan_turn(
 
 
 def initial_source_manifest(plan: TurnExecutionPlan) -> RunSourceManifest:
+    canonical_requested = Capability.CANONICAL_LOOKUP in plan.required_capabilities
     return RunSourceManifest(
         plan_id=plan.plan_id,
         source_policy=plan.source.policy,
         document_evidence_requested=plan.evidence.required,
         mcp_requested=plan.requires_mcp,
-        status="PLANNED" if plan.satisfiable else "FAILED",
+        status=(
+            "PLANNED"
+            if plan.satisfiable
+            and (plan.requires_document_retrieval or plan.requires_mcp or canonical_requested)
+            else "COMPLETED"
+            if plan.satisfiable
+            else "FAILED"
+        ),
         error_code=plan.error_code,
     )
 
@@ -474,14 +680,22 @@ def source_unavailable_message(plan: TurnExecutionPlan) -> str:
         )
     if plan.source.policy == SourcePolicy.BIBLIOGRAPHY_ONLY:
         return "本轮所需的受信文献检索来源当前不可用，且系统不会用模型记忆补写题录。"
+    if plan.task.primary_intent == TaskIntent.GLOSSARY_LOOKUP:
+        return "本轮术语词典权威源不可用，且系统不会用文献、网络或模型记忆补写定义。"
     if plan.requires_mcp:
         return "指定的 MCP 来源当前不可用，且本轮禁止静默改用知识库或网络来源。请检查智能体的 MCP 配置后重试。"
     return "本轮要求的文献证据来源当前不可用，请先挂载或上传相应文献后重试。"
 
 
 __all__ = [
+    "AuthorityOutcome",
+    "AuthorityDecision",
     "Capability",
+    "CitationPolicy",
+    "ClaimObligation",
+    "EvidenceLevel",
     "RunSourceManifest",
+    "SourceUseRecord",
     "SourceClass",
     "SourcePolicy",
     "TaskIntent",

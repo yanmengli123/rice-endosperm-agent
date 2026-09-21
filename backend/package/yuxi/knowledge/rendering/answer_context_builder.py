@@ -5,7 +5,7 @@ from typing import Any
 
 from yuxi.knowledge.graphs.graph_utils import TIER_C, predicate_tier
 from yuxi.knowledge.products.authority_gate import AuthorityGate
-from yuxi.knowledge.products.registry import is_derived_product
+from yuxi.knowledge.products.registry import is_evidence_authority
 from yuxi.knowledge.rendering.citation_channel import public_citations
 from yuxi.knowledge.validation.citation_validator import redact_narrative_citation_identifiers
 
@@ -39,7 +39,7 @@ def _drop_derived_product_rows(rows: list[dict[str, Any]] | None) -> tuple[list[
         if not isinstance(row, dict):
             continue
         kb_type = str(row.get("kb_type") or "").strip().casefold()
-        if kb_type and is_derived_product(kb_type):
+        if kb_type and not is_evidence_authority(kb_type):
             dropped += 1
             continue
         kept.append(row)

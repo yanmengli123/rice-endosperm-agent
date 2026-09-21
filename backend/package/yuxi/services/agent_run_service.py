@@ -149,6 +149,8 @@ def _build_server_run_context(run: object, retrieval_records: list[object] | Non
     input_payload = getattr(run, "input_payload", None)
     if not isinstance(input_payload, dict):
         input_payload = {}
+    source_manifest = input_payload.get("run_source_manifest")
+    turn_plan = input_payload.get("turn_execution_plan")
     return {
         "protocol_version": AGENT_RUN_PROTOCOL_VERSION,
         "agent_slug": getattr(run, "agent_slug", None),
@@ -158,6 +160,8 @@ def _build_server_run_context(run: object, retrieval_records: list[object] | Non
         "model_spec": input_payload.get("model_spec"),
         "knowledge_scope": _public_knowledge_scope(input_payload.get("knowledge_scope_snapshot")),
         "knowledge_retrievals": [_public_retrieval_summary(record) for record in (retrieval_records or [])],
+        "turn_execution_plan": turn_plan if isinstance(turn_plan, dict) else None,
+        "run_source_manifest": source_manifest if isinstance(source_manifest, dict) else None,
     }
 
 

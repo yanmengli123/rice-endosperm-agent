@@ -59,12 +59,13 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
         slug="rice-source-agent",
         source_dir=_SKILLS_ROOT / "rice-source-agent",
         description=(
-            "水稻源知识库 SOURCE-ONLY 问答契约：当问题涉及水稻基因/转录本/别名/坐标/注释/序列/来源记录时，"
+            "水稻源知识库 SOURCE-ONLY 问答契约：当问题明确涉及水稻基因/转录本/别名解析/坐标/注释/序列/来源记录时，"
             "必须先经内置 MCP ricekb 核验（先 ricekb_resolve，序列用 ricekb_sequence），禁止凭记忆回答；"
+            "纯短术语定义问题先服从权威词典三态，不因 Wx 一类裸符号自动抢占；"
             "回答必须以「数据模式：SOURCE-ONLY」开头，并引用工具返回的行级"
             " provenance（表/row_ref/sha256/import_run_id）。"
         ),
-        version="2026.09.16",
+        version="2026.09.21",
         mcp_dependencies=("ricekb",),
     ),
 ]

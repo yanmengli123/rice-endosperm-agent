@@ -11,7 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import aliased
 
 from yuxi.knowledge.base import KnowledgeBase
-from yuxi.knowledge.products.registry import is_derived_product
+from yuxi.knowledge.products.registry import is_derived_product, is_evidence_authority
 from yuxi.knowledge.research_evidence import (
     build_evidence_semantics,
     candidate_explicitly_requested,
@@ -112,6 +112,15 @@ def _member_is_derived(member: dict[str, Any], target: dict[str, Any] | None = N
     return is_derived_product(_member_kb_type(member, target))
 
 
+def _member_evidence_denied(member: dict[str, Any], target: dict[str, Any] | None = None) -> bool:
+    kb_type = _member_kb_type(member, target)
+    return bool(kb_type) and not is_evidence_authority(kb_type)
+
+
+def _member_authority_denial_code(member: dict[str, Any], target: dict[str, Any] | None = None) -> str:
+    return "DERIVED_PRODUCT_CHANNEL_DENIED" if _member_is_derived(member, target) else "PRODUCT_AUTHORITY_DENIED"
+
+
 def _normalize_document_results(
     kb_id: str,
     kb_name: str,
@@ -200,10 +209,10 @@ async def _query_document_source(
     from yuxi.knowledge.runtime import knowledge_base
 
     kb_id = member["kb_id"]
-    if _member_is_derived(member):
+    if _member_evidence_denied(member):
         # Authority Gate：派生产品无论资源是否可用都先被门禁拒绝，不属于可用性问题。
         logger.warning(f"Scope member {kb_id} is a derived product; document channel denied")
-        return [], "DERIVED_PRODUCT_CHANNEL_DENIED"
+        return [], _member_authority_denial_code(member)
     target = knowledge_base.get_retrievers().get(kb_id)
     if not target:
         return [], "DOCUMENT_RETRIEVER_UNAVAILABLE"
@@ -263,11 +272,11 @@ async def _query_source_with_timeout(
 async def _query_managed_graph_source(
     member: dict[str, Any], query_text: str, *, limit: int
 ) -> tuple[list[dict[str, Any]], str | None]:
-    if _member_is_derived(member):
+    if _member_evidence_denied(member):
         # Authority Gate：派生知识产品没有 graph/structured 证据通道，
         # 门禁优先于通道开关判断——策略拒绝不依赖成员策略字段。
         logger.warning(f"Scope member {member['kb_id']} is a derived product; graph channel denied")
-        return [], "DERIVED_PRODUCT_CHANNEL_DENIED"
+        return [], _member_authority_denial_code(member)
     if not member.get("graph_enabled") and not member.get("structured_enabled"):
         return [], None
     tokens = _query_tokens(query_text)
@@ -652,7 +661,7 @@ async def query_verbatim_for_scope(
     members = [
         member
         for member in scope_snapshot.get("members") or []
-        if isinstance(member, dict) and member.get("document_enabled") and not _member_is_derived(member)
+        if isinstance(member, dict) and member.get("document_enabled") and not _member_evidence_denied(member)
     ]
     tenant_id = scope_snapshot.get("tenant_id")
     if not members or tenant_id is None or not str(query_text or "").strip():
@@ -937,7 +946,7 @@ async def query_knowledge_scope_gateway(
     task_labels = []
     per_source_limit = max(top_k, 8)
     verbatim_members = [
-        member for member in members if member.get("document_enabled") and not _member_is_derived(member)
+        member for member in members if member.get("document_enabled") and not _member_evidence_denied(member)
     ]
     # mention.v2 文献硬约束（@doc）：对所有证据通道生效——文档通道按 file_id 收窄，
     # 图谱/结构化通道（无文献粒度）直接排除并记录状态，绝不静默忽略过滤条件。
@@ -958,7 +967,7 @@ async def query_knowledge_scope_gateway(
     scope_excluded_kbs: list[str] = []
     for member in members:
         kb_id = member["kb_id"]
-        if _member_is_derived(member):
+        if _member_evidence_denied(member):
             # Authority Gate：派生知识产品不产生任何证据任务；未来由
             # Wiki Navigator 单独供给 navigation_hits（P4）。
             logger.warning(f"Scope member {kb_id} is a derived product; evidence channels skipped")

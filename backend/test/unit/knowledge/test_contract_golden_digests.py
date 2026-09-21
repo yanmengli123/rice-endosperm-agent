@@ -25,6 +25,7 @@ GOLDEN_DIGESTS = {
     "managed_graph@1.0.0": "sha256:5835d95c337fd85b70601a66548510c4a68e582320dfbbe9283b0d2b90c4fb60",
     "managed_graph@1.1.0": "sha256:b1108aef6d668af9fc60fc4cc8bcfcc5ed6e314ade56715da11a6eabd071478e",
     "generic_document@1.0.0": "sha256:5feb59c3dc2c30bc7a019012beb2b069e2d8110c9800ce442f01bad8b31fc9cf",
+    "glossary@1.0.0": "sha256:bde6dfbc00be32e3c9da5025b7ed2bbfee79abecbc0729dd2b9426694e68c227",
     # legacy@0 特例：allowed_commands=ALL_COMMANDS（允许一切的兼容契约），全局
     # 命令表增长时 digest 合法前滚——语义正确（legacy 库自动获得新命令），
     # 与冻结纪律不冲突。其余任何契约 digest 漂移都是违规。

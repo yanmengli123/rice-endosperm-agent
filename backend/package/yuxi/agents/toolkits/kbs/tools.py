@@ -201,7 +201,12 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
     from sqlalchemy import select
 
     from yuxi.knowledge.orchestration import prepare_knowledge_context
-    from yuxi.knowledge.planning.turn_execution_plan import RunSourceManifest
+    from yuxi.knowledge.planning.turn_execution_plan import (
+        EvidenceLevel,
+        RunSourceManifest,
+        SourceClass,
+        SourceUseRecord,
+    )
     from yuxi.storage.postgres.manager import pg_manager
     from yuxi.storage.postgres.models_business import AgentRun
 
@@ -228,7 +233,46 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
             manifest = RunSourceManifest.model_validate(raw_manifest)
             manifest.document_evidence_requested = True
             manifest.knowledge_retrieval_count += int(frozen_contract.get("status") != "SKIPPED")
-            manifest.used_planes = list(dict.fromkeys([*manifest.used_planes, "DOCUMENT_EVIDENCE"]))
+            grouped: dict[tuple[SourceClass, str], list[str]] = {}
+            for row in frozen_contract.get("evidence") or []:
+                if not isinstance(row, dict):
+                    continue
+                origin = str(row.get("source_type") or row.get("origin") or "DOCUMENT").upper()
+                if origin in {"CSV_ROW", "CANONICAL_RECORD"}:
+                    source_class = SourceClass.CANONICAL_RECORD
+                    plane = "CANONICAL_DATA"
+                elif origin in {"GRAPH", "CANONICAL_CLAIM", "STRUCTURED"}:
+                    source_class = SourceClass.KNOWLEDGE_GRAPH
+                    plane = "GRAPH_EVIDENCE"
+                else:
+                    source_class = SourceClass.LOCAL_DOCUMENT
+                    plane = "DOCUMENT_EVIDENCE"
+                provider_id = str(row.get("kb_id") or "knowledge-scope")
+                evidence_id = str(row.get("evidence_id") or "").strip()
+                grouped.setdefault((source_class, provider_id), [])
+                if evidence_id:
+                    grouped[(source_class, provider_id)].append(evidence_id)
+                manifest.used_planes = list(dict.fromkeys([*manifest.used_planes, plane]))
+            for (source_class, provider_id), evidence_ids in grouped.items():
+                manifest.source_uses.append(
+                    SourceUseRecord(
+                        source_use_id=(
+                            f"knowledge:{frozen_contract.get('retrieval_id')}:{source_class}:{provider_id}"
+                        ),
+                        source_class=source_class,
+                        evidence_level=(
+                            EvidenceLevel.DATA_PROVENANCE
+                            if source_class == SourceClass.CANONICAL_RECORD
+                            else EvidenceLevel.CLAIM_EVIDENCE
+                        ),
+                        provider_id=provider_id,
+                        operation="query_knowledge_scope",
+                        status=str(frozen_contract.get("status") or "UNKNOWN"),
+                        evidence_ids=list(dict.fromkeys(evidence_ids)),
+                        provenance={"retrieval_id": frozen_contract.get("retrieval_id")},
+                        adopted=True,
+                    )
+                )
             manifest.status = "COMPLETED" if frozen_contract.get("status") != "FAILED" else "FAILED"
             manifest.amendments.append(
                 {

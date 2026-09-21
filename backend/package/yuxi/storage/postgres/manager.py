@@ -1071,7 +1071,269 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0054_kb_creation_integrity", "_migration_0054_kb_creation_integrity"),
         ("0055_csv_contract_v11_upgrade", "_migration_0055_csv_contract_v11_upgrade"),
         ("0056_csv_contract_v12_upgrade", "_migration_0056_csv_contract_v12_upgrade"),
+        ("0057_canonical_normalized_key", "_migration_0057_canonical_normalized_key"),
+        ("0058_canonical_alias_index", "_migration_0058_canonical_alias_index"),
+        ("0059_canonical_alias_uniqueness", "_migration_0059_canonical_alias_uniqueness"),
+        ("0060_promote_legacy_glossary", "_migration_0060_promote_legacy_glossary"),
     ]
+
+    async def _migration_0060_promote_legacy_glossary(self, conn) -> None:
+        """Promote unmistakable legacy CSV glossaries into the explicit contract.
+
+        Earlier releases offered only ``csv_record``.  This migration is
+        intentionally conservative: both the KB name and the committed schema
+        must declare glossary semantics.  It freezes an ACTIVE release so
+        closed-world MISS answers are immediately auditable after upgrade.
+        """
+        import hashlib
+        import json
+        import re
+        import unicodedata
+
+        from yuxi.knowledge.source_contracts.registry import resolve_contract
+        from yuxi.knowledge.source_contracts.specs import contract_digest, spec_to_api_dict
+
+        # Release manifests use the same self-describing digest form as source
+        # contracts (``sha256:<64 hex>``).  The original column was only wide
+        # enough for the bare digest, which made the regular release service
+        # fail as soon as it persisted its documented value.
+        await conn.execute(
+            text("ALTER TABLE knowledge_releases ALTER COLUMN manifest_hash TYPE VARCHAR(80)")
+        )
+
+        spec = resolve_contract("glossary", "1.0.0")
+        candidates = (
+            await conn.execute(
+                text(
+                    "SELECT DISTINCT ON (kb.kb_id) kb.kb_id, kb.tenant_id, rev.revision_id, rev.file_id, "
+                    "rev.source_filename, rev.source_sha256 "
+                    "FROM knowledge_bases kb "
+                    "JOIN knowledge_dataset_revisions rev ON rev.kb_id = kb.kb_id "
+                    "WHERE kb.contract_key = 'csv_record' AND rev.status = 'COMMITTED' "
+                    "AND (kb.name ILIKE '%词典%' OR kb.name ILIKE '%glossary%') "
+                    "AND (rev.columns_json::jsonb ?| ARRAY['缩写','术语','term','abbreviation']) "
+                    "AND (rev.columns_json::jsonb ?| ARRAY['含义','定义','definition','meaning']) "
+                    "ORDER BY kb.kb_id, rev.created_at DESC"
+                )
+            )
+        ).all()
+        for candidate in candidates:
+            records = (
+                await conn.execute(
+                    text(
+                        "SELECT id, record_id, fields_json FROM knowledge_canonical_records "
+                        "WHERE revision_id = :revision_id ORDER BY row_number"
+                    ),
+                    {"revision_id": candidate.revision_id},
+                )
+            ).all()
+            for record in records:
+                fields = dict(record.fields_json or {})
+                term = next(
+                    (
+                        str(fields.get(key) or "").strip()
+                        for key in ("缩写", "术语", "term", "abbreviation")
+                        if str(fields.get(key) or "").strip()
+                    ),
+                    "",
+                )
+                if not term:
+                    continue
+                normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", term).strip()).casefold()
+                await conn.execute(
+                    text("UPDATE knowledge_canonical_records SET normalized_key = :key WHERE id = :id"),
+                    {"key": normalized, "id": record.id},
+                )
+                alias_values: list[str] = []
+                for key in ("alias", "aliases", "别名", "同义词"):
+                    alias_values.extend(
+                        value.strip()
+                        for value in re.split(r"[,，;；|/\n]+", str(fields.get(key) or ""))
+                        if value.strip()
+                    )
+                for alias in dict.fromkeys(alias_values):
+                    normalized_alias = re.sub(
+                        r"\s+", " ", unicodedata.normalize("NFKC", alias).strip()
+                    ).casefold()
+                    await conn.execute(
+                        text(
+                            "INSERT INTO knowledge_canonical_aliases "
+                            "(revision_id, record_id, alias, normalized_alias, created_at) "
+                            "VALUES (:revision_id, :record_id, :alias, :normalized_alias, NOW()) "
+                            "ON CONFLICT (revision_id, normalized_alias, record_id) DO NOTHING"
+                        ),
+                        {
+                            "revision_id": candidate.revision_id,
+                            "record_id": record.record_id,
+                            "alias": alias,
+                            "normalized_alias": normalized_alias,
+                        },
+                    )
+
+            release_id = "rel_glossary_" + hashlib.sha256(
+                f"{candidate.kb_id}:{candidate.revision_id}".encode()
+            ).hexdigest()[:20]
+            manifest = {
+                "kb_id": candidate.kb_id,
+                "contract": spec.contract_ref,
+                "sources": [
+                    {
+                        "source_id": candidate.file_id,
+                        "filename": candidate.source_filename,
+                        "content_hash": candidate.source_sha256,
+                        "dataset_revision_id": candidate.revision_id,
+                    }
+                ],
+                "built_at": "migration-0060",
+                "promotion": {
+                    "from_contract": "csv_record",
+                    "reason": "explicit_glossary_name_and_schema",
+                },
+            }
+            manifest_hash = "sha256:" + hashlib.sha256(
+                json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            await conn.execute(
+                text(
+                    "UPDATE knowledge_releases SET status = 'SUPERSEDED', superseded_at = NOW() "
+                    "WHERE kb_id = :kb_id AND status = 'ACTIVE' AND release_id <> :release_id"
+                ),
+                {"kb_id": candidate.kb_id, "release_id": release_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO knowledge_releases "
+                    "(release_id, kb_id, tenant_id, contract_ref, manifest_hash, manifest_json, status, "
+                    "source_count, created_by, created_at, published_at) "
+                    "VALUES (:release_id, :kb_id, :tenant_id, :contract_ref, :manifest_hash, :manifest, "
+                    "'ACTIVE', 1, 'migration-0060', NOW(), NOW()) "
+                    "ON CONFLICT (release_id) DO UPDATE SET status = 'ACTIVE', published_at = NOW()"
+                ),
+                {
+                    "release_id": release_id,
+                    "kb_id": candidate.kb_id,
+                    "tenant_id": candidate.tenant_id,
+                    "contract_ref": spec.contract_ref,
+                    "manifest_hash": manifest_hash,
+                    "manifest": json.dumps(manifest, ensure_ascii=False),
+                },
+            )
+            await conn.execute(
+                text(
+                    "UPDATE knowledge_dataset_revisions SET contract_key = 'glossary', contract_version = '1.0.0' "
+                    "WHERE revision_id = :revision_id"
+                ),
+                {"revision_id": candidate.revision_id},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE knowledge_bases SET contract_key = 'glossary', contract_version = :version, "
+                    "contract_digest = :digest, contract_snapshot = :snapshot, governance_status = 'PUBLISHED', "
+                    "active_release_id = :release_id WHERE kb_id = :kb_id"
+                ),
+                {
+                    "version": spec.version,
+                    "digest": contract_digest(spec),
+                    "snapshot": json.dumps(spec_to_api_dict(spec), ensure_ascii=False),
+                    "release_id": release_id,
+                    "kb_id": candidate.kb_id,
+                },
+            )
+            event_id = "kae_glossary_" + hashlib.sha256(str(candidate.kb_id).encode()).hexdigest()[:24]
+            await conn.execute(
+                text(
+                    "INSERT INTO knowledge_audit_events "
+                    "(event_id, kb_id, tenant_id, event_type, actor_uid, payload_json, created_at) "
+                    "VALUES (:event_id, :kb_id, :tenant_id, 'LEGACY_GLOSSARY_PROMOTED', "
+                    "'migration-0060', :payload, NOW()) ON CONFLICT (event_id) DO NOTHING"
+                ),
+                {
+                    "event_id": event_id,
+                    "kb_id": candidate.kb_id,
+                    "tenant_id": candidate.tenant_id,
+                    "payload": json.dumps(
+                        {"revision_id": candidate.revision_id, "release_id": release_id}, ensure_ascii=False
+                    ),
+                },
+            )
+
+    async def _migration_0059_canonical_alias_uniqueness(self, conn) -> None:
+        """Prevent duplicate aliases within one immutable dataset revision."""
+        await conn.execute(
+            text(
+                "DELETE FROM knowledge_canonical_aliases older USING knowledge_canonical_aliases newer "
+                "WHERE older.id < newer.id "
+                "AND older.revision_id = newer.revision_id "
+                "AND older.normalized_alias = newer.normalized_alias "
+                "AND older.record_id = newer.record_id"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_canonical_alias_revision_record "
+                "ON knowledge_canonical_aliases(revision_id, normalized_alias, record_id)"
+            )
+        )
+
+    async def _migration_0058_canonical_alias_index(self, conn) -> None:
+        """Create the deterministic alias index used by glossary contracts."""
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS knowledge_canonical_aliases ("
+                "id SERIAL PRIMARY KEY, "
+                "revision_id VARCHAR(64) NOT NULL REFERENCES knowledge_dataset_revisions(revision_id) ON DELETE CASCADE, "
+                "record_id VARCHAR(64) NOT NULL, "
+                "alias VARCHAR(512) NOT NULL, "
+                "normalized_alias VARCHAR(512) NOT NULL, "
+                "created_at TIMESTAMPTZ DEFAULT NOW()"
+                ")"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_canonical_aliases_revision_alias "
+                "ON knowledge_canonical_aliases(revision_id, normalized_alias)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_canonical_aliases_record "
+                "ON knowledge_canonical_aliases(revision_id, record_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_canonical_alias_revision_record "
+                "ON knowledge_canonical_aliases(revision_id, normalized_alias, record_id)"
+            )
+        )
+
+    async def _migration_0057_canonical_normalized_key(self, conn) -> None:
+        """Add the deterministic lookup key used by glossary authority channels."""
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS knowledge_canonical_records "
+                "ADD COLUMN IF NOT EXISTS normalized_key VARCHAR(512)"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE knowledge_canonical_records SET normalized_key = LOWER(BTRIM(record_key)) "
+                "WHERE normalized_key IS NULL OR normalized_key = ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS knowledge_canonical_records "
+                "ALTER COLUMN normalized_key SET NOT NULL"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_canonical_records_revision_normalized_key "
+                "ON knowledge_canonical_records(revision_id, normalized_key)"
+            )
+        )
 
     async def _migration_0011_apikeys_tenant_scope(self, conn) -> None:
         """P5 补遗：api_keys.tenant_id 在 ORM 中声明但 0010 漏建，导致所有
@@ -2187,7 +2449,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 "tenant_id BIGINT, "
                 "contract_ref VARCHAR(128) NOT NULL, "
                 "retrieval_policy_revision_id VARCHAR(64), "
-                "manifest_hash VARCHAR(64) NOT NULL, "
+                "manifest_hash VARCHAR(80) NOT NULL, "
                 "manifest_json JSONB NOT NULL, "
                 "status VARCHAR(32) NOT NULL DEFAULT 'STAGED', "
                 "previous_release_id VARCHAR(64), "

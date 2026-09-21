@@ -78,7 +78,13 @@ def _turn_plan_prompt(plan: TurnExecutionPlan) -> str:
     )
 
 
-def _filter_tools_by_turn_plan(tools: list[Any], plan: TurnExecutionPlan) -> list[Any]:
+def filter_tools_by_turn_plan(tools: list[Any], plan: TurnExecutionPlan) -> list[Any]:
+    """Apply the server-authored source/capability plan to every tool set.
+
+    This function is public so middleware that adds tools dynamically (notably
+    SkillsMiddleware) cannot bypass the same authorization decision that was
+    applied to the base agent tool set.
+    """
     policy = plan.source.policy
     required = set(plan.required_capabilities)
     filtered: list[Any] = []
@@ -391,6 +397,7 @@ class KnowledgeContextMiddleware(AgentMiddleware):
             system_message = append_to_system_message(system_message, mention_directive)
         if isinstance(scope, dict) and (
             plan is None
+            or SourceClass.CANONICAL_RECORD in plan.source.allowed_sources
             or SourceClass.LOCAL_DOCUMENT in plan.source.allowed_sources
             or SourceClass.KNOWLEDGE_GRAPH in plan.source.allowed_sources
         ):
@@ -404,7 +411,7 @@ class KnowledgeContextMiddleware(AgentMiddleware):
         messages = _sanitize_messages(request.messages, contract=contract)
         tools = list(request.tools or [])
         if plan is not None:
-            tools = _filter_tools_by_turn_plan(tools, plan)
+            tools = filter_tools_by_turn_plan(tools, plan)
         if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
             tools = [tool for tool in tools if getattr(tool, "name", "") not in _KNOWLEDGE_SOURCE_TOOLS]
         return request.override(system_message=system_message, messages=messages, tools=tools)

@@ -169,3 +169,17 @@ def test_validate_record_mapping_unknown_identity():
     assert report["fatal"]
     report2 = validate_record_mapping(["a"], None)
     assert report2["identity_strategy"] == "row_number"
+
+
+def test_glossary_requires_identity_and_builds_normalized_aliases():
+    assert validate_record_mapping(["term", "aliases", "definition"], None, require_identity=True)["fatal"]
+    rows = [["ＰＣＲ", "PCR|聚合酶链式反应", "一种扩增方法"]]
+    records = build_canonical_records(
+        ["term", "aliases", "definition"],
+        rows,
+        contract_key="glossary",
+        identity_column="term",
+    )
+
+    assert records[0]["normalized_key"] == "pcr"
+    assert records[0]["aliases"] == ["PCR", "聚合酶链式反应"]

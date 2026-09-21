@@ -288,6 +288,16 @@ class SkillsMiddleware(AgentMiddleware):
                 model_tools.append(t)
                 existing_tool_names.add(t.name)
 
+        # Skill dependencies request tools; they do not grant source authority.
+        # Re-apply the frozen turn plan after dynamic expansion so a Skill cannot
+        # smuggle an MCP/web/knowledge source into a source-constrained turn.
+        raw_plan = getattr(runtime_context, "_turn_execution_plan", None)
+        if isinstance(raw_plan, dict):
+            from yuxi.agents.middlewares.knowledge_context import filter_tools_by_turn_plan
+            from yuxi.knowledge.planning.turn_execution_plan import TurnExecutionPlan
+
+            model_tools = filter_tools_by_turn_plan(model_tools, TurnExecutionPlan.model_validate(raw_plan))
+
         knowledge_contract = getattr(runtime_context, "_knowledge_contract", None)
         if isinstance(knowledge_contract, dict) and knowledge_contract.get("status") != "SKIPPED":
             model_tools = [tool for tool in model_tools if tool.name not in {"query_knowledge_scope", "query_kb"}]

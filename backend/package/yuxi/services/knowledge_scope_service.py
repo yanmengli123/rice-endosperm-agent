@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi.knowledge.products.registry import is_derived_product
+from yuxi.knowledge.products.registry import is_derived_product, is_evidence_authority
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.knowledge_scope_repository import (
     DEFAULT_QA_SCOPE_ID,
@@ -16,11 +16,13 @@ from yuxi.repositories.knowledge_scope_repository import (
 from yuxi.storage.postgres.models_business import Agent, User
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
+    KnowledgeCanonicalRecord,
     KnowledgeChunk,
     KnowledgeFile,
     KnowledgeGraphEntity,
     KnowledgeGraphRelationEvidence,
     KnowledgeGraphTriple,
+    KnowledgeRelease,
     KnowledgeWiki,
     WikiClaimRevision,
     WikiPageRevision,
@@ -240,18 +242,47 @@ async def resolve_effective_knowledge_scope(
         session_kb_ids=narrowed_ids,
     )
 
+    kb_rows = []
+    if effective_ids:
+        kb_rows = list(
+            (
+                await db.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id.in_(sorted(effective_ids))))
+            )
+            .scalars()
+            .all()
+        )
+    frozen_kb_by_id = {str(item.kb_id): item for item in kb_rows}
+
     filtered_out = []
     effective_members: list[dict[str, Any]] = []
     raw_ids = {
-        kb_id for kb_id in effective_ids if not is_derived_product(str(accessible_by_id[kb_id].get("kb_type") or ""))
+        kb_id
+        for kb_id in effective_ids
+        if kb_id in frozen_kb_by_id
+        and str(frozen_kb_by_id[kb_id].governance_status or "").upper() != "ARCHIVED"
+        and is_evidence_authority(str(accessible_by_id[kb_id].get("kb_type") or ""))
     }
     for kb_id in effective_ids:
+        frozen_kb = frozen_kb_by_id.get(kb_id)
+        if frozen_kb is None or str(frozen_kb.governance_status or "").upper() == "ARCHIVED":
+            filtered_out.append({"kb_id": kb_id, "reason": "SOURCE_RETIRED"})
+            continue
         member = enabled_members.get(kb_id)
         policy = serialize_member(member) if member else _default_policy(kb_id, accessible_by_id[kb_id])
         policy["kb_id"] = kb_id
         policy["kb_name"] = accessible_by_id[kb_id].get("name") or kb_id
         policy["kb_type"] = accessible_by_id[kb_id].get("kb_type")
+        policy["contract_key"] = frozen_kb.contract_key
+        policy["contract_version"] = frozen_kb.contract_version
+        policy["contract_digest"] = frozen_kb.contract_digest
+        policy["governance_status"] = frozen_kb.governance_status
+        policy["active_release_id"] = frozen_kb.active_release_id
         policy["included_via"] = "GLOBAL" if kb_id in global_ids else "CUSTOM"
+        if not is_derived_product(str(policy.get("kb_type") or "")) and not is_evidence_authority(
+            str(policy.get("kb_type") or "")
+        ):
+            filtered_out.append({"kb_id": kb_id, "reason": "PRODUCT_AUTHORITY_UNREGISTERED"})
+            continue
         if is_derived_product(str(policy.get("kb_type") or "")):
             closure = await _wiki_navigation_closure(db, tenant_id=tenant_id, kb_id=kb_id, raw_ids=raw_ids)
             if closure is None:
@@ -398,11 +429,40 @@ async def validate_member_health(
     entity_count = await count(KnowledgeGraphEntity, KnowledgeGraphEntity.kb_id == kb_id)
     triple_count = await count(KnowledgeGraphTriple, KnowledgeGraphTriple.kb_id == kb_id)
     evidence_count = await count(KnowledgeGraphRelationEvidence, KnowledgeGraphRelationEvidence.kb_id == kb_id)
+    canonical_enabled = bool(policy.get("structured_enabled")) and str(kb.contract_key or "") == "glossary"
+    canonical_count = 0
+    canonical_revision_ids: list[str] = []
+    if canonical_enabled and kb.active_release_id:
+        active_release = (
+            await db.execute(
+                select(KnowledgeRelease).where(
+                    KnowledgeRelease.release_id == kb.active_release_id,
+                    KnowledgeRelease.kb_id == kb_id,
+                    KnowledgeRelease.status == "ACTIVE",
+                )
+            )
+        ).scalar_one_or_none()
+        if active_release is not None:
+            canonical_revision_ids = list(
+                dict.fromkeys(
+                    str(item.get("dataset_revision_id"))
+                    for item in (active_release.manifest_json or {}).get("sources") or []
+                    if isinstance(item, dict) and item.get("dataset_revision_id")
+                )
+            )
+        if canonical_revision_ids:
+            canonical_count = await count(
+                KnowledgeCanonicalRecord,
+                KnowledgeCanonicalRecord.kb_id == kb_id,
+                KnowledgeCanonicalRecord.revision_id.in_(canonical_revision_ids),
+            )
+    structured_enabled = bool(policy.get("structured_enabled")) and not canonical_enabled
 
     channel_health = {
         "document": (not policy.get("document_enabled")) or chunk_count > 0 or str(kb.kb_type).lower() == "dify",
         "graph": (not policy.get("graph_enabled")) or entity_count > 0 or triple_count > 0,
-        "structured": (not policy.get("structured_enabled")) or evidence_count > 0,
+        "structured": (not structured_enabled) or evidence_count > 0,
+        "canonical": (not canonical_enabled) or canonical_count > 0,
         "wiki_navigation": not policy.get("wiki_navigation_enabled"),
     }
     enabled_channels = [
@@ -410,7 +470,8 @@ async def validate_member_health(
         for name, flag in (
             ("document", policy.get("document_enabled")),
             ("graph", policy.get("graph_enabled")),
-            ("structured", policy.get("structured_enabled")),
+            ("structured", structured_enabled),
+            ("canonical", canonical_enabled),
             ("wiki_navigation", policy.get("wiki_navigation_enabled")),
         )
         if flag
@@ -430,6 +491,8 @@ async def validate_member_health(
         "entities": entity_count,
         "triples": triple_count,
         "evidence": evidence_count,
+        "canonical_records": canonical_count,
+        "canonical_revision_ids": canonical_revision_ids,
         "channels": {
             name: {"enabled": name in enabled_channels, "ready": channel_health[name]} for name in channel_health
         },

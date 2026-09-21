@@ -1875,6 +1875,7 @@ class KnowledgeCanonicalRecord(Base):
     __table_args__ = (
         UniqueConstraint("revision_id", "record_id", name="uq_knowledge_canonical_records_revision_record"),
         Index("ix_knowledge_canonical_records_revision_key", "revision_id", "record_key"),
+        Index("ix_knowledge_canonical_records_revision_normalized_key", "revision_id", "normalized_key"),
         Index("ix_knowledge_canonical_records_kb", "kb_id"),
     )
 
@@ -1886,10 +1887,36 @@ class KnowledgeCanonicalRecord(Base):
     kb_id = Column(String(80), nullable=False)
     tenant_id = Column(BigInteger, index=True)
     record_key = Column(String(512), nullable=False)
+    normalized_key = Column(String(512), nullable=False, default="")
     row_number = Column(Integer, nullable=False)
     fields_json = Column(JSON_VALUE, nullable=False, default=dict)
     projection_text = Column(Text, nullable=False)
     projection_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class KnowledgeCanonicalAlias(Base):
+    """Normalized alias index for deterministic glossary lookups."""
+
+    __tablename__ = "knowledge_canonical_aliases"
+    __table_args__ = (
+        UniqueConstraint(
+            "revision_id",
+            "normalized_alias",
+            "record_id",
+            name="uq_knowledge_canonical_alias_revision_record",
+        ),
+        Index("ix_knowledge_canonical_aliases_revision_alias", "revision_id", "normalized_alias"),
+        Index("ix_knowledge_canonical_aliases_record", "revision_id", "record_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    revision_id = Column(
+        String(64), ForeignKey("knowledge_dataset_revisions.revision_id", ondelete="CASCADE"), nullable=False
+    )
+    record_id = Column(String(64), nullable=False)
+    alias = Column(String(512), nullable=False)
+    normalized_alias = Column(String(512), nullable=False)
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
@@ -1908,7 +1935,7 @@ class KnowledgeRelease(Base):
     tenant_id = Column(BigInteger, index=True)
     contract_ref = Column(String(128), nullable=False)
     retrieval_policy_revision_id = Column(String(64), index=True)
-    manifest_hash = Column(String(64), nullable=False)
+    manifest_hash = Column(String(80), nullable=False)
     manifest_json = Column(JSON_VALUE, nullable=False)
     # STAGED → ACTIVE → SUPERSEDED；ARCHIVED 随知识库归档
     status = Column(String(32), nullable=False, default="STAGED", index=True)

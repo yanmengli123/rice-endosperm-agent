@@ -47,3 +47,11 @@ def test_disabled_scope_has_highest_priority():
 
     assert plan["intent"] == "NO_RETRIEVAL"
     assert plan["retrieval_required"] is False
+
+
+def test_glossary_authority_runs_even_when_scope_is_empty_or_disabled():
+    for strategy in ("MODEL_DECIDES", "DISABLED"):
+        plan = plan_knowledge_query("OASIS 是什么缩写", strategy=strategy, scope_nonempty=False)
+        assert plan["intent"] == "GLOSSARY_LOOKUP"
+        assert plan["retrieval_required"] is True
+        assert plan["answer_mode"] == "DETERMINISTIC_GLOSSARY"

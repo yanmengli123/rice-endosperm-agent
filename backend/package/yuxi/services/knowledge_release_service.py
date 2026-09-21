@@ -21,6 +21,7 @@ from sqlalchemy import select
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
+    KnowledgeDatasetRevision,
     KnowledgeFile,
     KnowledgeRelease,
     KnowledgeRetrievalPolicyRevision,
@@ -197,6 +198,22 @@ async def build_release(kb_id: str, operator_id: str | None) -> dict:
             status = (record.status or "").lower()
             if status not in {"parsed", "indexed", "done", "error_indexing"}:
                 continue
+            dataset_revision = (
+                (
+                    await session.execute(
+                        select(KnowledgeDatasetRevision)
+                        .where(
+                            KnowledgeDatasetRevision.kb_id == kb_id,
+                            KnowledgeDatasetRevision.file_id == record.file_id,
+                            KnowledgeDatasetRevision.status == "COMMITTED",
+                        )
+                        .order_by(KnowledgeDatasetRevision.created_at.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
             sources.append(
                 {
                     "source_id": record.file_id,
@@ -205,6 +222,7 @@ async def build_release(kb_id: str, operator_id: str | None) -> dict:
                     "canonical_revision_id": record.active_parse_revision_id,
                     "projection_revision_id": record.active_index_revision_id,
                     "evidence_status": record.evidence_status,
+                    "dataset_revision_id": dataset_revision.revision_id if dataset_revision else None,
                 }
             )
         if not sources:

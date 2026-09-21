@@ -529,10 +529,58 @@ def _task_result_response(result: dict[str, Any], tool_call_id: str, subagent_ru
     if not output:
         output = "子智能体已完成任务，但没有返回文本结果。"
 
+    evidence_bundle = _subagent_evidence_bundle(result)
+    if evidence_bundle:
+        output = (
+            f"{output}\n\n---\n\n"
+            "SUBAGENT_EVIDENCE_BUNDLE (server-generated; preserve claim/source boundaries):\n"
+            f"```json\n{json.dumps(evidence_bundle, ensure_ascii=False, indent=2)}\n```"
+        )
     tool_result = _tool_result_with_thread_id(subagent_run["child_thread_id"], output)
     return Command(
         update={"messages": [ToolMessage(tool_result, tool_call_id=tool_call_id)], "subagent_runs": [subagent_run]}
     )
+
+
+def _subagent_evidence_bundle(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Project child authority metadata without exposing prompts or private state."""
+    run_context = result.get("run_context")
+    if not isinstance(run_context, dict):
+        return None
+    manifest = run_context.get("run_source_manifest")
+    retrievals = run_context.get("knowledge_retrievals")
+    plan = run_context.get("turn_execution_plan")
+    if not isinstance(manifest, dict) and not retrievals:
+        return None
+    scope = run_context.get("knowledge_scope")
+    scope = scope if isinstance(scope, dict) else {}
+    return {
+        "schema_version": "subagent-evidence-bundle.v1",
+        "child_run_id": result.get("agent_run_id"),
+        "result_authority": run_context.get("result_authority"),
+        "scope": {
+            "scope_id": scope.get("scope_id"),
+            "scope_version": scope.get("scope_version"),
+            "kb_count": scope.get("kb_count"),
+        },
+        "plan_id": plan.get("plan_id") if isinstance(plan, dict) else None,
+        "evidence_level": ((plan.get("evidence") or {}).get("level") if isinstance(plan, dict) else None),
+        "source_manifest": {
+            key: manifest.get(key)
+            for key in (
+                "schema_version",
+                "status",
+                "used_planes",
+                "source_uses",
+                "authority_outcomes",
+                "validation_results",
+                "error_code",
+            )
+        }
+        if isinstance(manifest, dict)
+        else None,
+        "knowledge_retrievals": retrievals if isinstance(retrievals, list) else [],
+    }
 
 
 def _task_wait_timeout_response(result: dict[str, Any], tool_call_id: str, subagent_run: dict[str, Any]) -> Command:

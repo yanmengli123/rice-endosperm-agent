@@ -20,6 +20,34 @@ def make_child_thread_id(parent_thread_id: str, agent_slug: str, tool_call_id: s
     return subagent_child_thread_id(parent_thread_id, agent_slug, tool_call_id)
 
 
+def test_subagent_evidence_bundle_projects_typed_child_authority_metadata() -> None:
+    bundle = subagent_task_middleware._subagent_evidence_bundle(
+        {
+            "agent_run_id": "child-run",
+            "run_context": {
+                "result_authority": "yuxi_server",
+                "knowledge_scope": {"scope_id": "scope-1", "scope_version": 3, "kb_count": 1},
+                "turn_execution_plan": {
+                    "plan_id": "tp-1",
+                    "evidence": {"level": "E3_CLAIM_EVIDENCE"},
+                },
+                "run_source_manifest": {
+                    "schema_version": "run-source-manifest.v2",
+                    "status": "COMPLETED",
+                    "source_uses": [{"source_use_id": "knowledge:1"}],
+                    "authority_outcomes": [{"claim_id": "claim:primary", "outcome": "HIT"}],
+                },
+                "knowledge_retrievals": [{"retrieval_id": "kr-1", "status": "COMPLETED"}],
+            },
+        }
+    )
+
+    assert bundle["schema_version"] == "subagent-evidence-bundle.v1"
+    assert bundle["child_run_id"] == "child-run"
+    assert bundle["evidence_level"] == "E3_CLAIM_EVIDENCE"
+    assert bundle["source_manifest"]["source_uses"][0]["source_use_id"] == "knowledge:1"
+
+
 class _ChildContext:
     def __init__(self):
         self.model = None

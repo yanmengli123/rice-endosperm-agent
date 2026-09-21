@@ -30,14 +30,22 @@ from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
 from yuxi.agents.state import AgentStatePayload
 from yuxi.knowledge.orchestration import prepare_knowledge_context
 from yuxi.knowledge.planning.turn_execution_plan import (
+    AuthorityDecision,
+    AuthorityOutcome,
     Capability,
+    EvidenceLevel,
     RunSourceManifest,
+    SourceClass,
+    SourceUseRecord,
     TurnExecutionPlan,
     plan_turn,
 )
 from yuxi.knowledge.rendering.answer_draft import render_answer_draft
 from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
-from yuxi.knowledge.rendering.source_output_guard import guard_non_document_source_answer
+from yuxi.knowledge.rendering.source_output_guard import (
+    guard_answer_for_evidence_level,
+    guard_glossary_answer,
+)
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -595,12 +603,17 @@ def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, d
 
 
 def _initial_source_manifest(plan: TurnExecutionPlan) -> RunSourceManifest:
+    canonical_requested = Capability.CANONICAL_LOOKUP in plan.required_capabilities
     return RunSourceManifest(
         plan_id=plan.plan_id,
         source_policy=plan.source.policy,
         document_evidence_requested=plan.evidence.required,
         mcp_requested=plan.requires_mcp,
-        status="PLANNED" if plan.requires_document_retrieval or plan.requires_mcp else "COMPLETED",
+        status=(
+            "PLANNED"
+            if plan.requires_document_retrieval or plan.requires_mcp or canonical_requested
+            else "COMPLETED"
+        ),
     )
 
 
@@ -612,6 +625,8 @@ def _plan_failure_answer(plan: TurnExecutionPlan) -> str:
         )
     if plan.source.policy.value == "BIBLIOGRAPHY_ONLY":
         return "本轮所需的受信文献检索来源当前不可用；系统没有改用模型记忆或本地知识库补写文献。"
+    if plan.task.primary_intent.value == "GLOSSARY_LOOKUP":
+        return "本轮禁止使用术语词典权威源，系统没有改用文献、网络或模型记忆补写术语定义。"
     if plan.requires_mcp:
         return "本轮指定的 MCP 来源当前不可用；系统没有静默改用知识库或网络来源。"
     return "本轮要求的文献来源当前不可用，无法在不扩大来源范围的前提下完成回答。"
@@ -680,6 +695,144 @@ def _record_mention_fulfillment(
         manifest.status = "DEGRADED"
 
 
+def _append_mcp_source_uses(
+    manifest: RunSourceManifest,
+    *,
+    audits: list[Any],
+    matched_ids: set[int],
+) -> None:
+    """Project append-only MCP audit rows into the run-level source ledger."""
+    existing = {item.source_use_id for item in manifest.source_uses}
+    for audit in audits:
+        source_use_id = f"mcp:{audit.id}"
+        if source_use_id in existing:
+            continue
+        profile = profile_for_protocol_name(str(audit.capability_name or ""))
+        bibliography = bool(profile and profile.source_class == "BIBLIOGRAPHY")
+        manifest.source_uses.append(
+            SourceUseRecord(
+                source_use_id=source_use_id,
+                source_class=SourceClass.BIBLIOGRAPHY if bibliography else SourceClass.STRUCTURED_DATABASE,
+                evidence_level=EvidenceLevel.BIBLIOGRAPHIC if bibliography else EvidenceLevel.DATA_PROVENANCE,
+                provider_id=str(audit.server_slug),
+                operation=str(audit.capability_name),
+                status=str(audit.status).upper(),
+                request_digest=audit.arguments_digest,
+                result_digest=audit.result_digest,
+                evidence_ids=[source_use_id] if int(audit.id) in matched_ids else [],
+                provenance={"mcp_call_audit_id": int(audit.id), **dict(audit.provenance or {})},
+                adopted=int(audit.id) in matched_ids,
+            )
+        )
+        existing.add(source_use_id)
+
+
+def _append_knowledge_source_uses(
+    manifest: RunSourceManifest,
+    *,
+    plan: TurnExecutionPlan,
+    contract: dict[str, Any],
+) -> None:
+    """Record the actual evidence channels used by the frozen knowledge Contract."""
+    grouped: dict[tuple[SourceClass, str], list[str]] = {}
+    for row in contract.get("evidence") or []:
+        if not isinstance(row, dict):
+            continue
+        origin = str(row.get("source_type") or row.get("origin") or "DOCUMENT").upper()
+        if origin in {"CSV_ROW", "CANONICAL_RECORD"}:
+            source_class = SourceClass.CANONICAL_RECORD
+            plane = "CANONICAL_DATA"
+        elif origin in {"GRAPH", "CANONICAL_CLAIM", "STRUCTURED"}:
+            source_class = SourceClass.KNOWLEDGE_GRAPH
+            plane = "GRAPH_EVIDENCE"
+        else:
+            source_class = SourceClass.LOCAL_DOCUMENT
+            plane = "DOCUMENT_EVIDENCE"
+        provider_id = str(row.get("kb_id") or "knowledge-scope")
+        evidence_id = str(row.get("evidence_id") or "").strip()
+        grouped.setdefault((source_class, provider_id), [])
+        if evidence_id:
+            grouped[(source_class, provider_id)].append(evidence_id)
+        manifest.used_planes = list(dict.fromkeys([*manifest.used_planes, plane]))
+
+    existing = {item.source_use_id for item in manifest.source_uses}
+    for (source_class, provider_id), evidence_ids in grouped.items():
+        source_use_id = f"knowledge:{contract.get('retrieval_id')}:{source_class}:{provider_id}"
+        if source_use_id in existing:
+            continue
+        manifest.source_uses.append(
+            SourceUseRecord(
+                source_use_id=source_use_id,
+                source_class=source_class,
+                evidence_level=(
+                    EvidenceLevel.DATA_PROVENANCE
+                    if source_class == SourceClass.CANONICAL_RECORD
+                    else plan.evidence.level
+                ),
+                provider_id=provider_id,
+                operation="query_knowledge_scope",
+                status=str(contract.get("status") or "UNKNOWN"),
+                evidence_ids=list(dict.fromkeys(evidence_ids)),
+                provenance={"retrieval_id": contract.get("retrieval_id")},
+                adopted=True,
+            )
+        )
+        existing.add(source_use_id)
+
+    authority_decision = contract.get("authority_decision")
+    authority_decision = authority_decision if isinstance(authority_decision, dict) else {}
+    if authority_decision.get("authority_kind") == "GLOSSARY" and not grouped:
+        source_use_id = f"knowledge:{contract.get('retrieval_id')}:glossary-scope"
+        if source_use_id not in existing:
+            manifest.source_uses.append(
+                SourceUseRecord(
+                    source_use_id=source_use_id,
+                    source_class=SourceClass.CANONICAL_RECORD,
+                    evidence_level=EvidenceLevel.DATA_PROVENANCE,
+                    provider_id="glossary-scope",
+                    operation="exact_canonical_lookup",
+                    status=str(authority_decision.get("outcome") or "UNAVAILABLE"),
+                    evidence_ids=[],
+                    provenance={
+                        "retrieval_id": contract.get("retrieval_id"),
+                        "revision_ids": authority_decision.get("revision_ids") or [],
+                        "lookup_terms": authority_decision.get("lookup_terms") or [],
+                    },
+                    adopted=True,
+                )
+            )
+
+    evidence_ids = [
+        str(row.get("evidence_id"))
+        for row in contract.get("evidence") or []
+        if isinstance(row, dict) and row.get("evidence_id")
+    ]
+    raw_outcome = str(authority_decision.get("outcome") or "").upper()
+    try:
+        outcome = AuthorityOutcome(raw_outcome) if raw_outcome else None
+    except ValueError:
+        outcome = None
+    if outcome is None:
+        outcome = AuthorityOutcome.HIT if evidence_ids else AuthorityOutcome.MISS
+        if str(contract.get("status") or "").upper() in {"FAILED", "UNAVAILABLE"}:
+            outcome = AuthorityOutcome.UNAVAILABLE
+    claim_id = (
+        "claim:literature" if plan.task.primary_intent.value == "HYBRID_VERIFICATION" else "claim:primary"
+    )
+    manifest.authority_outcomes = [
+        *[item for item in manifest.authority_outcomes if item.claim_id != claim_id],
+        AuthorityDecision(
+            claim_id=claim_id,
+            outcome=outcome,
+            evidence_level=plan.evidence.level,
+            evidence_ids=list(dict.fromkeys(evidence_ids)),
+            reason_code=(
+                str(authority_decision.get("reason_code") or contract.get("error_code") or "") or None
+            ),
+        ),
+    ]
+
+
 async def _finalize_mcp_manifest(
     db,
     *,
@@ -694,8 +847,6 @@ async def _finalize_mcp_manifest(
     MCP 服务器同样要核对"实际成功调用过"，等价能力的服务器不能替代指定项。
     """
     pinned_mcps = _pinned_mention_items(mention_resolution, "mcp")
-    if not plan.requires_mcp and not pinned_mcps:
-        return True
     if not run_id:
         return True
     audits = list(
@@ -714,6 +865,11 @@ async def _finalize_mcp_manifest(
     manifest.mcp_call_count = len(audits)
     manifest.successful_mcp_call_count = len(matched)
     manifest.mcp_servers = list(dict.fromkeys(str(audit.server_slug) for audit in matched))
+    _append_mcp_source_uses(
+        manifest,
+        audits=audits,
+        matched_ids={int(audit.id) for audit in matched},
+    )
     if matched:
         matched_planes = [
             "BIBLIOGRAPHY"
@@ -723,6 +879,25 @@ async def _finalize_mcp_manifest(
             for audit in matched
         ]
         manifest.used_planes = list(dict.fromkeys([*manifest.used_planes, *matched_planes]))
+    if plan.requires_mcp:
+        decision_claim_id = (
+            "claim:database" if plan.task.primary_intent.value == "HYBRID_VERIFICATION" else "claim:primary"
+        )
+        decision_level = (
+            EvidenceLevel.BIBLIOGRAPHIC
+            if plan.evidence.level == EvidenceLevel.BIBLIOGRAPHIC
+            else EvidenceLevel.DATA_PROVENANCE
+        )
+        manifest.authority_outcomes = [
+            *[item for item in manifest.authority_outcomes if item.claim_id != decision_claim_id],
+            AuthorityDecision(
+                claim_id=decision_claim_id,
+                outcome=AuthorityOutcome.HIT if matched else AuthorityOutcome.UNAVAILABLE,
+                evidence_level=decision_level,
+                evidence_ids=[f"mcp:{audit.id}" for audit in matched],
+                reason_code=None if matched else "MCP_CAPABILITY_NOT_FULFILLED",
+            ),
+        ]
     if pinned_mcps:
         successful_servers = {str(audit.server_slug) for audit in audits if str(audit.status).lower() == "success"}
         for slug, strength in pinned_mcps:
@@ -752,11 +927,57 @@ async def _finalize_mention_subagents(
 ) -> None:
     """子智能体后验：@subagent 指定项必须在本轮产生对应子运行（created_by_run_id 血缘）。"""
     pinned = _pinned_mention_items(mention_resolution, "subagent")
-    if not pinned or not run_id:
+    if not run_id:
         return
-    child_slugs = set(
-        (await db.execute(select(AgentRun.agent_slug).where(AgentRun.created_by_run_id == str(run_id)))).scalars().all()
+    child_runs = list(
+        (await db.execute(select(AgentRun).where(AgentRun.created_by_run_id == str(run_id)))).scalars().all()
     )
+    child_slugs = {str(child.agent_slug) for child in child_runs}
+    existing_source_uses = {item.source_use_id for item in manifest.source_uses}
+    for child in child_runs:
+        payload = child.input_payload if isinstance(child.input_payload, dict) else {}
+        child_manifest = payload.get("run_source_manifest")
+        if not isinstance(child_manifest, dict):
+            continue
+        for raw_source_use in child_manifest.get("source_uses") or []:
+            if not isinstance(raw_source_use, dict):
+                continue
+            child_source_use_id = str(raw_source_use.get("source_use_id") or "").strip()
+            source_use_id = f"subagent:{child.id}:{child_source_use_id}"
+            if not child_source_use_id or source_use_id in existing_source_uses:
+                continue
+            try:
+                source_use = SourceUseRecord.model_validate(
+                    {
+                        **raw_source_use,
+                        "source_use_id": source_use_id,
+                        "provenance": {
+                            **dict(raw_source_use.get("provenance") or {}),
+                            "child_run_id": str(child.id),
+                            "child_agent_slug": str(child.agent_slug),
+                        },
+                        "adopted": bool(raw_source_use.get("adopted"))
+                        and str(child.status).lower() == "completed",
+                    }
+                )
+            except ValueError:
+                continue
+            manifest.source_uses.append(source_use)
+            existing_source_uses.add(source_use_id)
+        for raw_outcome in child_manifest.get("authority_outcomes") or []:
+            if not isinstance(raw_outcome, dict):
+                continue
+            try:
+                manifest.authority_outcomes.append(
+                    AuthorityDecision.model_validate(
+                        {
+                            **raw_outcome,
+                            "claim_id": f"subagent:{child.id}:{raw_outcome.get('claim_id') or 'claim'}",
+                        }
+                    )
+                )
+            except ValueError:
+                continue
     for slug, strength in pinned:
         _record_mention_fulfillment(
             manifest,
@@ -1684,7 +1905,7 @@ async def stream_agent_chat(
     protected_output = turn_plan.buffers_output
     buffered_root_message_id: str | None = None
     buffered_root_metadata: dict[str, Any] | None = None
-    source_output_validation: dict[str, int | str] | None = None
+    source_output_validation: dict[str, Any] | None = None
 
     try:
         credential_context_token = await _activate_user_credential(db=db, uid=uid, meta=meta)
@@ -1787,7 +2008,7 @@ async def stream_agent_chat(
             yield make_chunk(status="finished", meta=meta)
             return
 
-        if turn_plan.requires_document_retrieval:
+        if turn_plan.requires_document_retrieval or Capability.CANONICAL_LOOKUP in turn_plan.required_capabilities:
             retrieval_id = f"kr_{uuid.uuid4().hex}"
             knowledge_contract = await prepare_knowledge_context(
                 db,
@@ -1801,10 +2022,18 @@ async def stream_agent_chat(
             )
             input_context["_knowledge_contract"] = knowledge_contract
             setattr(context, "_knowledge_contract", knowledge_contract)
-            citation_sensitive_output = knowledge_contract.get("status") != "SKIPPED"
-            if citation_sensitive_output:
+            knowledge_source_used = knowledge_contract.get("status") != "SKIPPED"
+            citation_sensitive_output = knowledge_source_used and turn_plan.evidence.level in {
+                EvidenceLevel.CLAIM_EVIDENCE,
+                EvidenceLevel.VERBATIM_LOCATOR,
+            }
+            if knowledge_source_used:
                 source_manifest.knowledge_retrieval_count = 1
-                source_manifest.used_planes = ["DOCUMENT_EVIDENCE"]
+                _append_knowledge_source_uses(
+                    source_manifest,
+                    plan=turn_plan,
+                    contract=knowledge_contract,
+                )
                 source_manifest.status = "COMPLETED" if knowledge_contract.get("status") == "COMPLETED" else "DEGRADED"
                 source_manifest.error_code = knowledge_contract.get("error_code")
             await _persist_turn_runtime(
@@ -2029,15 +2258,22 @@ async def stream_agent_chat(
         )
         if _settle_source_manifest_status(turn_plan, source_manifest, mcp_source_valid):
             accumulated_content = [_plan_failure_answer(turn_plan)]
-        if (
-            not turn_plan.requires_document_retrieval
-            and turn_plan.source.policy.value in {"MCP_ONLY", "WEB_ONLY", "BIBLIOGRAPHY_ONLY"}
-            and accumulated_content
-        ):
-            guarded_source_text, source_output_validation = guard_non_document_source_answer(
-                "".join(accumulated_content)
-            )
+        glossary_contract_ready = (
+            turn_plan.task.primary_intent.value == "GLOSSARY_LOOKUP" and knowledge_contract is not None
+        )
+        if accumulated_content or glossary_contract_ready:
+            if glossary_contract_ready:
+                guarded_source_text, source_output_validation = guard_glossary_answer(
+                    "".join(accumulated_content), contract=knowledge_contract
+                )
+            else:
+                guarded_source_text, source_output_validation = guard_answer_for_evidence_level(
+                    "".join(accumulated_content),
+                    evidence_level=turn_plan.evidence.level,
+                    source_uses=source_manifest.source_uses,
+                )
             accumulated_content = [guarded_source_text]
+            source_manifest.validation_results.append(source_output_validation)
             buffered_root_metadata = {
                 **dict(buffered_root_metadata or {}),
                 "source_output_guard": source_output_validation,

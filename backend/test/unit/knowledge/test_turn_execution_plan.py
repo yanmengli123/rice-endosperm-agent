@@ -4,6 +4,7 @@ import pytest
 
 from yuxi.knowledge.planning.turn_execution_plan import (
     Capability,
+    EvidenceLevel,
     SourceClass,
     SourcePolicy,
     TaskIntent,
@@ -89,13 +90,15 @@ def test_default_knowledge_question_keeps_enterprise_evidence_route():
 
     assert plan.source.policy == SourcePolicy.AUTO
     assert plan.requires_document_retrieval is True
-    assert plan.answer.citation_policy == "VERIFIED_ONLY"
+    assert plan.answer.citation_policy == "VERIFIED_CLAIMS_ONLY"
 
 
 def test_no_knowledge_constraint_removes_document_evidence():
     plan = plan_turn("不要查知识库，直接解释这个概念", has_knowledge_scope=True)
 
     assert plan.requires_document_retrieval is False
+    assert plan.evidence.level == EvidenceLevel.NONE
+    assert plan.satisfiable is True
     assert "EXPLICIT_NO_KB" in plan.reason_codes
 
 
@@ -134,6 +137,7 @@ def test_bibliography_only_output_is_buffered_for_non_document_guard():
     assert plan.requires_document_retrieval is False
     assert plan.requires_mcp is True
     assert plan.buffers_output is True
+    assert plan.evidence.level == EvidenceLevel.BIBLIOGRAPHIC
 
 
 def test_bibliography_only_without_provider_fails_closed():
@@ -201,3 +205,80 @@ def test_explicit_mcp_phrasing_with_rice_identifier_keeps_mcp_only():
     assert plan.source.allowed_sources == [SourceClass.STRUCTURED_DATABASE]
     assert plan.required_capabilities == [Capability.GENE_RECORD_LOOKUP]
     assert "RICE_SOURCE_IDENTIFIER_ROUTING" not in plan.reason_codes
+
+
+def test_evidence_level_matrix_is_explicit_and_auditable():
+    cases = [
+        ("你好", False, [], EvidenceLevel.NONE, "NONE"),
+        (
+            "通过 MCP 查询 Wx 的源记录",
+            True,
+            ["ricekb"],
+            EvidenceLevel.DATA_PROVENANCE,
+            "DATA_SOURCES",
+        ),
+        (
+            "帮我搜索 Wx 相关论文",
+            True,
+            ["literature-mcp"],
+            EvidenceLevel.BIBLIOGRAPHIC,
+            "REFERENCES",
+        ),
+        (
+            "Wx 如何调控直链淀粉合成？",
+            True,
+            [],
+            EvidenceLevel.CLAIM_EVIDENCE,
+            "EVIDENCE",
+        ),
+        (
+            "Figure S8 在哪一页？",
+            True,
+            [],
+            EvidenceLevel.VERBATIM_LOCATOR,
+            "ORIGINAL_TEXT",
+        ),
+    ]
+    for question, has_scope, mcps, level, section in cases:
+        plan = plan_turn(question, has_knowledge_scope=has_scope, configured_mcps=mcps)
+        assert plan.evidence.level == level
+        assert plan.answer.evidence_level == level
+        assert plan.answer.source_section == section
+
+
+def test_glossary_lookup_uses_canonical_record_not_document_quote():
+    plan = plan_turn("术语PCR含义是什么", has_knowledge_scope=True)
+
+    assert plan.task.primary_intent == TaskIntent.GLOSSARY_LOOKUP
+    assert plan.evidence.level == EvidenceLevel.DATA_PROVENANCE
+    assert plan.required_capabilities == [Capability.CANONICAL_LOOKUP]
+    assert plan.requires_document_retrieval is False
+    assert SourceClass.CANONICAL_RECORD in plan.source.allowed_sources
+
+
+@pytest.mark.parametrize("question", ["OASIS 是什么缩写", "Wx 是什么", "PCR是什么意思"])
+def test_short_definition_questions_route_to_glossary_before_gene_like(question):
+    plan = plan_turn(question, has_knowledge_scope=True, configured_mcps=["ricekb"])
+
+    assert plan.task.primary_intent == TaskIntent.GLOSSARY_LOOKUP
+    assert plan.task.target_type == "TERM"
+    assert plan.required_capabilities == [Capability.CANONICAL_LOOKUP]
+
+
+def test_glossary_without_scope_remains_satisfiable_for_unavailable_outcome():
+    plan = plan_turn("OASIS 是什么缩写", has_knowledge_scope=False)
+
+    assert plan.satisfiable is True
+
+
+def test_leading_combine_phrase_routes_to_hybrid_verification():
+    plan = plan_turn(
+        "结合知识库和 MCP 验证 Os01g0100100 的功能与论文依据",
+        has_knowledge_scope=True,
+        configured_mcps=["ricekb"],
+    )
+
+    assert plan.task.primary_intent == TaskIntent.HYBRID_VERIFICATION
+    assert plan.source.policy == SourcePolicy.HYBRID_EXPLICIT
+    assert [item.claim_id for item in plan.claim_obligations] == ["claim:database", "claim:literature"]
+    assert SourceClass.CANONICAL_RECORD in plan.source.allowed_sources

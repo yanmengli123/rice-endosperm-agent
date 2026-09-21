@@ -250,7 +250,11 @@ async def _gate_kb_file_deletion(kb_id: str, operation: str) -> None:
         spec = await load_kb_contract(kb_id)
     except SourceContractError as exc:
         raise _http_from_contract_error(exc) from exc
-    command = COMMAND_DATASET_DELETE if spec.contract_key in {"csv_record", "csv_qa"} else COMMAND_DOCUMENT_DELETE
+    command = (
+        COMMAND_DATASET_DELETE
+        if spec.contract_key in {"csv_record", "csv_qa", "glossary"}
+        else COMMAND_DOCUMENT_DELETE
+    )
     await _ensure_database_supports_documents(kb_id, operation, command)
 
 
@@ -528,7 +532,12 @@ async def create_database(
 
         # 契约托管分块展示值随建库入参一次写入（normalize 保留显式合法值）：真正的分块在服务端流水线
         # 固定（pdf→academic 流水线注入、csv→separator 在 Canonical Import 内写死），用户传入值一律被托管策略覆盖
-        managed_chunk_presets = {"pdf_evidence": "academic", "csv_record": "separator", "csv_qa": "separator"}
+        managed_chunk_presets = {
+            "pdf_evidence": "academic",
+            "csv_record": "separator",
+            "csv_qa": "separator",
+            "glossary": "separator",
+        }
         managed_preset = managed_chunk_presets.get(contract_spec.contract_key)
         if managed_preset:
             additional_params["chunk_preset_id"] = managed_preset
@@ -2816,7 +2825,7 @@ async def generate_sample_questions(
         spec = await load_kb_contract(kb_id)
     except SourceContractError as exc:
         raise _http_from_contract_error(exc) from exc
-    if spec.contract_key in {"csv_record", "csv_qa"}:
+    if spec.contract_key in {"csv_record", "csv_qa", "glossary"}:
         try:
             await require_contract_command(kb_id, COMMAND_DATASET_SAMPLE_QUESTIONS)
             return await generate_csv_dataset_sample_questions(kb_id, count=count)

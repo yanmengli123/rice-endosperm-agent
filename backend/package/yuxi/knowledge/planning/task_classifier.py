@@ -22,6 +22,25 @@ _MULTI_HOP_PATTERN = re.compile(
 # VERBATIM 字面量通道；标识符样 token 不在此触发，避免扰动 ENTITY/CITATION 题型）
 _VERBATIM_QUOTED_PATTERN = re.compile(r"[“\"]([^“”\"]{3,120})[”\"]")
 _VERBATIM_INTENT_PATTERN = re.compile(r"(?:原文|原句|逐字|精确匹配|verbatim|exact\s+match)", flags=re.IGNORECASE)
+_GLOSSARY_PATTERN = re.compile(
+    r"(?:是什么(?:的)?(?:缩写|全称)|(?:缩写|简称|术语).{0,8}(?:是什么|含义|意思|全称)|"
+    r"what\s+does\s+[A-Za-z][A-Za-z0-9-]{1,31}\s+stand\s+for)",
+    flags=re.IGNORECASE,
+)
+_SHORT_GLOSSARY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9-]{1,7})\s*(?:是|指的?是)\s*"
+    r"什么(?:意思|含义)?(?!\s*(?:基因|gene|RAP|MSU|ID|编号|转录本|蛋白|位点))",
+    flags=re.IGNORECASE,
+)
+_SHORT_GLOSSARY_STOP_TERMS = {"id", "rap", "msu", "gene"}
+
+
+def is_glossary_question(question: str) -> bool:
+    text = str(question or "")
+    if _GLOSSARY_PATTERN.search(text):
+        return True
+    match = _SHORT_GLOSSARY_PATTERN.search(text)
+    return bool(match and match.group(1).casefold() not in _SHORT_GLOSSARY_STOP_TERMS)
 
 
 def classify_task(question: str) -> str:
@@ -29,6 +48,8 @@ def classify_task(question: str) -> str:
     text = str(question or "")
     if re.search(r"(?:这篇|本文|文献|论文|文章|article|paper|document)", text, flags=re.IGNORECASE):
         return "DOCUMENT_EVIDENCE_SEARCH"
+    if is_glossary_question(text):
+        return "GLOSSARY_LOOKUP"
     if re.search(r"(?:机制|通路|如何|怎么|mechanism|pathway|how does)", text, flags=re.IGNORECASE):
         return "MECHANISM_EXPLANATION"
     if re.search(r"(?:是否|关系|关联|does .+ (?:regulate|affect)|relationship)", text, flags=re.IGNORECASE):
@@ -54,6 +75,8 @@ def detect_question_types(question: str) -> list[str]:
     """
     text = str(question or "")
     types: list[str] = []
+    if is_glossary_question(text):
+        types.append("GLOSSARY")
     identifiers = extract_gene_identifiers(text)
     gene_like = _GENE_LIKE_PATTERN.findall(text)
     if identifiers or gene_like:

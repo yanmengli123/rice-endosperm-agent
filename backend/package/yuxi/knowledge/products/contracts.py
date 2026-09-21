@@ -90,10 +90,12 @@ def to_evidence_envelope(row: dict[str, Any]) -> EvidenceEnvelope:
 
     kb_type = str(row.get("kb_type") or "")
     spec = get_product_spec(kb_type)
-    if spec.category == "derived_product":
+    if spec.category != "authority_source" or not spec.capabilities.supports_raw_evidence:
         from yuxi.knowledge.products.authority_gate import AuthorityGateError
 
-        raise AuthorityGateError(f"derived product kb_type={spec.kb_type!r} cannot enter the evidence channel")
+        if spec.category == "derived_product":
+            raise AuthorityGateError(f"derived product kb_type={spec.kb_type!r} cannot enter the evidence channel")
+        raise AuthorityGateError(f"kb_type={spec.kb_type!r} is not registered as an evidence authority")
     evidence_id = str(row.get("evidence_id") or "").strip()
     if not evidence_id:
         raise ValueError("evidence row requires evidence_id")

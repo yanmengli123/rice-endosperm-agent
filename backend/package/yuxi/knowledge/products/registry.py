@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-ProductCategory = Literal["authority_source", "derived_product"]
+ProductCategory = Literal["authority_source", "derived_product", "unregistered"]
 TrustClass = Literal["PRIMARY", "SECONDARY", "DERIVED"]
 AuthorityClass = Literal["FACT_AUTHORITY", "NAVIGATION_ONLY"]
 
@@ -67,6 +67,22 @@ _AUTHORITY_SOURCE = KnowledgeProductSpec(
     authority_class="FACT_AUTHORITY",
 )
 
+DIFY = KnowledgeProductSpec(
+    kb_type="dify",
+    category="authority_source",
+    trust_class="SECONDARY",
+    authority_class="FACT_AUTHORITY",
+    capabilities=KnowledgeProductCapabilities(supports_upload=False),
+)
+
+NOTION = KnowledgeProductSpec(
+    kb_type="notion",
+    category="authority_source",
+    trust_class="SECONDARY",
+    authority_class="FACT_AUTHORITY",
+    capabilities=KnowledgeProductCapabilities(supports_upload=False),
+)
+
 # 派生知识产品：动态 LLM-Wiki。控制面实体，不是 KnowledgeBase 适配器。
 LLMWIKI = KnowledgeProductSpec(
     kb_type="llmwiki",
@@ -78,21 +94,41 @@ LLMWIKI = KnowledgeProductSpec(
 
 _REGISTRY: dict[str, KnowledgeProductSpec] = {
     _AUTHORITY_SOURCE.kb_type: _AUTHORITY_SOURCE,
+    DIFY.kb_type: DIFY,
+    NOTION.kb_type: NOTION,
     LLMWIKI.kb_type: LLMWIKI,
 }
 
-# 未注册类型按权威知识源处理（向后兼容既有 milvus/milvus-plus 等实现）。
-_DEFAULT_SPEC = _AUTHORITY_SOURCE
-
-
 def get_product_spec(kb_type: str) -> KnowledgeProductSpec:
-    """返回某 kb_type 的产品声明；未知类型回落为权威知识源。"""
-    return _REGISTRY.get(str(kb_type or "").strip().casefold(), _DEFAULT_SPEC)
+    """返回产品声明；非空未知类型 fail-closed，不获得证据权限。"""
+    normalized = str(kb_type or "").strip().casefold()
+    if not normalized:
+        # 历史检索行未携带 kb_type；其成员已在冻结 scope 中经过类型校验。
+        return _AUTHORITY_SOURCE
+    return _REGISTRY.get(
+        normalized,
+        KnowledgeProductSpec(
+            kb_type=normalized,
+            category="unregistered",
+            trust_class="DERIVED",
+            authority_class="NAVIGATION_ONLY",
+            capabilities=KnowledgeProductCapabilities(
+                supports_upload=False,
+                supports_raw_evidence=False,
+            ),
+        ),
+    )
 
 
 def is_derived_product(kb_type: str) -> bool:
     """该类型是否为派生知识产品（永远不能进入证据通道）。"""
     return get_product_spec(kb_type).category == "derived_product"
+
+
+def is_evidence_authority(kb_type: str) -> bool:
+    """Only explicitly registered authority products may emit answer evidence."""
+    spec = get_product_spec(kb_type)
+    return spec.category == "authority_source" and spec.capabilities.supports_raw_evidence
 
 
 def require_capability(kb_type: str, capability: str) -> None:

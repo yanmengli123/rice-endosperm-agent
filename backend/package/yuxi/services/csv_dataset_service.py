@@ -19,10 +19,13 @@ import csv
 import hashlib
 import io
 import json
+import re
+import unicodedata
 import uuid
 from collections.abc import Iterable
 
 from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeCanonicalAlias,
     KnowledgeCanonicalRecord,
     KnowledgeDatasetRevision,
 )
@@ -208,11 +211,15 @@ def validate_qa_mapping(
     }
 
 
-def validate_record_mapping(header: list[str], identity_column: str | None) -> dict:
+def validate_record_mapping(
+    header: list[str], identity_column: str | None, *, require_identity: bool = False
+) -> dict:
     """csv_record 校验：identity 列（可选）必须存在。"""
     issues: list[str] = []
     if identity_column and identity_column not in header:
         issues.append(f"identity 列 {identity_column!r} 不存在于表头")
+    if require_identity and not identity_column:
+        issues.append("术语词典必须显式选择术语主键列")
     return {
         "valid": not issues,
         "fatal": bool(issues),
@@ -264,9 +271,18 @@ def build_canonical_records(
         else:
             record_key = f"row:{row_number}"
             identity_strategy = "row_number"
+        normalized_key = unicodedata.normalize("NFKC", record_key).strip().casefold()
+        aliases: list[str] = []
+        if contract_key == "glossary":
+            for name, value in values.items():
+                if str(name).strip().casefold() not in {"alias", "aliases", "别名", "同义词", "缩写"}:
+                    continue
+                aliases.extend(part.strip() for part in re.split(r"[,，;；|/\n]+", value) if part.strip())
         records.append(
             {
                 "record_key": record_key,
+                "normalized_key": normalized_key,
+                "aliases": list(dict.fromkeys(aliases)),
                 "row_number": row_number,
                 "fields": values,
                 "projection_text": projection,
@@ -322,7 +338,11 @@ async def preview_csv_dataset(raw: bytes, filename: str, contract_key: str, mapp
             header, rows, mapping.get("question_col"), mapping.get("answer_col")
         )
     else:
-        response["record_validation"] = validate_record_mapping(header, mapping.get("identity_column"))
+        response["record_validation"] = validate_record_mapping(
+            header,
+            mapping.get("identity_column"),
+            require_identity=contract_key == "glossary",
+        )
     return response
 
 
@@ -356,7 +376,11 @@ async def import_csv_dataset(
         validation = validate_qa_mapping(header, rows, mapping.get("question_col"), mapping.get("answer_col"))
         identity_column = None
     else:
-        validation = validate_record_mapping(header, mapping.get("identity_column"))
+        validation = validate_record_mapping(
+            header,
+            mapping.get("identity_column"),
+            require_identity=contract_key == "glossary",
+        )
         identity_column = mapping.get("identity_column")
     if validation.get("fatal"):
         raise CsvDatasetValidationError("；".join(validation.get("issues") or ["数据校验失败"]))
@@ -410,19 +434,30 @@ async def import_csv_dataset(
         # knowledge_canonical_records 先于父修订行执行，PostgreSQL 立即触发外键违约
         await session.flush()
         for record in records:
+            record_id = f"rec_{uuid.uuid4().hex[:24]}"
             session.add(
                 KnowledgeCanonicalRecord(
-                    record_id=f"rec_{uuid.uuid4().hex[:24]}",
+                    record_id=record_id,
                     revision_id=revision_id,
                     kb_id=kb_id,
                     tenant_id=tenant_id,
                     record_key=record["record_key"],
+                    normalized_key=record["normalized_key"],
                     row_number=record["row_number"],
                     fields_json=record["fields"],
                     projection_text=record["projection_text"],
                     projection_hash=record["projection_hash"],
                 )
             )
+            for alias in record.get("aliases") or []:
+                session.add(
+                    KnowledgeCanonicalAlias(
+                        revision_id=revision_id,
+                        record_id=record_id,
+                        alias=alias,
+                        normalized_alias=unicodedata.normalize("NFKC", alias).strip().casefold(),
+                    )
+                )
 
     # 2. 确定性投影 Markdown → parsed 桶，标记文件已解析
     projection_md = build_projection_markdown(

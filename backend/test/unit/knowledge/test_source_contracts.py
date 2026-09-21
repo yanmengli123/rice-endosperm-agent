@@ -7,6 +7,8 @@ import pytest
 from yuxi.knowledge.source_contracts import (
     COMMAND_DATASET_IMPORT,
     COMMAND_DATASET_PREVIEW,
+    COMMAND_DATASET_DELETE,
+    COMMAND_DATASET_SAMPLE_QUESTIONS,
     COMMAND_DOCUMENT_UPLOAD,
     COMMAND_FETCH_URL,
     COMMAND_GRAPH_IMPORT_EXECUTE,
@@ -66,6 +68,7 @@ class TestRegistry:
             "generic_document",
         } <= keys
         assert "legacy_generic" not in keys
+        assert "glossary" in keys
 
     def test_snapshot_includes_hidden_when_requested(self):
         snapshot = contract_registry_snapshot(include_hidden=True)
@@ -92,6 +95,15 @@ class TestRegistry:
         spec = resolve_contract("csv_qa")
         assert "上传" in spec.processing_policy["ingest"]
         assert "必须确认" in spec.processing_policy["ingest"]
+
+    def test_glossary_is_closed_world_canonical_authority(self):
+        spec = resolve_contract("glossary")
+        assert spec.authority_policy["glossary_authority"] is True
+        assert spec.authority_policy["coverage_semantics"] == "CLOSED_WORLD_ACTIVE_REVISION"
+        assert spec.base_capabilities["glossary_lookup"] == "FULL"
+        assert COMMAND_DATASET_IMPORT in spec.allowed_commands
+        assert COMMAND_DATASET_DELETE in spec.allowed_commands
+        assert COMMAND_DATASET_SAMPLE_QUESTIONS in spec.allowed_commands
 
     def test_generic_document_is_explicit_advanced_contract(self):
         spec = resolve_contract("generic_document")

@@ -298,6 +298,53 @@ CSV_QA = SourceContractSpec(
 )
 
 
+GLOSSARY = SourceContractSpec(
+    contract_key="glossary",
+    version="1.0.0",
+    product_category="authority_source",
+    display=SourceContractDisplay(
+        label="术语与缩写权威词典",
+        card_description=(
+            "以术语为稳定业务主键的确定性词典；命中、未收录、歧义和冲突均由活动修订"
+            "机器判定，不允许文献语义命中或模型记忆替代词典结论。"
+        ),
+        operator_description="供术语、缩写、别名和定义的确定性查表问答。",
+        entry_mode="advanced",
+    ),
+    allowed_commands=(
+        *CSV_RECORD.allowed_commands,
+        COMMAND_DATASET_DELETE,
+        COMMAND_DATASET_SAMPLE_QUESTIONS,
+    ),
+    forbidden_commands=CSV_RECORD.forbidden_commands,
+    accepted_media=CSV_RECORD.accepted_media,
+    authority_policy={
+        "artifact_store": "object_storage_csv_sha256",
+        "canonical_store": "postgresql_canonical_records",
+        "retrieval_projection": "deterministic_exact_and_alias_lookup",
+        "coverage_semantics": "CLOSED_WORLD_ACTIVE_REVISION",
+        "glossary_authority": True,
+        "llm_graph": "navigation_projection_non_authoritative",
+        "mindmap": "navigation_projection_non_authoritative",
+    },
+    required_provenance=CSV_RECORD.required_provenance,
+    base_capabilities={
+        "glossary_lookup": "FULL",
+        "structured_lookup": "FULL",
+        "row_level_provenance": "FULL",
+        "fulltext_search": "UNSUPPORTED",
+        "pdf_highlight": "UNSUPPORTED",
+        "literature_summary": "UNSUPPORTED",
+    },
+    processing_policy={
+        "ingest": "上传 → 术语列映射预检 → Canonical Commit → 发布活动修订",
+        "identity": "identity_column 必须映射到术语列；record_key 是词典精确查找键",
+        "lookup": "活动修订内 exact/alias 确定性匹配；零命中才可声明当前词典未收录",
+        "negative_semantics": "MISS 只表示当前活动词典修订未收录，不代表术语在外部世界不存在",
+    },
+)
+
+
 # =============================================================================
 # === csv_record / csv_qa@1.1.0：新增数据集删除（additive） ===
 # =============================================================================

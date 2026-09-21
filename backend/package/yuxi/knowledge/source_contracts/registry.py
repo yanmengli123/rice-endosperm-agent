@@ -16,6 +16,7 @@ from yuxi.knowledge.source_contracts.definitions import (
     CSV_RECORD_V1_1,
     CSV_RECORD_V1_2,
     GENERIC_DOCUMENT,
+    GLOSSARY,
     LEGACY_GENERIC,
     LEGACY_MIXED,
     MANAGED_GRAPH,
@@ -52,6 +53,7 @@ _REGISTRY: dict[tuple[str, str], SourceContractSpec] = {
         MANAGED_GRAPH,
         MANAGED_GRAPH_V1_1,
         GENERIC_DOCUMENT,
+        GLOSSARY,
         LEGACY_GENERIC,
         LEGACY_MIXED,
     )
