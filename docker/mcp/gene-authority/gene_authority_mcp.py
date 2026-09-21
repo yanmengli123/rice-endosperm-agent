@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -25,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 SCHEMA_VERSION = "gene-authority-envelope.v1"
 NCBI_BASE = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 UNIPROT_BASE = "https://rest.uniprot.org"
@@ -358,6 +359,45 @@ def verify_genomic_interval(start: int, end: int, coordinate_system: str = "one_
     }
 
 
+def _bounded_number(name: str, value: float, low: float, high: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AuthorityError(f"{name} must be a number")
+    number = float(value)
+    if not math.isfinite(number) or not low <= number <= high:
+        raise AuthorityError(f"{name} must be a finite number between {int(low)} and {int(high)}")
+    return number
+
+
+def compute_delta(minuend: float, subtrahend: float, label: str | None = None) -> dict[str, Any]:
+    """Deterministic difference for published derived values (e.g. coordinate deltas).
+
+    坐标差、计数差等派生值必须经此工具计算后引用，不得由模型心算——
+    区间长度语义（end-start+1）与差值语义（minuend-subtrahend）不同，
+    不得互相借用。
+    """
+    left = _bounded_number("minuend", minuend, -(2**53), 2**53)
+    right = _bounded_number("subtrahend", subtrahend, -(2**53), 2**53)
+    difference = left - right
+    if not math.isfinite(difference):
+        raise AuthorityError("difference is not finite")
+    note = _bounded_text("label", label, 100) if label else None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "VERIFIED",
+        "provider": "YUXI_DETERMINISTIC_CALCULATOR",
+        "retrieved_at": _now(),
+        "data": {
+            "minuend": left,
+            "subtrahend": right,
+            "delta": int(difference) if difference.is_integer() else difference,
+            "abs_delta": abs(difference),
+            "formula": "minuend - subtrahend",
+            **({"label": note} if note else {}),
+        },
+        "answer_policy": "The delta is deterministic; cite this tool for every published difference.",
+    }
+
+
 def build_server():
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.exceptions import ToolError
@@ -408,6 +448,10 @@ def build_server():
     @server.tool(name="verify_genomic_interval", description="Deterministically calculate interval length under an explicit coordinate convention. Use this for every published coordinate-derived length.")
     def _verify_interval(start: int, end: int, coordinate_system: str = "one_based_inclusive") -> dict[str, Any]:
         return guarded(verify_genomic_interval, start=start, end=end, coordinate_system=coordinate_system)
+
+    @server.tool(name="compute_delta", description="Deterministically calculate a difference (e.g. coordinate delta between two sources). Use this for every published derived difference; never mental arithmetic, never interval-length semantics.")
+    def _compute_delta(minuend: float, subtrahend: float, label: str | None = None) -> dict[str, Any]:
+        return guarded(compute_delta, minuend=minuend, subtrahend=subtrahend, label=label)
 
     return server
 

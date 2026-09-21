@@ -13,8 +13,8 @@ fail() {
 
 case "$SLUG" in
   gene-authority)
-    IMAGE="${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.0.0}"
-    REVISION="gene-authority-1.0.0+ncbi-datasets-18.37.0"
+    IMAGE="${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.1.0}"
+    REVISION="gene-authority-1.1.0+ncbi-datasets-18.37.0"
     ;;
   plant-genomics)
     IMAGE="${YUXI_PLANT_GENOMICS_IMAGE:-yuxi-plant-genomics:1.21.0}"

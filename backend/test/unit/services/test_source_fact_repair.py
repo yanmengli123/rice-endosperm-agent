@@ -68,11 +68,12 @@ async def test_exhausted_repairs_fall_back_to_degraded_fact_sheet(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_repair_channel_unavailable_keeps_fail_closed_text(monkeypatch):
-    async def no_repair(draft, validation, source_uses):
-        return None
+async def test_factless_custom_mcp_sources_impose_no_fact_obligation(monkeypatch):
+    """GENERIC_MCP 轮次只有非注册表来源时：无账本可核验 → 正常发布，不再必拒。"""
+    async def unexpected_repair(draft, validation, source_uses):
+        raise AssertionError("repair must not run without a fact ledger")
 
-    monkeypatch.setattr("yuxi.services.chat_service._repair_source_fact_grounding", no_repair)
+    monkeypatch.setattr("yuxi.services.chat_service._repair_source_fact_grounding", unexpected_repair)
     factless_uses = [
         {
             "source_use_id": "mcp:7",
@@ -87,9 +88,10 @@ async def test_repair_channel_unavailable_keeps_fail_closed_text(monkeypatch):
         _DRAFT, evidence_level="E1_DATA_PROVENANCE", source_uses=factless_uses
     )
 
-    assert "3 bp" not in guarded
-    assert "未通过 MCP 事实级核验" in guarded
-    assert validation["fact_repair_attempts"] == [{"attempt": 1, "repaired": False}]
+    assert guarded == _DRAFT
+    assert validation["fact_grounding"]["required"] is False
+    assert validation["fact_grounding"]["passed"] is True
+    assert "fact_repair_attempts" not in validation
 
 
 @pytest.mark.asyncio

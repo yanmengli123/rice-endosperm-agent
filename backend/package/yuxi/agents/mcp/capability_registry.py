@@ -57,6 +57,7 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
             "uniprot_entry_rest",
             "uniprot_search_rest",
             "verify_genomic_interval",
+            "compute_delta",
         )
     },
     **{

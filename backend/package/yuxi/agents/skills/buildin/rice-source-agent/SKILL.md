@@ -20,7 +20,8 @@ description: 水稻基因档案的 SOURCE-ONLY 核验契约。明确询问水稻
    - 蛋白：`uniprot_entry_rest` 或受限搜索。
    - 文献元数据：`europe_pmc_search_rest`；它只证明书目存在，不证明正文命题。
    - 植物跨库/同源：优先 `plant-genomics` 的精确 locus 工具；Gramene 用于其领域数据。
-4. 任何坐标差、区间长度或计数派生值必须调用 `verify_genomic_interval` 或引用工具已返回的确定性计算值，禁止心算。
+4. 任何坐标差、区间长度或计数派生值必须调用确定性计算工具：区间长度用 `verify_genomic_interval`，
+   两值差（如跨源坐标差）用 `compute_delta`，并引用其返回值；禁止心算，禁止借用区间长度语义表达差值。
 5. 任何来源返回 `NOT_FOUND`、`NO_EVIDENCE`、`AMBIGUOUS`、`CONFLICT` 或不可用时，原样披露并停止该字段；禁止用另一来源或模型记忆静默补齐。
 
 ## 事实引用硬规则

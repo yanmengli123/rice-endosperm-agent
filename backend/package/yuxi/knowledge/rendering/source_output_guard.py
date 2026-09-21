@@ -140,19 +140,26 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[s
                 unsupported_numbers.append({"line": line_number, "value": raw_number})
     return {
         "schema_version": "mcp-fact-grounding.v1",
-        "required": bool(adopted_sources),
+        # 事实级义务只在存在账本事实（受信注册表工具且 PUBLIC 值已入账）时成立。
+        # 仅有自定义/非注册表 MCP 来源的轮次（如 GENERIC_MCP 目标）没有可校验的
+        # 事实账本，维持 SOURCE-ONLY attestation 校验但不做逐行标记核验——否则
+        # 这类轮次会被"必拒"，等于功能性禁用。
+        "required": bool(adopted_sources) and bool(catalog),
         "adopted_mcp_source_count": len(adopted_sources),
         "available_fact_count": len(catalog),
         "marker_count": marker_count,
         "invalid_markers": invalid_markers[:20],
         "ungrounded_lines": ungrounded_lines[:20],
         "unsupported_numbers": unsupported_numbers[:20],
-        "passed": bool(adopted_sources)
-        and bool(catalog)
-        and marker_count > 0
-        and not invalid_markers
-        and not ungrounded_lines
-        and not unsupported_numbers,
+        "passed": (
+            not (bool(adopted_sources) and bool(catalog))
+            or (
+                marker_count > 0
+                and not invalid_markers
+                and not ungrounded_lines
+                and not unsupported_numbers
+            )
+        ),
     }
 
 

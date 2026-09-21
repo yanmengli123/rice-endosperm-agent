@@ -55,6 +55,13 @@ class ExtractedFact:
         return {"id": self.fact_id, "path": self.path, "value": self.value}
 
     def audit_dict(self, *, public_values: bool) -> dict[str, Any]:
+        """Persist-side fact record.
+
+        ``public_values=False``（受限数据级）只落摘要：数值与字符串值都不入库，
+        因此该轮次的答案不承担数字级核验义务（门禁按"无账本事实"处理）；
+        ``public_values=True``（PUBLIC 数据级）记录数值与字符串值，既支撑终态
+        数字核验，也供有界修复与降级渲染使用。
+        """
         payload: dict[str, Any] = {
             "id": self.fact_id,
             "path": self.path,

@@ -68,3 +68,23 @@ def test_new_authority_tools_are_in_the_server_side_trust_registry(name, capabil
     assert profile is not None
     assert capability in profile.capabilities
     assert profile.fallback_policy == "FAIL_CLOSED"
+
+
+def test_gene_authority_delta_semantics_distinct_from_interval_length():
+    module = _load_gene_authority()
+    delta = module.compute_delta(1770653, 1770556, label="RAP-DB minus MSU start")
+
+    assert delta["data"]["delta"] == 97
+    assert delta["data"]["abs_delta"] == 97
+    assert delta["data"]["formula"] == "minuend - subtrahend"
+    assert delta["data"]["label"] == "RAP-DB minus MSU start"
+    # 差值语义不得与区间长度语义混用：同两数的闭区间长度是 98。
+    assert module.verify_genomic_interval(1770556, 1770653)["data"]["length"] == 98
+
+
+def test_gene_authority_delta_rejects_nonfinite_inputs():
+    module = _load_gene_authority()
+    with pytest.raises(module.AuthorityError):
+        module.compute_delta(float("nan"), 1)
+    with pytest.raises(module.AuthorityError):
+        module.compute_delta(True, 1)

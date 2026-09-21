@@ -237,3 +237,24 @@ def test_fact_catalog_summary_exposes_values_for_repair_prompt():
     summary = fact_catalog_summary(uses)
     assert {"marker": "[MCP-F:42:f_1234567890abcdef]", "path": "/gene/start", "numeric_value": 1770556} in summary
     assert {"marker": "[MCP-F:42:f_1234567890ffffff]", "path": "/gene/symbol", "string_value": "Wx"} in summary
+
+
+def test_factless_adopted_sources_carry_no_fact_obligation():
+    uses = [
+        {
+            "source_use_id": "mcp:7",
+            "provider_id": "custom",
+            "operation": "anything",
+            "status": "SUCCESS",
+            "adopted": True,
+            "provenance": {"mcp_call_audit_id": 7},
+        }
+    ]
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n自定义工具返回了区间长度 3 bp。",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=uses,
+    )
+    assert audit["fact_grounding"]["required"] is False
+    assert audit["fact_grounding"]["passed"] is True
+    assert audit["source_only_verified"] is True
