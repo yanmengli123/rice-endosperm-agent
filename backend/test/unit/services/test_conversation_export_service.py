@@ -1,14 +1,18 @@
-"""会话 HTML 导出渲染层单测：XSS 防线、渲染结构、QA 配对、文件名清洗。"""
+"""会话 HTML 导出渲染层单测：XSS 防线、渲染结构、QA 配对、文件名清洗、标记注册表与图片内嵌。"""
 
 from __future__ import annotations
 
+import base64
+import io
 from datetime import datetime, UTC
 
 import pytest
 from bs4 import BeautifulSoup
+from PIL import Image
 
 from yuxi.services.conversation_export_service import (
     _CN_TZ,
+    _normalize_image_bytes,
     build_filename,
     render_conversation_html,
 )
@@ -160,14 +164,20 @@ async def test_data_uri_link_and_image_are_neutralized():
     )
     soup = _soup(html)
 
+    # 链接侧：data: 一律降级为纯文本（含 data:image 形态的链接也不放行）
     assert soup.select(".qa-a a") == []
-    assert soup.find("img") is None
-    # 任何残留标签属性都不允许携带 data: 载荷
+    # 图片侧：data:image/* 是自包含内嵌的唯一通道，白名单放行（链接形态仍不放行）
+    images = soup.select(".qa-a img")
+    assert len(images) == 1
+    assert images[0]["src"].startswith("data:image/")
+    # 除图片外，任何标签属性都不允许携带 data: 载荷
     for tag in soup.find_all(True):
+        if tag.name == "img":
+            continue
         for attr in tag.attrs.values():
             assert not (isinstance(attr, str) and attr.startswith("data:"))
     answer_text = soup.select_one(".qa-a").get_text()
-    assert "文件" in answer_text and "截图" in answer_text and "图链" in answer_text
+    assert "文件" in answer_text and "图链" in answer_text
 
 
 async def test_math_and_code_block_rendering():
@@ -311,8 +321,8 @@ async def test_evidence_markers_are_styled():
 
     chip = soup.select_one(".evidence-chip")
     assert chip is not None
-    assert "E3 · 正文·第3页" in chip.get_text()
-    assert chip.get("title") == "证据 E3 · A co-fractionation mass…"
+    assert "证据E3 · 正文·第3页" in chip.get_text()
+    assert chip.get("title") == "A co-fractionation mass…"
     assert "〔证据" not in html  # 原始标记不再以裸文本出现
 
     assert soup.select_one(".evidence-list-label") is not None
@@ -320,6 +330,82 @@ async def test_evidence_markers_are_styled():
 
     note = soup.select_one(".answer-note")
     assert note is not None and "请谨慎采信" in note.get_text()
+
+
+async def test_locator_authority_marker_is_chipped():
+    # 权威标记第二形态：〔引文定位｜…〕，形态来自 authority_markers 单点定义
+    html = _render([_msg("human", "q"), _msg("ai", "见〔引文定位｜QUOTE · 第8页〕。")])
+    soup = _soup(html)
+
+    chip = soup.select_one(".evidence-chip")
+    assert chip is not None
+    assert "引文定位 · QUOTE · 第8页" in chip.get_text()
+
+
+def test_mcp_f_pattern_matches_canonical():
+    # 锁定导出侧 MCP-F 形态与 source_output_guard 的单点定义不漂移
+    from yuxi.knowledge.rendering.source_output_guard import _FACT_MARKER as canonical
+
+    from yuxi.services.conversation_export_service import _MCP_FACT_MARKER
+
+    assert _MCP_FACT_MARKER.pattern == canonical.pattern
+
+
+async def test_mcp_f_markers_collapse_to_footnote_with_appendix():
+    content = (
+        "准符号为 `WX1`，对应基因名 `GLUTINOUS ENDOSPERM`。[MCP-F:171:f_4e941c3f061314b7] "
+        "[MCP-F:171:f_cc2d33ce09bd5f0c] 均指同一条染色体。[MCP-F:167:f_aa0183a733b0fe44]（参见warnings）"
+    )
+    html = _render(
+        [dict(_msg("human", "q"), id=1), dict(_msg("ai", content), id=2)],
+        fact_records={
+            171: {
+                "server_slug": "gene-authority",
+                "capability_name": "search_gene",
+                "status": "success",
+                "facts": [
+                    {
+                        "id": "f_4e941c3f061314b7",
+                        "path": "/results/0/symbol",
+                        "numeric_value": None,
+                        "value_digest": "sha256:abc123",
+                    },
+                    {
+                        "id": "f_cc2d33ce09bd5f0c",
+                        "path": "/results/0/name",
+                        "string_value": "GLUTINOUS ENDOSPERM",
+                        "value_digest": "sha256:def456",
+                    },
+                ],
+            }
+        },
+    )
+    soup = _soup(html)
+
+    refs = soup.select(".fact-ref")
+    assert len(refs) == 2
+    assert refs[0].get_text() == "M171"  # 同审计的连续标记收敛为一个上标
+    assert refs[1].get_text() == "M167"
+    assert "[MCP-F:" not in html  # 原始标记零残留
+
+    appendix_rows = soup.select(".appendix-table tbody tr")
+    assert len(appendix_rows) == 2
+    first_cells = [td.get_text() for td in appendix_rows[0].select("td")]
+    assert "M171" in first_cells[0] and "gene-authority · search_gene" in first_cells[1]
+    assert "GLUTINOUS ENDOSPERM" in first_cells[3]
+    assert "审计记录不可用" in appendix_rows[1].get_text()  # 167 未回查到 → 显式不可用
+
+
+async def test_no_appendix_without_mcp_f_markers():
+    html = _render([_msg("human", "q"), _msg("ai", "普通回答")])
+    assert '<section class="appendix">' not in html  # CSS 类名常驻，只断言结构不出现
+
+
+async def test_ledger_block_is_stripped():
+    content = '答案正文。\n\n<YUXI_MCP_FACT_LEDGER>{"facts": []}</YUXI_MCP_FACT_LEDGER>'
+    html = _render([_msg("human", "q"), _msg("ai", content)])
+    assert "YUXI_MCP_FACT_LEDGER" not in html
+    assert "答案正文" in html
 
 
 async def test_evidence_marker_inside_flattened_table_cell_stays_intact():
@@ -338,3 +424,151 @@ async def test_evidence_marker_inside_flattened_table_cell_stays_intact():
     assert "E3 · 正文·第3页" in chip.get_text()
     # 标记未被拆碎到多个单元格
     assert "〔证据E3</td>" not in html
+
+
+# ── 图片内嵌（question_images / kbassets 注入，覆盖嵌入、降级与归一化） ────────
+
+
+def _png_b64(width: int = 2, height: int = 2, color: tuple = (10, 20, 30)) -> str:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+async def test_question_image_is_embedded():
+    data_uri = f"data:image/png;base64,{_png_b64()}"
+    html = _render(
+        [dict(_msg("human", "看图", image_content=_png_b64()), id=1), dict(_msg("ai", "回答"), id=2)],
+        question_images={1: data_uri},
+    )
+    soup = _soup(html)
+
+    img = soup.select_one(".qa-q img.question-image")
+    assert img is not None and img["src"] == data_uri
+    assert "图片未内联" not in html
+    assert "已内嵌图片 1 张" in html  # 页脚统计
+
+
+async def test_question_image_placeholder_note_when_not_embedded():
+    html = _render(
+        [_msg("human", "看图", image_content="AAAA"), _msg("ai", "回答")],
+        question_images={1: None},
+    )
+    assert "含图片消息（图片未内联）" in html
+
+
+async def test_inline_kbasset_replaced_with_data_uri():
+    data_uri = "data:image/png;base64,QUJD"
+    content = "如图：![实验图](kbasset://file-1/rev-9/fig_3a.png) 所示。"
+    html = _render(
+        [dict(_msg("human", "q"), id=1), dict(_msg("ai", content), id=2)],
+        kbassets={"kbasset://file-1/rev-9/fig_3a.png": data_uri},
+    )
+    soup = _soup(html)
+
+    img = soup.select_one(".qa-a img")
+    assert img is not None and img["src"] == data_uri
+    assert "kbasset://" not in soup.select_one(".qa-a").get_text()
+
+
+async def test_inline_kbasset_missing_degrades_to_alt_text():
+    content = "如图：![实验图](kbasset://file-1/rev-9/fig_3a.png) 所示。"
+    html = _render(
+        [dict(_msg("human", "q"), id=1), dict(_msg("ai", content), id=2)],
+        kbassets={"kbasset://file-1/rev-9/fig_3a.png": None},
+    )
+    soup = _soup(html)
+
+    assert soup.select_one(".qa-a img") is None
+    assert "实验图" in soup.select_one(".qa-a").get_text()  # alt 文本保留
+
+
+async def test_figure_cards_from_citation_ready():
+    figures = {
+        "citation_ready": {
+            "figures": [
+                {
+                    "kb_id": "kb-1",
+                    "file_id": "file-1",
+                    "revision_id": "rev-9",
+                    "asset_name": "fig_3a.png",
+                    "caption": "Figure 3A 扫描电镜",
+                    "page": 8,
+                }
+            ]
+        }
+    }
+    data_uri = "data:image/png;base64,QUJD"
+    html = _render(
+        [dict(_msg("human", "q"), id=1), dict(_msg("ai", "见图。", extra_metadata=figures), id=2)],
+        kbassets={"kbasset://file-1/rev-9/fig_3a.png": data_uri},
+    )
+    soup = _soup(html)
+
+    card = soup.select_one("figure.figure-card")
+    assert card is not None
+    assert card.select_one("img")["src"] == data_uri
+    assert "Figure 3A 扫描电镜" in card.select_one("figcaption").get_text()
+    assert "第8页" in card.select_one(".figure-page").get_text()
+
+
+async def test_figure_card_missing_asset_renders_placeholder():
+    figures = {
+        "citation_ready": {
+            "figures": [
+                {
+                    "kb_id": "kb-1",
+                    "file_id": "file-1",
+                    "revision_id": "rev-9",
+                    "asset_name": "fig_3b.png",
+                    "figure_label": "Figure 3B",
+                    "page": 9,
+                }
+            ]
+        }
+    }
+    html = _render(
+        [dict(_msg("human", "q"), id=1), dict(_msg("ai", "见图。", extra_metadata=figures), id=2)],
+        kbassets={"kbasset://file-1/rev-9/fig_3b.png": None},
+    )
+    soup = _soup(html)
+
+    card = soup.select_one("figure.figure-card.figure-missing")
+    assert card is not None
+    assert "Figure 3B" in card.get_text() and "未内联" in card.get_text()
+
+
+async def test_data_image_uri_allowed_but_data_links_still_neutralized():
+    content = "![ok](data:image/png;base64,QUJD) 与 [x](data:text/html;base64,PGI+KSk=)"
+    html = _render([_msg("human", "q"), _msg("ai", content)])
+    soup = _soup(html)
+
+    img = soup.select_one(".qa-a img")
+    assert img is not None and img["src"].startswith("data:image/png")
+    assert soup.select_one(".qa-a a") is None  # data: 链接仍降级为纯文本
+
+
+async def test_normalize_image_bytes_resizes_and_reencodes():
+    buffer = io.BytesIO()
+    Image.new("RGB", (4000, 3000), (200, 30, 40)).save(buffer, format="PNG")
+
+    normalized = _normalize_image_bytes(buffer.getvalue())
+    assert normalized is not None
+    mime, payload = normalized
+    assert mime == "image/jpeg"
+    assert Image.open(io.BytesIO(payload)).size[0] <= 1600
+
+
+async def test_normalize_image_bytes_keeps_alpha_png():
+    buffer = io.BytesIO()
+    Image.new("RGBA", (8, 8), (255, 0, 0, 128)).save(buffer, format="PNG")
+
+    normalized = _normalize_image_bytes(buffer.getvalue())
+    assert normalized is not None
+    mime, payload = normalized
+    assert mime == "image/png"
+    assert Image.open(io.BytesIO(payload)).mode == "RGBA"
+
+
+async def test_normalize_image_bytes_rejects_non_image():
+    assert _normalize_image_bytes(b"not an image at all") is None

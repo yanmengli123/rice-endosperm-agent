@@ -3,12 +3,19 @@
 设计约束（docs/vibe/2026-09-21-conversation-html-export.md，V1b）：
 - 服务端统一渲染，Web 与桌面端拿到字节一致；
 - 零 JS、零外部资源（内联 CSS、系统字体、自带 CSP），离线可开，打印成 PDF 排版正确；
+  图片一律内嵌 data URI（预算化归一化，超限降级为占位卡）；
 - XSS 三层防线：MarkdownIt 以 html=False 渲染（原始 HTML 一律转义为文本）→
-  a[href]/img[src] 协议白名单（其余降级为纯文本）→ 文档级 CSP 兜底；
+  a[href]/img[src] 协议白名单（链接与图片分开收敛，图片允许 data:image/*）→
+  文档级 CSP 兜底；
 - 公式走 dollarmath 结构化呈现（.math-inline/.math-block，不引入 KaTeX 字体）；
-- 代码块走 pygments 服务端高亮（自定义浅色样式对齐 web base.css 色阶）。
+- 代码块走 pygments 服务端高亮（自定义浅色样式对齐 web base.css 色阶）；
+- 协议标记注册表：权威芯片形态从 authority_markers 单点取用，MCP-F 事实引用
+  脚注化并在文末生成溯源附录（MCPCallAudit 审计记录）。
 """
 
+import asyncio
+import base64
+import io
 import json
 import re
 from datetime import datetime, timedelta, timezone, UTC
@@ -19,20 +26,44 @@ from urllib.parse import urlparse
 from fastapi import HTTPException, Request
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
+from PIL import Image
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 from pygments.style import Style
 from pygments.token import Comment, Generic, Keyword, Name, Number, Operator, String
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.knowledge.rendering.authority_markers import authority_marker_pattern
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.services.conversation_service import get_thread_history_view
+from yuxi.services.knowledge_asset_service import KnowledgeAssetError, resolve_asset
 from yuxi.services.operation_log_service import log_operation
-from yuxi.storage.postgres.models_business import User
+from yuxi.storage.minio import get_minio_client
+from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_business import MCPCallAudit, User
+from yuxi.storage.postgres.models_knowledge import KnowledgeFile
 
 _CN_TZ = timezone(timedelta(hours=8))
 _ALLOWED_HREF_SCHEMES = {"http", "https", "mailto"}
+_ALLOWED_IMG_SRC_SCHEMES = _ALLOWED_HREF_SCHEMES | {"data"}
+
+# 图片内嵌预算：归一化后单图上限与全文总预算（base64 前的原始字节计）。
+_MAX_IMAGE_EDGE = 1600
+_PER_IMAGE_BYTES = int(1.5 * 1024 * 1024)
+_TOTAL_IMAGE_BUDGET = 20 * 1024 * 1024
+_MAX_ASSET_READ_BYTES = 32 * 1024 * 1024
+
+# MCP-F 事实引用：形态与 source_output_guard._FACT_MARKER / fact_ledger.citation_format
+# 对齐（该文件正处于在途改动的发布链路上，稳定后应上移到 authority_markers 单点维护，
+# 测试 test_mcp_f_pattern_matches_canonical 锁定两者不漂移）。
+_MCP_FACT_MARKER = re.compile(r"\[MCP-F:(\d+):(f_[0-9a-f]{16})\]", re.I)
+_MCP_FACT_RUN = re.compile(r"\[MCP-F:\d+:f_[0-9a-f]{16}\](?:\s*\[MCP-F:\d+:f_[0-9a-f]{16}\])*", re.I)
+# 事实账本目录块只应存在于工具观察中；出现在导出内容时整体剥离（保险层）。
+_LEDGER_BLOCK_RE = re.compile(r"<YUXI_MCP_FACT_LEDGER>.*?</YUXI_MCP_FACT_LEDGER>", re.S)
+# kbasset://{file_id}/{revision_id}/{asset_name}（与 web kbasset_contract 同构）。
+_KBASSET_URI_RE = re.compile(r"kbasset://([A-Za-z0-9._:-]+)/([A-Za-z0-9._:-]+)/([A-Za-z0-9._%+-]+)")
 
 
 async def export_thread_html_view(
@@ -50,6 +81,8 @@ async def export_thread_html_view(
 
     history_payload = await get_thread_history_view(thread_id=thread_id, current_uid=str(current_user.uid), db=db)
     history = history_payload.get("history") or []
+    question_images, kbassets = await _collect_embedded_images(history, current_user)
+    fact_records = await _collect_fact_records(history, current_user)
     exported_at = datetime.now(_CN_TZ)
     html = render_conversation_html(
         title=conversation.title,
@@ -59,13 +92,23 @@ async def export_thread_html_view(
         updated_at=conversation.updated_at,
         history=history,
         exported_at=exported_at,
+        question_images=question_images,
+        kbassets=kbassets,
+        fact_records=fact_records,
     )
     filename = build_filename(conversation.title, exported_at)
     await log_operation(
         db,
         current_user.id,
         "导出会话HTML",
-        json.dumps({"thread_id": thread_id, "messages": len(history)}, ensure_ascii=False),
+        json.dumps(
+            {
+                "thread_id": thread_id,
+                "messages": len(history),
+                "images_embedded": sum(1 for v in {**question_images, **kbassets}.values() if v),
+            },
+            ensure_ascii=False,
+        ),
         request=request,
     )
     return html, filename
@@ -91,12 +134,37 @@ def render_conversation_html(
     updated_at: datetime | None,
     history: list[dict],
     exported_at: datetime,
+    question_images: dict[int, str | None] | None = None,
+    kbassets: dict[str, str | None] | None = None,
+    fact_records: dict[int, dict] | None = None,
 ) -> str:
-    """把会话元数据与 history 视图渲染为完整 HTML 文档（纯函数，不碰 DB/IO）。"""
+    """把会话元数据与 history 视图渲染为完整 HTML 文档（纯函数，不碰 DB/IO）。
+
+    ``question_images``：消息 id → 用户图片的 data URI（None=嵌入失败）；
+    ``kbassets``：kbasset URI → data URI（None=资产不可用/超预算）；
+    ``fact_records``：MCP-F 审计 id → {server_slug, capability_name, status, facts}。
+    三者由编排层异步预取后注入，保持本函数可纯注入测试。
+    """
+    question_images = question_images or {}
+    kbassets = kbassets or {}
+    fact_records = fact_records or {}
     rounds = _pair_rounds(history)
-    cards = [card for card in (_render_qa_card(index, entry) for index, entry in enumerate(rounds, 1)) if card]
+    cards = [
+        card
+        for card in (
+            _render_qa_card(index=index, entry=entry, question_images=question_images, kbassets=kbassets)
+            for index, entry in enumerate(rounds, 1)
+        )
+        if card
+    ]
     toc = _render_toc(rounds)
+    appendix = _render_fact_appendix(history, fact_records)
     display_title = (title or "").strip() or "未命名会话"
+    embedded = sum(1 for value in {**question_images, **kbassets}.values() if value)
+    skipped = len(question_images) + len(kbassets) - embedded
+    image_stats = f" · 已内嵌图片 {embedded} 张" + (
+        f"（{skipped} 张因资产不可用或超预算降级为占位）" if skipped else ""
+    )
     meta_rows = "".join(
         f"<tr><th>{label}</th><td>{value}</td></tr>"
         for label, value in [
@@ -109,13 +177,17 @@ def render_conversation_html(
             ("导出时间", _fmt_datetime(exported_at)),
         ]
     )
-    footer = "由语析（Yuxi）导出 · 零脚本自包含文档（无外部资源，可离线查看）· 打印（Ctrl+P）可另存为排版正确的 PDF"
+    footer = (
+        "由语析（Yuxi）导出 · 零脚本自包含文档（无外部资源，可离线查看）· "
+        "打印（Ctrl+P）可另存为排版正确的 PDF" + image_stats
+    )
     return _TEMPLATE.safe_substitute(
         title=escape_html(display_title),
         subtitle=f"共 {len(cards)} 轮问答 · {len(history)} 条消息 · 时间均为 UTC+8",
         meta_rows=meta_rows,
         toc=toc,
         cards="\n".join(cards),
+        appendix=appendix,
         footer=footer,
         css=_CSS,
     )
@@ -138,7 +210,7 @@ def _pair_rounds(history: list[dict]) -> list[dict]:
     return rounds
 
 
-def _render_qa_card(index: int, entry: dict) -> str:
+def _render_qa_card(*, index: int, entry: dict, question_images: dict, kbassets: dict) -> str:
     question = entry["question"]
     question_html = ""
     if question is not None:
@@ -147,14 +219,19 @@ def _render_qa_card(index: int, entry: dict) -> str:
         stamp = _fmt_timestamp(question.get("created_at"))
         if stamp:
             meta_bits.append(stamp)
-        if question.get("image_content"):
-            meta_bits.append("含图片消息（图片不内联）")
+        question_image_uri = question_images.get(question.get("id"))
+        if question.get("image_content") and not question_image_uri:
+            meta_bits.append("含图片消息（图片未内联）")
         meta_bits.extend(f"附件 {name}（{size}）" for name, size in _attachment_summaries(question))
         meta_html = f'<p class="qa-meta">{escape_html(" · ".join(meta_bits))}</p>' if meta_bits else ""
+        image_html = (
+            f'<img class="question-image" src="{question_image_uri}" alt="用户图片" />' if question_image_uri else ""
+        )
         question_html = (
             '<div class="qa-q">'
             f'<span class="qa-label">问题 {index:02d}</span>'
             f'<p class="qa-q-text">{question_text or "（空提问）"}</p>'
+            f"{image_html}"
             f"{meta_html}"
             "</div>"
         )
@@ -163,15 +240,134 @@ def _render_qa_card(index: int, entry: dict) -> str:
     for answer in entry["answers"]:
         content = str(answer.get("content") or "")
         if content.strip():
-            answer_parts.append(_render_markdown(content))
+            answer_parts.append(_render_markdown(_inline_kbassets(content, kbassets)))
         else:
             error = str(answer.get("error_message") or "").strip()
             if error:
                 answer_parts.append(f'<p class="answer-error">本轮回答生成失败：{escape_html(error)}</p>')
+    figure_cards = _render_figure_cards(entry, kbassets)
+    if figure_cards:
+        answer_parts.append(figure_cards)
     if not answer_parts:
         return ""
     return (
         f'<section class="qa" id="qa-{index}">{question_html}<div class="qa-a">{"".join(answer_parts)}</div></section>'
+    )
+
+
+def _inline_kbassets(content: str, kbassets: dict) -> str:
+    """把正文中可解析的 kbasset:// 引用替换为内嵌 data URI；不可用的保留原样（由图片白名单降级为 alt 文本）。"""
+
+    def replace(match) -> str:  # noqa: ANN001
+        return kbassets.get(match.group(0)) or match.group(0)
+
+    return _KBASSET_URI_RE.sub(replace, content)
+
+
+# ── 图卡（citation_ready.figures，取数口径与站内 inlineFiguresForMessage 一致） ─
+
+
+def _figure_asset_uri(figure: dict) -> str:
+    """`kbasset://{file_id}/{revision_id}/{asset_name}`；与站内 figureAssetUri 同构，缺段即空。"""
+    file_id = str(figure.get("file_id") or "").strip()
+    revision_id = str(figure.get("revision_id") or "").strip()
+    asset_name = str(figure.get("asset_name") or "").strip()
+    if not (file_id and revision_id and asset_name and str(figure.get("kb_id") or "").strip()):
+        return ""
+    return f"kbasset://{file_id}/{revision_id}/{asset_name}"
+
+
+def _verified_figures(entry: dict) -> list[dict]:
+    """该轮最后一条携带 citation_ready 载荷的 assistant 消息的图卡（只收能组出合法 URI 的条目）。"""
+    for answer in reversed(entry["answers"]):
+        payload = ((answer.get("extra_metadata") or {}).get("citation_ready") or {}).get("figures")
+        if isinstance(payload, list) and payload:
+            return [figure for figure in payload if isinstance(figure, dict) and _figure_asset_uri(figure)]
+    return []
+
+
+def _render_figure_cards(entry: dict, kbassets: dict) -> str:
+    cards = []
+    for figure in _verified_figures(entry):
+        uri = _figure_asset_uri(figure)
+        page = figure.get("page")
+        has_page = isinstance(page, int) and not isinstance(page, bool) and page >= 1
+        # 标题回退链与站内 figureCardTitle 一致：题注 → 编号 → 中性文案（禁用任何模型文本）
+        caption = (
+            str(figure.get("caption") or "").strip()
+            or str(figure.get("figure_label") or "").strip()
+            or (f"图 · 第{page}页" if has_page else "图")
+        )
+        page_html = f'<span class="figure-page">第{page}页</span>' if has_page else ""
+        data_uri = kbassets.get(uri)
+        if data_uri:
+            cards.append(
+                f'<figure class="figure-card"><img src="{data_uri}" alt="{escape_html(caption)}" />'
+                f"<figcaption>{escape_html(caption)}{page_html}</figcaption></figure>"
+            )
+        else:
+            cards.append(
+                f'<figure class="figure-card figure-missing"><figcaption>{escape_html(caption)}{page_html}'
+                '<span class="figure-missing-note">图片资产不可用或超预算，未内联</span></figcaption></figure>'
+            )
+    return "".join(cards)
+
+
+# ── MCP-F 溯源附录（答案中的 [MCP-F] 引用收敛为上标，审计记录回查 MCPCallAudit） ─
+
+
+def _collect_audit_ids(history: list[dict]) -> list[int]:
+    ids: list[int] = []
+    for msg in history:
+        if msg.get("type") != "ai":
+            continue
+        for match in _MCP_FACT_MARKER.finditer(str(msg.get("content") or "")):
+            audit_id = int(match.group(1))
+            if audit_id not in ids:
+                ids.append(audit_id)
+    return ids
+
+
+def _render_fact_appendix(history: list[dict], fact_records: dict[int, dict]) -> str:
+    audit_ids = _collect_audit_ids(history)
+    if not audit_ids:
+        return ""
+    rows = []
+    for audit_id in audit_ids:
+        record = fact_records.get(audit_id)
+        if not record:
+            rows.append(f'<tr><td>M{audit_id}</td><td colspan="3">审计记录不可用</td></tr>')
+            continue
+        facts = [fact for fact in (record.get("facts") or []) if isinstance(fact, dict)]
+        fact_bits = []
+        for fact in facts[:6]:
+            path = str(fact.get("path") or "/")
+            value = fact.get("numeric_value")
+            if value is None:
+                value = fact.get("string_value")
+            digest = str(fact.get("value_digest") or "").removeprefix("sha256:")[:12]
+            cell = escape_html(path)
+            if value is not None:
+                cell += f" = {escape_html(str(value))}"
+            cell += f' <span class="fact-digest">#{digest}</span>'
+            fact_bits.append(f"<li>{cell}</li>")
+        if len(facts) > 6:
+            fact_bits.append(f"<li>… 共 {len(facts)} 项</li>")
+        if not fact_bits:
+            fact_bits.append("<li>（无抽取事实）</li>")
+        tool = f"{record.get('server_slug') or '—'} · {record.get('capability_name') or ''}".strip(" ·")
+        rows.append(
+            f"<tr><td>M{audit_id}</td><td>{escape_html(tool)}</td>"
+            f"<td>{escape_html(str(record.get('status') or '—'))}</td>"
+            f'<td><ul class="fact-list">{"".join(fact_bits)}</ul></td></tr>'
+        )
+    return (
+        '<section class="appendix"><h2 class="appendix-title">附录 · 事实核验记录（MCP-F）</h2>'
+        '<table class="appendix-table"><thead><tr><th>引用</th><th>工具</th><th>状态</th>'
+        "<th>抽取事实（路径 = 值 # 摘要）</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+        '<p class="appendix-note">答案中的 [MCP-F] 标记已收敛为上标引用；'
+        "本表为对应的服务端审计记录，供归档溯源。</p></section>"
     )
 
 
@@ -212,7 +408,8 @@ def _attachment_summaries(question: dict) -> list[tuple[str, str]]:
 
 
 def _render_markdown(text: str) -> str:
-    repaired = _repair_flattened_fences(text)
+    source = _LEDGER_BLOCK_RE.sub("", text)  # 事实账本目录块只应存在于工具观察，导出整体剥离
+    repaired = _repair_flattened_fences(source)
     repaired = _repair_flattened_tables(repaired)
     tokens = _MD.parse(repaired)
     _sanitize_tokens(tokens)
@@ -247,7 +444,7 @@ def _resolve_lexer(lang: str):
 
 
 def _sanitize_tokens(tokens) -> None:  # noqa: ANN001
-    """html=False 已挡住原始 HTML 注入；这里再收敛 a/img 的协议面。"""
+    """html=False 已挡住原始 HTML 注入；这里再收敛 a/img 的协议面（链接与图片分开白名单）。"""
     for idx, token in enumerate(tokens):
         if token.children:
             _sanitize_tokens(token.children)
@@ -260,7 +457,7 @@ def _sanitize_tokens(tokens) -> None:  # noqa: ANN001
                 if close is not None:
                     _turn_into_text(tokens[close], "")
         elif token.type == "image":
-            if not _safe_href(str(token.attrs.get("src") or "")):
+            if not _safe_img_src(str(token.attrs.get("src") or "")):
                 _turn_into_text(token, token.content or "")
 
 
@@ -291,6 +488,21 @@ def _safe_href(value: str) -> bool:
         return False
     scheme = urlparse(candidate).scheme.lower()
     return scheme in _ALLOWED_HREF_SCHEMES or scheme == ""
+
+
+def _safe_img_src(value: str) -> bool:
+    """图片源白名单：在链接白名单之上放行 data:image/*（自包含内嵌的唯一通道）。
+
+    markdown-it validateLink 在词法层已把 data: 限制到 image/(gif|png|jpeg|webp)，
+    这里是第二层收敛。
+    """
+    candidate = value.strip()
+    if not candidate or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in candidate):
+        return False
+    if candidate[:11].lower() == "data:image/":
+        return True
+    scheme = urlparse(candidate).scheme.lower()
+    return scheme in _ALLOWED_IMG_SRC_SCHEMES or scheme == ""
 
 
 # ── 上游保真修复（幂等：规范多行结构不触发，只修被问答流水线压扁的形态） ────
@@ -448,24 +660,39 @@ def _rebuild_single_line_table(line: str) -> str:
     return "\n".join(rebuilt)
 
 
-# ── 证据标记的导出形态（对已渲染 HTML 后处理，内容已转义，不再二次转义） ─────
+# ── 协议标记注册表（对已渲染 HTML 后处理，内容已转义，不再二次转义） ──────────
+# 权威芯片形态从 authority_markers 单点取用（〔证据E#｜…〕/〔引文定位｜…〕）；
+# MCP-F 事实引用收敛为上标，审计明细由文末溯源附录承载。
 
 
-_EVIDENCE_CHIP_RE = re.compile(r"〔证据(E\d+)(?:[｜|]([^｜|〕]*))?(?:[｜|]([^〕]*))?〕")
 _EVIDENCE_LIST_LABEL = "【证据引用】（后端渲染，页码来自证据锚点）"
 _NOTE_RE = re.compile(r"（注：[^）]{0,400}）")
 
 
+def _authority_chip(match) -> str:  # noqa: ANN001
+    head = match.group(1)
+    payload = match.group(0)[len(f"〔{head}｜") : -len("〕")]
+    parts = payload.split("｜")
+    locator = parts[0].strip() if parts else ""
+    description = "｜".join(parts[1:]).strip() if len(parts) > 1 else ""
+    title = f' title="{description}"' if description else ""
+    label = f"{head} · {locator}" if locator else head
+    return f'<span class="evidence-chip"{title}>{label}</span>'
+
+
+def _fact_ref_chip(match) -> str:  # noqa: ANN001
+    audit_ids: list[str] = []
+    for audit_match in _MCP_FACT_MARKER.finditer(match.group(0)):
+        audit_id = audit_match.group(1)
+        if audit_id not in audit_ids:
+            audit_ids.append(audit_id)
+    labels = " ".join(f"M{audit_id}" for audit_id in audit_ids)
+    return f'<sup class="fact-ref">{labels}</sup>'
+
+
 def _stylize_evidence_markers(html: str) -> str:
-    """〔证据E#｜定位｜描述〕→ 徽章、后端证据引用标签 → 样式化标签、未定位注记 → 提示条。"""
-
-    def chip(match) -> str:  # noqa: ANN001
-        evidence_id, locator, description = match.group(1), match.group(2) or "", match.group(3) or ""
-        title = f' title="证据 {evidence_id} · {description}"' if description.strip() else ""
-        label = f"{evidence_id} · {locator.strip()}" if locator.strip() else evidence_id
-        return f'<span class="evidence-chip"{title}>{label}</span>'
-
-    html = _EVIDENCE_CHIP_RE.sub(chip, html)
+    html = _MCP_FACT_RUN.sub(_fact_ref_chip, html)
+    html = authority_marker_pattern().sub(_authority_chip, html)
     html = html.replace(_EVIDENCE_LIST_LABEL, '<span class="evidence-list-label">证据引用</span>')
 
     def note(match) -> str:  # noqa: ANN001
@@ -507,6 +734,201 @@ def _fmt_size(value) -> str:  # noqa: ANN001
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} GB"
+
+
+# ── 图片内嵌与审计回查（编排层异步预取；渲染层只消费注入的映射） ─────────────
+
+
+def _normalize_image_bytes(data: bytes) -> tuple[str, bytes] | None:
+    """归一化为内嵌友好的图片字节：限边、限质、限单图体积；不可解析返回 None。
+
+    带透明的图保留 PNG，其余转 JPEG（科研 PDF 切图多为无透明 PNG，转 JPEG 收益显著）；
+    归一化后仍超单图上限的，降一档质量重试，再超即放弃。
+    """
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except Exception:  # noqa: BLE001 —— 非图片字节不内嵌
+        return None
+    if getattr(image, "is_animated", False):
+        return ("image/gif", data) if (image.format or "").upper() == "GIF" else None
+    if max(image.size) > _MAX_IMAGE_EDGE:
+        image.thumbnail((_MAX_IMAGE_EDGE, _MAX_IMAGE_EDGE))
+    has_alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
+    buffer = io.BytesIO()
+    if has_alpha:
+        image.save(buffer, format="PNG", optimize=True)
+        mime, payload = "image/png", buffer.getvalue()
+    else:
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        image.save(buffer, format="JPEG", quality=85, optimize=True)
+        mime, payload = "image/jpeg", buffer.getvalue()
+    if len(payload) > _PER_IMAGE_BYTES:
+        buffer = io.BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG", quality=70, optimize=True)
+        mime, payload = "image/jpeg", buffer.getvalue()
+    if len(payload) > _PER_IMAGE_BYTES:
+        return None
+    return mime, payload
+
+
+async def _read_asset_bytes(resolved: dict) -> bytes | None:  # noqa: ANN001
+    """按 stream_asset 同款读取方式把 MinIO 对象读全；超过读取上限返回 None。"""
+    client = get_minio_client()
+    stream = await client.adownload_response(resolved["bucket"], resolved["object_key"])
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            chunk = await asyncio.to_thread(stream.read, 1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_ASSET_READ_BYTES:
+                return None
+            chunks.append(chunk)
+    finally:
+        try:
+            stream.close()
+            stream.release_conn()
+        except Exception:  # noqa: BLE001 —— 尽力释放连接
+            pass
+    return b"".join(chunks)
+
+
+async def _lookup_kb_id(file_id: str) -> str | None:
+    """内联 kbasset URI 不携带 kb_id，按 file_id 回查所属知识库（与 resolve_asset 内部同口径）。"""
+    async with pg_manager.get_async_session_context() as session:
+        return (
+            (await session.execute(select(KnowledgeFile.kb_id).where(KnowledgeFile.file_id == file_id)))
+            .scalars()
+            .one_or_none()
+        )
+
+
+async def _kbasset_data_uri(target: dict, current_user: User) -> str | None:
+    """鉴权解析 + 读取 + 归一化，产出 data URI；任一步失败返回 None（单图软降级）。"""
+    kb_id = target.get("kb_id") or await _lookup_kb_id(target["file_id"])
+    if not kb_id:
+        return None
+    try:
+        resolved = await resolve_asset(
+            kb_id=kb_id,
+            file_id=target["file_id"],
+            revision_id=target["revision_id"],
+            asset_name=target["asset_name"],
+            user=current_user,
+        )
+    except KnowledgeAssetError:
+        return None
+    data = await _read_asset_bytes(resolved)
+    if data is None:
+        return None
+    normalized = _normalize_image_bytes(data)
+    if normalized is None:
+        return None
+    mime, payload = normalized
+    return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+
+
+async def _collect_embedded_images(history: list[dict], current_user: User) -> tuple[dict, dict]:
+    """收集本会话全部可内嵌图片：用户消息图（base64）+ 图卡与正文 kbasset 资产。
+
+    返回 (question_images: 消息id → data URI|None, kbassets: kbasset URI → data URI|None)；
+    失败也保留键（值为 None），渲染层据此降级为占位并计入页脚统计。
+    """
+    question_images: dict[int, str | None] = {}
+    question_sources: dict[int, str] = {}
+    asset_targets: dict[str, dict] = {}
+    for msg in history:
+        if msg.get("type") == "human":
+            if msg.get("image_content"):
+                question_images[msg.get("id")] = None
+                question_sources[msg.get("id")] = str(msg["image_content"])
+            continue
+        for figure in ((msg.get("extra_metadata") or {}).get("citation_ready") or {}).get("figures") or []:
+            if not isinstance(figure, dict):
+                continue
+            uri = _figure_asset_uri(figure)
+            if uri and uri not in asset_targets:
+                file_id, revision_id, asset_name = _KBASSET_URI_RE.match(uri).groups()
+                asset_targets[uri] = {
+                    "kb_id": str(figure.get("kb_id") or "").strip(),
+                    "file_id": file_id,
+                    "revision_id": revision_id,
+                    "asset_name": asset_name,
+                }
+        for match in _KBASSET_URI_RE.finditer(str(msg.get("content") or "")):
+            uri = match.group(0)
+            if uri not in asset_targets:
+                file_id, revision_id, asset_name = match.groups()
+                asset_targets[uri] = {
+                    "kb_id": "",
+                    "file_id": file_id,
+                    "revision_id": revision_id,
+                    "asset_name": asset_name,
+                }
+
+    budget_left = _TOTAL_IMAGE_BUDGET
+    kbassets: dict[str, str | None] = {}
+    for uri, target in asset_targets.items():
+        if budget_left <= 0:
+            kbassets[uri] = None
+            continue
+        data_uri = await _kbasset_data_uri(target, current_user)
+        if data_uri is None:
+            kbassets[uri] = None
+            continue
+        encoded_bytes = (len(data_uri) * 3) // 4  # 预算按归一化后的原始字节计
+        if encoded_bytes > budget_left:
+            kbassets[uri] = None
+            continue
+        kbassets[uri] = data_uri
+        budget_left -= encoded_bytes
+
+    for msg_id, image_content in question_sources.items():
+        try:
+            raw = base64.b64decode(image_content, validate=False)
+        except Exception:  # noqa: BLE001 —— 非法 base64 不内嵌
+            continue
+        normalized = _normalize_image_bytes(raw)
+        if normalized is None or budget_left < len(normalized[1]):
+            continue
+        mime, payload = normalized
+        budget_left -= len(payload)
+        question_images[msg_id] = f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+    return question_images, kbassets
+
+
+async def _collect_fact_records(history: list[dict], current_user: User) -> dict[int, dict]:
+    """按答案中出现的 MCP-F 审计 id 回查 MCPCallAudit（限定本人调用），供溯源附录渲染。"""
+    audit_ids = _collect_audit_ids(history)
+    if not audit_ids:
+        return {}
+    async with pg_manager.get_async_session_context() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(MCPCallAudit).where(
+                        MCPCallAudit.id.in_(audit_ids), MCPCallAudit.uid == str(current_user.uid)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    records: dict[int, dict] = {}
+    for row in rows:
+        provenance = row.provenance if isinstance(row.provenance, dict) else {}
+        facts = provenance.get("facts") if isinstance(provenance.get("facts"), list) else []
+        records[int(row.id)] = {
+            "server_slug": row.server_slug,
+            "capability_name": row.capability_name,
+            "status": row.status,
+            "facts": facts,
+        }
+    return records
 
 
 # ── pygments 浅色高亮（不覆盖代码块背景色） ─────────────────────────────────
@@ -923,6 +1345,135 @@ body {
   color: var(--warn-text);
 }
 
+.question-image {
+  display: block;
+  max-width: 360px;
+  max-height: 240px;
+  margin-top: 8px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+
+.figure-card {
+  margin: 14px 0;
+  text-align: center;
+}
+
+.figure-card img {
+  max-width: 100%;
+  max-height: 520px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.figure-card figcaption {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+}
+
+.figure-page {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.figure-missing {
+  padding: 14px 16px;
+  border: 1px dashed var(--rule);
+  border-radius: 8px;
+  background: var(--page);
+}
+
+.figure-missing-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.fact-ref {
+  margin: 0 1px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  vertical-align: super;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.appendix {
+  margin-top: 36px;
+}
+
+.appendix-title {
+  margin: 0 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--rule);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.appendix-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.appendix-table th,
+.appendix-table td {
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.appendix-table thead th {
+  background: var(--page);
+  font-weight: 600;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.appendix-table td:first-child {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.fact-list {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+.fact-list li {
+  margin-bottom: 2px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.fact-digest {
+  color: var(--muted);
+}
+
+.appendix-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .doc-footer {
   margin-top: 36px;
   padding-top: 16px;
@@ -966,7 +1517,7 @@ _TEMPLATE = Template(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
 <meta name="generator" content="Yuxi conversation-export/1.0">
 <title>$title</title>
 <style>
@@ -988,6 +1539,7 @@ $css
   <div class="qa-list">
 $cards
   </div>
+$appendix
   <div class="doc-footer">$footer</div>
 </div>
 </body>
