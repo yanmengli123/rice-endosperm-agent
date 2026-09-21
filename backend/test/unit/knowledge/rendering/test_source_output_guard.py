@@ -1,7 +1,9 @@
 from yuxi.knowledge.rendering.source_output_guard import (
+    fact_catalog_summary,
     guard_answer_for_evidence_level,
     guard_glossary_answer,
     guard_non_document_source_answer,
+    render_degraded_fact_sheet,
 )
 
 
@@ -155,3 +157,83 @@ def test_glossary_hit_publishes_only_in_scope_rows_with_data_provenance():
     assert "revision=rev_1" in guarded
     assert "kb_deleted" not in guarded
     assert audit["out_of_scope_evidence_removed"] == 1
+
+
+def _fact_source_uses(*facts: dict) -> list[dict]:
+    return [
+        {
+            "source_use_id": "mcp:42",
+            "provider_id": "ricekb",
+            "operation": "ricekb_entity",
+            "status": "SUCCESS",
+            "adopted": True,
+            "provenance": {
+                "mcp_call_audit_id": 42,
+                "fact_manifest": {"facts": list(facts)},
+            },
+        }
+    ]
+
+
+def test_attached_unit_and_cjk_adjacent_numbers_must_be_supported():
+    uses = _fact_source_uses({"id": "f_1234567890abcdef", "path": "/data/start", "numeric_value": 1770556})
+    for claim in ("区间长度是3bp。[MCP-F:42:f_1234567890abcdef]", "差值为3个碱基。[MCP-F:42:f_1234567890abcdef]"):
+        guarded, audit = guard_answer_for_evidence_level(
+            f"数据模式：SOURCE-ONLY\n{claim}",
+            evidence_level="E1_DATA_PROVENANCE",
+            source_uses=uses,
+        )
+        assert audit["fact_grounding"]["passed"] is False
+        assert {"line": 2, "value": "3"} in audit["fact_grounding"]["unsupported_numbers"]
+
+
+def test_supported_unit_number_and_cjk_adjacent_supported_value_pass():
+    uses = _fact_source_uses({"id": "f_1234567890abcdef", "path": "/data/length", "numeric_value": 98})
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n区间长度是98bp。[MCP-F:42:f_1234567890abcdef]",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=uses,
+    )
+    assert audit["fact_grounding"]["passed"] is True
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n跨度为98个碱基。[MCP-F:42:f_1234567890abcdef]",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=uses,
+    )
+    assert audit["fact_grounding"]["passed"] is True
+
+
+def test_datetime_and_heading_numbers_are_structural_not_claims():
+    uses = _fact_source_uses(
+        {"id": "f_1234567890abcdef", "path": "/retrieved_at", "string_value": "2026-09-21T07:12:43+00:00"}
+    )
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n## 3. 序列核验\n检索时间：2026-09-21T07:12:43+00:00。[MCP-F:42:f_1234567890abcdef]",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=uses,
+    )
+    assert audit["fact_grounding"]["passed"] is True
+
+
+def test_render_degraded_fact_sheet_is_deterministic_and_marker_bearing():
+    uses = _fact_source_uses(
+        {"id": "f_1234567890abcdef", "path": "/gene/start", "numeric_value": 1770556},
+        {"id": "f_1234567890ffffff", "path": "/gene/symbol", "string_value": "Wx"},
+    )
+    sheet = render_degraded_fact_sheet(uses)
+    assert sheet is not None
+    assert sheet.startswith("数据模式：SOURCE-ONLY")
+    assert "[MCP-F:42:f_1234567890abcdef]" in sheet
+    assert "1770556" in sheet
+    assert "Wx" in sheet
+    assert render_degraded_fact_sheet([]) is None
+
+
+def test_fact_catalog_summary_exposes_values_for_repair_prompt():
+    uses = _fact_source_uses(
+        {"id": "f_1234567890abcdef", "path": "/gene/start", "numeric_value": 1770556},
+        {"id": "f_1234567890ffffff", "path": "/gene/symbol", "string_value": "Wx"},
+    )
+    summary = fact_catalog_summary(uses)
+    assert {"marker": "[MCP-F:42:f_1234567890abcdef]", "path": "/gene/start", "numeric_value": 1770556} in summary
+    assert {"marker": "[MCP-F:42:f_1234567890ffffff]", "path": "/gene/symbol", "string_value": "Wx"} in summary

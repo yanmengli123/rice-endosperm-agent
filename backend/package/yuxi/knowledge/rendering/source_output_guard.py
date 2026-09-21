@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from yuxi.agents.mcp.fact_ledger import extract_number_tokens, mask_structural_number_spans
 from yuxi.knowledge.planning.turn_execution_plan import EvidenceLevel
 from yuxi.knowledge.rendering.authority_markers import authority_marker_pattern
 
@@ -16,7 +17,6 @@ _REFERENCE_BLOCK = re.compile(r"\n*【证据引用】[^\n]*\n(?:-\s*E\d+[^\n]*(?
 _SOURCE_ONLY = re.compile(r"数据模式\s*[：:]\s*SOURCE-ONLY", re.I)
 _FACT_MARKER = re.compile(r"\[MCP-F:(\d+):(f_[0-9a-f]{16})\]", re.I)
 _FACT_LEDGER_BLOCK = re.compile(r"\s*<YUXI_MCP_FACT_LEDGER>.*?</YUXI_MCP_FACT_LEDGER>\s*", re.S)
-_STANDALONE_NUMBER = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?(?![\w.])")
 
 
 def guard_non_document_source_answer(text: str) -> tuple[str, dict[str, int | str]]:
@@ -114,7 +114,11 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[s
         invalid_markers.extend(
             f"{audit_id}:{fact_id}" for audit_id, fact_id in markers if (audit_id, fact_id) not in catalog
         )
-        if _line_requires_fact_marker(line) and not markers:
+        if not _line_requires_fact_marker(line):
+            # 结构行（标题/表头/分隔线/SOURCE-ONLY 声明）不承载事实主张，
+            # 其中的编号类数字同样不做数值核验。
+            continue
+        if not markers:
             ungrounded_lines.append(line_number)
             continue
         cited_numbers = {
@@ -129,7 +133,8 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[s
                 )
         visible_line = _FACT_MARKER.sub("", line)
         visible_line = re.sub(r"^\s*\d+[.)、]\s+", "", visible_line)
-        for raw_number in _STANDALONE_NUMBER.findall(visible_line):
+        visible_line = mask_structural_number_spans(visible_line)
+        for raw_number in extract_number_tokens(visible_line):
             normalized = _normalize_number(raw_number)
             if normalized not in cited_numbers:
                 unsupported_numbers.append({"line": line_number, "value": raw_number})
@@ -149,6 +154,91 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[s
         and not ungrounded_lines
         and not unsupported_numbers,
     }
+
+
+def fact_catalog_summary(source_uses: list[Any] | None) -> list[dict[str, Any]]:
+    """Compact, prompt-safe view of the fact catalog for bounded repair rounds."""
+    summary: list[dict[str, Any]] = []
+    for (audit_id, fact_id), fact in _fact_catalog(source_uses).items():
+        entry: dict[str, Any] = {
+            "marker": f"[MCP-F:{audit_id}:{fact_id}]",
+            "path": str(fact.get("path") or ""),
+        }
+        if "numeric_value" in fact:
+            entry["numeric_value"] = fact["numeric_value"]
+        elif "string_value" in fact:
+            entry["string_value"] = fact["string_value"]
+        summary.append(entry)
+    return summary
+
+
+def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: int = 40) -> str | None:
+    """Deterministically render verified facts when the model answer fails grounding.
+
+    The sheet is program-generated: every value comes from the audit manifest, so
+    it cannot introduce claims beyond the ledger.  Returns ``None`` when no facts
+    exist (the plain failure notice stays appropriate there).
+    """
+    catalog = _fact_catalog(source_uses)
+    if not catalog:
+        return None
+    grouped: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+    for (audit_id, fact_id), fact in catalog.items():
+        grouped.setdefault(audit_id, []).append((fact_id, fact))
+    providers: dict[int, tuple[str, str]] = {}
+    for item in _adopted_mcp_sources(source_uses):
+        provenance = _source_use_value(item, "provenance")
+        if not isinstance(provenance, dict):
+            continue
+        raw_audit_id = provenance.get("mcp_call_audit_id")
+        try:
+            audit_id = int(raw_audit_id)
+        except (TypeError, ValueError):
+            continue
+        providers[audit_id] = (
+            str(_source_use_value(item, "provider_id") or "mcp"),
+            str(_source_use_value(item, "operation") or "tool"),
+        )
+    lines = [
+        "数据模式：SOURCE-ONLY",
+        "",
+        "（降级渲染）模型生成的回答未通过 MCP 事实级核验，已阻止发布。以下为本次工具调用中可直接核验的事实清单；未列出的字段一律视为未核验。",
+        "",
+    ]
+    published = 0
+    truncated = False
+    for audit_id in sorted(grouped):
+        provider, operation = providers.get(audit_id, ("mcp", "tool"))
+        facts = sorted(grouped[audit_id], key=lambda item: str(item[1].get("path") or ""))
+        lines.append(f"## 调用 {audit_id}：{provider}/{operation}")
+        lines.append("")
+        lines.append("| 字段（事实路径） | 值 | 来源 |")
+        lines.append("| --- | --- | --- |")
+        for index, (fact_id, fact) in enumerate(facts):
+            if published >= maximum_facts:
+                lines.extend(
+                    (
+                        "| 其余事实 | 从略（超出降级渲染上限，完整清单见调用审计） | |",
+                        "",
+                    )
+                )
+                truncated = True
+                break
+            if "numeric_value" in fact:
+                value = str(fact["numeric_value"])
+            elif "string_value" in fact:
+                value = str(fact["string_value"])
+            else:
+                value = "（非公开值，见审计摘要）"
+            lines.append(f"| `{fact.get('path') or '/'}` | {value} | [MCP-F:{audit_id}:{fact_id}] |")
+            published += 1
+        if not truncated:
+            lines.append("")
+        if truncated:
+            break
+    lines.append("")
+    lines.append("局限：以上为结构化事实本身；模型叙述、派生计算与跨源比较未通过核验，不在本清单中。")
+    return "\n".join(lines)
 
 
 def guard_answer_for_evidence_level(
@@ -260,7 +350,9 @@ def _glossary_guard_audit(
 
 
 __all__ = [
+    "fact_catalog_summary",
     "guard_answer_for_evidence_level",
     "guard_glossary_answer",
     "guard_non_document_source_answer",
+    "render_degraded_fact_sheet",
 ]

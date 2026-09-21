@@ -12,7 +12,36 @@ from typing import Any
 FACT_LEDGER_SCHEMA_VERSION = "mcp-fact-ledger.v1"
 MAX_FACTS = 256
 MAX_STRING_LENGTH = 240
-_NUMBER_TOKEN = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?(?![\w.])")
+
+# 数字抽取的统一口径：事实侧（numeric_tokens）与答案侧（门禁数字核验）必须
+# 逐字符一致，否则"逐字复制工具结果"不再自洽。边界只认 ASCII 词字符与点号：
+# CJK 字符视为合法边界（"相差3个"里的 3 必须核验，不能靠中文毗邻逃逸）；
+# 紧贴单位的数字（"3bp"）由单位式单独捕获，避免误吞标识符内嵌数字。
+_NUMBER_TOKEN = re.compile(r"(?<![A-Za-z0-9_.])[-+]?\d[\d,]*(?:\.\d+)?(?![A-Za-z0-9_])")
+_NUMBER_WITH_UNIT = re.compile(
+    r"(?<![A-Za-z0-9_.])([-+]?\d[\d,]*(?:\.\d+)?)(?:bp|kb|mb|gb|aa|nt|kda|da)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+# 非主张性结构片段：日期时间与 JSON 路径。答案侧核验前先掩蔽，避免
+# "2026-09-21" 或 "/rows/0/start" 里的数字被当成待核验的数值主张。
+_DATETIME_SPAN = re.compile(
+    r"\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    r"|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+    r"|\d{4}年\s*\d{1,2}月\s*\d{1,2}日"
+)
+_JSON_PATH_SPAN = re.compile(r"/[A-Za-z~][\w.-]*(?:/~?[\w][\w.-]*)*")
+
+
+def extract_number_tokens(text: str) -> list[str]:
+    tokens = [match.group(0) for match in _NUMBER_TOKEN.finditer(str(text or ""))]
+    tokens.extend(match.group(1) for match in _NUMBER_WITH_UNIT.finditer(str(text or "")))
+    return tokens
+
+
+def mask_structural_number_spans(text: str) -> str:
+    """Mask datetime and JSON-path spans so their digits are not treated as claims."""
+    masked = _DATETIME_SPAN.sub("▁", str(text or ""))
+    return _JSON_PATH_SPAN.sub("▁", masked)
 
 
 @dataclass(frozen=True)
@@ -34,7 +63,8 @@ class ExtractedFact:
         if public_values and isinstance(self.value, (int, float)) and not isinstance(self.value, bool):
             payload["numeric_value"] = self.value
         elif public_values and isinstance(self.value, str):
-            numeric_tokens = [token.replace(",", "") for token in _NUMBER_TOKEN.findall(self.value)]
+            payload["string_value"] = self.value
+            numeric_tokens = [token.replace(",", "") for token in extract_number_tokens(self.value)]
             if numeric_tokens:
                 payload["numeric_tokens"] = numeric_tokens[:16]
         return payload
@@ -145,4 +175,6 @@ __all__ = [
     "append_model_ledger",
     "build_audit_manifest",
     "extract_facts",
+    "extract_number_tokens",
+    "mask_structural_number_spans",
 ]

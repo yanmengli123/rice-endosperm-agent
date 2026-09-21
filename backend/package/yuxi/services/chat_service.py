@@ -43,8 +43,10 @@ from yuxi.knowledge.planning.turn_execution_plan import (
 from yuxi.knowledge.rendering.answer_draft import render_answer_draft
 from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
 from yuxi.knowledge.rendering.source_output_guard import (
+    fact_catalog_summary,
     guard_answer_for_evidence_level,
     guard_glossary_answer,
+    render_degraded_fact_sheet,
 )
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
@@ -831,6 +833,118 @@ def _append_knowledge_source_uses(
             ),
         ),
     ]
+
+
+# 事实核验修复：草稿超长直接放弃修复走降级渲染，避免修复调用本身成为成本放大器。
+_FACT_REPAIR_MAX_ATTEMPTS = 2
+_FACT_REPAIR_DRAFT_LIMIT = 30000
+_FACT_REPAIR_PROMPT = """你是 MCP 事实核验修复器。下面这份回答草稿未通过服务器端事实级核验，\
+你必须修复它使其通过核验。你只能做三类操作，绝不能引入新事实：
+1. 为缺少 [MCP-F:audit:fact] 标记的事实行补上真实标记（只能使用【可用事实清单】里的标记）；
+2. 删除无法引用任何事实支撑的行或字段（包括无来源的数字、来历不明的叙述）；
+3. 把写错的数字改成【可用事实清单】中明确给出的数值。
+规则：
+- 保持首行「数据模式：SOURCE-ONLY」原样不变；
+- 每一条事实句、每一个表格数据行必须在同一行附带至少一个真实标记；
+- 行内独立数字必须存在于该行所引事实的数值中；坐标差等派生数字若清单中没有，删除该句而不是自己计算；
+- 不要新增任何清单之外的结论、解释或数字；不要输出任何解释性前言，直接输出修复后的完整回答。"""
+
+
+async def _repair_source_fact_grounding(
+    draft_text: str,
+    validation: dict[str, Any],
+    source_uses: list[Any],
+) -> str | None:
+    """Bounded repair round: add markers / drop unsupported lines, never new facts.
+
+    修复模型只拿到草稿、核验失败明细与事实清单（含数值），没有任何工具通道；
+    修复结果仍要走同一终态门禁，因此这一步不可能放宽任何核验语义。
+    """
+    draft = str(draft_text or "")
+    if not draft.strip() or len(draft) > _FACT_REPAIR_DRAFT_LIMIT:
+        return None
+    catalog = fact_catalog_summary(source_uses)
+    if not catalog:
+        return None
+    grounding = validation.get("fact_grounding") or {}
+    lines = draft.splitlines()
+    ungrounded: list[str] = []
+    for number in grounding.get("ungrounded_lines") or []:
+        if isinstance(number, int) and 0 < number <= len(lines):
+            ungrounded.append(lines[number - 1])
+    unsupported = [
+        {"line": item.get("line"), "value": item.get("value")}
+        for item in grounding.get("unsupported_numbers") or []
+        if isinstance(item, dict)
+    ]
+    if not ungrounded and not unsupported and not (grounding.get("invalid_markers") or []):
+        return None
+    payload = {
+        "核验失败明细": {
+            "缺少标记的行": ungrounded[:20],
+            "无支撑数字": unsupported[:20],
+            "无效标记": grounding.get("invalid_markers") or [],
+        },
+        "可用事实清单": catalog[:200],
+    }
+    try:
+        from langchain.messages import HumanMessage, SystemMessage
+
+        from yuxi.agents.models import load_chat_model
+
+        model = load_chat_model(None, temperature=0)
+        response = await model.ainvoke(
+            [
+                SystemMessage(content=_FACT_REPAIR_PROMPT),
+                HumanMessage(
+                    content=f"【回答草稿】\n{draft}\n\n【核验输入(JSON)】\n{json.dumps(payload, ensure_ascii=False)}"
+                ),
+            ]
+        )
+    except Exception as error:  # 模型不可用时修复通道直接失效，回落降级渲染
+        logger.warning(f"MCP fact grounding repair skipped: {type(error).__name__}: {error}")
+        return None
+    repaired = str(getattr(response, "content", "") or "").strip()
+    if not repaired.startswith("数据模式"):
+        return None
+    return repaired
+
+
+async def _finalize_guarded_source_text(
+    draft: str,
+    *,
+    evidence_level,
+    source_uses: list[Any],
+) -> tuple[str, dict[str, Any]]:
+    """终态门禁 + 有界修复 + 确定性降级：修复失败绝不发布未核验内容。"""
+    guarded, validation = guard_answer_for_evidence_level(
+        draft, evidence_level=evidence_level, source_uses=source_uses
+    )
+    attempts: list[dict[str, Any]] = []
+
+    def _passed(report: dict[str, Any]) -> bool:
+        grounding = report.get("fact_grounding") or {}
+        return bool(grounding.get("required")) is False or bool(grounding.get("passed"))
+
+    if not _passed(validation):
+        for attempt in range(1, _FACT_REPAIR_MAX_ATTEMPTS + 1):
+            repaired = await _repair_source_fact_grounding(draft, validation, source_uses)
+            attempts.append({"attempt": attempt, "repaired": bool(repaired)})
+            if not repaired:
+                break
+            guarded, validation = guard_answer_for_evidence_level(
+                repaired, evidence_level=evidence_level, source_uses=source_uses
+            )
+            if _passed(validation):
+                break
+        if not _passed(validation):
+            degraded = render_degraded_fact_sheet(source_uses)
+            if degraded is not None:
+                guarded = degraded
+                validation = {**validation, "status": "DEGRADED", "degraded_render": True}
+    if attempts:
+        validation = {**validation, "fact_repair_attempts": attempts}
+    return guarded, validation
 
 
 async def _finalize_mcp_manifest(
@@ -2267,7 +2381,7 @@ async def stream_agent_chat(
                     "".join(accumulated_content), contract=knowledge_contract
                 )
             else:
-                guarded_source_text, source_output_validation = guard_answer_for_evidence_level(
+                guarded_source_text, source_output_validation = await _finalize_guarded_source_text(
                     "".join(accumulated_content),
                     evidence_level=turn_plan.evidence.level,
                     source_uses=source_manifest.source_uses,
