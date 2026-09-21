@@ -1147,6 +1147,17 @@ routes:
               type: string
               minLength: 1
               maxLength: 64
+            # mention.v2 结构化提及：解析/鉴权/冻结由上游承担，网关只放行
+            # 形状（mentions 元素结构与 query @ token 一致性由服务端 422 裁决）。
+            mention_protocol:
+              type: string
+              enum:
+                - mention.v2
+            mentions:
+              type: array
+              maxItems: 20
+              items:
+                type: object
           # query 与 resume 二选一：resume run（人工审批续跑）不带 query。
           anyOf:
             - required:
