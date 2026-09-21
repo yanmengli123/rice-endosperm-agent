@@ -88,3 +88,27 @@ def test_gene_authority_delta_rejects_nonfinite_inputs():
         module.compute_delta(float("nan"), 1)
     with pytest.raises(module.AuthorityError):
         module.compute_delta(True, 1)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "analyze_locus_synth",
+        "find_homologs_synth",
+        "biological_context_synth",
+        "consensus_homologs",
+        "gene_report",
+        "go_enrichment",
+        "blast_sequence",
+    ],
+)
+def test_synthesis_and_analysis_tools_are_excluded_from_the_trust_registry(name):
+    """合成/聚合与语义不符工具无 profile：不进 source-constrained 轮次，不满足来源义务。"""
+    assert profile_for_protocol_name(name) is None
+
+
+def test_exact_retrieval_tools_remain_registered():
+    for name in ("gramene_homologs", "batch_string_interactions", "locus_variants", "vep_annotate"):
+        profile = profile_for_protocol_name(name)
+        assert profile is not None
+        assert Capability.GENE_RECORD_LOOKUP in profile.capabilities

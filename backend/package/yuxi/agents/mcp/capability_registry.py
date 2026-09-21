@@ -69,10 +69,14 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
         )
         for name in ("europe_pmc_search_rest", "europe_pmc_article_rest")
     },
-    # Reviewed plant-genomics-mcp v1.21.0 surface. These tools retrieve
-    # structured source records; synthesis tools remain data provenance and do
-    # not acquire document-claim authority merely because the provider names
-    # multiple databases.
+    # Reviewed plant-genomics-mcp v1.21.0 surface (commit ddd223f). Only exact
+    # retrieval tools that return structured source records earn a capability.
+    # Synthesis/aggregate tools (analyze_locus_synth, find_homologs_synth,
+    # biological_context_synth, consensus_homologs, gene_report) and semantically
+    # mismatched analysis tools (go_enrichment, blast_sequence) are intentionally
+    # ABSENT: without a profile they are filtered out of source-constrained turns
+    # and can never satisfy a source obligation. Per-tool review decisions:
+    # docker/mcp/plant-genomics/TOOL_CONTRACT_REVIEW.md.
     **{
         name: ToolCapabilityProfile(
             capabilities=frozenset({Capability.GENE_RECORD_LOOKUP}),
@@ -88,7 +92,6 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
             "resolve_locus_to_uniprot",
             "locus_go_annotations",
             "locus_plant_ontology",
-            "go_enrichment",
             "gramene_homologs",
             "kegg_pathways",
             "bar_gene_summary",
@@ -122,12 +125,6 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
             "batch_string_interactions",
             "atted_coexpression",
             "batch_atted_coexpression",
-            "analyze_locus_synth",
-            "find_homologs_synth",
-            "biological_context_synth",
-            "consensus_homologs",
-            "gene_report",
-            "blast_sequence",
         )
     },
     **{
