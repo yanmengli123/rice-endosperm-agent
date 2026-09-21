@@ -612,9 +612,7 @@ def _initial_source_manifest(plan: TurnExecutionPlan) -> RunSourceManifest:
         document_evidence_requested=plan.evidence.required,
         mcp_requested=plan.requires_mcp,
         status=(
-            "PLANNED"
-            if plan.requires_document_retrieval or plan.requires_mcp or canonical_requested
-            else "COMPLETED"
+            "PLANNED" if plan.requires_document_retrieval or plan.requires_mcp or canonical_requested else "COMPLETED"
         ),
     )
 
@@ -625,6 +623,16 @@ def _plan_failure_answer(plan: TurnExecutionPlan) -> str:
             "本轮指定的 MCP 来源不具备经过服务端信任登记的 PDF 原文页码定位能力，"
             "因此执行计划不可满足；系统没有改用知识库或猜测页码。"
         )
+    if plan.error_code == "MCP_SERVER_NOT_CONFIGURED":
+        return (
+            f"本轮点名的 MCP 服务器「{plan.required_server_missing}」未绑定到当前智能体，"
+            "系统未改用其他等价能力服务器代答；请在扩展页安装并启用该服务器后重试。"
+        )
+    if getattr(plan, "required_server", None):
+        return (
+            f"本轮点名的 MCP 服务器「{plan.required_server}」没有成功完成的工具调用，"
+            "系统未静默改用其他等价能力服务器代答。"
+        )
     if plan.source.policy.value == "BIBLIOGRAPHY_ONLY":
         return "本轮所需的受信文献检索来源当前不可用；系统没有改用模型记忆或本地知识库补写文献。"
     if plan.task.primary_intent.value == "GLOSSARY_LOOKUP":
@@ -632,6 +640,30 @@ def _plan_failure_answer(plan: TurnExecutionPlan) -> str:
     if plan.requires_mcp:
         return "本轮指定的 MCP 来源当前不可用；系统没有静默改用知识库或网络来源。"
     return "本轮要求的文献来源当前不可用，无法在不扩大来源范围的前提下完成回答。"
+
+
+def _apply_skill_plan_dispatch(context, plan: TurnExecutionPlan, manifest: RunSourceManifest) -> None:
+    """Skill 注入服从 plan（P0-A）：本轮 plan 明确禁用 STRUCTURED_DATABASE 时，
+    MCP 依赖型 Skill 不进提示词/可读闭包——其 SOURCE-ONLY 契约不得约束
+    词典/文献/文档轮的输出格式。分派结果写 manifest amendment 供审计。"""
+    if SourceClass.STRUCTURED_DATABASE not in set(plan.source.forbidden_sources):
+        return
+    dependency_map: dict = getattr(context, "_runtime_skill_dependency_map", None) or {}
+    mcp_backed = {str(slug) for slug, node in dependency_map.items() if isinstance(node, dict) and node.get("mcps")}
+    dropped: list[str] = []
+    for attr in ("_prompt_skills", "_readable_skills"):
+        current = list(getattr(context, attr, None) or [])
+        kept = [slug for slug in current if str(slug) not in mcp_backed]
+        dropped.extend(slug for slug in current if str(slug) in mcp_backed)
+        setattr(context, attr, kept)
+    if dropped:
+        manifest.amendments.append(
+            {
+                "type": "SKILL_PLAN_DISPATCH",
+                "dropped_skills": list(dict.fromkeys(str(slug) for slug in dropped)),
+                "reason_code": "STRUCTURED_DATABASE_FORBIDDEN",
+            }
+        )
 
 
 async def _persist_turn_runtime(
@@ -818,9 +850,7 @@ def _append_knowledge_source_uses(
         outcome = AuthorityOutcome.HIT if evidence_ids else AuthorityOutcome.MISS
         if str(contract.get("status") or "").upper() in {"FAILED", "UNAVAILABLE"}:
             outcome = AuthorityOutcome.UNAVAILABLE
-    claim_id = (
-        "claim:literature" if plan.task.primary_intent.value == "HYBRID_VERIFICATION" else "claim:primary"
-    )
+    claim_id = "claim:literature" if plan.task.primary_intent.value == "HYBRID_VERIFICATION" else "claim:primary"
     manifest.authority_outcomes = [
         *[item for item in manifest.authority_outcomes if item.claim_id != claim_id],
         AuthorityDecision(
@@ -828,32 +858,36 @@ def _append_knowledge_source_uses(
             outcome=outcome,
             evidence_level=plan.evidence.level,
             evidence_ids=list(dict.fromkeys(evidence_ids)),
-            reason_code=(
-                str(authority_decision.get("reason_code") or contract.get("error_code") or "") or None
-            ),
+            reason_code=(str(authority_decision.get("reason_code") or contract.get("error_code") or "") or None),
         ),
     ]
 
 
 # 事实核验修复：草稿超长直接放弃修复走降级渲染，避免修复调用本身成为成本放大器。
 _FACT_REPAIR_MAX_ATTEMPTS = 2
-_FACT_REPAIR_DRAFT_LIMIT = 30000
+_FACT_REPAIR_DRAFT_LIMIT = 60000
 _FACT_REPAIR_PROMPT = """你是 MCP 事实核验修复器。下面这份回答草稿未通过服务器端事实级核验，\
 你必须修复它使其通过核验。你只能做三类操作，绝不能引入新事实：
-1. 为缺少 [MCP-F:audit:fact] 标记的事实行补上真实标记（只能使用【可用事实清单】里的标记）；
+1. 为缺少 [MCP-F:audit:fact] 标记的行补上真实标记（只能使用【可用事实清单】里的标记，\
+字符串型事实与数值型事实的标记同样有效）；
 2. 删除无法引用任何事实支撑的行或字段（包括无来源的数字、来历不明的叙述）；
 3. 把写错的数字改成【可用事实清单】中明确给出的数值。
 规则：
 - 保持首行「数据模式：SOURCE-ONLY」原样不变；
-- 每一条事实句、每一个表格数据行必须在同一行附带至少一个真实标记；
-- 行内独立数字必须存在于该行所引事实的数值中；坐标差等派生数字若清单中没有，删除该句而不是自己计算；
-- 不要新增任何清单之外的结论、解释或数字；不要输出任何解释性前言，直接输出修复后的完整回答。"""
+- 除标题（# 开头）、表头行、分隔线以外的**每一行**（包括概述句、结论句、注释句）\
+都必须在同一行末尾附带至少一个真实标记；没有事实可引的句子必须整行删除，不许保留；
+- 行内独立数字必须存在于该行所引事实的数值中；坐标差等派生数字若清单中没有对应计算结果，\
+删除该句而不是自己计算；
+- 不要新增任何清单之外的结论、解释或数字；不要输出任何解释性前言或代码围栏，\
+直接输出修复后的完整回答。"""
 
 
 async def _repair_source_fact_grounding(
     draft_text: str,
     validation: dict[str, Any],
     source_uses: list[Any],
+    *,
+    repair_model_spec: str | None = None,
 ) -> str | None:
     """Bounded repair round: add markers / drop unsupported lines, never new facts.
 
@@ -885,26 +919,43 @@ async def _repair_source_fact_grounding(
             "无支撑数字": unsupported[:20],
             "无效标记": grounding.get("invalid_markers") or [],
         },
-        "可用事实清单": catalog[:200],
+        "可用事实清单": catalog[:120],
     }
     try:
         from langchain.messages import HumanMessage, SystemMessage
 
         from yuxi.agents.models import load_chat_model
 
-        model = load_chat_model(None, temperature=0)
-        response = await model.ainvoke(
-            [
-                SystemMessage(content=_FACT_REPAIR_PROMPT),
-                HumanMessage(
-                    content=f"【回答草稿】\n{draft}\n\n【核验输入(JSON)】\n{json.dumps(payload, ensure_ascii=False)}"
-                ),
-            ]
-        )
+        repair_kwargs = {
+            "temperature": 0,
+            "request_timeout": 120,
+            "stream_chunk_timeout": 120,
+            "max_retries": 1,
+        }
+        model = None
+        if isinstance(repair_model_spec, str) and repair_model_spec.strip():
+            try:
+                model = load_chat_model(repair_model_spec.strip(), **repair_kwargs)
+            except Exception:
+                model = None
+        if model is None:
+            model = load_chat_model(None, **repair_kwargs)
+        messages = [
+            SystemMessage(content=_FACT_REPAIR_PROMPT),
+            HumanMessage(
+                content=f"【回答草稿】\n{draft}\n\n【核验输入(JSON)】\n{json.dumps(payload, ensure_ascii=False)}"
+            ),
+        ]
+        # 走流式聚合：部分网关/供应商只稳定放行 SSE 请求，非流式 invoke 会连接失败。
+        collected: list[str] = []
+        async for chunk in model.astream(messages):
+            piece = getattr(chunk, "content", "")
+            if isinstance(piece, str):
+                collected.append(piece)
     except Exception as error:  # 模型不可用时修复通道直接失效，回落降级渲染
         logger.warning(f"MCP fact grounding repair skipped: {type(error).__name__}: {error}")
         return None
-    repaired = str(getattr(response, "content", "") or "").strip()
+    repaired = "".join(collected).strip()
     if not repaired.startswith("数据模式"):
         return None
     return repaired
@@ -915,10 +966,12 @@ async def _finalize_guarded_source_text(
     *,
     evidence_level,
     source_uses: list[Any],
+    repair_model_spec: str | None = None,
+    source_policy: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """终态门禁 + 有界修复 + 确定性降级：修复失败绝不发布未核验内容。"""
     guarded, validation = guard_answer_for_evidence_level(
-        draft, evidence_level=evidence_level, source_uses=source_uses
+        draft, evidence_level=evidence_level, source_uses=source_uses, source_policy=source_policy
     )
     attempts: list[dict[str, Any]] = []
 
@@ -928,12 +981,21 @@ async def _finalize_guarded_source_text(
 
     if not _passed(validation):
         for attempt in range(1, _FACT_REPAIR_MAX_ATTEMPTS + 1):
-            repaired = await _repair_source_fact_grounding(draft, validation, source_uses)
+            repaired = await _repair_source_fact_grounding(
+                draft, validation, source_uses, repair_model_spec=repair_model_spec
+            )
             attempts.append({"attempt": attempt, "repaired": bool(repaired)})
             if not repaired:
-                break
+                # 瞬时失败（连接/超时）也给第二轮一次机会；草稿超限等永久性
+                # 原因会连续返回 None，同样快速放行到降级渲染。
+                continue
             guarded, validation = guard_answer_for_evidence_level(
-                repaired, evidence_level=evidence_level, source_uses=source_uses
+                repaired, evidence_level=evidence_level, source_uses=source_uses, source_policy=source_policy
+            )
+            logger.info(
+                "Source fact grounding repair round finished; "
+                f"passed={_passed(validation)} "
+                f"grounding={json.dumps(validation.get('fact_grounding') or {}, ensure_ascii=False)}"
             )
             if _passed(validation):
                 break
@@ -942,8 +1004,38 @@ async def _finalize_guarded_source_text(
             if degraded is not None:
                 guarded = degraded
                 validation = {**validation, "status": "DEGRADED", "degraded_render": True}
+            logger.info(
+                "Source fact grounding rejected the model draft; "
+                f"attempts={json.dumps(attempts, ensure_ascii=False)} "
+                f"grounding={json.dumps(validation.get('fact_grounding') or {}, ensure_ascii=False)} "
+                f"draft_head={draft[:4000]!r}"
+            )
     if attempts:
         validation = {**validation, "fact_repair_attempts": attempts}
+    try:
+        from yuxi.trace import emit_trace
+
+        grounding = validation.get("fact_grounding") or {}
+        emit_trace(
+            category="RUN",
+            operation="answer_guard",
+            event_type="answer.source_guard.completed",
+            attributes={
+                "guard_status": str(validation.get("status") or ""),
+                "evidence_level": str(getattr(evidence_level, "value", evidence_level)),
+                "fact_required": bool(grounding.get("required")),
+                "fact_passed": bool(grounding.get("passed")),
+                "marker_count": int(grounding.get("marker_count") or 0),
+                "ungrounded_line_count": len(grounding.get("ungrounded_lines") or []),
+                "unsupported_number_count": len(grounding.get("unsupported_numbers") or []),
+                "invalid_marker_count": len(grounding.get("invalid_markers") or []),
+                "degraded_render": bool(validation.get("degraded_render")),
+                "repair_attempt_count": len(attempts),
+            },
+            visibility="USER",
+        )
+    except Exception:  # 轨迹事件绝不影响发布路径
+        pass
     return guarded, validation
 
 
@@ -1002,16 +1094,30 @@ async def _finalize_mcp_manifest(
             if plan.evidence.level == EvidenceLevel.BIBLIOGRAPHIC
             else EvidenceLevel.DATA_PROVENANCE
         )
+        # 点名服务器后验（P1-A）：required_server 存在时，capability 命中还必须
+        # 来自该服务器的成功调用；等价能力服务器（如 ricekb 之于 bio-mcp）
+        # 不得静默顶替点名项。
+        required_server = str(getattr(plan, "required_server", None) or "")
+        server_satisfied = not required_server or any(str(audit.server_slug) == required_server for audit in matched)
+        decision_satisfied = bool(matched) and server_satisfied
         manifest.authority_outcomes = [
             *[item for item in manifest.authority_outcomes if item.claim_id != decision_claim_id],
             AuthorityDecision(
                 claim_id=decision_claim_id,
-                outcome=AuthorityOutcome.HIT if matched else AuthorityOutcome.UNAVAILABLE,
+                outcome=AuthorityOutcome.HIT if decision_satisfied else AuthorityOutcome.UNAVAILABLE,
                 evidence_level=decision_level,
                 evidence_ids=[f"mcp:{audit.id}" for audit in matched],
-                reason_code=None if matched else "MCP_CAPABILITY_NOT_FULFILLED",
+                reason_code=(
+                    None
+                    if decision_satisfied
+                    else "MCP_SERVER_NOT_INVOKED"
+                    if matched
+                    else "MCP_CAPABILITY_NOT_FULFILLED"
+                ),
             ),
         ]
+    else:
+        server_satisfied = True
     if pinned_mcps:
         successful_servers = {str(audit.server_slug) for audit in audits if str(audit.status).lower() == "success"}
         for slug, strength in pinned_mcps:
@@ -1023,11 +1129,11 @@ async def _finalize_mcp_manifest(
                 fulfilled=slug in successful_servers,
                 reason_code=None if slug in successful_servers else "MENTION_MCP_NOT_INVOKED",
             )
-    if matched:
+    if matched and server_satisfied:
         return True
     if plan.requires_mcp:
         manifest.status = "SOURCE_UNAVAILABLE"
-        manifest.error_code = "SOURCE_UNAVAILABLE"
+        manifest.error_code = "MCP_SERVER_NOT_INVOKED" if matched and not server_satisfied else "SOURCE_UNAVAILABLE"
         return False
     return True
 
@@ -1070,8 +1176,7 @@ async def _finalize_mention_subagents(
                             "child_run_id": str(child.id),
                             "child_agent_slug": str(child.agent_slug),
                         },
-                        "adopted": bool(raw_source_use.get("adopted"))
-                        and str(child.status).lower() == "completed",
+                        "adopted": bool(raw_source_use.get("adopted")) and str(child.status).lower() == "completed",
                     }
                 )
             except ValueError:
@@ -1985,12 +2090,15 @@ async def stream_agent_chat(
     # mention.v2：把冻结的提及解析结论绑定到 runtime，供 MODEL_DECIDES 路径的
     # 统一检索工具同样施加文献硬约束（@doc 不再只约束定位链）。
     input_context["_mention_resolution"] = _frozen_mention_resolution(meta)
+    from yuxi.agents.mcp.service import list_builtin_mcp_slugs
+
     turn_plan = plan_turn(
         model_query,
         has_knowledge_scope=bool(knowledge_scope_snapshot.get("effective_kb_ids") or []),
         configured_mcps=list(input_context.get("mcps") or []),
         knowledge_strategy=str(knowledge_scope_snapshot.get("knowledge_strategy") or "MODEL_DECIDES"),
         has_image=bool(image_content),
+        known_mcps=list_builtin_mcp_slugs(),
     )
     source_manifest = _initial_source_manifest(turn_plan)
     input_context["_turn_execution_plan"] = turn_plan.public_dict()
@@ -1999,6 +2107,7 @@ async def stream_agent_chat(
     meta["source_policy"] = turn_plan.source.policy.value
     context = _build_agent_context(agent, input_context)
     _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
+    _apply_skill_plan_dispatch(context, turn_plan, source_manifest)
     langfuse_run = _build_langfuse_run_context(
         current_user=current_user,
         thread_id=thread_id,
@@ -2372,10 +2481,28 @@ async def stream_agent_chat(
         )
         if _settle_source_manifest_status(turn_plan, source_manifest, mcp_source_valid):
             accumulated_content = [_plan_failure_answer(turn_plan)]
+            plan_failure_answer_active = True
+        else:
+            plan_failure_answer_active = False
         glossary_contract_ready = (
             turn_plan.task.primary_intent.value == "GLOSSARY_LOOKUP" and knowledge_contract is not None
         )
-        if accumulated_content or glossary_contract_ready:
+        if plan_failure_answer_active:
+            # 门禁分派：计划失败答复是系统生成的确定性文案，不是模型散文——
+            # 不再过 source 门（否则同轮若有其他成功调用的事实清单，拒绝文案
+            # 本身会被逐行核验拒绝/降级），也不进 citation 门。
+            source_output_validation = {
+                "schema_version": "answer-evidence-output-guard.v2",
+                "status": "SKIPPED",
+                "skip_reason": "PLAN_FAILURE_ANSWER",
+                "evidence_level": getattr(turn_plan.evidence.level, "value", turn_plan.evidence.level),
+            }
+            source_manifest.validation_results.append(source_output_validation)
+            buffered_root_metadata = {
+                **dict(buffered_root_metadata or {}),
+                "source_output_guard": source_output_validation,
+            }
+        elif accumulated_content or glossary_contract_ready:
             if glossary_contract_ready:
                 guarded_source_text, source_output_validation = guard_glossary_answer(
                     "".join(accumulated_content), contract=knowledge_contract
@@ -2385,6 +2512,8 @@ async def stream_agent_chat(
                     "".join(accumulated_content),
                     evidence_level=turn_plan.evidence.level,
                     source_uses=source_manifest.source_uses,
+                    repair_model_spec=meta.get("model_spec"),
+                    source_policy=turn_plan.source.policy.value,
                 )
             accumulated_content = [guarded_source_text]
             source_manifest.validation_results.append(source_output_validation)
@@ -2400,16 +2529,29 @@ async def stream_agent_chat(
                 manifest=source_manifest,
             )
 
+        source_guard_status = str((source_output_validation or {}).get("status") or "")
         if citation_sensitive_output and knowledge_contract is not None and accumulated_content:
-            guarded_content, locator_validation = _guard_knowledge_answer(
-                "".join(accumulated_content), knowledge_contract
-            )
-            accumulated_content = [guarded_content]
-            full_msg = AIMessage(
-                id=buffered_root_message_id or f"msg_{uuid.uuid4().hex}",
-                content=guarded_content,
-                additional_kwargs={"locator_validation": locator_validation},
-            )
+            if source_guard_status in {"REJECTED", "DEGRADED", "SKIPPED"}:
+                # 门禁分派：source 门已拒绝/降级（或计划失败答复）时文本为系统生成，
+                # citation/locator 门只管模型散文的文档主张——拒绝文案上不贴定位芯片。
+                full_msg = _ensure_full_msg(full_msg, accumulated_content)
+                buffered_root_metadata = {
+                    **dict(buffered_root_metadata or {}),
+                    "citation_gate_dispatch": {
+                        "applied": False,
+                        "skip_reason": f"SOURCE_GUARD_{source_guard_status}",
+                    },
+                }
+            else:
+                guarded_content, locator_validation = _guard_knowledge_answer(
+                    "".join(accumulated_content), knowledge_contract
+                )
+                accumulated_content = [guarded_content]
+                full_msg = AIMessage(
+                    id=buffered_root_message_id or f"msg_{uuid.uuid4().hex}",
+                    content=guarded_content,
+                    additional_kwargs={"locator_validation": locator_validation},
+                )
         else:
             full_msg = _ensure_full_msg(full_msg, accumulated_content)
         trace_info = get_trace_info(langfuse_run)

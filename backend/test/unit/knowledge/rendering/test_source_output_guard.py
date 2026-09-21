@@ -258,3 +258,49 @@ def test_factless_adopted_sources_carry_no_fact_obligation():
     assert audit["fact_grounding"]["required"] is False
     assert audit["fact_grounding"]["passed"] is True
     assert audit["source_only_verified"] is True
+
+
+# ── AUTO 轮门禁分派（P0-B5）：叙述行豁免、数字行仍严格 ───────────
+
+
+def test_auto_policy_exempts_narrative_lines_but_keeps_numeric_lines_strict():
+    uses = _fact_source_uses({"id": "f_1234567890abcdef", "path": "/gene/symbol", "string_value": "Wx"})
+    text = "数据模式：SOURCE-ONLY\n该基因在胚乳中高表达。[MCP-F:42:f_1234567890abcdef]\n基因全长 1860 bp。\n"
+    # 无分派（默认严格口径）：叙述行+数字行都要求标记 → 拒绝
+    _, strict = guard_answer_for_evidence_level(text, evidence_level="E1_DATA_PROVENANCE", source_uses=uses)
+    assert strict["status"] == "REJECTED"
+    # AUTO 分派：叙述行豁免，但数字行（1860 bp 无标记）仍必拒——数字口径不放松
+    _, relaxed = guard_answer_for_evidence_level(
+        text, evidence_level="E1_DATA_PROVENANCE", source_uses=uses, source_policy="AUTO"
+    )
+    assert relaxed["status"] == "REJECTED"
+    assert relaxed["fact_grounding"]["relaxed"] is True
+    assert 3 in relaxed["fact_grounding"]["ungrounded_lines"]
+    assert 2 not in relaxed["fact_grounding"]["ungrounded_lines"]
+
+
+def test_auto_policy_narrative_only_answer_passes():
+    uses = _fact_source_uses({"id": "f_1234567890abcdef", "path": "/gene/symbol", "string_value": "Wx"})
+    text = (
+        "数据模式：SOURCE-ONLY\n"
+        "该基因在胚乳中高表达，参与淀粉合成调控。[MCP-F:42:f_1234567890abcdef]\n"
+        "该位点的命名历史与各来源收录情况见下方记录。\n"
+    )
+    _, relaxed = guard_answer_for_evidence_level(
+        text, evidence_level="E1_DATA_PROVENANCE", source_uses=uses, source_policy="AUTO"
+    )
+    assert relaxed["status"] == "PASSED"
+    assert relaxed["fact_grounding"]["relaxed"] is True
+    # 同一答案在显式数据库轮（无分派）仍被逐行拒绝——AUTO 边界由测试锁定
+    _, strict = guard_answer_for_evidence_level(text, evidence_level="E1_DATA_PROVENANCE", source_uses=uses)
+    assert strict["status"] == "REJECTED"
+
+
+def test_auto_relaxation_keeps_gene_identifier_lines_strict():
+    uses = _fact_source_uses({"id": "f_1234567890abcdef", "path": "/gene/symbol", "string_value": "Wx"})
+    text = "数据模式：SOURCE-ONLY\n该位点对应 LOC_Os06g0133000。\n"
+    _, relaxed = guard_answer_for_evidence_level(
+        text, evidence_level="E1_DATA_PROVENANCE", source_uses=uses, source_policy="AUTO"
+    )
+    # 基因标识符是可核验主张：叙述豁免不覆盖标识符行
+    assert relaxed["status"] == "REJECTED"

@@ -192,6 +192,36 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
+#: 工具层把异常吞成字符串返回时的已知错误文案前缀（langchain-core
+#: handle_tool_error → "Error: ..."；langgraph ToolNode / MCP server 内部
+#: 兜底 → "Error executing tool ..."）。前缀只做兜底，结构化状态优先。
+_TOOL_ERROR_TEXT_PREFIXES = ("error:", "error executing")
+
+
+def _detect_tool_error(
+    text: str,
+    *,
+    output: Any,
+    blocks: Any,
+    artifact_data: Any,
+) -> bool:
+    """判定一次工具调用是否失败：结构化状态优先，文本前缀兜底。
+
+    多条错误出口任一命中即为 error：ToolMessage.status、MCP isError 块 /
+    artifact 标志、被工具层吞掉异常后返回的错误文案。错误文本绝不能以
+    success 身份进入事实账本（会被当成"已核验事实"转述）。
+    """
+    if str(getattr(output, "status", "") or "").lower() == "error":
+        return True
+    for block in blocks if isinstance(blocks, list) else []:
+        if isinstance(block, dict) and (block.get("is_error") or block.get("isError")):
+            return True
+    if isinstance(artifact_data, dict) and (artifact_data.get("is_error") or artifact_data.get("isError")):
+        return True
+    head = str(text or "").lstrip().lower()
+    return head.startswith(_TOOL_ERROR_TEXT_PREFIXES)
+
+
 def _normalize_tool_output(output: Any, *, provenance: dict[str, Any]) -> McpToolResult:
     artifact = None
     content = output
@@ -218,7 +248,7 @@ def _normalize_tool_output(output: Any, *, provenance: dict[str, Any]) -> McpToo
         candidate = artifact_data.get("structured_content") or artifact_data.get("structuredContent")
         if isinstance(candidate, dict):
             structured = candidate
-    is_error = text.lstrip().lower().startswith("error:")
+    is_error = _detect_tool_error(text, output=output, blocks=block_list, artifact_data=artifact_data)
     return McpToolResult(
         text=text,
         is_error=is_error,

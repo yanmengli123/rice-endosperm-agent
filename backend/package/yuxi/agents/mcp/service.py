@@ -224,6 +224,16 @@ _DEFAULT_MCP_SERVERS = {
 # 每工具一个隔离镜像 + 统一受控启动器），镜像构建后即可在管理页启用。
 _DEFAULT_MCP_SERVERS.update(BIOINFOMCP_SERVERS)
 
+
+def list_builtin_mcp_slugs() -> list[str]:
+    """内置注册表 slug 全集（含未绑定项）。
+
+    供"点名服务器"意图解析用：用户点名了已知内置服务器但当前智能体未绑定时，
+    计划层能显式失败并点名告知，而不是静默回退到等价能力服务器。
+    """
+    return list(_DEFAULT_MCP_SERVERS)
+
+
 _RETIRED_BUILTIN_MCP_SERVER_SLUGS = ("sequentialthinking",)
 
 _SYNCED_MCP_FIELDS = (
@@ -283,9 +293,7 @@ _GENOMICS_MCP_RUNTIMES: dict[str, tuple[str, str, str]] = {
         "b42afce19b96e14b0a3f2e47ce8208eea9fe1f60",
     ),
 }
-_WORKSPACE_SCOPED_MCP_SLUGS = (
-    frozenset({"bioinfomcp-fastqc", *_GENOMICS_MCP_RUNTIMES}) | BIOINFOMCP_SLUGS
-)
+_WORKSPACE_SCOPED_MCP_SLUGS = frozenset({"bioinfomcp-fastqc", *_GENOMICS_MCP_RUNTIMES}) | BIOINFOMCP_SLUGS
 
 
 def _bioinfomcp_runtime_image(slug: str) -> str | None:

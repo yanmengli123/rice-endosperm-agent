@@ -188,6 +188,12 @@ class TurnExecutionPlan(BaseModel):
     task: TaskSpec
     source: SourceSpec
     required_capabilities: list[Capability] = Field(default_factory=list)
+    # 点名服务器绑定：自然语言"通过 BioMCP 查"解析到的已配置服务器 slug。
+    # _finalize_mcp_manifest 据此逐服务器后验，等价能力服务器不得静默顶替。
+    required_server: str | None = None
+    # 点名了已知但未绑定到当前智能体的服务器（slug）；plan 直接显式失败，
+    # 失败答复点名告知，而不是回退到 capability 级匹配。
+    required_server_missing: str | None = None
     evidence: EvidenceSpec
     answer: AnswerSpec
     claim_obligations: list[ClaimObligation] = Field(default_factory=list)
@@ -213,12 +219,9 @@ class TurnExecutionPlan(BaseModel):
             SourcePolicy.HYBRID_EXPLICIT,
             SourcePolicy.BIBLIOGRAPHY_ONLY,
         }
-        auto_database_obligation = (
-            SourceClass.STRUCTURED_DATABASE in self.source.allowed_sources
-            and any(
-                capability in {Capability.GENE_RECORD_LOOKUP, Capability.GENERIC_MCP}
-                for capability in self.required_capabilities
-            )
+        auto_database_obligation = SourceClass.STRUCTURED_DATABASE in self.source.allowed_sources and any(
+            capability in {Capability.GENE_RECORD_LOOKUP, Capability.GENERIC_MCP}
+            for capability in self.required_capabilities
         )
         return policy_requires_mcp or auto_database_obligation
 
@@ -295,9 +298,44 @@ _MECHANISM_OR_LITERATURE_CLAIM = re.compile(
 # ORYZABASE:). Deliberately excludes bare symbols such as "Wx"; those still
 # need an explicit source phrase.
 RICE_SOURCE_MCP = "ricekb"
+
+
+def _server_mention_pattern(slug: str) -> re.Pattern[str]:
+    """slug → 点名匹配：bio-mcp 命中 bio-mcp / bio_mcp / BioMCP / "bio mcp"。
+
+    边界只拦 ASCII 字母数字：中文毗邻（"通过ricekb查"）必须命中。
+    """
+    parts = [re.escape(part) for part in re.split(r"[-_]", str(slug or "")) if part]
+    body = r"[-_ ]?".join(parts) if parts else re.escape(str(slug or ""))
+    return re.compile(rf"(?<![A-Za-z0-9]){body}(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def _resolve_mentioned_server(
+    text: str,
+    *,
+    configured_mcps: list[str] | None,
+    known_mcps: list[str] | None,
+) -> tuple[str | None, str | None]:
+    """解析文本点名的 MCP 服务器，返回 (required_server, required_server_missing)。
+
+    先在已配置集合内解析（点名即绑定，等价能力服务器不得顶替）；点名了
+    已知内置项但未绑定时返回 missing——显式失败，绝不静默回退。无点名
+    返回 (None, None)，维持既有 capability 级语义。
+    """
+    configured = [str(slug).strip() for slug in (configured_mcps or []) if str(slug or "").strip()]
+    for slug in configured:
+        if _server_mention_pattern(slug).search(text):
+            return slug, None
+    configured_set = set(configured)
+    for slug in dict.fromkeys(str(item).strip() for item in (known_mcps or []) if str(item or "").strip()):
+        if slug not in configured_set and _server_mention_pattern(slug).search(text):
+            return None, slug
+    return None, None
+
+
 _RICE_SOURCE_IDENTIFIER = re.compile(
     r"(?<![A-Za-z0-9_])(?:RAP:|MSU:|ORYZABASE:)?"
-    r"(?:Os(?:0[1-9]|1[0-2])[gt]\d{7}(?:-\d{2})?|LOC_Os(?:0[1-9]|1[0-2])g\d{5}(?:\.\d+)?)"
+    r"(?:Os(?:0[1-9]|1[0-2])[gt]\d{5,7}(?:-\d{2})?|LOC_Os(?:0[1-9]|1[0-2])g\d{5,7}(?:\.\d+)?)"
     r"(?![A-Za-z0-9_])",
     re.I,
 )
@@ -310,6 +348,7 @@ def plan_turn(
     configured_mcps: list[str] | None = None,
     knowledge_strategy: str = "MODEL_DECIDES",
     has_image: bool = False,
+    known_mcps: list[str] | None = None,
 ) -> TurnExecutionPlan:
     """Build and validate a deterministic turn plan.
 
@@ -340,6 +379,17 @@ def plan_turn(
         or _KB_NEGATIVE.search(text)
         or _WEB_NEGATIVE.search(text)
     )
+
+    # 服务器级意图解析（P1-A）：只在 MCP 使用意图成立时绑定点名服务器，
+    # "BioMCP 是什么"这类纯询问不触发绑定。
+    required_server: str | None = None
+    required_server_missing: str | None = None
+    if mcp_positive:
+        required_server, required_server_missing = _resolve_mentioned_server(
+            text, configured_mcps=configured_mcps, known_mcps=known_mcps
+        )
+        if required_server:
+            reason_codes.append("EXPLICIT_MCP_SERVER_BOUND")
 
     if hybrid:
         source_policy = SourcePolicy.HYBRID_EXPLICIT
@@ -546,6 +596,13 @@ def plan_turn(
         error_code = "SOURCE_UNAVAILABLE"
         reason_codes.append("GLOSSARY_AUTHORITY_FORBIDDEN")
 
+    if required_server_missing and source_policy in {SourcePolicy.MCP_ONLY, SourcePolicy.HYBRID_EXPLICIT}:
+        # 点名的服务器存在但未绑定到当前智能体：显式失败并点名告知，
+        # 绝不静默改用其他等价能力服务器。
+        satisfiable = False
+        error_code = "MCP_SERVER_NOT_CONFIGURED"
+        reason_codes.append("MCP_SERVER_NOT_CONFIGURED")
+
     if exact_locator:
         answer_mode = "STRUCTURED_EVIDENCE_QA" if locator.get("compound") else "DETERMINISTIC_LOCATOR"
     elif evidence_level == EvidenceLevel.CLAIM_EVIDENCE:
@@ -623,6 +680,8 @@ def plan_turn(
             forbidden_sources=list(dict.fromkeys(forbidden)),
         ),
         required_capabilities=list(dict.fromkeys(capabilities)),
+        required_server=required_server,
+        required_server_missing=required_server_missing,
         evidence=EvidenceSpec(
             required=evidence_required,
             exact_locator_required=exact_locator,
@@ -662,8 +721,7 @@ def initial_source_manifest(plan: TurnExecutionPlan) -> RunSourceManifest:
         mcp_requested=plan.requires_mcp,
         status=(
             "PLANNED"
-            if plan.satisfiable
-            and (plan.requires_document_retrieval or plan.requires_mcp or canonical_requested)
+            if plan.satisfiable and (plan.requires_document_retrieval or plan.requires_mcp or canonical_requested)
             else "COMPLETED"
             if plan.satisfiable
             else "FAILED"

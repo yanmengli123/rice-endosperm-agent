@@ -282,3 +282,79 @@ def test_leading_combine_phrase_routes_to_hybrid_verification():
     assert plan.source.policy == SourcePolicy.HYBRID_EXPLICIT
     assert [item.claim_id for item in plan.claim_obligations] == ["claim:database", "claim:literature"]
     assert SourceClass.CANONICAL_RECORD in plan.source.allowed_sources
+
+
+# ── 服务器级意图解析（P1-A）──────────────────────────────────────
+
+
+def test_named_configured_server_binds_to_plan():
+    plan = plan_turn(
+        "通过 BioMCP 查 Wx 基因信息",
+        has_knowledge_scope=True,
+        configured_mcps=["bio-mcp", "ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+
+    assert plan.source.policy == SourcePolicy.MCP_ONLY
+    assert plan.required_server == "bio-mcp"
+    assert plan.required_server_missing is None
+    assert "EXPLICIT_MCP_SERVER_BOUND" in plan.reason_codes
+    assert plan.satisfiable is True
+
+
+def test_named_unbound_builtin_server_fails_explicitly_without_silent_substitution():
+    plan = plan_turn(
+        "通过 BioMCP 查 Wx 基因信息",
+        has_knowledge_scope=True,
+        configured_mcps=["ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+
+    assert plan.required_server is None
+    assert plan.required_server_missing == "bio-mcp"
+    assert plan.satisfiable is False
+    assert plan.error_code == "MCP_SERVER_NOT_CONFIGURED"
+    assert "MCP_SERVER_NOT_CONFIGURED" in plan.reason_codes
+
+
+def test_plain_mcp_mention_without_server_name_keeps_capability_semantics():
+    plan = plan_turn(
+        "通过 MCP 查 Wx 基因信息",
+        has_knowledge_scope=True,
+        configured_mcps=["ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+
+    assert plan.required_server is None
+    assert plan.required_server_missing is None
+    assert plan.satisfiable is True
+
+
+def test_server_name_without_usage_intent_does_not_bind():
+    plan = plan_turn(
+        "BioMCP 是一个生物信息学 MCP 服务器吗",
+        has_knowledge_scope=True,
+        configured_mcps=["ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+
+    assert plan.required_server is None
+    assert plan.required_server_missing is None
+
+
+# ── 基因 ID 口径统一（P1-D）：7 位 MSU/RAP 形态触发路由 ──────────
+
+
+def test_seven_digit_msu_locus_routes_to_rice_source_mcp():
+    for scope in (False, True):
+        plan = plan_turn("LOC_Os06g0133000 是什么基因？", has_knowledge_scope=scope, configured_mcps=["ricekb"])
+        assert "RICE_SOURCE_IDENTIFIER_ROUTING" in plan.reason_codes
+        assert SourceClass.STRUCTURED_DATABASE in plan.source.allowed_sources
+        assert Capability.GENE_RECORD_LOOKUP in plan.required_capabilities
+        assert plan.requires_mcp is True
+        assert plan.satisfiable is True
+
+
+def test_seven_digit_rap_locus_also_routes():
+    plan = plan_turn("Os07g0842000 的注释有哪些", has_knowledge_scope=False, configured_mcps=["ricekb"])
+    assert "RICE_SOURCE_IDENTIFIER_ROUTING" in plan.reason_codes

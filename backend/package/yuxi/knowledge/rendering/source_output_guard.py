@@ -17,6 +17,9 @@ _REFERENCE_BLOCK = re.compile(r"\n*【证据引用】[^\n]*\n(?:-\s*E\d+[^\n]*(?
 _SOURCE_ONLY = re.compile(r"数据模式\s*[：:]\s*SOURCE-ONLY", re.I)
 _FACT_MARKER = re.compile(r"\[MCP-F:(\d+):(f_[0-9a-f]{16})\]", re.I)
 _FACT_LEDGER_BLOCK = re.compile(r"\s*<YUXI_MCP_FACT_LEDGER>.*?</YUXI_MCP_FACT_LEDGER>\s*", re.S)
+# 基因标识符提示（宽松形态，仅用于 AUTO 轮判定"该行是否携带可核验主张"）：
+# LOC_Os06g0133000 / Os07g0842000 / Os06t0101600 一类。
+_GENE_ID_HINT = re.compile(r"LOC_Os\d|Os\d{1,2}[gt]\d", re.IGNORECASE)
 
 
 def guard_non_document_source_answer(text: str) -> tuple[str, dict[str, int | str]]:
@@ -79,7 +82,7 @@ def _fact_catalog(source_uses: list[Any] | None) -> dict[tuple[int, str], dict[s
     return catalog
 
 
-def _line_requires_fact_marker(line: str) -> bool:
+def _line_requires_fact_marker(line: str, *, relaxed: bool = False) -> bool:
     stripped = line.strip()
     if not stripped or _SOURCE_ONLY.search(stripped):
         return False
@@ -87,8 +90,34 @@ def _line_requires_fact_marker(line: str) -> bool:
         return False
     if stripped.endswith(("：", ":")) and len(stripped) <= 80:
         return False
-    if stripped.startswith("|") and any(label in stripped for label in ("字段", "来源", "状态", "Field", "Source")):
+    if stripped.startswith("|") and any(
+        label in stripped
+        for label in (
+            "字段",
+            "字段（事实路径）",
+            "来源",
+            "状态",
+            "数据项",
+            "项目",
+            "属性",
+            "引用",
+            "值",
+            "Field",
+            "Source",
+            "Value",
+            "Item",
+            "Reference",
+        )
+    ):
         return False
+    if relaxed:
+        # AUTO 轮门禁分派：无数值主张、无基因标识符的叙述行不强制 MCP-F，
+        # 文档侧主张交给 citation/locator 门；带数字或标识符的行仍逐行核验
+        # （统一数字口径不变）。MCP_ONLY/HYBRID 等显式数据库轮保持全行严格。
+        visible = mask_structural_number_spans(_FACT_MARKER.sub("", stripped))
+        visible = re.sub(r"^\s*\d+[.)、]\s+", "", visible)
+        if not extract_number_tokens(visible) and not _GENE_ID_HINT.search(visible):
+            return False
     return bool(re.search(r"[A-Za-z0-9\u4e00-\u9fff]", _FACT_MARKER.sub("", stripped)))
 
 
@@ -101,7 +130,7 @@ def _normalize_number(raw: str) -> str:
     return str(int(number)) if number.is_integer() else format(number, ".15g")
 
 
-def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[str, Any]:
+def _validate_fact_grounding(text: str, source_uses: list[Any] | None, *, relaxed: bool = False) -> dict[str, Any]:
     adopted_sources = _adopted_mcp_sources(source_uses)
     catalog = _fact_catalog(source_uses)
     invalid_markers: list[str] = []
@@ -114,7 +143,7 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[s
         invalid_markers.extend(
             f"{audit_id}:{fact_id}" for audit_id, fact_id in markers if (audit_id, fact_id) not in catalog
         )
-        if not _line_requires_fact_marker(line):
+        if not _line_requires_fact_marker(line, relaxed=relaxed):
             # 结构行（标题/表头/分隔线/SOURCE-ONLY 声明）不承载事实主张，
             # 其中的编号类数字同样不做数值核验。
             continue
@@ -145,6 +174,8 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[s
         # 事实账本，维持 SOURCE-ONLY attestation 校验但不做逐行标记核验——否则
         # 这类轮次会被"必拒"，等于功能性禁用。
         "required": bool(adopted_sources) and bool(catalog),
+        # AUTO 策略下的分派模式：叙述行豁免（无数值/标识符主张），数字行仍严格。
+        "relaxed": bool(relaxed),
         "adopted_mcp_source_count": len(adopted_sources),
         "available_fact_count": len(catalog),
         "marker_count": marker_count,
@@ -153,12 +184,7 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[s
         "unsupported_numbers": unsupported_numbers[:20],
         "passed": (
             not (bool(adopted_sources) and bool(catalog))
-            or (
-                marker_count > 0
-                and not invalid_markers
-                and not ungrounded_lines
-                and not unsupported_numbers
-            )
+            or (marker_count > 0 and not invalid_markers and not ungrounded_lines and not unsupported_numbers)
         ),
     }
 
@@ -253,12 +279,17 @@ def guard_answer_for_evidence_level(
     *,
     evidence_level: EvidenceLevel | str,
     source_uses: list[Any] | None = None,
+    source_policy: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Enforce answer affordances from the frozen evidence level and source ledger.
 
     E0/E1/E2 may not claim PDF/page/quote evidence.  A model-emitted
     ``SOURCE-ONLY`` label additionally requires an adopted, successful ricekb
     audit row; the label is an attestation, not a formatting preference.
+
+    ``source_policy`` 驱动门禁分派：AUTO 策略下的事实义务按"数值/标识符主张"
+    逐行判定（叙述行交给文档/citation 门）；MCP_ONLY/HYBRID 等显式数据库轮
+    维持全行 MCP-F 严格口径。
     """
     try:
         level = EvidenceLevel(evidence_level)
@@ -274,7 +305,8 @@ def guard_answer_for_evidence_level(
     source_only_declared = bool(_SOURCE_ONLY.search(source))
     adopted_sources = _adopted_mcp_sources(source_uses)
     source_only_verified = not source_only_declared or bool(adopted_sources)
-    fact_grounding = _validate_fact_grounding(source, source_uses)
+    relaxed = str(source_policy or "").strip().upper() == "AUTO"
+    fact_grounding = _validate_fact_grounding(source, source_uses, relaxed=relaxed)
     fact_grounding_verified = not fact_grounding["required"] or fact_grounding["passed"]
     if (source_only_declared and not source_only_verified) or not fact_grounding_verified:
         source = (
@@ -343,9 +375,7 @@ def guard_glossary_answer(text: str, *, contract: dict[str, Any]) -> tuple[str, 
     return "\n\n".join(blocks), _glossary_guard_audit(outcome, rows, dropped, text)
 
 
-def _glossary_guard_audit(
-    outcome: str, rows: list[dict[str, Any]], dropped: int, model_text: str
-) -> dict[str, Any]:
+def _glossary_guard_audit(outcome: str, rows: list[dict[str, Any]], dropped: int, model_text: str) -> dict[str, Any]:
     return {
         "schema_version": "glossary-output-guard.v1",
         "status": "PASSED" if outcome in {"HIT", "MISS", "UNAVAILABLE", "AMBIGUOUS", "CONFLICT"} else "REJECTED",

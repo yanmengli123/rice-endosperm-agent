@@ -15,10 +15,13 @@ SCIENTIFIC_NOTATION_PATTERN = re.compile(r"^[+-]?(?:\d+\.\d+|\d+)[eE][+-]?\d+$")
 SCIENTIFIC_IDENTIFIER_IN_TEXT = re.compile(r"(?<![\w.])\d\.\d{4,}[eE]\+?0?[6-9](?!\w)")
 DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 
-# 水稻基因标识符：RAP（Os07g08420）与 MSU（LOC_Os07g40960）。
-# \b 在 LOC_ 前缀处不成立（下划线与 O 均为词字符），因此 RAP 模式不会误切 MSU ID。
-RAP_IDENTIFIER_IN_TEXT = re.compile(r"\bOs\d{1,2}g\d{5}\b", re.IGNORECASE)
-MSU_IDENTIFIER_IN_TEXT = re.compile(r"\bLOC_Os\d{1,2}g\d{5}\b", re.IGNORECASE)
+# 水稻基因标识符：RAP（Os07g0842000，RAP2/3 为 7 位，RAP1 时代存在 5 位短形态）
+# 与 MSU（LOC_Os07g40960）。位点数字段统一宽容 5-7 位，与 graphs/lexicon 的
+# _RAP_ID_PATTERN/_MSU_ID_PATTERN 同口径（LOC_Os06g0133000 一类 7 位形态必须触发
+# 路由/抽取）。lookbehind 拒绝字母数字与下划线：RAP 模式不会误切 MSU ID 内段
+# （"LOC_Os06g..." 中的 Os06g 前恒为下划线）。
+RAP_IDENTIFIER_IN_TEXT = re.compile(r"(?<![A-Za-z0-9_])Os\d{1,2}g\d{5,7}(?![0-9])", re.IGNORECASE)
+MSU_IDENTIFIER_IN_TEXT = re.compile(r"(?<![A-Za-z0-9_])LOC_Os\d{1,2}g\d{5,7}(?![0-9])", re.IGNORECASE)
 
 
 def extract_gene_identifiers(text: Any) -> list[str]:
