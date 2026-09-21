@@ -20,6 +20,17 @@
         </div>
         <div class="header__right">
           <button
+            type="button"
+            class="agent-nav-btn export-thread-btn"
+            :disabled="exportButtonDisabled"
+            :title="exportButtonTitle"
+            aria-label="导出问答 HTML"
+            @click.stop="handleExportThreadHtml"
+          >
+            <FileDown size="16" class="nav-btn-icon" />
+            <span class="hide-text">导出</span>
+          </button>
+          <button
             v-if="showStateEntry"
             type="button"
             class="agent-nav-btn agent-state-btn state-entry-btn"
@@ -731,7 +742,7 @@ import {
   onDeactivated
 } from 'vue'
 import { message } from 'ant-design-vue'
-import { ChevronDown, FolderKanban, History, LayoutList, RefreshCw } from '@lucide/vue'
+import { ChevronDown, FileDown, FolderKanban, History, LayoutList, RefreshCw } from '@lucide/vue'
 import { formatFileSize } from '@/utils/file_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -767,6 +778,7 @@ import { useAgentRunStream } from '@/composables/useAgentRunStream'
 import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
+import { useConversationExport } from '@/composables/useConversationExport'
 import { useRunTrace } from '@/composables/useRunTrace'
 import { useRunStatusArchive } from '@/composables/useRunStatusArchive'
 import EvidenceList from '@/components/evidence/EvidenceList.vue'
@@ -2290,6 +2302,32 @@ const isReplyLoading = computed(() => {
   const threadState = currentThreadState.value
   return Boolean(threadState?.replyLoadingVisible)
 })
+
+// 会话问答导出：一键把「提问 + 回答」导出为服务端渲染的美化 HTML（可打印成 PDF）
+const { exportThreadHtml, isExporting } = useConversationExport()
+const exportingCurrentThread = computed(() =>
+  currentChatId.value ? isExporting(currentChatId.value) : false
+)
+const exportButtonDisabled = computed(
+  () =>
+    !currentChatId.value ||
+    exportingCurrentThread.value ||
+    isReplyLoading.value ||
+    isProcessing.value
+)
+const exportButtonTitle = computed(() => {
+  if (!currentChatId.value) return '当前没有可导出的对话'
+  if (isProcessing.value || isReplyLoading.value) return '回答生成中，完成后即可导出'
+  if (exportingCurrentThread.value) return '正在导出…'
+  return '导出当前问答为美化 HTML（可打印成 PDF）'
+})
+const handleExportThreadHtml = () => {
+  if (!currentChatId.value) {
+    message.info('请先开始一段对话再导出')
+    return
+  }
+  exportThreadHtml(currentChatId.value)
+}
 const replyLoadingText = computed(() =>
   currentThreadState.value?.contextCompressing
     ? '正在压缩上下文...'
