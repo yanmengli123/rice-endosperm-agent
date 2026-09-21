@@ -53,7 +53,7 @@ def test_extract_number_tokens_catches_cjk_adjacent_and_attached_units():
 def test_extract_number_tokens_ignores_identifier_and_version_digits():
     # 标识符与版本号内嵌数字不构成数值主张。
     assert extract_number_tokens("LOC_Os06g01210.1") == []
-    assert extract_number_tokens("Os06t0101600-01") == ["01"]  # 与事实侧口径一致即可
+    assert extract_number_tokens("Os06t0101600-01") == []  # 连字符后缀属标识符内部
     assert extract_number_tokens("Q0DEV5") == []
     assert extract_number_tokens("v1.21.0") == []
     assert extract_number_tokens("1,770,653") == ["1,770,653"]
@@ -76,3 +76,13 @@ def test_public_manifest_carries_string_values_for_repair_and_degraded_rendering
     assert by_path["/gene/start"]["numeric_value"] == 1770556
     restricted = build_audit_manifest(facts, truncated=False, public_values=False)
     assert all("string_value" not in fact and "numeric_value" not in fact for fact in restricted["facts"])
+
+
+def test_identifier_internal_digits_after_colon_are_not_numeric_claims():
+    assert extract_number_tokens("GO:0004373, GO:0009011") == []
+    assert extract_number_tokens("PF0061010") == []
+    assert extract_number_tokens("IPR0005982") == []
+    # 尾随逗号只取数字部分
+    assert extract_number_tokens("编号 0004373,") == ["0004373"]
+    # 真正的独立数值仍要核验
+    assert "1770653" in extract_number_tokens("坐标 1770653、跨 98bp")

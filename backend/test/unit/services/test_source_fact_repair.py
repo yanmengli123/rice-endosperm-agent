@@ -35,7 +35,7 @@ _SOURCE_USES = [
 
 @pytest.mark.asyncio
 async def test_first_repair_round_success_publishes_repaired_text(monkeypatch):
-    async def fake_repair(draft, validation, source_uses):
+    async def fake_repair(draft, validation, source_uses, **kwargs):
         return _GOOD_DRAFT
 
     monkeypatch.setattr("yuxi.services.chat_service._repair_source_fact_grounding", fake_repair)
@@ -51,7 +51,7 @@ async def test_first_repair_round_success_publishes_repaired_text(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_exhausted_repairs_fall_back_to_degraded_fact_sheet(monkeypatch):
-    async def bad_repair(draft, validation, source_uses):
+    async def bad_repair(draft, validation, source_uses, **kwargs):
         return _DRAFT  # 修复失败：仍旧未通过
 
     monkeypatch.setattr("yuxi.services.chat_service._repair_source_fact_grounding", bad_repair)
@@ -70,7 +70,8 @@ async def test_exhausted_repairs_fall_back_to_degraded_fact_sheet(monkeypatch):
 @pytest.mark.asyncio
 async def test_factless_custom_mcp_sources_impose_no_fact_obligation(monkeypatch):
     """GENERIC_MCP 轮次只有非注册表来源时：无账本可核验 → 正常发布，不再必拒。"""
-    async def unexpected_repair(draft, validation, source_uses):
+
+    async def unexpected_repair(draft, validation, source_uses, **kwargs):
         raise AssertionError("repair must not run without a fact ledger")
 
     monkeypatch.setattr("yuxi.services.chat_service._repair_source_fact_grounding", unexpected_repair)

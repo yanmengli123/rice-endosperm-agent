@@ -136,3 +136,24 @@ def test_build_event_type_namespacing():
 
 def test_protocol_and_storage_retention_classes_stay_aligned():
     assert set(TRACE_EVENT_RETENTION_CLASSES) == set(TRACE_RETENTION_CLASSES)
+
+
+def test_answer_source_guard_event_is_registered_with_closed_attribute_set():
+    from yuxi.trace.protocol import EVENT_ATTRIBUTE_SCHEMAS
+
+    schema = EVENT_ATTRIBUTE_SCHEMAS.get("answer.source_guard.completed")
+    assert schema is not None
+    assert schema == frozenset(
+        {
+            "guard_status",
+            "evidence_level",
+            "fact_required",
+            "fact_passed",
+            "marker_count",
+            "ungrounded_line_count",
+            "unsupported_number_count",
+            "invalid_marker_count",
+            "degraded_render",
+            "repair_attempt_count",
+        }
+    )

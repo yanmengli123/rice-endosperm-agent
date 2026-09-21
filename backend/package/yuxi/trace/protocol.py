@@ -108,6 +108,20 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     "mcp.execution.retrying": _COMMON_ATTRIBUTES,
     "mcp.execution.interrupted": _COMMON_ATTRIBUTES,
     "mcp.audit.recorded": frozenset({"mcp_server", "mcp_tool", "mcp_audit_id", "audit_status"}),
+    "answer.source_guard.completed": frozenset(
+        {
+            "guard_status",
+            "evidence_level",
+            "fact_required",
+            "fact_passed",
+            "marker_count",
+            "ungrounded_line_count",
+            "unsupported_number_count",
+            "invalid_marker_count",
+            "degraded_render",
+            "repair_attempt_count",
+        }
+    ),
     "subagent.execution.started": frozenset({"tool", "args_digest", "agent_slug", "child_run_id"}),
     "subagent.execution.completed": frozenset({"agent_slug", "child_run_id"}),
     "subagent.execution.failed": _COMMON_ATTRIBUTES | {"agent_slug", "child_run_id"},
