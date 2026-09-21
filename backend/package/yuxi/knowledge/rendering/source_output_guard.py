@@ -14,6 +14,9 @@ _ANCHOR_ID = re.compile(r"\b(?:ea|ev|evs)_[0-9a-f]{12,64}\b", re.I)
 _PAGE = re.compile(r"第\s*\d{1,4}\s*页|\bp\.\s*\d{1,4}\b|\bpages?\s+\d{1,4}\b", re.I)
 _REFERENCE_BLOCK = re.compile(r"\n*【证据引用】[^\n]*\n(?:-\s*E\d+[^\n]*(?:\n|$))*", re.IGNORECASE)
 _SOURCE_ONLY = re.compile(r"数据模式\s*[：:]\s*SOURCE-ONLY", re.I)
+_FACT_MARKER = re.compile(r"\[MCP-F:(\d+):(f_[0-9a-f]{16})\]", re.I)
+_FACT_LEDGER_BLOCK = re.compile(r"\s*<YUXI_MCP_FACT_LEDGER>.*?</YUXI_MCP_FACT_LEDGER>\s*", re.S)
+_STANDALONE_NUMBER = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?(?![\w.])")
 
 
 def guard_non_document_source_answer(text: str) -> tuple[str, dict[str, int | str]]:
@@ -45,14 +48,107 @@ def _source_use_value(source_use: Any, field: str) -> Any:
     return getattr(source_use, field, None)
 
 
-def _has_adopted_ricekb_proof(source_uses: list[Any] | None) -> bool:
+def _adopted_mcp_sources(source_uses: list[Any] | None) -> list[Any]:
+    adopted_sources: list[Any] = []
     for source_use in source_uses or []:
-        provider = str(_source_use_value(source_use, "provider_id") or "").casefold()
         status = str(_source_use_value(source_use, "status") or "").casefold()
         adopted = bool(_source_use_value(source_use, "adopted"))
-        if provider == "ricekb" and status == "success" and adopted:
-            return True
-    return False
+        source_use_id = str(_source_use_value(source_use, "source_use_id") or "")
+        provenance = _source_use_value(source_use, "provenance") or {}
+        if status == "success" and adopted and (source_use_id.startswith("mcp:") or "mcp_call_audit_id" in provenance):
+            adopted_sources.append(source_use)
+    return adopted_sources
+
+
+def _fact_catalog(source_uses: list[Any] | None) -> dict[tuple[int, str], dict[str, Any]]:
+    catalog: dict[tuple[int, str], dict[str, Any]] = {}
+    for source_use in _adopted_mcp_sources(source_uses):
+        provenance = _source_use_value(source_use, "provenance") or {}
+        if not isinstance(provenance, dict):
+            continue
+        try:
+            audit_id = int(provenance.get("mcp_call_audit_id"))
+        except (TypeError, ValueError):
+            continue
+        manifest = provenance.get("fact_manifest")
+        if not isinstance(manifest, dict):
+            continue
+        for fact in manifest.get("facts") or []:
+            if isinstance(fact, dict) and re.fullmatch(r"f_[0-9a-f]{16}", str(fact.get("id") or ""), re.I):
+                catalog[(audit_id, str(fact["id"]).lower())] = fact
+    return catalog
+
+
+def _line_requires_fact_marker(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or _SOURCE_ONLY.search(stripped):
+        return False
+    if stripped.startswith("#") or re.fullmatch(r"[| :\-]+", stripped):
+        return False
+    if stripped.endswith(("：", ":")) and len(stripped) <= 80:
+        return False
+    if stripped.startswith("|") and any(label in stripped for label in ("字段", "来源", "状态", "Field", "Source")):
+        return False
+    return bool(re.search(r"[A-Za-z0-9\u4e00-\u9fff]", _FACT_MARKER.sub("", stripped)))
+
+
+def _normalize_number(raw: str) -> str:
+    value = raw.replace(",", "")
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    return str(int(number)) if number.is_integer() else format(number, ".15g")
+
+
+def _validate_fact_grounding(text: str, source_uses: list[Any] | None) -> dict[str, Any]:
+    adopted_sources = _adopted_mcp_sources(source_uses)
+    catalog = _fact_catalog(source_uses)
+    invalid_markers: list[str] = []
+    ungrounded_lines: list[int] = []
+    unsupported_numbers: list[dict[str, Any]] = []
+    marker_count = 0
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        markers = [(int(audit_id), fact_id.lower()) for audit_id, fact_id in _FACT_MARKER.findall(line)]
+        marker_count += len(markers)
+        invalid_markers.extend(
+            f"{audit_id}:{fact_id}" for audit_id, fact_id in markers if (audit_id, fact_id) not in catalog
+        )
+        if _line_requires_fact_marker(line) and not markers:
+            ungrounded_lines.append(line_number)
+            continue
+        cited_numbers = {
+            _normalize_number(str(catalog[key]["numeric_value"]))
+            for key in markers
+            if key in catalog and "numeric_value" in catalog[key]
+        }
+        for key in markers:
+            if key in catalog:
+                cited_numbers.update(
+                    _normalize_number(str(value)) for value in catalog[key].get("numeric_tokens") or []
+                )
+        visible_line = _FACT_MARKER.sub("", line)
+        visible_line = re.sub(r"^\s*\d+[.)、]\s+", "", visible_line)
+        for raw_number in _STANDALONE_NUMBER.findall(visible_line):
+            normalized = _normalize_number(raw_number)
+            if normalized not in cited_numbers:
+                unsupported_numbers.append({"line": line_number, "value": raw_number})
+    return {
+        "schema_version": "mcp-fact-grounding.v1",
+        "required": bool(adopted_sources),
+        "adopted_mcp_source_count": len(adopted_sources),
+        "available_fact_count": len(catalog),
+        "marker_count": marker_count,
+        "invalid_markers": invalid_markers[:20],
+        "ungrounded_lines": ungrounded_lines[:20],
+        "unsupported_numbers": unsupported_numbers[:20],
+        "passed": bool(adopted_sources)
+        and bool(catalog)
+        and marker_count > 0
+        and not invalid_markers
+        and not ungrounded_lines
+        and not unsupported_numbers,
+    }
 
 
 def guard_answer_for_evidence_level(
@@ -72,27 +168,31 @@ def guard_answer_for_evidence_level(
     except ValueError:
         level = EvidenceLevel.NONE
 
-    source = str(text or "")
+    source = _FACT_LEDGER_BLOCK.sub("", str(text or "")).strip()
     document_guard: dict[str, Any] = {"applied": False}
     if level in {EvidenceLevel.NONE, EvidenceLevel.DATA_PROVENANCE, EvidenceLevel.BIBLIOGRAPHIC}:
         source, document_guard = guard_non_document_source_answer(source)
         document_guard["applied"] = True
 
     source_only_declared = bool(_SOURCE_ONLY.search(source))
-    source_only_verified = not source_only_declared or _has_adopted_ricekb_proof(source_uses)
-    if source_only_declared and not source_only_verified:
+    adopted_sources = _adopted_mcp_sources(source_uses)
+    source_only_verified = not source_only_declared or bool(adopted_sources)
+    fact_grounding = _validate_fact_grounding(source, source_uses)
+    fact_grounding_verified = not fact_grounding["required"] or fact_grounding["passed"]
+    if (source_only_declared and not source_only_verified) or not fact_grounding_verified:
         source = (
-            "当前回答未取得可审计的 RiceKB 成功调用记录，无法发布 SOURCE-ONLY 数据结论。"
-            "系统未使用模型记忆补写数据库事实。"
+            "当前回答未通过 MCP 事实级核验，无法发布数据库结论。"
+            "系统已阻止无有效事实引用、越权数字或模型自行补写的内容；请重试并让每条事实引用本次工具返回的 MCP-F 标记。"
         )
 
     return source, {
-        "schema_version": "answer-evidence-output-guard.v1",
+        "schema_version": "answer-evidence-output-guard.v2",
         "evidence_level": level.value,
         "document_affordance_guard": document_guard,
         "source_only_declared": source_only_declared,
         "source_only_verified": source_only_verified,
-        "status": "PASSED" if source_only_verified else "REJECTED",
+        "fact_grounding": fact_grounding,
+        "status": "PASSED" if source_only_verified and fact_grounding_verified else "REJECTED",
     }
 
 

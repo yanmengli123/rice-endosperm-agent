@@ -83,3 +83,9 @@ RUN chmod 0755 /usr/local/bin/yuxi-bioinfomcp-tool
 # provenance 信封）。脚本从 Rice Research Agent 仓库字节一致 vendoring，见 docker/mcp/ricekb/VENDOR.md。
 COPY docker/mcp/ricekb/ricekb_mcp.py /usr/local/bin/ricekb-mcp
 RUN chmod 0755 /usr/local/bin/ricekb-mcp
+
+# Governed launchers for authoritative public genomics sources. The actual
+# runtimes live in pinned, read-only OCI images and never execute in the API
+# process or accept database-provided Docker arguments.
+COPY docker/mcp/run-genomics-mcp.sh /usr/local/bin/yuxi-genomics-mcp
+RUN chmod 0755 /usr/local/bin/yuxi-genomics-mcp

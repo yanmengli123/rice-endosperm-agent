@@ -166,6 +166,59 @@ _DEFAULT_MCP_SERVERS = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": "rice-research-agent:rice-kb-gateway/mcp/ricekb_mcp.py@gateway-2.2.0",
     },
+    "gene-authority": {
+        "name": "Gene Authority APIs",
+        "command": "/usr/local/bin/yuxi-genomics-mcp",
+        "args": ["gene-authority"],
+        "transport": "stdio",
+        "description": (
+            "受控访问 NCBI Datasets v2 REST、固定版本 NCBI Datasets CLI、UniProt REST、"
+            "Europe PMC REST，并提供显式坐标制的确定性区间计算。仅允许固定上游、类型化参数和有界响应。"
+        ),
+        "icon": "🧬",
+        "tags": ["内置", "权威数据源", "NCBI", "UniProt", "Europe PMC"],
+        "timeout": 300,
+        "env": {
+            "NCBI_API_KEY": "${NCBI_API_KEY}",
+            "YUXI_NCBI_EMAIL": "${YUXI_NCBI_EMAIL}",
+        },
+        "data_access_level": McpDataAccessLevel.PUBLIC.value,
+        "dependency_mode": McpDependencyMode.AUTHORITATIVE.value,
+        "source_type": SOURCE_TYPE_BUILTIN,
+        "source_ref": "builtin:gene-authority@1.0.0+ncbi-datasets-18.37.0",
+    },
+    "plant-genomics": {
+        "name": "Plant Genomics MCP",
+        "command": "/usr/local/bin/yuxi-genomics-mcp",
+        "args": ["plant-genomics"],
+        "transport": "stdio",
+        "description": (
+            "植物基因组跨源 MCP（Ensembl Plants、Phytozome、Gramene、UniProt 等），"
+            "固定到 musharna/plant-genomics-mcp v1.21.0 提交并在只读 OCI 沙箱运行。"
+        ),
+        "icon": "🌿",
+        "tags": ["内置", "植物基因组", "跨源核验"],
+        "timeout": 300,
+        "env": {"PLANT_GENOMICS_MCP_NCBI_EMAIL": "${PLANT_GENOMICS_MCP_NCBI_EMAIL}"},
+        "source_type": SOURCE_TYPE_BUILTIN,
+        "source_ref": "https://github.com/musharna/plant-genomics-mcp@ddd223f641cebf82927e9b6ce68394f047ee6930",
+    },
+    "gramene": {
+        "name": "Gramene MCP",
+        "command": "/usr/local/bin/yuxi-genomics-mcp",
+        "args": ["gramene"],
+        "transport": "stdio",
+        "description": (
+            "Gramene/SorghumBase 植物基因、同源、表达、变异和文献检索；固定到 warelab/gramene-mcp "
+            "提交 b42afce，默认使用 Gramene v69 API。上游未声明 LICENSE，生产启用前需完成法务复核。"
+        ),
+        "icon": "🌾",
+        "tags": ["内置", "Gramene", "法务复核"],
+        "timeout": 300,
+        "env": {"GRAMENE_API_BASE": "${GRAMENE_API_BASE}"},
+        "source_type": SOURCE_TYPE_BUILTIN,
+        "source_ref": "https://github.com/warelab/gramene-mcp@b42afce19b96e14b0a3f2e47ce8208eea9fe1f60",
+    },
 }
 # BioinfoMCP 其余 37 个工具：由 bioinfomcp_catalog.py 生成（固定上游提交，
 # 每工具一个隔离镜像 + 统一受控启动器），镜像构建后即可在管理页启用。
@@ -213,7 +266,26 @@ def _is_builtin_source(source_type: str | None, created_by: str | None = None, s
 _UNSET_SENTINEL = object()
 # 会话级工作区隔离的容器化 MCP：执行时注入 YUXI_MCP_EXECUTION_UID/THREAD_ID，
 # 由受控启动器只挂载本用户共享工作区与本会话 user-data。
-_WORKSPACE_SCOPED_MCP_SLUGS = frozenset({"bioinfomcp-fastqc"}) | BIOINFOMCP_SLUGS
+_GENOMICS_MCP_RUNTIMES: dict[str, tuple[str, str, str]] = {
+    "gene-authority": (
+        "YUXI_GENE_AUTHORITY_IMAGE",
+        "yuxi-gene-authority:1.0.0",
+        "gene-authority-1.0.0+ncbi-datasets-18.37.0",
+    ),
+    "plant-genomics": (
+        "YUXI_PLANT_GENOMICS_IMAGE",
+        "yuxi-plant-genomics:1.21.0",
+        "ddd223f641cebf82927e9b6ce68394f047ee6930",
+    ),
+    "gramene": (
+        "YUXI_GRAMENE_MCP_IMAGE",
+        "yuxi-gramene-mcp:b42afce",
+        "b42afce19b96e14b0a3f2e47ce8208eea9fe1f60",
+    ),
+}
+_WORKSPACE_SCOPED_MCP_SLUGS = (
+    frozenset({"bioinfomcp-fastqc", *_GENOMICS_MCP_RUNTIMES}) | BIOINFOMCP_SLUGS
+)
 
 
 def _bioinfomcp_runtime_image(slug: str) -> str | None:
@@ -254,6 +326,70 @@ def _bioinfomcp_runtime_ready(slug: str) -> bool:
     )
 
 
+@lru_cache(maxsize=16)
+def _genomics_mcp_runtime_ready(slug: str) -> bool:
+    runtime = _GENOMICS_MCP_RUNTIMES.get(slug)
+    if runtime is None or shutil.which("docker") is None:
+        return False
+    env_name, default_image, expected_revision = runtime
+    image = os.environ.get(env_name, default_image)
+    try:
+        completed = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                '{{index .Config.Labels "org.opencontainers.image.revision"}}|'
+                '{{index .Config.Labels "io.yuxi.mcp.slug"}}|'
+                '{{index .Config.Labels "io.yuxi.mcp.runtime-schema"}}',
+                image,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == f"{expected_revision}|{slug}|1"
+
+
+def _genomics_mcp_runtime_artifact(slug: str) -> dict[str, Any] | None:
+    runtime = _GENOMICS_MCP_RUNTIMES.get(slug)
+    if runtime is None or not _genomics_mcp_runtime_ready(slug):
+        return None
+    env_name, default_image, expected_revision = runtime
+    image = os.environ.get(env_name, default_image)
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    image_id = completed.stdout.strip()
+    if completed.returncode != 0 or not image_id.startswith("sha256:"):
+        return None
+    repository = image.rsplit(":", 1)[0] if ":" in image and "@" not in image else image.split("@", 1)[0]
+    return {
+        "kind": "oci_image",
+        "transport": "stdio",
+        "image_digest": f"{repository}@{image_id}",
+        "immutable": True,
+        "command": "/usr/local/bin/yuxi-genomics-mcp",
+        "args": [slug],
+        "provenance": {
+            "source_ref": _DEFAULT_MCP_SERVERS[slug]["source_ref"],
+            "verified_revision": expected_revision,
+            "runtime_schema": "1",
+        },
+    }
+
+
 # =============================================================================
 # === 配置归一化（legacy 行 -> host 可用配置）===
 # =============================================================================
@@ -292,6 +428,9 @@ def build_runtime_config(slug: str, server_config: dict[str, Any]) -> dict[str, 
                 "YUXI_BIOINFOMCP_FASTQC_IMAGE",
                 "yuxi-bioinfomcp-fastqc:7ada7918",
             )
+        if slug in _GENOMICS_MCP_RUNTIMES:
+            env_name, default_image, _revision = _GENOMICS_MCP_RUNTIMES[slug]
+            scoped_env[env_name] = os.environ.get(env_name, default_image)
         if context is not None:
             scoped_env["YUXI_MCP_EXECUTION_UID"] = context.uid
             if context.thread_id:
@@ -570,8 +709,13 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
         transport=config["transport"], url=config.get("url"), command=config.get("command"), args=config.get("args")
     )
     development = development_runtime_allowed()
-    bioinfomcp_runtime_ready = _bioinfomcp_runtime_ready(slug) if slug in _WORKSPACE_SCOPED_MCP_SLUGS else True
-    runtime_artifact = {
+    if slug in _GENOMICS_MCP_RUNTIMES:
+        runtime_ready = _genomics_mcp_runtime_ready(slug)
+    elif slug in _WORKSPACE_SCOPED_MCP_SLUGS:
+        runtime_ready = _bioinfomcp_runtime_ready(slug)
+    else:
+        runtime_ready = True
+    development_artifact = {
         "kind": "development_stdio",
         "transport": "stdio",
         "command": config.get("command"),
@@ -579,6 +723,8 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
         "immutable": False,
         "provenance": {"source_ref": config.get("source_ref", f"builtin:{slug}")},
     }
+    managed_artifact = _genomics_mcp_runtime_artifact(slug) if slug in _GENOMICS_MCP_RUNTIMES else None
+    runtime_artifact = managed_artifact or development_artifact
     values: dict[str, Any] = {
         "slug": slug,
         "name": config.get("name", slug),
@@ -600,13 +746,15 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
         "spec": plan.to_dict(),
         "lifecycle_status": (
             McpLifecycleStatus.READY.value
-            if development and bioinfomcp_runtime_ready
+            if managed_artifact is not None or (development and runtime_ready)
             else McpLifecycleStatus.BUILD_REQUIRED.value
         ),
-        "runtime_level": McpRuntimeLevel.DEVELOPMENT.value,
+        "runtime_level": (
+            McpRuntimeLevel.MANAGED_OCI.value if slug in _GENOMICS_MCP_RUNTIMES else McpRuntimeLevel.DEVELOPMENT.value
+        ),
         "runtime_artifact": runtime_artifact,
-        "data_access_level": McpDataAccessLevel.PUBLIC.value,
-        "dependency_mode": McpDependencyMode.OPTIONAL.value,
+        "data_access_level": config.get("data_access_level", McpDataAccessLevel.PUBLIC.value),
+        "dependency_mode": config.get("dependency_mode", McpDependencyMode.OPTIONAL.value),
         "raw_manifest": {"builtin": True, "slug": slug, "config": plan.to_dict()},
         "normalized_manifest": {"schema_version": 2, "deployment": runtime_artifact},
         "created_by": "system",
@@ -1284,9 +1432,15 @@ async def probe_mcp_server(
     }:
         # BioinfoMCP 镜像可能由管理员在服务启动后构建。重新检查受信标签，
         # 让管理页“连接测试”完成 BUILD_REQUIRED -> READY 的闭环。
-        if slug in _WORKSPACE_SCOPED_MCP_SLUGS:
+        if slug in _GENOMICS_MCP_RUNTIMES:
+            _genomics_mcp_runtime_ready.cache_clear()
+            runtime_ready = _genomics_mcp_runtime_ready(slug)
+        elif slug in _WORKSPACE_SCOPED_MCP_SLUGS:
             _bioinfomcp_runtime_ready.cache_clear()
-        if slug not in _WORKSPACE_SCOPED_MCP_SLUGS or not _bioinfomcp_runtime_ready(slug):
+            runtime_ready = _bioinfomcp_runtime_ready(slug)
+        else:
+            runtime_ready = False
+        if not runtime_ready:
             return await _finish(
                 error_result(
                     STAGE_RUNTIME,

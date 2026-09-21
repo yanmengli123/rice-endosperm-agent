@@ -10,6 +10,13 @@ x-api-worker-env: &api-worker-env
   YUXI_MCP_RUNTIME_URL: ${YUXI_MCP_RUNTIME_URL:-}
   YUXI_MCP_RUNTIME_TOKEN: ${YUXI_MCP_RUNTIME_TOKEN:-}
   YUXI_BIOINFOMCP_FASTQC_IMAGE: ${YUXI_BIOINFOMCP_FASTQC_IMAGE:-yuxi-bioinfomcp-fastqc:7ada7918}
+  YUXI_GENE_AUTHORITY_IMAGE: ${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.0.0}
+  YUXI_PLANT_GENOMICS_IMAGE: ${YUXI_PLANT_GENOMICS_IMAGE:-yuxi-plant-genomics:1.21.0}
+  YUXI_GRAMENE_MCP_IMAGE: ${YUXI_GRAMENE_MCP_IMAGE:-yuxi-gramene-mcp:b42afce}
+  NCBI_API_KEY: ${NCBI_API_KEY:-}
+  YUXI_NCBI_EMAIL: ${YUXI_NCBI_EMAIL:-}
+  PLANT_GENOMICS_MCP_NCBI_EMAIL: ${PLANT_GENOMICS_MCP_NCBI_EMAIL:-}
+  GRAMENE_API_BASE: ${GRAMENE_API_BASE:-https://data.gramene.org/v69}
   YUXI_BIOCOMPUTE_BROKER_URL: ${YUXI_BIOCOMPUTE_BROKER_URL:-}
   YUXI_BIOCOMPUTE_BROKER_TOKEN: ${YUXI_BIOCOMPUTE_BROKER_TOKEN:-}
   # DBs and other services
@@ -200,6 +207,30 @@ services:
       context: .
       dockerfile: docker/mcp/bioinfomcp-fastqc/Dockerfile
     image: ${YUXI_BIOINFOMCP_FASTQC_IMAGE:-yuxi-bioinfomcp-fastqc:7ada7918}
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  gene-authority-image:
+    profiles: ["genomics-mcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/gene-authority/Dockerfile
+    image: ${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.0.0}
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  plant-genomics-image:
+    profiles: ["genomics-mcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/plant-genomics/Dockerfile
+    image: ${YUXI_PLANT_GENOMICS_IMAGE:-yuxi-plant-genomics:1.21.0}
+    entrypoint: ["/bin/true"]
+    restart: "no"
+  gramene-mcp-image:
+    profiles: ["genomics-mcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp/gramene/Dockerfile
+    image: ${YUXI_GRAMENE_MCP_IMAGE:-yuxi-gramene-mcp:b42afce}
     entrypoint: ["/bin/true"]
     restart: "no"
   bioinfomcp-bamcoverage-image:

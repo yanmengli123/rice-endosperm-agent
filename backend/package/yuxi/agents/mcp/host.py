@@ -21,7 +21,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from yuxi.agents.mcp.execution import record_mcp_call
+from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
+from yuxi.agents.mcp.execution import get_mcp_execution_context, record_mcp_call
+from yuxi.agents.mcp.fact_ledger import append_model_ledger, build_audit_manifest, extract_facts
 from yuxi.agents.mcp.health import (
     CODE_CLIENT_INIT_FAILED,
     CODE_DISCOVERY_FAILED,
@@ -427,7 +429,17 @@ class LegacyLangChainHost(McpHost):
             output,
             provenance={"server_slug": slug, "tool": tool_name, "protocol": self._note_adapter_version()},
         )
-        await record_mcp_call(
+        facts = []
+        truncated = False
+        if not result.is_error and profile_for_protocol_name(tool_name) is not None:
+            facts, truncated = extract_facts(result)
+            context = get_mcp_execution_context()
+            result.provenance["fact_manifest"] = build_audit_manifest(
+                facts,
+                truncated=truncated,
+                public_values=bool(context and context.data_access_level == "PUBLIC"),
+            )
+        audit_id = await record_mcp_call(
             server_slug=slug,
             capability_type="tool",
             capability_name=tool_name,
@@ -437,6 +449,21 @@ class LegacyLangChainHost(McpHost):
             duration_ms=int((time.perf_counter() - started) * 1000),
             provenance=result.provenance,
         )
+        if audit_id is not None:
+            result.provenance["mcp_call_audit_id"] = audit_id
+            if facts:
+                result.text = append_model_ledger(
+                    result.text,
+                    audit_id=audit_id,
+                    facts=facts,
+                    truncated=truncated,
+                )
+                result.metadata["verification_ledger"] = {
+                    "schema_version": "mcp-fact-ledger.v1",
+                    "audit_id": audit_id,
+                    "fact_count": len(facts),
+                    "truncated": truncated,
+                }
         return result
 
     @asynccontextmanager
