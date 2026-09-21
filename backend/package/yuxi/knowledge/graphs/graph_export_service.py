@@ -41,7 +41,6 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
 
 from yuxi.knowledge.graphs.graph_evidence_service import parse_chunk_provenance, verify_quote
 from yuxi.knowledge.graphs.graph_utils import mention_key
@@ -1679,7 +1678,3 @@ class ManagedGraphExportService:
             f"evidence_complete={(evidence.get('coverage') or {}).get('evidence_complete')}"
         )
         return package
-
-
-def content_disposition_header(filename: str) -> str:
-    return f"attachment; filename*=UTF-8''{quote(filename)}"

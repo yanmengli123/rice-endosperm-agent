@@ -889,6 +889,43 @@ routes:
         show_limit_quota_header: true
         allow_degradation: true
 
+  # 会话问答 HTML 导出（桌面端「导出 HTML」）：GET 无请求体，鉴权与会话归属由上游承担。
+  - id: yuxi-chat-thread-export-html
+    name: yuxi-chat-thread-export-html
+    uri: /api/chat/thread/:thread_id/export
+    methods:
+      - GET
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
   # 桌面端附件链路（P5）：tmp 上传/解析 + 线程附件确认。
   # 上传是 multipart，不做请求体 schema 校验；身份与归属仍由 Yuxi 校验。
   - id: yuxi-chat-attachment-tmp-upload

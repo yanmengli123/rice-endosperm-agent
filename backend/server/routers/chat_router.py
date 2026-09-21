@@ -3,16 +3,14 @@ import uuid
 from typing import Any
 
 import aiofiles
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from yuxi.storage.postgres.models_business import User
-from server.utils.auth_middleware import get_db, get_required_user
 from yuxi import config as conf
 from yuxi.models import select_model
 from yuxi.services.chat_service import get_agent_state_view
+from yuxi.services.conversation_export_service import export_thread_html_view
 from yuxi.services.conversation_service import (
     confirm_tmp_thread_attachments_view,
     create_thread_view,
@@ -27,6 +25,7 @@ from yuxi.services.conversation_service import (
     upload_thread_attachment_view,
     upload_tmp_attachment_view,
 )
+from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
 from yuxi.services.file_preview import detect_media_type
 from yuxi.services.thread_files_service import (
     list_thread_files_view,
@@ -34,11 +33,13 @@ from yuxi.services.thread_files_service import (
     resolve_thread_artifact_view,
     save_thread_artifact_to_workspace_view,
 )
-from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
-from yuxi.utils.logging_config import logger
+from yuxi.storage.postgres.models_business import User
+from yuxi.utils.download_utils import content_disposition_header
 from yuxi.utils.image_processor import process_uploaded_image
+from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import VIRTUAL_PATH_PREFIX
 
+from server.utils.auth_middleware import get_db, get_required_user
 
 # TODO：当前文件的功能过于庞杂，路由标签混乱
 
@@ -110,6 +111,33 @@ async def get_thread_history(
     except Exception as e:
         logger.error(f"获取对话历史消息出错: {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"获取对话历史消息出错: {str(e)}")
+
+
+@chat.get("/thread/{thread_id}/export")
+async def export_thread_html(
+    thread_id: str,
+    request: Request,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """导出对话问答为自包含 HTML 文件（需要登录），归属校验与 /history 一致"""
+    try:
+        html, filename = await export_thread_html_view(
+            thread_id=thread_id,
+            current_user=current_user,
+            db=db,
+            request=request,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"导出会话HTML出错: {e}, {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"导出会话HTML出错: {str(e)}")
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": content_disposition_header(filename)},
+    )
 
 
 @chat.get("/thread/{thread_id}/state")

@@ -18,6 +18,35 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 async def test_chat_endpoints_require_authentication(test_client):
     assert (await test_client.get("/api/chat/threads")).status_code == 401
     assert (await test_client.get("/api/agent")).status_code == 401
+    assert (await test_client.get("/api/chat/thread/nonexistent/export")).status_code == 401
+
+
+async def test_thread_export_returns_404_for_missing_thread(test_client, admin_headers):
+    response = await test_client.get(f"/api/chat/thread/{uuid.uuid4()}/export", headers=admin_headers)
+    assert response.status_code == 404
+
+
+async def test_thread_export_rejects_foreign_thread(test_client, admin_headers, standard_user):
+    thread_id = await _create_thread_for_user(test_client, admin_headers)
+    response = await test_client.get(f"/api/chat/thread/{thread_id}/export", headers=standard_user["headers"])
+    assert response.status_code == 404
+
+
+async def test_thread_export_returns_self_contained_html(test_client, admin_headers):
+    thread_id = await _create_thread_for_user(test_client, admin_headers)
+    response = await test_client.get(f"/api/chat/thread/{thread_id}/export", headers=admin_headers)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/html")
+    disposition = response.headers["Content-Disposition"]
+    assert disposition.startswith("attachment;")
+    assert "filename*=UTF-8''" in disposition
+
+    html = response.text
+    assert html.startswith("<!DOCTYPE html>")
+    assert "chat-router-test-" in html  # 会话标题进入导出文档
+    assert "Content-Security-Policy" in html
+    assert "<script" not in html  # 零脚本
 
 
 async def test_image_upload_composites_transparent_png_pixels_on_white(test_client, admin_headers):

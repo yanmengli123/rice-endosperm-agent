@@ -37,6 +37,13 @@
                       重命名
                     </a-menu-item>
                     <a-menu-item
+                      key="export"
+                      :icon="h(FileDown, { size: 14 })"
+                      @click.stop="$emit('export-chat', chat.id)"
+                    >
+                      导出 HTML
+                    </a-menu-item>
+                    <a-menu-item
                       key="delete"
                       :icon="h(Trash2, { size: 14 })"
                       @click.stop="$emit('delete-chat', chat.id)"
@@ -74,7 +81,7 @@
 <script setup>
 import { computed, h, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { ChevronDown, MoreVertical, Pin, PinOff, SquarePen, Trash2 } from '@lucide/vue'
+import { ChevronDown, FileDown, MoreVertical, Pin, PinOff, SquarePen, Trash2 } from '@lucide/vue'
 import { parseToShanghai } from '@/utils/time'
 
 const props = defineProps({
@@ -108,6 +115,7 @@ const emit = defineEmits([
   'select-chat',
   'delete-chat',
   'rename-chat',
+  'export-chat',
   'toggle-pin',
   'load-more-chats'
 ])

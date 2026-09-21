@@ -379,6 +379,13 @@ export const threadApi = {
     apiGet(threadApi.getThreadArtifactUrl(threadId, path, true), {}, true, 'blob'),
 
   /**
+   * 导出会话问答为自包含 HTML 文件（blob 响应，文件名取 Content-Disposition）
+   * @param {string} threadId
+   * @returns {Promise<Response>}
+   */
+  exportThreadHtml: (threadId) => apiGet(`/api/chat/thread/${threadId}/export`, {}, true, 'blob'),
+
+  /**
    * 保存交付物到 workspace/saved_artifacts
    * @param {string} threadId
    * @param {string} path

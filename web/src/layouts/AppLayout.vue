@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
+import { message } from 'ant-design-vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
   BarChart3,
@@ -29,6 +30,8 @@ import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
 import { TITLE_SOURCE_USER } from '@/utils/threadTitle'
+import { agentApi } from '@/apis/agent_api'
+import { saveBlobResponse } from '@/utils/download'
 
 const configStore = useConfigStore()
 const agentStore = useAgentStore()
@@ -232,6 +235,25 @@ const handleRenameChat = async ({ chatId, title }) => {
   }
 }
 
+const exportingThreadIds = new Set()
+
+const handleExportChat = async (threadId) => {
+  if (!threadId || exportingThreadIds.has(threadId)) return
+  exportingThreadIds.add(threadId)
+  const hide = message.loading('正在生成导出文件…', 0)
+  try {
+    const response = await agentApi.exportThreadHtml(threadId)
+    const filename = await saveBlobResponse(response, '语析对话.html')
+    message.success(`已导出：${filename}`)
+  } catch (error) {
+    console.warn('导出会话失败:', error)
+    message.error(error?.message || '导出会话失败')
+  } finally {
+    hide()
+    exportingThreadIds.delete(threadId)
+  }
+}
+
 const handleTogglePinChat = async (threadId) => {
   const thread = threads.value.find((item) => item.id === threadId)
   if (!thread) return
@@ -352,6 +374,7 @@ watch(
           @select-chat="handleSelectChat"
           @delete-chat="handleDeleteChat"
           @rename-chat="handleRenameChat"
+          @export-chat="handleExportChat"
           @toggle-pin="handleTogglePinChat"
           @load-more-chats="() => chatThreadsStore.loadMoreThreads()"
         />

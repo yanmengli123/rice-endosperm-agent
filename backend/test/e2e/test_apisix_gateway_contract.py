@@ -36,6 +36,8 @@ REQUIRED_ROUTES: dict[str, set[str]] = {
     "/api/auth/sessions/:family_id": {"DELETE"},
     # 协议能力快照（公开）：连接阶段 fail-fast 的前置兼容判断。
     "/api/agent/protocol": {"GET"},
+    # 会话问答 HTML 导出（导出为自包含文件保存到本地）。
+    "/api/chat/thread/:thread_id/export": {"GET"},
     # 证据平面（citation_ready v2 图卡取图）：仅 GET，鉴权与归属由上游承担。
     "/api/knowledge/databases/:kb_id/documents/:file_id/revisions/:revision_id/assets/*": {"GET"},
 }
