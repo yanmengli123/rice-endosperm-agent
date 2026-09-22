@@ -1484,11 +1484,30 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
         "request_id": run.request_id,
         "final_message_id": output_message.id if output_message else None,
         "langfuse_trace_id": output_metadata.get("langfuse_trace_id"),
+        "artifacts": await _load_run_artifacts(run.id, db),
         "run_context": await _load_server_run_context(run, db),
     }
     if run.error_type or run.error_message:
         payload["error"] = {"type": run.error_type, "message": run.error_message}
     return payload
+
+
+async def _load_run_artifacts(run_id: str, db: AsyncSession) -> list[dict[str, Any]]:
+    """run result 的产物投影（additive 字段，桌面端 presence-as-gate 消费）。
+
+    查询失败降级为空列表：result 主链路（状态/输出）不允许被产物投影拖挂。
+    """
+    try:
+        from yuxi.storage.postgres.models_business import RunArtifact
+
+        rows = (
+            (await db.execute(select(RunArtifact).where(RunArtifact.run_id == run_id).order_by(RunArtifact.id.asc())))
+            .scalars()
+            .all()
+        )
+        return [row.to_dict() for row in rows]
+    except Exception:  # noqa: BLE001 —— 投影降级，不掩盖主结果
+        return []
 
 
 async def load_agent_run_result(*, run_id: str, current_uid: str) -> dict:

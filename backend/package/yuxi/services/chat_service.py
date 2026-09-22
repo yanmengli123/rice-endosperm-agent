@@ -27,7 +27,7 @@ from sqlalchemy import select
 from yuxi import config as conf
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
-from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
+from yuxi.agents.mcp.capability_registry import profile_for_server_tool
 from yuxi.agents.state import AgentStatePayload
 from yuxi.knowledge.orchestration import prepare_knowledge_context
 from yuxi.knowledge.planning.turn_execution_plan import (
@@ -56,16 +56,16 @@ from yuxi.repositories.subagent_thread_repository import SubagentThreadRepositor
 from yuxi.services.conversation_service import serialize_attachment
 from yuxi.services.input_message_service import AgentRunInputMessage
 from yuxi.services.knowledge_scope_service import resolve_effective_knowledge_scope
-from yuxi.services.run_stream_errors import (
-    MODEL_CONNECTION_ERROR,
-    MODEL_CONNECTION_ERROR_MESSAGE,
-    is_model_connection_error,
-)
 from yuxi.services.langfuse_service import (
     LangfuseRunContext,
     build_run_context,
     flush_langfuse,
     get_trace_info,
+)
+from yuxi.services.run_stream_errors import (
+    MODEL_CONNECTION_ERROR,
+    MODEL_CONNECTION_ERROR_MESSAGE,
+    is_model_connection_error,
 )
 from yuxi.services.subagent_run_service import serialize_subagent_run_state
 from yuxi.storage.postgres.manager import pg_manager
@@ -747,21 +747,35 @@ def _append_mcp_source_uses(
         source_use_id = f"mcp:{audit.id}"
         if source_use_id in existing:
             continue
-        profile = profile_for_protocol_name(str(audit.capability_name or ""))
+        profile = profile_for_server_tool(str(audit.server_slug or ""), str(audit.capability_name or ""))
         bibliography = bool(profile and profile.source_class == "BIBLIOGRAPHY")
+        discovery = bool(profile and profile.source_class == "DISCOVERY")
+        adopted = int(audit.id) in matched_ids and not discovery
         manifest.source_uses.append(
             SourceUseRecord(
                 source_use_id=source_use_id,
-                source_class=SourceClass.BIBLIOGRAPHY if bibliography else SourceClass.STRUCTURED_DATABASE,
-                evidence_level=EvidenceLevel.BIBLIOGRAPHIC if bibliography else EvidenceLevel.DATA_PROVENANCE,
+                source_class=(
+                    SourceClass.DISCOVERY
+                    if discovery
+                    else SourceClass.BIBLIOGRAPHY
+                    if bibliography
+                    else SourceClass.STRUCTURED_DATABASE
+                ),
+                evidence_level=(
+                    EvidenceLevel.NONE
+                    if discovery
+                    else EvidenceLevel.BIBLIOGRAPHIC
+                    if bibliography
+                    else EvidenceLevel.DATA_PROVENANCE
+                ),
                 provider_id=str(audit.server_slug),
                 operation=str(audit.capability_name),
-                status=str(audit.status).upper(),
+                status=str((audit.provenance or {}).get("provider_status") or audit.status).upper(),
                 request_digest=audit.arguments_digest,
                 result_digest=audit.result_digest,
-                evidence_ids=[source_use_id] if int(audit.id) in matched_ids else [],
+                evidence_ids=[source_use_id] if adopted else [],
                 provenance={"mcp_call_audit_id": int(audit.id), **dict(audit.provenance or {})},
-                adopted=int(audit.id) in matched_ids,
+                adopted=adopted,
             )
         )
         existing.add(source_use_id)
@@ -938,7 +952,6 @@ async def _repair_source_fact_grounding(
     }
     try:
         from langchain.messages import HumanMessage, SystemMessage
-
         from yuxi.agents.models import load_chat_model
 
         repair_kwargs = {
@@ -1109,8 +1122,19 @@ async def _finalize_mcp_manifest(
     for audit in audits:
         if str(audit.status).lower() != "success":
             continue
-        profile = profile_for_protocol_name(str(audit.capability_name or ""))
-        if Capability.GENERIC_MCP in required or (profile and not required.isdisjoint(profile.capabilities)):
+        if str((audit.provenance or {}).get("provider_status") or "").upper() in {
+            "NOT_FOUND",
+            "NO_EVIDENCE",
+            "AMBIGUOUS",
+            "CONFLICT",
+            "UNAVAILABLE",
+            "ERROR",
+        }:
+            continue
+        profile = profile_for_server_tool(str(audit.server_slug or ""), str(audit.capability_name or ""))
+        if (Capability.GENERIC_MCP in required and (profile is None or profile.answer_eligible)) or (
+            profile and profile.answer_eligible and not required.isdisjoint(profile.capabilities)
+        ):
             matched.append(audit)
     manifest.mcp_call_count = len(audits)
     manifest.successful_mcp_call_count = len(matched)
@@ -1123,7 +1147,7 @@ async def _finalize_mcp_manifest(
     if matched:
         matched_planes = [
             "BIBLIOGRAPHY"
-            if (profile := profile_for_protocol_name(str(audit.capability_name or "")))
+            if (profile := profile_for_server_tool(str(audit.server_slug or ""), str(audit.capability_name or "")))
             and profile.source_class == "BIBLIOGRAPHY"
             else "MCP_DATA"
             for audit in matched
@@ -2074,6 +2098,7 @@ async def stream_agent_chat(
         )
         return
 
+    from yuxi.agents.mcp.artifact_materializer import begin_artifact_accumulation
     from yuxi.agents.mcp.execution import McpExecutionContext, set_mcp_execution_context
     from yuxi.services.principal import resolve_tenant_id
 
@@ -2086,6 +2111,7 @@ async def stream_agent_chat(
             agent_slug=agent_slug,
         )
     )
+    artifact_accumulation_token = begin_artifact_accumulation()
 
     try:
         agent_item, agent, agent_config = await _resolve_agent_runtime(
@@ -2097,9 +2123,11 @@ async def stream_agent_chat(
         )
     except ValueError as e:
         # 该分支发生在主流式 try/finally 之前，必须在返回前显式清理。
+        from yuxi.agents.mcp.artifact_materializer import end_artifact_accumulation
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
 
         reset_mcp_execution_context(mcp_context_token)
+        end_artifact_accumulation(artifact_accumulation_token)
         yield make_chunk(status="error", error_type="invalid_agent", error_message=str(e), meta=meta)
         return
 
@@ -2793,9 +2821,11 @@ async def stream_agent_chat(
             from yuxi.agents.models import reset_user_credential_override
 
             reset_user_credential_override(credential_context_token)
+        from yuxi.agents.mcp.artifact_materializer import end_artifact_accumulation
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
 
         reset_mcp_execution_context(mcp_context_token)
+        end_artifact_accumulation(artifact_accumulation_token)
         flush_langfuse()
 
 
@@ -2824,6 +2854,7 @@ async def stream_agent_resume(
     resume_command = Command(resume=resume_input)
 
     uid = str(current_user.uid)
+    from yuxi.agents.mcp.artifact_materializer import begin_artifact_accumulation
     from yuxi.agents.mcp.execution import McpExecutionContext, set_mcp_execution_context
     from yuxi.services.principal import resolve_tenant_id
 
@@ -2836,6 +2867,7 @@ async def stream_agent_resume(
             agent_slug=meta.get("agent_slug"),
         )
     )
+    artifact_accumulation_token = begin_artifact_accumulation()
     try:
         agent_item, agent, agent_config = await _resolve_agent_runtime(
             db=db,
@@ -2845,9 +2877,11 @@ async def stream_agent_resume(
         )
     except ValueError as e:
         # 该分支同样尚未进入下方主 try/finally。
+        from yuxi.agents.mcp.artifact_materializer import end_artifact_accumulation
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
 
         reset_mcp_execution_context(mcp_context_token)
+        end_artifact_accumulation(artifact_accumulation_token)
         yield make_resume_chunk(status="error", error_type="invalid_agent", error_message=str(e), meta=meta)
         return
 
@@ -3101,9 +3135,11 @@ async def stream_agent_resume(
             from yuxi.agents.models import reset_user_credential_override
 
             reset_user_credential_override(credential_context_token)
+        from yuxi.agents.mcp.artifact_materializer import end_artifact_accumulation
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
 
         reset_mcp_execution_context(mcp_context_token)
+        end_artifact_accumulation(artifact_accumulation_token)
         flush_langfuse()
 
 

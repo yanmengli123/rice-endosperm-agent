@@ -1501,3 +1501,50 @@ Index(
     postgresql_where=AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
     sqlite_where=AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
 )
+
+
+class RunArtifact(Base):
+    """AgentRun 数据产物权威登记：MCP 查询结果物化文件与序列交付物的统一出口。
+
+    - ``virtual_path`` 是沙盒虚拟路径（outputs/ 下），下载/预览复用既有
+      thread artifacts 与 viewer 端点（归属、目录遏制在那两处校验）；
+    - 消息关联不落外键：历史回看经 ``messages.run_id → run_artifacts.run_id``
+      读时投影（get_thread_history_view），表是唯一真源；
+    - ``(run_id, virtual_path)`` 唯一：同 run 重复登记幂等（写入侧吞 IntegrityError）。
+    """
+
+    __tablename__ = "run_artifacts"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    uid = Column(String(64), nullable=False, index=True)
+    run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    thread_id = Column(String(64), nullable=False, index=True)
+    origin = Column(
+        JSON, nullable=False, default=dict, comment="来源：{source, mcp_server, mcp_tool, mcp_call_audit_id, ...}"
+    )
+    name = Column(String(255), nullable=False)
+    virtual_path = Column(String(512), nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    size_bytes = Column(BigInteger, nullable=False, default=0)
+    media_type = Column(String(128), nullable=False, default="application/octet-stream")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, index=True)
+
+    __table_args__ = (
+        Index("uq_run_artifacts_run_path", "run_id", "virtual_path", unique=True),
+        Index("ix_run_artifacts_thread_created", "thread_id", "created_at"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "run_id": self.run_id,
+            "thread_id": self.thread_id,
+            "origin": self.origin or {},
+            "name": self.name,
+            "virtual_path": self.virtual_path,
+            "sha256": self.sha256,
+            "size_bytes": int(self.size_bytes or 0),
+            "media_type": self.media_type,
+            "created_at": format_utc_datetime(self.created_at),
+        }

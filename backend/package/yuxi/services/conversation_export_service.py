@@ -18,7 +18,7 @@ import base64
 import io
 import json
 import re
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta, timezone
 from html import escape as escape_html
 from string import Template
 from urllib.parse import urlparse
@@ -34,7 +34,6 @@ from pygments.style import Style
 from pygments.token import Comment, Generic, Keyword, Name, Number, Operator, String
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.knowledge.rendering.authority_markers import authority_marker_pattern
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.services.conversation_service import get_thread_history_view
@@ -123,6 +122,91 @@ def build_filename(title: str | None, moment: datetime) -> str:
     if not cleaned:
         cleaned = "未命名会话"
     return f"语析对话_{cleaned}_{moment:%Y%m%d-%H%M%S}.html"
+
+
+def build_message_filename(question_text: str | None, moment: datetime) -> str:
+    """单条回答导出文件名：摘要取该轮提问首行，清洗规则与会话导出一致。"""
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(_CN_TZ)
+    first_line = str(question_text or "").strip().splitlines()[0] if str(question_text or "").strip() else ""
+    cleaned = re.sub(r"[\\/:*?\"<>|\r\n\t]", " ", first_line)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")[:60].strip()
+    if not cleaned:
+        cleaned = "未命名回答"
+    return f"语析回答_{cleaned}_{moment:%Y%m%d-%H%M%S}.html"
+
+
+def _pick_single_round(history: list[dict], message_id: int) -> tuple[list[dict], str] | None:
+    """抽取目标回答及其所属轮次：该回答 + 最近一条前置 human 提问。
+
+    返回 (单轮 history, 提问文本)；找不到目标回答返回 None。
+    """
+    target_index = None
+    for index, msg in enumerate(history):
+        if msg.get("id") == message_id and msg.get("type") == "ai":
+            target_index = index
+            break
+    if target_index is None:
+        return None
+    question = next(
+        (msg for msg in reversed(history[:target_index]) if msg.get("type") == "human"),
+        None,
+    )
+    single_history = [question, history[target_index]] if question is not None else [history[target_index]]
+    return single_history, str(question.get("content") or "") if question is not None else ""
+
+
+async def export_message_html_view(
+    *,
+    thread_id: str,
+    message_id: int,
+    current_user: User,
+    db: AsyncSession,
+    request: Request,
+) -> tuple[str, str]:
+    """导出单条回答为自包含 HTML；归属校验与 /history、会话导出一致，并写导出审计。"""
+    conv_repo = ConversationRepository(db)
+    conversation = await conv_repo.get_conversation_by_thread_id(thread_id, uid=str(current_user.uid))
+    if not conversation or conversation.uid != str(current_user.uid) or conversation.status == "deleted":
+        raise HTTPException(status_code=404, detail="对话线程不存在")
+
+    history_payload = await get_thread_history_view(thread_id=thread_id, current_uid=str(current_user.uid), db=db)
+    picked = _pick_single_round(history_payload.get("history") or [], message_id)
+    if picked is None:
+        raise HTTPException(status_code=404, detail="回答消息不存在")
+    single_history, question_text = picked
+
+    question_images, kbassets = await _collect_embedded_images(single_history, current_user)
+    fact_records = await _collect_fact_records(single_history, current_user)
+    exported_at = datetime.now(_CN_TZ)
+    html = render_conversation_html(
+        title=conversation.title,
+        agent_slug=conversation.agent_id,
+        thread_id=conversation.thread_id,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+        history=single_history,
+        exported_at=exported_at,
+        question_images=question_images,
+        kbassets=kbassets,
+        fact_records=fact_records,
+    )
+    filename = build_message_filename(question_text or conversation.title, exported_at)
+    await log_operation(
+        db,
+        current_user.id,
+        "导出单条回答HTML",
+        json.dumps(
+            {
+                "thread_id": thread_id,
+                "message_id": message_id,
+                "images_embedded": sum(1 for v in {**question_images, **kbassets}.values() if v),
+            },
+            ensure_ascii=False,
+        ),
+        request=request,
+    )
+    return html, filename
 
 
 def render_conversation_html(

@@ -50,6 +50,9 @@ export function useAgentThreadState({
         // 答案气泡内图卡的会话级暂存：run_id → figures（线程生命周期内不随新一轮重置，
         // 桥接"流结束 → 历史回读"之间；历史回读后以消息 extra_metadata.citation_ready 为准）
         figuresByRun: {},
+        // MCP 物化产物按轮快照：run_id → 虚拟路径列表（agent_state 整体替换会抹掉
+        // 线程级 artifacts，finished 时快照进当前 run；历史回读后以 run_artifacts 投影为准）
+        runArtifactsByRun: {},
         // 跨文献歧义时的候选文献（locator_candidates 事件；只含文档身份）
         locatorCandidates: []
       }

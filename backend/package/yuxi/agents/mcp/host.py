@@ -21,14 +21,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
+from yuxi.agents.mcp.artifact_materializer import materialize_mcp_data_result
+from yuxi.agents.mcp.capability_registry import profile_for_server_tool
 from yuxi.agents.mcp.execution import get_mcp_execution_context, record_mcp_call
 from yuxi.agents.mcp.fact_ledger import append_model_ledger, build_audit_manifest, extract_facts
-from yuxi.agents.mcp.sequence_deliverable import (
-    SEQUENCE_DELIVERABLE_TOOL,
-    append_deliverable_notice,
-    record_sequence_deliverable,
-)
 from yuxi.agents.mcp.health import (
     CODE_CLIENT_INIT_FAILED,
     CODE_DISCOVERY_FAILED,
@@ -38,6 +34,11 @@ from yuxi.agents.mcp.health import (
 from yuxi.agents.mcp.security import (
     build_safe_httpx_client_factory,
     validate_remote_url_dns,
+)
+from yuxi.agents.mcp.sequence_deliverable import (
+    SEQUENCE_DELIVERABLE_TOOL,
+    append_deliverable_notice,
+    record_sequence_deliverable,
 )
 from yuxi.agents.mcp.spec import to_camel_case
 
@@ -464,9 +465,14 @@ class LegacyLangChainHost(McpHost):
             output,
             provenance={"server_slug": slug, "tool": tool_name, "protocol": self._note_adapter_version()},
         )
+        if slug == "gene-authority" and isinstance(result.structured_content, dict):
+            provider_status = str(result.structured_content.get("status") or "").upper()
+            if provider_status:
+                result.provenance["provider_status"] = provider_status
         facts = []
         truncated = False
-        if not result.is_error and profile_for_protocol_name(tool_name) is not None:
+        profile = profile_for_server_tool(slug, tool_name)
+        if not result.is_error and profile and profile.answer_eligible:
             facts, truncated = extract_facts(result)
             context = get_mcp_execution_context()
             result.provenance["fact_manifest"] = build_audit_manifest(
@@ -484,6 +490,18 @@ class LegacyLangChainHost(McpHost):
             duration_ms=int((time.perf_counter() - started) * 1000),
             provenance=result.provenance,
         )
+        if not result.is_error and slug != "data-aggregator" and tool_name != SEQUENCE_DELIVERABLE_TOOL:
+            # MCP 数据产物确定性物化：成功的数据查询结果由程序落盘为可下载交付物，
+            # 是否出现产物不再依赖模型调用 present_artifacts。必须先于下方
+            # append_model_ledger 执行——物化消费的是账本标记追加前的原始文本。
+            await materialize_mcp_data_result(
+                server_slug=slug,
+                tool_name=tool_name,
+                result_text=result.text,
+                structured_content=result.structured_content,
+                is_error=result.is_error,
+                mcp_call_audit_id=audit_id,
+            )
         if audit_id is not None:
             result.provenance["mcp_call_audit_id"] = audit_id
             if facts:

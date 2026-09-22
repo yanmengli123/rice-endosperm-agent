@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from arq import cron
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
+from yuxi.agents.mcp.artifact_materializer import begin_artifact_accumulation, end_artifact_accumulation
 from yuxi.agents.mcp.execution import (
     McpExecutionContext,
     reset_mcp_execution_context,
@@ -18,6 +19,7 @@ from yuxi.agents.mcp.execution import (
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.agents.skills.service import init_builtin_skills
 from yuxi.config import config as sys_config
+from yuxi.knowledge.graphs.doclex.service import prewarm_doclex_for_kb
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.services.agent_run_service import (
     acknowledge_agent_run_dispatch,
@@ -32,14 +34,13 @@ from yuxi.services.run_queue_service import (
     has_cancel_signal,
     wait_for_cancel_signal,
 )
+from yuxi.services.run_stream_errors import normalize_stream_error_chunk
 from yuxi.services.scientific_pdf_ingest_service import (
     process_scientific_pdf_ingest,
     recover_stale_scientific_pdf_ingests,
 )
 from yuxi.services.trace_service import purge_expired_trace_runs, relay_trace_outbox
-from yuxi.knowledge.graphs.doclex.service import prewarm_doclex_for_kb
 from yuxi.services.wiki_service import process_dynamic_wiki_build, reconcile_dynamic_wikis
-from yuxi.services.run_stream_errors import normalize_stream_error_chunk
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import AgentRun, Message, User
 from yuxi.storage.redis import get_arq_redis_settings
@@ -747,6 +748,9 @@ async def process_agent_run(ctx, run_id: str):
                 agent_slug=agent_slug,
             )
         )
+    # 产物累积与 MCP 执行身份同边界开启：host 层物化的产物经该共享累积器
+    # 由 ArtifactStateMiddleware.after_model 排空进 state.artifacts。
+    artifact_accumulation_token = begin_artifact_accumulation()
 
     try:
         async with pg_manager.get_async_session_context() as db:
@@ -999,6 +1003,7 @@ async def process_agent_run(ctx, run_id: str):
     finally:
         # 与上方 set_mcp_execution_context 配对；跨 Context 时安全降级为 no-op。
         reset_mcp_execution_context(mcp_execution_token)
+        end_artifact_accumulation(artifact_accumulation_token)
         progress_done.set()
         progress_task.cancel()
         await asyncio.gather(progress_task, return_exceptions=True)

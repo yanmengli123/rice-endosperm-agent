@@ -29,6 +29,16 @@ from yuxi.agents.mcp.sequence_deliverable import (
 _SEQ = ("ATGTCGGCTCTCACCACGTCCCAGCTCGCCACCTCGGCCACCGGCTTCGG" + "CCGGCCGGCCGGCCGGCCGG") * 3
 
 
+@pytest.fixture(autouse=True)
+def _no_artifact_registration(monkeypatch):
+    """统一登记出口后 record_sequence_deliverable 会写 run_artifacts 表：单测不直连 Postgres。"""
+
+    async def _skip(*, context, entry):
+        return False
+
+    monkeypatch.setattr("yuxi.agents.mcp.artifact_materializer.register_run_artifact", _skip)
+
+
 def _envelope(sequence: str, sha: str | None = None) -> str:
     return json.dumps(
         {

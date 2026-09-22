@@ -49,6 +49,33 @@ async def test_thread_export_returns_self_contained_html(test_client, admin_head
     assert "<script" not in html  # 零脚本
 
 
+async def test_message_export_requires_authentication(test_client):
+    assert (await test_client.get("/api/chat/thread/nonexistent/messages/1/export")).status_code == 401
+
+
+async def test_message_export_returns_404_for_missing_thread(test_client, admin_headers):
+    response = await test_client.get(
+        f"/api/chat/thread/{uuid.uuid4()}/messages/1/export", headers=admin_headers
+    )
+    assert response.status_code == 404
+
+
+async def test_message_export_rejects_foreign_thread(test_client, admin_headers, standard_user):
+    thread_id = await _create_thread_for_user(test_client, admin_headers)
+    response = await test_client.get(
+        f"/api/chat/thread/{thread_id}/messages/1/export", headers=standard_user["headers"]
+    )
+    assert response.status_code == 404
+
+
+async def test_message_export_returns_404_for_missing_message(test_client, admin_headers):
+    thread_id = await _create_thread_for_user(test_client, admin_headers)
+    response = await test_client.get(
+        f"/api/chat/thread/{thread_id}/messages/999999/export", headers=admin_headers
+    )
+    assert response.status_code == 404
+
+
 async def test_image_upload_composites_transparent_png_pixels_on_white(test_client, admin_headers):
     image = Image.new("RGBA", (2, 2), (255, 255, 255, 0))
     image.putpixel((0, 0), (50, 87, 244, 0))

@@ -38,6 +38,11 @@ REQUIRED_ROUTES: dict[str, set[str]] = {
     "/api/agent/protocol": {"GET"},
     # 会话问答 HTML 导出（导出为自包含文件保存到本地）。
     "/api/chat/thread/:thread_id/export": {"GET"},
+    # 单条回答 HTML 导出（回答末尾「导出」按钮）。
+    "/api/chat/thread/:thread_id/messages/:message_id/export": {"GET"},
+    # 线程产物下载/预览与保存到工作区（MCP 物化产物、序列交付物、附件）。
+    "/api/chat/thread/:thread_id/artifacts/*": {"GET"},
+    "/api/chat/thread/:thread_id/artifacts/save": {"POST"},
     # 证据平面（citation_ready v2 图卡取图）：仅 GET，鉴权与归属由上游承担。
     "/api/knowledge/databases/:kb_id/documents/:file_id/revisions/:revision_id/assets/*": {"GET"},
 }

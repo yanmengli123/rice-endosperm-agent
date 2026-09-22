@@ -1099,5 +1099,42 @@ async def get_thread_history_view(
 
         history.append(msg_dict)
 
+    _inject_run_artifacts(history, db)
     logger.info(f"Loaded {len(history)} messages with feedback for thread {thread_id}")
     return {"history": history}
+
+
+async def _inject_run_artifacts(history: list[dict], db: AsyncSession) -> None:
+    """按消息携带的 run_id 批量投影 run_artifacts（读时注入，表是唯一真源）。
+
+    仅 assistant 消息携带产物；归属经会话属主校验传递（消息来自本人会话，
+    run_id 即本人 run）。查询失败只记日志——历史回看不允许因产物投影挂掉。
+    """
+    run_ids = {msg.get("run_id") for msg in history if msg.get("type") == "ai" and msg.get("run_id")}
+    if not run_ids:
+        return
+    try:
+        from yuxi.storage.postgres.models_business import RunArtifact
+
+        rows = (
+            (
+                await db.execute(
+                    select(RunArtifact).where(RunArtifact.run_id.in_(run_ids)).order_by(RunArtifact.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+    except Exception as error:  # noqa: BLE001 —— 投影是增强视图，失败降级为无产物历史
+        logger.warning(f"Run artifacts projection skipped: {type(error).__name__}: {error}")
+        return
+    by_run: dict[str, list[dict]] = {}
+    for row in rows:
+        by_run.setdefault(str(row.run_id), []).append(row.to_dict())
+    if not by_run:
+        return
+    for msg in history:
+        if msg.get("type") == "ai" and msg.get("run_id"):
+            artifacts = by_run.get(str(msg["run_id"]))
+            if artifacts:
+                msg["run_artifacts"] = artifacts

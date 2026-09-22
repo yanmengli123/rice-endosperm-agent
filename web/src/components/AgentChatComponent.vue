@@ -106,7 +106,7 @@
                 </template>
                 <AgentArtifactsCard
                   v-if="shouldShowArtifacts(row.conv)"
-                  :artifacts="currentArtifacts"
+                  :artifacts="getConvArtifacts(row.conv)"
                   :thread-id="currentChatId"
                   @saved="handleArtifactSaved"
                   @open-preview="openPanelPreview"
@@ -118,6 +118,7 @@
                   :show-refs="['model', 'copy', 'sources']"
                   :is-latest-message="false"
                   :sources="getConversationSources(row.conv)"
+                  :thread-id="currentChatId"
                 />
               </div>
               <div v-else class="chat-inline-notice">
@@ -535,6 +536,14 @@
                         <div class="state-list-item-title">{{ file.name }}</div>
                         <div class="state-list-item-meta">{{ file.meta || file.path }}</div>
                       </div>
+                      <button
+                        type="button"
+                        class="state-list-item-action"
+                        title="下载"
+                        @click.stop="downloadStateFile(file)"
+                      >
+                        <Download :size="15" />
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -568,24 +577,50 @@
                   class="state-section-content"
                 >
                   <div class="state-list">
-                    <button
+                    <div
                       v-for="file in currentArtifactFiles"
                       :key="file.path"
-                      type="button"
-                      class="state-list-item state-list-item--button"
-                      :title="`打开 ${file.name}`"
-                      @click="openPanelPreview(file)"
+                      class="state-list-item"
                     >
-                      <FileTypeIcon
-                        :name="file.name || file.path"
-                        :size="18"
-                        class="state-list-item-icon"
-                      />
-                      <div class="state-list-item-body">
-                        <div class="state-list-item-title">{{ file.name }}</div>
-                        <div class="state-list-item-meta">{{ file.meta }}</div>
-                      </div>
-                    </button>
+                      <button
+                        type="button"
+                        class="state-list-item-main"
+                        :title="`打开 ${file.name}`"
+                        @click="openPanelPreview(file)"
+                      >
+                        <FileTypeIcon
+                          :name="file.name || file.path"
+                          :size="18"
+                          class="state-list-item-icon"
+                        />
+                        <div class="state-list-item-body">
+                          <div class="state-list-item-title">{{ file.name }}</div>
+                          <div class="state-list-item-meta">{{ file.meta }}</div>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        class="state-list-item-action"
+                        title="下载"
+                        @click.stop="downloadStateFile(file)"
+                      >
+                        <Download :size="15" />
+                      </button>
+                      <button
+                        type="button"
+                        class="state-list-item-action"
+                        :title="savingArtifactPaths[file.path] ? '保存中' : '保存到工作区'"
+                        :disabled="!!savingArtifactPaths[file.path]"
+                        @click.stop="saveStateArtifactToWorkspace(file)"
+                      >
+                        <LoaderCircle
+                          v-if="savingArtifactPaths[file.path]"
+                          :size="15"
+                          class="state-list-item-spin"
+                        />
+                        <Save v-else :size="15" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </section>
@@ -742,7 +777,17 @@ import {
   onDeactivated
 } from 'vue'
 import { message } from 'ant-design-vue'
-import { ChevronDown, FileDown, FolderKanban, History, LayoutList, RefreshCw } from '@lucide/vue'
+import {
+  ChevronDown,
+  Download,
+  FileDown,
+  FolderKanban,
+  History,
+  LayoutList,
+  LoaderCircle,
+  RefreshCw,
+  Save
+} from '@lucide/vue'
 import { formatFileSize } from '@/utils/file_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -770,6 +815,7 @@ import { useConfigStore } from '@/stores/config'
 import { storeToRefs } from 'pinia'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import { agentApi, threadApi } from '@/apis'
+import { downloadViewerFile } from '@/apis/viewer_filesystem'
 import { downloadWorkspaceKnowledgeFile } from '@/apis/workspace_api'
 import HumanApprovalModal from '@/components/HumanApprovalModal.vue'
 import { useApproval } from '@/composables/useApproval'
@@ -1700,6 +1746,9 @@ const currentArtifacts = computed(() => {
   const artifacts = currentAgentState.value?.artifacts
   return Array.isArray(artifacts) ? artifacts : []
 })
+// 按轮快照（figuresByRun 同款）：agent_state 整体替换会抹掉上一轮 artifacts，
+// finished 时把线程级列表快照进当前 run，让上一轮产物卡在历史回读前不消失
+const runArtifactsByRun = computed(() => currentThreadState.value?.runArtifactsByRun || {})
 const currentArtifactFiles = computed(() =>
   currentArtifacts.value
     .map((path) => String(path || '').trim())
@@ -1907,11 +1956,33 @@ const shouldShowRefs = computed(() => {
 
 const shouldShowArtifacts = computed(() => {
   return (conv) => {
-    if (!currentArtifacts.value.length || conv.status === 'streaming') return false
-    const latestConv = conversations.value[conversations.value.length - 1]
-    return latestConv === conv
+    // R2/R3：产物按轮渲染——live 轮读线程级 agentState（历史轮为空），历史轮读
+    // 服务端按 run 投影的 run_artifacts。历史轮与最新轮渲染规则一致。
+    if (conv.status === 'streaming') return false
+    return getConvArtifacts(conv).length > 0
   }
 })
+
+// 按轮产物解析：历史轮消息自带服务端投影的 run_artifacts（含 sha256/size 元数据）；
+// live 轮（历史消息里没有投影）回退到线程级 agentState.artifacts（仅最后一轮有值）。
+const getConvArtifacts = (conv) => {
+  const messages = Array.isArray(conv?.messages) ? conv.messages : []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message?.type !== 'ai') continue
+    const projected = message?.run_artifacts
+    if (Array.isArray(projected) && projected.length) {
+      return projected
+        .map((item) => (typeof item === 'string' ? item : item?.virtual_path))
+        .filter(Boolean)
+    }
+    const runId = getMessageRunId(message)
+    if (runId && runArtifactsByRun.value[runId]) return runArtifactsByRun.value[runId]
+  }
+  // 无 run_id 归属（旧数据/live 流式轮）：沿用线程级状态，只挂在最后一轮
+  const latestConv = conversations.value[conversations.value.length - 1]
+  return latestConv === conv ? currentArtifacts.value : []
+}
 
 // 当前线程状态的computed属性
 const currentThreadState = computed(() => {
@@ -2758,6 +2829,64 @@ const handleArtifactSaved = async () => {
   showFileTreePanel()
 }
 
+// ---------------------------------------------------------------------------
+// 状态面板行级下载/保存（R4）：与 AgentArtifactsCard 相同的 API 复用——
+// 下载走 viewer 文件系统端点，保存到工作区走 thread artifacts save。
+// ---------------------------------------------------------------------------
+const savingArtifactPaths = ref({})
+
+const downloadStateFile = async (file) => {
+  const path = file?.path
+  if (!path || !currentChatId.value) return
+  try {
+    const response = await downloadViewerFile(currentChatId.value, path)
+    const blob = await response.blob()
+    const contentDisposition =
+      response.headers.get('Content-Disposition') || response.headers.get('content-disposition')
+    let filename = file.name || String(path).split('/').pop() || '文件'
+    if (contentDisposition) {
+      const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+      if (utf8Match?.[1]) {
+        try {
+          filename = decodeURIComponent(utf8Match[1])
+        } catch {
+          /* 文件名解析失败时沿用条目名 */
+        }
+      } else {
+        const asciiMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+        filename = asciiMatch?.[1] || filename
+      }
+    }
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  } catch (error) {
+    message.error(error?.message || '下载文件失败')
+  }
+}
+
+const saveStateArtifactToWorkspace = async (file) => {
+  const path = file?.path
+  if (!path || !currentChatId.value || savingArtifactPaths.value[path]) return
+  savingArtifactPaths.value = { ...savingArtifactPaths.value, [path]: true }
+  try {
+    const result = await threadApi.saveThreadArtifactToWorkspace(currentChatId.value, path)
+    message.success(`已保存到工作区：${result.saved_path}`)
+    await refreshThreadFilesAndAttachments(currentChatId.value)
+  } catch (error) {
+    message.error(error?.message || '保存到工作区失败')
+  } finally {
+    const next = { ...savingArtifactPaths.value }
+    delete next[path]
+    savingArtifactPaths.value = next
+  }
+}
+
 const fetchAgentState = async (agentId, threadId) => {
   if (!threadId) return
   try {
@@ -2765,8 +2894,10 @@ const fetchAgentState = async (agentId, threadId) => {
     const targetState = getThreadState(threadId)
     if (!targetState) return
     targetState.agentState = res.agent_state || null
-  } catch {
-    // agent state is optional UI state
+  } catch (error) {
+    // agent state 是增强 UI 状态：拉取失败不阻断对话，但要留下可观测痕迹
+    // （产物卡/状态面板会静默缺失，这是「偶尔没有按钮」的排查线索之一）
+    console.warn('[AgentState] fetchAgentState failed:', threadId, error)
   }
 }
 
@@ -4703,6 +4834,64 @@ watch(currentChatId, (threadId, oldThreadId) => {
 .state-list-item.is-clickable:hover {
   border-color: var(--main-200);
   background: var(--gray-0);
+}
+
+// 产物行整体 hover 高亮（行内含预览主按钮 + 下载/保存动作按钮）
+.state-list-item:hover {
+  border-color: var(--main-200);
+  background: var(--gray-0);
+}
+
+.state-list-item-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 0;
+}
+
+.state-list-item-action {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--gray-500);
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.18s ease;
+
+  &:hover:not(:disabled) {
+    color: var(--main-700);
+    background: var(--gray-100);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+}
+
+.state-list-item-spin {
+  animation: state-list-spin 1s linear infinite;
+}
+
+@keyframes state-list-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .state-list-item.is-clickable {

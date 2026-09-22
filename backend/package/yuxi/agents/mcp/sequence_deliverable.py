@@ -150,6 +150,7 @@ async def record_sequence_deliverable(tool_name: str, result_text: str) -> dict[
                 f"{spec.sequence_id} ({spec.sequence_type}); upstream bytes not verifiable"
             )
             return None
+        from yuxi.agents.mcp.artifact_materializer import MaterializedArtifact, note_delivered_artifact
         from yuxi.agents.mcp.execution import get_mcp_execution_context
 
         context = get_mcp_execution_context()
@@ -162,6 +163,27 @@ async def record_sequence_deliverable(tool_name: str, result_text: str) -> dict[
     except Exception as error:  # 交付物是增强通道，绝不能阻断工具调用主流程
         logger.warning(f"Sequence deliverable recording skipped: {type(error).__name__}: {error}")
         return None
+    # 统一登记出口：state 累积器 + run_artifacts 权威表（文件字节 = render_fasta，
+    # 确定性渲染，直接对渲染字节取哈希，避免重复读盘）。
+    rendered_bytes = render_fasta(spec).encode("utf-8")
+    try:
+        await note_delivered_artifact(
+            MaterializedArtifact(
+                virtual_path=deliverable_virtual_path(filename),
+                name=filename,
+                sha256=hashlib.sha256(rendered_bytes).hexdigest(),
+                size_bytes=len(rendered_bytes),
+                media_type="text/plain",
+                origin={
+                    "source": "sequence_deliverable",
+                    "sequence_id": spec.sequence_id,
+                    "sequence_type": spec.sequence_type,
+                    "sequence_sha256": spec.sequence_sha256,
+                },
+            )
+        )
+    except Exception as error:  # noqa: BLE001 —— 登记失败不撤销已落盘交付物
+        logger.warning(f"Sequence deliverable registration skipped: {type(error).__name__}: {error}")
     notice = {
         "schema_version": "sequence-deliverable.v1",
         "sequence_id": spec.sequence_id,

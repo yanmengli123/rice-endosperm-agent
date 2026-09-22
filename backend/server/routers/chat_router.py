@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi import config as conf
 from yuxi.models import select_model
 from yuxi.services.chat_service import get_agent_state_view
-from yuxi.services.conversation_export_service import export_thread_html_view
+from yuxi.services.conversation_export_service import export_message_html_view, export_thread_html_view
 from yuxi.services.conversation_service import (
     confirm_tmp_thread_attachments_view,
     create_thread_view,
@@ -133,6 +133,35 @@ async def export_thread_html(
     except Exception as e:
         logger.error(f"导出会话HTML出错: {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"导出会话HTML出错: {str(e)}")
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": content_disposition_header(filename)},
+    )
+
+
+@chat.get("/thread/{thread_id}/messages/{message_id}/export")
+async def export_thread_message_html(
+    thread_id: str,
+    message_id: int,
+    request: Request,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """导出单条回答为自包含 HTML 文件（需要登录），归属校验与会话导出一致"""
+    try:
+        html, filename = await export_message_html_view(
+            thread_id=thread_id,
+            message_id=message_id,
+            current_user=current_user,
+            db=db,
+            request=request,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"导出单条回答HTML出错: {e}, {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"导出单条回答HTML出错: {str(e)}")
     return Response(
         content=html,
         media_type="text/html; charset=utf-8",

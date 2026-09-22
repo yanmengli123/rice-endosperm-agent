@@ -33,6 +33,18 @@
         <Copy v-else size="12" />
       </span>
 
+      <!-- 导出单条回答（R1：finished 的回答恒可导出，服务端渲染自包含 HTML） -->
+      <span
+        v-if="showKey('copy') && canExportMessage"
+        class="item btn"
+        :class="{ disabled: isExporting }"
+        @click="exportMessage"
+        :title="isExporting ? '正在导出…' : '导出本条回答为 HTML'"
+      >
+        <Loader v-if="isExporting" size="12" class="export-spin" />
+        <Download v-else size="12" />
+      </span>
+
       <!-- 重试 -->
       <span
         v-if="showKey('regenerate')"
@@ -101,9 +113,13 @@ import {
   Check,
   RotateCcw,
   BookOpen,
-  ChevronDown
+  ChevronDown,
+  Download,
+  Loader
 } from '@lucide/vue'
 import { agentApi } from '@/apis'
+import { threadApi } from '@/apis/agent_api'
+import { saveBlobResponse } from '@/utils/download'
 import KnowledgeSourceSection from '@/components/KnowledgeSourceSection.vue'
 import WebSearchSourceSection from '@/components/WebSearchSourceSection.vue'
 
@@ -121,6 +137,10 @@ const props = defineProps({
   sources: {
     type: Object,
     default: () => ({})
+  },
+  threadId: {
+    type: String,
+    default: null
   }
 })
 
@@ -191,6 +211,24 @@ const showKey = (key) => {
 
 // 复制状态
 const isCopied = ref(false)
+
+// 单条回答导出状态（R1：finished 的回答恒可导出；threadId 由父组件注入）
+const isExporting = ref(false)
+const canExportMessage = computed(() => Boolean(props.threadId && msg.value?.id))
+const exportMessage = async () => {
+  if (!canExportMessage.value || isExporting.value) return
+  isExporting.value = true
+  try {
+    const response = await threadApi.exportMessageHtml(props.threadId, msg.value.id)
+    const filename = await saveBlobResponse(response, `语析回答_${msg.value.id}.html`)
+    antMessage.success(`已导出：${filename}`)
+  } catch (error) {
+    console.warn('导出单条回答失败:', error)
+    antMessage.error(error?.message || '导出单条回答失败')
+  } finally {
+    isExporting.value = false
+  }
+}
 
 // 定义 copy 方法
 const copyText = async (text) => {
@@ -364,6 +402,10 @@ const cancelDislike = () => {
     }
   }
 
+  .export-spin {
+    animation: refs-export-spin 1s linear infinite;
+  }
+
   .tags {
     display: flex;
     flex-wrap: wrap;
@@ -427,6 +469,15 @@ const cancelDislike = () => {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes refs-export-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
   }
 }
 </style>

@@ -25,7 +25,13 @@ from yuxi.utils.question_utils import normalize_questions
 _tavily_search_instance = None
 
 _PRESENT_ARTIFACTS_INTERNAL_DIR_NAMES = frozenset(
-    {CONVERSATION_HISTORY_DIR_NAME, LARGE_TOOL_RESULTS_DIR_NAME, "large_tool_history"}
+    {
+        CONVERSATION_HISTORY_DIR_NAME,
+        LARGE_TOOL_RESULTS_DIR_NAME,
+        "large_tool_history",
+        # MCP 物化产物由 host 层确定性登记进 state.artifacts，模型再 present 会造成重复卡片
+        "mcp_results",
+    }
 )
 _OCR_PARSE_ALLOWED_DIRS = frozenset({WORKSPACE_DIR_NAME, UPLOADS_DIR_NAME, OUTPUTS_DIR_NAME})
 _OCR_OUTPUT_DIR_NAME = "ocr"

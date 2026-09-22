@@ -1075,6 +1075,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0058_canonical_alias_index", "_migration_0058_canonical_alias_index"),
         ("0059_canonical_alias_uniqueness", "_migration_0059_canonical_alias_uniqueness"),
         ("0060_promote_legacy_glossary", "_migration_0060_promote_legacy_glossary"),
+        ("0061_run_artifacts", "_migration_0061_run_artifacts"),
     ]
 
     async def _migration_0060_promote_legacy_glossary(self, conn) -> None:
@@ -1097,9 +1098,7 @@ class PostgresManager(metaclass=SingletonMeta):
         # contracts (``sha256:<64 hex>``).  The original column was only wide
         # enough for the bare digest, which made the regular release service
         # fail as soon as it persisted its documented value.
-        await conn.execute(
-            text("ALTER TABLE knowledge_releases ALTER COLUMN manifest_hash TYPE VARCHAR(80)")
-        )
+        await conn.execute(text("ALTER TABLE knowledge_releases ALTER COLUMN manifest_hash TYPE VARCHAR(80)"))
 
         spec = resolve_contract("glossary", "1.0.0")
         candidates = (
@@ -1152,9 +1151,7 @@ class PostgresManager(metaclass=SingletonMeta):
                         if value.strip()
                     )
                 for alias in dict.fromkeys(alias_values):
-                    normalized_alias = re.sub(
-                        r"\s+", " ", unicodedata.normalize("NFKC", alias).strip()
-                    ).casefold()
+                    normalized_alias = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", alias).strip()).casefold()
                     await conn.execute(
                         text(
                             "INSERT INTO knowledge_canonical_aliases "
@@ -1170,9 +1167,9 @@ class PostgresManager(metaclass=SingletonMeta):
                         },
                     )
 
-            release_id = "rel_glossary_" + hashlib.sha256(
-                f"{candidate.kb_id}:{candidate.revision_id}".encode()
-            ).hexdigest()[:20]
+            release_id = (
+                "rel_glossary_" + hashlib.sha256(f"{candidate.kb_id}:{candidate.revision_id}".encode()).hexdigest()[:20]
+            )
             manifest = {
                 "kb_id": candidate.kb_id,
                 "contract": spec.contract_ref,
@@ -1190,9 +1187,12 @@ class PostgresManager(metaclass=SingletonMeta):
                     "reason": "explicit_glossary_name_and_schema",
                 },
             }
-            manifest_hash = "sha256:" + hashlib.sha256(
-                json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            manifest_hash = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+            )
             await conn.execute(
                 text(
                     "UPDATE knowledge_releases SET status = 'SUPERSEDED', superseded_at = NOW() "
@@ -1257,6 +1257,35 @@ class PostgresManager(metaclass=SingletonMeta):
                 },
             )
 
+    async def _migration_0061_run_artifacts(self, conn) -> None:
+        """AgentRun 数据产物登记表：MCP 查询结果物化文件 / 序列交付物的权威记录。
+
+        - 表结构由 ORM metadata create（本迁移内补建，兼容未走 create_business_tables
+          的迁移测试路径）；
+        - 启用 RLS 并挂租户策略（与 0023 执行轨迹同款 yuxi.tenant_id 会话变量；
+          应用当前以 owner 连接运行，策略为纵深防御，主边界仍是查询侧过滤）。
+        """
+        if hasattr(conn, "run_sync"):
+            from yuxi.storage.postgres.models_business import RunArtifact  # noqa: F401
+
+            await conn.run_sync(BusinessBase.metadata.create_all)
+        await conn.execute(text("ALTER TABLE run_artifacts ENABLE ROW LEVEL SECURITY"))
+        policy_name = "p_run_artifacts_tenant"
+        policy_exists = (
+            await conn.execute(
+                text("SELECT 1 FROM pg_policies WHERE tablename = 'run_artifacts' AND policyname = :policy"),
+                {"policy": policy_name},
+            )
+        ).scalar()
+        if not policy_exists:
+            await conn.execute(
+                text(
+                    f"CREATE POLICY {policy_name} ON run_artifacts "
+                    "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT) "
+                    "WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)"
+                )
+            )
+
     async def _migration_0059_canonical_alias_uniqueness(self, conn) -> None:
         """Prevent duplicate aliases within one immutable dataset revision."""
         await conn.execute(
@@ -1281,7 +1310,8 @@ class PostgresManager(metaclass=SingletonMeta):
             text(
                 "CREATE TABLE IF NOT EXISTS knowledge_canonical_aliases ("
                 "id SERIAL PRIMARY KEY, "
-                "revision_id VARCHAR(64) NOT NULL REFERENCES knowledge_dataset_revisions(revision_id) ON DELETE CASCADE, "
+                "revision_id VARCHAR(64) NOT NULL "
+                "REFERENCES knowledge_dataset_revisions(revision_id) ON DELETE CASCADE, "
                 "record_id VARCHAR(64) NOT NULL, "
                 "alias VARCHAR(512) NOT NULL, "
                 "normalized_alias VARCHAR(512) NOT NULL, "
@@ -1312,8 +1342,7 @@ class PostgresManager(metaclass=SingletonMeta):
         """Add the deterministic lookup key used by glossary authority channels."""
         await conn.execute(
             text(
-                "ALTER TABLE IF EXISTS knowledge_canonical_records "
-                "ADD COLUMN IF NOT EXISTS normalized_key VARCHAR(512)"
+                "ALTER TABLE IF EXISTS knowledge_canonical_records ADD COLUMN IF NOT EXISTS normalized_key VARCHAR(512)"
             )
         )
         await conn.execute(
@@ -1323,10 +1352,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         )
         await conn.execute(
-            text(
-                "ALTER TABLE IF EXISTS knowledge_canonical_records "
-                "ALTER COLUMN normalized_key SET NOT NULL"
-            )
+            text("ALTER TABLE IF EXISTS knowledge_canonical_records ALTER COLUMN normalized_key SET NOT NULL")
         )
         await conn.execute(
             text(

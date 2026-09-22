@@ -926,6 +926,131 @@ routes:
         show_limit_quota_header: true
         allow_degradation: true
 
+  # 单条回答 HTML 导出（回答末尾「导出」按钮）：GET 无请求体，鉴权与归属由上游承担。
+  - id: yuxi-chat-message-export-html
+    name: yuxi-chat-message-export-html
+    uri: /api/chat/thread/:thread_id/messages/:message_id/export
+    methods:
+      - GET
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  # 线程产物下载/预览（outputs/mcp_results、sequence_deliverables、uploads 等）：
+  # GET 无请求体，路径穿越/归属校验由上游 resolve_thread_artifact_view 承担。
+  - id: yuxi-chat-thread-artifact-download
+    name: yuxi-chat-thread-artifact-download
+    uri: /api/chat/thread/:thread_id/artifacts/*
+    methods:
+      - GET
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  # 线程产物保存到共享工作区：POST + 请求体闭集校验，归属校验由上游承担。
+  - id: yuxi-chat-thread-artifact-save
+    name: yuxi-chat-thread-artifact-save
+    uri: /api/chat/thread/:thread_id/artifacts/save
+    methods:
+      - POST
+    priority: 125
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      request-validation:
+        body_schema:
+          type: object
+          required:
+            - path
+          properties:
+            path:
+              type: string
+              minLength: 1
+              maxLength: 512
+          additionalProperties: false
+        rejected_code: 400
+        rejected_msg: invalid request
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
   # 桌面端附件链路（P5）：tmp 上传/解析 + 线程附件确认。
   # 上传是 multipart，不做请求体 schema 校验；身份与归属仍由 Yuxi 校验。
   - id: yuxi-chat-attachment-tmp-upload

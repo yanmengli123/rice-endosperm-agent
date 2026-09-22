@@ -326,6 +326,19 @@ async def test_figure_asset_lineage_repair_is_a_new_versioned_migration():
 
 
 @pytest.mark.asyncio
+async def test_run_artifacts_migration_creates_table_and_rls_policy():
+    manager = PostgresManager()
+    connection = _RecordingConnection()
+
+    await manager._migration_0061_run_artifacts(connection)
+
+    statements = "\n".join(connection.statements)
+    assert "ALTER TABLE run_artifacts ENABLE ROW LEVEL SECURITY" in statements
+    assert "CREATE POLICY p_run_artifacts_tenant ON run_artifacts" in statements
+    assert ("0061_run_artifacts", "_migration_0061_run_artifacts") in manager._VERSIONED_MIGRATIONS
+
+
+@pytest.mark.asyncio
 async def test_evidence_span_anchor_uniqueness_is_repaired_per_revision():
     manager = PostgresManager()
     connection = _RecordingConnection()

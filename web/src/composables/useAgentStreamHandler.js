@@ -302,6 +302,19 @@ export function useAgentStreamHandler({
           threadState.pendingRequestId = null
           threadState.pendingInterrupt = null
           threadState.contextCompressing = false
+          // 产物按轮快照（figuresByRun 同款）：agent_state 整体替换会抹掉线程级
+          // artifacts，流结束时把当前列表快照进本 run，上一轮产物卡不消失；
+          // 历史回读后以服务端 run_artifacts 投影为准（getConvArtifacts 优先读投影）
+          const runId = String(chunk.run_id || threadState.activeRunId || '')
+          const artifactPaths = Array.isArray(threadState.agentState?.artifacts)
+            ? threadState.agentState.artifacts
+            : []
+          if (runId && artifactPaths.length) {
+            threadState.runArtifactsByRun = {
+              ...(threadState.runArtifactsByRun || {}),
+              [runId]: artifactPaths
+            }
+          }
           console.log(`${debugPrefix}[finished]`, {
             threadId,
             currentAgentId: unref(currentAgentId),
