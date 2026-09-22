@@ -572,3 +572,157 @@ async def test_normalize_image_bytes_keeps_alpha_png():
 
 async def test_normalize_image_bytes_rejects_non_image():
     assert _normalize_image_bytes(b"not an image at all") is None
+
+
+# ── 图组分组渲染（题注每图组一次，子图缩略网格，对齐站内 FigureCardGroup） ────
+
+
+def _figure(
+    asset: str,
+    *,
+    role: str = "panel",
+    panel_label: str = "",
+    group_index: int = 0,
+    binding_id: str = "b-1",
+    caption: str = "Figure 5 籽粒表型分析",
+    page: int = 8,
+    asset_page: int = 0,
+) -> dict:
+    return {
+        "kb_id": "kb-1",
+        "file_id": "file-1",
+        "revision_id": "rev-9",
+        "asset_name": asset,
+        "binding_id": binding_id,
+        "role": role,
+        "panel_label": panel_label,
+        "group_index": group_index,
+        "figure_label": "Figure 5",
+        "caption": caption,
+        "page": page,
+        "asset_page": asset_page,
+    }
+
+
+def _render_with_figures(figures: list[dict], kbassets: dict) -> BeautifulSoup:
+    payload = {"citation_ready": {"figures": figures}}
+    html = _render(
+        [dict(_msg("human", "q"), id=1), dict(_msg("ai", "见图。", extra_metadata=payload), id=2)],
+        kbassets=kbassets,
+    )
+    return _soup(html)
+
+
+async def test_figure_panels_grouped_under_single_caption():
+    figures = [
+        _figure("panel_b.png", panel_label="B", group_index=2),
+        _figure("primary.png", role="primary", group_index=-1),
+        _figure("panel_a.png", panel_label="A", group_index=1),
+        _figure("panel_c.png", panel_label="C", group_index=3),
+    ]
+    kbassets = {
+        f"kbasset://file-1/rev-9/{name}": f"data:image/png;base64,{name[:4].upper()}"
+        for name in ("primary.png", "panel_a.png", "panel_b.png", "panel_c.png")
+    }
+    soup = _render_with_figures(figures, kbassets)
+
+    # 一个图组一张卡：题注只出一次（figcaption 级），主图为大图
+    cards = soup.select("figure.figure-card")
+    assert len(cards) == 1
+    assert len(cards[0].select("figcaption")) == 1
+    assert "Figure 5 籽粒表型分析" in cards[0].select_one("figcaption").get_text()
+    assert cards[0].select_one("img")["src"].endswith("PRIM")  # primary data URI
+
+    # 子图按阅读序渲染为缩略网格，只带字母角标、不带题注与页码
+    panels = cards[0].select(".figure-panel")
+    assert [p.select_one("i").get_text() for p in panels] == ["A", "B", "C"]
+    assert all(p.select_one("i") for p in panels)
+    assert len(cards[0].select(".figure-page")) == 1
+
+
+async def test_figure_group_without_primary_falls_back_to_first_member():
+    figures = [_figure("p1.png", panel_label="A"), _figure("p2.png", panel_label="B")]
+    kbassets = {
+        "kbasset://file-1/rev-9/p1.png": "data:image/png;base64,QUE=",
+        "kbasset://file-1/rev-9/p2.png": "data:image/png;base64,QkI=",
+    }
+    soup = _render_with_figures(figures, kbassets)
+
+    card = soup.select_one("figure.figure-card")
+    assert card is not None
+    assert card.select_one("img")["src"].endswith("QUE=")  # 首条充当主图
+    assert len(card.select(".figure-panel")) == 1
+
+
+async def test_legacy_figures_without_grouping_fields_dedupe_by_caption():
+    legacy = [
+        {
+            "kb_id": "kb-1",
+            "file_id": "file-1",
+            "revision_id": "rev-9",
+            "asset_name": f"p{i}.png",
+            "caption": "Figure 5 籽粒表型分析",
+            "page": 8,
+        }
+        for i in (1, 2, 3)
+    ]
+    kbassets = {f"kbasset://file-1/rev-9/p{i}.png": f"data:image/png;base64,UD{i}=" for i in (1, 2, 3)}
+    soup = _render_with_figures(legacy, kbassets)
+
+    # 旧载荷无 binding_id/role：按题注归组，题注仍只出一次
+    cards = soup.select("figure.figure-card")
+    assert len(cards) == 1
+    assert len(cards[0].select("figcaption")) == 1
+    assert len(cards[0].select(".figure-panel")) == 2
+
+
+async def test_cross_page_figure_shows_both_pages():
+    figures = [_figure("primary.png", role="primary", page=8, asset_page=9)]
+    kbassets = {"kbasset://file-1/rev-9/primary.png": "data:image/png;base64,QUE="}
+    soup = _render_with_figures(figures, kbassets)
+
+    assert "题注第8页 · 图第9页" in soup.select_one(".figure-page").get_text()
+
+    same_page = _render_with_figures([_figure("primary.png", role="primary", page=8, asset_page=8)], kbassets)
+    assert same_page.select_one(".figure-page").get_text() == "第8页"
+
+
+async def test_primary_missing_panels_available_degrades_to_panel_grid():
+    figures = [
+        _figure("primary.png", role="primary"),
+        _figure("panel_a.png", panel_label="A", group_index=1),
+    ]
+    kbassets = {
+        "kbasset://file-1/rev-9/primary.png": None,
+        "kbasset://file-1/rev-9/panel_a.png": "data:image/png;base64,QUE=",
+    }
+    soup = _render_with_figures(figures, kbassets)
+
+    card = soup.select_one("figure.figure-card.figure-primary-missing")
+    assert card is not None
+    assert len(card.select("figcaption")) == 1  # 题注仍只出一次
+    assert len(card.select(".figure-panel")) == 1
+    assert "figure-missing-note" not in str(card)
+
+
+async def test_ordered_asset_targets_prioritizes_primary_for_budget():
+    from yuxi.services.conversation_export_service import _ordered_asset_targets
+
+    figures = {
+        "citation_ready": {
+            "figures": [
+                _figure("panel_a.png", panel_label="A"),
+                _figure("primary.png", role="primary", binding_id="b-2", caption="Figure 6"),
+            ]
+        }
+    }
+    history = [
+        dict(_msg("human", "q"), id=1),
+        dict(_msg("ai", "见图 ![x](kbasset://file-1/rev-9/inline.png)", extra_metadata=figures), id=2),
+    ]
+
+    targets = list(_ordered_asset_targets(history))
+    # primary 先于 panel，正文内联最后：预算不足时子图先降级
+    assert targets[0] == "kbasset://file-1/rev-9/primary.png"
+    assert targets[1] == "kbasset://file-1/rev-9/panel_a.png"
+    assert targets[2] == "kbasset://file-1/rev-9/inline.png"

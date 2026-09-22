@@ -286,24 +286,95 @@ def _verified_figures(entry: dict) -> list[dict]:
     return []
 
 
+def _as_int(value, default: int = 0) -> int:  # noqa: ANN001
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value
+
+
+def _figure_caption(figure: dict) -> str:
+    # 标题回退链与站内 figureCardTitle 一致：题注 → 编号 → 中性文案（禁用任何模型文本）
+    page = _as_int(figure.get("page"))
+    return (
+        str(figure.get("caption") or "").strip()
+        or str(figure.get("figure_label") or "").strip()
+        or (f"图 · 第{page}页" if page >= 1 else "图")
+    )
+
+
+def _figure_page_badge(figure: dict) -> str:
+    """页码徽章：跨页图表（题注页/图页不同）显示两段，相同只显示一个（契约既有口径）。"""
+    page = _as_int(figure.get("page"))
+    asset_page = _as_int(figure.get("asset_page"))
+    if page < 1:
+        return ""
+    if asset_page >= 1 and asset_page != page:
+        return f'<span class="figure-page">题注第{page}页 · 图第{asset_page}页</span>'
+    return f'<span class="figure-page">第{page}页</span>'
+
+
+def _group_figures(figures: list[dict]) -> list[dict]:
+    """按 binding_id 分组（站内 FigureCardGroup 同款分组键；旧载荷无该字段时按题注文本归组）。
+
+    组内 primary 取 role=="primary"（缺失回退首条），panels 按 group_index 阅读序；
+    题注/页码在组级只输出一次，子图只带 panel_label 角标。
+    """
+    groups: list[dict] = []
+    by_key: dict[str, dict] = {}
+    for figure in figures:
+        binding_id = str(figure.get("binding_id") or "").strip()
+        caption_key = f"{str(figure.get('caption') or '').strip()}|{str(figure.get('figure_label') or '').strip()}"
+        key = f"b:{binding_id}" if binding_id else f"c:{caption_key}"
+        group = by_key.get(key)
+        if group is None:
+            group = {"members": []}
+            by_key[key] = group
+            groups.append(group)
+        group["members"].append(figure)
+    for group in groups:
+        members = group["members"]
+        primary = next((member for member in members if member.get("role") == "primary"), members[0])
+        panels = sorted(
+            (member for member in members if member is not primary),
+            key=lambda member: _as_int(member.get("group_index")),
+        )
+        group["primary"] = primary
+        group["panels"] = panels
+    return groups
+
+
+def _render_figure_panels(panels: list[dict], kbassets: dict) -> str:
+    items = []
+    for panel in panels:
+        data_uri = kbassets.get(_figure_asset_uri(panel))
+        if not data_uri:
+            continue  # 子图失败静默跳过：主图承载语义，不逐个占位
+        label = str(panel.get("panel_label") or "").strip()
+        label_html = f"<i>{escape_html(label)}</i>" if label else ""
+        items.append(f'<span class="figure-panel"><img src="{data_uri}" alt="" />{label_html}</span>')
+    if not items:
+        return ""
+    return f'<div class="figure-panels">{"".join(items)}</div>'
+
+
 def _render_figure_cards(entry: dict, kbassets: dict) -> str:
     cards = []
-    for figure in _verified_figures(entry):
-        uri = _figure_asset_uri(figure)
-        page = figure.get("page")
-        has_page = isinstance(page, int) and not isinstance(page, bool) and page >= 1
-        # 标题回退链与站内 figureCardTitle 一致：题注 → 编号 → 中性文案（禁用任何模型文本）
-        caption = (
-            str(figure.get("caption") or "").strip()
-            or str(figure.get("figure_label") or "").strip()
-            or (f"图 · 第{page}页" if has_page else "图")
-        )
-        page_html = f'<span class="figure-page">第{page}页</span>' if has_page else ""
-        data_uri = kbassets.get(uri)
+    for group in _group_figures(_verified_figures(entry)):
+        primary = group["primary"]
+        caption = _figure_caption(primary)
+        page_html = _figure_page_badge(primary)
+        panels_html = _render_figure_panels(group["panels"], kbassets)
+        data_uri = kbassets.get(_figure_asset_uri(primary))
         if data_uri:
             cards.append(
                 f'<figure class="figure-card"><img src="{data_uri}" alt="{escape_html(caption)}" />'
-                f"<figcaption>{escape_html(caption)}{page_html}</figcaption></figure>"
+                f"<figcaption>{escape_html(caption)}{page_html}</figcaption>{panels_html}</figure>"
+            )
+        elif panels_html:
+            # 主图不可用但子图可用：题注仍只出一次，子图网格降级呈现
+            cards.append(
+                f'<figure class="figure-card figure-primary-missing">'
+                f"<figcaption>{escape_html(caption)}{page_html}</figcaption>{panels_html}</figure>"
             )
         else:
             cards.append(
@@ -832,6 +903,50 @@ async def _kbasset_data_uri(target: dict, current_user: User) -> str | None:
     return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
 
 
+def _ordered_asset_targets(history: list[dict]) -> dict[str, dict]:
+    """收集 kbasset 解析目标并按预算优先级排序：图组 primary → 子图 → 正文内联引用。
+
+    预算不足时子图先降级（主图承载语义），同优先级保持载荷出现顺序（阅读序）。
+    """
+    figure_targets: list[tuple[int, str, dict]] = []
+    inline_targets: list[tuple[str, dict]] = []
+    for msg in history:
+        if msg.get("type") == "human":
+            continue
+        for figure in ((msg.get("extra_metadata") or {}).get("citation_ready") or {}).get("figures") or []:
+            if not isinstance(figure, dict):
+                continue
+            uri = _figure_asset_uri(figure)
+            if not uri:
+                continue
+            file_id, revision_id, asset_name = _KBASSET_URI_RE.match(uri).groups()
+            figure_targets.append(
+                (
+                    0 if figure.get("role") == "primary" else 1,
+                    uri,
+                    {
+                        "kb_id": str(figure.get("kb_id") or "").strip(),
+                        "file_id": file_id,
+                        "revision_id": revision_id,
+                        "asset_name": asset_name,
+                    },
+                )
+            )
+        for match in _KBASSET_URI_RE.finditer(str(msg.get("content") or "")):
+            uri = match.group(0)
+            file_id, revision_id, asset_name = match.groups()
+            inline_targets.append(
+                (uri, {"kb_id": "", "file_id": file_id, "revision_id": revision_id, "asset_name": asset_name})
+            )
+
+    asset_targets: dict[str, dict] = {}
+    for _, uri, target in sorted(figure_targets, key=lambda item: item[0]):
+        asset_targets.setdefault(uri, target)
+    for uri, target in inline_targets:
+        asset_targets.setdefault(uri, target)
+    return asset_targets
+
+
 async def _collect_embedded_images(history: list[dict], current_user: User) -> tuple[dict, dict]:
     """收集本会话全部可内嵌图片：用户消息图（base64）+ 图卡与正文 kbasset 资产。
 
@@ -840,35 +955,11 @@ async def _collect_embedded_images(history: list[dict], current_user: User) -> t
     """
     question_images: dict[int, str | None] = {}
     question_sources: dict[int, str] = {}
-    asset_targets: dict[str, dict] = {}
+    asset_targets = _ordered_asset_targets(history)
     for msg in history:
-        if msg.get("type") == "human":
-            if msg.get("image_content"):
-                question_images[msg.get("id")] = None
-                question_sources[msg.get("id")] = str(msg["image_content"])
-            continue
-        for figure in ((msg.get("extra_metadata") or {}).get("citation_ready") or {}).get("figures") or []:
-            if not isinstance(figure, dict):
-                continue
-            uri = _figure_asset_uri(figure)
-            if uri and uri not in asset_targets:
-                file_id, revision_id, asset_name = _KBASSET_URI_RE.match(uri).groups()
-                asset_targets[uri] = {
-                    "kb_id": str(figure.get("kb_id") or "").strip(),
-                    "file_id": file_id,
-                    "revision_id": revision_id,
-                    "asset_name": asset_name,
-                }
-        for match in _KBASSET_URI_RE.finditer(str(msg.get("content") or "")):
-            uri = match.group(0)
-            if uri not in asset_targets:
-                file_id, revision_id, asset_name = match.groups()
-                asset_targets[uri] = {
-                    "kb_id": "",
-                    "file_id": file_id,
-                    "revision_id": revision_id,
-                    "asset_name": asset_name,
-                }
+        if msg.get("type") == "human" and msg.get("image_content"):
+            question_images[msg.get("id")] = None
+            question_sources[msg.get("id")] = str(msg["image_content"])
 
     budget_left = _TOTAL_IMAGE_BUDGET
     kbassets: dict[str, str | None] = {}
@@ -1397,6 +1488,47 @@ body {
   margin-top: 4px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.figure-panels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.figure-panel {
+  position: relative;
+  display: inline-flex;
+}
+
+.figure-panel img {
+  display: block;
+  max-width: 200px;
+  max-height: 140px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.figure-panel i {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(30, 31, 31, 0.66);
+  color: #ffffff;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
+.figure-primary-missing figcaption {
+  margin-bottom: 8px;
+  text-align: center;
 }
 
 .fact-ref {
