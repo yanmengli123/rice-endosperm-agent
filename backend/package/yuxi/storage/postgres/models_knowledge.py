@@ -1876,6 +1876,7 @@ class KnowledgeCanonicalRecord(Base):
         UniqueConstraint("revision_id", "record_id", name="uq_knowledge_canonical_records_revision_record"),
         Index("ix_knowledge_canonical_records_revision_key", "revision_id", "record_key"),
         Index("ix_knowledge_canonical_records_revision_normalized_key", "revision_id", "normalized_key"),
+        Index("ix_knowledge_canonical_records_revision_fold_key", "revision_id", "fold_key"),
         Index("ix_knowledge_canonical_records_kb", "kb_id"),
     )
 
@@ -1888,6 +1889,7 @@ class KnowledgeCanonicalRecord(Base):
     tenant_id = Column(BigInteger, index=True)
     record_key = Column(String(512), nullable=False)
     normalized_key = Column(String(512), nullable=False, default="")
+    fold_key = Column(String(512), nullable=False, default="", server_default="")
     row_number = Column(Integer, nullable=False)
     fields_json = Column(JSON_VALUE, nullable=False, default=dict)
     projection_text = Column(Text, nullable=False)
@@ -1907,6 +1909,7 @@ class KnowledgeCanonicalAlias(Base):
             name="uq_knowledge_canonical_alias_revision_record",
         ),
         Index("ix_knowledge_canonical_aliases_revision_alias", "revision_id", "normalized_alias"),
+        Index("ix_knowledge_canonical_aliases_revision_fold_key", "revision_id", "fold_key"),
         Index("ix_knowledge_canonical_aliases_record", "revision_id", "record_id"),
     )
 
@@ -1917,6 +1920,7 @@ class KnowledgeCanonicalAlias(Base):
     record_id = Column(String(64), nullable=False)
     alias = Column(String(512), nullable=False)
     normalized_alias = Column(String(512), nullable=False)
+    fold_key = Column(String(512), nullable=False, default="", server_default="")
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from yuxi.knowledge.evidence.glossary import fold_term_key
 from yuxi.services.csv_dataset_service import (
     CsvDatasetValidationError,
     build_canonical_records,
@@ -14,6 +15,7 @@ from yuxi.services.csv_dataset_service import (
     parse_csv_rows,
     schema_hash,
     suggest_column_mapping,
+    validate_glossary_folds,
     validate_qa_mapping,
     validate_record_mapping,
 )
@@ -183,3 +185,42 @@ def test_glossary_requires_identity_and_builds_normalized_aliases():
 
     assert records[0]["normalized_key"] == "pcr"
     assert records[0]["aliases"] == ["PCR", "聚合酶链式反应"]
+
+
+def test_glossary_aliases_split_on_chinese_enum_comma_and_carry_fold_key():
+    rows = [["frameshift", "frame-shift、reading-frame shift", "移码突变"]]
+    records = build_canonical_records(
+        ["term", "aliases", "definition"],
+        rows,
+        contract_key="glossary",
+        identity_column="term",
+    )
+
+    assert records[0]["aliases"] == ["frame-shift", "reading-frame shift"]
+    assert records[0]["fold_key"] == "frameshift"
+    assert records[0]["fold_key"] == fold_term_key("frame shift")
+
+
+def test_validate_glossary_folds_flags_cross_record_collision_as_fatal():
+    records = [
+        {"record_key": "frameshift", "row_number": 2, "aliases": ["frame-shift"]},
+        {"record_key": "frame shift", "row_number": 3, "aliases": []},
+    ]
+    lint = validate_glossary_folds(records)
+    assert lint["fatal"]
+    assert any("frameshift" in issue for issue in lint["issues"])
+
+
+def test_validate_glossary_folds_allows_same_record_variants_and_warns_on_parenthetical_enum():
+    records = [
+        {
+            "record_key": "frameshift",
+            "row_number": 2,
+            "aliases": ["frame-shift", "PCR（也写作P.C.R）"],
+        }
+    ]
+    lint = validate_glossary_folds(records)
+    assert not lint["fatal"]
+    assert lint["valid"]
+    assert len(lint["warnings"]) == 1
+    assert "括号" in lint["warnings"][0]

@@ -1076,7 +1076,69 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0059_canonical_alias_uniqueness", "_migration_0059_canonical_alias_uniqueness"),
         ("0060_promote_legacy_glossary", "_migration_0060_promote_legacy_glossary"),
         ("0061_run_artifacts", "_migration_0061_run_artifacts"),
+        ("0062_canonical_fold_key", "_migration_0062_canonical_fold_key"),
     ]
+
+    async def _migration_0062_canonical_fold_key(self, conn) -> None:
+        """词典折叠键：拼写变体（frameshift / frame-shift / frame shift）统一确定性检索。
+
+        - fold_key 是从不可变原文确定性派生的索引列，projection_text / projection_hash /
+          发布清单哈希均不变，不破坏修订不可变语义；
+        - 取源顺序：normalized_key/normalized_alias 优先，record_key/alias 兜底。
+          0060 晋升的存量词典 record_key 是 row:N 兜底键，真正的术语只存在于
+          normalized_key——直接从 record_key 折叠会让这批词典的折叠层永久失效；
+        - 回填在 Python 侧执行，保证与查询侧（yuxi.knowledge.evidence.glossary.fold_term_key）
+          是同一实现——SQL 无法表达 NFKC，两侧口径漂移会造成永久性静默 MISS；
+        - 纯符号别名的折叠为空串，空 fold 键查询侧不探测，永不出错配；
+        - 列 NOT NULL DEFAULT ''：漏写 fold_key 的旧写入路径退化为空键（不命中折叠层），
+          而非违约崩溃。
+        """
+        from yuxi.knowledge.evidence.glossary import fold_term_key
+
+        async def _backfill(table: str, primary: str, fallback: str, row_key: str) -> None:
+            exists = (
+                await conn.execute(text("SELECT to_regclass(:name) AS reg"), {"name": f"public.{table}"})
+            ).scalar()
+            if not exists:
+                return
+            rows = (
+                await conn.execute(text(f"SELECT {row_key} AS id, {primary} AS prim, {fallback} AS alt FROM {table}"))
+            ).fetchall()
+            for start in range(0, len(rows), 500):
+                batch = rows[start : start + 500]
+                await conn.execute(
+                    text(f"UPDATE {table} SET fold_key = :fold WHERE {row_key} = :rid"),
+                    [{"rid": row.id, "fold": fold_term_key(row.prim) or fold_term_key(row.alt) or ""} for row in batch],
+                )
+
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS knowledge_canonical_records "
+                "ADD COLUMN IF NOT EXISTS fold_key VARCHAR(512) DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS knowledge_canonical_aliases "
+                "ADD COLUMN IF NOT EXISTS fold_key VARCHAR(512) DEFAULT ''"
+            )
+        )
+        await _backfill("knowledge_canonical_records", "normalized_key", "record_key", "id")
+        await _backfill("knowledge_canonical_aliases", "normalized_alias", "alias", "id")
+        await conn.execute(text("ALTER TABLE IF EXISTS knowledge_canonical_records ALTER COLUMN fold_key SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE IF EXISTS knowledge_canonical_aliases ALTER COLUMN fold_key SET NOT NULL"))
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_canonical_records_revision_fold_key "
+                "ON knowledge_canonical_records(revision_id, fold_key)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_canonical_aliases_revision_fold_key "
+                "ON knowledge_canonical_aliases(revision_id, fold_key)"
+            )
+        )
 
     async def _migration_0060_promote_legacy_glossary(self, conn) -> None:
         """Promote unmistakable legacy CSV glossaries into the explicit contract.

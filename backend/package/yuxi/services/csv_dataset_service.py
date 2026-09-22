@@ -20,10 +20,10 @@ import hashlib
 import io
 import json
 import re
-import unicodedata
 import uuid
 from collections.abc import Iterable
 
+from yuxi.knowledge.evidence.glossary import fold_term_key, normalize_glossary_key
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeCanonicalAlias,
     KnowledgeCanonicalRecord,
@@ -226,6 +226,39 @@ def validate_record_mapping(header: list[str], identity_column: str | None, *, r
     }
 
 
+def validate_glossary_folds(records: list[dict]) -> dict:
+    """词典折叠 lint：发布前拦截线上词典核验歧义隐患。
+
+    - 折叠冲突（fatal）：两个不同术语的键/别名折叠后同键，线上会触发 AMBIGUOUS；
+    - 括号枚举（warning）：别名单元格里的"（也写作 …）"式枚举拆不开，提示作者改用分隔符。
+    """
+    issues: list[str] = []
+    warnings: list[str] = []
+    fold_owner: dict[str, dict] = {}
+    for record in records:
+        owner_key = str(record.get("record_key") or "")
+        row_number = record.get("row_number")
+        for label in [owner_key, *(record.get("aliases") or [])]:
+            fold = fold_term_key(label)
+            if not fold:
+                continue
+            owner = fold_owner.get(fold)
+            if owner is None:
+                fold_owner[fold] = {"record_key": owner_key, "row_number": row_number}
+            elif owner["record_key"] != owner_key:
+                issues.append(
+                    f"第 {owner['row_number']} 行与第 {row_number} 行的术语/别名折叠后同为 {fold!r}"
+                    f"（{owner['record_key']!r} 与 {owner_key!r}），将触发词典核验歧义，请合并或改名"
+                )
+        for alias in record.get("aliases") or []:
+            if re.search(r"[（(][^()（）]+[)）]", alias):
+                warnings.append(
+                    f"第 {row_number} 行别名 {alias!r} 含括号内容，括号内枚举无法拆分，"
+                    "请改为逗号/顿号/竖线分隔的独立别名"
+                )
+    return {"valid": not issues, "fatal": bool(issues), "issues": issues, "warnings": warnings}
+
+
 def schema_hash(header: list[str]) -> str:
     return sha256_hex(json.dumps(header, ensure_ascii=False).encode("utf-8"))
 
@@ -269,17 +302,18 @@ def build_canonical_records(
         else:
             record_key = f"row:{row_number}"
             identity_strategy = "row_number"
-        normalized_key = unicodedata.normalize("NFKC", record_key).strip().casefold()
+        normalized_key = normalize_glossary_key(record_key)
         aliases: list[str] = []
         if contract_key == "glossary":
             for name, value in values.items():
                 if str(name).strip().casefold() not in {"alias", "aliases", "别名", "同义词", "缩写"}:
                     continue
-                aliases.extend(part.strip() for part in re.split(r"[,，;；|/\n]+", value) if part.strip())
+                aliases.extend(part.strip() for part in re.split(r"[,，;；、|/\n]+", value) if part.strip())
         records.append(
             {
                 "record_key": record_key,
                 "normalized_key": normalized_key,
+                "fold_key": fold_term_key(record_key),
                 "aliases": list(dict.fromkeys(aliases)),
                 "row_number": row_number,
                 "fields": values,
@@ -341,6 +375,14 @@ async def preview_csv_dataset(raw: bytes, filename: str, contract_key: str, mapp
             mapping.get("identity_column"),
             require_identity=contract_key == "glossary",
         )
+        if contract_key == "glossary" and mapping.get("identity_column"):
+            preview_records = build_canonical_records(
+                header,
+                rows,
+                contract_key="glossary",
+                identity_column=mapping.get("identity_column"),
+            )
+            response["glossary_fold_lint"] = validate_glossary_folds(preview_records)
     return response
 
 
@@ -383,16 +425,6 @@ async def import_csv_dataset(
     if validation.get("fatal"):
         raise CsvDatasetValidationError("；".join(validation.get("issues") or ["数据校验失败"]))
 
-    # 1. 文件记录（原始 CSV 是权威原件，走 KnowledgeFile 生命周期以便删除/审计）
-    # prepare_item_metadata 只认 content_hashes（按 item 索引的 dict），传单数 content_hash 会抛 Missing content_hash
-    file_meta = await knowledge_base.add_file_record(
-        kb_id,
-        minio_url,
-        params={"source_path": filename, "content_hashes": {minio_url: source_sha}},
-        operator_id=operator_id,
-    )
-    file_id = file_meta["file_id"]
-
     revision_id = f"dsrev_{uuid.uuid4().hex[:24]}"
     records = build_canonical_records(
         header,
@@ -402,6 +434,21 @@ async def import_csv_dataset(
         question_col=mapping.get("question_col"),
         answer_col=mapping.get("answer_col"),
     )
+    if contract_key == "glossary":
+        fold_lint = validate_glossary_folds(records)
+        if fold_lint.get("fatal"):
+            raise CsvDatasetValidationError("；".join(fold_lint.get("issues") or ["词典折叠冲突"]))
+        validation = {**validation, "glossary_fold_lint": fold_lint}
+
+    # 1. 文件记录（原始 CSV 是权威原件，走 KnowledgeFile 生命周期以便删除/审计）
+    # prepare_item_metadata 只认 content_hashes（按 item 索引的 dict），传单数 content_hash 会抛 Missing content_hash
+    file_meta = await knowledge_base.add_file_record(
+        kb_id,
+        minio_url,
+        params={"source_path": filename, "content_hashes": {minio_url: source_sha}},
+        operator_id=operator_id,
+    )
+    file_id = file_meta["file_id"]
 
     async with pg_manager.get_async_session_context() as session:
         revision = KnowledgeDatasetRevision(
@@ -441,6 +488,7 @@ async def import_csv_dataset(
                     tenant_id=tenant_id,
                     record_key=record["record_key"],
                     normalized_key=record["normalized_key"],
+                    fold_key=record["fold_key"] or "",
                     row_number=record["row_number"],
                     fields_json=record["fields"],
                     projection_text=record["projection_text"],
@@ -453,7 +501,8 @@ async def import_csv_dataset(
                         revision_id=revision_id,
                         record_id=record_id,
                         alias=alias,
-                        normalized_alias=unicodedata.normalize("NFKC", alias).strip().casefold(),
+                        normalized_alias=normalize_glossary_key(alias),
+                        fold_key=fold_term_key(alias) or "",
                     )
                 )
 

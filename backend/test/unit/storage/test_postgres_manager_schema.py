@@ -339,6 +339,28 @@ async def test_run_artifacts_migration_creates_table_and_rls_policy():
 
 
 @pytest.mark.asyncio
+async def test_canonical_fold_key_migration_backfills_before_constraints_and_indexes():
+    manager = PostgresManager()
+    connection = _RecordingConnection()
+
+    await manager._migration_0062_canonical_fold_key(connection)
+
+    statements = "\n".join(connection.statements)
+    assert "ADD COLUMN IF NOT EXISTS fold_key VARCHAR(512)" in statements
+    records_not_null = "ALTER TABLE IF EXISTS knowledge_canonical_records ALTER COLUMN fold_key SET NOT NULL"
+    aliases_not_null = "ALTER TABLE IF EXISTS knowledge_canonical_aliases ALTER COLUMN fold_key SET NOT NULL"
+    assert records_not_null in statements
+    assert aliases_not_null in statements
+    assert "ix_knowledge_canonical_records_revision_fold_key" in statements
+    assert "ix_knowledge_canonical_aliases_revision_fold_key" in statements
+    assert statements.index("ADD COLUMN IF NOT EXISTS fold_key") < statements.index(records_not_null)
+    assert statements.index(records_not_null) < statements.index(
+        "CREATE INDEX IF NOT EXISTS ix_knowledge_canonical_records_revision_fold_key"
+    )
+    assert ("0062_canonical_fold_key", "_migration_0062_canonical_fold_key") in manager._VERSIONED_MIGRATIONS
+
+
+@pytest.mark.asyncio
 async def test_evidence_span_anchor_uniqueness_is_repaired_per_revision():
     manager = PostgresManager()
     connection = _RecordingConnection()
