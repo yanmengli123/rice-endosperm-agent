@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SLUG="${1:-}"
+readonly PROBE_ONLY="$([[ "${1:-}" == "--probe" ]] && printf '1' || printf '0')"
+if [[ "$PROBE_ONLY" == "1" ]]; then
+  readonly SLUG="${2:-}"
+else
+  readonly SLUG="${1:-}"
+fi
 readonly UID_VALUE="${YUXI_MCP_EXECUTION_UID:-}"
 readonly THREAD_VALUE="${YUXI_MCP_EXECUTION_THREAD_ID:-}"
 readonly SAFE_ID_PATTERN='^[A-Za-z0-9_-]+$'
@@ -39,6 +44,10 @@ readonly RUNTIME_SCHEMA="$(docker image inspect --format '{{index .Config.Labels
 [[ "$ACTUAL_REVISION" == "$REVISION" ]] || fail "image revision label mismatch"
 [[ "$ACTUAL_SLUG" == "$SLUG" ]] || fail "image slug label mismatch"
 [[ "$RUNTIME_SCHEMA" == "1" ]] || fail "image runtime schema mismatch"
+if [[ "$PROBE_ONLY" == "1" ]]; then
+  printf 'ready:%s:%s\n' "$SLUG" "$REVISION"
+  exit 0
+fi
 
 mount_args=(--tmpfs "/home/gem/user-data:rw,nosuid,nodev,size=64m")
 if [[ "$SLUG" == "gene-authority" && -n "$THREAD_VALUE" ]]; then

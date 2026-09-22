@@ -95,3 +95,35 @@ docker exec api-dev uv run --no-sync --no-dev python scripts/verify_bioinfomcp.p
 BIOINFOMCP_SOURCE_DIR=../BioinfoMCP python scripts/build_bioinfomcp_manifest.py
 python scripts/gen_bioinfomcp_tools.py
 ```
+
+## 基因权威数据源与植物基因组 MCP
+
+`gene-authority` 将 NCBI Datasets v2 REST、固定版 Datasets CLI、UniProt REST、Europe PMC REST
+及确定性区间/差值计算封装为 9 个受控工具。`plant-genomics` 与 `gramene` 分别固定到经审查的
+上游提交，在独立只读 OCI 容器中运行；三者均不把上游依赖安装到主 API 环境。首次部署：
+
+```bash
+docker compose --profile genomics-mcp build gene-authority-image plant-genomics-image gramene-mcp-image
+docker compose build api
+docker compose up -d api worker
+docker compose exec api /usr/local/bin/yuxi-genomics-mcp --probe gene-authority
+docker compose exec api /usr/local/bin/yuxi-genomics-mcp --probe plant-genomics
+docker compose exec api /usr/local/bin/yuxi-genomics-mcp --probe gramene
+```
+
+镜像与启动器探针均通过后才报告 `READY`；工具卡片默认禁用，需要管理员添加并在 Agent
+的 MCP 配置中绑定。`gramene` 上游当前未声明 LICENSE，生产启用前须完成法务复核。
+`plant-genomics` 虽可发现 50 个工具，默认问答只开放 43 个精确检索工具；5 个二次合成工具、
+`go_enrichment` 与 `blast_sequence` 保留在目录中但默认禁用，不得作为 SOURCE-ONLY 原始记录。
+Gramene 的 `solr_suggest` 和 `mongo_list_collections` 只是检索建议/集合元数据，不能满足
+基因记录证据义务。部署到其他环境时需分别完成服务启用、健康探测和 Agent MCP 绑定；
+仅构建镜像不会自动让问答智能体调用它们。
+API/worker 挂载 Docker socket 以启动受限兄弟容器，部署时应限制宿主机与 API 管理员访问，
+并将其列入高权限资产审计范围。外部 API 仍可能限流、变更或返回冲突数据；不能把工具
+调用成功等同于生物学结论已证实。
+
+SOURCE-ONLY 轮次将受信工具的公开标量写入审计事实清单，模型引用 `MCP-F` 标记；发布门禁
+检查引用存在性、逐行引用和数值一致性，失败时拒绝或确定性降级为事实清单。该机制降低
+可检测的幻觉，但无法凭标记验证任意自然语言推论。正式基因档案应使用确定性字段装配，
+为每个字段保留数据库、稳定 ID、版本、检索时间、原始值、坐标制与冲突状态；无来源字段
+标记为“未核验”，不要让模型补全。

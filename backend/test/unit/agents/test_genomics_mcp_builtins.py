@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,6 +42,32 @@ def test_genomics_builtins_use_the_governed_launcher_and_start_disabled(slug, mo
     assert values["runtime_level"] == "managed_oci"
     assert values["runtime_artifact"]["kind"] == "oci_image"
     assert "@sha256:" in values["runtime_artifact"]["image_digest"]
+
+
+def test_genomics_runtime_requires_matching_launcher_probe(monkeypatch):
+    slug = "gene-authority"
+    revision = mcp_service._GENOMICS_MCP_RUNTIMES[slug][2]
+    monkeypatch.setattr(mcp_service.shutil, "which", lambda _command: "/usr/bin/docker")
+
+    def run(command, **_kwargs):
+        if command[0] == "docker":
+            return SimpleNamespace(returncode=0, stdout=f"{revision}|{slug}|1\n")
+        assert command == ["/usr/local/bin/yuxi-genomics-mcp", "--probe", slug]
+        return SimpleNamespace(returncode=0, stdout=f"ready:{slug}:{revision}\n")
+
+    monkeypatch.setattr(mcp_service.subprocess, "run", run)
+    mcp_service._genomics_mcp_runtime_ready.cache_clear()
+    assert mcp_service._genomics_mcp_runtime_ready(slug) is True
+
+    def stale_launcher(command, **kwargs):
+        result = run(command, **kwargs)
+        if command[0] != "docker":
+            result.stdout = "ready:gene-authority:stale-revision\n"
+        return result
+
+    monkeypatch.setattr(mcp_service.subprocess, "run", stale_launcher)
+    mcp_service._genomics_mcp_runtime_ready.cache_clear()
+    assert mcp_service._genomics_mcp_runtime_ready(slug) is False
 
 
 def test_gene_authority_interval_is_deterministic_and_coordinate_explicit():
@@ -104,6 +131,26 @@ def test_gene_authority_delta_rejects_nonfinite_inputs():
 )
 def test_synthesis_and_analysis_tools_are_excluded_from_the_trust_registry(name):
     """合成/聚合与语义不符工具无 profile：不进 source-constrained 轮次，不满足来源义务。"""
+    assert profile_for_protocol_name(name) is None
+
+
+def test_plant_synthesis_tools_are_disabled_for_new_installations():
+    values = mcp_service._builtin_row_values(
+        "plant-genomics", mcp_service._DEFAULT_MCP_SERVERS["plant-genomics"]
+    )
+    assert set(values["disabled_tools"]) == {
+        "analyze_locus_synth",
+        "find_homologs_synth",
+        "biological_context_synth",
+        "consensus_homologs",
+        "gene_report",
+        "go_enrichment",
+        "blast_sequence",
+    }
+
+
+@pytest.mark.parametrize("name", ["solr_suggest", "mongo_list_collections"])
+def test_gramene_metadata_tools_cannot_satisfy_gene_record_obligation(name):
     assert profile_for_protocol_name(name) is None
 
 

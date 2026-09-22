@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from typing import Any
 
@@ -18,6 +19,8 @@ _SOURCE_ONLY = re.compile(r"数据模式\s*[：:]\s*SOURCE-ONLY", re.I)
 _SOURCE_ONLY_LINE = re.compile(r"^[ \t]*数据模式[ \t]*[：:][ \t]*SOURCE-ONLY[ \t]*$", re.I | re.M)
 _FACT_MARKER = re.compile(r"\[MCP-F:(\d+):(f_[0-9a-f]{16})\]", re.I)
 _FACT_LEDGER_BLOCK = re.compile(r"\s*<YUXI_MCP_FACT_LEDGER>.*?</YUXI_MCP_FACT_LEDGER>\s*", re.S)
+# 序列交付物通知块（host 追加在账本之后）：发布前剥除，正文只允许摘要事实。
+_SEQUENCE_DELIVERABLE_BLOCK = re.compile(r"\s*<YUXI_SEQUENCE_DELIVERABLE>.*?</YUXI_SEQUENCE_DELIVERABLE>\s*", re.S)
 # 基因标识符提示（宽松形态，仅用于 AUTO 轮判定"该行是否携带可核验主张"）：
 # LOC_Os06g0133000 / Os07g0842000 / Os06t0101600 一类。
 _GENE_ID_HINT = re.compile(r"LOC_Os\d|Os\d{1,2}[gt]\d", re.IGNORECASE)
@@ -133,12 +136,40 @@ def _normalize_number(raw: str) -> str:
     return str(int(number)) if number.is_integer() else format(number, ".15g")
 
 
+def _audit_operations(source_uses: list[Any] | None) -> dict[int, str]:
+    """audit_id → 实际执行的工具名（供"未调用工具不得宣称结果"检查）。"""
+    operations: dict[int, str] = {}
+    for item in _adopted_mcp_sources(source_uses) or []:
+        provenance = _source_use_value(item, "provenance")
+        if not isinstance(provenance, dict):
+            continue
+        try:
+            audit_id = int(provenance.get("mcp_call_audit_id"))
+        except (TypeError, ValueError):
+            continue
+        operations[audit_id] = str(_source_use_value(item, "operation") or "")
+    return operations
+
+
+_TOOL_MENTION = re.compile(
+    r"\b(?:ricekb_[a-z_]+|ncbi_datasets_[a-z_]+|uniprot_[a-z_]+|europe_pmc_[a-z_]+"
+    r"|compute_delta|verify_genomic_interval)\b"
+)
+_MACHINE_STATE_CLAIM = re.compile(
+    r"NO_EVIDENCE|NOT_FOUND|FOUND\b|PARTIAL|CONFLICT|AMBIGUOUS|INVALID_IDENTIFIER|VERIFIED|返回|得出|结果是"
+)
+_PROVENANCE_PATH = re.compile(r"provenance|source_ref|content_sha256|import_run|^/qc/")
+
+
 def _validate_fact_grounding(text: str, source_uses: list[Any] | None, *, relaxed: bool = False) -> dict[str, Any]:
     adopted_sources = _adopted_mcp_sources(source_uses)
     catalog = _fact_catalog(source_uses)
+    operations = _audit_operations(source_uses)
     invalid_markers: list[str] = []
     ungrounded_lines: list[int] = []
     unsupported_numbers: list[dict[str, Any]] = []
+    uncalled_tool_claims: list[dict[str, Any]] = []
+    provenance_warn_lines: list[int] = []
     marker_count = 0
     for line_number, line in enumerate(text.splitlines(), start=1):
         markers = [(int(audit_id), fact_id.lower()) for audit_id, fact_id in _FACT_MARKER.findall(line)]
@@ -146,6 +177,21 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None, *, relaxe
         invalid_markers.extend(
             f"{audit_id}:{fact_id}" for audit_id, fact_id in markers if (audit_id, fact_id) not in catalog
         )
+        # 借标洗白拦截：行内宣称某工具"返回了"机器状态，则该工具必须确实是
+        # 本行所引事实对应的审计调用；静态契约披露（"未提供/未执行"）不含
+        # 机器状态词，不受影响。
+        mentioned_tools = set(_TOOL_MENTION.findall(line))
+        if mentioned_tools and _MACHINE_STATE_CLAIM.search(line):
+            cited_operations = {operations.get(audit_id) for audit_id, _ in markers}
+            for tool in sorted(mentioned_tools):
+                if tool not in cited_operations:
+                    uncalled_tool_claims.append({"line": line_number, "tool": tool})
+        # provenance 引用 WARN（不参与拒绝）：表格数据行应至少引用一条行级
+        # 溯源事实（provenance/source_ref/sha/import_run/qc 路径）。
+        if markers and line.lstrip().startswith("|"):
+            cited_paths = [str(catalog[key].get("path") or "") for key in markers if key in catalog]
+            if cited_paths and not any(_PROVENANCE_PATH.search(path) for path in cited_paths):
+                provenance_warn_lines.append(line_number)
         if not _line_requires_fact_marker(line, relaxed=relaxed):
             # 结构行（标题/表头/分隔线/SOURCE-ONLY 声明）不承载事实主张，
             # 其中的编号类数字同样不做数值核验。
@@ -185,9 +231,17 @@ def _validate_fact_grounding(text: str, source_uses: list[Any] | None, *, relaxe
         "invalid_markers": invalid_markers[:20],
         "ungrounded_lines": ungrounded_lines[:20],
         "unsupported_numbers": unsupported_numbers[:20],
+        "uncalled_tool_claims": uncalled_tool_claims[:20],
+        "provenance_warn_lines": provenance_warn_lines[:20],
         "passed": (
             not (bool(adopted_sources) and bool(catalog))
-            or (marker_count > 0 and not invalid_markers and not ungrounded_lines and not unsupported_numbers)
+            or (
+                marker_count > 0
+                and not invalid_markers
+                and not ungrounded_lines
+                and not unsupported_numbers
+                and not uncalled_tool_claims
+            )
         ),
     }
 
@@ -206,6 +260,12 @@ def fact_catalog_summary(source_uses: list[Any] | None) -> list[dict[str, Any]]:
             entry["string_value"] = fact["string_value"]
         summary.append(entry)
     return summary
+
+
+def _markdown_table_cell(value: Any) -> str:
+    """Keep untrusted source scalars inside one inert Markdown table cell."""
+    flattened = " ".join(str(value).splitlines())
+    return html.escape(flattened, quote=True).replace("|", "&#124;")
 
 
 def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: int = 40) -> str | None:
@@ -238,7 +298,8 @@ def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: 
     lines = [
         "数据模式：SOURCE-ONLY",
         "",
-        "（降级渲染）模型生成的回答未通过 MCP 事实级核验，已阻止发布。以下为本次工具调用中可直接核验的事实清单；未列出的字段一律视为未核验。",
+        "（降级渲染）模型生成的回答未通过 MCP 事实级核验，已阻止发布。"
+        "以下为本次工具调用中可直接核验的事实清单；未列出的字段一律视为未核验。",
         "",
     ]
     published = 0
@@ -266,7 +327,8 @@ def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: 
                 value = str(fact["string_value"])
             else:
                 value = "（非公开值，见审计摘要）"
-            lines.append(f"| `{fact.get('path') or '/'}` | {value} | [MCP-F:{audit_id}:{fact_id}] |")
+            path = _markdown_table_cell(fact.get("path") or "/")
+            lines.append(f"| `{path}` | {_markdown_table_cell(value)} | [MCP-F:{audit_id}:{fact_id}] |")
             published += 1
         if not truncated:
             lines.append("")
@@ -315,6 +377,7 @@ def guard_answer_for_evidence_level(
         level = EvidenceLevel.NONE
 
     source = _FACT_LEDGER_BLOCK.sub("", str(text or "")).strip()
+    source = _SEQUENCE_DELIVERABLE_BLOCK.sub("", source).strip()
     document_guard: dict[str, Any] = {"applied": False}
     if level in {EvidenceLevel.NONE, EvidenceLevel.DATA_PROVENANCE, EvidenceLevel.BIBLIOGRAPHIC}:
         source, document_guard = guard_non_document_source_answer(source)

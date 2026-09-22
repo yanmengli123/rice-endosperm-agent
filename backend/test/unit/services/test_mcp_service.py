@@ -108,7 +108,8 @@ def test_bioinfomcp_catalog_exposes_all_38_servers_and_92_tools():
     assert len(BIOINFOMCP_SERVERS) == 37
     assert len(BIOINFOMCP_EXPECTED_TOOLS) == 37
     assert sum(map(len, BIOINFOMCP_EXPECTED_TOOLS.values())) == 91
-    assert len(mcp_service._WORKSPACE_SCOPED_MCP_SLUGS) == 38
+    assert len(mcp_service._WORKSPACE_SCOPED_MCP_SLUGS) == 38 + len(mcp_service._GENOMICS_MCP_RUNTIMES)
+    assert set(mcp_service._GENOMICS_MCP_RUNTIMES) <= mcp_service._WORKSPACE_SCOPED_MCP_SLUGS
     assert BIOINFOMCP_SERVERS["bioinfomcp-samtools"]["args"] == ["bioinfomcp-samtools"]
     assert len(BIOINFOMCP_EXPECTED_TOOLS["bioinfomcp-samtools"]) == 11
 

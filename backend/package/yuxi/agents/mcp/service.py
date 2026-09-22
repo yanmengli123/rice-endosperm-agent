@@ -166,6 +166,27 @@ _DEFAULT_MCP_SERVERS = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": "rice-research-agent:rice-kb-gateway/mcp/ricekb_mcp.py@gateway-2.2.0",
     },
+    # 确定性档案装配器（Yuxi 自有代码，同 gateway 契约）：单次调用返回规范化
+    # 档案小对象 + 服务端 QC 派生值，替代 5+ 次链式 ricekb_* 调用与模型转述。
+    "ricekb-profile": {
+        "name": "RiceKB Gene Profile Assembler",
+        "command": "python",
+        "args": ["-m", "yuxi.agents.mcp.ricekb_profile"],
+        "transport": "stdio",
+        "description": "单次调用装配水稻基因档案：服务端顺序执行 resolve→entity→compare→support→"
+        "evidence→references，输出去重归一的规范化对象（identity/names/locations/transcripts/"
+        "xrefs/annotations/support/references），并附带确定性 QC 派生值（跨源坐标差、区间长度、"
+        "证据行计数）。坐标 1-based 含端点；模型只解释，不装配不心算。",
+        "icon": "🧾",
+        "tags": ["内置", "水稻", "档案装配"],
+        "timeout": 90,
+        "env": {
+            "RICE_KB_GATEWAY_URL": "${RICE_KB_GATEWAY_URL}",
+            "RICE_KB_API_TOKEN": "${RICE_KB_API_TOKEN}",
+        },
+        "source_type": SOURCE_TYPE_BUILTIN,
+        "source_ref": "builtin:ricekb-profile@1.0.0",
+    },
     "gene-authority": {
         "name": "Gene Authority APIs",
         "command": "/usr/local/bin/yuxi-genomics-mcp",
@@ -200,6 +221,17 @@ _DEFAULT_MCP_SERVERS = {
         "tags": ["内置", "植物基因组", "跨源核验"],
         "timeout": 300,
         "env": {"PLANT_GENOMICS_MCP_NCBI_EMAIL": "${PLANT_GENOMICS_MCP_NCBI_EMAIL}"},
+        # Synthesized/analytical tools are discoverable in the catalog but must
+        # not be model-callable by default as primary source evidence.
+        "disabled_tools": [
+            "analyze_locus_synth",
+            "find_homologs_synth",
+            "biological_context_synth",
+            "consensus_homologs",
+            "gene_report",
+            "go_enrichment",
+            "blast_sequence",
+        ],
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": "https://github.com/musharna/plant-genomics-mcp@ddd223f641cebf82927e9b6ce68394f047ee6930",
     },
@@ -360,7 +392,23 @@ def _genomics_mcp_runtime_ready(slug: str) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return completed.returncode == 0 and completed.stdout.strip() == f"{expected_revision}|{slug}|1"
+    if completed.returncode != 0 or completed.stdout.strip() != f"{expected_revision}|{slug}|1":
+        return False
+    # Image labels alone cannot establish readiness: an API image carrying an
+    # older launcher may reject this exact revision even while the image is
+    # installed.  Probe the launcher without starting a tool container.
+    try:
+        probe = subprocess.run(
+            ["/usr/local/bin/yuxi-genomics-mcp", "--probe", slug],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env={**os.environ, env_name: image},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0 and probe.stdout.strip() == f"ready:{slug}:{expected_revision}"
 
 
 def _genomics_mcp_runtime_artifact(slug: str) -> dict[str, Any] | None:
@@ -748,7 +796,7 @@ def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:
         "tags": config.get("tags"),
         "icon": config.get("icon"),
         "enabled": 0,
-        "disabled_tools": None,
+        "disabled_tools": config.get("disabled_tools"),
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": config.get("source_ref", f"{SOURCE_TYPE_BUILTIN}:{slug}"),
         "spec": plan.to_dict(),

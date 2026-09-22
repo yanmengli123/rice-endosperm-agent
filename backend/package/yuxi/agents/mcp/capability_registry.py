@@ -146,10 +146,8 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
         )
         for name in (
             "solr_search",
-            "solr_suggest",
             "solr_search_bool",
             "mongo_find",
-            "mongo_list_collections",
             "mongo_lookup_by_ids",
             "solr_graph",
             "kb_relations",
@@ -179,6 +177,7 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
             authority_level="PRIMARY_DATABASE",
         )
         for name in (
+            "ricekb_gene_profile",
             "ricekb_resolve",
             "ricekb_entity",
             "ricekb_compare",

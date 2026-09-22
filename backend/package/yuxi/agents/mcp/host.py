@@ -24,6 +24,11 @@ from typing import Any
 from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
 from yuxi.agents.mcp.execution import get_mcp_execution_context, record_mcp_call
 from yuxi.agents.mcp.fact_ledger import append_model_ledger, build_audit_manifest, extract_facts
+from yuxi.agents.mcp.sequence_deliverable import (
+    SEQUENCE_DELIVERABLE_TOOL,
+    append_deliverable_notice,
+    record_sequence_deliverable,
+)
 from yuxi.agents.mcp.health import (
     CODE_CLIENT_INIT_FAILED,
     CODE_DISCOVERY_FAILED,
@@ -494,6 +499,12 @@ class LegacyLangChainHost(McpHost):
                     "fact_count": len(facts),
                     "truncated": truncated,
                 }
+        if not result.is_error and tool_name == SEQUENCE_DELIVERABLE_TOOL:
+            # 序列交付物（P0-A）：完整 FASTA 程序字节级落盘进线程 outputs，正文
+            # 只发摘要事实；通知块追加在事实账本之后，模型可据此指引用户下载。
+            deliverable_notice = await record_sequence_deliverable(tool_name, result.text)
+            if deliverable_notice is not None:
+                result.text = append_deliverable_notice(result.text, deliverable_notice)
         return result
 
     @asynccontextmanager

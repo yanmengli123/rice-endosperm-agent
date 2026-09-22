@@ -57,7 +57,10 @@ class ExtractedFact:
     value_digest: str
 
     def model_dict(self) -> dict[str, Any]:
-        return {"id": self.fact_id, "path": self.path, "value": self.value}
+        # 模型可见账本只保留路径尾部三段：足以区分事实（如 /locations/0/start），
+        # 又不把大 envelope 的深层路径整串塞进上下文；审计清单保留全路径。
+        short_path = "/" + "/".join(self.path.split("/")[-3:]) if self.path.count("/") > 3 else self.path
+        return {"id": self.fact_id, "path": short_path, "value": self.value}
 
     def audit_dict(self, *, public_values: bool) -> dict[str, Any]:
         """Persist-side fact record.
@@ -89,7 +92,7 @@ def _canonical(value: Any) -> str:
 def _fact(path: str, value: Any) -> ExtractedFact:
     canonical = _canonical(value)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    fact_id = "f_" + hashlib.sha256(f"{path}\0{canonical}".encode("utf-8")).hexdigest()[:16]
+    fact_id = "f_" + hashlib.sha256(f"{path}\0{canonical}".encode()).hexdigest()[:16]
     return ExtractedFact(fact_id=fact_id, path=path, value=value, value_digest=f"sha256:{digest}")
 
 

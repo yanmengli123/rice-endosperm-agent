@@ -230,6 +230,21 @@ def test_render_degraded_fact_sheet_is_deterministic_and_marker_bearing():
     assert render_degraded_fact_sheet([]) is None
 
 
+def test_degraded_fact_sheet_escapes_untrusted_source_text():
+    uses = _fact_source_uses(
+        {
+            "id": "f_1234567890abcdef",
+            "path": "/gene|malicious",
+            "string_value": "Wx|false row\n# fabricated heading <script>alert(1)</script>",
+        }
+    )
+    sheet = render_degraded_fact_sheet(uses)
+    assert sheet is not None
+    assert "gene&#124;malicious" in sheet
+    assert "Wx&#124;false row # fabricated heading &lt;script&gt;" in sheet
+    assert "\n# fabricated heading" not in sheet
+
+
 def test_fact_catalog_summary_exposes_values_for_repair_prompt():
     uses = _fact_source_uses(
         {"id": "f_1234567890abcdef", "path": "/gene/start", "numeric_value": 1770556},
@@ -413,3 +428,175 @@ def test_degraded_sheet_excludes_error_status_calls():
     ]
     # RC5 回归锁：error 状态的调用不进 adopted 集，错误文本不得出现在降级事实清单
     assert render_degraded_fact_sheet(uses) is None
+
+
+def _op_source_uses(operation: str = "ricekb_entity") -> list[dict]:
+    return [
+        {
+            "source_use_id": "mcp:42",
+            "provider_id": "ricekb",
+            "operation": operation,
+            "status": "SUCCESS",
+            "adopted": True,
+            "provenance": {
+                "mcp_call_audit_id": 42,
+                "fact_manifest": {
+                    "facts": [
+                        {"id": "f_1234567890abcdef", "path": "/status", "string_value": "FOUND"},
+                        {
+                            "id": "f_1234567890ffffff",
+                            "path": "/data/locations/0/provenance_id",
+                            "string_value": "src:1",
+                        },
+                    ]
+                },
+            },
+        }
+    ]
+
+
+def test_claiming_machine_state_for_an_uncalled_tool_is_rejected():
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n`ricekb_regulators` 返回 NO_EVIDENCE。[MCP-F:42:f_1234567890abcdef]",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=_op_source_uses("ricekb_entity"),
+    )
+    grounding = audit["fact_grounding"]
+    assert grounding["passed"] is False
+    assert {"line": 2, "tool": "ricekb_regulators"} in grounding["uncalled_tool_claims"]
+
+
+def test_disclosing_contract_gap_without_machine_state_is_allowed():
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n当前 RiceKB 契约未提供调控关系数据（ricekb_regulators）；"
+        "本轮未执行该查询。[MCP-F:42:f_1234567890abcdef]",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=_op_source_uses("ricekb_entity"),
+    )
+    assert audit["fact_grounding"]["passed"] is True
+    assert audit["fact_grounding"]["uncalled_tool_claims"] == []
+
+
+def test_machine_state_claim_with_matching_cited_tool_passes():
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n`ricekb_entity` 返回 FOUND。[MCP-F:42:f_1234567890abcdef]",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=_op_source_uses("ricekb_entity"),
+    )
+    assert audit["fact_grounding"]["passed"] is True
+
+
+def test_table_rows_without_provenance_citation_get_warning_not_rejection():
+    guarded, audit = guard_answer_for_evidence_level(
+        "数据模式：SOURCE-ONLY\n| 状态 | FOUND | [MCP-F:42:f_1234567890abcdef] |",
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=_op_source_uses(),
+    )
+    grounding = audit["fact_grounding"]
+    assert grounding["passed"] is True  # WARN 不参与拒绝
+    assert grounding["provenance_warn_lines"] == [2]
+
+
+# ---------- P0-A：序列交付物（哈希锚定 FASTA）与摘要事实 ----------
+
+
+def _sequence_source_uses():
+    """ricekb_sequence 调用的事实清单：摘要事实（id/长度/sha256/表名）均 ≤240 可入账本。"""
+    return [
+        {
+            "source_use_id": "mcp:76",
+            "provider_id": "ricekb",
+            "operation": "ricekb_sequence",
+            "status": "SUCCESS",
+            "adopted": True,
+            "provenance": {
+                "mcp_call_audit_id": 76,
+                "fact_manifest": {
+                    "facts": [
+                        {
+                            "id": "f_0000000000000001",
+                            "path": "/data/sequence_id",
+                            "string_value": "Os06t0133000-01",
+                        },
+                        {
+                            "id": "f_0000000000000002",
+                            "path": "/data/sequence_length",
+                            "numeric_value": 1830,
+                        },
+                        {
+                            "id": "f_0000000000000003",
+                            "path": "/data/sequence_sha256",
+                            "string_value": "cab8b7a461fb0a54561ba4b13fda07145c31cd395012e45bea",
+                        },
+                        {
+                            "id": "f_0000000000000004",
+                            "path": "/data/source_table",
+                            "string_value": "irgsp_1_0_cds_20260205",
+                        },
+                    ]
+                },
+            },
+        }
+    ]
+
+
+def test_cds_summary_answer_with_markers_passes_grounding():
+    """CDS 摘要答案（正文只发摘要事实 + 交付物路径）必须原样通过门禁。"""
+    draft = (
+        "数据模式：SOURCE-ONLY\n"
+        "\n"
+        "Os06t0133000-01 的完整 CDS 已核验并作为线程文件交付。[MCP-F:76:f_0000000000000001]\n"
+        "\n"
+        "| 字段 | 值 |\n"
+        "| --- | --- |\n"
+        "| sequence_id | Os06t0133000-01 [MCP-F:76:f_0000000000000001] |\n"
+        "| sequence_length | 1830 [MCP-F:76:f_0000000000000002] |\n"
+        "| sequence_sha256 | cab8b7a461fb0a54561ba4b13fda07145c31cd395012e45bea "
+        "[MCP-F:76:f_0000000000000003] |\n"
+        "| source_table | irgsp_1_0_cds_20260205 [MCP-F:76:f_0000000000000004] |\n"
+        "\n"
+        "完整 FASTA 已保存：/home/gem/user-data/outputs/sequence_deliverables/Os06t0133000-01_cds.fa，"
+        "下载后可按 sha256 校验完整性。[MCP-F:76:f_0000000000000003]"
+    )
+    guarded, audit = guard_answer_for_evidence_level(
+        draft,
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=_sequence_source_uses(),
+    )
+    assert audit["status"] == "PASSED"
+    assert audit["fact_grounding"]["passed"] is True
+    assert audit["fact_grounding"]["ungrounded_lines"] == []
+    assert audit["fact_grounding"]["unsupported_numbers"] == []
+    assert guarded.startswith("数据模式：SOURCE-ONLY")
+
+
+def test_sequence_deliverable_notice_block_stripped_before_publish():
+    """模型若把交付物通知块误抄进正文，发布前剥除，不进入用户可见文本。"""
+    draft = (
+        "数据模式：SOURCE-ONLY\n"
+        "Os06t0133000-01 已交付。[MCP-F:76:f_0000000000000001]\n"
+        "\n"
+        '<YUXI_SEQUENCE_DELIVERABLE>{"path":"/home/gem/user-data/outputs/sequence_deliverables/x.fa"'
+        ',"sequence_sha256":"cab8"}</YUXI_SEQUENCE_DELIVERABLE>'
+    )
+    guarded, audit = guard_answer_for_evidence_level(
+        draft,
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=_sequence_source_uses(),
+    )
+    assert audit["status"] == "PASSED"
+    assert "YUXI_SEQUENCE_DELIVERABLE" not in guarded
+    assert "Os06t0133000-01 已交付" in guarded
+
+
+def test_inline_fasta_body_without_markers_is_rejected():
+    """正文内联 FASTA 碱基块（无标记可引）在严格轮必被拒——这正是交付物通道存在的原因。"""
+    fasta_body = "\n".join("ATGTCGGCTCTCACCACGTCCCAGCTCGCCACCTCGGCCACCGGCTTCGG" for _ in range(3))
+    draft = f"数据模式：SOURCE-ONLY\nOs06t0133000-01 [MCP-F:76:f_0000000000000001]\n{fasta_body}\n"
+    guarded, audit = guard_answer_for_evidence_level(
+        draft,
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=_sequence_source_uses(),
+    )
+    assert audit["fact_grounding"]["passed"] is False
+    assert audit["fact_grounding"]["ungrounded_lines"]
