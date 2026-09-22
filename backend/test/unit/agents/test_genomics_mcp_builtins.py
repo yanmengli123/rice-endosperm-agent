@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from yuxi.agents.mcp import service as mcp_service
-from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
+from yuxi.agents.mcp.capability_registry import profile_for_protocol_name, profile_for_server_tool
 from yuxi.knowledge.planning.turn_execution_plan import Capability
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -159,3 +159,31 @@ def test_exact_retrieval_tools_remain_registered():
         profile = profile_for_protocol_name(name)
         assert profile is not None
         assert Capability.GENE_RECORD_LOOKUP in profile.capabilities
+
+
+def test_dataset_candidates_cannot_satisfy_answer_authority():
+    for name in ("ncbi_eutils_search_rest", "pride_search_projects_rest"):
+        profile = profile_for_protocol_name(name)
+        assert profile is not None
+        assert Capability.DATASET_LOOKUP in profile.capabilities
+        assert profile.source_class == "DISCOVERY"
+        assert profile.answer_eligible is False
+    for name in ("ncbi_eutils_summary_rest", "pride_project_rest", "pride_project_files_rest"):
+        profile = profile_for_protocol_name(name)
+        assert profile is not None
+        assert profile.answer_eligible is True
+
+
+def test_large_datasets_download_is_not_callable_in_interactive_chat():
+    config = mcp_service._DEFAULT_MCP_SERVERS["gene-authority"]
+    assert "ncbi_gene_package_cli" in config["disabled_tools"]
+    assert "ncbi_gene_package_cli" in mcp_service._POLICY_DISABLED_TOOLS["gene-authority"]
+    assert {"fetch", "operate"} <= mcp_service._POLICY_DISABLED_TOOLS["data-aggregator"]
+
+
+def test_aggregator_generic_names_are_trusted_only_within_reviewed_server():
+    candidate = profile_for_server_tool("data-aggregator", "search")
+    assert candidate is not None
+    assert candidate.answer_eligible is False
+    assert profile_for_server_tool("another-server", "search") is None
+    assert profile_for_server_tool("data-aggregator", "fetch") is None

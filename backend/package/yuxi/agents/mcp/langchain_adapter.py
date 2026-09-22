@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from yuxi.agents.mcp.capability_registry import profile_for_protocol_name
+from yuxi.agents.mcp.capability_registry import profile_for_server_tool
 from yuxi.agents.mcp.host import McpHost, McpHostError, McpToolDescriptor
 from yuxi.agents.mcp.spec import to_camel_case
 from yuxi.knowledge.contracts.source_envelopes import BibliographicEnvelope, McpDataEnvelope
@@ -39,7 +39,7 @@ def build_mcp_base_tool(
     from pydantic import Field, create_model
 
     host = _resolve_host()
-    trusted_profile = profile_for_protocol_name(descriptor.name)
+    trusted_profile = profile_for_server_tool(descriptor.server_slug, descriptor.name)
 
     args_schema = descriptor.args_model
     # args_schema 兼容三种形态：

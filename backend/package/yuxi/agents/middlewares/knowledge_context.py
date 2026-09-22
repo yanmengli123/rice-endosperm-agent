@@ -106,6 +106,8 @@ def filter_tools_by_turn_plan(tools: list[Any], plan: TurnExecutionPlan) -> list
             profile_source = (
                 SourceClass.BIBLIOGRAPHY
                 if profile and profile.source_class == "BIBLIOGRAPHY"
+                else SourceClass.DISCOVERY
+                if profile and profile.source_class == "DISCOVERY"
                 else SourceClass.STRUCTURED_DATABASE
             )
             if profile_source not in plan.source.allowed_sources:

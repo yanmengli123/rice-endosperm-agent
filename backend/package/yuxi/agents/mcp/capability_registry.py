@@ -17,6 +17,7 @@ from yuxi.knowledge.planning.turn_execution_plan import Capability
 class ToolCapabilityProfile:
     capabilities: frozenset[Capability]
     source_class: str
+    answer_eligible: bool = True
     produces_document_evidence: bool = False
     citation_semantics: str = "DATA_PROVENANCE"
     authority_level: str = "PROVIDER_DECLARED"
@@ -25,6 +26,36 @@ class ToolCapabilityProfile:
 
 # Keys are original protocol tool names, not model-facing aliases. Additions
 # require a reviewed server/tool contract; provider descriptions are untrusted.
+
+# Vendored ricekb gateway 脚本（docker/mcp/ricekb/ricekb_mcp.py@gateway-2.2.0）
+# 声明的全部工具（与其 TOOL_NAMES 精确对齐）。profile 覆盖不变量
+# （test_ricekb_builtin：vendored ↔ registry 1:1）以此为唯一真源。
+_RICEKB_VENDORED_TOOLS: tuple[str, ...] = (
+    "ricekb_resolve",
+    "ricekb_entity",
+    "ricekb_compare",
+    "ricekb_annotations",
+    "ricekb_support",
+    "ricekb_evidence",
+    "ricekb_references",
+    "ricekb_regulators",
+    "ricekb_targets",
+    "ricekb_candidates",
+    "ricekb_search",
+    "ricekb_source",
+    "ricekb_sequence",
+    "ricekb_region",
+    "ricekb_genome",
+)
+
+# 包内确定性档案装配器（内置 MCP "ricekb-profile"，模块
+# yuxi.agents.mcp.ricekb_profile，Yuxi 自有代码）：与 vendored 行级工具同 gateway
+# 契约、同严格权威口径，但不是 vendored 脚本声明的工具，故不参与上面的覆盖不变量。
+_RICEKB_PROFILE_TOOLS: tuple[str, ...] = ("ricekb_gene_profile",)
+
+# ricekb_search 额外携带 VERBATIM_SEARCH 能力，单列定义（不并入严格行级块）。
+_RICEKB_VERBATIM_TOOLS: tuple[str, ...] = ("ricekb_search",)
+
 _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
     "plant_gene_lookup": ToolCapabilityProfile(
         capabilities=frozenset({Capability.GENE_RECORD_LOOKUP}),
@@ -69,6 +100,34 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
         )
         for name in ("europe_pmc_search_rest", "europe_pmc_article_rest")
     },
+    **{
+        name: ToolCapabilityProfile(
+            capabilities=frozenset({Capability.DATASET_LOOKUP, Capability.GENERIC_MCP}),
+            source_class="DISCOVERY",
+            answer_eligible=False,
+            authority_level="DISCOVERY_ONLY",
+        )
+        for name in ("ncbi_eutils_search_rest", "pride_search_projects_rest")
+    },
+    **{
+        name: ToolCapabilityProfile(
+            capabilities=frozenset({Capability.DATASET_LOOKUP}),
+            source_class="STRUCTURED_DATABASE",
+            authority_level="PRIMARY_DATABASE",
+        )
+        for name in (
+            "ncbi_eutils_summary_rest",
+            "ncbi_eutils_fetch_rest",
+            "pride_project_rest",
+            "pride_project_files_rest",
+        )
+    },
+    "europe_pmc_oa_passages_rest": ToolCapabilityProfile(
+        capabilities=frozenset({Capability.DOCUMENT_QA, Capability.GENERIC_MCP}),
+        source_class="DISCOVERY",
+        answer_eligible=False,
+        authority_level="QUOTE_CANDIDATE_ONLY",
+    ),
     # Reviewed plant-genomics-mcp v1.21.0 surface (commit ddd223f). Only exact
     # retrieval tools that return structured source records earn a capability.
     # Synthesis/aggregate tools (analyze_locus_synth, find_homologs_synth,
@@ -176,23 +235,8 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
             source_class="AUTHORITATIVE_DATABASE",
             authority_level="PRIMARY_DATABASE",
         )
-        for name in (
-            "ricekb_gene_profile",
-            "ricekb_resolve",
-            "ricekb_entity",
-            "ricekb_compare",
-            "ricekb_annotations",
-            "ricekb_support",
-            "ricekb_evidence",
-            "ricekb_references",
-            "ricekb_regulators",
-            "ricekb_targets",
-            "ricekb_candidates",
-            "ricekb_source",
-            "ricekb_sequence",
-            "ricekb_region",
-            "ricekb_genome",
-        )
+        for name in (*_RICEKB_VENDORED_TOOLS, *_RICEKB_PROFILE_TOOLS)
+        if name not in _RICEKB_VERBATIM_TOOLS
     },
     "ricekb_search": ToolCapabilityProfile(
         capabilities=frozenset({Capability.GENE_RECORD_LOOKUP, Capability.VERBATIM_SEARCH}),
@@ -201,7 +245,15 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
     ),
 }
 
-RICEKB_TOOL_NAMES: frozenset[str] = frozenset(name for name in _TRUSTED_PROFILES if name.startswith("ricekb_"))
+_DATA_AGGREGATOR_DISCOVERY = ToolCapabilityProfile(
+    capabilities=frozenset({Capability.DATASET_LOOKUP, Capability.GENERIC_MCP}),
+    source_class="DISCOVERY",
+    answer_eligible=False,
+    authority_level="DISCOVERY_ONLY",
+)
+_DATA_AGGREGATOR_TOOLS = frozenset({"search", "resolve", "relate", "list_sources"})
+
+RICEKB_TOOL_NAMES: frozenset[str] = frozenset(_RICEKB_VENDORED_TOOLS)
 
 
 def profile_for_tool(tool: Any) -> ToolCapabilityProfile | None:
@@ -209,7 +261,14 @@ def profile_for_tool(tool: Any) -> ToolCapabilityProfile | None:
     original_name = str(metadata.get("mcp_tool_name") or "")
     if not original_name:
         return None
-    return _TRUSTED_PROFILES.get(original_name)
+    return profile_for_server_tool(str(metadata.get("server") or ""), original_name)
+
+
+def profile_for_server_tool(server_slug: str, name: str) -> ToolCapabilityProfile | None:
+    """Generic upstream tool names are trusted only within their reviewed server."""
+    if server_slug == "data-aggregator" and name in _DATA_AGGREGATOR_TOOLS:
+        return _DATA_AGGREGATOR_DISCOVERY
+    return _TRUSTED_PROFILES.get(name)
 
 
 def profile_for_protocol_name(name: str) -> ToolCapabilityProfile | None:
@@ -226,5 +285,6 @@ __all__ = [
     "ToolCapabilityProfile",
     "is_mcp_tool",
     "profile_for_protocol_name",
+    "profile_for_server_tool",
     "profile_for_tool",
 ]

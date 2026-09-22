@@ -27,6 +27,21 @@ def test_explicit_mcp_gene_query_never_requests_document_evidence():
     assert plan.satisfiable is True
 
 
+def test_dataset_question_requires_official_record_and_buffers_answer():
+    plan = plan_turn(
+        "通过 MCP 查水稻胚乳磷酸化组数据集",
+        has_knowledge_scope=False,
+        configured_mcps=["gene-authority", "data-aggregator"],
+    )
+
+    assert plan.task.primary_intent == TaskIntent.DATASET_DISCOVERY
+    assert plan.required_capabilities == [Capability.DATASET_LOOKUP]
+    assert SourceClass.DISCOVERY in plan.source.allowed_sources
+    assert plan.requires_mcp is True
+    assert plan.buffers_output is True
+    assert plan.evidence.level == EvidenceLevel.DATA_PROVENANCE
+
+
 def test_explicit_mcp_without_server_fails_closed():
     plan = plan_turn("通过 MCP 查 Wx", has_knowledge_scope=True, configured_mcps=[])
 

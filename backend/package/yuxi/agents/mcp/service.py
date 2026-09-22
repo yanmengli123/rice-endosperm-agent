@@ -193,12 +193,15 @@ _DEFAULT_MCP_SERVERS = {
         "args": ["gene-authority"],
         "transport": "stdio",
         "description": (
-            "受控访问 NCBI Datasets v2 REST、固定版本 NCBI Datasets CLI、UniProt REST、"
-            "Europe PMC REST，并提供显式坐标制的确定性区间计算。仅允许固定上游、类型化参数和有界响应。"
+            "受控访问 NCBI Datasets REST/CLI、Entrez E-Utilities、UniProt、PRIDE 和 Europe PMC；"
+            "OA XML 只返回可定位原句，不自动判定生物学机制。仅允许固定上游和有界参数。"
         ),
         "icon": "🧬",
-        "tags": ["内置", "权威数据源", "NCBI", "UniProt", "Europe PMC"],
+        "tags": ["内置", "权威数据源", "NCBI", "UniProt", "PRIDE", "Europe PMC"],
         "timeout": 300,
+        # A datasets package can be hundreds of MiB; interactive Q&A may
+        # inspect summaries, but ingestion must run as an explicit background job.
+        "disabled_tools": ["ncbi_gene_package_cli"],
         "env": {
             "NCBI_API_KEY": "${NCBI_API_KEY}",
             "YUXI_NCBI_EMAIL": "${YUXI_NCBI_EMAIL}",
@@ -206,7 +209,7 @@ _DEFAULT_MCP_SERVERS = {
         "data_access_level": McpDataAccessLevel.PUBLIC.value,
         "dependency_mode": McpDependencyMode.AUTHORITATIVE.value,
         "source_type": SOURCE_TYPE_BUILTIN,
-        "source_ref": "builtin:gene-authority@1.1.0+ncbi-datasets-18.37.0",
+        "source_ref": "builtin:gene-authority@1.2.0+ncbi-datasets-18.37.0",
     },
     "plant-genomics": {
         "name": "Plant Genomics MCP",
@@ -251,10 +254,32 @@ _DEFAULT_MCP_SERVERS = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": "https://github.com/warelab/gramene-mcp@b42afce19b96e14b0a3f2e47ce8208eea9fe1f60",
     },
+    "data-aggregator": {
+        "name": "Research Data Discovery MCP",
+        "command": "/usr/local/bin/yuxi-genomics-mcp",
+        "args": ["data-aggregator"],
+        "transport": "stdio",
+        "description": (
+            "跨 GEO/SRA/BioProject/PRIDE 等来源发现候选数据；搜索结果不是生物学事实，下载与远程操作默认禁用。"
+        ),
+        "icon": "🔎",
+        "tags": ["内置", "数据发现", "非权威证据"],
+        "timeout": 120,
+        "disabled_tools": ["fetch", "operate", "understand", "multi_query"],
+        "source_type": SOURCE_TYPE_BUILTIN,
+        "source_ref": "https://pypi.org/project/data-aggregator-mcp/0.45.3/",
+    },
 }
 # BioinfoMCP 其余 37 个工具：由 bioinfomcp_catalog.py 生成（固定上游提交，
 # 每工具一个隔离镜像 + 统一受控启动器），镜像构建后即可在管理页启用。
 _DEFAULT_MCP_SERVERS.update(BIOINFOMCP_SERVERS)
+
+# These operations are not interactive Q&A capabilities.  Keep this policy
+# independent of mutable database/UI tool toggles, including older installs.
+_POLICY_DISABLED_TOOLS: dict[str, frozenset[str]] = {
+    "gene-authority": frozenset({"ncbi_gene_package_cli"}),
+    "data-aggregator": frozenset({"fetch", "operate", "understand", "multi_query"}),
+}
 
 
 def list_builtin_mcp_slugs() -> list[str]:
@@ -311,8 +336,13 @@ _UNSET_SENTINEL = object()
 _GENOMICS_MCP_RUNTIMES: dict[str, tuple[str, str, str]] = {
     "gene-authority": (
         "YUXI_GENE_AUTHORITY_IMAGE",
-        "yuxi-gene-authority:1.1.0",
-        "gene-authority-1.1.0+ncbi-datasets-18.37.0",
+        "yuxi-gene-authority:1.2.0",
+        "gene-authority-1.2.0+ncbi-datasets-18.37.0",
+    ),
+    "data-aggregator": (
+        "YUXI_DATA_AGGREGATOR_IMAGE",
+        "yuxi-data-aggregator:0.45.3",
+        "data-aggregator-mcp-0.45.3",
     ),
     "plant-genomics": (
         "YUXI_PLANT_GENOMICS_IMAGE",
@@ -865,7 +895,9 @@ async def get_mcp_tools(
         logger.exception(f"Failed to load tools from MCP server '{server_slug}': {e}")
         return []
 
-    global_disabled = set(server_config.get("disabled_tools") or [])
+    global_disabled = set(server_config.get("disabled_tools") or []) | _POLICY_DISABLED_TOOLS.get(
+        server_slug, frozenset()
+    )
     arg_disabled = set(disabled_tools or [])
     alive = [d for d in descriptors if d.name not in global_disabled and d.name not in arg_disabled]
 
@@ -894,7 +926,10 @@ async def get_tools_from_all_servers() -> list[Any]:
         except Exception as e:  # noqa: BLE001 —— 含 McpHostError；单个服务器失败不阻塞整体装配
             logger.warning(f"Skip MCP '{server_slug}' during global tool load: {e}")
             continue
-        groups.append((server_slug, descriptors, runtime_config))
+        disabled = set(server_configs[server_slug].get("disabled_tools") or []) | _POLICY_DISABLED_TOOLS.get(
+            server_slug, frozenset()
+        )
+        groups.append((server_slug, [item for item in descriptors if item.name not in disabled], runtime_config))
     return assemble_tools(groups)
 
 
@@ -942,7 +977,8 @@ async def get_all_mcp_tools(server_slug: str) -> list[Any]:
     except Exception as e:  # noqa: BLE001
         logger.error(f"Failed to load tools from MCP server '{server_slug}': {e}")
         raise
-    alive = [d for d in descriptors if d.name not in set(config.get("disabled_tools") or [])]
+    disabled = set(config.get("disabled_tools") or []) | _POLICY_DISABLED_TOOLS.get(server_slug, frozenset())
+    alive = [d for d in descriptors if d.name not in disabled]
     return assemble_tools([(server_slug, alive, runtime_config)])
 
 

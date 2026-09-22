@@ -33,6 +33,7 @@ class TaskIntent(StrEnum):
     NUMERIC_VERIFICATION = "NUMERIC_VERIFICATION"
     CITATION_LOOKUP = "CITATION_LOOKUP"
     LITERATURE_DISCOVERY = "LITERATURE_DISCOVERY"
+    DATASET_DISCOVERY = "DATASET_DISCOVERY"
     HYBRID_VERIFICATION = "HYBRID_VERIFICATION"
     TRANSFORMATION = "TRANSFORMATION"
     SOCIAL = "SOCIAL"
@@ -58,6 +59,7 @@ class Capability(StrEnum):
     DOCUMENT_QA = "DOCUMENT_QA"
     NUMERIC_EVIDENCE = "NUMERIC_EVIDENCE"
     BIBLIOGRAPHIC_SEARCH = "BIBLIOGRAPHIC_SEARCH"
+    DATASET_LOOKUP = "DATASET_LOOKUP"
     GENERIC_MCP = "GENERIC_MCP"
     CANONICAL_LOOKUP = "CANONICAL_LOOKUP"
 
@@ -67,6 +69,7 @@ class SourceClass(StrEnum):
     KNOWLEDGE_GRAPH = "KNOWLEDGE_GRAPH"
     STRUCTURED_DATABASE = "STRUCTURED_DATABASE"
     BIBLIOGRAPHY = "BIBLIOGRAPHY"
+    DISCOVERY = "DISCOVERY"
     WEB = "WEB"
     CANONICAL_RECORD = "CANONICAL_RECORD"
 
@@ -220,7 +223,7 @@ class TurnExecutionPlan(BaseModel):
             SourcePolicy.BIBLIOGRAPHY_ONLY,
         }
         auto_database_obligation = SourceClass.STRUCTURED_DATABASE in self.source.allowed_sources and any(
-            capability in {Capability.GENE_RECORD_LOOKUP, Capability.GENERIC_MCP}
+            capability in {Capability.GENE_RECORD_LOOKUP, Capability.DATASET_LOOKUP, Capability.GENERIC_MCP}
             for capability in self.required_capabilities
         )
         return policy_requires_mcp or auto_database_obligation
@@ -236,6 +239,7 @@ class TurnExecutionPlan(BaseModel):
             or self.source.explicit
             or non_default_source
             or self.risk_class == "HIGH_DETERMINISM"
+            or self.task.primary_intent == TaskIntent.DATASET_DISCOVERY
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -284,6 +288,11 @@ _SOCIAL = re.compile(r"^(?:hi|hello|hey|你好|您好|嗨|谢谢|感谢|再见)[
 _TRANSFORM = re.compile(r"^(?:请)?(?:翻译|改写|润色|校对|translate|rewrite|polish|proofread)\b", re.I)
 _LITERATURE = re.compile(
     r"(?:找|搜索|检索|推荐|有哪些).{0,12}(?:论文|文献|文章)|literature|papers?\s+(?:about|on)",
+    re.I,
+)
+_DATASET_QUERY = re.compile(
+    r"(?:数据集|组学数据|磷酸化组|蛋白质组|蛋白组|转录组|测序数据|"
+    r"\b(?:dataset|PRIDE|PXD\d{6,}|GEO|SRA|BioProject)\b)",
     re.I,
 )
 _MECHANISM_OR_LITERATURE_CLAIM = re.compile(
@@ -504,6 +513,12 @@ def plan_turn(
         evidence_required = True
         evidence_level = EvidenceLevel.CLAIM_EVIDENCE
         capabilities = [Capability.GENE_RECORD_LOOKUP, Capability.DOCUMENT_QA]
+    elif _DATASET_QUERY.search(text):
+        intent = TaskIntent.DATASET_DISCOVERY
+        evidence_level = EvidenceLevel.DATA_PROVENANCE
+        capabilities = [Capability.DATASET_LOOKUP]
+        if source_policy in {SourcePolicy.AUTO, SourcePolicy.MCP_ONLY}:
+            allowed.extend([SourceClass.DISCOVERY, SourceClass.STRUCTURED_DATABASE])
     elif _LITERATURE.search(text):
         intent = TaskIntent.LITERATURE_DISCOVERY
         evidence_level = EvidenceLevel.BIBLIOGRAPHIC

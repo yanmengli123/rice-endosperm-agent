@@ -18,8 +18,8 @@ fail() {
 
 case "$SLUG" in
   gene-authority)
-    IMAGE="${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.1.0}"
-    REVISION="gene-authority-1.1.0+ncbi-datasets-18.37.0"
+    IMAGE="${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.2.0}"
+    REVISION="gene-authority-1.2.0+ncbi-datasets-18.37.0"
     ;;
   plant-genomics)
     IMAGE="${YUXI_PLANT_GENOMICS_IMAGE:-yuxi-plant-genomics:1.21.0}"
@@ -28,6 +28,10 @@ case "$SLUG" in
   gramene)
     IMAGE="${YUXI_GRAMENE_MCP_IMAGE:-yuxi-gramene-mcp:b42afce}"
     REVISION="b42afce19b96e14b0a3f2e47ce8208eea9fe1f60"
+    ;;
+  data-aggregator)
+    IMAGE="${YUXI_DATA_AGGREGATOR_IMAGE:-yuxi-data-aggregator:0.45.3}"
+    REVISION="data-aggregator-mcp-0.45.3"
     ;;
   *) fail "slug '$SLUG' is not in the allowlist" ;;
 esac

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from yuxi.knowledge.planning.turn_execution_plan import (
     AuthorityOutcome,
     EvidenceLevel,
@@ -7,7 +11,12 @@ from yuxi.knowledge.planning.turn_execution_plan import (
     TaskIntent,
     plan_turn,
 )
-from yuxi.services.chat_service import _append_knowledge_source_uses, _initial_source_manifest
+from yuxi.services.chat_service import (
+    _append_knowledge_source_uses,
+    _append_mcp_source_uses,
+    _finalize_mcp_manifest,
+    _initial_source_manifest,
+)
 
 
 def test_glossary_miss_is_recorded_as_a_canonical_authority_decision() -> None:
@@ -69,3 +78,52 @@ def test_hybrid_knowledge_evidence_is_ledgered_against_literature_claim() -> Non
     assert manifest.source_uses[0].evidence_ids == ["ev-doc-1"]
     assert manifest.authority_outcomes[0].claim_id == "claim:literature"
     assert manifest.authority_outcomes[0].outcome == AuthorityOutcome.HIT
+
+
+def test_discovery_call_is_audited_but_never_adopted_as_answer_evidence() -> None:
+    plan = plan_turn(
+        "通过 MCP 查水稻胚乳磷酸化组数据集",
+        has_knowledge_scope=False,
+        configured_mcps=["data-aggregator"],
+    )
+    manifest = _initial_source_manifest(plan)
+    audit = SimpleNamespace(
+        id=42, server_slug="data-aggregator", capability_name="search", status="success",
+        arguments_digest="sha256:request", result_digest="sha256:result", provenance={},
+    )
+    _append_mcp_source_uses(manifest, audits=[audit], matched_ids={42})
+
+    assert manifest.source_uses[0].source_class == SourceClass.DISCOVERY
+    assert manifest.source_uses[0].adopted is False
+    assert manifest.source_uses[0].evidence_ids == []
+
+
+@pytest.mark.asyncio
+async def test_not_found_and_discovery_cannot_satisfy_dataset_authority() -> None:
+    plan = plan_turn(
+        "通过 MCP 查水稻胚乳磷酸化组数据集",
+        has_knowledge_scope=False,
+        configured_mcps=["gene-authority", "data-aggregator"],
+    )
+    manifest = _initial_source_manifest(plan)
+    audits = [
+        SimpleNamespace(
+            id=1, server_slug="data-aggregator", capability_name="search", status="success",
+            arguments_digest="q1", result_digest="r1", provenance={},
+        ),
+        SimpleNamespace(
+            id=2, server_slug="gene-authority", capability_name="pride_project_rest", status="success",
+            arguments_digest="q2", result_digest="r2", provenance={"provider_status": "NOT_FOUND"},
+        ),
+    ]
+
+    class _Db:
+        async def execute(self, _statement):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: audits))
+
+    satisfied = await _finalize_mcp_manifest(
+        _Db(), run_id="run-test", plan=plan, manifest=manifest,
+    )
+    assert satisfied is False
+    assert manifest.successful_mcp_call_count == 0
+    assert not any(use.adopted for use in manifest.source_uses)

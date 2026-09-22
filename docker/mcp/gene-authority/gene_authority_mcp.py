@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Governed MCP facade for NCBI Datasets, UniProt and Europe PMC.
+"""Governed MCP facade for official gene, dataset and literature APIs.
 
 Only fixed upstream hosts and bounded, typed operations are exposed.  The
 server never accepts arbitrary URLs or CLI arguments.  Every response carries
@@ -26,11 +26,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SERVER_VERSION = "1.1.0"
+from defusedxml import ElementTree
+
+SERVER_VERSION = "1.2.0"
 SCHEMA_VERSION = "gene-authority-envelope.v1"
 NCBI_BASE = "https://api.ncbi.nlm.nih.gov/datasets/v2"
+NCBI_EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 UNIPROT_BASE = "https://rest.uniprot.org"
 EUROPE_PMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+PRIDE_BASE = "https://www.ebi.ac.uk/pride/ws/archive/v2"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_IDENTIFIERS = 20
@@ -42,6 +46,10 @@ ARTICLE_SOURCE_RE = re.compile(r"^[A-Z]{3,12}$")
 ARTICLE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 IDENTIFIER_TYPES = ("gene-id", "symbol", "accession")
 GENE_INCLUDE_VALUES = ("none", "gene", "rna", "cds", "protein")
+ENTREZ_DATABASES = ("pubmed", "pmc", "gds", "sra", "bioproject")
+ENTREZ_ID_RE = re.compile(r"^[0-9]{1,18}$")
+PXD_RE = re.compile(r"^PXD[0-9]{6,12}$", re.I)
+PMCID_RE = re.compile(r"^PMC[0-9]{1,12}$", re.I)
 
 
 class AuthorityError(RuntimeError):
@@ -102,10 +110,15 @@ def _request_json(
     url: str,
     *,
     params: dict[str, Any] | None = None,
+    private_params: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     query = urllib.parse.urlencode({key: value for key, value in (params or {}).items() if value is not None})
     public_url = url + (f"?{query}" if query else "")
+    private_query = urllib.parse.urlencode(
+        {key: value for key, value in (private_params or {}).items() if value is not None}
+    )
+    request_url = public_url + (("&" if query else "?") + private_query if private_query else "")
     request_headers = {
         "Accept": "application/json",
         "User-Agent": f"Yuxi-gene-authority/{SERVER_VERSION} ({os.getenv('YUXI_NCBI_EMAIL', 'contact-unset')})",
@@ -114,7 +127,7 @@ def _request_json(
     api_key = os.getenv("NCBI_API_KEY", "").strip()
     if provider == "NCBI_DATASETS" and api_key:
         request_headers["api-key"] = api_key
-    request = urllib.request.Request(public_url, method="GET", headers=request_headers)
+    request = urllib.request.Request(request_url, method="GET", headers=request_headers)
     last_error: Exception | None = None
     for attempt in range(3):
         try:
@@ -124,8 +137,10 @@ def _request_json(
             if len(body) > MAX_RESPONSE_BYTES:
                 raise AuthorityError(f"{provider} response exceeded the 8 MiB limit")
             payload = json.loads(body.decode("utf-8"))
+            if isinstance(payload, list):
+                payload = {"results": payload}
             if not isinstance(payload, dict):
-                raise AuthorityError(f"{provider} response must be a JSON object")
+                raise AuthorityError(f"{provider} response must be a JSON object or array")
             return _envelope(provider, public_url, payload, status_code=status_code)
         except urllib.error.HTTPError as error:
             if error.code == 404:
@@ -142,6 +157,8 @@ def _request_json(
 
 
 def _has_records(payload: dict[str, Any]) -> bool:
+    if isinstance(payload.get("esearchresult"), dict):
+        return int(payload["esearchresult"].get("count") or 0) > 0
     for key in ("reports", "results", "resultList"):
         value = payload.get(key)
         if isinstance(value, list) and value:
@@ -328,6 +345,173 @@ def europe_pmc_article_rest(source: str, external_id: str) -> dict[str, Any]:
     return europe_pmc_search_rest(f'EXT_ID:"{id_value}" AND SRC:{source_value}', page_size=5)
 
 
+def ncbi_eutils_search_rest(database: str, term: str, retmax: int = 10) -> dict[str, Any]:
+    db = _bounded_text("database", database, 20).lower()
+    if db not in ENTREZ_DATABASES:
+        raise AuthorityError(f"database must be one of {', '.join(ENTREZ_DATABASES)}")
+    email = os.getenv("YUXI_NCBI_EMAIL", "").strip()
+    if email:
+        email = _bounded_text("YUXI_NCBI_EMAIL", email, 200)
+    result = _request_json(
+        "NCBI_EUTILS",
+        f"{NCBI_EUTILS_BASE}/esearch.fcgi",
+        params={"db": db, "term": _bounded_text("term", term), "retmax": _bounded_int("retmax", retmax, 1, 50),
+                "retmode": "json", "tool": "yuxi-gene-authority"},
+        private_params={"email": email, "api_key": os.getenv("NCBI_API_KEY", "").strip() or None},
+    )
+    result["answer_policy"] = "Discovery IDs only; resolve official records before claiming dataset or article properties."
+    return result
+
+
+def ncbi_eutils_summary_rest(database: str, ids: list[str]) -> dict[str, Any]:
+    db = _bounded_text("database", database, 20).lower()
+    if db not in ENTREZ_DATABASES:
+        raise AuthorityError(f"database must be one of {', '.join(ENTREZ_DATABASES)}")
+    values = _identifiers(ids)
+    if any(not ENTREZ_ID_RE.fullmatch(value) for value in values):
+        raise AuthorityError("Entrez IDs must be decimal integers")
+    email = os.getenv("YUXI_NCBI_EMAIL", "").strip()
+    if email:
+        email = _bounded_text("YUXI_NCBI_EMAIL", email, 200)
+    return _request_json(
+        "NCBI_EUTILS", f"{NCBI_EUTILS_BASE}/esummary.fcgi",
+        params={"db": db, "id": ",".join(values), "retmode": "json", "tool": "yuxi-gene-authority"},
+        private_params={"email": email, "api_key": os.getenv("NCBI_API_KEY", "").strip() or None},
+    )
+
+
+def ncbi_eutils_fetch_rest(database: str, ids: list[str]) -> dict[str, Any]:
+    db = _bounded_text("database", database, 20).lower()
+    if db not in ENTREZ_DATABASES:
+        raise AuthorityError(f"database must be one of {', '.join(ENTREZ_DATABASES)}")
+    values = _identifiers(ids)
+    if any(not ENTREZ_ID_RE.fullmatch(value) for value in values):
+        raise AuthorityError("Entrez IDs must be decimal integers")
+    email = os.getenv("YUXI_NCBI_EMAIL", "").strip()
+    if email:
+        email = _bounded_text("YUXI_NCBI_EMAIL", email, 200)
+    public_params = {"db": db, "id": ",".join(values), "retmode": "xml",
+                     "tool": "yuxi-gene-authority"}
+    public_url = f"{NCBI_EUTILS_BASE}/efetch.fcgi?{urllib.parse.urlencode(public_params)}"
+    api_key = os.getenv("NCBI_API_KEY", "").strip()
+    request_url = public_url + "&" + urllib.parse.urlencode(
+        {key: value for key, value in {"email": email, "api_key": api_key}.items() if value}
+    )
+    raw, status_code = _request_xml(request_url, "NCBI_EUTILS", maximum=1024 * 1024)
+    return {
+        "schema_version": SCHEMA_VERSION, "status": "FOUND" if raw.strip() else "NOT_FOUND",
+        "provider": "NCBI_EUTILS", "retrieved_at": _now(),
+        "request": {"method": "GET", "url": public_url, "http_status": status_code},
+        "data": {"database": db, "ids": values, "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                 "xml": raw.decode("utf-8")},
+        "answer_policy": "Official Entrez record XML; do not infer experimental conclusions from metadata.",
+    }
+
+
+def pride_search_projects_rest(keyword: str, page_size: int = 10) -> dict[str, Any]:
+    result = _request_json(
+        "PRIDE", f"{PRIDE_BASE}/search/projects",
+        params={"keyword": _bounded_text("keyword", keyword), "page": 0,
+                "pageSize": _bounded_int("page_size", page_size, 1, 25)},
+    )
+    result["answer_policy"] = "Candidate projects only. Verify accession details, organism, tissue, assay and files."
+    return result
+
+
+def pride_project_rest(accession: str) -> dict[str, Any]:
+    value = _bounded_text("accession", accession, 15).upper()
+    if not PXD_RE.fullmatch(value):
+        raise AuthorityError("accession must be a PXD identifier")
+    return _request_json("PRIDE", f"{PRIDE_BASE}/projects/{value}")
+
+
+def pride_project_files_rest(accession: str, page_size: int = 20) -> dict[str, Any]:
+    value = _bounded_text("accession", accession, 15).upper()
+    if not PXD_RE.fullmatch(value):
+        raise AuthorityError("accession must be a PXD identifier")
+    return _request_json(
+        "PRIDE", f"{PRIDE_BASE}/projects/{value}/files",
+        params={"page": 0, "pageSize": _bounded_int("page_size", page_size, 1, 50)},
+    )
+
+
+def europe_pmc_oa_passages_rest(pmcid: str, query: str, max_hits: int = 5) -> dict[str, Any]:
+    """Return verbatim OA paragraph snippets with XML locators, never PDF pages."""
+    value = _bounded_text("pmcid", pmcid, 15).upper()
+    needle = _bounded_text("query", query, 100)
+    limit = _bounded_int("max_hits", max_hits, 1, 10)
+    if not PMCID_RE.fullmatch(value):
+        raise AuthorityError("pmcid must be a PMC identifier")
+    url = f"{EUROPE_PMC_BASE}/{value}/fullTextXML"
+    raw, status_code = _request_xml(url, "EUROPE_PMC_OA", maximum=MAX_RESPONSE_BYTES, not_found_ok=True)
+    if status_code == 404:
+        return _envelope("EUROPE_PMC_OA", url, {}, status="NOT_FOUND", status_code=404)
+    try:
+        root = ElementTree.fromstring(raw)
+    except (ElementTree.ParseError, ElementTree.EntitiesForbidden, ElementTree.ExternalReferenceForbidden) as error:
+        raise AuthorityError("Europe PMC OA XML is malformed") from error
+    parents = {child: parent for parent in root.iter() for child in parent}
+    passages: list[dict[str, Any]] = []
+    all_matches = 0
+    for paragraph_index, paragraph in enumerate(root.iter("p")):
+        if not any(ancestor.tag == "body" for ancestor in _ancestors(paragraph, parents)):
+            continue
+        text = " ".join("".join(paragraph.itertext()).split())
+        start = text.casefold().find(needle.casefold())
+        if start < 0:
+            continue
+        all_matches += 1
+        if len(passages) >= limit:
+            continue
+        quote_start = max(0, start - 80)
+        quote_end = min(len(text), start + len(needle) + 80)
+        quote = text[quote_start:quote_end]
+        section = next((ancestor for ancestor in _ancestors(paragraph, parents) if ancestor.tag == "sec"), None)
+        title = " ".join("".join(section.find("title").itertext()).split()) if section is not None and section.find("title") is not None else ""
+        passages.append({
+            "quote": quote,
+            "quote_hash": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+            "locator": {"kind": "XML", "pmcid": value, "section": title,
+                        "paragraph_index": paragraph_index, "char_start": quote_start, "char_end": quote_end},
+            "verification": "QUOTE_MATCHED_IN_SOURCE_XML",
+        })
+    license_node = root.find(".//license")
+    license_text = " ".join("".join(license_node.itertext()).split())[:500] if license_node is not None else None
+    return {
+        "schema_version": SCHEMA_VERSION, "status": "FOUND" if passages else "NOT_FOUND",
+        "provider": "EUROPE_PMC_OA", "retrieved_at": _now(),
+        "request": {"method": "GET", "url": url, "http_status": status_code},
+        "data": {"pmcid": value, "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                 "license_text": license_text, "matches": all_matches, "passages": passages},
+        "answer_policy": "Quotes are verified XML substrings, not validated biological claims or PDF page locators.",
+    }
+
+
+def _request_xml(url: str, provider: str, *, maximum: int, not_found_ok: bool = False) -> tuple[bytes, int]:
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/xml", "User-Agent": f"Yuxi-gene-authority/{SERVER_VERSION}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:  # noqa: S310
+            raw = response.read(maximum + 1)
+            status_code = int(response.status)
+    except urllib.error.HTTPError as error:
+        if not_found_ok and error.code == 404:
+            return b"", 404
+        raise AuthorityError(f"{provider} request failed: HTTP {error.code}") from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise AuthorityError(f"{provider} request failed: {type(error).__name__}") from error
+    if len(raw) > maximum:
+        raise AuthorityError(f"{provider} XML exceeded the {maximum} byte limit")
+    return raw, status_code
+
+
+def _ancestors(node: ElementTree.Element, parents: dict[ElementTree.Element, ElementTree.Element]):
+    while node in parents:
+        node = parents[node]
+        yield node
+
+
 def verify_genomic_interval(start: int, end: int, coordinate_system: str = "one_based_inclusive") -> dict[str, Any]:
     start_value = _bounded_int("start", start, 0, 2**63 - 1)
     end_value = _bounded_int("end", end, 0, 2**63 - 1)
@@ -444,6 +628,34 @@ def build_server():
     @server.tool(name="europe_pmc_article_rest", description="Official Europe PMC exact external-id/source metadata lookup.")
     def _epmc_article(source: str, external_id: str) -> dict[str, Any]:
         return guarded(europe_pmc_article_rest, source=source, external_id=external_id)
+
+    @server.tool(name="ncbi_eutils_search_rest", description="NCBI Entrez ESearch across allowlisted databases. Returns candidate IDs, not dataset or article claims.")
+    def _entrez_search(database: str, term: str, retmax: int = 10) -> dict[str, Any]:
+        return guarded(ncbi_eutils_search_rest, database=database, term=term, retmax=retmax)
+
+    @server.tool(name="ncbi_eutils_summary_rest", description="NCBI Entrez ESummary for exact numeric IDs in an allowlisted database.")
+    def _entrez_summary(database: str, ids: list[str]) -> dict[str, Any]:
+        return guarded(ncbi_eutils_summary_rest, database=database, ids=ids)
+
+    @server.tool(name="ncbi_eutils_fetch_rest", description="NCBI Entrez EFetch bounded XML for exact numeric IDs in an allowlisted database.")
+    def _entrez_fetch(database: str, ids: list[str]) -> dict[str, Any]:
+        return guarded(ncbi_eutils_fetch_rest, database=database, ids=ids)
+
+    @server.tool(name="pride_search_projects_rest", description="Search candidate PRIDE projects; a keyword hit is not verified tissue or assay evidence.")
+    def _pride_search(keyword: str, page_size: int = 10) -> dict[str, Any]:
+        return guarded(pride_search_projects_rest, keyword=keyword, page_size=page_size)
+
+    @server.tool(name="pride_project_rest", description="Official PRIDE project metadata by exact PXD accession.")
+    def _pride_project(accession: str) -> dict[str, Any]:
+        return guarded(pride_project_rest, accession=accession)
+
+    @server.tool(name="pride_project_files_rest", description="Official PRIDE file metadata by exact PXD accession; no file download.")
+    def _pride_files(accession: str, page_size: int = 20) -> dict[str, Any]:
+        return guarded(pride_project_files_rest, accession=accession, page_size=page_size)
+
+    @server.tool(name="europe_pmc_oa_passages_rest", description="Find exact query-matching passages in Europe PMC OA XML with XML-only locators; not a mechanism verifier.")
+    def _epmc_passages(pmcid: str, query: str, max_hits: int = 5) -> dict[str, Any]:
+        return guarded(europe_pmc_oa_passages_rest, pmcid=pmcid, query=query, max_hits=max_hits)
 
     @server.tool(name="verify_genomic_interval", description="Deterministically calculate interval length under an explicit coordinate convention. Use this for every published coordinate-derived length.")
     def _verify_interval(start: int, end: int, coordinate_system: str = "one_based_inclusive") -> dict[str, Any]:

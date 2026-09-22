@@ -45,6 +45,13 @@ def publication_env(base_env, monkeypatch):
         status="ACTIVE",
     )
 
+    class FakeScalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return list(self._rows)
+
     class FakeResult:
         def __init__(self, value):
             self.value = value
@@ -52,7 +59,31 @@ def publication_env(base_env, monkeypatch):
         def scalar_one_or_none(self):
             return self.value
 
-    db = SimpleNamespace(execute=AsyncMock(side_effect=[FakeResult(item) for item in (agent, wiki, publication)]))
+        def scalars(self):
+            # knowledge_scope_service 冻结 KB 行（治理/契约身份）走 scalars().all()
+            return FakeScalars(self.value if isinstance(self.value, list) else [])
+
+    frozen_rows = [
+        SimpleNamespace(
+            kb_id=kb_id,
+            governance_status="ACTIVE",
+            contract_key=f"{kb_id}-contract",
+            contract_version=1,
+            contract_digest="d" * 16,
+            active_release_id=None,
+        )
+        for kb_id in ("wiki-a", "src-a", "src-b")
+    ]
+    db = SimpleNamespace(
+        execute=AsyncMock(
+            side_effect=[
+                FakeResult(agent),
+                FakeResult(frozen_rows),
+                FakeResult(wiki),
+                FakeResult(publication),
+            ]
+        )
+    )
     monkeypatch.setattr(wiki_runtime_service, "_enabled_source_ids", AsyncMock(return_value=["src-a", "src-b"]))
     source_access = AsyncMock()
     monkeypatch.setattr(wiki_runtime_service, "assert_wiki_source_access", source_access)
