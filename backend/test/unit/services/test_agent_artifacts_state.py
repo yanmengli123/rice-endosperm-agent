@@ -146,7 +146,10 @@ def test_normalize_presented_artifact_path_accepts_host_path():
 
     normalized = _normalize_presented_artifact_path(str(output_file), _runtime_with_thread(thread_id))
 
-    assert normalized == f"{VIRTUAL_PATH_PREFIX}/outputs/report.md"
+    # 返回 (宿主真实路径, 虚拟路径)：真实路径供 run 级登记取哈希/大小
+    actual_path, virtual_path = normalized
+    assert actual_path == output_file.resolve()
+    assert virtual_path == f"{VIRTUAL_PATH_PREFIX}/outputs/report.md"
 
 
 def test_normalize_presented_artifact_path_accepts_virtual_path():
@@ -160,7 +163,9 @@ def test_normalize_presented_artifact_path_accepts_virtual_path():
         _runtime_with_thread(thread_id),
     )
 
-    assert normalized == f"{VIRTUAL_PATH_PREFIX}/outputs/summary.txt"
+    actual_path, virtual_path = normalized
+    assert actual_path == output_file.resolve()
+    assert virtual_path == f"{VIRTUAL_PATH_PREFIX}/outputs/summary.txt"
 
 
 def test_normalize_presented_artifact_path_rejects_non_outputs_path():

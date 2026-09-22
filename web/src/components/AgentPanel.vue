@@ -225,6 +225,22 @@ const buildDisplayName = (fullPath) => {
   return parts[parts.length - 1] || normalized
 }
 
+// 展示根（user-data）下一级目录的语义标注：workspace 是跨会话共享工作区，
+// outputs/uploads 是本会话私有——避免"别的会话的文件出现在新会话"的误解。
+const ROOT_DIRECTORY_LABELS = {
+  workspace: '工作区 · 跨会话共享',
+  outputs: '产物 · 本会话',
+  uploads: '附件 · 本会话'
+}
+const rootDirectoryLabel = (fullPath, isDirectory) => {
+  if (!isDirectory) return ''
+  const parts = String(fullPath || '')
+    .split('/')
+    .filter(Boolean)
+  if (parts.length !== 2 || parts[0] !== DISPLAY_ROOT_DIRECTORY_NAME) return ''
+  return ROOT_DIRECTORY_LABELS[parts[1]] || ''
+}
+
 const sortEntries = (entries) => {
   return [...entries].sort((left, right) => {
     const leftIsDir = Boolean(left?.is_dir)
@@ -241,8 +257,8 @@ const sortEntries = (entries) => {
 
 const createTreeNode = (entry) => {
   const fullPath = String(entry?.path || '')
-  const title = buildDisplayName(fullPath)
   const isLeaf = !entry?.is_dir
+  const title = rootDirectoryLabel(fullPath, !isLeaf) || buildDisplayName(fullPath)
 
   let nameStart = title
   let nameEnd = ''

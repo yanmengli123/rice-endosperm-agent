@@ -4,6 +4,7 @@ import { unref } from 'vue'
 import { extractPendingInterrupt } from '@/composables/useApproval'
 import { ReasoningVisibilityBuffer } from '@/utils/reasoningVisibility'
 import { normalizeVerifiedFigures } from '@/utils/figureCard'
+import { artifactPathsFromChunk } from '@/utils/runArtifacts'
 
 const reasoningVisibilityByMessage = new Map()
 
@@ -302,14 +303,13 @@ export function useAgentStreamHandler({
           threadState.pendingRequestId = null
           threadState.pendingInterrupt = null
           threadState.contextCompressing = false
-          // 产物按轮快照（figuresByRun 同款）：agent_state 整体替换会抹掉线程级
-          // artifacts，流结束时把当前列表快照进本 run，上一轮产物卡不消失；
-          // 历史回读后以服务端 run_artifacts 投影为准（getConvArtifacts 优先读投影）
+          // 产物按 run 快照（figuresByRun 同款桥接语义）：只信 finished chunk
+          // 携带的 run 级权威清单（run_artifacts 投影，含空清单）；字段缺席
+          // （旧服务端）不写快照——线程级 agentState.artifacts 是跨轮累积列表，
+          // 绝不能当"本轮产物"快照（上一轮产物被钉到本轮的泄漏根因）
           const runId = String(chunk.run_id || threadState.activeRunId || '')
-          const artifactPaths = Array.isArray(threadState.agentState?.artifacts)
-            ? threadState.agentState.artifacts
-            : []
-          if (runId && artifactPaths.length) {
+          const artifactPaths = artifactPathsFromChunk(chunk)
+          if (runId && artifactPaths) {
             threadState.runArtifactsByRun = {
               ...(threadState.runArtifactsByRun || {}),
               [runId]: artifactPaths

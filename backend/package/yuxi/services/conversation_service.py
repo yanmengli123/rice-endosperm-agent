@@ -15,6 +15,10 @@ from yuxi.agents.buildin import agent_manager
 from yuxi.config import config as app_config
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
 from yuxi.knowledge.parser.unified import Parser
+from yuxi.knowledge.rendering.source_answer_renderer import (
+    has_renderable_content,
+    render_source_answer,
+)
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES, ConversationRepository
 from yuxi.services.mention_search_service import invalidate_mention_cache
@@ -1044,6 +1048,10 @@ async def get_thread_history_view(
 
     history: list[dict] = []
     role_type_map = {"user": "human", "assistant": "ai", "tool": "tool", "system": "system"}
+    source_fact_notes = await _load_source_fact_notes(
+        db,
+        {msg.run_id for msg in messages if msg.role == "assistant" and msg.run_id},
+    )
 
     for msg in messages:
         user_feedback = None
@@ -1063,6 +1071,13 @@ async def get_thread_history_view(
         if msg.role == "assistant":
             extra_metadata = redact_reasoning_metadata(extra_metadata)
             content = sanitize_visible_text(content)
+            # F5 卫生：空占位行（子运行 lc_run 轮次/流式占位）不进入历史视图
+            if not str(content or "").strip() and not msg.tool_calls:
+                continue
+            # 呈现边界渲染：门禁已验证的原文 → 脚注化/折叠/声明归位（零生成、
+            # 信息保损可逆；任何异常由渲染器内部回退原文，绝不阻断历史回看）。
+            if _source_answer_renderable(content, extra_metadata):
+                content = render_source_answer(content, fact_notes=source_fact_notes)
         request_id = extra_metadata.get("request_id")
         if msg.role == "user" and request_id and not extra_metadata.get("attachments"):
             extra_metadata["attachments"] = attachments_by_request_id.get(str(request_id), [])
@@ -1104,6 +1119,51 @@ async def get_thread_history_view(
     return {"history": history}
 
 
+def _source_answer_renderable(content: str, extra_metadata: dict) -> bool:
+    """渲染资格：错误消息与 SKIPPED 门禁消息不渲染；其余按渲染器判定。"""
+    if extra_metadata.get("error_type") or extra_metadata.get("is_error"):
+        return False
+    guard_status = str((extra_metadata.get("source_output_guard") or {}).get("status") or "")
+    if guard_status == "SKIPPED":
+        return False
+    return has_renderable_content(content)
+
+
+async def _load_source_fact_notes(db: AsyncSession, run_ids: set) -> dict:
+    """L2 引用增强：从 AgentRun.input_payload.run_source_manifest 投影 (audit,fact)→{path,value}。
+
+    查询失败只记日志并返回空 dict——L1 附录不依赖它（A5 血缘单一 / A6 失败回退）。
+    """
+    if not run_ids:
+        return {}
+    try:
+        from yuxi.storage.postgres.models_business import AgentRun
+
+        rows = (await db.execute(select(AgentRun).where(AgentRun.id.in_(run_ids)))).scalars().all()
+    except Exception as error:  # noqa: BLE001 —— 增强数据缺失退回 L1，不阻断历史
+        logger.warning(f"Source fact notes projection skipped: {type(error).__name__}: {error}")
+        return {}
+    notes: dict = {}
+    for run in rows:
+        payload = run.input_payload if isinstance(run.input_payload, dict) else {}
+        manifest = payload.get("run_source_manifest") or {}
+        for item in manifest.get("source_uses") or []:
+            provenance = (item or {}).get("provenance") or {}
+            try:
+                audit_id = int(provenance.get("mcp_call_audit_id"))
+            except (TypeError, ValueError):
+                continue
+            for fact in ((provenance.get("fact_manifest") or {}).get("facts")) or []:
+                fact_id = str((fact or {}).get("id") or "").lower()
+                if not fact_id:
+                    continue
+                notes[(audit_id, fact_id)] = {
+                    "path": str((fact or {}).get("path") or ""),
+                    "value": (fact or {}).get("numeric_value", (fact or {}).get("string_value")),
+                }
+    return notes
+
+
 async def _inject_run_artifacts(history: list[dict], db: AsyncSession) -> None:
     """按消息携带的 run_id 批量投影 run_artifacts（读时注入，表是唯一真源）。
 
@@ -1131,10 +1191,9 @@ async def _inject_run_artifacts(history: list[dict], db: AsyncSession) -> None:
     by_run: dict[str, list[dict]] = {}
     for row in rows:
         by_run.setdefault(str(row.run_id), []).append(row.to_dict())
-    if not by_run:
-        return
     for msg in history:
         if msg.get("type") == "ai" and msg.get("run_id"):
-            artifacts = by_run.get(str(msg["run_id"]))
-            if artifacts:
-                msg["run_artifacts"] = artifacts
+            # 键恒写（含空清单）：键存在 = 服务端已给出该 run 的权威产物清单，
+            # 空就是空；键缺失 = 升级前的历史数据。空清单绝不允许在前端回退到
+            # 其他来源（跨轮泄漏根因）。
+            msg["run_artifacts"] = by_run.get(str(msg["run_id"]), [])

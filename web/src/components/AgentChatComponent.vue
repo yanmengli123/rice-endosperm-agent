@@ -550,7 +550,7 @@
               </section>
 
               <section
-                v-if="currentArtifactFiles.length"
+                v-if="displayedRunArtifactFiles.length"
                 class="state-section"
                 :class="{ 'is-collapsed': !isStateSectionExpanded('artifacts') }"
               >
@@ -562,14 +562,14 @@
                   @click="toggleStateSection('artifacts')"
                 >
                   <span class="state-section-label">
-                    <span class="state-section-title">产物</span>
+                    <span class="state-section-title">本轮产物</span>
                     <ChevronDown
                       :size="15"
                       class="state-section-chevron"
                       :class="{ 'is-collapsed': !isStateSectionExpanded('artifacts') }"
                     />
                   </span>
-                  <span class="state-section-meta">{{ currentArtifactFiles.length }}</span>
+                  <span class="state-section-meta">{{ displayedRunArtifactFiles.length }}</span>
                 </button>
                 <div
                   v-show="isStateSectionExpanded('artifacts')"
@@ -578,7 +578,7 @@
                 >
                   <div class="state-list">
                     <div
-                      v-for="file in currentArtifactFiles"
+                      v-for="file in displayedRunArtifactFiles"
                       :key="file.path"
                       class="state-list-item"
                     >
@@ -620,6 +620,85 @@
                         />
                         <Save v-else :size="15" />
                       </button>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section
+                v-if="sessionArtifactGroups.length && sessionArtifactGroups.length > 1"
+                class="state-section"
+                :class="{ 'is-collapsed': !isStateSectionExpanded('sessionArtifacts') }"
+              >
+                <button
+                  type="button"
+                  class="state-section-header"
+                  :aria-expanded="isStateSectionExpanded('sessionArtifacts')"
+                  aria-controls="state-section-session-artifacts"
+                  @click="toggleStateSection('sessionArtifacts')"
+                >
+                  <span class="state-section-label">
+                    <span class="state-section-title">本会话产物</span>
+                    <ChevronDown
+                      :size="15"
+                      class="state-section-chevron"
+                      :class="{ 'is-collapsed': !isStateSectionExpanded('sessionArtifacts') }"
+                    />
+                  </span>
+                  <span class="state-section-meta">{{ sessionArtifactGroups.length }} 轮</span>
+                </button>
+                <div
+                  v-show="isStateSectionExpanded('sessionArtifacts')"
+                  id="state-section-session-artifacts"
+                  class="state-section-content"
+                >
+                  <div
+                    v-for="group in sessionArtifactGroups"
+                    :key="group.key"
+                    class="state-session-group"
+                  >
+                    <div class="state-session-group-title">{{ group.label }}</div>
+                    <div class="state-list">
+                      <div v-for="file in group.files" :key="file.path" class="state-list-item">
+                        <button
+                          type="button"
+                          class="state-list-item-main"
+                          :title="`打开 ${file.name}`"
+                          @click="openPanelPreview(file)"
+                        >
+                          <FileTypeIcon
+                            :name="file.name || file.path"
+                            :size="18"
+                            class="state-list-item-icon"
+                          />
+                          <div class="state-list-item-body">
+                            <div class="state-list-item-title">{{ file.name }}</div>
+                            <div class="state-list-item-meta">{{ file.meta }}</div>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          class="state-list-item-action"
+                          title="下载"
+                          @click.stop="downloadStateFile(file)"
+                        >
+                          <Download :size="15" />
+                        </button>
+                        <button
+                          type="button"
+                          class="state-list-item-action"
+                          :title="savingArtifactPaths[file.path] ? '保存中' : '保存到工作区'"
+                          :disabled="!!savingArtifactPaths[file.path]"
+                          @click.stop="saveStateArtifactToWorkspace(file)"
+                        >
+                          <LoaderCircle
+                            v-if="savingArtifactPaths[file.path]"
+                            :size="15"
+                            class="state-list-item-spin"
+                          />
+                          <Save v-else :size="15" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -831,6 +910,7 @@ import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import { extractCitationReadyFromHistory, inlineFiguresForMessage } from '@/utils/figureCard'
+import { artifactsForConversation, sessionArtifactGroupsFromMessages } from '@/utils/runArtifacts'
 import { buildStructuredMentions, formatMentionToken } from '@/utils/mention_utils'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
@@ -935,6 +1015,8 @@ const collapsedStateSections = reactive({
   todos: false,
   files: false,
   artifacts: false,
+  // 本会话产物聚合视图默认折叠（主视图是「本轮产物」）
+  sessionArtifacts: true,
   subagents: false
 })
 const threadConfigNoticeMap = ref({})
@@ -1742,15 +1824,34 @@ const currentThreadAttachments = computed(() => {
 const currentPendingThreadAttachments = computed(() =>
   currentThreadAttachments.value.filter((attachment) => !attachment?.request_id)
 )
-const currentArtifacts = computed(() => {
-  const artifacts = currentAgentState.value?.artifacts
-  return Array.isArray(artifacts) ? artifacts : []
-})
-// 按轮快照（figuresByRun 同款）：agent_state 整体替换会抹掉上一轮 artifacts，
-// finished 时把线程级列表快照进当前 run，让上一轮产物卡在历史回读前不消失
+// 按轮快照（figuresByRun 同款桥接语义）：只存 finished chunk 附带的 run 级
+// 权威清单；线程级 agentState.artifacts 是跨轮累积列表，绝不入快照（泄漏根因）
 const runArtifactsByRun = computed(() => currentThreadState.value?.runArtifactsByRun || {})
-const currentArtifactFiles = computed(() =>
-  currentArtifacts.value
+// 本轮产物（run 级权威口径）：live 模式取最新一轮；pinned 模式取所聚焦 run 的
+// 消息投影（投影键缺失的旧轮回退该 run 的快照）。
+const displayedRunArtifactPaths = computed(() => {
+  if (focusedRunId.value) {
+    const target = String(focusedRunId.value)
+    const messages = currentThreadMessages.value || []
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]
+      if (message?.type !== 'ai') continue
+      if (String(message.run_id || '') !== target) continue
+      if (Array.isArray(message?.run_artifacts)) {
+        return message.run_artifacts
+          .map((item) => (typeof item === 'string' ? item : item?.virtual_path))
+          .filter(Boolean)
+      }
+      return Array.isArray(runArtifactsByRun.value[target]) ? runArtifactsByRun.value[target] : []
+    }
+    return []
+  }
+  const convs = conversations.value
+  const lastConv = convs[convs.length - 1]
+  return lastConv ? artifactsForConversation(lastConv, runArtifactsByRun.value) : []
+})
+const displayedRunArtifactFiles = computed(() =>
+  displayedRunArtifactPaths.value
     .map((path) => String(path || '').trim())
     .filter(Boolean)
     .map((path) => ({
@@ -1758,6 +1859,17 @@ const currentArtifactFiles = computed(() =>
       name: getPanelFileName({ path }),
       meta: getArtifactMetaLabel(path)
     }))
+)
+// 本会话产物（按轮分组、跨轮去重，折叠区聚合展示）
+const sessionArtifactGroups = computed(() =>
+  sessionArtifactGroupsFromMessages(currentThreadMessages.value).map((group) => ({
+    ...group,
+    files: group.paths.map((path) => ({
+      path,
+      name: getPanelFileName({ path }),
+      meta: getArtifactMetaLabel(path)
+    }))
+  }))
 )
 const currentTodos = computed(() => {
   const todos = currentAgentState.value?.todos
@@ -1862,7 +1974,7 @@ const stateSummaryLabel = computed(() => {
     (currentTokenUsage.value ? 1 : 0) +
     totalTodoCount.value +
     currentStateFiles.value.length +
-    currentArtifactFiles.value.length +
+    displayedRunArtifactFiles.value.length +
     displaySubagentRuns.value.length
   return total ? `${total} 项` : '暂无内容'
 })
@@ -1871,7 +1983,7 @@ const hasVisibleStateSections = computed(
     Boolean(currentTokenUsage.value) ||
     currentTodos.value.length > 0 ||
     currentStateFiles.value.length > 0 ||
-    currentArtifactFiles.value.length > 0 ||
+    displayedRunArtifactFiles.value.length > 0 ||
     displaySubagentRuns.value.length > 0
 )
 
@@ -1956,33 +2068,16 @@ const shouldShowRefs = computed(() => {
 
 const shouldShowArtifacts = computed(() => {
   return (conv) => {
-    // R2/R3：产物按轮渲染——live 轮读线程级 agentState（历史轮为空），历史轮读
-    // 服务端按 run 投影的 run_artifacts。历史轮与最新轮渲染规则一致。
+    // R2/R3：产物按轮（run 级）渲染——投影键优先、run 快照兜底，历史轮与
+    // 最新轮规则一致；绝不读线程级累积列表（跨轮泄漏根因已修）。
     if (conv.status === 'streaming') return false
     return getConvArtifacts(conv).length > 0
   }
 })
 
-// 按轮产物解析：历史轮消息自带服务端投影的 run_artifacts（含 sha256/size 元数据）；
-// live 轮（历史消息里没有投影）回退到线程级 agentState.artifacts（仅最后一轮有值）。
-const getConvArtifacts = (conv) => {
-  const messages = Array.isArray(conv?.messages) ? conv.messages : []
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]
-    if (message?.type !== 'ai') continue
-    const projected = message?.run_artifacts
-    if (Array.isArray(projected) && projected.length) {
-      return projected
-        .map((item) => (typeof item === 'string' ? item : item?.virtual_path))
-        .filter(Boolean)
-    }
-    const runId = getMessageRunId(message)
-    if (runId && runArtifactsByRun.value[runId]) return runArtifactsByRun.value[runId]
-  }
-  // 无 run_id 归属（旧数据/live 流式轮）：沿用线程级状态，只挂在最后一轮
-  const latestConv = conversations.value[conversations.value.length - 1]
-  return latestConv === conv ? currentArtifacts.value : []
-}
+// 按轮产物解析（纯函数在 utils/runArtifacts.js，可单测）：run_artifacts 投影键
+// 存在（含空）即权威；键缺失（升级前历史数据）回退 finished 快照。
+const getConvArtifacts = (conv) => artifactsForConversation(conv, runArtifactsByRun.value)
 
 // 当前线程状态的computed属性
 const currentThreadState = computed(() => {
@@ -4811,6 +4906,23 @@ watch(currentChatId, (threadId, oldThreadId) => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.state-session-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  & + .state-session-group {
+    margin-top: 10px;
+  }
+}
+
+.state-session-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gray-500);
+  letter-spacing: 0.04em;
 }
 
 .state-list-item {

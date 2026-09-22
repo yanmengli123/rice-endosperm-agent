@@ -303,6 +303,28 @@ async def _append_end_event(run_id: str, status: str, *, thread_id: str | None, 
     await append_run_event(run_id, "end", end_payload, thread_id=thread_id)
 
 
+async def _attach_run_artifacts_to_finished_chunk(run_id: str, chunk: dict) -> dict:
+    """终态 finished chunk 附带 run 级产物清单（run_artifacts 权威投影）。
+
+    产物卡以 run 为粒度渲染：该字段给"本轮产物"一个确定性信号，前端不再从
+    线程级累积的 agent_state.artifacts 推断（那会把上一轮产物钉到本轮——
+    跨轮泄漏根因）。仅在确有产物时附带（字段缺席 ⟺ 本轮无产物，与 figures
+    发布口径一致）；查询失败降级为不附带，终态语义不被产物投影拖挂。
+    """
+    if not isinstance(chunk, dict) or chunk.get("status") != "finished":
+        return chunk
+    try:
+        from yuxi.services.agent_run_service import load_run_artifacts
+
+        artifacts = await load_run_artifacts(run_id)
+    except Exception as error:  # noqa: BLE001 —— 附带字段尽力而为
+        logger.warning(f"Run artifacts terminal attach skipped for {run_id}: {type(error).__name__}")
+        return chunk
+    if artifacts:
+        return {**chunk, "artifacts": artifacts}
+    return chunk
+
+
 async def _persist_terminal_trace(
     recorder: TraceRecorder,
     status: str,
@@ -869,6 +891,7 @@ async def process_agent_run(ctx, run_id: str):
         await writer.flush()
         if terminal_outcome is not None:
             terminal_status, error_type, error_message, terminal_chunk = terminal_outcome
+            terminal_chunk = await _attach_run_artifacts_to_finished_chunk(run_id, terminal_chunk)
             trace_committed = await _persist_terminal_trace(
                 recorder,
                 terminal_status,
@@ -883,6 +906,7 @@ async def process_agent_run(ctx, run_id: str):
             )
         else:
             finished_chunk = {"status": "finished", "request_id": request_id}
+            finished_chunk = await _attach_run_artifacts_to_finished_chunk(run_id, finished_chunk)
             trace_committed = await _persist_terminal_trace(recorder, "completed")
             await _append_end_event(
                 run_id,

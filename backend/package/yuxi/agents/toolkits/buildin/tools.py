@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 from pathlib import Path
@@ -80,7 +81,8 @@ class PresentArtifactsInput(BaseModel):
     )
 
 
-def _normalize_presented_artifact_path(filepath: str, runtime: ToolRuntime) -> str:
+def _normalize_presented_artifact_path(filepath: str, runtime: ToolRuntime) -> tuple[Path, str]:
+    """归一化并校验展示路径，返回 (宿主真实路径, 虚拟路径) 供登记与展示。"""
     from yuxi.agents.backends.sandbox.paths import (
         VIRTUAL_PATH_PREFIX,
         ensure_thread_dirs,
@@ -121,7 +123,7 @@ def _normalize_presented_artifact_path(filepath: str, runtime: ToolRuntime) -> s
     if relative_path.parts and relative_path.parts[0] in _PRESENT_ARTIFACTS_INTERNAL_DIR_NAMES:
         raise ValueError(f"不允许展示工具调用阶段文件: {outputs_virtual_prefix}/{relative_path.as_posix()}")
 
-    return f"{outputs_virtual_prefix}/{relative_path.as_posix()}"
+    return actual_path, f"{outputs_virtual_prefix}/{relative_path.as_posix()}"
 
 
 PRESENT_ARTIFACTS_DESCRIPTION = f"""
@@ -142,6 +144,24 @@ PRESENT_ARTIFACTS_DESCRIPTION = f"""
 """
 
 
+def _presented_artifact_entry(actual_path: Path, virtual_path: str):
+    """为已展示文件构造 run 级登记要素（宿主路径上取哈希与大小，磁盘 IO 走 to_thread）。"""
+    import hashlib
+
+    from yuxi.agents.mcp.artifact_materializer import MaterializedArtifact
+
+    payload = actual_path.read_bytes()
+    stat = actual_path.stat()
+    return MaterializedArtifact(
+        virtual_path=virtual_path,
+        name=actual_path.name,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=stat.st_size,
+        media_type="application/octet-stream",
+        origin={"source": "agent_presented"},
+    )
+
+
 @tool(
     category="buildin",
     tags=["文件", "交付物"],
@@ -149,20 +169,31 @@ PRESENT_ARTIFACTS_DESCRIPTION = f"""
     description=PRESENT_ARTIFACTS_DESCRIPTION,
     args_schema=PresentArtifactsInput,
 )
-def present_artifacts(
+async def present_artifacts(
     filepaths: list[str],
     runtime: ToolRuntime,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """登记当前线程 outputs 目录下的交付物文件，使前端在对话结束后展示给用户。"""
     try:
-        normalized_paths = [_normalize_presented_artifact_path(filepath, runtime) for filepath in filepaths]
+        resolved = [_normalize_presented_artifact_path(filepath, runtime) for filepath in filepaths]
     except ValueError as exc:
         return Command(update={"messages": [ToolMessage(content=f"Error: {exc}", tool_call_id=tool_call_id)]})
 
+    # 模型展示的文件同样进 run 级权威登记（state 累积器 + run_artifacts 表），
+    # 使按轮产物卡对本通道与 MCP 物化通道口径一致；登记失败不阻断展示。
+    from yuxi.agents.mcp.artifact_materializer import note_delivered_artifact
+
+    for actual_path, virtual_path in resolved:
+        try:
+            entry = await asyncio.to_thread(_presented_artifact_entry, actual_path, virtual_path)
+            await note_delivered_artifact(entry)
+        except Exception as error:  # noqa: BLE001 —— 登记是增强通道，绝不阻断工具主流程
+            logger.warning(f"Presented artifact registration skipped ({virtual_path}): {type(error).__name__}")
+
     return Command(
         update={
-            "artifacts": normalized_paths,
+            "artifacts": [virtual_path for _, virtual_path in resolved],
             "messages": [ToolMessage(content="已将交付物展示给用户", tool_call_id=tool_call_id)],
         }
     )

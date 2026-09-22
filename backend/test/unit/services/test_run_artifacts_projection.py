@@ -79,7 +79,8 @@ async def test_history_projection_injects_per_run_artifacts(session):
     assert by_id[4]["run_artifacts"][0]["origin"]["source"] == "sequence_deliverable"
     assert "run_artifacts" not in by_id[1]
     assert "run_artifacts" not in by_id[5]
-    assert "run_artifacts" not in by_id[6]
+    # 键恒写（含空）：无产物的 run 得到权威空清单——"空就是空"，前端不再回退
+    assert by_id[6]["run_artifacts"] == []
     # 序列化形状锁定（前端下载/保存卡片消费的字段）
     first = by_id[2]["run_artifacts"][0]
     assert set(first) >= {"run_id", "thread_id", "origin", "name", "virtual_path", "sha256", "size_bytes", "media_type"}

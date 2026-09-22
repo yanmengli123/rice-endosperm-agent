@@ -346,6 +346,9 @@ COMPACT_CHUNK_FIELDS: tuple[str, ...] = (
     "figures",
     # 跨文献歧义时的候选文献清单（locator_candidates 事件，只含文档身份）
     "candidates",
+    # 终态 finished chunk 附带的 run 级产物清单（run_artifacts 权威投影，
+    # 仅确有产物时携带；漏加白名单会被压缩层静默剥离——figures 事故红线）
+    "artifacts",
 )
 
 
@@ -1514,6 +1517,15 @@ async def load_agent_run_result(*, run_id: str, current_uid: str) -> dict:
     """自开独立会话读取 run 结果，用于流结束/后台调用等请求会话已不可用的场景。"""
     async with pg_manager.get_async_session_context() as db:
         return await get_agent_run_result(run_id=run_id, current_uid=current_uid, db=db)
+
+
+async def load_run_artifacts(run_id: str) -> list[dict[str, Any]]:
+    """自开独立会话读取 run 的产物投影（run_worker 终态附常用，无用户上下文）。
+
+    与 ``_load_run_artifacts`` 同一序列化；查询失败返回空列表（降级语义一致）。
+    """
+    async with pg_manager.get_async_session_context() as db:
+        return await _load_run_artifacts(run_id, db)
 
 
 async def await_agent_run_result(*, run_id: str, current_uid: str) -> dict:

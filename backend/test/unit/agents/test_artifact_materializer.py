@@ -218,3 +218,53 @@ async def test_same_payload_dedupes_by_digest_filename(materialize_outputs, run_
     assert first is not None and second is not None
     # 相同负载 → 相同摘要文件名（内容寻址幂等），累积器两条（merge_artifacts 归并去重）
     assert first.name == second.name
+
+
+async def test_present_artifacts_registers_run_level_entry(materialize_outputs, run_scope, monkeypatch):
+    """present_artifacts（模型手动展示通道）同样进 run 级权威登记：state Command +
+    累积器条目 + DB 登记尝试，三通道口径一致。"""
+    from types import SimpleNamespace
+
+    from yuxi.agents.mcp import artifact_materializer as materializer_module
+    from yuxi.agents.toolkits.buildin.tools import present_artifacts
+
+    outputs_dir = materialize_outputs
+    target = outputs_dir / "report.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# 报告\n内容", encoding="utf-8")
+
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.paths.ensure_thread_dirs", lambda thread_id, uid: None)
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.paths.sandbox_outputs_dir", lambda thread_id: outputs_dir)
+
+    def fake_resolve(thread_id, virtual_path, *, uid):
+        relative = virtual_path.rstrip("/").split("/outputs/", 1)[-1]
+        return outputs_dir / relative
+
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.paths.resolve_virtual_path", fake_resolve)
+
+    registration_attempts: list = []
+
+    async def recording_register(*, context, entry):
+        registration_attempts.append(entry)
+        return True
+
+    monkeypatch.setattr(materializer_module, "register_run_artifact", recording_register)
+
+    runtime = SimpleNamespace(context=SimpleNamespace(file_thread_id="t-mat", uid="u1"))
+    command = await present_artifacts.coroutine(
+        filepaths=["/home/gem/user-data/outputs/report.md"],
+        runtime=runtime,
+        tool_call_id="tc-1",
+    )
+
+    expected_virtual_path = "/home/gem/user-data/outputs/report.md"
+    # state 通道：Command.update 携带归一化虚拟路径
+    assert command.update["artifacts"] == [expected_virtual_path]
+    # 累积器通道：origin 标记 agent_presented，哈希与大小来自宿主文件
+    entries = drain_materialized_artifacts()
+    assert [entry.virtual_path for entry in entries] == [expected_virtual_path]
+    assert entries[0].origin == {"source": "agent_presented"}
+    assert entries[0].size_bytes == target.stat().st_size
+    assert len(entries[0].sha256) == 64
+    # DB 登记通道：登记尝试发生（真实落库由 SQLite 写侧用例覆盖）
+    assert [entry.virtual_path for entry in registration_attempts] == [expected_virtual_path]
