@@ -20,13 +20,12 @@ from yuxi.agents.mcp.security import (
     validate_remote_url_dns,
     validate_remote_url_static,
 )
-from yuxi.utils import logger
-
 from yuxi.agents.toolkits.custom.domain import (
     DEFAULT_MAX_TEXT_LENGTH,
     TEMPLATE_REF_PATTERN,
     CustomToolError,
 )
+from yuxi.utils import logger
 
 
 def substitute_template(template: str, args: dict[str, Any], *, section: str) -> str:

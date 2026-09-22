@@ -624,9 +624,7 @@ async def prepare_knowledge_context(
     retrieval_id = retrieval_id or f"kr_{uuid.uuid4().hex}"
     started_at = utc_now_naive()
     members = [member for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
-    raw_members = [
-        member for member in members if is_evidence_authority(str(member.get("kb_type") or ""))
-    ]
+    raw_members = [member for member in members if is_evidence_authority(str(member.get("kb_type") or ""))]
     wiki_members = [
         member
         for member in members

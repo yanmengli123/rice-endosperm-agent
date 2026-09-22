@@ -256,9 +256,7 @@ async def query_knowledge_scope(query_text: str, top_k: int = 12, runtime: ToolR
             for (source_class, provider_id), evidence_ids in grouped.items():
                 manifest.source_uses.append(
                     SourceUseRecord(
-                        source_use_id=(
-                            f"knowledge:{frozen_contract.get('retrieval_id')}:{source_class}:{provider_id}"
-                        ),
+                        source_use_id=(f"knowledge:{frozen_contract.get('retrieval_id')}:{source_class}:{provider_id}"),
                         source_class=source_class,
                         evidence_level=(
                             EvidenceLevel.DATA_PROVENANCE

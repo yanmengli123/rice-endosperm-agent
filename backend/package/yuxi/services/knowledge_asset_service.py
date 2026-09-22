@@ -25,8 +25,8 @@ from typing import Any
 
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
-from yuxi.knowledge.runtime import knowledge_base
 from yuxi.knowledge.pdf_evidence.asset_paths import revision_image_prefix
+from yuxi.knowledge.runtime import knowledge_base
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User

@@ -245,9 +245,7 @@ async def resolve_effective_knowledge_scope(
     kb_rows = []
     if effective_ids:
         kb_rows = list(
-            (
-                await db.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id.in_(sorted(effective_ids))))
-            )
+            (await db.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id.in_(sorted(effective_ids)))))
             .scalars()
             .all()
         )

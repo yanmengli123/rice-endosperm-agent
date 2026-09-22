@@ -99,6 +99,7 @@ _REGISTRY: dict[str, KnowledgeProductSpec] = {
     LLMWIKI.kb_type: LLMWIKI,
 }
 
+
 def get_product_spec(kb_type: str) -> KnowledgeProductSpec:
     """返回产品声明；非空未知类型 fail-closed，不获得证据权限。"""
     normalized = str(kb_type or "").strip().casefold()

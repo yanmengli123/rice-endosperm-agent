@@ -1,7 +1,7 @@
 from .query_planner import PLANNER_VERSION, plan_knowledge_query
 from .turn_execution_plan import (
-    AuthorityOutcome,
     AuthorityDecision,
+    AuthorityOutcome,
     CitationPolicy,
     EvidenceLevel,
     RunSourceManifest,

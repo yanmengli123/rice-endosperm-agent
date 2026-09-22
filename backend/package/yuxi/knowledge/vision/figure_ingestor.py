@@ -91,9 +91,8 @@ def _caption_matches_visual_anchor(caption: str, anchor_quote: str) -> bool:
 
 async def _resolve_asset_objects(revision: Any) -> dict[str, str]:
     """版本专属前缀列表 → {safe_name: object_name}。"""
-    from yuxi.storage.minio.client import get_minio_client
-
     from yuxi.knowledge.pdf_evidence.asset_paths import revision_image_prefix  # 惰性：避免与 pipeline 循环导入
+    from yuxi.storage.minio.client import get_minio_client
 
     client = get_minio_client()
     prefix = revision_image_prefix(

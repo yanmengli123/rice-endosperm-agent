@@ -211,9 +211,7 @@ def validate_qa_mapping(
     }
 
 
-def validate_record_mapping(
-    header: list[str], identity_column: str | None, *, require_identity: bool = False
-) -> dict:
+def validate_record_mapping(header: list[str], identity_column: str | None, *, require_identity: bool = False) -> dict:
     """csv_record 校验：identity 列（可选）必须存在。"""
     issues: list[str] = []
     if identity_column and identity_column not in header:
@@ -592,7 +590,6 @@ async def generate_csv_dataset_sample_questions(kb_id: str, count: int = 10) -> 
     """
     from fastapi import HTTPException
     from sqlalchemy import select
-
     from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
     from yuxi.storage.postgres.manager import pg_manager
 

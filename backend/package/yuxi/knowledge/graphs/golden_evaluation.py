@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import select
+
 from yuxi.knowledge.graphs.graph_utils import normalize_entity_name
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeChunk,
     KnowledgeGraphGoldenSample,
 )
-from sqlalchemy import select
 
 GOLDEN_EVALUATION_VERSION = "golden_evaluation_v1"
 # 同步 HTTP 评测的样本上限（每样本一次 LLM 批调用，防长事务）

@@ -23,11 +23,6 @@ from yuxi.agents.mcp.security import (
     assert_no_inline_secrets,
     validate_remote_url_static,
 )
-from yuxi.storage.postgres.models_business import CustomTool, MCPUserCredential
-from yuxi.storage.postgres.manager import pg_manager
-from yuxi.utils import logger
-from yuxi.utils.datetime_utils import utc_now
-
 from yuxi.agents.toolkits.custom import repository
 from yuxi.agents.toolkits.custom.adapter import build_custom_tool, execute_custom_http_tool
 from yuxi.agents.toolkits.custom.domain import (
@@ -49,6 +44,10 @@ from yuxi.agents.toolkits.custom.domain import (
     CustomToolLifecycle,
     CustomToolReferenceError,
 )
+from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_business import CustomTool, MCPUserCredential
+from yuxi.utils import logger
+from yuxi.utils.datetime_utils import utc_now
 
 _ALLOWED_ARG_PROPERTY_KEYS = {"type", "description", "enum", "items", "default"}
 _CONNECTION_FIELDS = ("tool_type", "spec", "args_schema", "credential_id")

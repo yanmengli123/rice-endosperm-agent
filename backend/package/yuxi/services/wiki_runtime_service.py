@@ -11,7 +11,6 @@ from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.knowledge.products.contracts import WikiNavigationHit
 from yuxi.knowledge.products.registry import is_derived_product
 from yuxi.services.wiki_service import (

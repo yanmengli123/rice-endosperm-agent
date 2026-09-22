@@ -12,7 +12,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.services import wiki_service as wiki
 from yuxi.services.wiki_service import WikiServiceError
 from yuxi.storage.postgres.models_business import AgentRun, User
