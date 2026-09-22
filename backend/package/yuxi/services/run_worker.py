@@ -39,6 +39,7 @@ from yuxi.services.scientific_pdf_ingest_service import (
 from yuxi.services.trace_service import purge_expired_trace_runs, relay_trace_outbox
 from yuxi.knowledge.graphs.doclex.service import prewarm_doclex_for_kb
 from yuxi.services.wiki_service import process_dynamic_wiki_build, reconcile_dynamic_wikis
+from yuxi.services.run_stream_errors import normalize_stream_error_chunk
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import AgentRun, Message, User
 from yuxi.storage.redis import get_arq_redis_settings
@@ -285,6 +286,9 @@ def _map_chunk_to_run_event(chunk: dict) -> tuple[str, dict]:
     if status == "warning":
         return "custom", {"name": "yuxi.warning", "chunk": chunk}
     if status == "error":
+        # 防御归一：旁路生产者（resume/subagent 等）未分类的连接类错误统一
+        # error_type/retryable；已细分类的 error_type 原样放行。
+        chunk = normalize_stream_error_chunk(chunk)
         return "error", {"chunk": chunk, "retryable": bool(chunk.get("retryable"))}
     if status == "finished":
         return "end", {"status": "completed", "chunk": chunk}

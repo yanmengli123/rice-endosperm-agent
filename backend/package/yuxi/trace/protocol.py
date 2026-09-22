@@ -120,6 +120,8 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
             "invalid_marker_count",
             "degraded_render",
             "repair_attempt_count",
+            "elapsed_ms",
+            "repair_elapsed_ms",
         }
     ),
     "subagent.execution.started": frozenset({"tool", "args_digest", "agent_slug", "child_run_id"}),

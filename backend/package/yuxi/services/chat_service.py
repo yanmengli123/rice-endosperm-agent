@@ -15,6 +15,7 @@ share the same runtime behavior once they reach the worker.
 import asyncio
 import base64
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -55,6 +56,11 @@ from yuxi.repositories.subagent_thread_repository import SubagentThreadRepositor
 from yuxi.services.conversation_service import serialize_attachment
 from yuxi.services.input_message_service import AgentRunInputMessage
 from yuxi.services.knowledge_scope_service import resolve_effective_knowledge_scope
+from yuxi.services.run_stream_errors import (
+    MODEL_CONNECTION_ERROR,
+    MODEL_CONNECTION_ERROR_MESSAGE,
+    is_model_connection_error,
+)
 from yuxi.services.langfuse_service import (
     LangfuseRunContext,
     build_run_context,
@@ -866,6 +872,15 @@ def _append_knowledge_source_uses(
 # 事实核验修复：草稿超长直接放弃修复走降级渲染，避免修复调用本身成为成本放大器。
 _FACT_REPAIR_MAX_ATTEMPTS = 2
 _FACT_REPAIR_DRAFT_LIMIT = 60000
+# 修复轮时间预算：request/stream_chunk 超时只封"静默"（多久没有 chunk），不封
+# "总时长"（慢而不断流的修复流两者都不触发）。run 看门狗在 idle 180s / total 300s
+# 处收尸（run_worker.RUN_STREAM_*_TIMEOUT_SECONDS），修复轮全程对事件流静默，
+# 因此每轮外加固墙钟兜底，且 SDK 层零重试防预算被隐藏重试翻倍。预算关系由
+# test_source_fact_repair.py 的不变量测试锁死：
+# _FACT_REPAIR_MAX_ATTEMPTS * _FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS < idle < total。
+_FACT_REPAIR_REQUEST_TIMEOUT_SECONDS = 35.0
+_FACT_REPAIR_STREAM_CHUNK_TIMEOUT_SECONDS = 30.0
+_FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS = 40.0
 _FACT_REPAIR_PROMPT = """你是 MCP 事实核验修复器。下面这份回答草稿未通过服务器端事实级核验，\
 你必须修复它使其通过核验。你只能做三类操作，绝不能引入新事实：
 1. 为缺少 [MCP-F:audit:fact] 标记的行补上真实标记（只能使用【可用事实清单】里的标记，\
@@ -928,9 +943,9 @@ async def _repair_source_fact_grounding(
 
         repair_kwargs = {
             "temperature": 0,
-            "request_timeout": 120,
-            "stream_chunk_timeout": 120,
-            "max_retries": 1,
+            "request_timeout": _FACT_REPAIR_REQUEST_TIMEOUT_SECONDS,
+            "stream_chunk_timeout": _FACT_REPAIR_STREAM_CHUNK_TIMEOUT_SECONDS,
+            "max_retries": 0,
         }
         model = None
         if isinstance(repair_model_spec, str) and repair_model_spec.strip():
@@ -948,10 +963,23 @@ async def _repair_source_fact_grounding(
         ]
         # 走流式聚合：部分网关/供应商只稳定放行 SSE 请求，非流式 invoke 会连接失败。
         collected: list[str] = []
-        async for chunk in model.astream(messages):
-            piece = getattr(chunk, "content", "")
-            if isinstance(piece, str):
-                collected.append(piece)
+
+        async def _collect_stream() -> None:
+            async for chunk in model.astream(messages):
+                piece = getattr(chunk, "content", "")
+                if isinstance(piece, str):
+                    collected.append(piece)
+
+        # 墙钟兜底：chunk 持续到达但整体拖长（慢流）时，request/stream_chunk 超时
+        # 都不会触发，只有这里能保证修复轮有界、不给 run 看门狗留静默窗口。
+        try:
+            await asyncio.wait_for(_collect_stream(), timeout=_FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "MCP fact grounding repair round exceeded "
+                f"{_FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS:.0f}s wall budget; round abandoned"
+            )
+            return None
     except Exception as error:  # 模型不可用时修复通道直接失效，回落降级渲染
         logger.warning(f"MCP fact grounding repair skipped: {type(error).__name__}: {error}")
         return None
@@ -971,6 +999,8 @@ async def _finalize_guarded_source_text(
     requires_mcp: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """终态门禁 + 有界修复 + 确定性降级：修复失败绝不发布未核验内容。"""
+    finalize_started_at = time.monotonic()
+    repair_elapsed_ms = 0
     guarded, validation = guard_answer_for_evidence_level(
         draft,
         evidence_level=evidence_level,
@@ -986,10 +1016,13 @@ async def _finalize_guarded_source_text(
 
     if not _passed(validation):
         for attempt in range(1, _FACT_REPAIR_MAX_ATTEMPTS + 1):
+            round_started_at = time.monotonic()
             repaired = await _repair_source_fact_grounding(
                 draft, validation, source_uses, repair_model_spec=repair_model_spec
             )
-            attempts.append({"attempt": attempt, "repaired": bool(repaired)})
+            round_elapsed_ms = int((time.monotonic() - round_started_at) * 1000)
+            repair_elapsed_ms += round_elapsed_ms
+            attempts.append({"attempt": attempt, "repaired": bool(repaired), "elapsed_ms": round_elapsed_ms})
             if not repaired:
                 # 瞬时失败（连接/超时）也给第二轮一次机会；草稿超限等永久性
                 # 原因会连续返回 None，同样快速放行到降级渲染。
@@ -1040,6 +1073,8 @@ async def _finalize_guarded_source_text(
                 "invalid_marker_count": len(grounding.get("invalid_markers") or []),
                 "degraded_render": bool(validation.get("degraded_render")),
                 "repair_attempt_count": len(attempts),
+                "elapsed_ms": int((time.monotonic() - finalize_started_at) * 1000),
+                "repair_elapsed_ms": repair_elapsed_ms,
             },
             visibility="USER",
         )
@@ -2720,8 +2755,14 @@ async def stream_agent_chat(
     except Exception as e:
         logger.exception(f"Error streaming messages: {e}")
 
-        error_msg = f"Error streaming messages: {e}"
-        error_type = "unexpected_error"
+        if is_model_connection_error(e):
+            # 连接类失败与通用异常分流：前者可重试且文案指向模型服务，
+            # 不再让"检索/看门狗"类超时文案掩盖真实故障层。
+            error_type = MODEL_CONNECTION_ERROR
+            error_msg = MODEL_CONNECTION_ERROR_MESSAGE
+        else:
+            error_type = "unexpected_error"
+            error_msg = f"Error streaming messages: {e}"
 
         full_msg = _ensure_full_msg(full_msg, accumulated_content)
 
@@ -2739,7 +2780,14 @@ async def stream_agent_chat(
                 knowledge_contract=knowledge_contract,
             )
 
-        yield make_chunk(status="error", error_type=error_type, error_message=error_msg, meta=meta)
+        yield make_chunk(
+            status="error",
+            error_type=error_type,
+            error_message=error_msg,
+            message=error_msg,
+            retryable=error_type == MODEL_CONNECTION_ERROR,
+            meta=meta,
+        )
     finally:
         if credential_context_token is not None:
             from yuxi.agents.models import reset_user_credential_override

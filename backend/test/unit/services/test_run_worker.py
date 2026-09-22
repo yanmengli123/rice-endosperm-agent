@@ -792,3 +792,30 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "rebuild_ocr_cache",
         "start_runtime_sync",
     ]
+
+
+def test_map_chunk_normalizes_unclassified_connection_error():
+    """旁路生产者未分类的连接类错误：映射层兜底归一为 model_connection_error。"""
+    chunk = {
+        "status": "error",
+        "error_type": "unexpected_error",
+        "error_message": (
+            "Error streaming messages: Model call failed after 3 attempts with APIConnectionError: Connection error."
+        ),
+    }
+    event, payload = run_worker._map_chunk_to_run_event(chunk)
+    assert event == "error"
+    assert payload["chunk"]["error_type"] == "model_connection_error"
+    assert payload["retryable"] is True
+
+
+def test_map_chunk_preserves_classified_error_types():
+    chunk = {
+        "status": "error",
+        "error_type": "run_idle_timeout",
+        "error_message": "服务端长时间未收到检索或模型输出，已安全结束本次任务，请重试。",
+        "retryable": True,
+    }
+    event, payload = run_worker._map_chunk_to_run_event(chunk)
+    assert event == "error"
+    assert payload["chunk"]["error_type"] == "run_idle_timeout"
