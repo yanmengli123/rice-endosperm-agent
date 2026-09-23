@@ -44,6 +44,7 @@ from yuxi.knowledge.planning.turn_execution_plan import (
 from yuxi.knowledge.rendering.answer_draft import render_answer_draft
 from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
 from yuxi.knowledge.rendering.profile_projection import project_data_plane
+from yuxi.knowledge.rendering.provider_status_view import render_provider_status_answer
 from yuxi.knowledge.rendering.source_output_guard import (
     fact_catalog_summary,
     guard_answer_for_evidence_level,
@@ -2711,7 +2712,8 @@ async def stream_agent_chat(
                     "".join(accumulated_content), contract=knowledge_contract
                 )
             # MCP 值答案：模型只负责选工具，不参与最终事实措辞。终态正文必须由
-            # 服务端直接从已采纳事实账本投影；无可投影事实时宁可明确无结果。
+            # 服务端直接从已采纳事实账本投影；无可投影事实时按五态语义给确定性
+            # 终态文案（UNAVAILABLE 绝不伪装成未找到），两者都无才用兜底句。
             elif turn_plan.answer.mode == "MCP_VALUE_ONLY":
                 projection = project_data_plane(source_manifest.source_uses)
                 deterministic_text = (
@@ -2719,6 +2721,8 @@ async def stream_agent_chat(
                     if projection is not None
                     else render_degraded_fact_sheet(source_manifest.source_uses)
                 )
+                if deterministic_text is None:
+                    deterministic_text = render_provider_status_answer(source_manifest.source_uses)
                 guarded_source_text = deterministic_text or "未获取到可发布的数据值。"
                 _, deterministic_validation = guard_answer_for_evidence_level(
                     guarded_source_text,

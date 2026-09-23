@@ -28,7 +28,7 @@ from typing import Any
 
 from defusedxml import ElementTree
 
-SERVER_VERSION = "1.4.0"
+SERVER_VERSION = "1.5.0"
 SCHEMA_VERSION = "gene-authority-envelope.v1"
 NCBI_BASE = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 NCBI_EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -116,6 +116,8 @@ def _request_json(
     private_params: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    if not _breaker_allows(provider):
+        raise AuthorityError(f"{provider} circuit breaker open (cooldown); data source temporarily unavailable")
     query = urllib.parse.urlencode({key: value for key, value in (params or {}).items() if value is not None})
     public_url = url + (f"?{query}" if query else "")
     private_query = urllib.parse.urlencode(
@@ -144,9 +146,11 @@ def _request_json(
                 payload = {"results": payload}
             if not isinstance(payload, dict):
                 raise AuthorityError(f"{provider} response must be a JSON object or array")
+            _breaker_record(provider, ok=True)
             return _envelope(provider, public_url, payload, status_code=status_code)
         except urllib.error.HTTPError as error:
             if error.code == 404:
+                _breaker_record(provider, ok=True)
                 return _envelope(provider, public_url, {}, status="NOT_FOUND", status_code=404)
             last_error = error
             if error.code not in {429, 500, 502, 503, 504} or attempt == 2:
@@ -156,7 +160,38 @@ def _request_json(
             if attempt == 2:
                 break
         time.sleep(0.5 * (2**attempt))
+    _breaker_record(provider, ok=False)
     raise AuthorityError(f"{provider} request failed after bounded retries: {type(last_error).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# 熔断器（per provider）：连续失败达阈值后快速失败一个冷却窗，冷却结束半开
+# 放行试探。失败以 AuthorityError 呈现 → host 侧 status=error → 用户面五态
+# 语义渲染为「数据源暂不可用」（绝不伪装成 NOT_FOUND）。
+# ---------------------------------------------------------------------------
+
+_BREAKER_THRESHOLD = 5
+_BREAKER_COOLDOWN_SECONDS = 60.0
+_BREAKER_STATE: dict[str, dict[str, float]] = {}
+
+
+def _breaker_allows(provider: str) -> bool:
+    state = _BREAKER_STATE.get(provider)
+    if not state:
+        return True
+    return time.monotonic() >= state.get("open_until", 0.0)
+
+
+def _breaker_record(provider: str, *, ok: bool) -> None:
+    state = _BREAKER_STATE.setdefault(provider, {"consecutive_failures": 0.0, "open_until": 0.0})
+    if ok:
+        state["consecutive_failures"] = 0.0
+        state["open_until"] = 0.0
+        return
+    state["consecutive_failures"] += 1
+    if state["consecutive_failures"] >= _BREAKER_THRESHOLD:
+        state["open_until"] = time.monotonic() + _BREAKER_COOLDOWN_SECONDS
+        state["consecutive_failures"] = 0.0
 
 
 def _has_records(payload: dict[str, Any]) -> bool:
@@ -254,11 +289,25 @@ def ncbi_gene_report_rest(
             }
         kind = "gene-id"
     path = _gene_path(kind, lookup_identifiers, None, "dataset_report")
-    result = _request_json(
-        "NCBI_DATASETS",
-        NCBI_BASE + path,
-        params={"page_size": _bounded_int("page_size", page_size, 1, 100)},
-    )
+    try:
+        result = _request_json(
+            "NCBI_DATASETS",
+            NCBI_BASE + path,
+            params={"page_size": _bounded_int("page_size", page_size, 1, 100)},
+        )
+    except AuthorityError as rest_error:
+        # REST 在有限重试后仍失败（远端断连/限流）：回退到固定版官方 CLI 取
+        # 同口径 summary。CLI 也不可用才向用户呈现「数据源暂不可用」。
+        try:
+            result = ncbi_gene_summary_cli(
+                lookup_identifiers, identifier_type="gene-id", taxon=taxon if kind == "symbol" else None
+            )
+            result.setdefault("data", {})["rest_fallback"] = {
+                "used_cli": True,
+                "rest_error": str(rest_error)[:200],
+            }
+        except AuthorityError:
+            raise
     if resolution is not None:
         result.setdefault("data", {})["symbol_resolution"] = resolution
         result["answer_policy"] = (

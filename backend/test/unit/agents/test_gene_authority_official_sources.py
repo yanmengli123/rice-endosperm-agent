@@ -181,5 +181,71 @@ class OfficialSourceTests(unittest.TestCase):
         self.assertIn("api_key=secret-key", open_url.call_args.args[0].full_url)
 
 
+class CircuitBreakerAndCliFallbackContract(unittest.TestCase):
+    """P3 韧性：熔断（连续失败快速失败 + 冷却半开）与 REST→CLI 回退。"""
+
+    def setUp(self):
+        sources._BREAKER_STATE.clear()
+
+    def test_breaker_opens_after_consecutive_failures_and_half_opens_after_cooldown(self):
+        self.assertTrue(sources._breaker_allows("NCBI_DATASETS"))
+        for _ in range(sources._BREAKER_THRESHOLD):
+            sources._breaker_record("NCBI_DATASETS", ok=False)
+        self.assertFalse(sources._breaker_allows("NCBI_DATASETS"))
+        # 冷却结束（模拟时间流逝）→ 半开放行
+        sources._BREAKER_STATE["NCBI_DATASETS"]["open_until"] = 0.0
+        self.assertTrue(sources._breaker_allows("NCBI_DATASETS"))
+        # 成功即复位
+        sources._breaker_record("NCBI_DATASETS", ok=False)
+        sources._breaker_record("NCBI_DATASETS", ok=True)
+        self.assertEqual(sources._BREAKER_STATE["NCBI_DATASETS"]["consecutive_failures"], 0)
+        self.assertTrue(sources._breaker_allows("NCBI_DATASETS"))
+
+    def test_open_breaker_fails_fast_without_network(self):
+        for _ in range(sources._BREAKER_THRESHOLD):
+            sources._breaker_record("NCBI_DATASETS", ok=False)
+        with patch.object(sources.urllib.request, "urlopen") as open_url:
+            with self.assertRaises(sources.AuthorityError) as ctx:
+                sources._request_json("NCBI_DATASETS", sources.NCBI_BASE + "/gene")
+        open_url.assert_not_called()
+        self.assertIn("circuit breaker open", str(ctx.exception))
+
+    def test_retries_record_breaker_failure_then_open(self):
+        # 三次重试全失败 → 记一次 breaker 失败；重复 5 轮 → 熔断打开
+        for _ in range(sources._BREAKER_THRESHOLD):
+            with patch.object(
+                sources.urllib.request, "urlopen", side_effect=sources.urllib.error.URLError("refused")
+            ):
+                with self.assertRaises(sources.AuthorityError):
+                    sources._request_json("NCBI_DATASETS", sources.NCBI_BASE + "/gene")
+        self.assertFalse(sources._breaker_allows("NCBI_DATASETS"))
+
+    def test_rest_failure_falls_back_to_cli_summary(self):
+        cli_envelope = {
+            "schema_version": sources.SCHEMA_VERSION,
+            "status": "FOUND",
+            "provider": "NCBI_DATASETS_CLI",
+            "retrieved_at": sources._now(),
+            "data": {"reports": []},
+        }
+        with patch.object(
+            sources, "_request_json", side_effect=sources.AuthorityError("NCBI_DATASETS request failed")
+        ), patch.object(sources, "ncbi_gene_summary_cli", return_value=cli_envelope) as cli:
+            result = sources.ncbi_gene_report_rest(["4340018"], identifier_type="gene-id")
+        cli.assert_called_once()
+        self.assertEqual(result["status"], "FOUND")
+        self.assertTrue(result["data"]["rest_fallback"]["used_cli"])
+        self.assertIn("NCBI_DATASETS request failed", result["data"]["rest_fallback"]["rest_error"])
+
+    def test_rest_and_cli_both_failing_raises_unavailable(self):
+        with patch.object(
+            sources, "_request_json", side_effect=sources.AuthorityError("NCBI_DATASETS request failed")
+        ), patch.object(
+            sources, "ncbi_gene_summary_cli", side_effect=sources.AuthorityError("CLI rejected")
+        ):
+            with self.assertRaises(sources.AuthorityError):
+                sources.ncbi_gene_report_rest(["4340018"], identifier_type="gene-id")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,7 @@ from yuxi.services.agent_run_service import (
 )
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
+from yuxi.services.mcp_canary_service import run_mcp_live_canary
 from yuxi.services.run_queue_service import (
     append_run_stream_event,
     clear_cancel_signal,
@@ -1101,6 +1102,9 @@ class WorkerSettings:
         cron(relay_trace_outbox, minute=set(range(0, 60))),
         # 每日按有界多批追赶超过策略期限的 STANDARD 终态轨迹；数据库函数承担安全门。
         cron(purge_expired_trace_runs, hour={3}, minute={17}),
+        # 每日 MCP live canary：离线契约证明不了远程持续可用——成功率/空结果率
+        # /p95 延迟落轨迹事件（mcp.canary.*），监控侧按阈值决定升级。
+        cron(run_mcp_live_canary, hour={2}, minute={30}),
     ]
     # 不做 ARQ 自动重试：重跑会从 checkpoint 重复注入本轮输入（见 process_agent_run
     # 的 except 分支说明）。max_tries 保留 1 仅作为兜底声明。

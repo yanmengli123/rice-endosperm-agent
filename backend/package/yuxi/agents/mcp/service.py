@@ -20,6 +20,7 @@ from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.agents.mcp.bioinfomcp_catalog import (
@@ -800,23 +801,121 @@ async def ensure_builtin_mcp_servers_in_db() -> None:
                         )
                     )
                     if binding is None:
-                        session.add(
-                            AgentMCPBinding(
-                                tenant_id=DEFAULT_TENANT_ID,
-                                agent_id=agent.id,
-                                installation_id=installation.id,
-                                dependency_mode=installation.dependency_mode,
-                                policy_json=dict(installation.policy_json or {}),
-                                enabled=True,
-                            )
-                        )
+                        # api 与 worker 启动会并发跑 ensure：SAVEPOINT 让"对方
+                        # 已插入"成为幂等 skip，而不是把整个 ensure 打断。
+                        try:
+                            async with session.begin_nested():
+                                session.add(
+                                    AgentMCPBinding(
+                                        tenant_id=DEFAULT_TENANT_ID,
+                                        agent_id=agent.id,
+                                        installation_id=installation.id,
+                                        dependency_mode=installation.dependency_mode,
+                                        policy_json=dict(installation.policy_json or {}),
+                                        enabled=True,
+                                    )
+                                )
+                        except IntegrityError:
+                            logger.info(f"MCP binding '{slug}' already created by concurrent startup; skipped")
                 any_changed = True
+
+            # 单一真源对账：config_json.context.mcps 是运行时附着权威，绑定表
+            # 是管理面投影——收敛多余绑定行（直接编辑 config 不经过绑定 API 时
+            # 的漂移）并补齐非 builtin 附着的缺失行。
+            any_changed = await _reconcile_agent_bindings(session) or any_changed
 
             if any_changed:
                 await session.commit()
 
     except Exception as e:
         logger.exception(f"Failed to ensure builtin MCP servers in database: {e}")
+
+
+async def _reconcile_agent_bindings(session) -> bool:
+    """绑定表存在性收敛到 ``config_json.context.mcps``（唯一附着权威）。
+
+    - 绑定行 slug ∉ 权威集 → 删除 + 漂移告警（附着已移除，依赖模式/策略无处
+      生效，随之移除）；
+    - 权威集 slug 缺绑定行且存在本租户 installation → 补齐（builtin 回填的
+      通用化，覆盖非 builtin 附着）；
+    - 权威集 slug 连 catalog/installation 都没有 → 只记漂移（无从绑定）。
+    幂等：收敛后两源一致，二次运行为 no-op。
+    """
+    changed = False
+    rows = (
+        await session.execute(
+            select(AgentMCPBinding, MCPCatalog.slug, Agent.config_json)
+            .join(TenantMCPInstallation, TenantMCPInstallation.id == AgentMCPBinding.installation_id)
+            .join(MCPCatalog, MCPCatalog.id == TenantMCPInstallation.catalog_id)
+            .join(Agent, Agent.id == AgentMCPBinding.agent_id)
+            .where(AgentMCPBinding.tenant_id == DEFAULT_TENANT_ID)
+        )
+    ).all()
+    bindings_by_agent: dict[int, list[tuple[AgentMCPBinding, str]]] = {}
+    attached_by_agent: dict[int, set[str]] = {}
+    for binding, catalog_slug, config_json in rows:
+        bindings_by_agent.setdefault(binding.agent_id, []).append((binding, str(catalog_slug)))
+        context = (config_json or {}).get("context") if isinstance(config_json, dict) else {}
+        attached_by_agent[binding.agent_id] = {
+            str(value).strip() for value in ((context or {}).get("mcps") or []) if str(value).strip()
+        }
+
+    for agent_id, bindings in bindings_by_agent.items():
+        attached = attached_by_agent.get(agent_id, set())
+        for binding, catalog_slug in bindings:
+            if catalog_slug in attached:
+                continue
+            logger.warning(
+                f"MCP binding drift reconciled: agent={agent_id} server='{catalog_slug}' "
+                "not in config_json.context.mcps (runtime authority); binding row removed"
+            )
+            await session.delete(binding)
+            changed = True
+
+    # 缺失方向：权威集有、绑定行无（通用化回填，含非 builtin）
+    unbound = (
+        await session.execute(
+            select(Agent.id, MCPCatalog.slug, TenantMCPInstallation)
+            .join(TenantMCPInstallation, TenantMCPInstallation.tenant_id == Agent.tenant_id)
+            .join(MCPCatalog, MCPCatalog.id == TenantMCPInstallation.catalog_id)
+            .where(Agent.tenant_id == DEFAULT_TENANT_ID)
+        )
+    ).all()
+    for agent_id, catalog_slug, installation in unbound:
+        context = dict(
+            (await session.scalar(select(Agent.config_json).where(Agent.id == agent_id)) or {}).get("context") or {}
+        )
+        attached = {str(value).strip() for value in (context.get("mcps") or []) if str(value).strip()}
+        if catalog_slug not in attached:
+            continue
+        exists = await session.scalar(
+            select(AgentMCPBinding.id).where(
+                AgentMCPBinding.tenant_id == DEFAULT_TENANT_ID,
+                AgentMCPBinding.agent_id == agent_id,
+                AgentMCPBinding.installation_id == installation.id,
+            )
+        )
+        if exists is None:
+            logger.info(
+                f"MCP binding backfilled: agent={agent_id} server='{catalog_slug}' "
+                "attached in config_json but binding row missing"
+            )
+            try:
+                async with session.begin_nested():
+                    session.add(
+                        AgentMCPBinding(
+                            tenant_id=DEFAULT_TENANT_ID,
+                            agent_id=agent_id,
+                            installation_id=installation.id,
+                            dependency_mode=installation.dependency_mode,
+                            policy_json=dict(installation.policy_json or {}),
+                            enabled=True,
+                        )
+                    )
+            except IntegrityError:
+                logger.info(f"MCP binding '{catalog_slug}' already created by concurrent startup; skipped")
+            changed = True
+    return changed
 
 
 def _builtin_row_values(slug: str, config: dict[str, Any]) -> dict[str, Any]:

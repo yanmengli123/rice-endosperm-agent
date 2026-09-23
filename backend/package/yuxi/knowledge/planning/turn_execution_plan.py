@@ -332,6 +332,16 @@ def _resolve_fixed_source_route(text: str) -> str | None:
             return slug
     if re.search(r"(?:CDS|cDNA|FASTA|基因组|转录本).{0,8}(?:序列|下载)|序列.{0,8}(?:CDS|cDNA|FASTA)", text, re.I):
         return "ricekb"
+    # 意图级固定路由（用户路由矩阵口径）：仅在显式 MCP 使用意图且非定位符
+    # 意图时生效——书目级证据流（知识域文献检索、Figure 定位）不在此列。
+    # 文献/论文 → Europe PMC（gene-authority）；数据集/GEO/SRA/PXD → 发现层
+    if re.search(r"(?:通过|使用|用|调用)\s*MCP|MCP(?:模式)?(?:查|查询|检索|搜索|获取)", text, re.I) and not re.search(
+        r"(?:第?\s*\d+\s*页|\bF(?:igure|ig)\.?\s*S?\d+|图\s*S?\d+)", text, re.I
+    ):
+        if re.search(r"(?:论文|文献|references?|literature)", text, re.I):
+            return "gene-authority"
+        if re.search(r"(?:数据集|datasets?\b|\bGSE\d+|\bGEO\b|\bSRA\b|\bPXD\d*)", text, re.I):
+            return "data-aggregator"
     if re.search(r"(?:水稻|\bWx\b|\bOs(?:0[1-9]|1[0-2])[gt]\d{5,7}\b|\bLOC_Os\w+)", text, re.I) and re.search(
         r"(?:基因)?(?:详细)?档案|完整信息", text, re.I
     ):
