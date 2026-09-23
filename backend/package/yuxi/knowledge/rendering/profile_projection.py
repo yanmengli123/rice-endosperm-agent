@@ -20,10 +20,9 @@
 - 边界说明行只走"类别→罐头模板"（note 含"未提供"才映射，罐头句是对 note
   存在性的事实陈述而非转述）；未匹配 note 原样进折叠层，一字不改；
 - 不存在的字段不列行，绝不编造标签或值；
-- 组合文本（叙述+表格）由调用方整体复跑事实门禁后才发布。产物下载清单块
-  （``rendering/artifacts_block``）在**全部门禁之后**由调用方追加，不进本
-  模块输出——产物元数据（size 等）不是 manifest 事实，进了组合复跑必被
-  ``unsupported_numbers`` 打回。
+- 组合文本（叙述+表格）由调用方整体复跑事实门禁后才发布。产物下载走客户端
+  原生产物卡（run_artifacts 表权威），不在正文渲染任何产物元数据——size 等
+  不是 manifest 事实，进了组合复跑必被 ``unsupported_numbers`` 打回。
 """
 
 from __future__ import annotations

@@ -58,6 +58,7 @@ def test_build_event_accepts_all_registered_categories():
         "SUBAGENT": ("execution", "subagent.execution.started"),
         "VALIDATION": ("quality", "validation.quality.passed"),
         "SYSTEM": ("execution", "system.execution.started"),
+        "ANSWER": ("render", "answer.render.applied"),
     }
     assert set(registered) == set(TRACE_CATEGORIES)
     for category, (operation, event_type) in registered.items():
@@ -155,5 +156,7 @@ def test_answer_source_guard_event_is_registered_with_closed_attribute_set():
             "invalid_marker_count",
             "degraded_render",
             "repair_attempt_count",
+            "elapsed_ms",
+            "repair_elapsed_ms",
         }
     )

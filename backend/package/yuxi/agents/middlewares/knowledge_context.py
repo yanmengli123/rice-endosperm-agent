@@ -91,6 +91,10 @@ def filter_tools_by_turn_plan(tools: list[Any], plan: TurnExecutionPlan) -> list
     for tool in tools:
         name = str(getattr(tool, "name", "") or "")
         mcp_tool = is_mcp_tool(tool)
+        if mcp_tool and plan.required_server:
+            metadata = getattr(tool, "metadata", None) or {}
+            if str(metadata.get("server") or "") != plan.required_server:
+                continue
         if policy == SourcePolicy.MCP_ONLY:
             if not mcp_tool:
                 continue

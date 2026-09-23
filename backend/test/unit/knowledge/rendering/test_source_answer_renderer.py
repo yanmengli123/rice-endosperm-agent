@@ -1,20 +1,9 @@
-"""source_answer_renderer 信息保损回放套件 + 变换单测。
-
-四条保损断言（红线：格式演进被钉死在"零语义变化"上）：
-一、marker 双射：引用清单中的原标记与原文标记集合逐元素相等；
-二、正文等价：剥离标记/上标/包裹/附录后，正文与原文逐字节相等；
-三、数字不变：正文剥离后的数字 token 集合渲染前后相等；
-四、失败回退：未知 path 不翻译、渲染器异常原样返回原文。
-
-golden 输入为 2026-09-22 实测抓取的三类真实文本（见 fixtures/knowledge_rendering）。
-"""
+"""MCP 值答案公开投影：业务值保留，内部审计协议不进入用户视图。"""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
-from yuxi.agents.mcp.fact_ledger import extract_number_tokens, mask_structural_number_spans
 from yuxi.knowledge.rendering.source_answer_renderer import (
     _FASTA_LINE,
     label_for_path,
@@ -25,9 +14,6 @@ from yuxi.knowledge.rendering.source_answer_renderer import (
 from yuxi.knowledge.rendering.source_output_guard import render_degraded_fact_sheet
 
 _FIXTURES = Path(__file__).parents[3] / "fixtures" / "knowledge_rendering"
-_MARKER = re.compile(r"\[MCP-F:(\d+):(f_[0-9a-f]{16})\]", re.I)
-_SUP = re.compile(r'<sup class="yuxi-ref">\[\d+\]</sup>')
-_PROV_SPAN = re.compile(r'<span class="yuxi-prov">|</span>')
 _DETAILS_OPEN = '<details class="yuxi-citations">'
 
 
@@ -35,66 +21,36 @@ def _golden(name: str) -> str:
     return (_FIXTURES / name).read_text(encoding="utf-8")
 
 
-def _strip_markers(text: str) -> str:
-    return _MARKER.sub("", text)
-
-
-def _split_appendix(rendered: str) -> tuple[str, str]:
-    idx = rendered.find(_DETAILS_OPEN)
-    if idx == -1:
-        return rendered, ""
-    return rendered[:idx], rendered[idx:]
-
-
-def _strip_rendered_body(rendered: str) -> str:
-    body, _ = _split_appendix(rendered)
-    body = _SUP.sub("", body)
-    body = _PROV_SPAN.sub("", body)
-    return body
-
-
-def _number_tokens(text: str) -> set[str]:
-    return set(extract_number_tokens(mask_structural_number_spans(text)))
-
-
-def test_lossless_roundtrip_on_all_golden_fixtures():
+def test_value_only_projection_hides_audit_protocol_on_all_golden_fixtures():
     for name in ("archive_draft.txt", "degraded_sheet.txt", "cds_answer.txt"):
         original = _golden(name)
         rendered = render_source_answer(original)
-        # 断言一：marker 双射（按"事实集合"口径：同一事实的大小写变体记一个）
-        original_markers = sorted({m.group(0).lower() for m in _MARKER.finditer(original)})
-        _, appendix = _split_appendix(rendered)
-        appendix_markers = sorted({m.group(0).lower() for m in _MARKER.finditer(appendix)})
-        assert appendix_markers == original_markers, name
-        # 断言二：正文逐字节等价（仅允许声明的语法包裹被剥离；折叠块为纯包装）
-        assert _strip_rendered_body(rendered).rstrip() == _strip_markers(original).rstrip(), name
-        # 断言三：数字 token 集合不变
-        assert _number_tokens(_strip_rendered_body(rendered)) == _number_tokens(_strip_markers(original)), name
+        assert "SOURCE-ONLY" not in rendered, name
+        assert "MCP-F:" not in rendered, name
+        assert "yuxi-citations" not in rendered, name
+        assert "| 引用 |" not in rendered, name
+        assert rendered.strip(), name
 
 
-def test_appendix_l1_holds_without_fact_notes():
+def test_markers_and_source_mode_are_hidden_without_fact_notes():
     original = "数据模式：SOURCE-ONLY\nWx 已核验。[MCP-F:42:f_00000000000000a1]"
     rendered = render_source_answer(original)  # 无 L2 数据
-    assert _DETAILS_OPEN in rendered
-    assert "已核验 1 条事实" in rendered
-    assert "`[MCP-F:42:f_00000000000000a1]`" in rendered
+    assert rendered == "Wx 已核验。"
 
 
-def test_appendix_l2_enrichment_best_effort():
+def test_fact_notes_never_surface_in_public_answer():
     original = "数据模式：SOURCE-ONLY\nWx 已核验。[MCP-F:42:f_00000000000000a1]"
     notes = {(42, "f_00000000000000a1"): {"path": "/data/identity/canonical_rap_id", "value": "Os06g0133000"}}
     rendered = render_source_answer(original, fact_notes=notes)
-    assert "规范 RAP ID" in rendered
-    assert "Os06g0133000" in rendered
-    # L1 双射不因 L2 改变
-    assert "`[MCP-F:42:f_00000000000000a1]`" in rendered
+    assert rendered == "Wx 已核验。"
+    assert "canonical_rap_id" not in rendered
 
 
-def test_unknown_path_never_translated():
+def test_unknown_path_never_leaks_from_fact_notes():
     assert label_for_path("/data/completely/unknown/field") is None
     notes = {(42, "f_00000000000000a1"): {"path": "/data/completely/unknown/field", "value": "x"}}
     rendered = render_source_answer("数据模式：SOURCE-ONLY\n事实。[MCP-F:42:f_00000000000000a1]", fact_notes=notes)
-    assert "unknown/field" in rendered  # 原样保留路径，不猜标签
+    assert rendered == "事实。"
 
 
 def test_renderer_failure_falls_back_to_original(monkeypatch):
@@ -102,17 +58,15 @@ def test_renderer_failure_falls_back_to_original(monkeypatch):
 
     original = "数据模式：SOURCE-ONLY\nx [MCP-F:42:f_00000000000000a1]"
     monkeypatch.setattr(
-        renderer_module, "_superscript_markers", lambda text: (_ for _ in ()).throw(RuntimeError("boom"))
+        renderer_module, "_value_only_projection", lambda text: (_ for _ in ()).throw(RuntimeError("boom"))
     )
-    assert render_source_answer(original) == original
+    assert render_source_answer(original) == "x"
 
 
-def test_declaration_misplacement_moves_to_first_line():
+def test_declaration_is_removed_wherever_it_appears():
     text = "概述一句话。\n\n数据模式：SOURCE-ONLY\n\n| 字段 | 值 |\n| --- | --- |"
     rendered = render_source_answer(text)
-    assert rendered.splitlines()[0] == "数据模式：SOURCE-ONLY"
-    # 纯移动：原声明行不残留、其余内容保持
-    assert rendered.count("数据模式：SOURCE-ONLY") == 1
+    assert "SOURCE-ONLY" not in rendered
     assert "概述一句话。" in rendered
 
 
@@ -126,11 +80,11 @@ def test_fasta_block_folding_preserves_bytes():
     assert "展开序列（3 行）" in rendered
 
 
-def test_provenance_tokens_wrapped_outside_code_spans_only():
+def test_provenance_tokens_are_not_wrapped_with_internal_css():
     sha = "a" * 64
     text = f"数据模式：SOURCE-ONLY\n哈希 {sha} 与代码内 `{sha}`。"
     rendered = render_source_answer(text)
-    assert rendered.count('<span class="yuxi-prov">') == 1  # 代码 span 内不包裹
+    assert '<span class="yuxi-prov">' not in rendered
     assert f"`{sha}`" in rendered
 
 
@@ -220,11 +174,11 @@ def test_fenced_fasta_folds_at_fence_level():
     assert rendered.index("```") < rendered.index("</details>")
 
 
-def test_span_wrapping_skipped_inside_fences():
+def test_no_internal_span_wrapping_inside_or_outside_fences():
     sha = "a" * 64
     text = f"数据模式：SOURCE-ONLY\n外部哈希 {sha}，代码内不变：\n```\nhash={sha}\n```\n[MCP-F:42:f_00000000000000a1]"
     rendered = render_source_answer(text)
-    assert rendered.count('<span class="yuxi-prov">') == 1  # 围栏内不包裹
+    assert '<span class="yuxi-prov">' not in rendered
     assert f"hash={sha}" in rendered
 
 
@@ -235,14 +189,11 @@ def test_single_long_bare_sequence_line_folds():
     assert line in rendered
 
 
-def test_citation_appendix_is_folded_by_default():
+def test_citation_appendix_is_absent_from_public_answer():
     rendered = render_source_answer("数据模式：SOURCE-ONLY\nWx 已核验。[MCP-F:42:f_00000000000000a1]")
-    assert _DETAILS_OPEN in rendered
-    assert "展开引用清单" in rendered
-    # 默认视图正文部分不含引用清单标题
-    body, appendix = _split_appendix(rendered)
-    assert "**引用清单**" not in body
-    assert "**引用清单**" in appendix
+    assert _DETAILS_OPEN not in rendered
+    assert "引用清单" not in rendered
+    assert rendered == "Wx 已核验。"
 
 
 # ---------- 降级表 v3 收尾：D1/D2/D3 ----------

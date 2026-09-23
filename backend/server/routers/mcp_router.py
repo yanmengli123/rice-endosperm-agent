@@ -508,6 +508,14 @@ async def bind_agent_mcp_route(
     binding.dependency_mode = request.dependency_mode
     binding.policy_json = dict(request.policy or {})
     binding.enabled = True
+    catalog_slug = await db.scalar(select(MCPCatalog.slug).where(MCPCatalog.id == installation.catalog_id))
+    config_json = dict(agent.config_json or {})
+    context = dict(config_json.get("context") or {})
+    configured_mcps = [str(value) for value in (context.get("mcps") or []) if str(value).strip()]
+    if catalog_slug and catalog_slug not in configured_mcps:
+        context["mcps"] = [*configured_mcps, catalog_slug]
+        config_json["context"] = context
+        agent.config_json = config_json
     await db.commit()
     await db.refresh(binding)
     return {"success": True, "data": {"binding_id": binding.id}}

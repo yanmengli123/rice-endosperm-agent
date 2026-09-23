@@ -19,7 +19,13 @@ from yuxi.agents.mcp.execution import (
 )
 from yuxi.agents.mcp.host import McpToolDescriptor
 from yuxi.storage.postgres import manager as postgres_manager
-from yuxi.storage.postgres.models_business import MCPCatalog, MCPServer, TenantMCPInstallation
+from yuxi.storage.postgres.models_business import (
+    Agent,
+    AgentMCPBinding,
+    MCPCatalog,
+    MCPServer,
+    TenantMCPInstallation,
+)
 
 
 class _AsyncSessionContext:
@@ -40,6 +46,8 @@ async def mcp_session():
         await conn.run_sync(MCPServer.__table__.create)
         await conn.run_sync(MCPCatalog.__table__.create)
         await conn.run_sync(TenantMCPInstallation.__table__.create)
+        await conn.run_sync(Agent.__table__.create)
+        await conn.run_sync(AgentMCPBinding.__table__.create)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
@@ -102,6 +110,33 @@ async def test_ensure_builtin_mcp_servers_removes_retired_system_server(monkeypa
     assert fastqc.to_mcp_config()["args"] == []
     assert "timeout" not in fastqc.to_mcp_config()
     assert "7ada7918" in str(fastqc.source_ref)
+
+
+async def test_builtin_sync_backfills_agent_binding_from_runtime_config(monkeypatch, mcp_session):
+    agent = Agent(
+        id=101,
+        tenant_id=1,
+        slug="binding-agent",
+        backend_id="default",
+        name="Binding Agent",
+        config_json={"context": {"mcps": ["ricekb", "ricekb-profile"]}},
+        share_config={},
+        pics=[],
+    )
+    mcp_session.add(agent)
+    await mcp_session.commit()
+    monkeypatch.setattr(
+        postgres_manager.pg_manager,
+        "get_async_session_context",
+        lambda: _AsyncSessionContext(mcp_session),
+    )
+
+    await mcp_service.ensure_builtin_mcp_servers_in_db()
+
+    bindings = (
+        await mcp_session.scalars(select(AgentMCPBinding).where(AgentMCPBinding.agent_id == agent.id))
+    ).all()
+    assert len(bindings) == 2
 
 
 def test_bioinfomcp_catalog_exposes_all_38_servers_and_92_tools():

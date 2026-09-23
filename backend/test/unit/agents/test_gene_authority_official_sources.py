@@ -90,6 +90,28 @@ class OfficialSourceTests(unittest.TestCase):
         self.assertEqual(result["data"]["esearchresult"]["idlist"], ["4340018"])
         self.assertIn("db=gene", open_url.call_args.args[0].full_url)
 
+    def test_gene_esummary_adds_explicit_one_based_coordinates(self):
+        body = json.dumps(
+            {
+                "result": {
+                    "uids": ["4340018"],
+                    "4340018": {
+                        "uid": "4340018",
+                        "genomicinfo": [{"chraccver": "NC_029261.1", "chrstart": 1927857, "chrstop": 1922742}],
+                    },
+                }
+            }
+        ).encode()
+        with patch.object(sources.urllib.request, "urlopen", return_value=_Response(body)):
+            result = sources.ncbi_eutils_summary_rest("gene", ["4340018"])
+
+        location = result["data"]["result"]["4340018"]["genomicinfo"][0]
+        self.assertEqual(location["chrstart"], 1927857)
+        self.assertEqual(location["chrstop"], 1922742)
+        self.assertEqual(location["coordinate_system"], "zero_based_inclusive")
+        self.assertEqual(location["one_based_inclusive"], {"start": 1922743, "end": 1927858})
+        self.assertIn("publish one_based_inclusive only", result["answer_policy"])
+
     def test_uniprot_calls_request_a_bounded_identity_projection(self):
         body = b'{"results":[{"primaryAccession":"P0C585"}]}'
         with patch.object(sources.urllib.request, "urlopen", return_value=_Response(body)) as open_url:

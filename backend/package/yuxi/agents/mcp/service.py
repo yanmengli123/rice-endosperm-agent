@@ -78,6 +78,8 @@ from yuxi.agents.mcp.spec import (
 )
 from yuxi.storage.postgres.models_business import (
     DEFAULT_TENANT_ID,
+    Agent,
+    AgentMCPBinding,
     MCPCatalog,
     MCPServer,
     TenantMCPInstallation,
@@ -209,7 +211,7 @@ _DEFAULT_MCP_SERVERS = {
         "data_access_level": McpDataAccessLevel.PUBLIC.value,
         "dependency_mode": McpDependencyMode.AUTHORITATIVE.value,
         "source_type": SOURCE_TYPE_BUILTIN,
-        "source_ref": "builtin:gene-authority@1.3.0+ncbi-datasets-18.37.0",
+        "source_ref": "builtin:gene-authority@1.4.0+ncbi-datasets-18.37.0",
     },
     "plant-genomics": {
         "name": "Plant Genomics MCP",
@@ -341,8 +343,8 @@ _UNSET_SENTINEL = object()
 _GENOMICS_MCP_RUNTIMES: dict[str, tuple[str, str, str]] = {
     "gene-authority": (
         "YUXI_GENE_AUTHORITY_IMAGE",
-        "yuxi-gene-authority:1.3.0",
-        "gene-authority-1.3.0+ncbi-datasets-18.37.0",
+        "yuxi-gene-authority:1.4.0",
+        "gene-authority-1.4.0+ncbi-datasets-18.37.0",
     ),
     "data-aggregator": (
         "YUXI_DATA_AGGREGATOR_IMAGE",
@@ -779,12 +781,35 @@ async def ensure_builtin_mcp_servers_in_db() -> None:
                     if server_changed:
                         existing.updated_by = "system"
                         any_changed = True
-                await _upsert_catalog_installation(
+                installation = await _upsert_catalog_installation(
                     session,
                     server=existing,
                     tenant_id=DEFAULT_TENANT_ID,
                     installed_by="system",
                 )
+                agents = (await session.scalars(select(Agent).where(Agent.tenant_id == DEFAULT_TENANT_ID))).all()
+                for agent in agents:
+                    context = dict((agent.config_json or {}).get("context") or {})
+                    if slug not in (context.get("mcps") or []):
+                        continue
+                    binding = await session.scalar(
+                        select(AgentMCPBinding).where(
+                            AgentMCPBinding.tenant_id == DEFAULT_TENANT_ID,
+                            AgentMCPBinding.agent_id == agent.id,
+                            AgentMCPBinding.installation_id == installation.id,
+                        )
+                    )
+                    if binding is None:
+                        session.add(
+                            AgentMCPBinding(
+                                tenant_id=DEFAULT_TENANT_ID,
+                                agent_id=agent.id,
+                                installation_id=installation.id,
+                                dependency_mode=installation.dependency_mode,
+                                policy_json=dict(installation.policy_json or {}),
+                                enabled=True,
+                            )
+                        )
                 any_changed = True
 
             if any_changed:

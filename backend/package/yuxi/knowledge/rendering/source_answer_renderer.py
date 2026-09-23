@@ -1,4 +1,4 @@
-"""读取边界的确定性答案渲染变换（零模型调用、信息保损可逆）。
+"""读取/发布边界的 MCP 值答案渲染（零模型调用）。
 
 架构公理（与门禁体系共用，违反任何一条即事故）：
 
@@ -6,15 +6,14 @@ A1 只处理已过终态门禁的文本（PASSED/DEGRADED）；渲染发生在**
    （get_thread_history_view），发布时只发 trace 事件记录渲染器可用性，
    DB 永远存带 marker 的已验证原文——渲染产物绝不回流模型历史。
 A2 变换零生成：纯函数（正则/字典投影），绝不调用模型、绝不新增内容。
-A3 信息保损可逆：T1 上标↔marker 双射，引用清单（L1 级）恒含全部原标记；
-   L1 不依赖任何外部数据，任何情况下可完整还原原文。
+A3 审计信息只保留在数据库原文与调用审计中；用户视图是有意的信息隐藏投影，
+   不显示 marker、内部路径、来源声明、引用/QC/契约折叠块。
 A5 血缘单一：L2 增强（事实路径→人类字段名 + 值摘要）只来自 run runtime
    的 source_manifest 投影，查询失败静默退回 L1。
-A6 失败回退：任何异常原样返回输入文本——格式层绝不阻断历史回看。
+A6 失败回退仍须剥除内部 marker 与 SOURCE-ONLY 声明，避免审计协议泄漏到用户视图。
 A7 禁止服务端代引：不为任何行补标记、不猜测未知 path 的字段名。
 
-不做红线：不删行、不改值、不并句、不总结、不改数字格式。
-溯源 token（T3）只做零截断包裹（前端可按 class 收纳样式），字节原样保留。
+不做红线：不改业务值、不并句、不总结、不改数字格式。
 """
 
 from __future__ import annotations
@@ -24,15 +23,24 @@ from typing import Any
 
 from yuxi.utils import logger
 
-RENDERER_VERSION = "source-answer-renderer.v2"
+RENDERER_VERSION = "source-answer-renderer.v3-value-only"
 
 # 与 source_output_guard._FACT_MARKER 同口径（自持副本，避免渲染层↔门禁层耦合）
 _FACT_MARKER = re.compile(r"\[MCP-F:(\d+):(f_[0-9a-f]{16})\]", re.I)
+_ANY_FACT_MARKER = re.compile(r"\[MCP-F:[^\]\r\n]+\]", re.I)
 _SUP_REF = re.compile(r'<sup class="yuxi-ref">\[(\d+)\]</sup>')
 _APPENDIX_HEADER = "**引用清单**"
 
 # T6：SOURCE-ONLY 声明行（允许标题前缀；错位时归位到首行）
 _SOURCE_ONLY_DECL_LINE = re.compile(r"^[ \t]*#*[ \t]*数据模式[ \t]*[：:][ \t]*SOURCE-ONLY[ \t]*$", re.I)
+_HIDDEN_DETAILS = re.compile(
+    r'<details class="yuxi-(?:citations|references|qc|contract-notes)">.*?</details>',
+    re.I | re.S,
+)
+_INTERNAL_LINE = re.compile(
+    r"^(?:（(?:模型叙述未通过逐行核验|降级渲染).*|##\s*调用\s+\d+[:：].*|"
+    r"另有.+从略，见调用审计。|局限：.*)$"
+)
 
 # T3：溯源类 token（零截断包裹）
 _HASH_TOKEN = re.compile(r"(?<![0-9a-fA-F])[0-9a-f]{64}(?![0-9a-fA-F])")
@@ -362,6 +370,55 @@ def _process_body_lines(text: str) -> str:
     return "\n".join(output)
 
 
+def _strip_citation_column(line: str) -> str | None:
+    """移除 Markdown 表格最后一列“引用”，不触碰其余单元格字节。"""
+    if not line.lstrip().startswith("|"):
+        return line
+    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    if not cells:
+        return line
+    separator_row = len(cells) >= 3 and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+    if cells[-1] == "引用" or _FACT_MARKER.search(cells[-1]) or cells[-1] == "" or separator_row:
+        cells = cells[:-1]
+    if not cells or all(not cell for cell in cells):
+        return None
+    return "| " + " | ".join(cells) + " |"
+
+
+def _value_only_projection(text: str) -> str:
+    source = _HIDDEN_DETAILS.sub("", text)
+    source = _ANY_FACT_MARKER.sub("", source)
+    source = re.sub(r"数据模式\s*[：:]\s*SOURCE-ONLY\s*[、，,]?", "", source, flags=re.I)
+    visible: list[str] = []
+    in_fence = False
+    for raw_line in source.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            visible.append(line)
+            continue
+        if in_fence:
+            visible.append(line)
+            continue
+        if _SOURCE_ONLY_DECL_LINE.match(line) or _INTERNAL_LINE.match(stripped):
+            continue
+        if stripped.startswith(">"):
+            continue
+        if "其余事实" in stripped and "从略" in stripped:
+            continue
+        if re.match(r"^#{2}\s*调用\s+\d+", stripped):
+            continue
+        table_line = _strip_citation_column(line)
+        if table_line is not None:
+            visible.append(table_line)
+    source = "\n".join(visible)
+    source = _process_body_lines(source)
+    source = source.replace('<span class="yuxi-prov">', "").replace("</span>", "")
+    source = re.sub(r"\n{3,}", "\n\n", source).strip()
+    return source
+
+
 # ---------------------------------------------------------------- 公共 API
 
 
@@ -396,20 +453,17 @@ def render_source_answer(
     *,
     fact_notes: dict[Any, Any] | None = None,
 ) -> str:
-    """应用 T6→T1→围栏感知的 T3/T5 并附折叠引用清单；任何异常原样返回输入（A6）。"""
+    """投影为用户可见的纯值答案；审计信息仍保存在调用方持久化的原文中。"""
     original = str(text or "")
     try:
         if not original.strip():
             return text
-        source = _normalize_declaration_position(original)
-        source, order = _superscript_markers(source)
-        source = _process_body_lines(source)
-        if order:
-            source = source.rstrip() + "\n\n" + _render_citation_appendix(order, fact_notes)
-        return source
+        return _value_only_projection(original)
     except Exception as error:  # noqa: BLE001 —— A6：格式层绝不阻断历史回看
-        logger.warning(f"Source answer render fell back to original text: {type(error).__name__}: {error}")
-        return text
+        logger.warning(f"Source answer render used minimal sanitizer: {type(error).__name__}: {error}")
+        return "\n".join(
+            _ANY_FACT_MARKER.sub("", line) for line in original.splitlines() if not _SOURCE_ONLY_DECL_LINE.match(line)
+        ).strip()
 
 
 __all__ = [

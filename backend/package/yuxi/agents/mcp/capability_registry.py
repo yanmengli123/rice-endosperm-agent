@@ -10,7 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from yuxi.knowledge.planning.turn_execution_plan import Capability
+from yuxi.knowledge.evidence.dimensions import ClaimClass
+from yuxi.knowledge.planning.turn_execution_plan import Capability, EvidenceLevel
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,22 @@ class ToolCapabilityProfile:
     citation_semantics: str = "DATA_PROVENANCE"
     authority_level: str = "PROVIDER_DECLARED"
     fallback_policy: str = "FAIL_CLOSED"
+    # --- ADR-0006 企业级来源注册字段（服务端裁决的输入，提供方不可自填）---
+    # 提供方与其 API/数据版本：可复现裁决的前提（ADR-0005 验收第 1 条）
+    provider: str = ""
+    provider_version: str = ""
+    # 该操作可支持的 Claim 类型闭集（取值于 ClaimClass；空 = 不支撑任何 Claim，
+    # 仅发现/候选用途）。PXD 项目元数据只能声明 DATASET_METADATA，不得冒充实验结论。
+    supported_claim_types: frozenset[ClaimClass] = frozenset()
+    # 最高可满足的证据义务；None = 不具备任何答案证据义务
+    max_evidence_obligation: EvidenceLevel | None = None
+    # 许可/再分发约束（如 Europe PMC 仅 OA 子集、Gramene 待法务复核）
+    license_scope: str = ""
+    # 失败语义：上游超时/5xx/空结果分别映射到哪个 AuthorityOutcome，
+    # 防止 UNAVAILABLE 被静默降级成 MISS
+    failure_semantics: str = ""
+    # 出口预算归属（NCBI 按 api_key × egress_ip × tool 核算；共享代理据此限流）
+    egress_class: str = ""
 
 
 # Keys are original protocol tool names, not model-facing aliases. Additions
@@ -75,58 +92,137 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
         source_class="BIBLIOGRAPHY",
         citation_semantics="BIBLIOGRAPHIC_PROVENANCE",
     ),
+    # NCBI Datasets（官方基因档案）：符号→Entrez Gene→精确记录链已编入工具本身。
+    # 只支撑数据库档案事实（E1），不得用于机制结论。
     **{
         name: ToolCapabilityProfile(
             capabilities=frozenset({Capability.GENE_RECORD_LOOKUP}),
             source_class="AUTHORITATIVE_DATABASE",
             authority_level="PRIMARY_DATABASE",
+            provider="NCBI Datasets",
+            provider_version="v2 REST / datasets CLI 18.37.0 (pinned, sha256-verified)",
+            supported_claim_types=frozenset({ClaimClass.RECORD_FACT}),
+            max_evidence_obligation=EvidenceLevel.DATA_PROVENANCE,
+            license_scope="PUBLIC_WITH_TOOL_IDENTITY",
+            failure_semantics="MISS_ON_EMPTY_RECORDS;UNAVAILABLE_ON_5XX_OR_TIMEOUT",
+            egress_class="ncbi",
         )
         for name in (
             "ncbi_datasets_gene_report_rest",
             "ncbi_datasets_gene_summary_cli",
             "ncbi_datasets_gene_package_cli",
-            "uniprot_entry_rest",
-            "uniprot_search_rest",
-            "verify_genomic_interval",
-            "compute_delta",
         )
     },
+    **{
+        name: ToolCapabilityProfile(
+            capabilities=frozenset({Capability.GENE_RECORD_LOOKUP}),
+            source_class="AUTHORITATIVE_DATABASE",
+            authority_level="PRIMARY_DATABASE",
+            provider="UniProtKB",
+            provider_version="REST current (field-projected responses)",
+            supported_claim_types=frozenset({ClaimClass.RECORD_FACT}),
+            max_evidence_obligation=EvidenceLevel.DATA_PROVENANCE,
+            license_scope="CC_BY_4_0",
+            failure_semantics="MISS_ON_404;UNAVAILABLE_ON_5XX_OR_TIMEOUT",
+            egress_class="uniprot",
+        )
+        for name in ("uniprot_entry_rest", "uniprot_search_rest")
+    },
+    # 服务端确定性计算工具：无外部出口，非证据来源
+    **{
+        name: ToolCapabilityProfile(
+            capabilities=frozenset({Capability.GENE_RECORD_LOOKUP}),
+            source_class="AUTHORITATIVE_DATABASE",
+            authority_level="PRIMARY_DATABASE",
+            provider="yuxi-internal",
+            provider_version="deterministic",
+            supported_claim_types=frozenset({ClaimClass.RECORD_FACT}),
+            max_evidence_obligation=EvidenceLevel.DATA_PROVENANCE,
+            egress_class="none",
+        )
+        for name in ("verify_genomic_interval", "compute_delta")
+    },
+    # Europe PMC 题录：只支撑书目事实（E2），不是论文结论的证据
     **{
         name: ToolCapabilityProfile(
             capabilities=frozenset({Capability.BIBLIOGRAPHIC_SEARCH}),
             source_class="BIBLIOGRAPHY",
             citation_semantics="BIBLIOGRAPHIC_PROVENANCE",
             authority_level="PRIMARY_DATABASE",
+            provider="Europe PMC",
+            provider_version="REST v6+ (core metadata)",
+            supported_claim_types=frozenset({ClaimClass.BIBLIOGRAPHIC_FACT}),
+            max_evidence_obligation=EvidenceLevel.BIBLIOGRAPHIC,
+            license_scope="OA_SUBSET_ONLY",
+            failure_semantics="MISS_ON_NO_HIT;UNAVAILABLE_ON_5XX_OR_TIMEOUT",
+            egress_class="europepmc",
         )
         for name in ("europe_pmc_search_rest", "europe_pmc_article_rest")
     },
+    # 发现型工具：只产出候选，永不直接支撑答案 Claim
     **{
         name: ToolCapabilityProfile(
             capabilities=frozenset({Capability.DATASET_LOOKUP, Capability.GENERIC_MCP}),
             source_class="DISCOVERY",
             answer_eligible=False,
             authority_level="DISCOVERY_ONLY",
+            provider="NCBI E-Utilities / EBI PRIDE",
+            provider_version="esearch v2 / pride ws archive v2",
+            supported_claim_types=frozenset(),
+            max_evidence_obligation=None,
+            license_scope="PUBLIC_WITH_TOOL_IDENTITY",
+            failure_semantics="CANDIDATE_ONLY;UNAVAILABLE_ON_5XX_OR_TIMEOUT",
+            egress_class="ncbi+ebi-pride",
         )
         for name in ("ncbi_eutils_search_rest", "pride_search_projects_rest")
     },
+    # NCBI E-Utilities 精确记录（esummary/efetch）：数字 ID 精确核验，E1
     **{
         name: ToolCapabilityProfile(
             capabilities=frozenset({Capability.DATASET_LOOKUP}),
             source_class="STRUCTURED_DATABASE",
             authority_level="PRIMARY_DATABASE",
+            provider="NCBI E-Utilities",
+            provider_version="esummary/efetch v2 (gene db allowlisted)",
+            supported_claim_types=frozenset({ClaimClass.RECORD_FACT}),
+            max_evidence_obligation=EvidenceLevel.DATA_PROVENANCE,
+            license_scope="PUBLIC_WITH_TOOL_IDENTITY",
+            failure_semantics="MISS_ON_EMPTY;UNAVAILABLE_ON_5XX_OR_TIMEOUT",
+            egress_class="ncbi",
         )
-        for name in (
-            "ncbi_eutils_summary_rest",
-            "ncbi_eutils_fetch_rest",
-            "pride_project_rest",
-            "pride_project_files_rest",
-        )
+        for name in ("ncbi_eutils_summary_rest", "ncbi_eutils_fetch_rest")
     },
+    # PRIDE 项目/文件元数据：只能证明「项目记录存在及其字段」，
+    # 不能单凭 PXD 记录证明任何 PTM / 实验结论（磷酸化须 MS run 级核验）
+    **{
+        name: ToolCapabilityProfile(
+            capabilities=frozenset({Capability.DATASET_LOOKUP}),
+            source_class="STRUCTURED_DATABASE",
+            authority_level="PRIMARY_DATABASE",
+            provider="EBI PRIDE Archive",
+            provider_version="ws archive v2 (HAL links, domain-allowlisted)",
+            supported_claim_types=frozenset({ClaimClass.DATASET_METADATA}),
+            max_evidence_obligation=EvidenceLevel.DATA_PROVENANCE,
+            license_scope="PUBLIC_METADATA",
+            failure_semantics="MISS_ON_404;UNAVAILABLE_ON_5XX_OR_TIMEOUT",
+            egress_class="ebi-pride",
+        )
+        for name in ("pride_project_rest", "pride_project_files_rest")
+    },
+    # OA XML 段落候选：只产出 XML 定位候选（QUOTE_CANDIDATE_ONLY），
+    # 须本地解析/对齐后方可升级为证据单元；不编页码
     "europe_pmc_oa_passages_rest": ToolCapabilityProfile(
         capabilities=frozenset({Capability.DOCUMENT_QA, Capability.GENERIC_MCP}),
         source_class="DISCOVERY",
         answer_eligible=False,
         authority_level="QUOTE_CANDIDATE_ONLY",
+        provider="Europe PMC",
+        provider_version="fullTextXML OA subset",
+        supported_claim_types=frozenset(),
+        max_evidence_obligation=None,
+        license_scope="OA_SUBSET_ONLY",
+        failure_semantics="NON_OA_IS_MISS_NOT_UNAVAILABLE;UNAVAILABLE_ON_5XX_OR_TIMEOUT",
+        egress_class="europepmc",
     ),
     # Reviewed plant-genomics-mcp v1.21.0 surface (commit ddd223f). Only exact
     # retrieval tools that return structured source records earn a capability.
@@ -250,10 +346,24 @@ _DATA_AGGREGATOR_DISCOVERY = ToolCapabilityProfile(
     source_class="DISCOVERY",
     answer_eligible=False,
     authority_level="DISCOVERY_ONLY",
+    provider="data-aggregator-mcp (musharna)",
+    provider_version="pinned upstream",
+    supported_claim_types=frozenset(),
+    max_evidence_obligation=None,
+    license_scope="DISCOVERY_ONLY_NO_ANSWER",
+    failure_semantics="CANDIDATE_ONLY;SERVER_FS_DOWNLOADS_NOT_USER_PATHS",
+    egress_class="aggregator",
 )
 _DATA_AGGREGATOR_TOOLS = frozenset({"search", "resolve", "relate", "list_sources"})
 
 RICEKB_TOOL_NAMES: frozenset[str] = frozenset(_RICEKB_VENDORED_TOOLS)
+
+# 服务器级限定 profile：通用上游工具名（search/resolve/...）只在其评审过的
+# 服务器内受信；命中该表的服务器实行 fail-closed（未列名工具一律无 profile），
+# 不再回落到全局裸名表，防止跨服务器裸名撞车。
+_SERVER_SCOPED_PROFILES: dict[str, dict[str, ToolCapabilityProfile]] = {
+    "data-aggregator": {name: _DATA_AGGREGATOR_DISCOVERY for name in sorted(_DATA_AGGREGATOR_TOOLS)},
+}
 
 
 def profile_for_tool(tool: Any) -> ToolCapabilityProfile | None:
@@ -265,10 +375,15 @@ def profile_for_tool(tool: Any) -> ToolCapabilityProfile | None:
 
 
 def profile_for_server_tool(server_slug: str, name: str) -> ToolCapabilityProfile | None:
-    """Generic upstream tool names are trusted only within their reviewed server."""
-    if server_slug == "data-aggregator" and name in _DATA_AGGREGATOR_TOOLS:
-        return _DATA_AGGREGATOR_DISCOVERY
-    return _TRUSTED_PROFILES.get(name)
+    """Generic upstream tool names are trusted only within their reviewed server.
+
+    命中服务器级限定表时 fail-closed：该服务器上未列名的工具一律无 profile，
+    不回落全局裸名表；未限定的服务器按全局受信表解析。
+    """
+    scoped = _SERVER_SCOPED_PROFILES.get(str(server_slug or ""))
+    if scoped is not None:
+        return scoped.get(str(name or ""))
+    return _TRUSTED_PROFILES.get(str(name or ""))
 
 
 def profile_for_protocol_name(name: str) -> ToolCapabilityProfile | None:

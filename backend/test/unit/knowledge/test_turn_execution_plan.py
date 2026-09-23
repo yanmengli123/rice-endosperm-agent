@@ -23,6 +23,7 @@ def test_explicit_mcp_gene_query_never_requests_document_evidence():
     assert plan.task.primary_intent == TaskIntent.ENTITY_PROFILE
     assert plan.source.policy == SourcePolicy.MCP_ONLY
     assert plan.required_capabilities == [Capability.GENE_RECORD_LOOKUP]
+    assert plan.answer.mode == "MCP_VALUE_ONLY"
     assert plan.requires_document_retrieval is False
     assert plan.satisfiable is True
 
@@ -317,6 +318,42 @@ def test_named_configured_server_binds_to_plan():
     assert plan.satisfiable is True
 
 
+@pytest.mark.parametrize(
+    ("question", "server"),
+    [
+        ("从 NCBI 查询 Wx 的官方记录", "gene-authority"),
+        ("用 UniProt 获取 Wx 蛋白信息", "gene-authority"),
+        ("通过 Gramene 查询 Os06g0133000", "gramene"),
+        ("使用 Plant Genomics MCP 获取 Wx 注释", "plant-genomics"),
+        ("通过 Research Data Discovery 搜索水稻数据集", "data-aggregator"),
+        ("查询 Wx 的 CDS 序列", "ricekb"),
+        ("查询水稻 Wx 的详细基因档案", "ricekb-profile"),
+    ],
+)
+def test_fixed_source_words_route_to_one_server(question: str, server: str):
+    configured = ["gene-authority", "gramene", "plant-genomics", "data-aggregator", "ricekb", "ricekb-profile"]
+    plan = plan_turn(question, has_knowledge_scope=False, configured_mcps=configured, known_mcps=configured)
+
+    assert plan.source.policy == SourcePolicy.MCP_ONLY
+    assert plan.required_server == server
+    assert "FIXED_MCP_SOURCE_ROUTE" in plan.reason_codes
+    assert plan.answer.mode == "MCP_VALUE_ONLY"
+
+
+def test_at_mcp_mention_routes_even_after_control_token_is_removed():
+    plan = plan_turn(
+        "查询 Wx 的官方记录",
+        has_knowledge_scope=False,
+        configured_mcps=["gene-authority", "ricekb"],
+        known_mcps=["gene-authority", "ricekb"],
+        mentioned_mcp_slugs=["gene-authority"],
+    )
+
+    assert plan.source.policy == SourcePolicy.MCP_ONLY
+    assert plan.required_server == "gene-authority"
+    assert "MENTION_MCP_SERVER_BOUND" in plan.reason_codes
+
+
 def test_named_unbound_builtin_server_fails_explicitly_without_silent_substitution():
     plan = plan_turn(
         "通过 BioMCP 查 Wx 基因信息",
@@ -367,7 +404,7 @@ def test_skills_glossary_and_locator_questions_never_require_mcp():
     assert locator_q.requires_mcp is False
 
 
-def test_plain_mcp_mention_without_server_name_keeps_capability_semantics():
+def test_plain_mcp_rice_gene_query_uses_configured_rice_authority():
     plan = plan_turn(
         "通过 MCP 查 Wx 基因信息",
         has_knowledge_scope=True,
@@ -375,9 +412,21 @@ def test_plain_mcp_mention_without_server_name_keeps_capability_semantics():
         known_mcps=["bio-mcp", "ricekb"],
     )
 
-    assert plan.required_server is None
+    assert plan.required_server == "ricekb"
     assert plan.required_server_missing is None
     assert plan.satisfiable is True
+
+
+def test_plain_mcp_wx_prefers_profile_assembler_when_configured():
+    plan = plan_turn(
+        "通过 MCP 查 Wx",
+        has_knowledge_scope=False,
+        configured_mcps=["ricekb", "ricekb-profile"],
+        known_mcps=["ricekb", "ricekb-profile"],
+    )
+
+    assert plan.required_server == "ricekb-profile"
+    assert plan.answer.mode == "MCP_VALUE_ONLY"
 
 
 def test_server_name_without_usage_intent_does_not_bind():

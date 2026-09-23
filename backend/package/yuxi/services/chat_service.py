@@ -2041,61 +2041,6 @@ def _ensure_full_msg(full_msg: AIMessage | None, accumulated_content: list[str])
     return full_msg
 
 
-async def _append_run_artifacts_footer(
-    full_msg: AIMessage | None,
-    *,
-    run_id: Any,
-    source_uses: list[Any] | None,
-) -> AIMessage | None:
-    """门禁链尾追加「本轮产物」清单块（P5 修正版）。
-
-    - 注入时机：终态门禁、组合复跑与 citation 分派**全部之后**——产物元数据
-      （size 等）不是 manifest 事实，进组合复跑必被 ``unsupported_numbers``
-      打回，把整个投影打回原形；
-    - join 语义：run_id 第一维限定本轮；``origin.source=="mcp"`` 再按本轮
-      adopted 审计集合过滤；sequence_deliverable/agent_presented 按 run_id
-      直收（sequence_deliverable 的 origin 无 mcp_call_audit_id）；
-    - 任何失败（查询异常/空清单/空消息）原样返回，绝不阻断发布。
-    """
-    if full_msg is None or not str(getattr(full_msg, "content", "") or "").strip():
-        return full_msg
-    if not run_id:
-        return full_msg
-    try:
-        from yuxi.knowledge.rendering.artifacts_block import (
-            render_run_artifacts_block,
-            select_publishable_artifacts,
-        )
-        from yuxi.services.agent_run_service import load_run_artifacts
-
-        rows = await load_run_artifacts(str(run_id))
-    except Exception as error:  # noqa: BLE001 —— 清单块是增强通道，绝不阻断发布
-        logger.warning(f"Run artifacts footer skipped for {run_id}: {type(error).__name__}")
-        return full_msg
-    if not rows:
-        return full_msg
-
-    adopted_audit_ids: set[int] = set()
-    for use in source_uses or []:
-        adopted = use.get("adopted") if isinstance(use, dict) else getattr(use, "adopted", False)
-        if not adopted:
-            continue
-        provenance = use.get("provenance") if isinstance(use, dict) else getattr(use, "provenance", None)
-        audit_id = (provenance or {}).get("mcp_call_audit_id") if isinstance(provenance, dict) else None
-        if audit_id is None:
-            continue
-        try:
-            adopted_audit_ids.add(int(audit_id))
-        except (TypeError, ValueError):
-            continue
-
-    block = render_run_artifacts_block(select_publishable_artifacts(rows, adopted_audit_ids))
-    if not block:
-        return full_msg
-    full_msg.content = f"{str(full_msg.content).rstrip()}\n\n{block}"
-    return full_msg
-
-
 def _extract_ai_message(messages: list[Any] | None) -> AIMessage | None:
     """从消息列表中提取最后一条 AIMessage。"""
     if not isinstance(messages, list):
@@ -2356,6 +2301,7 @@ async def stream_agent_chat(
         knowledge_strategy=str(knowledge_scope_snapshot.get("knowledge_strategy") or "MODEL_DECIDES"),
         has_image=bool(image_content),
         known_mcps=list_builtin_mcp_slugs(),
+        mentioned_mcp_slugs=list(input_context["_mention_resolution"].get("mcp_slugs") or []),
     )
     source_manifest = _initial_source_manifest(turn_plan)
     input_context["_turn_execution_plan"] = turn_plan.public_dict()
@@ -2759,11 +2705,40 @@ async def stream_agent_chat(
                 **dict(buffered_root_metadata or {}),
                 "source_output_guard": source_output_validation,
             }
-        elif accumulated_content or glossary_contract_ready:
+        elif accumulated_content or glossary_contract_ready or turn_plan.answer.mode == "MCP_VALUE_ONLY":
             if glossary_contract_ready:
                 guarded_source_text, source_output_validation = guard_glossary_answer(
                     "".join(accumulated_content), contract=knowledge_contract
                 )
+            # MCP 值答案：模型只负责选工具，不参与最终事实措辞。终态正文必须由
+            # 服务端直接从已采纳事实账本投影；无可投影事实时宁可明确无结果。
+            elif turn_plan.answer.mode == "MCP_VALUE_ONLY":
+                projection = project_data_plane(source_manifest.source_uses)
+                deterministic_text = (
+                    projection.blocks
+                    if projection is not None
+                    else render_degraded_fact_sheet(source_manifest.source_uses)
+                )
+                guarded_source_text = deterministic_text or "未获取到可发布的数据值。"
+                _, deterministic_validation = guard_answer_for_evidence_level(
+                    guarded_source_text,
+                    evidence_level=turn_plan.evidence.level,
+                    source_uses=source_manifest.source_uses,
+                    source_policy=turn_plan.source.policy.value,
+                    requires_mcp=turn_plan.requires_mcp,
+                )
+                source_output_validation = {
+                    **deterministic_validation,
+                    "status": "PASSED" if deterministic_text else "DEGRADED",
+                    "presentation_mode": "MCP_VALUE_ONLY",
+                    "model_facts_published": False,
+                }
+                if projection is not None:
+                    source_output_validation["data_plane_projection"] = {
+                        "kind": projection.kind,
+                        "audit_id": projection.audit_id,
+                        "fact_count": len(projection.used_fact_ids),
+                    }
             else:
                 guarded_source_text, source_output_validation = await _finalize_guarded_source_text(
                     "".join(accumulated_content),
@@ -2781,7 +2756,10 @@ async def stream_agent_chat(
             # 数据面投影（呈现层 v3）：模型只写叙述，数据表由服务端从 manifest
             # 确定性构造（构造性 marker，降级表同款零幻觉链路）。组合文本整体
             # 复跑事实门禁，通过才发布；失败回退纯叙述并记日志，绝不带病拼接。
-            if str((source_output_validation or {}).get("status") or "") == "PASSED":
+            if (
+                turn_plan.answer.mode != "MCP_VALUE_ONLY"
+                and str((source_output_validation or {}).get("status") or "") == "PASSED"
+            ):
                 projection = project_data_plane(source_manifest.source_uses)
                 if projection is not None:
                     combined = guarded_source_text.rstrip() + "\n\n" + projection.blocks
@@ -2892,14 +2870,6 @@ async def stream_agent_chat(
         else:
             full_msg = _ensure_full_msg(full_msg, accumulated_content)
 
-        # P5（修正版注入点）：本轮产物清单块在终态门禁、组合复跑与 citation
-        # 分派全部之后追加——PASSED 与 DEGRADED 两条分支在此汇合，杜绝半边
-        # 生效；产物元数据不进任何门禁（缺陷2红线）。
-        full_msg = await _append_run_artifacts_footer(
-            full_msg,
-            run_id=meta.get("run_id"),
-            source_uses=source_manifest.source_uses,
-        )
         trace_info = get_trace_info(langfuse_run)
 
         if conf.enable_content_guard and hasattr(full_msg, "content") and await content_guard.check(full_msg.content):
@@ -2918,13 +2888,22 @@ async def stream_agent_chat(
             return
 
         if protected_output and full_msg is not None and str(full_msg.content or ""):
+            public_content = str(full_msg.content)
+            if turn_plan.answer.mode == "MCP_VALUE_ONLY":
+                from yuxi.knowledge.rendering.source_answer_renderer import render_source_answer
+
+                public_content = render_source_answer(public_content)
+                buffered_root_metadata = {
+                    **dict(buffered_root_metadata or {}),
+                    "presentation_mode": "MCP_VALUE_ONLY",
+                }
             safe_message_id = str(getattr(full_msg, "id", None) or buffered_root_message_id or uuid.uuid4())
             yield make_chunk(
-                content=str(full_msg.content),
+                content=public_content,
                 stream_event={
                     "type": "message_delta",
                     "message_id": safe_message_id,
-                    "content": str(full_msg.content),
+                    "content": public_content,
                     "thread_id": thread_id,
                     "namespace": [],
                 },

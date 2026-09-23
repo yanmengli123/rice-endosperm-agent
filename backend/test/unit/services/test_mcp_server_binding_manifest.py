@@ -92,7 +92,10 @@ async def test_unnamed_plan_keeps_capability_level_semantics():
         configured_mcps=["ricekb"],
         known_mcps=["bio-mcp", "ricekb"],
     )
-    assert plan.required_server is None
+    # P5 确定性路由：水稻基因 + MCP 使用意图 → FIXED_MCP_SOURCE_ROUTE 绑定
+    # ricekb（不再是无点名的 capability 级语义）；路由仍属 capability 内服务
+    assert plan.required_server == "ricekb"
+    assert "FIXED_MCP_SOURCE_ROUTE" in plan.reason_codes
 
     manifest = _initial_source_manifest(plan)
     valid = await _finalize_mcp_manifest(

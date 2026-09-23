@@ -28,7 +28,7 @@ from typing import Any
 
 from defusedxml import ElementTree
 
-SERVER_VERSION = "1.3.0"
+SERVER_VERSION = "1.4.0"
 SCHEMA_VERSION = "gene-authority-envelope.v1"
 NCBI_BASE = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 NCBI_EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -471,11 +471,38 @@ def ncbi_eutils_summary_rest(database: str, ids: list[str]) -> dict[str, Any]:
     email = os.getenv("YUXI_NCBI_EMAIL", "").strip()
     if email:
         email = _bounded_text("YUXI_NCBI_EMAIL", email, 200)
-    return _request_json(
+    result = _request_json(
         "NCBI_EUTILS", f"{NCBI_EUTILS_BASE}/esummary.fcgi",
         params={"db": db, "id": ",".join(values), "retmode": "json", "tool": "yuxi-gene-authority"},
         private_params={"email": email, "api_key": os.getenv("NCBI_API_KEY", "").strip() or None},
     )
+    if db == "gene":
+        payload = result.get("data", {}).get("result")
+        if isinstance(payload, dict):
+            for record in payload.values():
+                if not isinstance(record, dict):
+                    continue
+                for field in ("genomicinfo", "locationhist"):
+                    locations = record.get(field)
+                    if not isinstance(locations, list):
+                        continue
+                    for location in locations:
+                        if not isinstance(location, dict):
+                            continue
+                        start = location.get("chrstart")
+                        stop = location.get("chrstop")
+                        if not isinstance(start, int) or not isinstance(stop, int):
+                            continue
+                        location["coordinate_system"] = "zero_based_inclusive"
+                        location["one_based_inclusive"] = {
+                            "start": min(start, stop) + 1,
+                            "end": max(start, stop) + 1,
+                        }
+        result["answer_policy"] = (
+            "For gene genomic coordinates publish one_based_inclusive only; chrstart/chrstop are preserved "
+            "as NCBI zero-based inclusive source fields. Publish no inferred coordinate."
+        )
+    return result
 
 
 def ncbi_eutils_fetch_rest(database: str, ids: list[str]) -> dict[str, Any]:

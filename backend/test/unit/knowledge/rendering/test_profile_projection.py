@@ -133,8 +133,8 @@ def test_sequence_projection_renders_summary_table():
     assert '<details class="yuxi-citations"><summary>核验明细' in blocks
     assert "[MCP-F:235:f_00000000000000f5]" in main_view
     # P5：散文指针（"完整 FASTA 文件见本消息产物区"）已删除——下载入口由
-    # 全门禁之后追加的产物清单块（artifacts_block）承载，投影文本必须 100%
-    # 过事实门禁，不得携带非 manifest 内容。
+    # 客户端原生产物卡（run_artifacts 权威）承载，投影文本必须 100% 过事实
+    # 门禁，不得携带非 manifest 内容。
     assert "完整 FASTA 文件见本消息产物区" not in blocks
     assert "产物" not in blocks
 

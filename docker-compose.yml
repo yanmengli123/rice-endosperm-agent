@@ -10,7 +10,7 @@ x-api-worker-env: &api-worker-env
   YUXI_MCP_RUNTIME_URL: ${YUXI_MCP_RUNTIME_URL:-}
   YUXI_MCP_RUNTIME_TOKEN: ${YUXI_MCP_RUNTIME_TOKEN:-}
   YUXI_BIOINFOMCP_FASTQC_IMAGE: ${YUXI_BIOINFOMCP_FASTQC_IMAGE:-yuxi-bioinfomcp-fastqc:7ada7918}
-  YUXI_GENE_AUTHORITY_IMAGE: ${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.3.0}
+  YUXI_GENE_AUTHORITY_IMAGE: ${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.4.0}
   YUXI_PLANT_GENOMICS_IMAGE: ${YUXI_PLANT_GENOMICS_IMAGE:-yuxi-plant-genomics:1.21.0}
   YUXI_GRAMENE_MCP_IMAGE: ${YUXI_GRAMENE_MCP_IMAGE:-yuxi-gramene-mcp:b42afce}
   YUXI_DATA_AGGREGATOR_IMAGE: ${YUXI_DATA_AGGREGATOR_IMAGE:-yuxi-data-aggregator:0.45.3}
@@ -215,7 +215,7 @@ services:
     build:
       context: .
       dockerfile: docker/mcp/gene-authority/Dockerfile
-    image: ${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.3.0}
+    image: ${YUXI_GENE_AUTHORITY_IMAGE:-yuxi-gene-authority:1.4.0}
     entrypoint: ["/bin/true"]
     restart: "no"
   plant-genomics-image:

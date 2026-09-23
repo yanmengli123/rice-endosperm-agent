@@ -22,8 +22,8 @@ class _Request:
         )
 
 
-def _tool(name, *, mcp_name=None):
-    metadata = {"server": "bioinfo-mcp", "mcp_tool_name": mcp_name} if mcp_name else {}
+def _tool(name, *, mcp_name=None, server="bioinfo-mcp"):
+    metadata = {"server": server, "mcp_tool_name": mcp_name} if mcp_name else {}
     return SimpleNamespace(name=name, metadata=metadata)
 
 
@@ -78,3 +78,30 @@ async def test_frozen_document_plan_exposes_no_model_driven_evidence_tools():
         return [tool.name for tool in prepared.tools]
 
     assert await KnowledgeContextMiddleware().awrap_model_call(request, handler) == []
+
+
+@pytest.mark.asyncio
+async def test_named_server_plan_excludes_equivalent_tools_from_other_servers():
+    plan = plan_turn(
+        "通过 BioMCP 查 Wx 基因详细信息",
+        has_knowledge_scope=False,
+        configured_mcps=["bio-mcp", "ricekb"],
+        known_mcps=["bio-mcp", "ricekb"],
+    )
+    context = SimpleNamespace(
+        _turn_execution_plan=plan.public_dict(),
+        _effective_knowledge_scope={"effective_kb_ids": []},
+        _knowledge_contract=None,
+    )
+    request = _Request(
+        context=context,
+        tools=[
+            _tool("bio_lookup", mcp_name="plant_gene_lookup", server="bio-mcp"),
+            _tool("rice_lookup", mcp_name="ricekb_entity", server="ricekb"),
+        ],
+    )
+
+    async def handler(prepared):
+        return [tool.name for tool in prepared.tools]
+
+    assert await KnowledgeContextMiddleware().awrap_model_call(request, handler) == ["bio_lookup"]

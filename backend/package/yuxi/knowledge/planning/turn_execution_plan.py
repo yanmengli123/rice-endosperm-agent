@@ -269,6 +269,10 @@ class RunSourceManifest(BaseModel):
 
 _MCP_POSITIVE = re.compile(r"(?:通过|使用|只用|仅用|调用|走)\s*MCP|MCP\s*(?:查询|查|检索|获取|调用)", re.I)
 _MCP_NEGATIVE = re.compile(r"(?:不要|不用|禁止|别)\s*(?:调用|使用|走)?\s*MCP", re.I)
+_MCP_LOOKUP_ACTION = re.compile(
+    r"(?:查|查询|检索|搜索|获取|调用|使用|通过|来自|官方(?:地址|链接|记录)|档案|注释|序列|CDS|cDNA|蛋白|文献|数据集|项目)",
+    re.I,
+)
 _KB_POSITIVE = re.compile(r"(?:只|仅)?(?:根据|使用|查询|检索|查|看)\s*(?:当前)?知识库|只用知识库", re.I)
 _KB_NEGATIVE = re.compile(r"(?:不要|不用|禁止|别|不需要)\s*(?:查询|检索|查|使用)?\s*知识库", re.I)
 _LOCAL_DOCUMENT = re.compile(
@@ -307,6 +311,36 @@ _MECHANISM_OR_LITERATURE_CLAIM = re.compile(
 # ORYZABASE:). Deliberately excludes bare symbols such as "Wx"; those still
 # need an explicit source phrase.
 RICE_SOURCE_MCP = "ricekb"
+
+_FIXED_SOURCE_ROUTES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:NCBI|Entrez|UniProt|Europe\s*PMC|PRIDE)\b", re.I), "gene-authority"),
+    (re.compile(r"\bGramene(?:\s*MCP)?\b", re.I), "gramene"),
+    (re.compile(r"\bPlant[\s-]*Genomics(?:\s*MCP)?\b", re.I), "plant-genomics"),
+    (re.compile(r"\b(?:Research\s*Data\s*Discovery|data[\s-]*aggregator)(?:\s*MCP)?\b", re.I), "data-aggregator"),
+    (re.compile(r"\bBioMCP\b|\bbio[-_ ]mcp\b", re.I), "bio-mcp"),
+    (re.compile(r"\bRiceKB\s*Gene\s*Profile\s*Assembler\b|水稻基因档案", re.I), "ricekb-profile"),
+    (re.compile(r"\bRice\s*Source\s*KB\b|\bRiceKB\b|\bRAP-?DB\b|\bOryzabase\b", re.I), "ricekb"),
+)
+
+
+def _resolve_fixed_source_route(text: str) -> str | None:
+    """把明确的数据源词映射到唯一 MCP；纯介绍问题不触发调用。"""
+    if not _MCP_LOOKUP_ACTION.search(text):
+        return None
+    for pattern, slug in _FIXED_SOURCE_ROUTES:
+        if pattern.search(text):
+            return slug
+    if re.search(r"(?:CDS|cDNA|FASTA|基因组|转录本).{0,8}(?:序列|下载)|序列.{0,8}(?:CDS|cDNA|FASTA)", text, re.I):
+        return "ricekb"
+    if re.search(r"(?:水稻|\bWx\b|\bOs(?:0[1-9]|1[0-2])[gt]\d{5,7}\b|\bLOC_Os\w+)", text, re.I) and re.search(
+        r"(?:基因)?(?:详细)?档案|完整信息", text, re.I
+    ):
+        return "ricekb-profile"
+    if _MCP_POSITIVE.search(text) and re.search(
+        r"(?:水稻|\bWx\b|\bOs(?:0[1-9]|1[0-2])[gt]\d{5,7}\b|\bLOC_Os\w+)", text, re.I
+    ):
+        return "ricekb-profile"
+    return None
 
 
 def _server_mention_pattern(slug: str) -> re.Pattern[str]:
@@ -358,6 +392,7 @@ def plan_turn(
     knowledge_strategy: str = "MODEL_DECIDES",
     has_image: bool = False,
     known_mcps: list[str] | None = None,
+    mentioned_mcp_slugs: list[str] | None = None,
 ) -> TurnExecutionPlan:
     """Build and validate a deterministic turn plan.
 
@@ -372,7 +407,16 @@ def plan_turn(
     question_types = set(detect_question_types(text))
     locator = detect_locator_intent(text)
 
-    mcp_positive = bool(_MCP_POSITIVE.search(text)) and not _MCP_NEGATIVE.search(text)
+    configured = [str(slug).strip() for slug in (configured_mcps or []) if str(slug or "").strip()]
+    mentioned = list(
+        dict.fromkeys(str(slug).strip() for slug in (mentioned_mcp_slugs or []) if str(slug or "").strip())
+    )
+    fixed_route = _resolve_fixed_source_route(text)
+    if fixed_route == "ricekb-profile" and not re.search(r"档案|完整信息|RiceKB\s*Gene\s*Profile", text, re.I):
+        fixed_route = (
+            "ricekb-profile" if "ricekb-profile" in configured else "ricekb" if "ricekb" in configured else None
+        )
+    mcp_positive = bool(_MCP_POSITIVE.search(text) or mentioned or fixed_route) and not _MCP_NEGATIVE.search(text)
     kb_positive = bool(_KB_POSITIVE.search(text)) and not _KB_NEGATIVE.search(text)
     local_document = bool(_LOCAL_DOCUMENT.search(text))
     hybrid = bool(_HYBRID.search(text))
@@ -394,9 +438,17 @@ def plan_turn(
     required_server: str | None = None
     required_server_missing: str | None = None
     if mcp_positive:
-        required_server, required_server_missing = _resolve_mentioned_server(
-            text, configured_mcps=configured_mcps, known_mcps=known_mcps
-        )
+        requested_server = mentioned[0] if len(mentioned) == 1 else fixed_route
+        if requested_server:
+            if requested_server in configured:
+                required_server = requested_server
+            else:
+                required_server_missing = requested_server
+            reason_codes.append("MENTION_MCP_SERVER_BOUND" if mentioned else "FIXED_MCP_SOURCE_ROUTE")
+        else:
+            required_server, required_server_missing = _resolve_mentioned_server(
+                text, configured_mcps=configured, known_mcps=known_mcps
+            )
         if required_server:
             reason_codes.append("EXPLICIT_MCP_SERVER_BOUND")
 
@@ -628,6 +680,12 @@ def plan_turn(
         answer_mode = "BIBLIOGRAPHIC_ANSWER"
     else:
         answer_mode = "FREEFORM"
+
+    if source_policy == SourcePolicy.MCP_ONLY and evidence_level in {
+        EvidenceLevel.DATA_PROVENANCE,
+        EvidenceLevel.BIBLIOGRAPHIC,
+    }:
+        answer_mode = "MCP_VALUE_ONLY"
 
     citation_policy = {
         EvidenceLevel.NONE: CitationPolicy.NONE,
