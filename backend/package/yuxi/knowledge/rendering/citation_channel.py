@@ -840,20 +840,16 @@ def apply_citation_channel(
     expanded, markers_stripped, placeholders_stripped = _strip_display_placeholders(expanded)
 
     # 6) 未定位依据明示（P2 幂等：提示前缀已存在则不重复追加）
-    uncovered = uncovered[:_MAX_UNCOVERED_NOTICES]
+    #    F5：不再罗列未覆盖原句——曾把模型泄漏的过程叙述（"Let me try…"）展示
+    #    进提示正文，形成二次噪声；固定一句通用提示，明细走 validation 载荷。
     notice_needed = bool(uncovered) or markers_stripped > 0
     if notice_needed and _UNCOVERED_NOTICE_PREFIX not in expanded:
-        if uncovered:
-            detail = "、" + "、".join(uncovered)
-        else:
-            detail = ""
         expanded = (
             expanded.rstrip()
             + "\n\n"
             + _UNCOVERED_NOTICE_PREFIX
             + "，请谨慎采信"
             + ("以下结论" if uncovered else "个别结论")
-            + detail
             + "）"
         )
 

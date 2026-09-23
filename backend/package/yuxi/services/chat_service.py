@@ -43,6 +43,7 @@ from yuxi.knowledge.planning.turn_execution_plan import (
 )
 from yuxi.knowledge.rendering.answer_draft import render_answer_draft
 from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
+from yuxi.knowledge.rendering.profile_projection import project_data_plane
 from yuxi.knowledge.rendering.source_output_guard import (
     fact_catalog_summary,
     guard_answer_for_evidence_level,
@@ -696,7 +697,7 @@ def _pinned_mention_items(mention_resolution: dict | None, mention_type: str) ->
     """从冻结结论提取已解析的执行者类提及：[(resource_id, strength)]。"""
     if not isinstance(mention_resolution, dict):
         return []
-    items: list[tuple[str, str]] = []
+    items: list[dict] = []
     for item in mention_resolution.get("mentions") or []:
         if not isinstance(item, dict):
             continue
@@ -706,6 +707,12 @@ def _pinned_mention_items(mention_resolution: dict | None, mention_type: str) ->
         if resource_id:
             items.append((resource_id, str(item.get("strength") or "REQUIRED").upper()))
     return items
+
+
+#: MCP 负状态：科学上"合法无结果"或失败，不算成功调用，不参与 adoption/匹配。
+_MCP_ADOPTION_NEGATIVE_STATUSES = frozenset(
+    {"NOT_FOUND", "NO_EVIDENCE", "AMBIGUOUS", "CONFLICT", "UNAVAILABLE", "ERROR"}
+)
 
 
 def _record_mention_fulfillment(
@@ -741,7 +748,13 @@ def _append_mcp_source_uses(
     audits: list[Any],
     matched_ids: set[int],
 ) -> None:
-    """Project append-only MCP audit rows into the run-level source ledger."""
+    """Project append-only MCP audit rows into the run-level source ledger.
+
+    F1（审计为权威）：受信注册表、answer-eligible、非 discovery 的**成功**调用
+    一律 adopted——计划未要求 MCP 的轮次（golden 实测 run 09452049：序列零标记
+    放行）同样要挂账本核验；``matched_ids`` 只再服务于 requires_mcp 与 manifest
+    状态。负状态（NOT_FOUND 等）不算成功调用，不参与 adoption。
+    """
     existing = {item.source_use_id for item in manifest.source_uses}
     for audit in audits:
         source_use_id = f"mcp:{audit.id}"
@@ -750,7 +763,23 @@ def _append_mcp_source_uses(
         profile = profile_for_server_tool(str(audit.server_slug or ""), str(audit.capability_name or ""))
         bibliography = bool(profile and profile.source_class == "BIBLIOGRAPHY")
         discovery = bool(profile and profile.source_class == "DISCOVERY")
-        adopted = int(audit.id) in matched_ids and not discovery
+        provenance = audit.provenance or {}
+        provider_status = str(provenance.get("provider_status") or "").upper()
+        if not provider_status:
+            # Legacy MCP adapters expose structured payloads as text, so host-level
+            # ``provider_status`` can be absent even though the append-only fact
+            # manifest contains the authoritative top-level /status field.
+            for fact in (provenance.get("fact_manifest") or {}).get("facts") or []:
+                if str(fact.get("path") or "") == "/status" and fact.get("string_value"):
+                    provider_status = str(fact["string_value"]).upper()
+                    break
+        provider_status = provider_status or str(audit.status).upper()
+        succeeded = str(audit.status).lower() == "success" and provider_status not in _MCP_ADOPTION_NEGATIVE_STATUSES
+        adopted = (
+            succeeded
+            and not discovery
+            and (int(audit.id) in matched_ids or (profile is not None and profile.answer_eligible))
+        )
         manifest.source_uses.append(
             SourceUseRecord(
                 source_use_id=source_use_id,
@@ -895,6 +924,21 @@ _FACT_REPAIR_DRAFT_LIMIT = 60000
 _FACT_REPAIR_REQUEST_TIMEOUT_SECONDS = 35.0
 _FACT_REPAIR_STREAM_CHUNK_TIMEOUT_SECONDS = 30.0
 _FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS = 40.0
+#: run 级总时限参考值（权威在 run_worker.RUN_STREAM_TOTAL_TIMEOUT_SECONDS=300；
+#: 此处仅用于把修复预算钉进 run 剩余时限——修复抢不过看门狗就没有意义）。
+_RUN_STREAM_TOTAL_REFERENCE_SECONDS = 300.0
+
+
+def _effective_repair_wall_budget(run_deadline_remaining: float | None) -> float:
+    """每轮修复墙钟 = min(标称墙钟, run 剩余时限 / 轮数)，下限 5s。"""
+    if run_deadline_remaining is None:
+        return _FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS
+    return max(
+        5.0,
+        min(_FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS, run_deadline_remaining / _FACT_REPAIR_MAX_ATTEMPTS),
+    )
+
+
 _FACT_REPAIR_PROMPT = """你是 MCP 事实核验修复器。下面这份回答草稿未通过服务器端事实级核验，\
 你必须修复它使其通过核验。你只能做三类操作，绝不能引入新事实：
 1. 为缺少 [MCP-F:audit:fact] 标记的行补上真实标记（只能使用【可用事实清单】里的标记，\
@@ -917,11 +961,13 @@ async def _repair_source_fact_grounding(
     source_uses: list[Any],
     *,
     repair_model_spec: str | None = None,
+    wall_budget: float | None = None,
 ) -> str | None:
     """Bounded repair round: add markers / drop unsupported lines, never new facts.
 
     修复模型只拿到草稿、核验失败明细与事实清单（含数值），没有任何工具通道；
     修复结果仍要走同一终态门禁，因此这一步不可能放宽任何核验语义。
+    ``wall_budget`` 由调用方按 run 剩余时限收窄（修复抢不过看门狗就没有意义）。
     """
     draft = str(draft_text or "")
     if not draft.strip() or len(draft) > _FACT_REPAIR_DRAFT_LIMIT:
@@ -986,7 +1032,10 @@ async def _repair_source_fact_grounding(
         # 墙钟兜底：chunk 持续到达但整体拖长（慢流）时，request/stream_chunk 超时
         # 都不会触发，只有这里能保证修复轮有界、不给 run 看门狗留静默窗口。
         try:
-            await asyncio.wait_for(_collect_stream(), timeout=_FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS)
+            await asyncio.wait_for(
+                _collect_stream(),
+                timeout=wall_budget or _FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS,
+            )
         except TimeoutError:
             logger.warning(
                 "MCP fact grounding repair round exceeded "
@@ -1010,8 +1059,15 @@ async def _finalize_guarded_source_text(
     repair_model_spec: str | None = None,
     source_policy: str | None = None,
     requires_mcp: bool = False,
+    repair_wall_budget: float | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """终态门禁 + 有界修复 + 确定性降级：修复失败绝不发布未核验内容。"""
+    """终态门禁 + 数据面投影兜底 + 有界修复 + 确定性降级（v4 分层）。
+
+    拒绝后优先数据面投影（确定性、值视图、构造性 marker）；投影可用时直接
+    发布并**跳过修复轮**——修好了也只是叙述+表，修不好白等 2×墙钟（实测
+    模型慢时 ~80s）。投影不可用才走修复轮，且每轮预算纳入 run 剩余时限：
+    修复抢不过看门狗就没有意义。修复失败绝不发布未核验内容。
+    """
     finalize_started_at = time.monotonic()
     repair_elapsed_ms = 0
     guarded, validation = guard_answer_for_evidence_level(
@@ -1028,43 +1084,70 @@ async def _finalize_guarded_source_text(
         return bool(grounding.get("required")) is False or bool(grounding.get("passed"))
 
     if not _passed(validation):
-        for attempt in range(1, _FACT_REPAIR_MAX_ATTEMPTS + 1):
-            round_started_at = time.monotonic()
-            repaired = await _repair_source_fact_grounding(
-                draft, validation, source_uses, repair_model_spec=repair_model_spec
+        projection = project_data_plane(source_uses)
+        if projection is not None:
+            guarded = (
+                "数据模式：SOURCE-ONLY\n\n"
+                "（模型叙述未通过逐行核验，已改为直接呈现服务端核验的数据摘要）\n\n" + projection.blocks
             )
-            round_elapsed_ms = int((time.monotonic() - round_started_at) * 1000)
-            repair_elapsed_ms += round_elapsed_ms
-            attempts.append({"attempt": attempt, "repaired": bool(repaired), "elapsed_ms": round_elapsed_ms})
-            if not repaired:
-                # 瞬时失败（连接/超时）也给第二轮一次机会；草稿超限等永久性
-                # 原因会连续返回 None，同样快速放行到降级渲染。
-                continue
-            guarded, validation = guard_answer_for_evidence_level(
-                repaired,
-                evidence_level=evidence_level,
-                source_uses=source_uses,
-                source_policy=source_policy,
-                requires_mcp=requires_mcp,
-            )
+            validation = {
+                **validation,
+                "status": "DEGRADED",
+                "degraded_render": True,
+                "degraded_via_projection": True,
+                "data_plane_projection": {
+                    "kind": projection.kind,
+                    "audit_id": projection.audit_id,
+                    "fact_count": len(projection.used_fact_ids),
+                },
+            }
             logger.info(
-                "Source fact grounding repair round finished; "
-                f"passed={_passed(validation)} "
-                f"grounding={json.dumps(validation.get('fact_grounding') or {}, ensure_ascii=False)}"
+                "Source fact grounding rejected the draft; data-plane projection "
+                f"published (kind={projection.kind}, repair rounds skipped)"
             )
-            if _passed(validation):
-                break
-        if not _passed(validation):
-            degraded = render_degraded_fact_sheet(source_uses)
-            if degraded is not None:
-                guarded = degraded
-                validation = {**validation, "status": "DEGRADED", "degraded_render": True}
-            logger.info(
-                "Source fact grounding rejected the model draft; "
-                f"attempts={json.dumps(attempts, ensure_ascii=False)} "
-                f"grounding={json.dumps(validation.get('fact_grounding') or {}, ensure_ascii=False)} "
-                f"draft_head={draft[:4000]!r}"
-            )
+        else:
+            per_round_budget = _effective_repair_wall_budget(repair_wall_budget)
+            for attempt in range(1, _FACT_REPAIR_MAX_ATTEMPTS + 1):
+                round_started_at = time.monotonic()
+                repaired = await _repair_source_fact_grounding(
+                    draft,
+                    validation,
+                    source_uses,
+                    repair_model_spec=repair_model_spec,
+                    wall_budget=per_round_budget,
+                )
+                round_elapsed_ms = int((time.monotonic() - round_started_at) * 1000)
+                repair_elapsed_ms += round_elapsed_ms
+                attempts.append({"attempt": attempt, "repaired": bool(repaired), "elapsed_ms": round_elapsed_ms})
+                if not repaired:
+                    # 瞬时失败（连接/超时）也给第二轮一次机会；草稿超限等永久性
+                    # 原因会连续返回 None，同样快速放行到降级渲染。
+                    continue
+                guarded, validation = guard_answer_for_evidence_level(
+                    repaired,
+                    evidence_level=evidence_level,
+                    source_uses=source_uses,
+                    source_policy=source_policy,
+                    requires_mcp=requires_mcp,
+                )
+                logger.info(
+                    "Source fact grounding repair round finished; "
+                    f"passed={_passed(validation)} "
+                    f"grounding={json.dumps(validation.get('fact_grounding') or {}, ensure_ascii=False)}"
+                )
+                if _passed(validation):
+                    break
+            if not _passed(validation):
+                degraded = render_degraded_fact_sheet(source_uses)
+                if degraded is not None:
+                    guarded = degraded
+                    validation = {**validation, "status": "DEGRADED", "degraded_render": True}
+                logger.info(
+                    "Source fact grounding rejected the model draft; "
+                    f"attempts={json.dumps(attempts, ensure_ascii=False)} "
+                    f"grounding={json.dumps(validation.get('fact_grounding') or {}, ensure_ascii=False)} "
+                    f"draft_head={draft[:4000]!r}"
+                )
     if attempts:
         validation = {**validation, "fact_repair_attempts": attempts}
     try:
@@ -1072,8 +1155,8 @@ async def _finalize_guarded_source_text(
 
         grounding = validation.get("fact_grounding") or {}
         emit_trace(
-            category="RUN",
-            operation="answer_guard",
+            category="ANSWER",
+            operation="source_guard",
             event_type="answer.source_guard.completed",
             attributes={
                 "guard_status": str(validation.get("status") or ""),
@@ -1122,14 +1205,7 @@ async def _finalize_mcp_manifest(
     for audit in audits:
         if str(audit.status).lower() != "success":
             continue
-        if str((audit.provenance or {}).get("provider_status") or "").upper() in {
-            "NOT_FOUND",
-            "NO_EVIDENCE",
-            "AMBIGUOUS",
-            "CONFLICT",
-            "UNAVAILABLE",
-            "ERROR",
-        }:
+        if str((audit.provenance or {}).get("provider_status") or "").upper() in _MCP_ADOPTION_NEGATIVE_STATUSES:
             continue
         profile = profile_for_server_tool(str(audit.server_slug or ""), str(audit.capability_name or ""))
         if (Capability.GENERIC_MCP in required and (profile is None or profile.answer_eligible)) or (
@@ -1607,6 +1683,49 @@ async def _save_tool_message(conv_repo: ConversationRepository, msg_dict: dict) 
     )
 
 
+def _emergency_source_text(source_manifest) -> tuple[str, dict[str, Any]] | None:
+    """中止/异常路径的应急终稿（零幻觉红线修复，v4）。
+
+    golden 实测（run b005413c）：修复轮 2×墙钟触发的流中止发生在 finalize 完成
+    之前，清理路径把**门禁前的流式草稿**当终稿落库——未核验文本上屏，门禁被
+    墙钟超时绕过。修复：protected 轮的中止保存改用确定性内容——优先数据面
+    投影，其次降级表；并同步给出 source_output_guard 元数据保持审计链完整。
+    """
+    if source_manifest is None:
+        return None
+    source_uses = list(getattr(source_manifest, "source_uses", []) or [])
+    if not any(
+        (item.get("adopted") if isinstance(item, dict) else getattr(item, "adopted", False)) for item in source_uses
+    ):
+        return None
+    projection = project_data_plane(source_uses)
+    if projection is not None:
+        text = (
+            "数据模式：SOURCE-ONLY\n\n"
+            "（模型叙述未通过逐行核验，已改为直接呈现服务端核验的数据摘要）\n\n" + projection.blocks
+        )
+        metadata = {
+            "schema_version": "answer-evidence-output-guard.v2",
+            "status": "DEGRADED",
+            "degraded_render": True,
+            "degraded_via_projection": True,
+            "data_plane_projection": {
+                "kind": projection.kind,
+                "audit_id": projection.audit_id,
+                "fact_count": len(projection.used_fact_ids),
+            },
+        }
+        return text, metadata
+    degraded = render_degraded_fact_sheet(source_uses)
+    if degraded is None:
+        return None
+    return degraded, {
+        "schema_version": "answer-evidence-output-guard.v2",
+        "status": "DEGRADED",
+        "degraded_render": True,
+    }
+
+
 async def save_partial_message(
     conv_repo: ConversationRepository,
     thread_id: str,
@@ -1617,6 +1736,7 @@ async def save_partial_message(
     run_id: str | None = None,
     request_id: str | None = None,
     knowledge_contract: dict[str, Any] | None = None,
+    source_guard_metadata: dict[str, Any] | None = None,
 ):
     try:
         extra_metadata = {
@@ -1624,13 +1744,23 @@ async def save_partial_message(
             "is_error": True,
             "error_message": error_message or f"发生错误: {error_type}",
         }
+        if source_guard_metadata is not None:
+            extra_metadata["source_output_guard"] = source_guard_metadata
         if full_msg:
             msg_dict = full_msg.model_dump() if hasattr(full_msg, "model_dump") else {}
             content = full_msg.content if hasattr(full_msg, "content") else str(full_msg)
             content = normalize_markdown_tables(
                 sanitize_visible_text(content if isinstance(content, str) else str(content))
             )
-            if knowledge_contract and knowledge_contract.get("status") != "SKIPPED":
+            if (
+                knowledge_contract
+                and knowledge_contract.get("status") != "SKIPPED"
+                # F5 卫生：citation 通道只管模型散文的文档主张。错误保存
+                # （unexpected_error/model_connection_error 等）的正文是错误
+                # 文案不是模型散文，不得贴"未定位到依据"加注（golden 实测：
+                # 136 字符错误消息曾被错贴 citation 加注）。
+                and error_type == "interrupted"
+            ):
                 content, citation_validation = apply_citation_channel(
                     content,
                     knowledge_contract.get("citations") or [],
@@ -1908,6 +2038,61 @@ def _ensure_full_msg(full_msg: AIMessage | None, accumulated_content: list[str])
     """如果 full_msg 为空且有累积内容，构建 AIMessage"""
     if not full_msg and accumulated_content:
         return AIMessage(content="".join(accumulated_content))
+    return full_msg
+
+
+async def _append_run_artifacts_footer(
+    full_msg: AIMessage | None,
+    *,
+    run_id: Any,
+    source_uses: list[Any] | None,
+) -> AIMessage | None:
+    """门禁链尾追加「本轮产物」清单块（P5 修正版）。
+
+    - 注入时机：终态门禁、组合复跑与 citation 分派**全部之后**——产物元数据
+      （size 等）不是 manifest 事实，进组合复跑必被 ``unsupported_numbers``
+      打回，把整个投影打回原形；
+    - join 语义：run_id 第一维限定本轮；``origin.source=="mcp"`` 再按本轮
+      adopted 审计集合过滤；sequence_deliverable/agent_presented 按 run_id
+      直收（sequence_deliverable 的 origin 无 mcp_call_audit_id）；
+    - 任何失败（查询异常/空清单/空消息）原样返回，绝不阻断发布。
+    """
+    if full_msg is None or not str(getattr(full_msg, "content", "") or "").strip():
+        return full_msg
+    if not run_id:
+        return full_msg
+    try:
+        from yuxi.knowledge.rendering.artifacts_block import (
+            render_run_artifacts_block,
+            select_publishable_artifacts,
+        )
+        from yuxi.services.agent_run_service import load_run_artifacts
+
+        rows = await load_run_artifacts(str(run_id))
+    except Exception as error:  # noqa: BLE001 —— 清单块是增强通道，绝不阻断发布
+        logger.warning(f"Run artifacts footer skipped for {run_id}: {type(error).__name__}")
+        return full_msg
+    if not rows:
+        return full_msg
+
+    adopted_audit_ids: set[int] = set()
+    for use in source_uses or []:
+        adopted = use.get("adopted") if isinstance(use, dict) else getattr(use, "adopted", False)
+        if not adopted:
+            continue
+        provenance = use.get("provenance") if isinstance(use, dict) else getattr(use, "provenance", None)
+        audit_id = (provenance or {}).get("mcp_call_audit_id") if isinstance(provenance, dict) else None
+        if audit_id is None:
+            continue
+        try:
+            adopted_audit_ids.add(int(audit_id))
+        except (TypeError, ValueError):
+            continue
+
+    block = render_run_artifacts_block(select_publishable_artifacts(rows, adopted_audit_ids))
+    if not block:
+        return full_msg
+    full_msg.content = f"{str(full_msg.content).rstrip()}\n\n{block}"
     return full_msg
 
 
@@ -2587,14 +2772,93 @@ async def stream_agent_chat(
                     repair_model_spec=meta.get("model_spec"),
                     source_policy=turn_plan.source.policy.value,
                     requires_mcp=turn_plan.requires_mcp,
+                    # 修复预算纳入 run 剩余时限（v4）：修复抢不过看门狗就没有意义
+                    repair_wall_budget=max(
+                        0.0,
+                        _RUN_STREAM_TOTAL_REFERENCE_SECONDS - (asyncio.get_event_loop().time() - start_time),
+                    ),
                 )
+            # 数据面投影（呈现层 v3）：模型只写叙述，数据表由服务端从 manifest
+            # 确定性构造（构造性 marker，降级表同款零幻觉链路）。组合文本整体
+            # 复跑事实门禁，通过才发布；失败回退纯叙述并记日志，绝不带病拼接。
+            if str((source_output_validation or {}).get("status") or "") == "PASSED":
+                projection = project_data_plane(source_manifest.source_uses)
+                if projection is not None:
+                    combined = guarded_source_text.rstrip() + "\n\n" + projection.blocks
+                    _, combined_validation = guard_answer_for_evidence_level(
+                        combined,
+                        evidence_level=turn_plan.evidence.level,
+                        source_uses=source_manifest.source_uses,
+                        source_policy=turn_plan.source.policy.value,
+                        requires_mcp=turn_plan.requires_mcp,
+                    )
+                    combined_grounding = combined_validation.get("fact_grounding") or {}
+                    if not combined_grounding.get("required") or combined_grounding.get("passed"):
+                        guarded_source_text = combined
+                        source_output_validation = {
+                            **combined_validation,
+                            "data_plane_projection": {
+                                "kind": projection.kind,
+                                "audit_id": projection.audit_id,
+                                "fact_count": len(projection.used_fact_ids),
+                            },
+                        }
+                    else:
+                        # 投影回退观测（v4）：validation 记录 + trace 事件——
+                        # 否则"投影回退率"这个关键指标永远是盲的。
+                        source_output_validation = {
+                            **source_output_validation,
+                            "data_plane_projection_fallback": True,
+                        }
+                        logger.warning("Data-plane projection combined text failed grounding; publishing prose only")
+                        try:
+                            from yuxi.trace import emit_trace
+
+                            emit_trace(
+                                category="ANSWER",
+                                operation="render",
+                                event_type="answer.render.applied",
+                                attributes={
+                                    "renderer_version": "projection-combined",
+                                    "boundary": "publish",
+                                    "eligible": True,
+                                    "applied": False,
+                                    "fallback_reason": "combined_grounding_failed",
+                                },
+                                visibility="USER",
+                            )
+                        except Exception:  # noqa: BLE001 —— 轨迹事件绝不影响发布路径
+                            pass
             accumulated_content = [guarded_source_text]
             source_manifest.validation_results.append(source_output_validation)
             buffered_root_metadata = {
                 **dict(buffered_root_metadata or {}),
                 "source_output_guard": source_output_validation,
             }
-        if turn_plan.requires_mcp:
+            # 呈现边界定稿⑤：发布时**不**渲染（DB 存带 marker 原文，读取边界渲染），
+            # 只发 trace 事件记录渲染器可用性；轨迹事件绝不影响发布路径。
+            try:
+                from yuxi.knowledge.rendering.source_answer_renderer import render_report
+                from yuxi.trace import emit_trace
+
+                report = render_report(guarded_source_text)
+                emit_trace(
+                    category="ANSWER",
+                    operation="render",
+                    event_type="answer.render.applied",
+                    attributes={
+                        "renderer_version": report["renderer_version"],
+                        "boundary": "publish",
+                        "eligible": bool(report["eligible"]),
+                        "applied": False,
+                    },
+                    visibility="USER",
+                )
+            except Exception:  # noqa: BLE001 —— 轨迹事件绝不影响发布路径
+                pass
+        if turn_plan.requires_mcp or any(getattr(item, "adopted", False) for item in source_manifest.source_uses):
+            # V4-5：有 adopted 源即持久化 run runtime——宽松轮（未点名 MCP）的
+            # 读取边界 L2 引用增强（折叠附录带标签+值）不再缺失。
             await _persist_turn_runtime(
                 db,
                 meta.get("run_id"),
@@ -2627,6 +2891,15 @@ async def stream_agent_chat(
                 )
         else:
             full_msg = _ensure_full_msg(full_msg, accumulated_content)
+
+        # P5（修正版注入点）：本轮产物清单块在终态门禁、组合复跑与 citation
+        # 分派全部之后追加——PASSED 与 DEGRADED 两条分支在此汇合，杜绝半边
+        # 生效；产物元数据不进任何门禁（缺陷2红线）。
+        full_msg = await _append_run_artifacts_footer(
+            full_msg,
+            run_id=meta.get("run_id"),
+            source_uses=source_manifest.source_uses,
+        )
         trace_info = get_trace_info(langfuse_run)
 
         if conf.enable_content_guard and hasattr(full_msg, "content") and await content_guard.check(full_msg.content):
@@ -2747,6 +3020,17 @@ async def stream_agent_chat(
         async def save_cleanup():
             nonlocal full_msg
             full_msg = _ensure_full_msg(full_msg, accumulated_content)
+            # 零幻觉红线修复（v4）：protected 轮的中止保存绝不让门禁前的流式
+            # 草稿当终稿落库——改存确定性降级内容（投影优先），并携带门禁元数据。
+            guard_metadata = None
+            if protected_output:
+                emergency = _emergency_source_text(source_manifest)
+                if emergency is not None:
+                    full_msg = AIMessage(
+                        id=f"msg_{uuid.uuid4().hex}",
+                        content=emergency[0],
+                    )
+                    guard_metadata = emergency[1]
 
             async with pg_manager.get_async_session_context() as new_db:
                 new_conv_repo = ConversationRepository(new_db)
@@ -2760,6 +3044,7 @@ async def stream_agent_chat(
                     run_id=meta.get("run_id"),
                     request_id=meta.get("request_id"),
                     knowledge_contract=knowledge_contract,
+                    source_guard_metadata=guard_metadata,
                 )
 
         cleanup_task = asyncio.create_task(save_cleanup())
@@ -2793,6 +3078,16 @@ async def stream_agent_chat(
             error_msg = f"Error streaming messages: {e}"
 
         full_msg = _ensure_full_msg(full_msg, accumulated_content)
+        # 同一红线修复：通用异常路径的 protected 轮同样改存确定性降级内容。
+        guard_metadata = None
+        if protected_output:
+            emergency = _emergency_source_text(source_manifest)
+            if emergency is not None:
+                full_msg = AIMessage(
+                    id=f"msg_{uuid.uuid4().hex}",
+                    content=emergency[0],
+                )
+                guard_metadata = emergency[1]
 
         async with pg_manager.get_async_session_context() as new_db:
             new_conv_repo = ConversationRepository(new_db)
@@ -2806,6 +3101,7 @@ async def stream_agent_chat(
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
                 knowledge_contract=knowledge_contract,
+                source_guard_metadata=guard_metadata,
             )
 
         yield make_chunk(

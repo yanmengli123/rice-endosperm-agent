@@ -31,6 +31,7 @@ TRACE_CATEGORIES = frozenset(
         "SUBAGENT",
         "VALIDATION",
         "SYSTEM",
+        "ANSWER",
     }
 )
 
@@ -124,6 +125,7 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
             "repair_elapsed_ms",
         }
     ),
+    "answer.render.applied": frozenset({"renderer_version", "boundary", "eligible", "applied", "fallback_reason"}),
     "subagent.execution.started": frozenset({"tool", "args_digest", "agent_slug", "child_run_id"}),
     "subagent.execution.completed": frozenset({"agent_slug", "child_run_id"}),
     "subagent.execution.failed": _COMMON_ATTRIBUTES | {"agent_slug", "child_run_id"},

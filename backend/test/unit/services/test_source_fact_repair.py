@@ -173,3 +173,88 @@ async def test_slow_repair_stream_abandoned_by_wall_budget(monkeypatch):
     started = time.monotonic()
     assert await _repair_source_fact_grounding(_DRAFT, validation, _SOURCE_USES) is None
     assert time.monotonic() - started < 2.0
+
+
+# ---------- v4：降级即投影 + 修复预算纳入 run 剩余 + 应急终稿 ----------
+
+_PROFILE_PROJECTION_USES = [
+    {
+        "source_use_id": "mcp:31",
+        "provider_id": "ricekb",
+        "operation": "ricekb_gene_profile",
+        "status": "SUCCESS",
+        "adopted": True,
+        "provenance": {
+            "mcp_call_audit_id": 31,
+            "fact_manifest": {
+                "facts": [
+                    {
+                        "id": "f_0000000000000051",
+                        "path": "/data/identity/entity_key",
+                        "string_value": "RAP:Os06g0133000",
+                    },
+                    {
+                        "id": "f_0000000000000052",
+                        "path": "/data/identity/canonical_rap_id",
+                        "string_value": "Os06g0133000",
+                    },
+                    {"id": "f_0000000000000053", "path": "/data/identity/description", "string_value": "GBSS"},
+                    {"id": "f_0000000000000054", "path": "/data/identity/matched_identifiers/0", "string_value": "Wx"},
+                    {"id": "f_0000000000000055", "path": "/data/locations/0/chromosome", "string_value": "Chr6"},
+                    {"id": "f_0000000000000056", "path": "/data/locations/0/start", "numeric_value": 1765622},
+                    {"id": "f_0000000000000057", "path": "/data/locations/0/end", "numeric_value": 1770656},
+                    {"id": "f_0000000000000058", "path": "/data/annotations/go", "string_value": "GO:0004373"},
+                ]
+            },
+        },
+    }
+]
+
+
+@pytest.mark.asyncio
+async def test_projection_fallback_skips_repair_rounds(monkeypatch):
+    """v4 核心：投影可用时拒绝草稿直接发布投影表，修复轮被跳过（省 2×墙钟）。"""
+
+    async def fail_repair(*args, **kwargs):
+        raise AssertionError("repair must be skipped when data-plane projection is available")
+
+    monkeypatch.setattr("yuxi.services.chat_service._repair_source_fact_grounding", fail_repair)
+    guarded, validation = await _finalize_guarded_source_text(
+        _DRAFT, evidence_level="E1_DATA_PROVENANCE", source_uses=_PROFILE_PROJECTION_USES
+    )
+    assert validation["status"] == "DEGRADED"
+    assert validation["degraded_via_projection"] is True
+    assert "fact_repair_attempts" not in validation  # 修复轮零调用
+    assert "已改为直接呈现服务端核验的数据摘要" in guarded
+    assert "规范 RAP ID" in guarded and "Os06g0133000" in guarded
+    assert "[MCP-F:31:f_0000000000000052]" in guarded
+
+
+def test_effective_repair_wall_budget_caps_by_run_remaining():
+    """修复预算 = min(标称墙钟, 剩余/轮数)，下限 5s——修复抢不过看门狗就没有意义。"""
+    from yuxi.services.chat_service import _effective_repair_wall_budget
+
+    assert _effective_repair_wall_budget(None) == chat_service._FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS
+    assert _effective_repair_wall_budget(300.0) == chat_service._FACT_REPAIR_ROUND_WALL_BUDGET_SECONDS
+    assert _effective_repair_wall_budget(50.0) == 25.0
+    assert _effective_repair_wall_budget(6.0) == 5.0
+
+
+def test_emergency_source_text_prefers_projection_with_guard_metadata():
+    """中止/异常路径的应急终稿：投影优先 + 携带 source_output_guard 元数据。"""
+    from types import SimpleNamespace
+
+    from yuxi.services.chat_service import _emergency_source_text
+
+    manifest = SimpleNamespace(source_uses=_PROFILE_PROJECTION_USES)
+    emergency = _emergency_source_text(manifest)
+    assert emergency is not None
+    text, metadata = emergency
+    assert text.startswith("数据模式：SOURCE-ONLY")
+    assert "规范 RAP ID" in text
+    assert metadata["status"] == "DEGRADED"
+    assert metadata["degraded_via_projection"] is True
+    # 无 adopted 源（非 source 轮）→ 无应急内容，维持普通中断语义
+    plain_uses = [dict(_PROFILE_PROJECTION_USES[0], adopted=False)]
+    assert _emergency_source_text(SimpleNamespace(source_uses=plain_uses)) is None
+    assert _emergency_source_text(None) is None

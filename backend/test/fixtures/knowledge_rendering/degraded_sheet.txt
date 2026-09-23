@@ -1,0 +1,52 @@
+数据模式：SOURCE-ONLY
+
+（降级渲染）模型生成的回答未通过 MCP 事实级核验，已阻止发布。以下为本次工具调用中可直接核验的事实清单；未列出的字段一律视为未核验。
+
+## 调用 205：ricekb-profile/ricekb_gene_profile
+
+| 字段（事实路径） | 值 | 来源 |
+| --- | --- | --- |
+| `/data/annotations/go` | Molecular Function: alpha-1, 4-glucan glucosyltransferase (UDP-glucose donor) activity (GO:0004373), Molecular Function: glycosyltransferase activity (GO:0016757) | [MCP-F:205:f_a6086f768a0c7b20] |
+| `/data/annotations/interpro` | Glycosyl transferase, family 1 (IPR001296), Bacterial/plant glycogen synthase (IPR011835), Starch synthase, catalytic domain (IPR013534) | [MCP-F:205:f_0375dbf5797dc7df] |
+| `/data/annotations/msu_annotation` | starch synthase, putative, expressed | [MCP-F:205:f_d1abb1dd264f0166] |
+| `/data/compare/agreements/0/field` | chromosome | [MCP-F:205:f_c62e965edec3d829] |
+| `/data/compare/agreements/0/sources/0` | MSU | [MCP-F:205:f_a561f6bc65d55a27] |
+| `/data/compare/agreements/0/sources/1` | ORYZABASE | [MCP-F:205:f_85b48d716b074dc1] |
+| `/data/compare/agreements/0/sources/2` | RAP_DB | [MCP-F:205:f_b4659bb627d9013d] |
+| `/data/compare/agreements/0/value` | 6 | [MCP-F:205:f_41b2efac759d31bf] |
+| `/data/contract_notes/0` | 调控关系（regulators/targets）：当前 RiceKB 契约未提供该数据；本轮未执行该查询——不得写成任何工具返回 NO_EVIDENCE。 | [MCP-F:205:f_996f6dc255fbac8b] |
+| `/data/contract_notes/1` | source_coverage_score 只表示覆盖完整度，不是生物学置信度，禁止渲染成置信度/可信度。 | [MCP-F:205:f_1e314c745756779e] |
+| `/data/contract_notes/2` | 坐标差与区间长度只引用 qc 记录的 value，禁止自行计算或改写口径。 | [MCP-F:205:f_35e731cc372f7f72] |
+| `/data/evidence_refs/provenance_ids/0` | source_msu.osa1_r7_locus_brief_info:33731 | [MCP-F:205:f_b7c071870e467b40] |
+| `/data/evidence_refs/provenance_ids/1` | source_msu.osa1_r7_locus_brief_info:33732 | [MCP-F:205:f_ac2432aff3864db7] |
+| `/data/evidence_refs/provenance_ids/10` | source_rapdb.irgsp_1_0_representative_annotation_20260205:22050 | [MCP-F:205:f_cddee45d234b42d1] |
+| `/data/evidence_refs/provenance_ids/11` | source_rapdb.rap_msu_20260205:23310 | [MCP-F:205:f_89bbb0e11a9d8542] |
+| `/data/evidence_refs/provenance_ids/2` | source_msu.osa1_r7_locus_brief_info:33733 | [MCP-F:205:f_d3a75b8c230a636b] |
+| `/data/evidence_refs/provenance_ids/3` | source_msu.osa1_r7_locus_brief_info:33734 | [MCP-F:205:f_7df6da32e4ad2ba7] |
+| `/data/evidence_refs/provenance_ids/4` | source_oryzabase.gene_list_en_20260802010113:705 | [MCP-F:205:f_8a2f7d51ec3268ba] |
+| `/data/evidence_refs/provenance_ids/5` | source_oryzabase.rice_id_20140620174522:114321 | [MCP-F:205:f_f6bfffb1e6a78d00] |
+| `/data/evidence_refs/provenance_ids/6` | source_oryzabase.rice_id_20140620174522:114322 | [MCP-F:205:f_720275c45b73285d] |
+| `/data/evidence_refs/provenance_ids/7` | source_oryzabase.rice_id_20140620174522:114323 | [MCP-F:205:f_4ec83c987fd41464] |
+| `/data/evidence_refs/provenance_ids/8` | source_oryzabase.rice_id_20140620174522:114324 | [MCP-F:205:f_a96014753697cfaf] |
+| `/data/evidence_refs/provenance_ids/9` | source_rapdb.irgsp_1_0_representative_annotation_20260205:22049 | [MCP-F:205:f_f1c3356e6a19ec0f] |
+| `/data/evidence_refs/total` | 12 | [MCP-F:205:f_b21a7d71ba6a8a4c] |
+| `/data/identity/canonical_rap_id` | Os06g0133000 | [MCP-F:205:f_f50105befa1c169e] |
+| `/data/identity/description` | Granule-bound starch synthase, Synthesis of amylose in endosperm | [MCP-F:205:f_092975731573a8b1] |
+| `/data/identity/entity_key` | RAP:Os06g0133000 | [MCP-F:205:f_46bd40a0f0fe15cb] |
+| `/data/identity/matched_identifiers/0` | Wx | [MCP-F:205:f_199dd60e9f730218] |
+| `/data/identity/matched_namespaces/0` | SYMBOL | [MCP-F:205:f_44981a8672512417] |
+| `/data/identity/source_coverage_note` | source_coverage_score 只表示已配置源表的记录覆盖完整度，不是生物学置信度。 | [MCP-F:205:f_0a09d9dff2c4a1e4] |
+| `/data/identity/source_coverage_score` | 100 | [MCP-F:205:f_3b46f39da0934185] |
+| `/data/identity/source_database_count` | 3 | [MCP-F:205:f_3ac012dbeffc44bc] |
+| `/data/identity/source_databases/0` | MSU | [MCP-F:205:f_3c353ad3dda27817] |
+| `/data/identity/source_databases/1` | ORYZABASE | [MCP-F:205:f_2dc40eb91dca13d1] |
+| `/data/identity/source_databases/2` | RAP_DB | [MCP-F:205:f_4d69e11dff77d804] |
+| `/data/identity/source_record_count` | 12 | [MCP-F:205:f_339bacb564883fdf] |
+| `/data/locations/0/chromosome` | Chr6 | [MCP-F:205:f_4293c9341be94357] |
+| `/data/locations/0/coordinate_system` | one_based_inclusive | [MCP-F:205:f_7ad96288c046cf32] |
+| `/data/locations/0/end` | 1770656 | [MCP-F:205:f_61b3dd6b4bc1fc5c] |
+| `/data/locations/0/locus` | LOC_Os06g04200 | [MCP-F:205:f_b6c74cee6f541ce2] |
+| 其余事实 | 从略（超出降级渲染上限，完整清单见调用审计） |  |
+
+
+局限：以上为结构化事实本身；模型叙述、派生计算与跨源比较未通过核验，不在本清单中。

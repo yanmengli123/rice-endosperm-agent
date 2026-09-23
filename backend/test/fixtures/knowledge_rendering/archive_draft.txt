@@ -1,0 +1,102 @@
+数据模式：SOURCE-ONLY
+
+# Wx 基因档案（ricekb `ricekb_gene_profile` 单次装配）
+
+## 1. 标识符解析与唯一性状态
+
+- 状态：`FOUND`（query=`Wx`，retrieved_at=2026-09-21T14:49:20Z）[MCP-F:199:f_46bd40a0f0fe15cb]
+- 实体键：`RAP:Os06g0133000`；规范 RAP ID：`Os06g0133000` [MCP-F:199:f_f50105befa1c169e]
+- 匹配标识符：`Wx`（命名空间 `SYMBOL`）[MCP-F:199:f_199dd60e9f730218][MCP-F:199:f_44981a8672512417]
+- 已配置源覆盖：MSU / ORYZABASE / RAP_DB，源数=3，记录数=12 [MCP-F:199:f_3ac012dbeffc44bc][MCP-F:199:f_2dc40eb91dca13d1][MCP-F:199:f_4d69e11dff77d804][MCP-F:199:f_3c353ad3dda27817][MCP-F:199:f_3ac012dbeffc44bc][MCP-F:199:f_3b46f39da0934185][MCP-F:199:f_339bacb564883fdf]
+- 描述：`Granule-bound starch synthase, Synthesis of amylose in endosperm` [MCP-F:199:f_092975731573a8b1]
+
+## 2. 契约说明（逐条原样引用）
+
+- 调控关系（regulators/targets）：当前 RiceKB 契约未提供该数据；本轮未执行该查询——不得写成任何工具返回 NO_EVIDENCE。 [MCP-F:199:f_996f6dc255fbac8b]
+- source_coverage_score 只表示覆盖完整度，不是生物学置信度，禁止渲染成置信度/可信度。 [MCP-F:199:f_1e314c745756779e]
+- 坐标差与区间长度只引用 qc 记录的 value，禁止自行计算或改写口径。 [MCP-F:199:f_35e731cc372f7f72]
+
+## 3. 各源名称、别名、cgsnl 符号
+
+| 源 | cgsnl_symbol | cgsnl_name | 别名 / synonyms |
+| --- | --- | --- | --- |
+| RAP_DB | WX1 | GLUTINOUS ENDOSPERM | Wx, wx, (Wx(am)), WX-B, GBSS-I, GBSS, OsGBSSI, GBSS1 |
+| MSU | — | — | — |
+| ORYZABASE | WX1 | GLUTINOUS ENDOSPERM | — |
+
+## 4. 组装版本、染色体、坐标、方向与坐标制
+
+坐标均为 `one_based_inclusive`。
+
+| 源 | 染色体 | 位点 | start | end | 链方向 | source_ref |
+| --- | --- | --- | --- | --- | --- | --- |
+| MSU | Chr6 | LOC_Os06g04200 | 1765622 | 1770656 | + | source_msu.msu_loci#row=33731 |
+| RAP_DB | chr06 | — | 1765622 | 1770653 | + | source_rapdb.rapdb_loci#line=19632 |
+
+染色体三源一致：`6` [MCP-F:199:f_c62e965edec3d829][MCP-F:199:f_a561f6bc65d55a27][MCP-F:199:f_85b48d716b074dc1][MCP-F:199:f_b4659bb627d9013d][MCP-F:199:f_41b2efac759d31bf]
+
+## 5. 跨源坐标差与区间长度（直接引用 qc 记录）
+
+- 区间长度（MSU，`interval_length_v1`）= 5035 bp（公式 `end - start + 1 (one_based_inclusive)`）[MCP-F:199:source_msu.msu_loci#row=33731]
+- 区间长度（RAP_DB，`interval_length_v1`）= 5032 bp（公式同上）[MCP-F:199:source_rapdb.rapdb_loci#line=19632]
+- 起始坐标差（`coordinate_start_delta_v1`，左=MSU，右=RAP_DB）= 0 bp
+- 终止坐标差（`coordinate_end_delta_v1`，左=MSU，右=RAP_DB）= 3 bp
+- distinct_evidence_rows_v1 = 12 行
+
+## 6. 转录本与交叉引用（计数与示例）
+
+| 类型 | 计数 | 示例 | provenance_id |
+| --- | --- | --- | --- |
+| MSU 转录本 | 4 | LOC_Os06g04200.1–.4 | — |
+| RAP_DB 转录本 | 2 | Os06t0133000-01 / -02 | — |
+| KOME clone | 4 | 206229 | source_oryzabase.rice_id_20140620174522:114321 |
+| cDNA accession | 4 | AK070431 | source_oryzabase.rice_id_20140620174522:114321 |
+| UniProt accession | 4 | Q0DEV5 | source_oryzabase.rice_id_20140620174522:114321 |
+| Locus（MSU） | 13 | LOC_Os06g04200 | source_msu.osa1_r7_locus_brief_info:33731 |
+| MSU transcript | 22 | LOC_Os06g04200.1/.2 | source_msu.osa1_r7_locus_brief_info:33731 |
+| Trait gene id（Oryzabase） | 3 | 744 | source_oryzabase.gene_list_en_20260802010113:705 |
+| Symbol alias（Oryzabase） | 11 | GBSS, GBSS-I, GBSS1, GBSSI, GSS | source_oryzabase.gene_list_en_20260802010113:705 |
+| Oryzabase symbol alias | 22 | GBSS, GBSS-I, GBSS1 | source_rapdb.irgsp_1_0_representative_annotation_20260205:22049 |
+| RAP symbol alias | 11 | GBSS, GBSS-I, GBSS1, GBSSI, OsGBSS1 | source_rapdb.irgsp_1_0_representative_annotation_20260205:22050 |
+| Approved symbol | 3 | WX1 | source_oryzabase.gene_list_en_20260802010113:705 |
+
+## 7. GO / 结构域 / 蛋白功能注释
+
+- GO（Molecular Function）：`alpha-1,4-glucan glucosyltransferase (UDP-glucose donor) activity (GO:0004373)`、`glycosyltransferase activity (GO:0016757)` [MCP-F:199:f_a6086f768a0c7b20]
+- InterPro：`Glycosyl transferase, family 1 (IPR001296)`、`Bacterial/plant glycogen synthase (IPR011835)`、`Starch synthase, catalytic domain (IPR013534)` [MCP-F:199:f_0375dbf5797dc7df]
+- MSU 注释：`starch synthase, putative, expressed` [MCP-F:199:f_d1abb1dd264f0166]
+
+## 8. 文献元数据（仅书目，不构成正文命题证据）
+
+- 2026 · Plant Biotechnol. J. · "Genetic Determinants and Breeding Strategies for Rice Cooking and Eating Quality: A Comprehensive Review." · PMID 41186968 [MCP-F:199:source_oryzabase.references#row=27739]
+- 2025 · Natl Sci Rev · "A molecular module improves rice grain quality and yield at high temperatures." · PMID 39868077 [MCP-F:199:source_oryzabase.references#row=26294]
+- 2025 · Life (Basel) · "OsMYBR1, a 1R-MYB Family Transcription Factor Regulates Starch Biosynthesis in Rice Endosperm." · PMID 40566614 [MCP-F:199:source_oryzabase.references#row=26451]
+- 2025 · Plant Biotechnol. J. · "A large-scale gene regulatory network for rice endosperm starch biosynthesis and its application in genetic improvement…" · PMID 40192301 [MCP-F:199:source_oryzabase.references#row=26558]
+- 2025 · Int J Mol Sci · "The Wx/SSIIa and GS3/GW7 Alleles, Both Individually and in Combination, Can Significantly D…" · PMID 40724975 [MCP-F:199:source_oryzabase.references#row=27582]
+- 2025 · Sci Rep · "Whole-genome polymorphisms and relatedness of rice varieties circulating in the Mediterranean market." · PMID 41249292 [MCP-F:199:source_oryzabase.references#row=27709]
+- 2025 · Nat Commun · "The bHLH transcription factor PIL1 orchestrates starch synthesis in key cereal crops." · PMID 41372211 [MCP-F:199:source_oryzabase.references#row=27851]
+- 2024 · Plant Commun · "OsLESV and OsESV1 promote transitory and storage starch biosynthesis to determine rice grain quality and yield." · PMID 38581128 [MCP-F:199:source_oryzabase.references#row=24819]
+
+## 9. 来源支持（按源表记录计数）
+
+- MSU `osa1_r7_locus_brief_info`：4 行 [MCP-F:199:f_b7c071870e467b40][MCP-F:199:f_ac2432aff3864db7][MCP-F:199:f_d3a75b8c230a636b][MCP-F:199:f_7df6da32e4ad2ba7]
+- ORYZABASE `gene_list_en_20260802010113`：1 行 [MCP-F:199:f_8a2f7d51ec3268ba]
+- ORYZABASE `rice_id_20140620174522`：4 行 [MCP-F:199:f_f6bfffb1e6a78d00][MCP-F:199:f_720275c45b73285d][MCP-F:199:f_4ec83c987fd41464][MCP-F:199:f_a96014753697cfaf]
+- RAP_DB `irgsp_1_0_representative_annotation_20260205`：2 行 [MCP-F:199:f_f1c3356e6a19ec0f][MCP-F:199:f_cddee45d234b42d1]
+- RAP_DB `rap_msu_20260205`：1 行 [MCP-F:199:f_89bbb0e11a9d8542]
+- 证据行总数：12 行 [MCP-F:199:f_b21a7d71ba6a8a4c]
+
+## 10. 来源冲突、缺失字段与提示
+
+- 跨源比对 `compare.conflicts`：空（染色体 = 6 三源一致）[MCP-F:199:f_c62e965edec3d829][MCP-F:199:f_41b2efac759d31bf]
+- `missing_sources`：无
+- 未在本档案中出现的字段——调控关系（regulators/targets）、等位变异（Wx-a/b、Wx-opaque、Wx-mq 等）、蛋白序列、变异效应——按契约第二条均不提供；如需请发起对应查询
+
+需要继续做什么？例如：
+
+- 调某条具体转录本序列（`ricekb_sequence`）
+- 比对 MSU 与 RAP_DB 在 Wx 区段的碱基（`ricekb_genome`）
+- 调 UniProt `Q0DEV5` 蛋白条目，或 NCBI Datasets WX1（gene-id 鉴定 ID）做交叉核验
+- 用 `europe_pmc_search_rest` 追某篇 PMID 的书目信息
+
+（注：以下结论未在原文中定位到对应依据，请谨慎采信以下结论、数据模式：SOURCE-ONLY、状态： FOUND （query= Wx…、实体键： RAP:Os06g0133000 ；规范 RAP…）

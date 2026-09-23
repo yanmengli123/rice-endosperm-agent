@@ -9,6 +9,11 @@ from typing import Any
 from yuxi.agents.mcp.fact_ledger import extract_number_tokens, mask_structural_number_spans
 from yuxi.knowledge.planning.turn_execution_plan import EvidenceLevel
 from yuxi.knowledge.rendering.authority_markers import authority_marker_pattern
+from yuxi.knowledge.rendering.source_answer_renderer import (
+    domain_key_for_path,
+    domain_title,
+    label_for_path,
+)
 
 _EVIDENCE_CHIP = authority_marker_pattern()
 _EVIDENCE_REF = re.compile(r"\[E\d{1,3}\]")
@@ -91,6 +96,11 @@ def _line_requires_fact_marker(line: str, *, relaxed: bool = False) -> bool:
     if not stripped or _SOURCE_ONLY.search(stripped):
         return False
     if stripped.startswith("#") or re.fullmatch(r"[| :\-]+", stripped):
+        return False
+    if re.fullmatch(r"</?(?:details|summary)(?:\s[^>]*)?/?>", stripped):
+        # 纯 HTML 折叠结构标签行（<details>/<summary>/</details>，无正文内容）
+        # 不承载事实主张——与表头/分隔线同类的结构豁免；带内容的 summary 行
+        # 不匹配 fullmatch，仍需标记。
         return False
     if not _FACT_MARKER.search(stripped) and stripped.endswith(("：", ":")) and len(stripped) <= 80:
         # 冒号结尾豁免仅限无标记的标签/结构行（"来源："）；带标记行仍承载
@@ -268,12 +278,144 @@ def _markdown_table_cell(value: Any) -> str:
     return html.escape(flattened, quote=True).replace("|", "&#124;")
 
 
+#: 降级表默认剔除的管线/元信息 path（信封内部口径，非业务事实；仍可经调用审计查阅）。
+_DEGRADED_EXCLUDED_SUFFIXES = frozenset(
+    {
+        "answer_policy",
+        "api_version",
+        "command_contract",
+        "service_version",
+        "contract_version",
+        "provider",
+        "retrieved_at",
+        "schema_version",
+        "result_count",
+        "score_version",
+        "scientific_scope",
+        "data_mode",
+    }
+)
+
+
+def _degraded_row_value(fact: dict[str, Any]) -> str | None:
+    """值视图（v4）：null/digest-only 事实返回 None（不渲染行——"非公开"是
+    语义误标，它们只是空值），不再输出"（非公开值，见审计摘要）"。"""
+    if "numeric_value" in fact:
+        return str(fact["numeric_value"])
+    if "string_value" in fact:
+        return str(fact["string_value"])
+    return None
+
+
+def _is_degraded_plumbing_row(path: str) -> bool:
+    normalized = str(path or "").strip("/")
+    if normalized.startswith("data/meta/") or normalized.startswith("meta/"):
+        return True
+    return normalized.split("/")[-1] in _DEGRADED_EXCLUDED_SUFFIXES
+
+
+#: v4 值化：审计/溯源类字段（哈希、行号、信封结构）主视图不展示，整体下沉折叠层。
+_DEGRADED_FOLDED_SUFFIXES = frozenset(
+    {
+        "sequence_sha256",
+        "content_hash",
+        "provenance_id",
+        "source_import_run_id",
+        "import_run_id",
+        "source_table",
+        "table",
+        "source_schema",
+        "schema",
+        "source_record_id",
+        "row_ref",
+        "source_ref",
+        "source_database",
+        "source",
+        "status",
+        "entity",
+        "entity_key",
+    }
+)
+_DEGRADED_FOLDED_PREFIXES = (
+    "provenance/",
+    "evidence/",
+    "query/",
+    "request/",
+    "entity/",
+    "data/provenance/",
+    "data/evidence/",
+    "data/query/",
+    "data/request/",
+    "data/entity/",
+)
+
+
+def _is_degraded_folded_row(path: str) -> bool:
+    normalized = str(path or "").strip("/")
+    if normalized.startswith("data/"):
+        normalized = normalized[len("data/") :]
+    if any(normalized.startswith(prefix) for prefix in _DEGRADED_FOLDED_PREFIXES):
+        return True
+    parts = [p for p in normalized.split("/") if not p.isdigit()]
+    return bool(parts) and parts[-1] in _DEGRADED_FOLDED_SUFFIXES
+
+
+def _degraded_field_name(path: str) -> str:
+    """主视图字段名：标签优先；未命中取去下标后的末段（确定性投影，不猜测语义）。"""
+    normalized = str(path or "").strip("/")
+    label = label_for_path(normalized)
+    if label:
+        return label
+    parts = [p for p in normalized.split("/") if not p.isdigit()]
+    return parts[-1] if parts else normalized or "/"
+
+
+def _degraded_dedupe_key(path: str, value: str) -> tuple[str, str]:
+    """同值去重键：path 去数组下标后的**末段字段名** + 值。
+
+    /entity/canonical_rap_id 与 /data/0/canonical_rap_id 的末段同为
+    canonical_rap_id——信封重复字段（entity 与 data/N 双写）同值只留一条。
+    """
+    parts = [p for p in str(path or "").strip("/").split("/") if not p.isdigit()]
+    tail = parts[-1] if parts else ""
+    return (tail, value)
+
+
+_DEGRADED_IDENTITY_PRIORITY = {
+    "gene/gene_id": 0,
+    "symbol_resolution/gene_ids": 0,
+    "primaryAccession": 1,
+    "uniProtkbId": 2,
+    "gene/symbol": 3,
+    "geneName/value": 4,
+    "organism/scientificName": 5,
+    "organism/taxonId": 6,
+    "gene/description": 7,
+    "proteinDescription/recommendedName/fullName/value": 8,
+    "sequence/length": 9,
+}
+
+
+def _degraded_fact_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
+    path = str(item[1].get("path") or "").strip("/")
+    comparable = "/".join(part for part in path.split("/") if not part.isdigit())
+    priority = min(
+        (rank for suffix, rank in _DEGRADED_IDENTITY_PRIORITY.items() if comparable.endswith(suffix)),
+        default=100,
+    )
+    return priority, path
+
+
 def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: int = 40) -> str | None:
     """Deterministically render verified facts when the model answer fails grounding.
 
     The sheet is program-generated: every value comes from the audit manifest, so
     it cannot introduce claims beyond the ledger.  Returns ``None`` when no facts
     exist (the plain failure notice stays appropriate there).
+
+    呈现收尾（v3）：业务域分组 + 人类标签（T7）；管线/元信息行默认剔除（D2）、
+    同值去重（D3）、事实预算按"信息量最大的调用优先"分配（D1）——被剔除与被
+    截断的行仍可经调用审计完整查阅。
     """
     catalog = _fact_catalog(source_uses)
     if not catalog:
@@ -304,37 +446,76 @@ def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: 
     ]
     published = 0
     truncated = False
-    for audit_id in sorted(grouped):
+    omitted_plumbing = 0
+    omitted_empty = 0
+    seen_values: set[tuple[str, str]] = set()
+    folded_rows: list[str] = []
+    # D1：信息量最大的调用优先（事实数降序），最弱调用不再耗尽 40 条预算。
+    for audit_id in sorted(grouped, key=lambda aid: -len(grouped[aid])):
         provider, operation = providers.get(audit_id, ("mcp", "tool"))
-        facts = sorted(grouped[audit_id], key=lambda item: str(item[1].get("path") or ""))
+        # T7：按业务域分组（identity→locations→annotations→…），域内按路径排序，
+        # 取代旧 path 字母序；标签来自渲染器字典（未知 path 用确定性末段名，禁止猜测语义）。
+        by_domain: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+        for fact_id, fact in grouped[audit_id]:
+            path = str(fact.get("path") or "")
+            value = _degraded_row_value(fact)
+            if value is None:
+                # v4 空值语义：null/digest-only 不渲染行（"非公开"是误标）
+                omitted_empty += 1
+                continue
+            if _is_degraded_plumbing_row(path):
+                omitted_plumbing += 1
+                continue
+            if _degraded_dedupe_key(path, value) in seen_values:
+                continue
+            if _is_degraded_folded_row(path):
+                folded_rows.append(
+                    f"- **{_markdown_table_cell(_degraded_field_name(path))}**"
+                    f"（`{_markdown_table_cell(path)}`）= {_markdown_table_cell(value)}"
+                    f" [MCP-F:{audit_id}:{fact_id}]"
+                )
+                continue
+            by_domain.setdefault(domain_key_for_path(path), []).append((fact_id, fact))
         lines.append(f"## 调用 {audit_id}：{provider}/{operation}")
         lines.append("")
-        lines.append("| 字段（事实路径） | 值 | 来源 |")
-        lines.append("| --- | --- | --- |")
-        for index, (fact_id, fact) in enumerate(facts):
-            if published >= maximum_facts:
-                lines.extend(
-                    (
-                        "| 其余事实 | 从略（超出降级渲染上限，完整清单见调用审计） | |",
-                        "",
-                    )
-                )
-                truncated = True
-                break
-            if "numeric_value" in fact:
-                value = str(fact["numeric_value"])
-            elif "string_value" in fact:
-                value = str(fact["string_value"])
-            else:
-                value = "（非公开值，见审计摘要）"
-            path = _markdown_table_cell(fact.get("path") or "/")
-            lines.append(f"| `{path}` | {_markdown_table_cell(value)} | [MCP-F:{audit_id}:{fact_id}] |")
-            published += 1
-        if not truncated:
+        for domain in sorted(by_domain):
+            lines.append(f"### {domain_title(domain)}")
             lines.append("")
+            lines.append("| 字段 | 值 | 引用 |")
+            lines.append("| --- | --- | --- |")
+            for fact_id, fact in sorted(by_domain[domain], key=_degraded_fact_sort_key):
+                if published >= maximum_facts:
+                    lines.extend(
+                        (
+                            "| 其余事实 | 从略（超出降级渲染上限，完整清单见调用审计） | |",
+                            "",
+                        )
+                    )
+                    truncated = True
+                    break
+                value = _degraded_row_value(fact) or ""
+                seen_values.add(_degraded_dedupe_key(str(fact.get("path") or ""), value))
+                field = _markdown_table_cell(_degraded_field_name(str(fact.get("path") or "")))
+                lines.append(f"| {field} | {_markdown_table_cell(value)} | [MCP-F:{audit_id}:{fact_id}] |")
+                published += 1
+            lines.append("")
+            if truncated:
+                break
         if truncated:
             break
-    lines.append("")
+    if folded_rows:
+        lines.append('<details class="yuxi-citations"><summary>溯源与审计明细</summary>')
+        lines.append("")
+        lines.extend(folded_rows)
+        lines.extend(["", "</details>", ""])
+    omissions = []
+    if omitted_plumbing:
+        omissions.append(f"{omitted_plumbing} 条管线/元信息（版本号、快照计数等）")
+    if omitted_empty:
+        omissions.append(f"{omitted_empty} 条空值/未核验")
+    if omissions:
+        lines.append(f"另有 {'、'.join(omissions)}从略，见调用审计。")
+        lines.append("")
     lines.append("局限：以上为结构化事实本身；模型叙述、派生计算与跨源比较未通过核验，不在本清单中。")
     return "\n".join(lines)
 
