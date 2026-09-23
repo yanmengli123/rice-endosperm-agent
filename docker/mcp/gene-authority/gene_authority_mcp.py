@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -28,7 +29,7 @@ from typing import Any
 
 from defusedxml import ElementTree
 
-SERVER_VERSION = "1.5.0"
+SERVER_VERSION = "1.5.1"
 SCHEMA_VERSION = "gene-authority-envelope.v1"
 NCBI_BASE = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 NCBI_EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -153,12 +154,21 @@ def _request_json(
                 _breaker_record(provider, ok=True)
                 return _envelope(provider, public_url, {}, status="NOT_FOUND", status_code=404)
             last_error = error
-            if error.code not in {429, 500, 502, 503, 504} or attempt == 2:
+            if error.code not in {429, 500, 502, 503, 504}:
+                # 4xx（404 除外）说明上游可达但请求被拒绝，不是可用性故障；
+                # 不得用调用方参数/权限错误污染 provider 熔断计数。
+                _breaker_record(provider, ok=True)
+                raise AuthorityError(f"{provider} request rejected: HTTP {error.code}") from error
+            if attempt == 2:
                 break
         except (urllib.error.URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as error:
             last_error = error
             if attempt == 2:
                 break
+        except AuthorityError as error:
+            # 响应超限/结构异常属于 provider 协议失败；释放半开探针并计入熔断。
+            last_error = error
+            break
         time.sleep(0.5 * (2**attempt))
     _breaker_record(provider, ok=False)
     raise AuthorityError(f"{provider} request failed after bounded retries: {type(last_error).__name__}")
@@ -172,26 +182,49 @@ def _request_json(
 
 _BREAKER_THRESHOLD = 5
 _BREAKER_COOLDOWN_SECONDS = 60.0
-_BREAKER_STATE: dict[str, dict[str, float]] = {}
+_BREAKER_STATE: dict[str, dict[str, float | bool]] = {}
+_BREAKER_LOCK = threading.Lock()
 
 
 def _breaker_allows(provider: str) -> bool:
-    state = _BREAKER_STATE.get(provider)
-    if not state:
+    with _BREAKER_LOCK:
+        state = _BREAKER_STATE.get(provider)
+        if not state:
+            return True
+        open_until = float(state.get("open_until", 0.0))
+        if open_until <= 0.0:
+            return True
+        if time.monotonic() < open_until:
+            return False
+        # 冷却期结束只允许一个半开探针；并发请求继续快速失败，避免故障源
+        # 恢复瞬间被请求洪峰击穿。
+        if bool(state.get("half_open_in_flight", False)):
+            return False
+        state["half_open_in_flight"] = True
         return True
-    return time.monotonic() >= state.get("open_until", 0.0)
 
 
 def _breaker_record(provider: str, *, ok: bool) -> None:
-    state = _BREAKER_STATE.setdefault(provider, {"consecutive_failures": 0.0, "open_until": 0.0})
-    if ok:
-        state["consecutive_failures"] = 0.0
-        state["open_until"] = 0.0
-        return
-    state["consecutive_failures"] += 1
-    if state["consecutive_failures"] >= _BREAKER_THRESHOLD:
-        state["open_until"] = time.monotonic() + _BREAKER_COOLDOWN_SECONDS
-        state["consecutive_failures"] = 0.0
+    with _BREAKER_LOCK:
+        state = _BREAKER_STATE.setdefault(
+            provider,
+            {"consecutive_failures": 0.0, "open_until": 0.0, "half_open_in_flight": False},
+        )
+        was_half_open = bool(state.get("half_open_in_flight", False))
+        state["half_open_in_flight"] = False
+        if ok:
+            state["consecutive_failures"] = 0.0
+            state["open_until"] = 0.0
+            return
+        if was_half_open:
+            # 半开探针失败必须立即重新开闸，不能退回“再累计 5 次”。
+            state["consecutive_failures"] = 0.0
+            state["open_until"] = time.monotonic() + _BREAKER_COOLDOWN_SECONDS
+            return
+        state["consecutive_failures"] = float(state.get("consecutive_failures", 0.0)) + 1
+        if state["consecutive_failures"] >= _BREAKER_THRESHOLD:
+            state["open_until"] = time.monotonic() + _BREAKER_COOLDOWN_SECONDS
+            state["consecutive_failures"] = 0.0
 
 
 def _has_records(payload: dict[str, Any]) -> bool:
@@ -274,6 +307,7 @@ def ncbi_gene_report_rest(
     page_size: int = 20,
 ) -> dict[str, Any]:
     kind = _identifier_type(identifier_type)
+    bounded_page_size = _bounded_int("page_size", page_size, 1, 100)
     resolution: dict[str, Any] | None = None
     lookup_identifiers = identifiers
     if kind == "symbol":
@@ -293,7 +327,7 @@ def ncbi_gene_report_rest(
         result = _request_json(
             "NCBI_DATASETS",
             NCBI_BASE + path,
-            params={"page_size": _bounded_int("page_size", page_size, 1, 100)},
+            params={"page_size": bounded_page_size},
         )
     except AuthorityError as rest_error:
         # REST 在有限重试后仍失败（远端断连/限流）：回退到固定版官方 CLI 取
@@ -306,8 +340,8 @@ def ncbi_gene_report_rest(
                 "used_cli": True,
                 "rest_error": str(rest_error)[:200],
             }
-        except AuthorityError:
-            raise
+        except AuthorityError as cli_error:
+            raise AuthorityError("NCBI Datasets REST and CLI are both unavailable") from cli_error
     if resolution is not None:
         result.setdefault("data", {})["symbol_resolution"] = resolution
         result["answer_policy"] = (
@@ -339,6 +373,8 @@ def _run_datasets(arguments: list[str]) -> subprocess.CompletedProcess[str]:
         )
     except subprocess.TimeoutExpired as error:
         raise AuthorityError(f"NCBI Datasets CLI timed out after {CLI_TIMEOUT_SECONDS}s") from error
+    except OSError as error:
+        raise AuthorityError("NCBI Datasets CLI could not be started") from error
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout or "unknown CLI failure").strip()[:1000]
         raise AuthorityError(f"NCBI Datasets CLI rejected the bounded request: {message}")
@@ -371,7 +407,10 @@ def ncbi_gene_summary_cli(
     records: list[dict[str, Any]] = []
     for line in completed.stdout.splitlines():
         if line.strip():
-            value = json.loads(line)
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise AuthorityError("NCBI Datasets CLI returned malformed JSON Lines") from error
             if isinstance(value, dict):
                 records.append(value)
     return {

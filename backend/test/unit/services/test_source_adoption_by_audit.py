@@ -66,6 +66,7 @@ def test_negative_status_from_fact_manifest_not_adopted():
     manifest = _manifest()
     _append_mcp_source_uses(manifest, audits=[audit], matched_ids={106})
     assert manifest.source_uses[0].adopted is False
+    assert manifest.source_uses[0].status == "NOT_FOUND"
 
 
 def test_failed_audit_not_adopted():

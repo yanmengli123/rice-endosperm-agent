@@ -1,9 +1,9 @@
 """每日 MCP live canary：离线契约证明不了远程持续可用，本服务补位。
 
 定位（企业级观测闭环）：
-- 每台启用且 READY 的服务器跑两级探针——**连通级**（host.discover：可达性
-  与工具清单）与**数据级**（已知参数形态的真实调用，当前覆盖 gene-authority
-  的 Europe PMC 检索；探针表按服务器扩展，参数形态确证一个加一个）；
+- default-chatbot 的七个科研 MCP 跑两级探针——**连通级**（host.discover：
+  可达性与工具清单）与**数据级**（真实调用 + 黄金标志校验）；通用 UI 工具
+  扩展不混入科研来源 SLO；
 - 指标走 trace 事件（`mcp.canary.probe` / `mcp.canary.completed`）：
   成功率、空结果率、p95 延迟——复用现有轨迹查询即可观测，不引入新指标面；
 - canary 失败绝不告警风暴：结果只落轨迹与日志，由监控侧按 success_rate
@@ -17,17 +17,61 @@
 from __future__ import annotations
 
 import time
+import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from yuxi.utils import logger
 
-#: 数据级探针表：slug → (tool_name, args)。只登记参数形态已确证的工具；
-#: 未登记的服务只跑连通级探针。
-CANARY_DATA_PROBES: dict[str, tuple[str, dict[str, Any]]] = {
-    "gene-authority": ("europe_pmc_search_rest", {"query": "WAXY rice endosperm", "page_size": 1}),
+@dataclass(frozen=True)
+class CanaryDataProbe:
+    tool_name: str
+    arguments: dict[str, Any]
+    expected_markers: tuple[str, ...]
+
+
+#: 本 canary 的健康域是 default-chatbot 绑定的七个科研 MCP；memory/filesystem/
+#: fetch/chart 等通用扩展依赖临时 npm/PyPI 安装，不属于科研来源 SLO，混入会把
+#: 包镜像网络抖动错误计算为权威数据源故障。
+CANARY_SERVER_SLUGS = frozenset(
+    {"ricekb", "bio-mcp", "ricekb-profile", "gramene", "plant-genomics", "data-aggregator", "gene-authority"}
+)
+
+#: 数据级黄金探针：除工具成功外，还要求返回稳定的已知标志，防止 HTTP 200/
+#: 空对象被误报健康。参数均经过 live 验证，并保持有界结果集。
+CANARY_DATA_PROBES: dict[str, CanaryDataProbe] = {
+    "ricekb": CanaryDataProbe("ricekb_resolve", {"query": "Wx", "limit": 3}, ("Os06g0133000",)),
+    "bio-mcp": CanaryDataProbe(
+        "plant_gene_lookup",
+        {"symbol": "Os06g0133000", "species": "oryza_sativa"},
+        ("Os06g0133000", "chr6"),
+    ),
+    "ricekb-profile": CanaryDataProbe(
+        "ricekb_gene_profile", {"identifier": "Wx"}, ("\"status\": \"FOUND\"", "Os06g0133000")
+    ),
+    "gramene": CanaryDataProbe(
+        "genes_in_region",
+        {"region": "6", "start": 1_750_000, "end": 1_780_000, "taxon_id": 4530, "rows": 10},
+        ("Os06g0133000",),
+    ),
+    "plant-genomics": CanaryDataProbe(
+        "ensembl_plants_lookup_locus",
+        {"locus": "Os06g0133000", "organism": "oryza_sativa"},
+        ("Os06g0133000", "WX1"),
+    ),
+    "data-aggregator": CanaryDataProbe(
+        "search",
+        {"query": "WAXY rice endosperm", "size": 1, "sources": ["literature"]},
+        ("\"count\": 1", "pubmed:"),
+    ),
+    "gene-authority": CanaryDataProbe(
+        "europe_pmc_search_rest",
+        {"query": "WAXY rice endosperm", "page_size": 1},
+        ("WAXY", "resultList"),
+    ),
 }
 
-_EMPTY_RESULT_STATUSES = frozenset({"NOT_FOUND", "NO_EVIDENCE"})
+_EMPTY_RESULT_STATUSES = frozenset({"NOT_FOUND", "NO_EVIDENCE", "EMPTY", "CONTRACT_MISMATCH"})
 
 
 def _p95(samples: list[float]) -> int:
@@ -50,111 +94,142 @@ async def _probe_data(slug: str, runtime_config: dict[str, Any]) -> tuple[bool, 
     """数据级探针：真实调用一个已知参数形态的工具，返回 (ok, provider_status, elapsed_ms)。"""
     from yuxi.agents.mcp.host import get_host
 
-    tool_name, args = CANARY_DATA_PROBES[slug]
+    probe = CANARY_DATA_PROBES[slug]
     started = time.monotonic()
-    result = await get_host().call_tool(slug, runtime_config, tool_name, dict(args))
+    result = await get_host().call_tool(slug, runtime_config, probe.tool_name, dict(probe.arguments))
     elapsed = int((time.monotonic() - started) * 1000)
     status = str((result.provenance or {}).get("provider_status") or ("ERROR" if result.is_error else "OK"))
-    return (not result.is_error), status, elapsed
+    if result.is_error or status.upper() in _EMPTY_RESULT_STATUSES:
+        return False, status, elapsed
+    text = str(result.text or "")
+    if not text.strip():
+        return False, "EMPTY", elapsed
+    folded = text.casefold()
+    if not all(marker.casefold() in folded for marker in probe.expected_markers):
+        return False, "CONTRACT_MISMATCH", elapsed
+    return True, status, elapsed
 
 
 async def run_mcp_live_canary() -> dict[str, Any]:
     """跑一轮全部服务器的 live canary，返回汇总（同时落 trace 事件）。"""
-    from sqlalchemy import select
-    from yuxi.agents.mcp.domain import McpLifecycleStatus
     from yuxi.agents.mcp.execution import McpExecutionContext, reset_mcp_execution_context, set_mcp_execution_context
     from yuxi.agents.mcp.service import build_runtime_config, get_enabled_mcp_server_config
     from yuxi.storage.postgres.manager import pg_manager
-    from yuxi.storage.postgres.models_business import MCPServer
+    from yuxi.storage.postgres.models_business import AgentRun
     from yuxi.trace import emit_trace
+    from yuxi.trace.recorder import TraceRecorder
 
-    token = set_mcp_execution_context(McpExecutionContext(tenant_id=1, uid="system:canary", run_id=None))
-    probe_latencies: list[float] = []
-    ok_count = 0
-    server_count = 0
-    empty_result_count = 0
+    # cron 不在聊天 run 上下文中；裸 emit_trace 会直接 no-op。为每轮 canary
+    # 创建一个终态 system run，使用 ADMIN 可见轨迹持久化探针与汇总指标，且
+    # 不向用户聊天流推送这些运维事件。
+    canary_run_id = f"mcp-canary-{uuid.uuid4().hex}"
+    recorder = TraceRecorder(
+        run_id=canary_run_id,
+        thread_id=canary_run_id,
+        tenant_id=1,
+        uid="system:canary",
+        agent_slug="system-mcp-canary",
+        run_type="mcp_canary",
+        request_id=canary_run_id,
+    )
+    recorder.activate()
     try:
-        async with pg_manager.get_async_session_context() as session:
-            servers = (
-                (
-                    await session.execute(
-                        select(MCPServer.slug).where(
-                            MCPServer.enabled == 1,
-                            MCPServer.lifecycle_status == McpLifecycleStatus.READY.value,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        for slug in [slug for slug in servers if isinstance(slug, str) and slug]:
-            server_count += 1
-            started = time.monotonic()
-            ok = False
-            provider_status = ""
-            tool_count = 0
-            error = ""
-            try:
-                config = await get_enabled_mcp_server_config(slug)
-                if config is None:
-                    error = "server config unavailable"
-                else:
-                    runtime_config = build_runtime_config(slug, config)
-                    ok, tool_count, error = await _probe_discovery(slug, runtime_config)
-                    if ok and slug in CANARY_DATA_PROBES:
-                        data_ok, provider_status, data_elapsed = await _probe_data(slug, runtime_config)
-                        ok = data_ok
-                        probe_latencies.append(float(data_elapsed))
-                        if provider_status in _EMPTY_RESULT_STATUSES:
-                            empty_result_count += 1
-                    elif ok:
-                        probe_latencies.append((time.monotonic() - started) * 1000)
-            except Exception as exc:  # noqa: BLE001 —— canary 探针失败是数据点，不是任务失败
-                ok = False
-                error = f"{type(exc).__name__}: {exc}"[:200]
-                provider_status = provider_status or "UNAVAILABLE"
-            if ok:
-                ok_count += 1
-            try:
-                emit_trace(
-                    category="MCP",
-                    operation="canary",
-                    event_type="mcp.canary.probe",
-                    attributes={
-                        "mcp_server": slug,
-                        "probe": "discovery+data" if slug in CANARY_DATA_PROBES else "discovery",
-                        "ok": ok,
-                        "provider_status": provider_status or "OK",
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "tool_count": tool_count,
-                        "error": error,
-                    },
-                    visibility="USER",
-                )
-            except Exception:  # noqa: BLE001 —— 轨迹绝不影响 canary
-                pass
-    finally:
-        reset_mcp_execution_context(token)
-
-    summary = {
-        "server_count": server_count,
-        "ok_count": ok_count,
-        "success_rate": round(ok_count / server_count, 4) if server_count else 0.0,
-        "p95_latency_ms": _p95(probe_latencies),
-        "empty_result_count": empty_result_count,
-    }
-    try:
-        emit_trace(
-            category="MCP",
-            operation="canary",
-            event_type="mcp.canary.completed",
-            attributes=summary,
-            visibility="USER",
+        token = set_mcp_execution_context(
+            McpExecutionContext(tenant_id=1, uid="system:canary", run_id=canary_run_id)
         )
-    except Exception:  # noqa: BLE001
-        pass
-    logger.info(f"MCP live canary completed: {summary}")
-    return summary
+        probe_latencies: list[float] = []
+        ok_count = 0
+        server_count = 0
+        empty_result_count = 0
+        try:
+            # 遍历 SLO 期望集合，而不是只 SELECT enabled+READY：未安装、被禁用
+            # 或生命周期退化都必须作为失败计入，不能从分母消失后形成“6/6 健康”。
+            for slug in sorted(CANARY_SERVER_SLUGS):
+                server_count += 1
+                started = time.monotonic()
+                ok = False
+                provider_status = ""
+                tool_count = 0
+                error = ""
+                try:
+                    config = await get_enabled_mcp_server_config(slug)
+                    if config is None:
+                        error = "server config unavailable"
+                    else:
+                        runtime_config = build_runtime_config(slug, config)
+                        ok, tool_count, error = await _probe_discovery(slug, runtime_config)
+                        if ok and slug in CANARY_DATA_PROBES:
+                            data_ok, provider_status, data_elapsed = await _probe_data(slug, runtime_config)
+                            ok = data_ok
+                            probe_latencies.append(float(data_elapsed))
+                            if provider_status in _EMPTY_RESULT_STATUSES:
+                                empty_result_count += 1
+                        elif ok:
+                            probe_latencies.append((time.monotonic() - started) * 1000)
+                except Exception as exc:  # noqa: BLE001 —— canary 探针失败是数据点，不是任务失败
+                    ok = False
+                    error = f"{type(exc).__name__}: {exc}"[:200]
+                    provider_status = provider_status or "UNAVAILABLE"
+                if ok:
+                    ok_count += 1
+                try:
+                    emit_trace(
+                        category="MCP",
+                        operation="canary",
+                        event_type="mcp.canary.probe",
+                        attributes={
+                            "mcp_server": slug,
+                            "probe": "discovery+data" if slug in CANARY_DATA_PROBES else "discovery",
+                            "ok": ok,
+                            "provider_status": provider_status or "OK",
+                            "elapsed_ms": int((time.monotonic() - started) * 1000),
+                            "tool_count": tool_count,
+                            "error": error,
+                        },
+                        visibility="ADMIN",
+                    )
+                except Exception:  # noqa: BLE001 —— 轨迹绝不影响 canary
+                    pass
+        finally:
+            reset_mcp_execution_context(token)
+
+        summary = {
+            "server_count": server_count,
+            "ok_count": ok_count,
+            "success_rate": round(ok_count / server_count, 4) if server_count else 0.0,
+            "p95_latency_ms": _p95(probe_latencies),
+            "empty_result_count": empty_result_count,
+        }
+        try:
+            emit_trace(
+                category="MCP",
+                operation="canary",
+                event_type="mcp.canary.completed",
+                attributes=summary,
+                visibility="ADMIN",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Trace 投影/Outbox 对 agent_runs 有外键：flush 前登记终态 system run。
+        async with pg_manager.get_async_session_context() as session:
+            session.add(
+                AgentRun(
+                    tenant_id=1,
+                    id=canary_run_id,
+                    conversation_thread_id=canary_run_id,
+                    agent_slug="system-mcp-canary",
+                    uid="system:canary",
+                    status="completed",
+                    request_id=canary_run_id,
+                    run_type="mcp_canary",
+                    input_payload={"canary_summary": summary},
+                )
+            )
+        logger.info(f"MCP live canary completed: {summary}")
+        return summary
+    finally:
+        await recorder.finalize()
 
 
-__all__ = ["CANARY_DATA_PROBES", "run_mcp_live_canary"]
+__all__ = ["CANARY_DATA_PROBES", "CANARY_SERVER_SLUGS", "CanaryDataProbe", "run_mcp_live_canary"]

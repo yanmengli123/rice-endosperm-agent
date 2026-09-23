@@ -193,12 +193,33 @@ class CircuitBreakerAndCliFallbackContract(unittest.TestCase):
             sources._breaker_record("NCBI_DATASETS", ok=False)
         self.assertFalse(sources._breaker_allows("NCBI_DATASETS"))
         # 冷却结束（模拟时间流逝）→ 半开放行
-        sources._BREAKER_STATE["NCBI_DATASETS"]["open_until"] = 0.0
+        sources._BREAKER_STATE["NCBI_DATASETS"]["open_until"] = sources.time.monotonic() - 1.0
         self.assertTrue(sources._breaker_allows("NCBI_DATASETS"))
+        # 半开只准一个试探请求，第二个并发请求仍快速失败。
+        self.assertFalse(sources._breaker_allows("NCBI_DATASETS"))
         # 成功即复位
-        sources._breaker_record("NCBI_DATASETS", ok=False)
         sources._breaker_record("NCBI_DATASETS", ok=True)
         self.assertEqual(sources._BREAKER_STATE["NCBI_DATASETS"]["consecutive_failures"], 0)
+        self.assertTrue(sources._breaker_allows("NCBI_DATASETS"))
+
+    def test_failed_half_open_probe_reopens_immediately(self):
+        for _ in range(sources._BREAKER_THRESHOLD):
+            sources._breaker_record("NCBI_DATASETS", ok=False)
+        sources._BREAKER_STATE["NCBI_DATASETS"]["open_until"] = sources.time.monotonic() - 1.0
+        self.assertTrue(sources._breaker_allows("NCBI_DATASETS"))
+        sources._breaker_record("NCBI_DATASETS", ok=False)
+        self.assertFalse(sources._breaker_allows("NCBI_DATASETS"))
+
+    def test_non_transient_http_error_does_not_poison_breaker(self):
+        error = sources.urllib.error.HTTPError(
+            sources.NCBI_BASE + "/gene", 400, "bad request", hdrs=None, fp=None
+        )
+        with patch.object(sources.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(sources.AuthorityError) as ctx:
+                sources._request_json("NCBI_DATASETS", sources.NCBI_BASE + "/gene")
+        self.assertIn("HTTP 400", str(ctx.exception))
+        state = sources._BREAKER_STATE["NCBI_DATASETS"]
+        self.assertEqual(state["consecutive_failures"], 0)
         self.assertTrue(sources._breaker_allows("NCBI_DATASETS"))
 
     def test_open_breaker_fails_fast_without_network(self):
@@ -245,6 +266,27 @@ class CircuitBreakerAndCliFallbackContract(unittest.TestCase):
         ):
             with self.assertRaises(sources.AuthorityError):
                 sources.ncbi_gene_report_rest(["4340018"], identifier_type="gene-id")
+
+    def test_invalid_page_size_never_invokes_rest_or_cli(self):
+        with patch.object(sources, "_request_json") as request, patch.object(
+            sources, "ncbi_gene_summary_cli"
+        ) as cli:
+            with self.assertRaises(sources.AuthorityError):
+                sources.ncbi_gene_report_rest(["4340018"], identifier_type="gene-id", page_size=0)
+        request.assert_not_called()
+        cli.assert_not_called()
+
+    def test_cli_start_and_json_failures_are_normalized(self):
+        with patch.object(sources.subprocess, "run", side_effect=FileNotFoundError("datasets")):
+            with self.assertRaisesRegex(sources.AuthorityError, "could not be started"):
+                sources._run_datasets(["summary", "gene", "gene-id", "4340018"])
+
+        completed = sources.subprocess.CompletedProcess(
+            args=["datasets"], returncode=0, stdout="not-json\n", stderr=""
+        )
+        with patch.object(sources, "_run_datasets", return_value=completed):
+            with self.assertRaisesRegex(sources.AuthorityError, "malformed JSON Lines"):
+                sources.ncbi_gene_summary_cli(["4340018"])
 
 
 if __name__ == "__main__":

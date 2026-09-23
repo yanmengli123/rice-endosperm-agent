@@ -148,7 +148,15 @@ def test_settle_status_completes_when_not_degraded():
 
 def test_settle_status_signals_failure_answer_without_touching_status():
     manifest = _manifest(status="SOURCE_UNAVAILABLE")
-    assert _settle_source_manifest_status(SimpleNamespace(requires_mcp=True), manifest, False) is True
+    plan = SimpleNamespace(requires_mcp=True, answer=SimpleNamespace(mode="STRUCTURED_DATA_ANSWER"))
+    assert _settle_source_manifest_status(plan, manifest, False) is True
+    assert manifest.status == "SOURCE_UNAVAILABLE"
+
+
+def test_settle_status_keeps_value_only_failure_for_five_state_rendering():
+    manifest = _manifest(status="SOURCE_UNAVAILABLE")
+    plan = SimpleNamespace(requires_mcp=True, answer=SimpleNamespace(mode="MCP_VALUE_ONLY"))
+    assert _settle_source_manifest_status(plan, manifest, False) is False
     assert manifest.status == "SOURCE_UNAVAILABLE"
 
 

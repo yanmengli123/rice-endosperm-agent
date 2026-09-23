@@ -800,7 +800,10 @@ def _append_mcp_source_uses(
                 ),
                 provider_id=str(audit.server_slug),
                 operation=str(audit.capability_name),
-                status=str((audit.provenance or {}).get("provider_status") or audit.status).upper(),
+                # 使用上面已按 structured_content → fact_manifest → audit status
+                # 归一后的权威状态；否则 legacy NOT_FOUND 会在这里退化成 SUCCESS，
+                # 最终五态视图无法区分“未找到”和“无可发布值”。
+                status=provider_status,
                 request_digest=audit.arguments_digest,
                 result_digest=audit.result_digest,
                 evidence_ids=[source_use_id] if adopted else [],
@@ -1362,8 +1365,11 @@ def _settle_source_manifest_status(
     mention 后验写入的 ``DEGRADED`` 不能被能力级 ``COMPLETED`` 覆写——
     「等价能力的其他服务器成功过」不等于「用户指定的服务器被调用过」。
     """
+    answer_mode = str(getattr(getattr(plan, "answer", None), "mode", ""))
     if plan.requires_mcp and not mcp_source_valid:
-        return True
+        # 值答案失败轮保留 SOURCE_UNAVAILABLE，让后续五态视图区分
+        # UNAVAILABLE / NOT_FOUND；其他回答模式仍走既有计划失败文案。
+        return answer_mode != "MCP_VALUE_ONLY"
     if plan.requires_mcp and manifest.status != "DEGRADED":
         manifest.status = "COMPLETED"
     return False

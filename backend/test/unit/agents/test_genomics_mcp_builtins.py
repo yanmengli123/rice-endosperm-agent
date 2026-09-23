@@ -70,6 +70,15 @@ def test_genomics_runtime_requires_matching_launcher_probe(monkeypatch):
     assert mcp_service._genomics_mcp_runtime_ready(slug) is False
 
 
+def test_gene_authority_catalog_runtime_and_launcher_versions_are_synchronized():
+    """目录 source_ref、运行时镜像与受管启动器必须同版，禁止半边升级。"""
+    config = mcp_service._DEFAULT_MCP_SERVERS["gene-authority"]
+    _env_name, image, revision = mcp_service._GENOMICS_MCP_RUNTIMES["gene-authority"]
+    assert config["source_ref"] == "builtin:gene-authority@1.5.1+ncbi-datasets-18.37.0"
+    assert image == "yuxi-gene-authority:1.5.1"
+    assert revision == "gene-authority-1.5.1+ncbi-datasets-18.37.0"
+
+
 def test_gene_authority_interval_is_deterministic_and_coordinate_explicit():
     module = _load_gene_authority()
     inclusive = module.verify_genomic_interval(1770556, 1770653)

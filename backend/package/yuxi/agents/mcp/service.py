@@ -212,7 +212,7 @@ _DEFAULT_MCP_SERVERS = {
         "data_access_level": McpDataAccessLevel.PUBLIC.value,
         "dependency_mode": McpDependencyMode.AUTHORITATIVE.value,
         "source_type": SOURCE_TYPE_BUILTIN,
-        "source_ref": "builtin:gene-authority@1.4.0+ncbi-datasets-18.37.0",
+        "source_ref": "builtin:gene-authority@1.5.1+ncbi-datasets-18.37.0",
     },
     "plant-genomics": {
         "name": "Plant Genomics MCP",
@@ -344,8 +344,8 @@ _UNSET_SENTINEL = object()
 _GENOMICS_MCP_RUNTIMES: dict[str, tuple[str, str, str]] = {
     "gene-authority": (
         "YUXI_GENE_AUTHORITY_IMAGE",
-        "yuxi-gene-authority:1.4.0",
-        "gene-authority-1.4.0+ncbi-datasets-18.37.0",
+        "yuxi-gene-authority:1.5.1",
+        "gene-authority-1.5.1+ncbi-datasets-18.37.0",
     ),
     "data-aggregator": (
         "YUXI_DATA_AGGREGATOR_IMAGE",
