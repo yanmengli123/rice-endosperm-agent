@@ -28,7 +28,7 @@ from typing import Any
 
 from defusedxml import ElementTree
 
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.3.0"
 SCHEMA_VERSION = "gene-authority-envelope.v1"
 NCBI_BASE = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 NCBI_EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -46,7 +46,10 @@ ARTICLE_SOURCE_RE = re.compile(r"^[A-Z]{3,12}$")
 ARTICLE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 IDENTIFIER_TYPES = ("gene-id", "symbol", "accession")
 GENE_INCLUDE_VALUES = ("none", "gene", "rna", "cds", "protein")
-ENTREZ_DATABASES = ("pubmed", "pmc", "gds", "sra", "bioproject")
+ENTREZ_DATABASES = ("gene", "pubmed", "pmc", "gds", "sra", "bioproject")
+UNIPROT_IDENTITY_FIELDS = (
+    "accession,id,gene_names,organism_name,protein_name,reviewed,length,xref_geneid"
+)
 ENTREZ_ID_RE = re.compile(r"^[0-9]{1,18}$")
 PXD_RE = re.compile(r"^PXD[0-9]{6,12}$", re.I)
 PMCID_RE = re.compile(r"^PMC[0-9]{1,12}$", re.I)
@@ -157,6 +160,10 @@ def _request_json(
 
 
 def _has_records(payload: dict[str, Any]) -> bool:
+    # NCBI Datasets may return HTTP 200 with only a structured error in
+    # ``messages``. That is not a record and must never be promoted to FOUND.
+    if not payload or payload.get("error") or payload.get("errors"):
+        return False
     if isinstance(payload.get("esearchresult"), dict):
         return int(payload["esearchresult"].get("count") or 0) > 0
     for key in ("reports", "results", "resultList"):
@@ -167,7 +174,9 @@ def _has_records(payload: dict[str, Any]) -> bool:
             nested = value.get("result")
             if isinstance(nested, list) and nested:
                 return True
-    return bool(payload) and payload.get("total_count") not in {0, "0"}
+    if set(payload) <= {"messages", "warnings"}:
+        return False
+    return payload.get("total_count") not in {0, "0"}
 
 
 def _envelope(
@@ -189,18 +198,74 @@ def _envelope(
     }
 
 
+def _resolve_gene_symbols(identifiers: list[str], taxon: str | None) -> tuple[list[str], dict[str, Any]]:
+    """Resolve bounded symbols through official Entrez Gene before exact Datasets lookup.
+
+    NCBI Datasets' symbol endpoint does not reliably resolve historical aliases such
+    as rice ``Wx``.  Entrez Gene is the official discovery layer for that alias;
+    every returned numeric ID is subsequently verified against Datasets, so a
+    discovery hit alone is never published as the final record.
+    """
+    symbols = _identifiers(identifiers)
+    taxon_value = _bounded_text("taxon", taxon or "", 100)
+    if not IDENTIFIER_RE.fullmatch(taxon_value.replace(" ", "_")):
+        raise AuthorityError("taxon contains unsupported characters")
+    organism_term = f"txid{taxon_value}[Organism]" if taxon_value.isdigit() else f"{taxon_value}[Organism]"
+    resolved_ids: list[str] = []
+    queries: list[dict[str, Any]] = []
+    for symbol in symbols:
+        term = f"{symbol}[Gene Name] AND {organism_term}"
+        discovery = ncbi_eutils_search_rest("gene", term, retmax=20)
+        ids = [
+            item
+            for item in discovery.get("data", {}).get("esearchresult", {}).get("idlist", [])
+            if isinstance(item, str) and ENTREZ_ID_RE.fullmatch(item)
+        ]
+        resolved_ids.extend(ids)
+        queries.append({"symbol": symbol, "term": term, "gene_ids": ids})
+    return list(dict.fromkeys(resolved_ids)), {
+        "method": "NCBI_EUTILS_ESEARCH_GENE",
+        "requested_symbols": symbols,
+        "taxon": taxon_value,
+        "gene_ids": list(dict.fromkeys(resolved_ids)),
+        "queries": queries,
+    }
+
+
 def ncbi_gene_report_rest(
     identifiers: list[str],
     identifier_type: str = "gene-id",
     taxon: str | None = None,
     page_size: int = 20,
 ) -> dict[str, Any]:
-    path = _gene_path(identifier_type, identifiers, taxon, "dataset_report")
-    return _request_json(
+    kind = _identifier_type(identifier_type)
+    resolution: dict[str, Any] | None = None
+    lookup_identifiers = identifiers
+    if kind == "symbol":
+        lookup_identifiers, resolution = _resolve_gene_symbols(identifiers, taxon)
+        if not lookup_identifiers:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "status": "NOT_FOUND",
+                "provider": "NCBI_DATASETS",
+                "retrieved_at": _now(),
+                "data": {"reports": [], "symbol_resolution": resolution},
+                "answer_policy": "No official Entrez Gene ID was resolved; do not infer a Datasets record.",
+            }
+        kind = "gene-id"
+    path = _gene_path(kind, lookup_identifiers, None, "dataset_report")
+    result = _request_json(
         "NCBI_DATASETS",
         NCBI_BASE + path,
         params={"page_size": _bounded_int("page_size", page_size, 1, 100)},
     )
+    if resolution is not None:
+        result.setdefault("data", {})["symbol_resolution"] = resolution
+        result["answer_policy"] = (
+            "The symbol was discovered through Entrez Gene and the returned numeric ID was verified "
+            "against this exact NCBI Datasets record; publish only returned fields."
+        )
+    return result
 
 
 def _cli_base(identifier_type: str, identifiers: list[str], taxon: str | None) -> list[str]:
@@ -236,7 +301,23 @@ def _run_datasets(arguments: list[str]) -> subprocess.CompletedProcess[str]:
 def ncbi_gene_summary_cli(
     identifiers: list[str], identifier_type: str = "gene-id", taxon: str | None = None
 ) -> dict[str, Any]:
-    args = ["summary", "gene", *_cli_base(identifier_type, identifiers, taxon), "--as-json-lines"]
+    kind = _identifier_type(identifier_type)
+    resolution: dict[str, Any] | None = None
+    lookup_identifiers = identifiers
+    if kind == "symbol":
+        lookup_identifiers, resolution = _resolve_gene_symbols(identifiers, taxon)
+        if not lookup_identifiers:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "status": "NOT_FOUND",
+                "provider": "NCBI_DATASETS_CLI",
+                "retrieved_at": _now(),
+                "command_contract": "Entrez symbol resolution -> datasets summary gene-id --as-json-lines",
+                "data": {"reports": [], "symbol_resolution": resolution},
+                "answer_policy": "No official Entrez Gene ID was resolved; do not infer a CLI record.",
+            }
+        kind = "gene-id"
+    args = ["summary", "gene", *_cli_base(kind, lookup_identifiers, None), "--as-json-lines"]
     completed = _run_datasets(args)
     records: list[dict[str, Any]] = []
     for line in completed.stdout.splitlines():
@@ -250,8 +331,16 @@ def ncbi_gene_summary_cli(
         "provider": "NCBI_DATASETS_CLI",
         "retrieved_at": _now(),
         "command_contract": "datasets summary gene <allowlisted-selector> --as-json-lines",
-        "data": {"reports": records},
-        "answer_policy": "Publish only returned CLI fields; do not infer missing records.",
+        "data": {
+            "reports": records,
+            **({"symbol_resolution": resolution} if resolution is not None else {}),
+        },
+        "answer_policy": (
+            "The symbol was discovered through Entrez Gene and verified by the pinned Datasets CLI; "
+            "publish only returned CLI fields."
+            if resolution is not None
+            else "Publish only returned CLI fields; do not infer missing records."
+        ),
     }
 
 
@@ -310,17 +399,26 @@ def uniprot_entry_rest(accession: str) -> dict[str, Any]:
     value = _bounded_text("accession", accession, 25).upper()
     if not UNIPROT_ACCESSION_RE.fullmatch(value):
         raise AuthorityError("accession is not a valid bounded UniProt accession")
-    return _request_json("UNIPROT", f"{UNIPROT_BASE}/uniprotkb/{urllib.parse.quote(value, safe='')}.json")
+    return _request_json(
+        "UNIPROT",
+        f"{UNIPROT_BASE}/uniprotkb/{urllib.parse.quote(value, safe='')}.json",
+        params={"fields": UNIPROT_IDENTITY_FIELDS},
+    )
 
 
-def uniprot_search_rest(query: str, size: int = 10, reviewed_only: bool = False) -> dict[str, Any]:
+def uniprot_search_rest(query: str, size: int = 10, reviewed_only: bool = True) -> dict[str, Any]:
     value = _bounded_text("query", query, 500)
     if reviewed_only:
         value = f"({value}) AND reviewed:true"
     return _request_json(
         "UNIPROT",
         f"{UNIPROT_BASE}/uniprotkb/search",
-        params={"query": value, "format": "json", "size": _bounded_int("size", size, 1, 50)},
+        params={
+            "query": value,
+            "format": "json",
+            "size": _bounded_int("size", size, 1, 50),
+            "fields": UNIPROT_IDENTITY_FIELDS,
+        },
     )
 
 
@@ -590,6 +688,9 @@ def build_server():
         "gene-authority",
         instructions=(
             "Authoritative, read-only gene/protein/literature access. Use exact identifiers and taxa. "
+            "For a gene symbol, resolve its numeric NCBI Gene ID with ncbi_eutils_search_rest "
+            "(database=gene, '<symbol>[Gene Name] AND <species>[Organism]'), then verify that exact ID "
+            "with ncbi_eutils_summary_rest or NCBI Datasets. "
             "Never turn NOT_FOUND into a biological conclusion. Every published fact must use the "
             "Yuxi MCP fact marker returned by the host; use verify_genomic_interval for arithmetic."
         ),
@@ -601,11 +702,11 @@ def build_server():
         except (AuthorityError, json.JSONDecodeError, OSError) as error:
             raise ToolError(str(error)) from error
 
-    @server.tool(name="ncbi_datasets_gene_report_rest", description="Official NCBI Datasets v2 REST gene data report. Symbol queries require taxon. No inference on empty results.")
+    @server.tool(name="ncbi_datasets_gene_report_rest", description="Official NCBI gene authority lookup. Symbol queries require taxon and are resolved through Entrez Gene, then automatically verified by exact numeric ID against NCBI Datasets v2. No inference on empty results.")
     def _ncbi_rest(identifiers: list[str], identifier_type: str = "gene-id", taxon: str | None = None, page_size: int = 20) -> dict[str, Any]:
         return guarded(ncbi_gene_report_rest, identifiers=identifiers, identifier_type=identifier_type, taxon=taxon, page_size=page_size)
 
-    @server.tool(name="ncbi_datasets_gene_summary_cli", description="Pinned official NCBI Datasets CLI metadata summary with allowlisted arguments only.")
+    @server.tool(name="ncbi_datasets_gene_summary_cli", description="Pinned official NCBI Datasets CLI metadata summary with allowlisted arguments only. Symbol queries are resolved through Entrez Gene and then verified by exact numeric ID through the CLI.")
     def _ncbi_cli_summary(identifiers: list[str], identifier_type: str = "gene-id", taxon: str | None = None) -> dict[str, Any]:
         return guarded(ncbi_gene_summary_cli, identifiers=identifiers, identifier_type=identifier_type, taxon=taxon)
 
@@ -617,8 +718,8 @@ def build_server():
     def _uniprot_entry(accession: str) -> dict[str, Any]:
         return guarded(uniprot_entry_rest, accession=accession)
 
-    @server.tool(name="uniprot_search_rest", description="Bounded official UniProtKB REST search. Query syntax is UniProt's documented syntax.")
-    def _uniprot_search(query: str, size: int = 10, reviewed_only: bool = False) -> dict[str, Any]:
+    @server.tool(name="uniprot_search_rest", description="Bounded official UniProtKB REST search. Defaults to reviewed Swiss-Prot records for authoritative profiles; set reviewed_only=false explicitly when unreviewed TrEMBL coverage is required.")
+    def _uniprot_search(query: str, size: int = 10, reviewed_only: bool = True) -> dict[str, Any]:
         return guarded(uniprot_search_rest, query=query, size=size, reviewed_only=reviewed_only)
 
     @server.tool(name="europe_pmc_search_rest", description="Official Europe PMC core-metadata search; returns bibliographic records, not proof of article claims.")
@@ -629,7 +730,7 @@ def build_server():
     def _epmc_article(source: str, external_id: str) -> dict[str, Any]:
         return guarded(europe_pmc_article_rest, source=source, external_id=external_id)
 
-    @server.tool(name="ncbi_eutils_search_rest", description="NCBI Entrez ESearch across allowlisted databases. Returns candidate IDs, not dataset or article claims.")
+    @server.tool(name="ncbi_eutils_search_rest", description="NCBI Entrez ESearch across allowlisted databases, including Gene. For symbols use '<symbol>[Gene Name] AND <species>[Organism]'. Returns candidate IDs that require exact-record verification.")
     def _entrez_search(database: str, term: str, retmax: int = 10) -> dict[str, Any]:
         return guarded(ncbi_eutils_search_rest, database=database, term=term, retmax=retmax)
 

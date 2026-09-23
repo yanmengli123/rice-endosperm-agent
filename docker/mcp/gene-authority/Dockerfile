@@ -27,8 +27,8 @@ COPY docker/mcp/gene-authority/gene_authority_mcp.py /app/gene_authority_mcp.py
 
 LABEL org.opencontainers.image.title="Yuxi Gene Authority MCP" \
       org.opencontainers.image.source="https://www.ncbi.nlm.nih.gov/datasets/docs/v2/" \
-      org.opencontainers.image.version="1.2.0" \
-      org.opencontainers.image.revision="gene-authority-1.2.0+ncbi-datasets-18.37.0" \
+      org.opencontainers.image.version="1.3.0" \
+      org.opencontainers.image.revision="gene-authority-1.3.0+ncbi-datasets-18.37.0" \
       org.opencontainers.image.licenses="Apache-2.0" \
       io.yuxi.mcp.slug="gene-authority" \
       io.yuxi.mcp.runtime-schema="1"

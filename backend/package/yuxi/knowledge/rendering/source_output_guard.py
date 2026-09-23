@@ -378,11 +378,14 @@ def _degraded_dedupe_key(path: str, value: str) -> tuple[str, str]:
     """
     parts = [p for p in str(path or "").strip("/").split("/") if not p.isdigit()]
     tail = parts[-1] if parts else ""
+    if tail in {"gene_id", "gene_ids"}:
+        tail = "ncbi_gene_id"
     return (tail, value)
 
 
 _DEGRADED_IDENTITY_PRIORITY = {
     "gene/gene_id": 0,
+    "gene_id": 0,
     "symbol_resolution/gene_ids": 0,
     "primaryAccession": 1,
     "uniProtkbId": 2,
@@ -445,13 +448,18 @@ def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: 
         "",
     ]
     published = 0
-    truncated = False
     omitted_plumbing = 0
     omitted_empty = 0
     seen_values: set[tuple[str, str]] = set()
     folded_rows: list[str] = []
-    # D1：信息量最大的调用优先（事实数降序），最弱调用不再耗尽 40 条预算。
-    for audit_id in sorted(grouped, key=lambda aid: -len(grouped[aid])):
+    # D1：信息量最大的调用优先；同时按剩余调用数公平分配预算，避免一个
+    # 大型 UniProt/NCBI 载荷独占 40 行、把另一个权威源完全饿死。
+    audit_order = sorted(grouped, key=lambda aid: -len(grouped[aid]))
+    for audit_position, audit_id in enumerate(audit_order):
+        remaining_calls = len(audit_order) - audit_position
+        call_budget = max(1, (maximum_facts - published) // remaining_calls)
+        call_published = 0
+        call_truncated = False
         provider, operation = providers.get(audit_id, ("mcp", "tool"))
         # T7：按业务域分组（identity→locations→annotations→…），域内按路径排序，
         # 取代旧 path 字母序；标签来自渲染器字典（未知 path 用确定性末段名，禁止猜测语义）。
@@ -484,24 +492,25 @@ def render_degraded_fact_sheet(source_uses: list[Any] | None, *, maximum_facts: 
             lines.append("| 字段 | 值 | 引用 |")
             lines.append("| --- | --- | --- |")
             for fact_id, fact in sorted(by_domain[domain], key=_degraded_fact_sort_key):
-                if published >= maximum_facts:
+                if published >= maximum_facts or call_published >= call_budget:
                     lines.extend(
                         (
                             "| 其余事实 | 从略（超出降级渲染上限，完整清单见调用审计） | |",
                             "",
                         )
                     )
-                    truncated = True
+                    call_truncated = True
                     break
                 value = _degraded_row_value(fact) or ""
                 seen_values.add(_degraded_dedupe_key(str(fact.get("path") or ""), value))
                 field = _markdown_table_cell(_degraded_field_name(str(fact.get("path") or "")))
                 lines.append(f"| {field} | {_markdown_table_cell(value)} | [MCP-F:{audit_id}:{fact_id}] |")
                 published += 1
+                call_published += 1
             lines.append("")
-            if truncated:
+            if call_truncated:
                 break
-        if truncated:
+        if published >= maximum_facts:
             break
     if folded_rows:
         lines.append('<details class="yuxi-citations"><summary>溯源与审计明细</summary>')

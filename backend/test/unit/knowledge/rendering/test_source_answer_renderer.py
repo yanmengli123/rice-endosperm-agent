@@ -362,3 +362,45 @@ def test_degraded_sheet_prioritizes_official_gene_and_protein_identifiers():
     assert "物种" in sheet and "Oryza sativa" in sheet
     assert "do not infer" not in sheet and "UNIPROT" not in sheet
     assert "FUNCTION" not in sheet
+
+
+def test_degraded_sheet_fair_budget_keeps_two_authority_sources_visible():
+    uniprot = [
+        {
+            "id": f"f_{index:016x}",
+            "path": f"/data/results/0/comments/{index}/value",
+            "string_value": f"annotation-{index}",
+        }
+        for index in range(1, 31)
+    ]
+    uniprot.insert(
+        0,
+        {
+            "id": "f_0000000000000200",
+            "path": "/data/results/0/primaryAccession",
+            "string_value": "P0C585",
+        },
+    )
+    ncbi = [
+        {
+            "id": "f_0000000000000300",
+            "path": "/data/reports/0/gene_id",
+            "string_value": "4340018",
+        },
+        {
+            "id": "f_0000000000000301",
+            "path": "/data/reports/0/symbol",
+            "string_value": "LOC4340018",
+        },
+    ]
+    sheet = render_degraded_fact_sheet(
+        [
+            _degraded_use(205, "uniprot_search_rest", uniprot),
+            _degraded_use(206, "ncbi_datasets_gene_summary_cli", ncbi),
+        ],
+        maximum_facts=10,
+    )
+    assert sheet is not None
+    assert "P0C585" in sheet
+    assert "NCBI Gene ID" in sheet and "4340018" in sheet
+    assert "NCBI 基因符号" in sheet and "LOC4340018" in sheet

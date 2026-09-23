@@ -201,7 +201,7 @@ _DEFAULT_MCP_SERVERS = {
         "timeout": 300,
         # A datasets package can be hundreds of MiB; interactive Q&A may
         # inspect summaries, but ingestion must run as an explicit background job.
-        "disabled_tools": ["ncbi_gene_package_cli"],
+        "disabled_tools": ["ncbi_datasets_gene_package_cli"],
         "env": {
             "NCBI_API_KEY": "${NCBI_API_KEY}",
             "YUXI_NCBI_EMAIL": "${YUXI_NCBI_EMAIL}",
@@ -209,7 +209,7 @@ _DEFAULT_MCP_SERVERS = {
         "data_access_level": McpDataAccessLevel.PUBLIC.value,
         "dependency_mode": McpDependencyMode.AUTHORITATIVE.value,
         "source_type": SOURCE_TYPE_BUILTIN,
-        "source_ref": "builtin:gene-authority@1.2.0+ncbi-datasets-18.37.0",
+        "source_ref": "builtin:gene-authority@1.3.0+ncbi-datasets-18.37.0",
     },
     "plant-genomics": {
         "name": "Plant Genomics MCP",
@@ -277,9 +277,14 @@ _DEFAULT_MCP_SERVERS.update(BIOINFOMCP_SERVERS)
 # These operations are not interactive Q&A capabilities.  Keep this policy
 # independent of mutable database/UI tool toggles, including older installs.
 _POLICY_DISABLED_TOOLS: dict[str, frozenset[str]] = {
-    "gene-authority": frozenset({"ncbi_gene_package_cli"}),
+    "gene-authority": frozenset({"ncbi_datasets_gene_package_cli"}),
     "data-aggregator": frozenset({"fetch", "operate", "understand", "multi_query"}),
 }
+
+
+def get_policy_disabled_tools(server_slug: str) -> frozenset[str]:
+    """Tools visible to administrators but never callable by an online agent."""
+    return _POLICY_DISABLED_TOOLS.get(server_slug, frozenset())
 
 
 def list_builtin_mcp_slugs() -> list[str]:
@@ -336,8 +341,8 @@ _UNSET_SENTINEL = object()
 _GENOMICS_MCP_RUNTIMES: dict[str, tuple[str, str, str]] = {
     "gene-authority": (
         "YUXI_GENE_AUTHORITY_IMAGE",
-        "yuxi-gene-authority:1.2.0",
-        "gene-authority-1.2.0+ncbi-datasets-18.37.0",
+        "yuxi-gene-authority:1.3.0",
+        "gene-authority-1.3.0+ncbi-datasets-18.37.0",
     ),
     "data-aggregator": (
         "YUXI_DATA_AGGREGATOR_IMAGE",
@@ -977,9 +982,7 @@ async def get_all_mcp_tools(server_slug: str) -> list[Any]:
     except Exception as e:  # noqa: BLE001
         logger.error(f"Failed to load tools from MCP server '{server_slug}': {e}")
         raise
-    disabled = set(config.get("disabled_tools") or []) | _POLICY_DISABLED_TOOLS.get(server_slug, frozenset())
-    alive = [d for d in descriptors if d.name not in disabled]
-    return assemble_tools([(server_slug, alive, runtime_config)])
+    return assemble_tools([(server_slug, descriptors, runtime_config)])
 
 
 async def discover_mcp_capabilities(
@@ -1458,6 +1461,9 @@ async def toggle_tool_enabled(
     server = await get_mcp_server(db, server_slug)
     if not server:
         raise ValueError(f"Server '{server_slug}' does not exist")
+
+    if tool_name in get_policy_disabled_tools(server_slug):
+        raise PolicyError(f"MCP tool '{server_slug}/{tool_name}' is locked off by the runtime safety policy")
 
     disabled_tools = list(server.disabled_tools or [])
 

@@ -176,8 +176,8 @@ def test_dataset_candidates_cannot_satisfy_answer_authority():
 
 def test_large_datasets_download_is_not_callable_in_interactive_chat():
     config = mcp_service._DEFAULT_MCP_SERVERS["gene-authority"]
-    assert "ncbi_gene_package_cli" in config["disabled_tools"]
-    assert "ncbi_gene_package_cli" in mcp_service._POLICY_DISABLED_TOOLS["gene-authority"]
+    assert "ncbi_datasets_gene_package_cli" in config["disabled_tools"]
+    assert "ncbi_datasets_gene_package_cli" in mcp_service._POLICY_DISABLED_TOOLS["gene-authority"]
     assert {"fetch", "operate"} <= mcp_service._POLICY_DISABLED_TOOLS["data-aggregator"]
 
 

@@ -33,7 +33,7 @@ from yuxi.agents.mcp.service import (
     get_all_mcp_tools,
     get_last_health,
     get_mcp_server,
-    get_mcp_tools_stats,
+    get_policy_disabled_tools,
     import_mcp_servers,
     probe_mcp_server,
     read_mcp_resource,
@@ -759,7 +759,7 @@ async def get_mcp_server_tools(
     try:
         principal = await _request_principal(db, current_user)
         server = await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
-        disabled_tools = server.disabled_tools or []
+        disabled_tools = set(server.disabled_tools or []) | set(get_policy_disabled_tools(slug))
 
         try:
             # 获取所有工具（不过滤 disabled_tools）
@@ -887,10 +887,13 @@ async def refresh_mcp_server_tools(
             finally:
                 reset_mcp_execution_context(token)
 
-            # 获取统计信息
-            stats = get_mcp_tools_stats(slug)
-            enabled_count = stats.get("enabled", len(tools)) if stats else len(tools)
-            disabled_count = stats.get("disabled", 0) if stats else 0
+            disabled_tools = set(get_policy_disabled_tools(slug))
+            server = await get_mcp_server(db, slug, tenant_id=principal.tenant_id)
+            if server is not None:
+                disabled_tools.update(server.disabled_tools or [])
+            protocol_names = {(tool.metadata or {}).get("mcp_tool_name", tool.name) for tool in tools}
+            disabled_count = len(protocol_names & disabled_tools)
+            enabled_count = len(tools) - disabled_count
 
             message = "工具列表已刷新"
             if disabled_count > 0:
@@ -901,7 +904,7 @@ async def refresh_mcp_server_tools(
             return {
                 "success": True,
                 "message": message,
-                "tool_count": enabled_count,
+                "tool_count": len(tools),
                 "enabled_count": enabled_count,
                 "disabled_count": disabled_count,
             }
@@ -932,6 +935,8 @@ async def toggle_mcp_server_tool_route(
             "enabled": enabled,
             "message": f"工具 '{tool_name}' 已{'启用' if enabled else '禁用'}",
         }
+    except PolicyError as pe:
+        raise _policy_http_error(pe)
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve))
     except Exception as e:

@@ -8,8 +8,6 @@ import types
 import unittest
 from pathlib import Path
 
-import pytest
-
 # 双运行方式兼容：
 # 1) 隔离镜像内（cwd=/app，模块随 COPY 落盘）→ 直接导入；
 # 2) 仓库/API 测试容器内 → 按 ROOT 相对路径编译执行（与 test_genomics_mcp_builtins 同款）；
@@ -34,9 +32,8 @@ def _load_sources():
     except ImportError:
         pass
     if GENE_AUTHORITY is None or not GENE_AUTHORITY.is_file():
-        pytest.skip(
-            "gene-authority sources unavailable（在隔离镜像内运行，或挂载 docker 构建上下文）",
-            allow_module_level=True,
+        raise unittest.SkipTest(
+            "gene-authority sources unavailable（在隔离镜像内运行，或挂载 docker 构建上下文）"
         )
     name = "gene_authority_mcp"
     module = types.ModuleType(name)
@@ -53,6 +50,26 @@ sources = _load_sources()
 
 @unittest.skipUnless(os.getenv("YUXI_LIVE_OFFICIAL_SOURCES") == "1", "live official API probe is opt-in")
 class LiveOfficialSourceTests(unittest.TestCase):
+    def test_ncbi_datasets_rest_cli_and_uniprot(self):
+        # Resolve the symbol with official Entrez first, then verify the exact ID
+        # independently through NCBI Datasets REST and the pinned CLI.
+        symbol_report = sources.ncbi_gene_report_rest(
+            ["WAXY", "Wx"], identifier_type="symbol", taxon="4530", page_size=2
+        )
+        self.assertEqual(symbol_report["status"], "FOUND")
+        gene_id = symbol_report["data"]["symbol_resolution"]["gene_ids"][0]
+        self.assertEqual(gene_id, "4340018")
+        rest = sources.ncbi_gene_report_rest([gene_id], identifier_type="gene-id", page_size=2)
+        cli = sources.ncbi_gene_summary_cli([gene_id], identifier_type="gene-id")
+        uniprot = sources.uniprot_search_rest("gene:Wx AND organism_id:4530", size=3)
+        self.assertEqual(rest["status"], "FOUND")
+        self.assertEqual(rest["data"]["reports"][0]["gene"]["gene_id"], gene_id)
+        self.assertEqual(cli["status"], "FOUND")
+        self.assertTrue(cli["data"]["reports"])
+        self.assertEqual(uniprot["status"], "FOUND")
+        self.assertTrue(uniprot["data"]["results"][0]["primaryAccession"])
+        print("NCBI Datasets REST/CLI and UniProt verified for rice Wx")
+
     def test_pride_project_and_files(self):
         candidates = sources.pride_search_projects_rest("rice", page_size=2)
         self.assertEqual(candidates["status"], "FOUND")

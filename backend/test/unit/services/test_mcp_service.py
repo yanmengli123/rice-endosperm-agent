@@ -318,6 +318,50 @@ async def test_get_mcp_tools_rebuilds_cache_when_config_hash_changes(monkeypatch
     # 配置未变时命中缓存只建一次；配置变化后重建
     assert build_calls == ["demo-v1", "demo-v2"]
 
+
+async def test_gene_authority_package_download_is_hard_filtered_by_protocol_name(monkeypatch):
+    config = {"transport": "stdio", "command": "governed", "disabled_tools": []}
+
+    @_host_noop_methods
+    class _FakeHost:
+        async def discover(self, slug, runtime_config, *, force_refresh=False, update_cache=True):
+            del runtime_config, force_refresh, update_cache
+            descriptors = [
+                McpToolDescriptor(server_slug=slug, name="ncbi_datasets_gene_report_rest", stable_id="report"),
+                McpToolDescriptor(server_slug=slug, name="ncbi_datasets_gene_package_cli", stable_id="package"),
+            ]
+            return descriptors, SimpleNamespace(
+                server_slug=slug, duration_ms=1, tool_count=2, protocol_note="fake"
+            )
+
+        async def call_tool(self, *_args, **_kwargs):  # pragma: no cover - 本用例不触发
+            raise AssertionError
+
+        def note_filter(self, slug, disabled_count):
+            assert slug == "gene-authority"
+            assert disabled_count == 1
+
+        def get_stats(self, slug):
+            return None
+
+    monkeypatch.setattr(mcp_service, "get_host", lambda: _FakeHost())
+    tools = await mcp_service.get_mcp_tools(
+        "gene-authority", additional_servers={"gene-authority": config}
+    )
+    assert [tool.metadata["mcp_tool_name"] for tool in tools] == ["ncbi_datasets_gene_report_rest"]
+
+    async def fake_config(server_name: str, db=None):
+        del db
+        assert server_name == "gene-authority"
+        return config
+
+    monkeypatch.setattr(mcp_service, "get_enabled_mcp_server_config", fake_config)
+    admin_tools = await mcp_service.get_all_mcp_tools("gene-authority")
+    assert [tool.metadata["mcp_tool_name"] for tool in admin_tools] == [
+        "ncbi_datasets_gene_report_rest",
+        "ncbi_datasets_gene_package_cli",
+    ]
+
     mcp_service.clear_mcp_cache()
 
 

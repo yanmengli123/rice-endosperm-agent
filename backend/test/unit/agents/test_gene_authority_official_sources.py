@@ -10,8 +10,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 # 与 test_genomics_mcp_builtins 同款加载方式：vendored 脚本按 ROOT 相对路径编译执行，
 # 构建上下文未挂载进 API 测试容器时整模块 skip（而不是收集期 ImportError 中断整套）。
 def _find_repo_root() -> Path | None:
@@ -28,10 +26,7 @@ GENE_AUTHORITY = ROOT / "docker" / "mcp" / "gene-authority" / "gene_authority_mc
 
 def _load_gene_authority():
     if GENE_AUTHORITY is None or not GENE_AUTHORITY.is_file():
-        pytest.skip(
-            "docker build context is not mounted into the API test container",
-            allow_module_level=True,
-        )
+        raise unittest.SkipTest("docker build context is not mounted into the API test container")
     name = "gene_authority_mcp"
     module = types.ModuleType(name)
     sys.modules[name] = module
@@ -61,6 +56,11 @@ class _Response:
 
 
 class OfficialSourceTests(unittest.TestCase):
+    def test_http_200_provider_error_is_not_a_found_record(self):
+        self.assertFalse(
+            sources._has_records({"messages": [{"error": {"reason": "invalid taxonomy token"}}]})
+        )
+
     def test_entrez_search_discovery_does_not_leak_api_key(self):
         body = b'{"esearchresult":{"count":"1","idlist":["123"]}}'
         with patch.dict("os.environ", {"NCBI_API_KEY": "secret-key", "YUXI_NCBI_EMAIL": "admin@example.org"}):
@@ -74,11 +74,49 @@ class OfficialSourceTests(unittest.TestCase):
 
     def test_entrez_empty_search_and_invalid_database(self):
         with patch.dict("os.environ", {"YUXI_NCBI_EMAIL": "admin@example.org"}):
-            with patch.object(sources.urllib.request, "urlopen", return_value=_Response(b'{"esearchresult":{"count":"0","idlist":[]}}')):
+            body = b'{"esearchresult":{"count":"0","idlist":[]}}'
+            with patch.object(sources.urllib.request, "urlopen", return_value=_Response(body)):
                 result = sources.ncbi_eutils_search_rest("sra", "unfindable")
         self.assertEqual(result["status"], "NOT_FOUND")
         with self.assertRaises(sources.AuthorityError):
             sources.ncbi_eutils_search_rest("arbitrary", "rice")
+
+    def test_entrez_gene_symbol_resolution_is_allowlisted(self):
+        body = b'{"esearchresult":{"count":"1","idlist":["4340018"]}}'
+        with patch.object(sources.urllib.request, "urlopen", return_value=_Response(body)) as open_url:
+            result = sources.ncbi_eutils_search_rest(
+                "gene", "Wx[Gene Name] AND Oryza sativa[Organism]", retmax=10
+            )
+        self.assertEqual(result["data"]["esearchresult"]["idlist"], ["4340018"])
+        self.assertIn("db=gene", open_url.call_args.args[0].full_url)
+
+    def test_uniprot_calls_request_a_bounded_identity_projection(self):
+        body = b'{"results":[{"primaryAccession":"P0C585"}]}'
+        with patch.object(sources.urllib.request, "urlopen", return_value=_Response(body)) as open_url:
+            result = sources.uniprot_search_rest("gene:Wx AND organism_id:4530", size=1)
+        self.assertEqual(result["data"]["results"][0]["primaryAccession"], "P0C585")
+        requested = open_url.call_args.args[0].full_url
+        self.assertIn("reviewed%3Atrue", requested)
+        self.assertIn("fields=accession%2Cid%2Cgene_names", requested)
+        self.assertIn("xref_geneid", requested)
+
+    def test_dataset_symbol_lookup_resolves_entrez_then_verifies_numeric_id(self):
+        empty = {"data": {"esearchresult": {"idlist": []}}}
+        found = {"data": {"esearchresult": {"idlist": ["4340018"]}}}
+        dataset = sources._envelope(
+            "NCBI_DATASETS",
+            "https://api.ncbi.nlm.nih.gov/datasets/v2/gene/id/4340018/dataset_report",
+            {"reports": [{"gene": {"gene_id": "4340018"}}]},
+        )
+        with patch.object(sources, "ncbi_eutils_search_rest", side_effect=[empty, found]) as search:
+            with patch.object(sources, "_request_json", return_value=dataset) as request:
+                result = sources.ncbi_gene_report_rest(
+                    ["WAXY", "Wx"], identifier_type="symbol", taxon="4530"
+                )
+        self.assertEqual(result["status"], "FOUND")
+        self.assertEqual(result["data"]["symbol_resolution"]["gene_ids"], ["4340018"])
+        self.assertEqual(search.call_count, 2)
+        self.assertIn("/gene/id/4340018/dataset_report", request.call_args.args[1])
 
     def test_pride_search_is_candidate_and_exact_project_is_bounded(self):
         with patch.object(sources.urllib.request, "urlopen", return_value=_Response(b'[{"accession":"PXD000001"}]')):
@@ -89,7 +127,11 @@ class OfficialSourceTests(unittest.TestCase):
             sources.pride_project_rest("https://example.com/")
 
     def test_oa_passages_have_xml_locator_and_exact_quote(self):
-        xml = b'<article><body><sec><title>Results</title><p>OsbZIP58 binds the Wx promoter in rice endosperm.</p></sec></body></article>'
+        xml = (
+            b"<article><body><sec><title>Results</title><p>"
+            b"OsbZIP58 binds the Wx promoter in rice endosperm."
+            b"</p></sec></body></article>"
+        )
         with patch.object(sources.urllib.request, "urlopen", return_value=_Response(xml)):
             result = sources.europe_pmc_oa_passages_rest("PMC12345", "Wx")
         self.assertEqual(result["status"], "FOUND")
