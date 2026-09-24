@@ -23,6 +23,7 @@ from typing import Any
 
 from yuxi.utils import logger
 
+
 @dataclass(frozen=True)
 class CanaryDataProbe:
     tool_name: str
