@@ -207,6 +207,7 @@ async def retrieve_neo4j_paths(
                 max_depth=max_depth,
                 max_nodes=min(max(max_nodes, 1), policy.node_budget),
                 exclude_chunk=True,
+                raise_on_error=True,
             )
             return member, seed, result, None
         except Exception as exc:  # noqa: BLE001

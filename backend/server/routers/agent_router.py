@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
@@ -610,6 +610,73 @@ async def get_agent_run_evidence(
         }:
             assembled["projection_status"] = "EVIDENCE_UNAVAILABLE"
     return assembled
+
+
+@agent_router.get("/runs/{run_id}/graph-snapshot-export")
+async def export_agent_run_graph_snapshot(
+    run_id: str,
+    format: str = Query(default="json", pattern="^(json|csv)$"),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """导出本 Run 当时**发布**的关系图快照（graph_snapshot_v1，确定性字节）。
+
+    只回放 ``output_message.extra_metadata.graph_snapshot``（发布载荷）——审计行
+    ``graph_snapshot_json`` 永不作为导出源（暗发布防泄漏，ADR-0004 §7 同款纪律）。
+    当时未发布（开关关闭 / 非 HIT）即 404；快照涉及的知识库必须仍在当前可见
+    范围内（冻结范围 ∩ 当前可见，与证据端点同一权限语义）。导出无时钟字段，
+    同 run 字节恒定，``projection_hash`` 即 ETag。
+    """
+    run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_user.uid))
+    if not run:
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+    if not getattr(run, "output_message_id", None):
+        raise HTTPException(status_code=404, detail="本运行任务未发布关系图快照")
+
+    from sqlalchemy import select
+
+    from yuxi.knowledge.graphs.graph_snapshot_export import (
+        export_filename,
+        export_graph_snapshot_csv_zip,
+        export_graph_snapshot_json,
+    )
+    from yuxi.storage.postgres.models_business import Message
+
+    extra = (
+        await db.execute(select(Message.extra_metadata).where(Message.id == run.output_message_id))
+    ).scalar_one_or_none()
+    snapshot = dict(extra or {}).get("graph_snapshot") if isinstance(extra, dict) else None
+    if not isinstance(snapshot, dict) or snapshot.get("schema") != "graph_snapshot_v1":
+        raise HTTPException(status_code=404, detail="本运行任务未发布关系图快照")
+
+    allowed_kb_ids = await _evidence_scope_kb_ids(run, current_user)
+    if allowed_kb_ids is not None and not allowed_kb_ids:
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+    snapshot_kb_ids = {
+        str(item.get("kb_id"))
+        for item in [*(snapshot.get("nodes") or []), *(snapshot.get("edges") or [])]
+        if isinstance(item, dict) and item.get("kb_id")
+    }
+    if allowed_kb_ids and snapshot_kb_ids - allowed_kb_ids:
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+
+    if format == "csv":
+        body = export_graph_snapshot_csv_zip(snapshot, run_id=run_id)
+        media_type = "application/zip"
+    else:
+        body = export_graph_snapshot_json(snapshot, run_id=run_id)
+        media_type = "application/json"
+    filename = export_filename(snapshot, "zip" if format == "csv" else "json")
+    from urllib.parse import quote
+
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "ETag": f'"{snapshot.get("projection_hash")}"',
+        },
+    )
 
 
 @agent_router.post("/runs/{run_id}/evidence/{evidence_id}/feedback")
