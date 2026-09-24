@@ -920,7 +920,9 @@ async def test_dispatch_relay_includes_cancel_requested_runs(monkeypatch: pytest
     assert await agent_run_service.dispatch_pending_agent_runs() == 0
     assert len(selects) == 1
     parameter_sets = [
-        set(value) for value in selects[0].compile().params.values() if isinstance(value, (list, tuple, set, frozenset))
+        set(value)
+        for value in selects[0].compile().params.values()
+        if isinstance(value, list | tuple | set | frozenset)
     ]
     assert agent_run_service.DISPATCHABLE_RUN_STATUSES in parameter_sets
     update_parameter_sets = [statement.compile().params for statement in updates]
@@ -1330,6 +1332,57 @@ async def test_get_agent_run_result_uses_output_message_id(monkeypatch: pytest.M
     assert payload["final_message_id"] == 2
     assert payload["langfuse_trace_id"] == "trace-old"
     assert "debug" not in payload
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_result_renders_mcp_value_only_output(monkeypatch: pytest.MonkeyPatch):
+    run = SimpleNamespace(
+        id="run-1",
+        status="completed",
+        agent_slug="default-chatbot",
+        conversation_thread_id="thread-1",
+        conversation_id=10,
+        request_id="req-1",
+        output_message_id=2,
+        error_type=None,
+        error_message=None,
+    )
+    messages = [
+        SimpleNamespace(
+            id=2,
+            role="assistant",
+            content="| 序列 | 引用 |\n| --- | --- |\n| `Os06t0133000-01` | [MCP-F:76:f_0000000000000001] |",
+            extra_metadata={
+                "presentation_mode": "MCP_VALUE_ONLY",
+                "source_output_guard": {"status": "PASSED"},
+            },
+        )
+    ]
+
+    class FakeScalars:
+        def unique(self):
+            return self
+
+        def all(self):
+            return messages
+
+    class FakeDB:
+        async def execute(self, _stmt):
+            return SimpleNamespace(scalars=lambda: FakeScalars())
+
+    class RunRepo:
+        def __init__(self, db):
+            self.db = db
+
+        async def get_run_for_user(self, run_id: str, uid: str):
+            return run
+
+    monkeypatch.setattr(agent_run_service, "AgentRunRepository", RunRepo)
+    payload = await agent_run_service.get_agent_run_result(run_id="run-1", current_uid="user-1", db=FakeDB())
+
+    assert "MCP-F" not in payload["output"]
+    assert "引用" not in payload["output"]
+    assert "Os06t0133000-01" in payload["output"]
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ RUN_SOURCE_MANIFEST_SCHEMA_VERSION = "run-source-manifest.v2"
 
 class TaskIntent(StrEnum):
     ENTITY_PROFILE = "ENTITY_PROFILE"
+    SEQUENCE_EXPORT = "SEQUENCE_EXPORT"
     KB_EVIDENCE_QA = "KB_EVIDENCE_QA"
     QUOTE_LOCATOR = "QUOTE_LOCATOR"
     FIGURE_LOCATOR = "FIGURE_LOCATOR"
@@ -54,6 +55,7 @@ class SourcePolicy(StrEnum):
 
 class Capability(StrEnum):
     GENE_RECORD_LOOKUP = "GENE_RECORD_LOOKUP"
+    SEQUENCE_LOOKUP = "SEQUENCE_LOOKUP"
     VERBATIM_SEARCH = "VERBATIM_SEARCH"
     PDF_LOCATOR = "PDF_LOCATOR"
     DOCUMENT_QA = "DOCUMENT_QA"
@@ -114,12 +116,46 @@ class SourceUseRecord(BaseModel):
     evidence_level: EvidenceLevel
     provider_id: str
     operation: str
+    # Execution and provider states are orthogonal.  ``status`` remains the
+    # execution-state compatibility field for persisted manifests.
     status: str
+    execution_status: str | None = None
+    provider_status: str | None = None
     request_digest: str | None = None
     result_digest: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     provenance: dict[str, Any] = Field(default_factory=dict)
     adopted: bool = False
+
+
+def source_use_execution_succeeded(source_use: Any) -> bool:
+    """Return whether a source call executed successfully.
+
+    Older manifests stored the provider ``FOUND`` state in ``status``.  Treat
+    that single legacy value as success while new rows use execution_status.
+    """
+
+    value = (
+        source_use.get("execution_status")
+        if isinstance(source_use, dict)
+        else getattr(source_use, "execution_status", None)
+    )
+    if value is None:
+        value = source_use.get("status") if isinstance(source_use, dict) else getattr(source_use, "status", None)
+    return str(value or "").upper() in {"SUCCESS", "FOUND"}
+
+
+def source_use_provider_status(source_use: Any) -> str:
+    value = (
+        source_use.get("provider_status")
+        if isinstance(source_use, dict)
+        else getattr(source_use, "provider_status", None)
+    )
+    if value:
+        return str(value).upper()
+    legacy = source_use.get("status") if isinstance(source_use, dict) else getattr(source_use, "status", None)
+    normalized = str(legacy or "").upper()
+    return normalized if normalized != "SUCCESS" else ""
 
 
 class AuthorityDecision(BaseModel):
@@ -223,7 +259,13 @@ class TurnExecutionPlan(BaseModel):
             SourcePolicy.BIBLIOGRAPHY_ONLY,
         }
         auto_database_obligation = SourceClass.STRUCTURED_DATABASE in self.source.allowed_sources and any(
-            capability in {Capability.GENE_RECORD_LOOKUP, Capability.DATASET_LOOKUP, Capability.GENERIC_MCP}
+            capability
+            in {
+                Capability.GENE_RECORD_LOOKUP,
+                Capability.SEQUENCE_LOOKUP,
+                Capability.DATASET_LOOKUP,
+                Capability.GENERIC_MCP,
+            }
             for capability in self.required_capabilities
         )
         return policy_requires_mcp or auto_database_obligation
@@ -297,6 +339,11 @@ _LITERATURE = re.compile(
 _DATASET_QUERY = re.compile(
     r"(?:数据集|组学数据|磷酸化组|蛋白质组|蛋白组|转录组|测序数据|"
     r"\b(?:dataset|PRIDE|PXD\d{6,}|GEO|SRA|BioProject)\b)",
+    re.I,
+)
+_SEQUENCE_QUERY = re.compile(
+    r"(?:CDS|cDNA|mRNA|转录本|蛋白|基因组|FASTA).{0,10}(?:序列|下载|保存)|"
+    r"(?:序列|下载|保存).{0,10}(?:CDS|cDNA|mRNA|转录本|蛋白|基因组|FASTA)",
     re.I,
 )
 _MECHANISM_OR_LITERATURE_CLAIM = re.compile(
@@ -575,6 +622,12 @@ def plan_turn(
         evidence_required = True
         evidence_level = EvidenceLevel.CLAIM_EVIDENCE
         capabilities = [Capability.GENE_RECORD_LOOKUP, Capability.DOCUMENT_QA]
+    elif _SEQUENCE_QUERY.search(text):
+        intent = TaskIntent.SEQUENCE_EXPORT
+        target_type = "SEQUENCE"
+        evidence_level = EvidenceLevel.DATA_PROVENANCE
+        capabilities = [Capability.SEQUENCE_LOOKUP]
+        reason_codes.append("DETERMINISTIC_SEQUENCE_EXPORT")
     elif _DATASET_QUERY.search(text):
         intent = TaskIntent.DATASET_DISCOVERY
         evidence_level = EvidenceLevel.DATA_PROVENANCE

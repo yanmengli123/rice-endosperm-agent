@@ -191,9 +191,9 @@ def _jsonable(value: Any) -> Any:
         return value.model_dump(mode="json", by_alias=True)
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if isinstance(value, str | int | float | bool) or value is None:
         return value
     return str(value)
 
@@ -490,7 +490,14 @@ class LegacyLangChainHost(McpHost):
             duration_ms=int((time.perf_counter() - started) * 1000),
             provenance=result.provenance,
         )
-        if not result.is_error and slug != "data-aggregator" and tool_name != SEQUENCE_DELIVERABLE_TOOL:
+        execution_context = get_mcp_execution_context()
+        sequence_only_artifacts = bool(execution_context and execution_context.artifact_policy == "sequence_only")
+        if (
+            not result.is_error
+            and slug != "data-aggregator"
+            and tool_name != SEQUENCE_DELIVERABLE_TOOL
+            and not sequence_only_artifacts
+        ):
             # MCP 数据产物确定性物化：成功的数据查询结果由程序落盘为可下载交付物，
             # 是否出现产物不再依赖模型调用 present_artifacts。必须先于下方
             # append_model_ledger 执行——物化消费的是账本标记追加前的原始文本。
@@ -520,7 +527,11 @@ class LegacyLangChainHost(McpHost):
         if not result.is_error and tool_name == SEQUENCE_DELIVERABLE_TOOL:
             # 序列交付物（P0-A）：完整 FASTA 程序字节级落盘进线程 outputs，正文
             # 只发摘要事实；通知块追加在事实账本之后，模型可据此指引用户下载。
-            deliverable_notice = await record_sequence_deliverable(tool_name, result.text)
+            deliverable_notice = await record_sequence_deliverable(
+                tool_name,
+                result.text,
+                mcp_call_audit_id=audit_id,
+            )
             if deliverable_notice is not None:
                 result.text = append_deliverable_notice(result.text, deliverable_notice)
         return result

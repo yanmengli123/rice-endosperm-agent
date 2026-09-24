@@ -113,6 +113,15 @@ def _decide_payload(
         payload = json.dumps(structured_content, ensure_ascii=False, indent=2, default=str).encode("utf-8")
         return payload, "json", "application/json"
     if len(result_text or "") >= _MATERIALIZED_MIN_TEXT_CHARS:
+        candidate = str(result_text).strip()
+        if candidate.startswith(("{", "[")):
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict | list):
+                payload = json.dumps(parsed, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+                return payload, "json", "application/json"
         return str(result_text).encode("utf-8"), "md", "text/markdown"
     return None
 

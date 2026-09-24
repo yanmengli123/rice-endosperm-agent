@@ -38,6 +38,7 @@ from yuxi.knowledge.planning.turn_execution_plan import (
     RunSourceManifest,
     SourceClass,
     SourceUseRecord,
+    TaskIntent,
     TurnExecutionPlan,
     plan_turn,
 )
@@ -774,7 +775,7 @@ def _append_mcp_source_uses(
                 if str(fact.get("path") or "") == "/status" and fact.get("string_value"):
                     provider_status = str(fact["string_value"]).upper()
                     break
-        provider_status = provider_status or str(audit.status).upper()
+        execution_status = str(audit.status).upper()
         succeeded = str(audit.status).lower() == "success" and provider_status not in _MCP_ADOPTION_NEGATIVE_STATUSES
         adopted = (
             succeeded
@@ -800,10 +801,9 @@ def _append_mcp_source_uses(
                 ),
                 provider_id=str(audit.server_slug),
                 operation=str(audit.capability_name),
-                # 使用上面已按 structured_content → fact_manifest → audit status
-                # 归一后的权威状态；否则 legacy NOT_FOUND 会在这里退化成 SUCCESS，
-                # 最终五态视图无法区分“未找到”和“无可发布值”。
-                status=provider_status,
+                status=execution_status,
+                execution_status=execution_status,
+                provider_status=provider_status or None,
                 request_digest=audit.arguments_digest,
                 result_digest=audit.result_digest,
                 evidence_ids=[source_use_id] if adopted else [],
@@ -1808,12 +1808,12 @@ def _extract_total_tokens(state) -> int | None:
         model_usage = usage.get("model_usage") if isinstance(usage, dict) else None
     if isinstance(model_usage, dict) and model_usage:
         total_tokens = model_usage.get("total_tokens")
-        if isinstance(total_tokens, (int, float)) and not isinstance(total_tokens, bool):
+        if isinstance(total_tokens, int | float) and not isinstance(total_tokens, bool):
             return int(total_tokens)
         input_tokens = model_usage.get("input_tokens", model_usage.get("prompt_tokens", 0))
         output_tokens = model_usage.get("output_tokens", model_usage.get("completion_tokens", 0))
         if all(
-            isinstance(value, (int, float)) and not isinstance(value, bool) for value in (input_tokens, output_tokens)
+            isinstance(value, int | float) and not isinstance(value, bool) for value in (input_tokens, output_tokens)
         ):
             return int(input_tokens) + int(output_tokens)
     return None
@@ -2434,6 +2434,139 @@ async def stream_agent_chat(
                     "namespace": [],
                 },
                 metadata={"turn_execution_plan": turn_plan.public_dict()},
+                status="loading",
+                thread_id=thread_id,
+            )
+            meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+            yield make_chunk(status="finished", meta=meta)
+            return
+
+        if turn_plan.task.primary_intent == TaskIntent.SEQUENCE_EXPORT:
+            # Sequence export is a deterministic service path: the model never
+            # decides whether to call RiceKB and never copies sequence bytes.
+            from yuxi.knowledge.rendering.source_answer_renderer import render_source_answer
+            from yuxi.services.rice_sequence_service import execute_rice_sequence_query
+
+            sequence_result = await execute_rice_sequence_query(model_query)
+            for index, call in enumerate(sequence_result.calls, start=1):
+                call_id = f"seq_{index}_{uuid.uuid4().hex[:8]}"
+                yield make_chunk(
+                    status="loading",
+                    stream_event={
+                        "type": "tool_call",
+                        "method": "tools",
+                        "namespace": [],
+                        "data": {
+                            "event": "tool-call",
+                            "tool_call_id": call_id,
+                            "tool_name": call["tool"],
+                            "args": call["arguments"],
+                        },
+                    },
+                    meta=meta,
+                )
+                yield make_chunk(
+                    status="loading",
+                    stream_event={
+                        "type": "tool_result",
+                        "method": "tools",
+                        "namespace": [],
+                        "data": {
+                            "event": "tool-finished",
+                            "tool_call_id": call_id,
+                            "tool_name": call["tool"],
+                            "output": {"is_error": call["is_error"]},
+                        },
+                    },
+                    meta=meta,
+                )
+
+            mcp_source_valid = await _finalize_mcp_manifest(
+                db,
+                run_id=meta.get("run_id"),
+                plan=turn_plan,
+                manifest=source_manifest,
+                mention_resolution=_frozen_mention_resolution(meta),
+            )
+            _settle_source_manifest_status(turn_plan, source_manifest, mcp_source_valid)
+            projection = project_data_plane(source_manifest.source_uses) if sequence_result.succeeded else None
+            internal_content = projection.blocks if projection is not None else None
+            if internal_content is not None:
+                guarded_content, validation = guard_answer_for_evidence_level(
+                    internal_content,
+                    evidence_level=turn_plan.evidence.level,
+                    source_uses=source_manifest.source_uses,
+                    source_policy=turn_plan.source.policy.value,
+                    requires_mcp=True,
+                )
+                source_output_validation = {
+                    **validation,
+                    "presentation_mode": "MCP_VALUE_ONLY",
+                    "model_facts_published": False,
+                    "data_plane_projection": {
+                        "kind": projection.kind,
+                        "audit_id": projection.audit_id,
+                        "fact_count": len(projection.used_fact_ids),
+                    },
+                }
+                if validation.get("status") == "PASSED":
+                    public_content = render_source_answer(internal_content)
+                else:
+                    # The deterministic projection should satisfy this guard.
+                    # If contracts drift, fail closed instead of force-marking
+                    # a rejected value sheet as publishable.
+                    internal_content = guarded_content
+                    public_content = render_source_answer(guarded_content)
+            else:
+                provider_answer = render_provider_status_answer(source_manifest.source_uses)
+                public_content = provider_answer or sequence_result.error_message or _plan_failure_answer(turn_plan)
+                internal_content = public_content
+                source_output_validation = {
+                    "schema_version": "answer-evidence-output-guard.v2",
+                    "status": "DEGRADED",
+                    "presentation_mode": "MCP_VALUE_ONLY",
+                    "model_facts_published": False,
+                    "reason_code": sequence_result.status,
+                }
+            source_manifest.validation_results.append(source_output_validation)
+
+            await _persist_turn_runtime(
+                db,
+                meta.get("run_id"),
+                plan=turn_plan,
+                manifest=source_manifest,
+            )
+            message_id = f"msg_{uuid.uuid4().hex}"
+            ai_message = await conv_repo.add_message_by_thread_id(
+                thread_id=thread_id,
+                role="assistant",
+                content=internal_content,
+                message_type="text",
+                extra_metadata={
+                    "id": message_id,
+                    "presentation_mode": "MCP_VALUE_ONLY",
+                    "deterministic_sequence": True,
+                    "source_output_guard": source_output_validation,
+                    "turn_execution_plan": turn_plan.public_dict(),
+                    "run_source_manifest": source_manifest.model_dump(mode="json"),
+                    **get_trace_info(langfuse_run),
+                },
+                run_id=meta.get("run_id"),
+                request_id=meta.get("request_id"),
+            )
+            if ai_message is not None and meta.get("run_id"):
+                await AgentRunRepository(db).set_output_message(str(meta["run_id"]), ai_message.id)
+            await db.commit()
+            yield make_chunk(
+                content=public_content,
+                stream_event={
+                    "type": "message_delta",
+                    "message_id": message_id,
+                    "content": public_content,
+                    "thread_id": thread_id,
+                    "namespace": [],
+                },
+                metadata={"deterministic_sequence": True, "presentation_mode": "MCP_VALUE_ONLY"},
                 status="loading",
                 thread_id=thread_id,
             )

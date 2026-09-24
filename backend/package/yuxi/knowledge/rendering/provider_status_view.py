@@ -8,14 +8,16 @@
 - AMBIGUOUS：提示存在多个候选，引导用户带完整标识符点名重查；
 - CONFLICT：多源值相互冲突，提示点名单一来源——不让模型裁决。
 
-输入是 ``RunSourceManifest.source_uses``（``SourceUseRecord.status`` 已归一为
-provider_status 或 audit status）。只要存在 adopted 成功调用就返回 None
+输入是 ``RunSourceManifest.source_uses``（执行状态与来源五态分别保存在
+``execution_status`` / ``provider_status``，并兼容旧清单的 ``status``）。只要存在 adopted 成功调用就返回 None
 （正常投影负责呈现值）；完全不适用（无 MCP 调用）也返回 None。
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from yuxi.knowledge.planning.turn_execution_plan import source_use_provider_status
 
 _UNAVAILABLE_STATUSES = frozenset({"UNAVAILABLE", "ERROR", "TIMEOUT", "UNAVAILABLE_ERROR"})
 _NOT_FOUND_STATUSES = frozenset({"NOT_FOUND", "NO_EVIDENCE"})
@@ -39,7 +41,7 @@ def render_provider_status_answer(source_uses: list[Any] | None) -> str | None:
     if any(bool(_use_value(use, "adopted")) for use in uses):
         return None  # 存在成功调用：值呈现交给数据面投影
 
-    statuses = {str(_use_value(use, "status") or "").upper() for use in uses}
+    statuses = {source_use_provider_status(use) for use in uses}
     providers = sorted({str(_use_value(use, "provider_id")) for use in uses if _use_value(use, "provider_id")})
 
     def _named(copy: str) -> str:

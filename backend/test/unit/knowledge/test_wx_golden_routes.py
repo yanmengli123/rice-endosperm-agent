@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from yuxi.knowledge.planning.turn_execution_plan import plan_turn
+from yuxi.knowledge.planning.turn_execution_plan import Capability, TaskIntent, plan_turn
 
 pytestmark = [pytest.mark.unit]
 
@@ -42,6 +42,15 @@ def test_wx_golden_route(name, question, server, mode):
     assert plan.source.policy.value == "MCP_ONLY", f"{name}：期望 MCP_ONLY"
     assert plan.answer.mode == mode, f"{name}：期望 {mode}，实际 {plan.answer.mode}"
     assert plan.satisfiable is True
+
+
+@pytest.mark.parametrize("question", ["Wx的转录本序列给我", "Wx 的 CDS 序列给我，我要求一键下载保存"])
+def test_sequence_queries_use_the_deterministic_sequence_contract(question):
+    plan = plan_turn(question, has_knowledge_scope=True, configured_mcps=_ALL_SERVERS, known_mcps=_ALL_SERVERS)
+    assert plan.task.primary_intent == TaskIntent.SEQUENCE_EXPORT
+    assert plan.required_capabilities == [Capability.SEQUENCE_LOOKUP]
+    assert plan.required_server == "ricekb"
+    assert plan.answer.mode == "MCP_VALUE_ONLY"
 
 
 def test_unbound_point_named_server_fails_closed():

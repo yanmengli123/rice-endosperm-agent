@@ -145,6 +145,7 @@ def test_sequence_tools_are_trusted_source_records():
         assert profile.citation_semantics == "DATA_PROVENANCE", name
         assert profile.fallback_policy == "FAIL_CLOSED", name
         assert Capability.GENE_RECORD_LOOKUP in profile.capabilities, name
+    assert Capability.SEQUENCE_LOOKUP in _TRUSTED_PROFILES["ricekb_sequence"].capabilities
 
 
 def test_vendored_script_declares_the_sequence_tools():

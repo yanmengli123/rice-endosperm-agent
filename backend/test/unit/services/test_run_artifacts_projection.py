@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.services.agent_run_service import _load_run_artifacts
-from yuxi.services.conversation_service import _inject_run_artifacts
+from yuxi.services.conversation_service import _inject_run_artifacts, get_thread_history_view
 from yuxi.storage.postgres.models_business import RunArtifact
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -92,6 +92,30 @@ async def test_history_projection_skips_when_no_run_ids(session):
     assert "run_artifacts" not in history[0]
 
 
+async def test_history_view_awaits_artifact_projection(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    class FakeRepo:
+        def __init__(self, db):
+            self.db = db
+
+        async def get_conversation_by_thread_id(self, thread_id, uid):
+            return SimpleNamespace(id=1, uid=uid, status="active")
+
+        async def get_messages_by_thread_id(self, thread_id):
+            return []
+
+    projection = AsyncMock()
+    monkeypatch.setattr("yuxi.services.conversation_service.ConversationRepository", FakeRepo)
+    monkeypatch.setattr("yuxi.services.conversation_service._inject_run_artifacts", projection)
+
+    payload = await get_thread_history_view(thread_id="thread-1", current_uid="u1", db=object())
+
+    assert payload == {"history": []}
+    assert projection.await_count == 1
+
+
 async def test_run_result_artifacts_array(session):
     session.add(_artifact(1, run_id="run-a", path="/home/gem/user-data/outputs/mcp_results/a.json"))
     await session.commit()
@@ -135,7 +159,7 @@ def _install_sqlite_manager(monkeypatch, engine, session_factory):
     monkeypatch.setattr(pg_manager_module, "pg_manager", _PgManagerStub(session_factory))
 
 
-def _write_entry(path: str, digest: str = "b" * 64) -> "object":
+def _write_entry(path: str, digest: str = "b" * 64) -> object:
     from yuxi.agents.mcp.artifact_materializer import MaterializedArtifact
 
     return MaterializedArtifact(

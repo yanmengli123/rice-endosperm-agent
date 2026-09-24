@@ -339,6 +339,11 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
         source_class="AUTHORITATIVE_DATABASE",
         authority_level="PRIMARY_DATABASE",
     ),
+    "ricekb_sequence": ToolCapabilityProfile(
+        capabilities=frozenset({Capability.GENE_RECORD_LOOKUP, Capability.SEQUENCE_LOOKUP}),
+        source_class="AUTHORITATIVE_DATABASE",
+        authority_level="PRIMARY_DATABASE",
+    ),
 }
 
 _DATA_AGGREGATOR_DISCOVERY = ToolCapabilityProfile(

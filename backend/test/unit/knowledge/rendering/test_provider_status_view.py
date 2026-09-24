@@ -40,6 +40,11 @@ def test_adopted_success_delegates_to_projection():
     assert render_provider_status_answer([_use("ricekb", "SUCCESS", adopted=True)]) is None
 
 
+def test_provider_status_is_independent_from_execution_status():
+    use = _use("ricekb", "SUCCESS") | {"execution_status": "SUCCESS", "provider_status": "NOT_FOUND"}
+    assert render_provider_status_answer([use]).startswith("未找到")
+
+
 def test_no_mcp_uses_or_unknown_negative_falls_back():
     assert render_provider_status_answer([]) is None
     assert render_provider_status_answer(None) is None

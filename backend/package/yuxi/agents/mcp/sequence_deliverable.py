@@ -20,7 +20,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +34,8 @@ SEQUENCE_DELIVERABLE_TAG = "YUXI_SEQUENCE_DELIVERABLE"
 SEQUENCE_DELIVERABLE_DIR_NAME = "sequence_deliverables"
 _FASTA_LINE_WIDTH = 60
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_NUCLEOTIDE_RE = re.compile(r"[ACGTRYSWKMBDHVN]+", re.I)
+_PROTEIN_RE = re.compile(r"[ABCDEFGHIKLMNPQRSTVWXYZ*UO]+", re.I)
 
 
 @dataclass(frozen=True)
@@ -84,7 +88,12 @@ def extract_sequence_deliverable(result_text: str) -> SequenceDeliverable | None
 
 
 def verify_sequence_integrity(spec: SequenceDeliverable) -> bool:
-    """完整性门：sequence 字节的自算哈希必须与上游 sequence_sha256 一致。"""
+    """完整性门：长度、字母表和 sha256 必须同时匹配。"""
+    if spec.sequence_length != len(spec.sequence):
+        return False
+    alphabet = _PROTEIN_RE if spec.sequence_type.lower() == "protein" else _NUCLEOTIDE_RE
+    if alphabet.fullmatch(spec.sequence) is None:
+        return False
     computed = hashlib.sha256(spec.sequence.encode("utf-8")).hexdigest()
     return computed == spec.sequence_sha256
 
@@ -131,12 +140,35 @@ def _write_deliverable_file(spec: SequenceDeliverable, thread_id: str, uid: str)
     target_dir.mkdir(parents=True, exist_ok=True)
     filename = deliverable_filename(spec)
     target_path = target_dir / filename
-    # 同名不同内容（上游快照更新）时覆盖：交付物始终反映本轮审计调用返回的字节。
-    target_path.write_text(render_fasta(spec), encoding="utf-8")
+    # 同名不同内容（上游快照更新）时原子替换，下载端永远不会读到半个 FASTA。
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target_dir,
+            prefix=f".{filename}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(render_fasta(spec))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = temporary.name
+        os.replace(temporary_path, target_path)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
     return filename
 
 
-async def record_sequence_deliverable(tool_name: str, result_text: str) -> dict[str, Any] | None:
+async def record_sequence_deliverable(
+    tool_name: str,
+    result_text: str,
+    *,
+    mcp_call_audit_id: int | None = None,
+) -> dict[str, Any] | None:
     """落盘交付物并返回模型可见通知；任何失败都只记日志、返回 None。"""
     if tool_name != SEQUENCE_DELIVERABLE_TOOL:
         return None
@@ -179,6 +211,7 @@ async def record_sequence_deliverable(tool_name: str, result_text: str) -> dict[
                     "sequence_id": spec.sequence_id,
                     "sequence_type": spec.sequence_type,
                     "sequence_sha256": spec.sequence_sha256,
+                    "mcp_call_audit_id": mcp_call_audit_id,
                 },
             )
         )

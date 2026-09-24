@@ -31,6 +31,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from yuxi.knowledge.planning.turn_execution_plan import source_use_execution_succeeded
+
 PROFILE_TOOL = "ricekb_gene_profile"
 SEQUENCE_TOOL = "ricekb_sequence"
 _MIN_PROFILE_FACTS = 8
@@ -133,7 +135,7 @@ def _manifest_facts(source_use: Any) -> list[dict]:
 def _is_successful_adopted(source_use: Any, tool: str) -> bool:
     if str(_value(source_use, "operation") or "") != tool:
         return False
-    if str(_value(source_use, "status") or "").upper() != "SUCCESS":
+    if not source_use_execution_succeeded(source_use):
         return False
     if not bool(_value(source_use, "adopted")):
         return False

@@ -86,6 +86,17 @@ def test_tampered_base_fails_integrity_gate():
     assert not verify_sequence_integrity(spec)
 
 
+def test_declared_length_and_sequence_alphabet_are_validated():
+    wrong_length = json.loads(_envelope(_SEQ))
+    wrong_length["data"]["sequence_length"] += 1
+    assert not verify_sequence_integrity(extract_sequence_deliverable(json.dumps(wrong_length)))
+
+    invalid_alphabet = _SEQ[:-1] + "!"
+    invalid = extract_sequence_deliverable(_envelope(invalid_alphabet))
+    assert invalid is not None
+    assert not verify_sequence_integrity(invalid)
+
+
 def test_fasta_render_is_deterministic_wrapped_and_anchored():
     spec = extract_sequence_deliverable(_envelope(_SEQ))
     fasta = render_fasta(spec)
@@ -144,6 +155,25 @@ async def test_record_writes_file_and_returns_notice(delivered_outputs):
     spec = extract_sequence_deliverable(_envelope(_SEQ))
     assert target.read_text(encoding="utf-8") == render_fasta(spec)
     assert notice["sequence_sha256"] == spec.sequence_sha256
+
+
+@pytest.mark.asyncio
+async def test_record_links_artifact_to_mcp_audit(monkeypatch, delivered_outputs):
+    from yuxi.agents.mcp.execution import McpExecutionContext, reset_mcp_execution_context, set_mcp_execution_context
+
+    captured = []
+
+    async def capture(entry):
+        captured.append(entry)
+
+    monkeypatch.setattr("yuxi.agents.mcp.artifact_materializer.note_delivered_artifact", capture)
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=1, uid="u1", thread_id="t-seq", run_id="r1"))
+    try:
+        await record_sequence_deliverable("ricekb_sequence", _envelope(_SEQ), mcp_call_audit_id=76)
+    finally:
+        reset_mcp_execution_context(token)
+
+    assert captured[0].origin["mcp_call_audit_id"] == 76
 
 
 @pytest.mark.asyncio

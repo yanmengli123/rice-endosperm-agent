@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from yuxi.agents.mcp.artifact_materializer import (
@@ -49,9 +51,7 @@ def materialize_outputs(monkeypatch, tmp_path):
 @pytest.fixture
 def run_scope():
     """同时开启 MCP 执行身份与产物累积器（对齐 run 边界的真实时序）。"""
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=1, uid="u1", thread_id="t-mat", run_id="r-mat")
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=1, uid="u1", thread_id="t-mat", run_id="r-mat"))
     accumulation_token = begin_artifact_accumulation()
     try:
         yield accumulation_token
@@ -95,6 +95,21 @@ async def test_long_text_materializes_markdown(materialize_outputs, run_scope):
     assert (materialize_outputs / MCP_RESULTS_DIR_NAME / entry.name).read_text(encoding="utf-8") == _LONG_TEXT
 
 
+async def test_long_json_text_keeps_json_media_type(materialize_outputs, run_scope):
+    payload = {"status": "FOUND", "data": {"text": "A" * 2500}}
+    entry = await materialize_mcp_data_result(
+        server_slug="ricekb-profile",
+        tool_name="ricekb_gene_profile",
+        result_text=json.dumps(payload),
+        structured_content=None,
+        is_error=False,
+        mcp_call_audit_id=9,
+    )
+    assert entry is not None
+    assert entry.virtual_path.endswith(".json")
+    assert entry.media_type == "application/json"
+
+
 async def test_short_plain_result_and_error_result_are_not_materialized(materialize_outputs, run_scope):
     assert (
         await materialize_mcp_data_result(
@@ -123,9 +138,7 @@ async def test_short_plain_result_and_error_result_are_not_materialized(material
 
 async def test_missing_scope_or_context_is_tolerated(materialize_outputs):
     # 无累积器（run 边界外，如离线评估）：不物化、不抛异常
-    token = set_mcp_execution_context(
-        McpExecutionContext(tenant_id=1, uid="u1", thread_id="t-x", run_id="r-x")
-    )
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=1, uid="u1", thread_id="t-x", run_id="r-x"))
     try:
         assert (
             await materialize_mcp_data_result(

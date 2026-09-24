@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from yuxi.agents.mcp.fact_ledger import extract_number_tokens, mask_structural_number_spans
-from yuxi.knowledge.planning.turn_execution_plan import EvidenceLevel
+from yuxi.knowledge.planning.turn_execution_plan import EvidenceLevel, source_use_execution_succeeded
 from yuxi.knowledge.rendering.authority_markers import authority_marker_pattern
 from yuxi.knowledge.rendering.source_answer_renderer import (
     domain_key_for_path,
@@ -63,11 +63,14 @@ def _source_use_value(source_use: Any, field: str) -> Any:
 def _adopted_mcp_sources(source_uses: list[Any] | None) -> list[Any]:
     adopted_sources: list[Any] = []
     for source_use in source_uses or []:
-        status = str(_source_use_value(source_use, "status") or "").casefold()
         adopted = bool(_source_use_value(source_use, "adopted"))
         source_use_id = str(_source_use_value(source_use, "source_use_id") or "")
         provenance = _source_use_value(source_use, "provenance") or {}
-        if status == "success" and adopted and (source_use_id.startswith("mcp:") or "mcp_call_audit_id" in provenance):
+        if (
+            source_use_execution_succeeded(source_use)
+            and adopted
+            and (source_use_id.startswith("mcp:") or "mcp_call_audit_id" in provenance)
+        ):
             adopted_sources.append(source_use)
     return adopted_sources
 

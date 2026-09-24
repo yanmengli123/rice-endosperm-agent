@@ -1476,10 +1476,19 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
     output_metadata = (
         output_message.extra_metadata if output_message and isinstance(output_message.extra_metadata, dict) else {}
     )
+    output = sanitize_visible_text(output_message.content) if output_message else ""
+    if (
+        output
+        and output_metadata.get("presentation_mode") == "MCP_VALUE_ONLY"
+        and str((output_metadata.get("source_output_guard") or {}).get("status") or "") != "SKIPPED"
+    ):
+        from yuxi.knowledge.rendering.source_answer_renderer import render_source_answer
+
+        output = render_source_answer(output)
 
     payload: dict[str, Any] = {
         "status": run.status,
-        "output": sanitize_visible_text(output_message.content) if output_message else "",
+        "output": output,
         "agent_slug": run.agent_slug,
         "thread_id": run.conversation_thread_id,
         "conversation_id": run.conversation_id,

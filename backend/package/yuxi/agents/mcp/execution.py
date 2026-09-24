@@ -22,6 +22,9 @@ class McpExecutionContext:
     agent_slug: str | None = None
     installation_id: int | None = None
     data_access_level: str = "PUBLIC"
+    # Deterministic multi-step flows may keep every call in the audit ledger
+    # while exposing only final deliverables in the user-facing artifact list.
+    artifact_policy: str = "all"
 
 
 _MCP_EXECUTION_CONTEXT: contextvars.ContextVar[McpExecutionContext | None] = contextvars.ContextVar(
@@ -66,17 +69,17 @@ def get_mcp_execution_context() -> McpExecutionContext | None:
 def _safe_json_value(value: Any) -> Any:
     """把审计字段转换成可规范序列化的 JSON 值，拒绝运行时对象。"""
 
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, bool | int | float | str):
         return value
     if isinstance(value, bytes):
         return {"__bytes__": value.hex()}
-    if isinstance(value, (Token, ContextVar)):
+    if isinstance(value, Token | ContextVar):
         raise TypeError(f"refusing to serialize {type(value).__qualname__} into MCP call digest")
     if callable(value):
         raise TypeError(f"refusing to serialize callable into MCP call digest: {type(value).__qualname__}")
     if isinstance(value, BaseException):
         raise TypeError(f"refusing to serialize {type(value).__qualname__} into MCP call digest")
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_safe_json_value(item) for item in value]
     if isinstance(value, dict):
         return {str(key): _safe_json_value(item) for key, item in value.items()}

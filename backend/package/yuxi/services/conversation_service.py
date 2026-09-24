@@ -1114,7 +1114,7 @@ async def get_thread_history_view(
 
         history.append(msg_dict)
 
-    _inject_run_artifacts(history, db)
+    await _inject_run_artifacts(history, db)
     logger.info(f"Loaded {len(history)} messages with feedback for thread {thread_id}")
     return {"history": history}
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from yuxi.knowledge.planning.turn_execution_plan import plan_turn
+from yuxi.knowledge.rendering.source_output_guard import fact_catalog_summary
 from yuxi.services.chat_service import _append_mcp_source_uses, _initial_source_manifest
 
 
@@ -40,6 +41,42 @@ def test_successful_registry_tool_adopted_without_plan_match():
     assert len(manifest.source_uses) == 1
     assert manifest.source_uses[0].adopted is True
     assert manifest.source_uses[0].evidence_ids == ["mcp:101"]
+    assert manifest.source_uses[0].execution_status == "SUCCESS"
+
+
+def test_found_provider_status_does_not_replace_execution_success():
+    manifest = _manifest()
+    _append_mcp_source_uses(manifest, audits=[_audit(107, provider_status="FOUND")], matched_ids=set())
+    source_use = manifest.source_uses[0]
+    assert source_use.status == "SUCCESS"
+    assert source_use.execution_status == "SUCCESS"
+    assert source_use.provider_status == "FOUND"
+    assert source_use.adopted is True
+
+
+def test_found_fact_manifest_reaches_the_publish_catalog():
+    audit = _audit(108, tool="ricekb_gene_profile")
+    audit.provenance = {
+        "fact_manifest": {
+            "facts": [
+                {"id": "f_0000000000000108", "path": "/status", "string_value": "FOUND"},
+                {
+                    "id": "f_0000000000000109",
+                    "path": "/data/identity/canonical_rap_id",
+                    "string_value": "Os06g0133000",
+                },
+            ]
+        }
+    }
+    manifest = _manifest()
+    _append_mcp_source_uses(manifest, audits=[audit], matched_ids={108})
+
+    assert manifest.source_uses[0].adopted is True
+    assert manifest.source_uses[0].provider_status == "FOUND"
+    assert [fact["string_value"] for fact in fact_catalog_summary(manifest.source_uses)] == [
+        "FOUND",
+        "Os06g0133000",
+    ]
 
 
 def test_negative_provider_status_not_adopted():
@@ -66,7 +103,8 @@ def test_negative_status_from_fact_manifest_not_adopted():
     manifest = _manifest()
     _append_mcp_source_uses(manifest, audits=[audit], matched_ids={106})
     assert manifest.source_uses[0].adopted is False
-    assert manifest.source_uses[0].status == "NOT_FOUND"
+    assert manifest.source_uses[0].status == "SUCCESS"
+    assert manifest.source_uses[0].provider_status == "NOT_FOUND"
 
 
 def test_failed_audit_not_adopted():
