@@ -1460,7 +1460,7 @@ async def test_get_agent_run_result_exposes_authoritative_model_scope_and_retrie
     payload = await agent_run_service.get_agent_run_result(run_id="run-1", current_uid="user-1", db=object())
 
     context = payload["run_context"]
-    assert context["protocol_version"] == "1.4"  # 1.4：执行轨迹改用独立持久化 SSE 端点
+    assert context["protocol_version"] == "1.5"  # 1.5：增加确定性对话关系子图附件
     assert context["agent_slug"] == "default-chatbot"
     assert context["thread_id"] == "thread-1"
     assert context["request_id"] == "req-1"

@@ -361,6 +361,22 @@ async def test_canonical_fold_key_migration_backfills_before_constraints_and_ind
 
 
 @pytest.mark.asyncio
+async def test_conversation_graph_snapshot_has_a_versioned_migration():
+    manager = PostgresManager()
+    connection = _RecordingConnection()
+
+    await manager._migration_0063_conversation_graph_snapshot(connection)
+
+    statements = "\n".join(connection.statements)
+    assert "ALTER TABLE IF EXISTS knowledge_retrieval_runs" in statements
+    assert "ADD COLUMN IF NOT EXISTS graph_snapshot_json JSON" in statements
+    assert (
+        "0063_conversation_graph_snapshot",
+        "_migration_0063_conversation_graph_snapshot",
+    ) in manager._VERSIONED_MIGRATIONS
+
+
+@pytest.mark.asyncio
 async def test_evidence_span_anchor_uniqueness_is_repaired_per_revision():
     manager = PostgresManager()
     connection = _RecordingConnection()

@@ -1312,6 +1312,8 @@ class KnowledgeRetrievalRun(Base):
     # Immutable direct-locator audit fact. Retrieval candidate ids alone cannot
     # reconstruct the exact parse-revision/anchor/page binding used in output.
     locator_resolution_json = Column(JSON_VALUE)
+    # Immutable bounded relationship graph published for this retrieval.
+    graph_snapshot_json = Column(JSON_VALUE)
     contract_hash = Column(String(64))
     status = Column(String(32), nullable=False, default="RUNNING")
     warnings_json = Column(JSON_VALUE)

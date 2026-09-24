@@ -9,7 +9,7 @@ from yuxi.knowledge.planning.task_classifier import (
     detect_question_types,
 )
 
-PLANNER_VERSION = "1.3"
+PLANNER_VERSION = "1.4"
 
 _SOCIAL_PATTERNS = (
     r"^(?:hi|hello|hey|你好|您好|嗨|早上好|下午好|晚上好)[!！。.，,\s]*$",
@@ -43,6 +43,33 @@ def _enumeration_target(question: str) -> str | None:
         match = re.search(pattern, question, flags=re.IGNORECASE)
         if match:
             return _clean_target(match.group(1))
+    return None
+
+
+def _relation_target(question: str) -> str | None:
+    """Extract the explicitly named subject of a relationship question.
+
+    This stays deliberately conservative: a relationship turn without one
+    unambiguous textual subject falls back to the ordinary evidence gateway
+    instead of letting the model choose a graph seed.
+    """
+    patterns = (
+        r"(?:查询|查找|展示|显示|分析|请问)?\s*[“\"']?([^“”\"'，,。；;？?]{1,80}?)[”\"']?\s*(?:和|与)\s*(?:其他|其它|哪些|什么).{0,16}(?:节点|实体|基因|表型|关系|关联)",
+        r"(?:查询|查找|展示|显示|分析|请问)?\s*[“\"']?([^“”\"'，,。；;？?]{1,80}?)[”\"']?\s*(?:有|存在|包含)(?:哪些|什么).{0,12}(?:关系|关联|邻居)",
+        r"[“\"']?([^“”\"'，,。；;？?]{1,80}?)[”\"']?\s*(?:的)?(?:关系图|关联图|邻居节点|一跳关系)",
+        r"(?:relationship|relations?|neighbors?)\s+(?:of|for)\s+([A-Za-z0-9_.:-]{2,80})",
+        r"^(?:does|is)\s+([A-Za-z0-9_.:-]{2,80})\s+(?:regulate|affect|influence|associate|relate)",
+        r"^(?:relationship\s+between\s+)?([A-Za-z0-9_.:-]{2,80})\s+(?:and|和|与)",
+        r"^([\u4e00-\u9fffA-Za-z0-9_.:-]{1,80})\s*(?:和|与)",
+        r"^([A-Za-z0-9_.:-]{2,80})\s*(?:是否)?(?:调控|影响|关联|参与)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, question, flags=re.IGNORECASE)
+        if match:
+            target = _clean_target(match.group(1))
+            if target:
+                target = re.sub(r"^(?:查询|查找|展示|显示|分析|请问)\s*", "", target).strip()
+            return target or None
     return None
 
 
@@ -105,10 +132,13 @@ def plan_knowledge_query(question: str, *, strategy: str, scope_nonempty: bool) 
     intent = early_intent
     question_types = detect_question_types(text)
 
+    relation_target = _relation_target(text) if intent == "RELATION_LOOKUP" else None
+
     return {
         **base,
         "intent": intent,
         "question_types": question_types,
+        "target_mention": relation_target,
         "retrieval_required": intent == "GLOSSARY_LOOKUP" or effective_strategy == "KNOWLEDGE_FIRST",
         "answer_mode": (
             "DETERMINISTIC_GLOSSARY"

@@ -92,6 +92,7 @@
                     :hide-tool-calls="true"
                     :mention="mentionConfigWithDocuments"
                     :figures="inlineFigures(displayItem.message, row.conv)"
+                    :graph-snapshot="inlineGraph(displayItem.message, row.conv)"
                     :evidence-id-set="displayedEvidenceIdSet"
                     @openStatus="handleOpenMessageStatus"
                     @openFigureSource="openFigureSource"
@@ -550,7 +551,7 @@
               </section>
 
               <section
-                v-if="displayedRunArtifactFiles.length"
+                v-if="displayedRunArtifactFiles.length || stateGraphExport"
                 class="state-section"
                 :class="{ 'is-collapsed': !isStateSectionExpanded('artifacts') }"
               >
@@ -569,7 +570,9 @@
                       :class="{ 'is-collapsed': !isStateSectionExpanded('artifacts') }"
                     />
                   </span>
-                  <span class="state-section-meta">{{ displayedRunArtifactFiles.length }}</span>
+                  <span class="state-section-meta">{{
+                    displayedRunArtifactFiles.length + (stateGraphExport ? 1 : 0)
+                  }}</span>
                 </button>
                 <div
                   v-show="isStateSectionExpanded('artifacts')"
@@ -619,6 +622,41 @@
                           class="state-list-item-spin"
                         />
                         <Save v-else :size="15" />
+                      </button>
+                    </div>
+                    <div v-if="stateGraphExport" class="state-list-item">
+                      <FileTypeIcon
+                        :name="'graph-snapshot.json'"
+                        :size="18"
+                        class="state-list-item-icon"
+                      />
+                      <div class="state-list-item-body">
+                        <div class="state-list-item-title">
+                          关系图快照 · {{ stateGraphExport.snapshot.edges.length }} 组关系
+                        </div>
+                        <div class="state-list-item-meta">
+                          聚合自 {{
+                            stateGraphExport.snapshot.total_raw_edge_count ||
+                            stateGraphExport.snapshot.edges.length
+                          }}
+                          条抽取记录 · 服务端回放导出
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        class="state-list-item-action"
+                        title="下载 JSON（含投影哈希与完整载荷）"
+                        @click.stop="downloadGraphSnapshot(stateGraphExport, 'json')"
+                      >
+                        <Download :size="15" />
+                      </button>
+                      <button
+                        type="button"
+                        class="state-list-item-action"
+                        title="下载 CSV 压缩包（nodes / edges / manifest）"
+                        @click.stop="downloadGraphSnapshot(stateGraphExport, 'csv')"
+                      >
+                        <Download :size="15" />
                       </button>
                     </div>
                   </div>
@@ -893,7 +931,7 @@ import { useChatUIStore } from '@/stores/chatUI'
 import { useConfigStore } from '@/stores/config'
 import { storeToRefs } from 'pinia'
 import { MessageProcessor } from '@/utils/messageProcessor'
-import { agentApi, threadApi } from '@/apis'
+import { agentApi, threadApi, apiGet } from '@/apis'
 import { downloadViewerFile } from '@/apis/viewer_filesystem'
 import { downloadWorkspaceKnowledgeFile } from '@/apis/workspace_api'
 import HumanApprovalModal from '@/components/HumanApprovalModal.vue'
@@ -910,6 +948,12 @@ import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import { extractCitationReadyFromHistory, inlineFiguresForMessage } from '@/utils/figureCard'
+import {
+  exportGraphSnapshotUrl,
+  extractGraphSnapshotFromHistory,
+  graphExportSourceForConversation,
+  inlineGraphForMessage
+} from '@/utils/graphSnapshot'
 import { artifactsForConversation, sessionArtifactGroupsFromMessages } from '@/utils/runArtifacts'
 import { buildStructuredMentions, formatMentionToken } from '@/utils/mention_utils'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
@@ -1392,6 +1436,7 @@ const resetRunEvidence = (threadId, runId = null) => {
   ts.sourceManifest = null
   ts.verifiedCitation = null
   ts.verifiedFigures = []
+  ts.verifiedGraphSnapshot = null
   ts.locatorCandidates = []
 }
 const currentEvidence = computed(() => {
@@ -1433,6 +1478,9 @@ const currentVerifiedFigures = computed(() => {
 // 答案气泡内图卡（消息级附件）：已落库载荷优先，其次本会话按 run 暂存；只挂该轮最后一条 AI 消息
 const inlineFigures = (message, conv) =>
   inlineFiguresForMessage(message, conv, currentThreadState.value?.figuresByRun)
+// 答案气泡内关系图：落库载荷优先，其次使用当前会话按 run 暂存的 SSE 快照
+const inlineGraph = (message, conv) =>
+  inlineGraphForMessage(message, conv, currentThreadState.value?.graphsByRun)
 // 跨文献歧义的候选文献（只含文档身份）；点选后以 @doc 提及重新提问
 const currentLocatorCandidates = computed(() => {
   const candidates = currentChatId.value
@@ -1849,6 +1897,12 @@ const displayedRunArtifactPaths = computed(() => {
   const convs = conversations.value
   const lastConv = convs[convs.length - 1]
   return lastConv ? artifactsForConversation(lastConv, runArtifactsByRun.value) : []
+})
+// 状态面板产物区的关系图导出源：取当前线程最后一轮的发布快照（与产物卡同语义）
+const stateGraphExport = computed(() => {
+  const convs = conversations.value
+  const lastConv = convs[convs.length - 1]
+  return lastConv ? graphExportSourceForConversation(lastConv) : null
 })
 const displayedRunArtifactFiles = computed(() =>
   displayedRunArtifactPaths.value
@@ -2855,6 +2909,7 @@ const restoreCitationReadyFromHistory = (threadId, history) => {
   const restored = extractCitationReadyFromHistory(history)
   ts.verifiedCitation = restored?.citation || null
   ts.verifiedFigures = restored?.figures || []
+  ts.verifiedGraphSnapshot = extractGraphSnapshotFromHistory(history)
 }
 
 const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
@@ -2929,6 +2984,44 @@ const handleArtifactSaved = async () => {
 // 下载走 viewer 文件系统端点，保存到工作区走 thread artifacts save。
 // ---------------------------------------------------------------------------
 const savingArtifactPaths = ref({})
+
+// ---------------------------------------------------------------------------
+// 关系图快照导出（状态面板产物区行级入口）：服务端回放发布载荷，确定性字节；
+// 前端只做触发与文件名解析——与 AgentArtifactsCard.downloadFile 同款模式。
+// ---------------------------------------------------------------------------
+const getConvGraphExport = (conv) => graphExportSourceForConversation(conv)
+
+const downloadGraphSnapshot = async (source, format) => {
+  if (!source?.runId) return
+  try {
+    const response = await apiGet(exportGraphSnapshotUrl(source.runId, format), {}, true, 'blob')
+    const blob = await response.blob()
+    const disposition =
+      response.headers.get('Content-Disposition') || response.headers.get('content-disposition')
+    let filename = `graph-snapshot.${format === 'csv' ? 'zip' : 'json'}`
+    if (disposition) {
+      const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+      if (utf8Match?.[1]) {
+        try {
+          filename = decodeURIComponent(utf8Match[1])
+        } catch {
+          /* 沿用兜底文件名 */
+        }
+      } else {
+        const asciiMatch = disposition.match(/filename="?([^";]+)"?/i)
+        filename = asciiMatch?.[1] || filename
+      }
+    }
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    link.click()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    message.error(error?.message || '关系图导出失败')
+  }
+}
 
 const downloadStateFile = async (file) => {
   const path = file?.path
@@ -3816,6 +3909,29 @@ watch(currentChatId, (threadId, oldThreadId) => {
 </script>
 
 <style lang="less" scoped>
+/* 关系图快照导出行（状态面板产物区，与 AgentArtifactsCard 同区视觉） */
+.graph-export-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px 2px;
+}
+.graph-export-label {
+  font-size: 12px;
+  color: var(--gray-550, #6b6f76);
+}
+.graph-export-row .item-action-btn {
+  border: 1px solid var(--gray-200, #e5e6eb);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gray-650, #4e5561);
+  font-size: 12px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+.graph-export-row .item-action-btn:hover {
+  background: var(--gray-100, #f2f3f5);
+}
 @import '@/assets/css/main.css';
 @import '@/assets/css/animations.less';
 

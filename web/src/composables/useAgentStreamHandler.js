@@ -4,6 +4,7 @@ import { unref } from 'vue'
 import { extractPendingInterrupt } from '@/composables/useApproval'
 import { ReasoningVisibilityBuffer } from '@/utils/reasoningVisibility'
 import { normalizeVerifiedFigures } from '@/utils/figureCard'
+import { normalizeGraphSnapshot } from '@/utils/graphSnapshot'
 import { artifactPathsFromChunk } from '@/utils/runArtifacts'
 
 const reasoningVisibilityByMessage = new Map()
@@ -281,6 +282,16 @@ export function useAgentStreamHandler({
         const runId = String(chunk.run_id || threadState.activeRunId || '')
         if (runId && figures.length) {
           threadState.figuresByRun = { ...(threadState.figuresByRun || {}), [runId]: figures }
+        }
+        return false
+      }
+
+      case 'graph_snapshot_ready': {
+        const snapshot = normalizeGraphSnapshot(chunk.graph_snapshot)
+        threadState.verifiedGraphSnapshot = snapshot
+        const runId = String(chunk.run_id || threadState.activeRunId || '')
+        if (runId && snapshot) {
+          threadState.graphsByRun = { ...(threadState.graphsByRun || {}), [runId]: snapshot }
         }
         return false
       }

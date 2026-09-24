@@ -35,6 +35,7 @@ def serialize_retrieval_run(record: KnowledgeRetrievalRun) -> dict[str, Any]:
         "evidence_ids": record.evidence_ids_json or [],
         "chunk_ids": record.chunk_ids_json or [],
         "locator_resolution": record.locator_resolution_json,
+        "graph_snapshot": record.graph_snapshot_json,
         "contract_hash": record.contract_hash,
         "status": record.status,
         "warnings": record.warnings_json or [],

@@ -1077,7 +1077,17 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0060_promote_legacy_glossary", "_migration_0060_promote_legacy_glossary"),
         ("0061_run_artifacts", "_migration_0061_run_artifacts"),
         ("0062_canonical_fold_key", "_migration_0062_canonical_fold_key"),
+        ("0063_conversation_graph_snapshot", "_migration_0063_conversation_graph_snapshot"),
     ]
+
+    async def _migration_0063_conversation_graph_snapshot(self, conn) -> None:
+        """Persist the immutable, bounded graph projection used by a chat turn."""
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS knowledge_retrieval_runs "
+                "ADD COLUMN IF NOT EXISTS graph_snapshot_json JSON"
+            )
+        )
 
     async def _migration_0062_canonical_fold_key(self, conn) -> None:
         """词典折叠键：拼写变体（frameshift / frame-shift / frame shift）统一确定性检索。

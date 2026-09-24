@@ -29,7 +29,7 @@ def test_detect_question_types_figure_table_citation():
 def test_plan_carries_question_types_and_version():
     plan = plan_knowledge_query("OsMYB73 与 OsbZIP58 的调控关系？", strategy="KNOWLEDGE_FIRST", scope_nonempty=True)
     # 1.3：detect_question_types 新增 VERBATIM 题型（引号原文片段/逐字意图）
-    assert PLANNER_VERSION == "1.3" and TASK_CLASSIFIER_VERSION == "1.3"
+    assert PLANNER_VERSION == "1.4" and TASK_CLASSIFIER_VERSION == "1.3"
     assert "question_types" in plan
     assert "MULTI_HOP" in plan["question_types"]
 

@@ -32,7 +32,7 @@ from yuxi.storage.postgres.models_knowledge import KnowledgeRetrievalRun
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.logging_config import logger
 
-ORCHESTRATOR_VERSION = "1.0"
+ORCHESTRATOR_VERSION = "1.1"
 
 
 def _merge_gateway_results(
@@ -323,6 +323,35 @@ def _emit_figure_projection_trace(retrieval_id: str, contract: dict[str, Any]) -
     )
 
 
+def _emit_graph_snapshot_trace(retrieval_id: str, contract: dict[str, Any]) -> None:
+    """Emit one auditable projection result for conversation graph cards."""
+    snapshot = contract.get("graph_snapshot")
+    if not isinstance(snapshot, dict):
+        return
+    from yuxi.trace import emit_trace
+
+    edges = snapshot.get("edges") or []
+    status = "attached" if edges else "suppressed"
+    outcome = str(snapshot.get("outcome") or "UNAVAILABLE")
+    emit_trace(
+        category="KNOWLEDGE",
+        operation="graph_snapshot",
+        event_type=f"knowledge.graph_snapshot.{status}",
+        span_id=retrieval_id,
+        title="对话关系子图投影",
+        summary="规范关系子图已附着" if status == "attached" else f"关系子图未附着：{outcome}",
+        attributes={
+            "outcome": outcome,
+            "node_count": len(snapshot.get("nodes") or []),
+            "edge_count": len(edges),
+            "truncated": bool(snapshot.get("truncated")),
+            "review_policy": snapshot.get("review_policy"),
+        },
+        resource_refs=[{"type": "knowledge_retrieval", "id": retrieval_id}],
+        visibility="ADMIN",
+    )
+
+
 async def _persist_audit(
     db: AsyncSession,
     *,
@@ -364,6 +393,7 @@ async def _persist_audit(
             evidence_ids_json=[item.get("evidence_id") for item in evidence if item.get("evidence_id")],
             chunk_ids_json=[item.get("chunk_id") for item in evidence if item.get("chunk_id")],
             locator_resolution_json=contract.get("locator_resolution"),
+            graph_snapshot_json=contract.get("graph_snapshot"),
             contract_hash=contract.get("contract_hash"),
             status=str(contract.get("status") or "COMPLETED"),
             warnings_json=contract.get("warnings") or [],
@@ -1115,6 +1145,75 @@ async def prepare_knowledge_context(
                 contract["warnings"].append(
                     f"标识符 {', '.join(identifiers)} 已精确匹配到规范实体，但当前策略下没有可引用的一跳关系证据。"
                 )
+        elif plan.get("intent") == "RELATION_LOOKUP" and plan.get("target_mention"):
+            async with db.begin_nested():
+                mention_text = str(plan["target_mention"])
+                member_kb_ids = [str(member["kb_id"]) for member in raw_members]
+                resolution = await resolve_entities(
+                    db,
+                    mention=mention_text,
+                    kb_ids=member_kb_ids,
+                    allow_lexical_fallback=False,
+                )
+                if resolution.get("match_tier") not in {"EXACT_CANONICAL", "EXACT_ALIAS"}:
+                    # 精确未命中 → 词面回退：闭世界内包含该词的节点应当可达。
+                    # 唯一 normalized 身份才采纳（含变体）；多义给候选名单，不猜。
+                    lexical = await resolve_entities(
+                        db,
+                        mention=mention_text,
+                        kb_ids=member_kb_ids,
+                        allow_lexical_fallback=True,
+                    )
+                    lexical_names = sorted(
+                        {
+                            str(item.get("normalized_name") or item.get("canonical_name") or "")
+                            for item in lexical.get("entities") or []
+                            if item.get("normalized_name") or item.get("canonical_name")
+                        }
+                    )
+                    if lexical.get("match_tier") == "PHRASE_LEXICAL" and lexical_names:
+                        if len(lexical_names) == 1:
+                            resolution = lexical
+                        else:
+                            contract["entity_candidates"] = lexical_names[:6]
+                            raise LookupError("AMBIGUOUS_EXACT_ENTITY")
+                    else:
+                        raise LookupError("EXACT_ENTITY_NOT_FOUND")
+                contract["resolved_entities"] = resolution.get("entities") or []
+                if resolution.get("ambiguity"):
+                    exact_names = sorted(
+                        {
+                            str(item.get("normalized_name") or item.get("canonical_name") or "")
+                            for item in resolution.get("entities") or []
+                            if item.get("normalized_name") or item.get("canonical_name")
+                        }
+                    )
+                    if exact_names:
+                        contract["entity_candidates"] = exact_names[:6]
+                    raise LookupError("AMBIGUOUS_EXACT_ENTITY")
+                lookup = await retrieve_entities_by_identifiers(
+                    db,
+                    entity_ids=[str(item["entity_id"]) for item in contract["resolved_entities"]],
+                    members=raw_members,
+                )
+            contract.update(
+                {
+                    "status": "COMPLETED",
+                    "claims": lookup["claims"],
+                    "evidence": lookup["evidence"],
+                    "knowledge_source_status": lookup["source_status"],
+                    "completeness": lookup["completeness"],
+                    "retriever_version": lookup["retriever_version"],
+                }
+            )
+            completeness_status, completeness_warnings = validate_completeness(contract["completeness"])
+            contract["completeness"]["status"] = completeness_status
+            contract["warnings"].extend(completeness_warnings)
+            if not lookup["claims"]:
+                contract["warnings"].append(
+                    f"实体 {plan['target_mention']} 已精确匹配，但当前证据策略下没有可引用的关系 Claim；"
+                    "候选关系裁决见关系图投影（HIT/PENDING_REVIEW）。"
+                )
         else:
             from yuxi.knowledge.scope_gateway import query_knowledge_scope_gateway, query_verbatim_for_scope
 
@@ -1526,6 +1625,16 @@ async def prepare_knowledge_context(
             contract["locator_resolution"],
             publish_allowed=bool((contract.get("answer_policy") or {}).get("figure_image_publish_allowed")),
         )
+    if (contract.get("retrieval_plan") or {}).get("intent") in {
+        "RELATION_LOOKUP",
+        "ENTITY_LOOKUP",
+        "PHENOTYPE_REGULATOR_ENUMERATION",
+    }:
+        from yuxi.knowledge.contracts.graph_snapshot_projection import project_graph_snapshot
+
+        # members=冻结 Scope 成员：投影的一跳查询被硬限制在这些 KB 内，候选边准入
+        # 也按成员 evidence_candidate 策略位裁决（与 claim 通道同一治理词表）。
+        contract["graph_snapshot"] = await project_graph_snapshot(db, contract, members=raw_members)
     # NUMERIC 题型：数字/区间/单位必须逐字来自证据原文，禁止换算或近似改写（P2-12）
     if "NUMERIC" in (plan.get("question_types") or []):
         contract["answer_instruction"] += (
@@ -1545,4 +1654,5 @@ async def prepare_knowledge_context(
     )
     _emit_knowledge_trace(retrieval_id, contract, started_at)
     _emit_figure_projection_trace(retrieval_id, contract)
+    _emit_graph_snapshot_trace(retrieval_id, contract)
     return contract

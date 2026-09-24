@@ -96,3 +96,44 @@ async def test_dataset_id_only_operation_resolves_owning_kb(monkeypatch):
         "kb_id": "kb-owner",
         "manage": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_graph_guard_falls_back_to_member_capability_for_reads(monkeypatch):
+    """图卡证据抽屉依赖的租户门：accessible 拒绝时，KB 成员 viewer 仍可读，非成员 404。
+
+    锁定 /api/graph/evidence/* 的授权语义——聊天关系图展开证据时不得因 share_config
+    不可见而误杀已授权审阅者，也不得向跨租户调用者泄露资源存在性。
+    """
+    async def denied(_user, _kb_id):
+        return False
+
+    monkeypatch.setattr(knowledge_access.knowledge_base, "check_accessible", denied)
+
+    async def capability_of_viewer(self, kb_id, uid):
+        return "viewer"
+
+    async def capability_of_none(self, kb_id, uid):
+        return None
+
+    request = SimpleNamespace(
+        method="GET",
+        path_params={},
+        query_params={"kb_id": "kb-graph"},
+        url=SimpleNamespace(path="/api/graph/evidence/triple"),
+    )
+    user = SimpleNamespace(uid="reviewer-1")
+
+    monkeypatch.setattr(
+        "yuxi.repositories.knowledge_graph_review_repository.KnowledgeGraphReviewRepository.get_member_capability",
+        capability_of_viewer,
+    )
+    await knowledge_access.authorize_graph_path(request, current_user=user)  # viewer 读放行，不抛
+
+    monkeypatch.setattr(
+        "yuxi.repositories.knowledge_graph_review_repository.KnowledgeGraphReviewRepository.get_member_capability",
+        capability_of_none,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await knowledge_access.authorize_graph_path(request, current_user=user)
+    assert exc_info.value.status_code == 404

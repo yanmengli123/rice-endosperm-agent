@@ -564,6 +564,88 @@ def _citation_ready_payload(locator: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _published_graph_snapshot(contract: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return only the already-frozen graph projection selected for publication.
+
+    只有 HIT（存在可发布边）才附卡：PENDING_REVIEW/MISS/AMBIGUOUS/UNAVAILABLE 的
+    裁决由确定性答案文本承载，不渲染空卡片。
+    """
+    if not getattr(conf, "graph_card_enabled", False) or not isinstance(contract, dict):
+        return None
+    snapshot = contract.get("graph_snapshot")
+    if not isinstance(snapshot, dict) or snapshot.get("schema") != "graph_snapshot_v1":
+        return None
+    if not (snapshot.get("edges") or []):
+        return None
+    return snapshot
+
+
+def _deterministic_relation_answer(contract: dict[str, Any] | None) -> str | None:
+    """Render canonical relation lookups without granting the model graph authority."""
+    if not isinstance(contract, dict):
+        return None
+    plan = contract.get("retrieval_plan") or {}
+    if plan.get("intent") != "RELATION_LOOKUP":
+        return None
+    snapshot = contract.get("graph_snapshot") or {}
+    if snapshot.get("schema") != "graph_snapshot_v1":
+        return "本次未生成可验证的关系子图，请稍后重试。"
+    outcome = str(snapshot.get("outcome") or "UNAVAILABLE")
+    if outcome == "AMBIGUOUS":
+        candidates = [str(item) for item in contract.get("entity_candidates") or [] if item]
+        base = "目标实体存在多个候选，当前无法唯一确定。请补充标准名称、别名或知识库范围后重试。"
+        if candidates:
+            base = f"{base}候选包括：{'、'.join(candidates[:6])}。"
+        return base
+    if outcome == "UNAVAILABLE":
+        return "规范知识图谱当前不可用，本次不返回未经验证的关系。请稍后重试。"
+    suppressed_candidates = int((snapshot.get("suppressed") or {}).get("review_policy") or 0)
+    if outcome == "PENDING_REVIEW":
+        names = [str(name) for name in snapshot.get("seed_names") or []]
+        subject = str(snapshot.get("seed_display_name") or "") or (names[0] if names else "该实体")
+        return (
+            f"在当前知识范围内找到 {suppressed_candidates} 条与「{subject}」相关的候选关系，"
+            "均来自自动抽取、尚待人工审核，暂不在关系图中展示。"
+            "可在图谱审核工作台完成审核后查看，或由管理员为该知识库开启候选证据策略。"
+        )
+    if outcome == "MISS":
+        return "在当前知识范围内未找到该实体的任何图谱关系（含待审核候选）。"
+
+    names = {
+        str(node.get("entity_id")): str(node.get("name") or node.get("entity_id"))
+        for node in snapshot.get("nodes") or []
+        if isinstance(node, dict) and node.get("entity_id")
+    }
+    edges = [edge for edge in snapshot.get("edges") or [] if isinstance(edge, dict)]
+    has_pending_edges = any(str(edge.get("review_status") or "").upper() == "CANDIDATE" for edge in edges)
+    lines = [
+        "已从规范知识图谱检索到以下关系（含标注待审核的候选关系）："
+        if has_pending_edges
+        else "已从规范知识图谱检索到以下已审核关系："
+    ]
+    listed_max = 20
+    for edge in edges[:listed_max]:
+        source = names.get(str(edge.get("source_entity_id")), str(edge.get("source_entity_id") or "未知实体"))
+        target = names.get(str(edge.get("target_entity_id")), str(edge.get("target_entity_id") or "未知实体"))
+        predicate = str(edge.get("predicate") or "相关")
+        pending = "（待审核）" if str(edge.get("review_status") or "").upper() == "CANDIDATE" else ""
+        conflict = "（存在证据冲突）" if str(edge.get("conflict_status") or "NONE") != "NONE" else ""
+        parallel = int(edge.get("parallel_count") or 1)
+        parallel_note = f"（{parallel} 条平行证据）" if parallel > 1 else ""
+        lines.append(f"- {source} —{predicate}→ {target}{pending}{conflict}{parallel_note}")
+    hidden_in_list = len(edges) - min(len(edges), listed_max)
+    if hidden_in_list > 0:
+        lines.append(f"……其余 {hidden_in_list} 组关系见下方关系图。")
+    total_raw = int(snapshot.get("total_raw_edge_count") or 0)
+    if total_raw > len(edges):
+        lines.append(f"共 {len(edges)} 组关系，聚合自 {total_raw} 条原始抽取记录（同名实体与近义谓词已合并）。")
+    if snapshot.get("truncated"):
+        lines.append("关系较多，图中仅展示按证据支持度排序后的受控子集。")
+    if suppressed_candidates:
+        lines.append(f"另有 {suppressed_candidates} 条待审核候选关系未展示。")
+    return "\n".join(lines)
+
+
 def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
 
@@ -1975,6 +2057,14 @@ async def save_messages_from_langgraph_state(
                 persisted["citation_ready"] = _citation_ready_payload(locator)
             last_ai_message.extra_metadata = persisted
             await conv_repo.db.flush()
+        graph_snapshot = _published_graph_snapshot(knowledge_contract)
+        if graph_snapshot is not None:
+            last_ai_message.extra_metadata = {
+                **dict(last_ai_message.extra_metadata or {}),
+                "knowledge_retrieval_id": knowledge_contract.get("retrieval_id"),
+                "graph_snapshot": graph_snapshot,
+            }
+            await conv_repo.db.flush()
 
     if run_id and last_ai_message:
         run_repo = AgentRunRepository(conv_repo.db)
@@ -2643,6 +2733,60 @@ async def stream_agent_chat(
                 meta=meta,
             )
 
+        deterministic_relation_answer = _deterministic_relation_answer(knowledge_contract)
+        if deterministic_relation_answer is not None:
+            # 关系查询由规范三元组确定性渲染；模型不参与节点、边或关系类型的生成。
+            if conf.enable_content_guard and await content_guard.check(deterministic_relation_answer):
+                yield make_chunk(
+                    status="error",
+                    error_type="content_guard_blocked",
+                    error_message="输出内容包含敏感词",
+                    meta=meta,
+                )
+                return
+            message_id = f"msg_{uuid.uuid4().hex}"
+            graph_snapshot = _published_graph_snapshot(knowledge_contract)
+            extra_metadata = {
+                "id": message_id,
+                "knowledge_retrieval_id": knowledge_contract.get("retrieval_id"),
+                "turn_execution_plan": turn_plan.public_dict(),
+                "run_source_manifest": source_manifest.model_dump(mode="json"),
+                "deterministic_relation": True,
+                **get_trace_info(langfuse_run),
+            }
+            if graph_snapshot is not None:
+                extra_metadata["graph_snapshot"] = graph_snapshot
+            ai_message = await conv_repo.add_message_by_thread_id(
+                thread_id=thread_id,
+                role="assistant",
+                content=deterministic_relation_answer,
+                message_type="text",
+                extra_metadata=extra_metadata,
+                run_id=meta.get("run_id"),
+                request_id=meta.get("request_id"),
+            )
+            if ai_message is not None and meta.get("run_id"):
+                await AgentRunRepository(db).set_output_message(str(meta["run_id"]), ai_message.id)
+            await db.commit()
+            yield make_chunk(
+                content=deterministic_relation_answer,
+                stream_event={
+                    "type": "message_delta",
+                    "message_id": message_id,
+                    "content": deterministic_relation_answer,
+                    "thread_id": thread_id,
+                    "namespace": [],
+                },
+                metadata={"deterministic_relation": True},
+                status="loading",
+                thread_id=thread_id,
+            )
+            if graph_snapshot is not None:
+                yield make_chunk(status="graph_snapshot_ready", graph_snapshot=graph_snapshot, meta=meta)
+            meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+            yield make_chunk(status="finished", meta=meta)
+            return
+
         deterministic_locator_answer = (
             _deterministic_locator_answer(knowledge_contract) if knowledge_contract is not None else None
         )
@@ -3095,7 +3239,7 @@ async def stream_agent_chat(
                 }
                 if source_output_validation is not None:
                     save_kwargs["run_metadata"]["source_output_guard"] = source_output_validation
-            if citation_sensitive_output:
+            if citation_sensitive_output or _published_graph_snapshot(knowledge_contract) is not None:
                 save_kwargs["knowledge_contract"] = knowledge_contract
             await save_messages_from_langgraph_state(**save_kwargs)
         except Exception as e:
@@ -3132,6 +3276,9 @@ async def stream_agent_chat(
                 candidate_documents = _candidate_documents(_terminal_locator, knowledge_contract.get("answer_policy"))
                 if len(candidate_documents) > 1:
                     yield make_chunk(status="locator_candidates", candidates=candidate_documents, meta=meta)
+            graph_snapshot = _published_graph_snapshot(knowledge_contract)
+            if graph_snapshot is not None:
+                yield make_chunk(status="graph_snapshot_ready", graph_snapshot=graph_snapshot, meta=meta)
 
         yield make_chunk(status="finished", meta=meta)
 

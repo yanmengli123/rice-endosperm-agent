@@ -86,7 +86,9 @@ async def resolve_entities(
             .all()
         )
         exact = aliases
-        tier = "EXACT_ALIAS"
+        # 别名未命中必须报 NO_MATCH：曾把空结果也标成 EXACT_ALIAS，
+        # 让垃圾输入"伪解析成功"、上层词面回退被跳过
+        tier = "EXACT_ALIAS" if aliases else "NO_MATCH"
 
     if not exact and allow_lexical_fallback:
         from yuxi.knowledge.evidence.verbatim import escape_like

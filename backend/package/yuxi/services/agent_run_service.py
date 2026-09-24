@@ -344,6 +344,8 @@ COMPACT_CHUNK_FIELDS: tuple[str, ...] = (
     "citation",
     # 图卡投影（citation_ready.figures）
     "figures",
+    # 确定性关系图快照（graph_snapshot_ready）
+    "graph_snapshot",
     # 跨文献歧义时的候选文献清单（locator_candidates 事件，只含文档身份）
     "candidates",
     # 终态 finished chunk 附带的 run 级产物清单（run_artifacts 权威投影，

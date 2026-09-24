@@ -21,7 +21,7 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeGraphTriple,
 )
 
-CANONICAL_RETRIEVER_VERSION = "1.1"
+CANONICAL_RETRIEVER_VERSION = "1.2"
 
 
 def _policy_allows(member: dict[str, Any], status: str) -> bool:
@@ -270,7 +270,8 @@ async def retrieve_exact_regulator_enumeration(
 async def retrieve_entities_by_identifiers(
     db: AsyncSession,
     *,
-    identifiers: list[str],
+    identifiers: list[str] | None = None,
+    entity_ids: list[str] | None = None,
     members: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """按 RAP/MSU 标识符精确解析实体，并枚举其全部一跳关系（任意方向、任意实体类型）。
@@ -281,13 +282,17 @@ async def retrieve_entities_by_identifiers(
     member_by_kb = {str(member["kb_id"]): member for member in members}
     kb_ids = list(member_by_kb)
 
+    identifiers = list(identifiers or [])
+    requested_entity_ids = list(dict.fromkeys(str(item) for item in (entity_ids or []) if str(item)))
     matched_entities: list[dict[str, Any]] = []
-    entity_ids: list[str] = []
-    if kb_ids and identifiers:
-        stmt = select(KnowledgeGraphEntity).where(
-            KnowledgeGraphEntity.kb_id.in_(kb_ids),
-            func.lower(KnowledgeGraphEntity.canonical_identity).in_([item.casefold() for item in identifiers]),
+    resolved_entity_ids: list[str] = []
+    if kb_ids and (identifiers or requested_entity_ids):
+        identity_filter = (
+            KnowledgeGraphEntity.entity_id.in_(requested_entity_ids)
+            if requested_entity_ids
+            else func.lower(KnowledgeGraphEntity.canonical_identity).in_([item.casefold() for item in identifiers])
         )
+        stmt = select(KnowledgeGraphEntity).where(KnowledgeGraphEntity.kb_id.in_(kb_ids), identity_filter)
         entities = list((await db.execute(stmt)).scalars().all())
         for entity in entities:
             matched_entities.append(
@@ -298,7 +303,7 @@ async def retrieve_entities_by_identifiers(
                     "canonical_identity": entity.canonical_identity,
                 }
             )
-            entity_ids.append(entity.entity_id)
+            resolved_entity_ids.append(entity.entity_id)
 
     relation_triples: dict[str, set[str]] = defaultdict(set)
     relation_kbs: dict[str, set[str]] = defaultdict(set)
@@ -309,7 +314,7 @@ async def retrieve_entities_by_identifiers(
     claims: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
 
-    if entity_ids:
+    if resolved_entity_ids:
         source_entity = aliased(KnowledgeGraphEntity)
         target_entity = aliased(KnowledgeGraphEntity)
         stmt = (
@@ -322,9 +327,10 @@ async def retrieve_entities_by_identifiers(
             )
             .where(
                 KnowledgeGraphTriple.kb_id.in_(kb_ids),
+                KnowledgeGraphTriple.review_status.in_(("APPROVED", "CANONICAL")),
                 or_(
-                    KnowledgeGraphTriple.source_entity_id.in_(entity_ids),
-                    KnowledgeGraphTriple.target_entity_id.in_(entity_ids),
+                    KnowledgeGraphTriple.source_entity_id.in_(resolved_entity_ids),
+                    KnowledgeGraphTriple.target_entity_id.in_(resolved_entity_ids),
                 ),
             )
             .order_by(
@@ -420,6 +426,7 @@ async def retrieve_entities_by_identifiers(
 
     completeness = {
         "identifier_count": len(identifiers),
+        "requested_entity_count": len(requested_entity_ids),
         "matched_entity_count": len(matched_entities),
         "eligible_claim_count": len(claim_groups),
         "eligible_evidence_count": len(eligible_evidence_keys),

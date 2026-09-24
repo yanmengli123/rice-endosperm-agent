@@ -55,3 +55,18 @@ def test_glossary_authority_runs_even_when_scope_is_empty_or_disabled():
         assert plan["intent"] == "GLOSSARY_LOOKUP"
         assert plan["retrieval_required"] is True
         assert plan["answer_mode"] == "DETERMINISTIC_GLOSSARY"
+
+
+def test_relation_lookup_extracts_a_deterministic_graph_seed():
+    cases = {
+        "GS3和其他节点有什么关系？": "GS3",
+        "GS3是否调控grain size？": "GS3",
+        "Wx和直链淀粉是什么关系？": "Wx",
+        "高温与垩白度是否关联？": "高温",
+        "Does GS3 regulate grain size?": "GS3",
+        "relationship between Wx and amylose": "Wx",
+    }
+    for question, target in cases.items():
+        plan = _plan(question)
+        assert plan["intent"] == "RELATION_LOOKUP"
+        assert plan["target_mention"] == target

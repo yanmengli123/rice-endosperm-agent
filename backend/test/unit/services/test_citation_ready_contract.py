@@ -57,6 +57,82 @@ _LOCATOR = {
 
 def test_config_switch_defaults_off():
     assert Config.model_fields["figure_card_enabled"].default is False
+    assert Config.model_fields["graph_card_enabled"].default is False
+
+
+def test_graph_snapshot_publish_switch_is_fail_closed(monkeypatch):
+    snapshot = {
+        "schema": "graph_snapshot_v1",
+        "outcome": "HIT",
+        "nodes": [{"entity_id": "e1", "kb_id": "kb", "name": "GS3", "label": "Gene", "is_seed": True}],
+        "edges": [
+            {
+                "triple_id": "t1",
+                "kb_id": "kb",
+                "source_entity_id": "e1",
+                "target_entity_id": "e2",
+                "predicate": "regulates",
+                "review_status": "APPROVED",
+                "conflict_status": "NONE",
+            }
+        ],
+    }
+    contract = {"graph_snapshot": snapshot}
+    monkeypatch.setattr(svc.conf, "graph_card_enabled", False)
+    assert svc._published_graph_snapshot(contract) is None
+    monkeypatch.setattr(svc.conf, "graph_card_enabled", True)
+    assert svc._published_graph_snapshot(contract) == snapshot
+    # 非 HIT（无边）不附卡：PENDING_REVIEW 等裁决由答案文本承载，不渲染空卡片
+    empty = {"graph_snapshot": {**snapshot, "outcome": "PENDING_REVIEW", "edges": [], "nodes": []}}
+    assert svc._published_graph_snapshot(empty) is None
+    assert svc._published_graph_snapshot({"graph_snapshot": {"schema": "unknown"}}) is None
+
+
+def test_relation_answer_uses_only_frozen_snapshot():
+    contract = {
+        "retrieval_plan": {"intent": "RELATION_LOOKUP"},
+        "graph_snapshot": {
+            "schema": "graph_snapshot_v1",
+            "outcome": "HIT",
+            "truncated": False,
+            "nodes": [
+                {"entity_id": "e1", "name": "GS3"},
+                {"entity_id": "e2", "name": "grain size"},
+            ],
+            "edges": [
+                {
+                    "source_entity_id": "e1",
+                    "target_entity_id": "e2",
+                    "predicate": "regulates",
+                    "conflict_status": "NONE",
+                    "review_status": "APPROVED",
+                }
+            ],
+            "suppressed": {"review_policy": 0},
+        },
+    }
+    assert svc._deterministic_relation_answer(contract) == (
+        "已从规范知识图谱检索到以下已审核关系：\n- GS3 —regulates→ grain size"
+    )
+
+
+def test_relation_answer_reports_pending_review_with_count():
+    contract = {
+        "retrieval_plan": {"intent": "RELATION_LOOKUP"},
+        "graph_snapshot": {
+            "schema": "graph_snapshot_v1",
+            "outcome": "PENDING_REVIEW",
+            "seed_names": ["OsMYB73"],
+            "nodes": [],
+            "edges": [],
+            "suppressed": {"review_policy": 729},
+        },
+    }
+    assert svc._deterministic_relation_answer(contract) == (
+        "在当前知识范围内找到 729 条与「OsMYB73」相关的候选关系，"
+        "均来自自动抽取、尚待人工审核，暂不在关系图中展示。"
+        "可在图谱审核工作台完成审核后查看，或由管理员为该知识库开启候选证据策略。"
+    )
 
 
 def test_payload_adds_kb_and_revision_and_omits_figures_when_switch_off(monkeypatch):

@@ -60,10 +60,20 @@
         @open-source="emit('openFigureSource', $event)"
       />
 
+      <!-- 规范关系子图：消息级附件，数据来自后端冻结的 graph_snapshot_v1 -->
+      <GraphSnapshotCard
+        v-if="graphSnapshot"
+        :snapshot="graphSnapshot"
+        :run-id="String(message.run_id || message?.extra_metadata?.run_id || '')"
+      />
+
       <!-- 错误提示块 -->
       <div v-if="displayError" class="error-hint">
         <span v-if="getErrorMessage">{{ getErrorMessage }}</span>
         <span v-else-if="message.error_type === 'interrupted'">回答生成已中断</span>
+        <span v-else-if="message.error_type === 'model_connection_error'"
+          >模型服务连接中断，本次回答未完成；网络恢复后可直接重试</span
+        >
         <span v-else-if="message.error_type === 'unexpect'">生成过程中出现异常</span>
         <span v-else-if="message.error_type === 'content_guard_blocked'"
           >检测到敏感内容，已中断输出</span
@@ -170,6 +180,7 @@ import { inferImageMimeTypeFromBase64, normalizeAttachmentPreviews } from '@/uti
 import { buildMentionDisplayLabels } from '@/utils/mention_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
+import GraphSnapshotCard from '@/components/evidence/GraphSnapshotCard.vue'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 
 const props = defineProps({
@@ -210,6 +221,11 @@ const props = defineProps({
   figures: {
     type: Array,
     default: () => []
+  },
+  // 已审核知识关系的确定性子图（消息级附件；禁止从 Markdown/模型文本反向解析）
+  graphSnapshot: {
+    type: Object,
+    default: null
   },
   // 可跳转原文的 evidence_id 集合（Set）；缺失即不显示「查看原文」
   evidenceIdSet: {
@@ -315,6 +331,8 @@ const getErrorMessage = computed(() => {
   switch (props.message.error_type) {
     case 'interrupted':
       return '回答生成已中断'
+    case 'model_connection_error':
+      return '模型服务连接中断，本次回答未完成；网络恢复后可直接重试'
     case 'content_guard_blocked':
       return '检测到敏感内容，已中断输出'
     case 'unexpect':

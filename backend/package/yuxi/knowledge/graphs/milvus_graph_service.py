@@ -1162,6 +1162,7 @@ class MilvusGraphService:
         max_depth: int = 1,
         max_nodes: int = 50,
         exclude_chunk: bool = False,
+        raise_on_error: bool = False,
     ) -> dict[str, Any]:
         effective_kb_id = kb_id or self.kb_id
         if not effective_kb_id:
@@ -1183,6 +1184,8 @@ class MilvusGraphService:
             return filter_edges_by_policy(result, policy)
         except Exception as e:
             logger.error(f"Milvus graph query failed: {e}")
+            if raise_on_error:
+                raise
             return {"nodes": [], "edges": []}
 
     def _query_nodes_sync(

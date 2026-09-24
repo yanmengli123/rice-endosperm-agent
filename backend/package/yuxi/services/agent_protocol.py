@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-# 1.4：执行轨迹改用独立、可补偿的持久化 SSE 端点。
-AGENT_RUN_PROTOCOL_VERSION = "1.4"
+# 1.5：增加确定性对话关系子图消息附件与 SSE 事件。
+AGENT_RUN_PROTOCOL_VERSION = "1.5"
 # 服务端仍兼容的最低协议版本（桌面端 run_context 校验下限同源）。
 AGENT_RUN_MIN_SUPPORTED_PROTOCOL_VERSION = "1.2"
 
@@ -36,6 +36,8 @@ AGENT_RUN_CAPABILITIES: tuple[str, ...] = (
     "citation_v2",
     # citation_ready.figures 图卡投影（字段缺席即本 run 未发布图卡）。
     "figures_card",
+    # graph_snapshot_ready 确定性规范关系子图（消息级附件）。
+    "graph_snapshot_card",
     # 跨文献歧义时候选清单（locator_candidates）。
     "locator_candidates",
     # 独立执行轨迹端点：/trace 快照 + /trace/events 增量补拉。
