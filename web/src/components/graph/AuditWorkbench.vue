@@ -41,14 +41,21 @@
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'action'">
-          <a-tag :color="actionColor(record.action)" size="small">{{ auditActionLabel(record.action) }}</a-tag>
+          <a-tag :color="actionColor(record.action)" size="small">{{
+            auditActionLabel(record.action)
+          }}</a-tag>
         </template>
         <template v-else-if="column.key === 'target'">
           <span class="mono" :title="record.target_id">{{ record.target_id?.slice(0, 12) }}…</span>
           <a-tag size="small">{{ record.target_kind }}</a-tag>
         </template>
         <template v-else-if="column.key === 'diff'">
-          <a-button v-if="hasSnapshot(record)" size="small" type="link" @click.stop="openDiff(record)">
+          <a-button
+            v-if="hasSnapshot(record)"
+            size="small"
+            type="link"
+            @click.stop="openDiff(record)"
+          >
             前后差异
           </a-button>
           <span v-else class="audit-hint">—</span>
@@ -56,7 +63,13 @@
       </template>
     </a-table>
 
-    <a-modal v-model:open="diffOpen" title="决策前后差异" width="680px" ok-text="关闭" :footer="null">
+    <a-modal
+      v-model:open="diffOpen"
+      title="决策前后差异"
+      width="680px"
+      ok-text="关闭"
+      :footer="null"
+    >
       <template v-if="diffRecord">
         <div class="diff-meta">
           {{ formatTime(diffRecord.created_at) }} · {{ diffRecord.actor_uid }} ·
@@ -137,11 +150,9 @@ const actionColor = (action) =>
     CONFLICT_RESOLVE: 'orange'
   })[action] || 'default'
 
-const hasSnapshot = (record) =>
-  Boolean(record.before_snapshot || record.after_snapshot)
+const hasSnapshot = (record) => Boolean(record.before_snapshot || record.after_snapshot)
 
-const formatSnapshot = (snapshot) =>
-  snapshot ? JSON.stringify(snapshot, null, 2) : '（无）'
+const formatSnapshot = (snapshot) => (snapshot ? JSON.stringify(snapshot, null, 2) : '（无）')
 
 const formatTime = (iso) => (iso ? new Date(iso).toLocaleString() : '—')
 

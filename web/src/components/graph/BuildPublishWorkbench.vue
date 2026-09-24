@@ -9,8 +9,12 @@
             <a-tag v-if="isManagedGraph" color="default" size="small">契约禁止 LLM 抽取</a-tag>
             <template v-else>
               <a-tag v-if="!buildModel.configured" color="orange" size="small">未配置</a-tag>
-              <a-tag v-else-if="buildModel.active" color="processing" size="small">{{ buildStatusLabel }}</a-tag>
-              <a-tag v-else-if="buildModel.taskStatus === 'failed'" color="red" size="small">上次未完成</a-tag>
+              <a-tag v-else-if="buildModel.active" color="processing" size="small">{{
+                buildStatusLabel
+              }}</a-tag>
+              <a-tag v-else-if="buildModel.taskStatus === 'failed'" color="red" size="small"
+                >上次未完成</a-tag
+              >
               <a-tag v-else-if="buildModel.pending > 0" color="gold" size="small">
                 待索引 {{ buildModel.pending.toLocaleString('zh-CN') }} 段
               </a-tag>
@@ -19,8 +23,8 @@
           </a-space>
         </div>
         <div v-if="isManagedGraph" class="form-hint">
-          当前知识库为规范图谱契约（managed_graph）：规范事实只来自 Canonical 导入，
-          禁止 LLM 自动抽取（llm_graph_config / llm_graph_build）。
+          当前知识库为规范图谱契约（managed_graph）：规范事实只来自 Canonical 导入， 禁止 LLM
+          自动抽取（llm_graph_config / llm_graph_build）。
           图谱内容请使用「图谱探索」工具栏的<b>托管导入</b>上传节点/关系 CSV 维护。
         </div>
         <template v-else>
@@ -31,7 +35,12 @@
             </template>
           </div>
           <a-space wrap>
-            <a-button size="small" type="primary" :loading="buildStatusLoading" @click="openConfigModal">
+            <a-button
+              size="small"
+              type="primary"
+              :loading="buildStatusLoading"
+              @click="openConfigModal"
+            >
               {{ buildModel.configured ? '修改抽取配置' : '配置抽取器' }}
             </a-button>
             <a-button
@@ -43,25 +52,31 @@
             >
               开始索引
             </a-button>
-            <a-button v-if="buildModel.configured" size="small" danger @click="confirmReset">清空并重建</a-button>
+            <a-button v-if="buildModel.configured" size="small" danger @click="confirmReset"
+              >清空并重建</a-button
+            >
           </a-space>
           <div v-if="buildModel.configured" class="form-hint build-summary-line">
             {{ buildStatusSummary(buildModel) }}
           </div>
           <a-progress
-            v-if="buildModel.configured && (buildModel.active || buildModel.taskStatus === 'failed')"
+            v-if="
+              buildModel.configured && (buildModel.active || buildModel.taskStatus === 'failed')
+            "
             :percent="buildModel.active ? buildModel.taskProgress : buildModel.percent"
             :status="buildModel.taskStatus === 'failed' ? 'exception' : 'active'"
             size="small"
           />
-          <div
-            v-if="buildModel.taskStatus === 'failed'"
-            class="form-hint build-fail-line"
-          >
-            {{ buildModel.taskMessage || buildModel.taskError || '存在待重试段落，可再次点击「开始索引」续跑' }}
+          <div v-if="buildModel.taskStatus === 'failed'" class="form-hint build-fail-line">
+            {{
+              buildModel.taskMessage ||
+              buildModel.taskError ||
+              '存在待重试段落，可再次点击「开始索引」续跑'
+            }}
           </div>
           <div class="form-hint">
-            抽取器类型（LLM 开放 Schema / 科研闭集）、模型与并发数决定构建产出的质量与成本；修改仅影响后续构建。
+            抽取器类型（LLM 开放 Schema /
+            科研闭集）、模型与并发数决定构建产出的质量与成本；修改仅影响后续构建。
           </div>
         </template>
       </div>
@@ -105,7 +120,12 @@
             </a-form-item>
           </div>
           <a-form-item>
-            <a-button type="primary" size="small" :loading="governanceSaving" @click="saveGovernance">
+            <a-button
+              type="primary"
+              size="small"
+              :loading="governanceSaving"
+              @click="saveGovernance"
+            >
               保存（写审计）
             </a-button>
           </a-form-item>
@@ -126,7 +146,11 @@
             <a-tag color="red" size="small">阻断</a-tag>{{ gateLabel(blocker.code) }}
             <span class="gate-detail">{{ blockerDetail(blocker) }}</span>
           </div>
-          <div v-for="warning in gates.warnings" :key="warning.code" class="gate-row gate-row--warn">
+          <div
+            v-for="warning in gates.warnings"
+            :key="warning.code"
+            class="gate-row gate-row--warn"
+          >
             <a-tag color="orange" size="small">披露</a-tag>{{ gateLabel(warning.code) }}
             <span class="gate-detail">{{ blockerDetail(warning) }}</span>
           </div>
@@ -134,7 +158,9 @@
             无阻断与披露项，可发布。
           </div>
         </template>
-        <div v-else class="form-hint">点击「重新评估」运行发布门禁（完整性/maker-checker 阻断，死信/门禁/冲突披露）。</div>
+        <div v-else class="form-hint">
+          点击「重新评估」运行发布门禁（完整性/maker-checker 阻断，死信/门禁/冲突披露）。
+        </div>
       </div>
 
       <!-- Release 清单 -->
@@ -143,7 +169,9 @@
           <span class="card-title">发布清单（Release）</span>
           <a-space>
             <a-button size="small" :loading="releasesLoading" @click="loadReleases">刷新</a-button>
-            <a-button size="small" type="primary" :loading="building" @click="buildRelease">构建新清单</a-button>
+            <a-button size="small" type="primary" :loading="building" @click="buildRelease"
+              >构建新清单</a-button
+            >
           </a-space>
         </div>
         <div v-if="!releases.length" class="form-hint">
@@ -162,24 +190,39 @@
           </thead>
           <tbody>
             <tr v-for="release in releases" :key="release.release_id">
-              <td class="mono" :title="release.release_id">{{ release.release_id.slice(0, 14) }}…</td>
+              <td class="mono" :title="release.release_id">
+                {{ release.release_id.slice(0, 14) }}…
+              </td>
               <td>
-                <a-tag :color="releaseStatusColor(release.status)" size="small">{{ release.status }}</a-tag>
+                <a-tag :color="releaseStatusColor(release.status)" size="small">{{
+                  release.status
+                }}</a-tag>
               </td>
               <td>
                 <span v-if="release.graph">
-                  {{ release.graph.decisions_watermark?.total ?? 0 }} 条 · v≤{{ release.graph.decisions_watermark?.max_version ?? 0 }}
-                  <a-tag v-if="release.graph.review_policy === 'approved_only'" size="small" color="green">仅批准</a-tag>
+                  {{ release.graph.decisions_watermark?.total ?? 0 }} 条 · v≤{{
+                    release.graph.decisions_watermark?.max_version ?? 0
+                  }}
+                  <a-tag
+                    v-if="release.graph.review_policy === 'approved_only'"
+                    size="small"
+                    color="green"
+                    >仅批准</a-tag
+                  >
                 </span>
                 <span v-else class="form-hint">未冻结</span>
               </td>
               <td>
-                <a-tag v-if="release.retrieval_policy_revision_id" size="small" color="blue">已挂接</a-tag>
+                <a-tag v-if="release.retrieval_policy_revision_id" size="small" color="blue"
+                  >已挂接</a-tag
+                >
                 <span v-else class="form-hint">—</span>
               </td>
               <td class="time-cell">
                 {{ formatTime(release.created_at) }}
-                <template v-if="release.published_at"> / {{ formatTime(release.published_at) }}</template>
+                <template v-if="release.published_at">
+                  / {{ formatTime(release.published_at) }}</template
+                >
               </td>
               <td>
                 <a-space size="small">
@@ -223,18 +266,25 @@
           <span class="card-title">协作成员（KB 级能力）</span>
         </div>
         <div class="form-hint" style="margin-bottom: 8px">
-          share_config 决定「能否看见」，这里决定「能做什么」：viewer 只读治理视图，reviewer 可裁决，publisher
-          可发布。管理员默认具备全部能力。
+          share_config 决定「能否看见」，这里决定「能做什么」：viewer 只读治理视图，reviewer
+          可裁决，publisher 可发布。管理员默认具备全部能力。
         </div>
         <div class="member-add-row">
-          <a-input v-model:value="memberForm.uid" placeholder="用户 uid" size="small" style="width: 220px" />
+          <a-input
+            v-model:value="memberForm.uid"
+            placeholder="用户 uid"
+            size="small"
+            style="width: 220px"
+          />
           <a-select
             v-model:value="memberForm.capability"
             size="small"
             style="width: 140px"
             :options="capabilityOptions"
           />
-          <a-button size="small" type="primary" :loading="memberSaving" @click="addMember">授予 / 更新</a-button>
+          <a-button size="small" type="primary" :loading="memberSaving" @click="addMember"
+            >授予 / 更新</a-button
+          >
         </div>
         <table v-if="members.length" class="release-table">
           <thead>
@@ -249,7 +299,9 @@
             <tr v-for="member in members" :key="member.uid">
               <td class="mono">{{ member.uid }}</td>
               <td>
-                <a-tag :color="capabilityColor(member.capability)" size="small">{{ member.capability }}</a-tag>
+                <a-tag :color="capabilityColor(member.capability)" size="small">{{
+                  member.capability
+                }}</a-tag>
               </td>
               <td>{{ member.created_by }}</td>
               <td>
@@ -274,7 +326,12 @@ import { computed, reactive, ref, watch } from 'vue'
 import { Modal, message } from 'ant-design-vue'
 import { graphApi } from '@/apis/graph_api'
 import { graphBuildApi, kbReleaseApi } from '@/apis/knowledge_api'
-import { BATCH_ADMISSION_META, normalizeBuildStatus, buildStatusSummary, buildTaskLabel } from '@/utils/graph/reviewMeta'
+import {
+  BATCH_ADMISSION_META,
+  normalizeBuildStatus,
+  buildStatusSummary,
+  buildTaskLabel
+} from '@/utils/graph/reviewMeta'
 import { useDatabaseStore } from '@/stores/database'
 import GraphExtractorConfigModal from '@/components/graph/GraphExtractorConfigModal.vue'
 
@@ -301,7 +358,8 @@ const buildStatusLabel = computed(() => buildTaskLabel(buildModel.value))
 const buildActive = computed(() => buildModel.value.active)
 const pendingChunks = computed(() => buildModel.value.pending)
 
-const extractorLabel = (type) => ({ llm: 'LLM（开放 Schema）', llm_scientific: '科研闭集' })[type] || type || '—'
+const extractorLabel = (type) =>
+  ({ llm: 'LLM（开放 Schema）', llm_scientific: '科研闭集' })[type] || type || '—'
 
 const loadBuildStatus = async () => {
   if (!props.kbId) return
@@ -376,7 +434,8 @@ watch(
 const confirmReset = () => {
   Modal.confirm({
     title: '清空并重建图谱',
-    content: '将清空当前图谱并重抽所有段落；人工审核决策与已固定证据会在重建后按决策恢复。确定继续？',
+    content:
+      '将清空当前图谱并重抽所有段落；人工审核决策与已固定证据会在重建后按决策恢复。确定继续？',
     okText: '清空并重建',
     okButtonProps: { danger: true },
     cancelText: '取消',
@@ -417,8 +476,12 @@ const capabilityOptions = [
   { value: 'publisher', label: 'publisher（发布）' }
 ]
 
-const admissionHint = computed(() => BATCH_ADMISSION_META[governanceForm.batch_admission]?.hint || '')
-const hasActiveRelease = computed(() => releases.value.some((release) => release.status === 'ACTIVE'))
+const admissionHint = computed(
+  () => BATCH_ADMISSION_META[governanceForm.batch_admission]?.hint || ''
+)
+const hasActiveRelease = computed(() =>
+  releases.value.some((release) => release.status === 'ACTIVE')
+)
 
 const GATE_LABELS = {
   integrity_violation: '完整性违规',
@@ -442,7 +505,8 @@ const blockerDetail = (item) => {
 }
 
 const releaseStatusColor = (status) =>
-  ({ ACTIVE: 'green', STAGED: 'blue', SUPERSEDED: 'default', ARCHIVED: 'default' })[status] || 'default'
+  ({ ACTIVE: 'green', STAGED: 'blue', SUPERSEDED: 'default', ARCHIVED: 'default' })[status] ||
+  'default'
 
 const capabilityColor = (capability) =>
   ({ viewer: 'default', reviewer: 'blue', publisher: 'purple' })[capability] || 'default'
@@ -514,7 +578,9 @@ const buildRelease = async () => {
   building.value = true
   try {
     const res = await kbReleaseApi.build(props.kbId)
-    message.success(`发布清单已构建：${res?.release_id || ''}（图谱决策冻结 ${res?.graph_decisions_frozen ?? 0} 条）`)
+    message.success(
+      `发布清单已构建：${res?.release_id || ''}（图谱决策冻结 ${res?.graph_decisions_frozen ?? 0} 条）`
+    )
     emit('changed')
     await loadReleases()
   } catch (e) {

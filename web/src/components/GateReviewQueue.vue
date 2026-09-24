@@ -1,7 +1,11 @@
 <template>
   <component
     :is="embedded ? 'div' : 'a-drawer'"
-    v-bind="embedded ? { class: 'queue-embedded' } : { open, title: '门禁送审队列', width: '860', destroyOnClose: true }"
+    v-bind="
+      embedded
+        ? { class: 'queue-embedded' }
+        : { open, title: '门禁送审队列', width: '860', destroyOnClose: true }
+    "
     v-on="embedded ? {} : { close: () => $emit('update:open', false) }"
   >
     <div class="queue-header">

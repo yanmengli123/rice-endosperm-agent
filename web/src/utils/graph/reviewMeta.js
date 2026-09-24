@@ -52,7 +52,9 @@ export const REASON_CODES = Object.freeze([
 
 /** 组合原因代码与说明（与后端 compose_reason 同格式 `[CODE] 说明`） */
 export function composeReason(code, note) {
-  const normalized = String(code || '').trim().toUpperCase()
+  const normalized = String(code || '')
+    .trim()
+    .toUpperCase()
   const text = String(note || '').trim()
   const valid = REASON_CODES.some((item) => item.value === normalized)
   return valid && text ? `[${normalized}] ${text}` : text
@@ -237,7 +239,8 @@ export function normalizeBuildStatus(raw) {
     taskStatus,
     taskProgress: Math.min(100, Math.max(0, toSafeCount(s.build_task_progress))),
     taskMessage: typeof s.build_task_message === 'string' ? s.build_task_message : '',
-    taskError: typeof s.build_task_error === 'string' && s.build_task_error ? s.build_task_error : null,
+    taskError:
+      typeof s.build_task_error === 'string' && s.build_task_error ? s.build_task_error : null,
     active: taskStatus === 'pending' || taskStatus === 'running',
     configured: Boolean(s.configured)
   }

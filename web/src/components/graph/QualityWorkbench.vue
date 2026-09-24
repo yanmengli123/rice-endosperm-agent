@@ -5,7 +5,9 @@
       <div class="quality-card">
         <div class="card-header">
           <span class="card-title">完整性审计</span>
-          <a-button size="small" :loading="integrityLoading" @click="runIntegrity">逐条重验（完整审计）</a-button>
+          <a-button size="small" :loading="integrityLoading" @click="runIntegrity"
+            >逐条重验（完整审计）</a-button
+          >
         </div>
         <div v-if="integrityLoading" class="card-hint">正在逐条重验引文…</div>
         <template v-else-if="integrity">
@@ -14,7 +16,8 @@
               {{ integrity.status === 'OK' ? 'OK' : 'VIOLATION' }}
             </a-tag>
             <span class="card-hint">
-              重验引文 {{ integrity.checked_quotes?.triple ?? 0 }} 条边 / {{ integrity.checked_quotes?.entity ?? 0 }} 条节点
+              重验引文 {{ integrity.checked_quotes?.triple ?? 0 }} 条边 /
+              {{ integrity.checked_quotes?.entity ?? 0 }} 条节点
             </span>
           </div>
           <div class="violation-list">
@@ -29,7 +32,9 @@
             </div>
           </div>
         </template>
-        <div v-else class="card-hint">轻量计数见顶部治理条；点击「逐条重验」运行完整审计（I1–I7）。</div>
+        <div v-else class="card-hint">
+          轻量计数见顶部治理条；点击「逐条重验」运行完整审计（I1–I7）。
+        </div>
       </div>
 
       <!-- 死信与过期缓存 -->
@@ -39,11 +44,15 @@
         </div>
         <div class="debt-row">
           <span>死信 Chunk（累计失败 ≥6 次）</span>
-          <span class="debt-value" :class="{ 'debt-value--warn': deadChunks > 0 }">{{ deadChunks }}</span>
+          <span class="debt-value" :class="{ 'debt-value--warn': deadChunks > 0 }">{{
+            deadChunks
+          }}</span>
         </div>
         <div class="debt-row">
           <span>过期抽取缓存（无指纹）</span>
-          <span class="debt-value" :class="{ 'debt-value--warn': staleCache > 0 }">{{ staleCache }}</span>
+          <span class="debt-value" :class="{ 'debt-value--warn': staleCache > 0 }">{{
+            staleCache
+          }}</span>
         </div>
         <div class="card-hint">
           死信在修复模型/配置后可通过索引管理「重试索引」复活；过期缓存会在下次构建时按新指纹重抽。
@@ -68,7 +77,8 @@
           </a-space>
         </div>
         <div v-if="!goldenItems.length" class="card-hint">
-          尚未注册 golden 样本。对代表性 chunk 标注期望三元组后，可度量抽取质量（P/R/F1）并作为晋升导出门禁。
+          尚未注册 golden 样本。对代表性 chunk
+          标注期望三元组后，可度量抽取质量（P/R/F1）并作为晋升导出门禁。
         </div>
         <table v-else class="golden-table">
           <thead>
@@ -106,8 +116,14 @@
           A→C 直连与 A→B→C 共存、且 A→C 引文不提及 B——LLM 脑补传递推理的高危信号。
         </div>
         <div v-else class="shortcut-list">
-          <div v-for="(item, index) in shortcutItems.slice(0, 20)" :key="index" class="shortcut-row">
-            <span class="shortcut-content">{{ item.content || item.subject }} {{ item.via ? `(经 ${item.via})` : '' }}</span>
+          <div
+            v-for="(item, index) in shortcutItems.slice(0, 20)"
+            :key="index"
+            class="shortcut-row"
+          >
+            <span class="shortcut-content"
+              >{{ item.content || item.subject }} {{ item.via ? `(经 ${item.via})` : '' }}</span
+            >
             <span class="shortcut-reason">{{ item.reason || '引文未提及中间实体' }}</span>
           </div>
         </div>

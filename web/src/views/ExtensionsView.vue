@@ -96,6 +96,9 @@ const activeChildLoading = computed(() => {
 watch(
   () => [route.query.tab, userStore.isAdmin],
   ([tab]) => {
+    // 详情子页（knowledgebase/:kbId 等）的 ?tab= 归子页签使用（如 tab=graph 直达图谱），
+    // 不属于扩展顶级页签词表——不做归一化，更不得从 URL 剥除
+    if (isDetailPage.value) return
     const nextTab = normalizeTab(tab)
     if (activeTab.value !== nextTab) activeTab.value = nextTab
     if (tab && tab !== nextTab) replaceTabQuery(nextTab)
@@ -105,6 +108,7 @@ watch(
 
 watch(activeTab, (tab) => {
   if (!tab) return
+  if (isDetailPage.value) return
   const nextTab = normalizeTab(tab)
   if (nextTab !== tab) {
     activeTab.value = nextTab

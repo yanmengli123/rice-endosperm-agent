@@ -43,7 +43,11 @@
               class="action-btn"
               :class="{ 'attention-btn': !graphConfigured }"
               @click="openGraphConfig"
-              :title="graphConfigured ? '修改图谱抽取配置（抽取器类型、模型、并发）' : '配置抽取器：从当前知识库构建实体与关系'"
+              :title="
+                graphConfigured
+                  ? '修改图谱抽取配置（抽取器类型、模型、并发）'
+                  : '配置抽取器：从当前知识库构建实体与关系'
+              "
             >
               <BrainCircuit :size="16" />
             </a-button>
@@ -84,10 +88,16 @@
               </a-button>
               <template #overlay>
                 <a-menu @click="onExportMenuClick">
-                  <a-menu-item key="roundtrip" title="严格符合导入契约的节点/关系 CSV 与清单，可直接重新导入">
+                  <a-menu-item
+                    key="roundtrip"
+                    title="严格符合导入契约的节点/关系 CSV 与清单，可直接重新导入"
+                  >
                     标准往返包（CSV + 清单）
                   </a-menu-item>
-                  <a-menu-item key="evidence" title="实体 / 三元组 / 证据明细 / 原文引文四类工作表，供科研审阅">
+                  <a-menu-item
+                    key="evidence"
+                    title="实体 / 三元组 / 证据明细 / 原文引文四类工作表，供科研审阅"
+                  >
                     证据明细（Excel）
                   </a-menu-item>
                   <a-menu-item
@@ -102,7 +112,10 @@
                   >
                     Neo4j 投影全量（含引文，不含段落）
                   </a-menu-item>
-                  <a-menu-item key="projection-structure" title="仅节点、关系与对账清单，不含证据成员（体积最小）">
+                  <a-menu-item
+                    key="projection-structure"
+                    title="仅节点、关系与对账清单，不含证据成员（体积最小）"
+                  >
                     Neo4j 投影（仅结构，轻量）
                   </a-menu-item>
                 </a-menu>
@@ -163,7 +176,9 @@
             配置抽取器
           </a-button>
           <a-button
-            v-else-if="isLlmGraphAllowed && graphConfigured && hasPendingGraphChunks && !isBuildActive"
+            v-else-if="
+              isLlmGraphAllowed && graphConfigured && hasPendingGraphChunks && !isBuildActive
+            "
             type="primary"
             class="lucide-icon-btn"
             :loading="startingIndex"
@@ -196,22 +211,34 @@
       class="build-progress-panel"
       :class="{ 'build-progress-panel--error': buildModel.taskStatus === 'failed' }"
     >
-        <div class="build-progress-head">
-          <span class="build-progress-title">
-            <Database :size="14" />
-            {{ buildModel.active ? buildStatusLabel : (buildModel.taskStatus === 'failed' ? '上次索引未完成' : '索引未完成') }}
-          </span>
-          <span class="build-progress-summary">{{ buildStatusSummary(buildModel) }}</span>
-        </div>
-        <a-progress
-          :percent="buildModel.active ? buildModel.taskProgress : buildModel.percent"
-          :status="buildModel.taskStatus === 'failed' ? 'exception' : buildModel.active ? 'active' : 'normal'"
-          size="small"
-          :show-info="false"
-        />
-        <div v-if="buildModel.taskStatus === 'failed'" class="build-progress-detail">
-          {{ buildModel.taskMessage || buildModel.taskError || '存在待重试段落，可再次点击「开始索引」续跑' }}
-        </div>
+      <div class="build-progress-head">
+        <span class="build-progress-title">
+          <Database :size="14" />
+          {{
+            buildModel.active
+              ? buildStatusLabel
+              : buildModel.taskStatus === 'failed'
+                ? '上次索引未完成'
+                : '索引未完成'
+          }}
+        </span>
+        <span class="build-progress-summary">{{ buildStatusSummary(buildModel) }}</span>
+      </div>
+      <a-progress
+        :percent="buildModel.active ? buildModel.taskProgress : buildModel.percent"
+        :status="
+          buildModel.taskStatus === 'failed' ? 'exception' : buildModel.active ? 'active' : 'normal'
+        "
+        size="small"
+        :show-info="false"
+      />
+      <div v-if="buildModel.taskStatus === 'failed'" class="build-progress-detail">
+        {{
+          buildModel.taskMessage ||
+          buildModel.taskError ||
+          '存在待重试段落，可再次点击「开始索引」续跑'
+        }}
+      </div>
     </div>
 
     <!-- 设置浮动面板（纯显示；生产策略在「构建与发布」工作区） -->
@@ -227,8 +254,13 @@
             </div>
             <a-form-item label="全图模式">
               <div class="full-graph-row">
-                <a-switch v-model:checked="settingsForm.fullGraph" :disabled="graphSettingsSaving" />
-                <span class="full-graph-hint">加载全库（口径与规范层一致），忽略搜索、深度与上限</span>
+                <a-switch
+                  v-model:checked="settingsForm.fullGraph"
+                  :disabled="graphSettingsSaving"
+                />
+                <span class="full-graph-hint"
+                  >加载全库（口径与规范层一致），忽略搜索、深度与上限</span
+                >
               </div>
             </a-form-item>
             <a-form-item label="最大节点数 (limit)">
@@ -252,7 +284,10 @@
               />
             </a-form-item>
             <a-form-item label="排除 Chunk 节点">
-              <a-switch v-model:checked="settingsForm.excludeChunk" :disabled="graphSettingsSaving" />
+              <a-switch
+                v-model:checked="settingsForm.excludeChunk"
+                :disabled="graphSettingsSaving"
+              />
             </a-form-item>
             <a-form-item label="画布会话过滤（仅本画布，不改生产检索）">
               <a-radio-group v-model:value="sessionFilter" size="small">
@@ -276,7 +311,12 @@
               </div>
             </a-form-item>
             <a-form-item>
-              <a-button type="primary" :loading="graphSettingsSaving" @click="applySettings" style="width: 100%">
+              <a-button
+                type="primary"
+                :loading="graphSettingsSaving"
+                @click="applySettings"
+                style="width: 100%"
+              >
                 应用
               </a-button>
             </a-form-item>
@@ -337,7 +377,7 @@ const DEFAULT_GRAPH_VIEW_SETTINGS = Object.freeze({
 })
 
 const props = defineProps({
-  active: { type: Boolean, default: false },
+  active: { type: Boolean, default: false }
 })
 
 const store = useDatabaseStore()
@@ -359,10 +399,30 @@ const subgraphParams = reactive({ ...DEFAULT_GRAPH_VIEW_SETTINGS })
 const settingsForm = reactive({ ...DEFAULT_GRAPH_VIEW_SETTINGS })
 // 画布会话级显示过滤（不持久化、不影响检索）：inherit = 跟随生产策略
 const sessionFilter = ref('inherit')
-const highlightKeywords = computed(() => (searchInput.value.trim() ? [searchInput.value.trim()] : []))
+const highlightKeywords = computed(() =>
+  searchInput.value.trim() ? [searchInput.value.trim()] : []
+)
 const graphSettingsLoadedKbId = ref('')
 const graphSettingsLoading = ref(false)
+// 模块级加载状态：历史提交中声明遗失、只剩使用处（loadGraphSettings 读到未声明变量即
+// ReferenceError，被上层 try/catch 吞掉导致视图设置持久化静默失效）——此处恢复声明
+let graphSettingsLoadPromise = null
+let graphSettingsLoadKbId = ''
+let graphSettingsRequestSeq = 0
 const searchInput = ref('')
+// 对话关系图深链：?seed= 预填画布检索词（一次性，不覆盖用户后续输入）
+{
+  const seedFromRoute = String(
+    (typeof window !== 'undefined' && window.location.search.match(/[?&]seed=([^&]+)/) || [])[1] || ''
+  )
+  if (seedFromRoute) {
+    try {
+      searchInput.value = decodeURIComponent(seedFromRoute)
+    } catch {
+      searchInput.value = seedFromRoute
+    }
+  }
+}
 const showGraphConfig = ref(false)
 const showGraphImport = ref(false)
 const showReviewQueue = ref(false)
@@ -381,14 +441,18 @@ const isBuildActive = computed(() => {
 const graphSettingsSaving = ref(false)
 // 抽取器是否已配置（决定空态引导与工具栏高亮）
 const graphConfigured = computed(() => Boolean(graphBuildStatus.value?.configured))
-const hasPendingGraphChunks = computed(() => Number(graphBuildStatus.value?.pending_chunks ?? 0) > 0)
+const hasPendingGraphChunks = computed(
+  () => Number(graphBuildStatus.value?.pending_chunks ?? 0) > 0
+)
 // 构建进度展示模型（归一化，杜绝「已开始索引  个段落」这类空数字）
 const buildModel = computed(() => normalizeBuildStatus(graphBuildStatus.value))
 const buildStatusLabel = computed(() => buildTaskLabel(buildModel.value))
 const showBuildBanner = computed(
-  () => buildModel.value.active || buildModel.value.taskStatus === 'failed' || buildModel.value.pending > 0
+  () =>
+    buildModel.value.active ||
+    buildModel.value.taskStatus === 'failed' ||
+    buildModel.value.pending > 0
 )
-
 
 const toggleSettingsPanel = async () => {
   const opening = !showSettings.value
@@ -649,7 +713,6 @@ const loadGraphBuildStatus = async () => {
   }
 }
 
-
 const openGraphConfig = () => {
   showGraphConfig.value = true
 }
@@ -718,7 +781,11 @@ const loadGraph = async () => {
 
   const requestedDatabaseId = kbId.value
   await loadGraphSettings()
-  if (requestedDatabaseId !== kbId.value) return
+  if (requestedDatabaseId !== kbId.value) {
+    // 等待期间库已切换：让位给当前库的调度，绝不静默中止（冷启动白板的根因之一）
+    if (kbId.value) scheduleGraphLoad(0)
+    return
+  }
 
   const requestSeq = ++graphLoadRequestSeq
   const currentDatabaseId = kbId.value
@@ -844,18 +911,22 @@ const scheduleGraphLoad = (delay = 200) => {
 
 watch(sessionFilter, () => loadGraph())
 
+// 联合就绪触发：active 与 kbId 各自异步就位（冷启动直达时顺序不定），
+// 两者齐备才首载；谁后到谁补枪——取代原先两个会互相错过的独立触发器。
+const graphBootstrappedFor = ref('')
 watch(
-  () => props.active,
-  (active) => {
-    if (active) {
-      loadGraphBuildStatus()
-      scheduleGraphLoad()
-    }
+  () => [props.active, kbId.value],
+  ([active, kb]) => {
+    if (!active || !kb) return
+    if (graphBootstrappedFor.value === kb) return
+    graphBootstrappedFor.value = kb
+    loadGraphBuildStatus()
+    scheduleGraphLoad()
   },
   { immediate: true }
 )
 
-watch(kbId, () => {
+watch(kbId, (_next, previous) => {
   graphStatusRequestSeq += 1
   graphLoadRequestSeq += 1
   graphSettingsRequestSeq += 1
@@ -863,12 +934,15 @@ watch(kbId, () => {
   graphSettingsLoadPromise = null
   graphSettingsLoadKbId = ''
   graphSettingsLoading.value = false
+  graphBootstrappedFor.value = ''
   resetGraphViewSettings()
   graphLoaded.value = false
   graph.clearGraph()
   graphBuildStatus.value = null
-  loadGraphBuildStatus()
-  scheduleGraphLoad(300)
+  if (previous) {
+    loadGraphBuildStatus()
+    scheduleGraphLoad(300)
+  }
 })
 
 defineExpose({ openGraphConfig, loadGraph, loadGraphBuildStatus })
@@ -1098,7 +1172,6 @@ onUnmounted(() => {
     line-height: 1.4;
   }
 }
-
 
 .slide-fade-enter-active {
   transition: all 0.25s ease-out;

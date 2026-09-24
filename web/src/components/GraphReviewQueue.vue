@@ -1,7 +1,11 @@
 <template>
   <component
     :is="embedded ? 'div' : 'a-drawer'"
-    v-bind="embedded ? { class: 'queue-embedded' } : { open, title: '审核队列', width: '860', destroyOnClose: true }"
+    v-bind="
+      embedded
+        ? { class: 'queue-embedded' }
+        : { open, title: '审核队列', width: '860', destroyOnClose: true }
+    "
     v-on="embedded ? {} : { close: () => $emit('update:open', false) }"
   >
     <div class="queue-header">
@@ -51,8 +55,15 @@
           <div class="relation-types">
             <a-tag size="small">{{ record.source?.label }}</a-tag>
             <a-tag size="small">{{ record.target?.label }}</a-tag>
-            <a-tag v-if="record.conflict_status === 'CONTESTED'" size="small" color="red">冲突中</a-tag>
-            <a-tag v-if="record.task" size="small" color="blue" :title="`已被 ${record.task.assignee_uid} 领取`">
+            <a-tag v-if="record.conflict_status === 'CONTESTED'" size="small" color="red"
+              >冲突中</a-tag
+            >
+            <a-tag
+              v-if="record.task"
+              size="small"
+              color="blue"
+              :title="`已被 ${record.task.assignee_uid} 领取`"
+            >
               {{ record.task.assignee_uid }} 处理中
             </a-tag>
           </div>
@@ -63,12 +74,20 @@
           </div>
           <div class="quote-meta">
             <span>{{ record.mention_count }} 处 · {{ record.file_count }} 文件</span>
-            <span v-if="record.risk_score != null" class="risk-score" title="机器证据风险分（越高越该先看）">
+            <span
+              v-if="record.risk_score != null"
+              class="risk-score"
+              title="机器证据风险分（越高越该先看）"
+            >
               风险 {{ record.risk_score }}
             </span>
             <a-tag v-if="record.hedge_any" size="small" color="gold">推测性</a-tag>
-            <a-tag v-if="record.trigger_verified_any" size="small" color="cyan">机器校验·触发词</a-tag>
-            <a-tag v-if="record.verifier_confirmed_any" size="small" color="cyan">机器校验·复核</a-tag>
+            <a-tag v-if="record.trigger_verified_any" size="small" color="cyan"
+              >机器校验·触发词</a-tag
+            >
+            <a-tag v-if="record.verifier_confirmed_any" size="small" color="cyan"
+              >机器校验·复核</a-tag
+            >
             <a-tag v-if="record.pinned_any" size="small" color="blue">已固定证据</a-tag>
           </div>
         </template>
@@ -170,7 +189,12 @@
       <template v-if="batchPreviewSummary.blocked.length">
         <div class="preview-block-title">阻断原因分布</div>
         <div class="blocked-reasons">
-          <a-tag v-for="(count, reason) in blockedReasonCounts" :key="reason" size="small" color="orange">
+          <a-tag
+            v-for="(count, reason) in blockedReasonCounts"
+            :key="reason"
+            size="small"
+            color="orange"
+          >
             {{ previewReasonLabel(reason) }} × {{ count }}
           </a-tag>
         </div>
@@ -182,7 +206,11 @@
       <a-tabs size="small">
         <a-tab-pane :tab="`成功 ${batchResult.succeeded.length}`" key="ok">
           <div class="result-list">
-            <div v-for="item in batchResult.succeeded" :key="item.id" class="result-row result-row--ok">
+            <div
+              v-for="item in batchResult.succeeded"
+              :key="item.id"
+              class="result-row result-row--ok"
+            >
               {{ item.id.slice(0, 12) }}… · v{{ item.version }} · 证据
               {{ item.pinned_chunk_id || '（未固定）' }}
             </div>
@@ -191,7 +219,11 @@
         <a-tab-pane :tab="`跳过 ${batchResult.skipped.length}`" key="skipped">
           <div v-if="!batchResult.skipped.length" class="queue-hint">没有跳过的条目。</div>
           <div class="result-list">
-            <div v-for="item in batchResult.skipped" :key="item.id" class="result-row result-row--skipped">
+            <div
+              v-for="item in batchResult.skipped"
+              :key="item.id"
+              class="result-row result-row--skipped"
+            >
               <a-tag size="small" :color="item.reason === 'version_conflict' ? 'orange' : 'red'">
                 {{ item.reason === 'version_conflict' ? '版本冲突（他人已更新）' : '无效条目' }}
               </a-tag>
@@ -380,7 +412,9 @@ const confirmReject = async () => {
         reason,
         if_version: rejectTarget.value.review_version || undefined
       })
-      message.success(revokeMode.value ? '已撤销批准' : '已人工拒绝：图上投影与向量已清理，审计可查')
+      message.success(
+        revokeMode.value ? '已撤销批准' : '已人工拒绝：图上投影与向量已清理，审计可查'
+      )
     } else {
       const res = await graphApi.reviewBatch({
         kb_id: props.kbId,

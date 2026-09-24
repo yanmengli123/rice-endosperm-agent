@@ -20,7 +20,9 @@ function test(name, fn) {
 }
 
 test('contractAllows：按快照命令判定，快照缺失一律 false（fail-closed）', () => {
-  const kb11 = { contract_snapshot: { allowed_commands: ['graph_mindmap_generate', 'stats_repair'] } }
+  const kb11 = {
+    contract_snapshot: { allowed_commands: ['graph_mindmap_generate', 'stats_repair'] }
+  }
   assert.equal(contractAllows(kb11, 'graph_mindmap_generate'), true)
   assert.equal(contractAllows(kb11, 'sample_questions'), false)
   // 1.0.0 快照无导图命令 → 不显示入口

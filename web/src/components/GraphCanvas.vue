@@ -8,7 +8,7 @@
       <div class="canvas-content">
         <slot name="content" />
       </div>
-      <div class="graph-stats-wrapper" v-if="graphData.nodes.length > 0">
+      <div class="graph-stats-wrapper" v-if="graphData.nodes.length > 0 && !compact">
         <div v-if="activeStatsPanel" class="floating-panel type-stats-card">
           <div class="panel-header">
             <span class="panel-title">
@@ -140,7 +140,10 @@
               <div class="legend-popover">
                 <div class="legend-title">关系审核状态（线型 + 文字，不依赖颜色）</div>
                 <div v-for="item in edgeLegend" :key="item.key" class="legend-row">
-                  <span class="legend-line" :class="`legend-line--${item.key.toLowerCase()}`"></span>
+                  <span
+                    class="legend-line"
+                    :class="`legend-line--${item.key.toLowerCase()}`"
+                  ></span>
                   <span class="legend-label">{{ item.label }}</span>
                   <span class="legend-pattern">{{ item.pattern }}</span>
                 </div>
@@ -208,7 +211,8 @@ const props = defineProps({
   edgeStyleOptions: { type: Object, default: () => ({}) },
   enableFocusNeighbor: { type: Boolean, default: true },
   sizeByDegree: { type: Boolean, default: true },
-  highlightKeywords: { type: Array, default: () => [] }
+  highlightKeywords: { type: Array, default: () => [] },
+  compact: { type: Boolean, default: false }
 })
 
 const emit = defineEmits([
@@ -217,7 +221,9 @@ const emit = defineEmits([
   'node-click',
   'edge-click',
   'canvas-click',
-  'change-display-limit'
+  'change-display-limit',
+  // 容器尺寸重试耗尽：调用方据此给出可重试的 UI 错误态，而不是静默空白
+  'render-failed'
 ])
 
 const container = ref(null)
@@ -504,6 +510,8 @@ function initGraph() {
       retryCount++
       clearTimeout(renderTimeout)
       renderTimeout = setTimeout(initGraph, 200)
+    } else {
+      emit('render-failed')
     }
     return
   }
@@ -526,7 +534,23 @@ function initGraph() {
     height,
     autoFit: props.autoFit,
     autoResize: props.autoResize,
-    layout: { ...defaultLayout, ...props.layoutOptions },
+    // 大图性能预算：迭代数随节点规模自适应（≥300 降档、≥600 再降），
+    // 保证 UI 承诺的 1000 上限下首帧不冻结主线程
+    layout: {
+      ...defaultLayout,
+      iterations:
+        (props.graphData?.nodes || []).length >= 600
+          ? 40
+          : (props.graphData?.nodes || []).length >= 300
+            ? 70
+            : defaultLayout.iterations,
+      collide: {
+        ...defaultLayout.collide,
+        iterations:
+          (props.graphData?.nodes || []).length >= 300 ? 1 : defaultLayout.collide.iterations
+      },
+      ...props.layoutOptions
+    },
     node: {
       type: 'circle',
       style: {

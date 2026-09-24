@@ -140,7 +140,9 @@ export const getMentionDisplayLabel = (type, value, displayLabels = {}) => {
 // 只从 token 派生，保证「文本与 payload 描述同一组资源」；mentionConfig 提供
 // 名称 → 稳定 ID 的映射（知识库名 → kb_id 等），映射不到时原值透传，由服务端鉴权裁决。
 export const buildStructuredMentions = (text = '', mentionConfig = null) => {
-  const segments = parseMentionText(String(text || '')).filter((segment) => segment.kind === 'mention')
+  const segments = parseMentionText(String(text || '')).filter(
+    (segment) => segment.kind === 'mention'
+  )
   if (!segments.length) return null
 
   const knowledgeBases = mentionConfig?.knowledgeBases || []
@@ -161,16 +163,19 @@ export const buildStructuredMentions = (text = '', mentionConfig = null) => {
     const displayLabel = segment.value
     let resourceId = segment.value
     if (type === 'knowledge') {
-      const kb = findByDisplayField(knowledgeBases, displayLabel) ||
+      const kb =
+        findByDisplayField(knowledgeBases, displayLabel) ||
         knowledgeBases.find((kb) => kb?.kb_id === displayLabel)
       resourceId = kb?.kb_id || displayLabel
     } else if (type === 'doc') {
       resourceId = documents.find((doc) => doc?.file_id === displayLabel)?.file_id || displayLabel
     } else if (type === 'mcp') {
-      const mcp = findByDisplayField(mcps, displayLabel) || mcps.find((m) => m?.slug === displayLabel)
+      const mcp =
+        findByDisplayField(mcps, displayLabel) || mcps.find((m) => m?.slug === displayLabel)
       resourceId = mcp?.slug || displayLabel
     } else if (type === 'skill') {
-      const skill = findByDisplayField(skills, displayLabel) || skills.find((s) => s?.slug === displayLabel)
+      const skill =
+        findByDisplayField(skills, displayLabel) || skills.find((s) => s?.slug === displayLabel)
       resourceId = skill?.slug || displayLabel
     } else if (type === 'subagent') {
       const subagent =

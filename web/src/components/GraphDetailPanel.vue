@@ -96,7 +96,9 @@
             </div>
             <template v-else-if="evidence">
               <div v-if="evidence.decision?.reason" class="evidence-hint decision-reason">
-                最近决策：{{ historyActionLabel(evidence.decision.action) }}（{{ evidence.decision.actor_uid }}）—
+                最近决策：{{ historyActionLabel(evidence.decision.action) }}（{{
+                  evidence.decision.actor_uid
+                }}）—
                 {{ evidence.decision.reason }}
               </div>
               <div v-if="type === 'edge'" class="evidence-meta">
@@ -301,7 +303,12 @@
         cancel-text="关闭"
         @ok="reloadAfterConflict"
       >
-        <a-alert type="warning" show-icon :message="conflictModal.detail" style="margin-bottom: 10px" />
+        <a-alert
+          type="warning"
+          show-icon
+          :message="conflictModal.detail"
+          style="margin-bottom: 10px"
+        />
         <template v-if="conflictModal.latestAudit">
           <div class="conflict-latest">
             <div class="conflict-latest-title">对方最新的决定：</div>

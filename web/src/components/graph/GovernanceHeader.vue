@@ -14,16 +14,37 @@
       <span class="pipeline-step" :class="{ active: Boolean(lastReleaseId) }">发布</span>
     </div>
     <div class="metrics">
-      <button class="metric" type="button" title="待人工审核的候选关系与实体" @click="$emit('navigate', 'review')">
-        <span class="metric-value" :class="{ 'metric-value--hot': pendingReview > 0 }">{{ pendingReview }}</span>
+      <button
+        class="metric"
+        type="button"
+        title="待人工审核的候选关系与实体"
+        @click="$emit('navigate', 'review')"
+      >
+        <span class="metric-value" :class="{ 'metric-value--hot': pendingReview > 0 }">{{
+          pendingReview
+        }}</span>
         <span class="metric-label">待人工审核</span>
       </button>
-      <button class="metric" type="button" title="门禁送审待裁决" @click="$emit('navigate', 'review', 'gate')">
-        <span class="metric-value" :class="{ 'metric-value--warn': gateCount > 0 }">{{ gateCount }}</span>
+      <button
+        class="metric"
+        type="button"
+        title="门禁送审待裁决"
+        @click="$emit('navigate', 'review', 'gate')"
+      >
+        <span class="metric-value" :class="{ 'metric-value--warn': gateCount > 0 }">{{
+          gateCount
+        }}</span>
         <span class="metric-label">门禁待裁决</span>
       </button>
-      <button class="metric" type="button" title="开放冲突" @click="$emit('navigate', 'review', 'conflict')">
-        <span class="metric-value" :class="{ 'metric-value--warn': conflictCount > 0 }">{{ conflictCount }}</span>
+      <button
+        class="metric"
+        type="button"
+        title="开放冲突"
+        @click="$emit('navigate', 'review', 'conflict')"
+      >
+        <span class="metric-value" :class="{ 'metric-value--warn': conflictCount > 0 }">{{
+          conflictCount
+        }}</span>
         <span class="metric-label">开放冲突</span>
       </button>
       <button
@@ -32,15 +53,33 @@
         title="完整性轻量计数（I3/I5/I6，不含引文重验；点击进入质量页做完整审计）"
         @click="$emit('navigate', 'quality')"
       >
-        <span class="metric-value" :class="{ 'metric-value--bad': integrityCount > 0 }">{{ integrityCount }}</span>
+        <span class="metric-value" :class="{ 'metric-value--bad': integrityCount > 0 }">{{
+          integrityCount
+        }}</span>
         <span class="metric-label">完整性违规</span>
       </button>
-      <button class="metric" type="button" title="死信 Chunk / 过期缓存" @click="$emit('navigate', 'quality')">
-        <span class="metric-value" :class="{ 'metric-value--warn': deadChunks > 0 }">{{ deadChunks }}</span>
+      <button
+        class="metric"
+        type="button"
+        title="死信 Chunk / 过期缓存"
+        @click="$emit('navigate', 'quality')"
+      >
+        <span class="metric-value" :class="{ 'metric-value--warn': deadChunks > 0 }">{{
+          deadChunks
+        }}</span>
         <span class="metric-label">死信 Chunk</span>
       </button>
-      <button class="metric" type="button" title="当前生产检索策略" @click="$emit('navigate', 'build')">
-        <a-tag :color="reviewPolicy === 'approved_only' ? 'green' : 'default'" size="small" class="metric-tag">
+      <button
+        class="metric"
+        type="button"
+        title="当前生产检索策略"
+        @click="$emit('navigate', 'build')"
+      >
+        <a-tag
+          :color="reviewPolicy === 'approved_only' ? 'green' : 'default'"
+          size="small"
+          class="metric-tag"
+        >
           {{ reviewPolicy === 'approved_only' ? '生产检索：仅已批准' : '生产检索：候选可见' }}
         </a-tag>
         <span class="metric-label">{{ lastReleaseText }}</span>
@@ -61,7 +100,8 @@ defineEmits(['navigate'])
 
 const pendingReview = computed(
   () =>
-    Number(props.summary?.counts?.triples?.CANDIDATE ?? 0) + Number(props.summary?.counts?.entities?.CANDIDATE ?? 0)
+    Number(props.summary?.counts?.triples?.CANDIDATE ?? 0) +
+    Number(props.summary?.counts?.entities?.CANDIDATE ?? 0)
 )
 const gateCount = computed(() => Number(props.summary?.gates?.pending?._total ?? 0))
 const conflictCount = computed(() => Number(props.summary?.conflicts?.open?._total ?? 0))

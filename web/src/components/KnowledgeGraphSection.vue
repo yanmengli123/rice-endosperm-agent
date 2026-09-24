@@ -17,7 +17,12 @@
             <a-radio-button value="build">构建与发布</a-radio-button>
             <a-radio-button value="audit">审计日志</a-radio-button>
           </a-radio-group>
-          <a-button size="small" type="text" title="切换回经典画布视图（只保留画布与队列抽屉）" @click="setClassic">
+          <a-button
+            size="small"
+            type="text"
+            title="切换回经典画布视图（只保留画布与队列抽屉）"
+            @click="setClassic"
+          >
             经典视图
           </a-button>
         </div>
@@ -65,9 +70,7 @@
     <template v-else>
       <!-- 经典视图：原画布页（保留回退通道） -->
       <div class="classic-toolbar">
-        <a-button size="small" type="primary" @click="setWorkbench">
-          进入治理工作台
-        </a-button>
+        <a-button size="small" type="primary" @click="setWorkbench"> 进入治理工作台 </a-button>
       </div>
       <div class="classic-body">
         <ExplorerWorkbench ref="classicExplorerRef" :active="props.active" />
@@ -115,9 +118,19 @@ const governance = useGraphGovernanceStore()
 const kbId = computed(() => store.kbId)
 const kbType = computed(() => store.database.kb_type)
 const kbTypeLabel = computed(() => getKbTypeLabel(kbType.value || 'milvus'))
-const isGraphSupported = computed(() => (kbType.value?.toLowerCase() || 'milvus') === MILVUS_KB_TYPE)
+const isGraphSupported = computed(
+  () => (kbType.value?.toLowerCase() || 'milvus') === MILVUS_KB_TYPE
+)
 
 const activeWorkspace = ref('review')
+// 深链 ?ws=explorer：一次性选中画布子工作区（对话关系图「打开完整图」的落地位置），
+// 不覆盖用户后续手动切换
+{
+  const ws = String(
+    (typeof window !== 'undefined' && window.location.search.match(/[?&]ws=([^&]+)/) || [])[1] || ''
+  )
+  if (ws === 'explorer' || ws === 'graph') activeWorkspace.value = 'explorer'
+}
 const explorerRef = ref(null)
 const classicExplorerRef = ref(null)
 

@@ -21,7 +21,10 @@
             v-for="option in extractorTypeOptions"
             :key="option.value"
             class="extractor-type-card"
-            :class="{ active: form.extractor_type === option.value, disabled: isEditing || option.disabled }"
+            :class="{
+              active: form.extractor_type === option.value,
+              disabled: isEditing || option.disabled
+            }"
             role="radio"
             :aria-checked="form.extractor_type === option.value"
             :aria-disabled="isEditing || option.disabled"
@@ -64,7 +67,13 @@
       </a-form-item>
       <div class="form-grid two-columns">
         <a-form-item label="并发队列数">
-          <a-input-number v-model:value="form.concurrency_count" :min="1" :max="1000" :step="1" style="width: 100%" />
+          <a-input-number
+            v-model:value="form.concurrency_count"
+            :min="1"
+            :max="1000"
+            :step="1"
+            style="width: 100%"
+          />
         </a-form-item>
         <a-form-item label="模型参数 JSON">
           <a-input v-model:value="form.model_params_text" placeholder='例如 {"temperature":0.1}' />
@@ -93,11 +102,31 @@ const configStore = useConfigStore()
 const saving = ref(false)
 
 const extractorTypeOptions = [
-  { value: 'llm', label: 'LLM', description: '使用大模型按 Schema 抽取实体和关系', helper: '通用开放 Schema，适合非科研语料', icon: BrainCircuit, disabled: false },
-  { value: 'llm_scientific', label: '科研闭集', description: '闭集词表 + 句窗抽取 + 逐字校验门，产出可度量的科研三元组', helper: '推荐用于人工整理的文献结果段 Markdown', icon: ScanText, disabled: false }
+  {
+    value: 'llm',
+    label: 'LLM',
+    description: '使用大模型按 Schema 抽取实体和关系',
+    helper: '通用开放 Schema，适合非科研语料',
+    icon: BrainCircuit,
+    disabled: false
+  },
+  {
+    value: 'llm_scientific',
+    label: '科研闭集',
+    description: '闭集词表 + 句窗抽取 + 逐字校验门，产出可度量的科研三元组',
+    helper: '推荐用于人工整理的文献结果段 Markdown',
+    icon: ScanText,
+    disabled: false
+  }
 ]
 
-const form = reactive({ extractor_type: 'llm', model_spec: '', schema: '', concurrency_count: 50, model_params_text: '' })
+const form = reactive({
+  extractor_type: 'llm',
+  model_spec: '',
+  schema: '',
+  concurrency_count: 50,
+  model_params_text: ''
+})
 const isEditing = computed(() => Boolean(props.status?.locked))
 const isScientificExtractor = computed(() => form.extractor_type === 'llm_scientific')
 
@@ -111,7 +140,12 @@ const fillForm = () => {
   form.model_params_text = options.model_params ? JSON.stringify(options.model_params) : ''
 }
 
-watch(() => props.open, (open) => { if (open) fillForm() })
+watch(
+  () => props.open,
+  (open) => {
+    if (open) fillForm()
+  }
+)
 
 const selectExtractorType = (option) => {
   if (isEditing.value || option.disabled) return
@@ -127,12 +161,17 @@ const parseModelParams = () => {
   } catch {
     throw new Error('模型参数必须是合法 JSON 对象')
   }
-  if (!params || Array.isArray(params) || typeof params !== 'object') throw new Error('模型参数必须是 JSON 对象')
+  if (!params || Array.isArray(params) || typeof params !== 'object')
+    throw new Error('模型参数必须是 JSON 对象')
   return params
 }
 
 const buildExtractorOptions = () => {
-  const options = { model_spec: form.model_spec, concurrency_count: form.concurrency_count || 50, model_params: parseModelParams() }
+  const options = {
+    model_spec: form.model_spec,
+    concurrency_count: form.concurrency_count || 50,
+    model_params: parseModelParams()
+  }
   if (!isScientificExtractor.value) options.schema = form.schema.trim()
   return options
 }
@@ -144,7 +183,10 @@ const save = async () => {
   saving.value = true
   try {
     const { graphBuildApi } = await import('@/apis/knowledge_api')
-    await graphBuildApi.configure(props.kbId, { extractor_type: form.extractor_type, extractor_options: buildExtractorOptions() })
+    await graphBuildApi.configure(props.kbId, {
+      extractor_type: form.extractor_type,
+      extractor_options: buildExtractorOptions()
+    })
     message.success(isEditing.value ? '图谱抽取配置已更新' : '图谱抽取配置已保存')
     emit('update:open', false)
     emit('saved')
@@ -157,24 +199,77 @@ const save = async () => {
 }
 </script>
 <style scoped lang="less">
-.config-warning { margin-bottom: 16px; }
+.config-warning {
+  margin-bottom: 16px;
+}
 .extractor-type-cards {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
   .extractor-type-card {
-    border: 1px solid var(--gray-150); border-radius: 8px; padding: 14px; cursor: pointer;
-    transition: all 0.2s ease; background: var(--gray-0);
-    &:hover { border-color: var(--main-color); }
-    &.active { border-color: var(--main-color); background: var(--main-10); box-shadow: 0 0 0 1px var(--main-20); .type-icon { color: var(--main-color); } }
-    &.disabled { cursor: not-allowed; opacity: 0.72; background: var(--gray-50); &:hover { border-color: var(--gray-150); } }
-    .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-    .type-icon { width: 20px; height: 20px; color: var(--main-color); flex-shrink: 0; }
-    .type-title { font-size: 15px; font-weight: 600; color: var(--gray-800); }
-    .card-description { font-size: 13px; color: var(--gray-600); line-height: 1.5; }
-    .card-helper { margin-top: 8px; font-size: 12px; color: var(--gray-500); &.warning { color: var(--color-warning-500); } }
+    border: 1px solid var(--gray-150);
+    border-radius: 8px;
+    padding: 14px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    background: var(--gray-0);
+    &:hover {
+      border-color: var(--main-color);
+    }
+    &.active {
+      border-color: var(--main-color);
+      background: var(--main-10);
+      box-shadow: 0 0 0 1px var(--main-20);
+      .type-icon {
+        color: var(--main-color);
+      }
+    }
+    &.disabled {
+      cursor: not-allowed;
+      opacity: 0.72;
+      background: var(--gray-50);
+      &:hover {
+        border-color: var(--gray-150);
+      }
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .type-icon {
+      width: 20px;
+      height: 20px;
+      color: var(--main-color);
+      flex-shrink: 0;
+    }
+    .type-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--gray-800);
+    }
+    .card-description {
+      font-size: 13px;
+      color: var(--gray-600);
+      line-height: 1.5;
+    }
+    .card-helper {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--gray-500);
+      &.warning {
+        color: var(--color-warning-500);
+      }
+    }
   }
 }
 .form-grid.two-columns {
-  display: grid; grid-template-columns: 180px 1fr; gap: 12px;
-  @media (max-width: 640px) { grid-template-columns: 1fr; }
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 12px;
+  @media (max-width: 640px) {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

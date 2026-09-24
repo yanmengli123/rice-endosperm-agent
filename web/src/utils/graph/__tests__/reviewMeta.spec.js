@@ -174,7 +174,11 @@ test('构建状态规范化：空值与负值安全归零', () => {
   assert.equal(m.taskStatus, null)
   assert.equal(m.active, false)
   assert.equal(m.configured, false)
-  const weird = normalizeBuildStatus({ total_chunks: 'abc', indexed_chunks: -5, build_task_progress: 320 })
+  const weird = normalizeBuildStatus({
+    total_chunks: 'abc',
+    indexed_chunks: -5,
+    build_task_progress: 320
+  })
   assert.equal(weird.total, 0)
   assert.equal(weird.indexed, 0)
   assert.equal(weird.taskProgress, 100)
@@ -194,7 +198,12 @@ test('构建状态规范化：计数/百分比/活跃态', () => {
   assert.equal(m.active, true)
   assert.equal(m.taskProgress, 55)
   assert.equal(m.configured, true)
-  const done = normalizeBuildStatus({ total_chunks: 10, indexed_chunks: 10, pending_chunks: 0, build_task_status: 'success' })
+  const done = normalizeBuildStatus({
+    total_chunks: 10,
+    indexed_chunks: 10,
+    pending_chunks: 0,
+    build_task_status: 'success'
+  })
   assert.equal(done.percent, 100)
   assert.equal(done.active, false)
 })

@@ -176,6 +176,13 @@
               @change="handleChange('figure_card_enabled', $event)"
             />
           </div>
+          <div class="card">
+            <span class="label">{{ items?.graph_card_enabled?.des || '对话关系图' }}</span>
+            <a-switch
+              :checked="configStore.config?.graph_card_enabled"
+              @change="handleChange('graph_card_enabled', $event)"
+            />
+          </div>
         </div>
       </template>
     </template>

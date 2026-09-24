@@ -567,6 +567,8 @@ watch(
   () => [kbId.value, isMilvus.value],
   ([newDbId, isMilvusType]) => {
     if (!newDbId) return
+    // 深链显式指定图谱页签时保持（冷启动时库类型默认值不得覆盖 ?tab=graph）
+    if (route.query.tab === 'graph') return
     activeTab.value = isMilvusType ? 'filetable' : 'query'
   },
   { immediate: true }
