@@ -480,6 +480,7 @@ def _render_sequence(uses: list[Any]) -> ProjectionSegment | None:
     verify_lines: list[str] = []
     used: list[dict] = []
     first_audit_id: int | None = None
+    first_verification_marker = ""
     for use in uses:
         facts = [f for f in _manifest_facts(use) if _fact_value(f) is not None]
         index = _FactIndex(facts)
@@ -514,6 +515,8 @@ def _render_sequence(uses: list[Any]) -> ProjectionSegment | None:
         sha = index.field("sequence_sha256")
         if sha is not None:
             verify_lines.append(f"- 序列 SHA256：`{_fmt(_fact_value(sha))}` {_marker(audit_id, sha)}")
+            if not first_verification_marker:
+                first_verification_marker = _marker(audit_id, sha)
             used.append(sha)
         table = index.field("source_table")
         record = index.field("source_record_id")
@@ -524,6 +527,8 @@ def _render_sequence(uses: list[Any]) -> ProjectionSegment | None:
                 cell = f"{cell}:{_fmt(_fact_value(record))}"
                 table_facts.append(record)
             verify_lines.append(f"- 源表:行：`{cell}` {' '.join(_marker(audit_id, f) for f in table_facts)}")
+            if not first_verification_marker:
+                first_verification_marker = _marker(audit_id, table_facts[0])
             used.extend(table_facts)
     if not rows or first_audit_id is None:
         return None
@@ -531,9 +536,8 @@ def _render_sequence(uses: list[Any]) -> ProjectionSegment | None:
     separator = "| --- | --- | --- | --- | --- |"
     blocks = ["\n".join([header, separator, *rows])]
     if verify_lines:
-        footer_marker = _marker(first_audit_id, used[-1]) if used else ""
         blocks.append(
-            f'<details class="yuxi-citations"><summary>核验明细 {footer_marker}'.rstrip()
+            f'<details class="yuxi-citations"><summary>核验明细 {first_verification_marker}'.rstrip()
             + "</summary>\n\n"
             + "\n".join(verify_lines)
             + "\n\n</details>"
@@ -600,6 +604,19 @@ def project_data_plane(source_uses: list[Any] | None) -> DataPlaneProjection | N
     """
     uses = list(source_uses or [])
     segments: list[ProjectionSegment] = []
+
+    from yuxi.knowledge.rendering.authority_projection import project_ncbi_official_links
+
+    for authority in project_ncbi_official_links(uses):
+        segments.append(
+            ProjectionSegment(
+                kind=authority.kind,
+                audit_id=authority.audit_id,
+                blocks=authority.blocks,
+                used_fact_ids=authority.used_fact_ids,
+                coverage=authority.coverage,
+            )
+        )
 
     sequence_segment = _render_sequence([u for u in uses if _is_successful_adopted(u, SEQUENCE_TOOL)])
     if sequence_segment is not None:

@@ -48,7 +48,7 @@ CANARY_DATA_PROBES: dict[str, CanaryDataProbe] = {
         ("Os06g0133000", "chr6"),
     ),
     "ricekb-profile": CanaryDataProbe(
-        "ricekb_gene_profile", {"identifier": "Wx"}, ("\"status\": \"FOUND\"", "Os06g0133000")
+        "ricekb_gene_profile", {"identifier": "Wx"}, ('"status": "FOUND"', "Os06g0133000")
     ),
     "gramene": CanaryDataProbe(
         "genes_in_region",
@@ -57,18 +57,47 @@ CANARY_DATA_PROBES: dict[str, CanaryDataProbe] = {
     ),
     "plant-genomics": CanaryDataProbe(
         "ensembl_plants_lookup_locus",
-        {"locus": "Os06g0133000", "organism": "oryza_sativa"},
-        ("Os06g0133000", "WX1"),
+        {"locus": "AT1G01010", "organism": "arabidopsis_thaliana"},
+        ("AT1G01010", "NAC001"),
     ),
     "data-aggregator": CanaryDataProbe(
         "search",
         {"query": "WAXY rice endosperm", "size": 1, "sources": ["literature"]},
-        ("\"count\": 1", "pubmed:"),
+        ('"count": 1', "pubmed:"),
     ),
     "gene-authority": CanaryDataProbe(
         "europe_pmc_search_rest",
         {"query": "WAXY rice endosperm", "page_size": 1},
         ("WAXY", "resultList"),
+    ),
+}
+
+# Contract probes exercise high-value operation shapes that a single generic
+# server probe cannot cover.  They are deliberately bounded and read-only.
+CANARY_CONTRACT_PROBES: dict[str, tuple[CanaryDataProbe, ...]] = {
+    "ricekb": (
+        CanaryDataProbe(
+            "ricekb_sequence",
+            {"source": "RAP_DB", "sequence_type": "cds", "sequence_id": "Os06t0133000-01"},
+            ("Os06t0133000-01", "cds", "1830"),
+        ),
+    ),
+    "gene-authority": (
+        CanaryDataProbe(
+            "ncbi_datasets_gene_report_rest",
+            {"identifiers": ["Wx"], "identifier_type": "symbol", "taxon": "Oryza sativa", "page_size": 5},
+            ("4340018", "Oryza sativa"),
+        ),
+        CanaryDataProbe(
+            "ncbi_datasets_gene_summary_cli",
+            {"identifiers": ["4340018"], "identifier_type": "gene-id", "taxon": None},
+            ("4340018", "NCBI_DATASETS_CLI"),
+        ),
+        CanaryDataProbe(
+            "uniprot_search_rest",
+            {"query": "gene:Wx AND organism_id:4530", "size": 3, "reviewed_only": True},
+            ("primaryAccession", "Oryza sativa"),
+        ),
     ),
 }
 
@@ -92,23 +121,25 @@ async def _probe_discovery(slug: str, runtime_config: dict[str, Any]) -> tuple[b
 
 
 async def _probe_data(slug: str, runtime_config: dict[str, Any]) -> tuple[bool, str, int]:
-    """数据级探针：真实调用一个已知参数形态的工具，返回 (ok, provider_status, elapsed_ms)。"""
+    """数据级 + 关键参数契约探针，返回 (ok, provider_status, elapsed_ms)。"""
     from yuxi.agents.mcp.host import get_host
 
-    probe = CANARY_DATA_PROBES[slug]
     started = time.monotonic()
-    result = await get_host().call_tool(slug, runtime_config, probe.tool_name, dict(probe.arguments))
-    elapsed = int((time.monotonic() - started) * 1000)
-    status = str((result.provenance or {}).get("provider_status") or ("ERROR" if result.is_error else "OK"))
-    if result.is_error or status.upper() in _EMPTY_RESULT_STATUSES:
-        return False, status, elapsed
-    text = str(result.text or "")
-    if not text.strip():
-        return False, "EMPTY", elapsed
-    folded = text.casefold()
-    if not all(marker.casefold() in folded for marker in probe.expected_markers):
-        return False, "CONTRACT_MISMATCH", elapsed
-    return True, status, elapsed
+    status = "OK"
+    probes = (CANARY_DATA_PROBES[slug], *CANARY_CONTRACT_PROBES.get(slug, ()))
+    for probe in probes:
+        result = await get_host().call_tool(slug, runtime_config, probe.tool_name, dict(probe.arguments))
+        elapsed = int((time.monotonic() - started) * 1000)
+        status = str((result.provenance or {}).get("provider_status") or ("ERROR" if result.is_error else "OK"))
+        if result.is_error or status.upper() in _EMPTY_RESULT_STATUSES:
+            return False, status, elapsed
+        text = str(result.text or "")
+        if not text.strip():
+            return False, "EMPTY", elapsed
+        folded = text.casefold()
+        if not all(marker.casefold() in folded for marker in probe.expected_markers):
+            return False, "CONTRACT_MISMATCH", elapsed
+    return True, status, int((time.monotonic() - started) * 1000)
 
 
 async def run_mcp_live_canary() -> dict[str, Any]:
@@ -135,9 +166,7 @@ async def run_mcp_live_canary() -> dict[str, Any]:
     )
     recorder.activate()
     try:
-        token = set_mcp_execution_context(
-            McpExecutionContext(tenant_id=1, uid="system:canary", run_id=canary_run_id)
-        )
+        token = set_mcp_execution_context(McpExecutionContext(tenant_id=1, uid="system:canary", run_id=canary_run_id))
         probe_latencies: list[float] = []
         ok_count = 0
         server_count = 0
@@ -233,4 +262,10 @@ async def run_mcp_live_canary() -> dict[str, Any]:
         await recorder.finalize()
 
 
-__all__ = ["CANARY_DATA_PROBES", "CANARY_SERVER_SLUGS", "CanaryDataProbe", "run_mcp_live_canary"]
+__all__ = [
+    "CANARY_CONTRACT_PROBES",
+    "CANARY_DATA_PROBES",
+    "CANARY_SERVER_SLUGS",
+    "CanaryDataProbe",
+    "run_mcp_live_canary",
+]

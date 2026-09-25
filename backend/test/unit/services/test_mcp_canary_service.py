@@ -152,3 +152,16 @@ async def test_data_probe_requires_expected_golden_markers(monkeypatch):
     ok, status, _elapsed = await mcp_canary_service._probe_data("gene-authority", {})
     assert ok is False
     assert status == "CONTRACT_MISMATCH"
+
+
+def test_contract_probes_cover_sequence_and_all_authority_paths():
+    rice_tools = {probe.tool_name for probe in mcp_canary_service.CANARY_CONTRACT_PROBES["ricekb"]}
+    authority_tools = {
+        probe.tool_name for probe in mcp_canary_service.CANARY_CONTRACT_PROBES["gene-authority"]
+    }
+    assert rice_tools == {"ricekb_sequence"}
+    assert authority_tools == {
+        "ncbi_datasets_gene_report_rest",
+        "ncbi_datasets_gene_summary_cli",
+        "uniprot_search_rest",
+    }

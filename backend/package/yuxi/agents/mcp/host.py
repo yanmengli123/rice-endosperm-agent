@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
@@ -23,6 +24,7 @@ from typing import Any
 
 from yuxi.agents.mcp.artifact_materializer import materialize_mcp_data_result
 from yuxi.agents.mcp.capability_registry import profile_for_server_tool
+from yuxi.agents.mcp.error_semantics import apply_failure_provenance
 from yuxi.agents.mcp.execution import get_mcp_execution_context, record_mcp_call
 from yuxi.agents.mcp.fact_ledger import append_model_ledger, build_audit_manifest, extract_facts
 from yuxi.agents.mcp.health import (
@@ -202,6 +204,7 @@ def _jsonable(value: Any) -> Any:
 #: handle_tool_error → "Error: ..."；langgraph ToolNode / MCP server 内部
 #: 兜底 → "Error executing tool ..."）。前缀只做兜底，结构化状态优先。
 _TOOL_ERROR_TEXT_PREFIXES = ("error:", "error executing")
+_BRACKETED_ERROR_PREFIX = re.compile(r"^\[[A-Za-z][A-Za-z0-9_.-]*Error\]", re.IGNORECASE)
 
 
 def _detect_tool_error(
@@ -225,7 +228,7 @@ def _detect_tool_error(
     if isinstance(artifact_data, dict) and (artifact_data.get("is_error") or artifact_data.get("isError")):
         return True
     head = str(text or "").lstrip().lower()
-    return head.startswith(_TOOL_ERROR_TEXT_PREFIXES)
+    return head.startswith(_TOOL_ERROR_TEXT_PREFIXES) or bool(_BRACKETED_ERROR_PREFIX.match(head))
 
 
 def _normalize_tool_output(output: Any, *, provenance: dict[str, Any]) -> McpToolResult:
@@ -449,7 +452,9 @@ class LegacyLangChainHost(McpHost):
             raised = failure_from_exception(e, fallback_stage=STAGE_TRANSPORT)
             if raised.code in (CODE_DISCOVERY_FAILED, CODE_CLIENT_INIT_FAILED):
                 raise McpHostError(raised.message, stage=raised.stage, code=raised.code) from e
-            result = McpToolResult(text=f"Error: {e}", is_error=True)
+            provenance = {"protocol": self._note_adapter_version()}
+            apply_failure_provenance(provenance, e, stage_hint=raised.stage)
+            result = McpToolResult(text=f"Error: {e}", is_error=True, provenance=provenance)
             await record_mcp_call(
                 server_slug=slug,
                 capability_type="tool",
@@ -458,17 +463,19 @@ class LegacyLangChainHost(McpHost):
                 result=result.to_dict(),
                 status="error",
                 duration_ms=int((time.perf_counter() - started) * 1000),
-                provenance={"protocol": self._note_adapter_version()},
+                provenance=provenance,
             )
             return result
         result = _normalize_tool_output(
             output,
             provenance={"server_slug": slug, "tool": tool_name, "protocol": self._note_adapter_version()},
         )
-        if slug == "gene-authority" and isinstance(result.structured_content, dict):
+        if isinstance(result.structured_content, dict):
             provider_status = str(result.structured_content.get("status") or "").upper()
             if provider_status:
                 result.provenance["provider_status"] = provider_status
+        if result.is_error:
+            apply_failure_provenance(result.provenance, result.text)
         facts = []
         truncated = False
         profile = profile_for_server_tool(slug, tool_name)
@@ -491,12 +498,14 @@ class LegacyLangChainHost(McpHost):
             provenance=result.provenance,
         )
         execution_context = get_mcp_execution_context()
-        sequence_only_artifacts = bool(execution_context and execution_context.artifact_policy == "sequence_only")
+        final_only_artifacts = bool(
+            execution_context and execution_context.artifact_policy in {"sequence_only", "value_only"}
+        )
         if (
             not result.is_error
             and slug != "data-aggregator"
             and tool_name != SEQUENCE_DELIVERABLE_TOOL
-            and not sequence_only_artifacts
+            and not final_only_artifacts
         ):
             # MCP 数据产物确定性物化：成功的数据查询结果由程序落盘为可下载交付物，
             # 是否出现产物不再依赖模型调用 present_artifacts。必须先于下方

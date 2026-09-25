@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from yuxi.knowledge.evidence.quote_locator import detect_locator_intent
+from yuxi.knowledge.planning.scientific_intent import ScientificAction, parse_scientific_intent
 from yuxi.knowledge.planning.task_classifier import classify_task, detect_question_types, is_glossary_question
 
 TURN_EXECUTION_PLAN_SCHEMA_VERSION = "turn-execution-plan.v3"
@@ -26,6 +27,7 @@ RUN_SOURCE_MANIFEST_SCHEMA_VERSION = "run-source-manifest.v2"
 class TaskIntent(StrEnum):
     ENTITY_PROFILE = "ENTITY_PROFILE"
     SEQUENCE_EXPORT = "SEQUENCE_EXPORT"
+    OFFICIAL_LINK = "OFFICIAL_LINK"
     KB_EVIDENCE_QA = "KB_EVIDENCE_QA"
     QUOTE_LOCATOR = "QUOTE_LOCATOR"
     FIGURE_LOCATOR = "FIGURE_LOCATOR"
@@ -56,6 +58,7 @@ class SourcePolicy(StrEnum):
 class Capability(StrEnum):
     GENE_RECORD_LOOKUP = "GENE_RECORD_LOOKUP"
     SEQUENCE_LOOKUP = "SEQUENCE_LOOKUP"
+    OFFICIAL_LINK_LOOKUP = "OFFICIAL_LINK_LOOKUP"
     VERBATIM_SEARCH = "VERBATIM_SEARCH"
     PDF_LOCATOR = "PDF_LOCATOR"
     DOCUMENT_QA = "DOCUMENT_QA"
@@ -263,6 +266,7 @@ class TurnExecutionPlan(BaseModel):
             in {
                 Capability.GENE_RECORD_LOOKUP,
                 Capability.SEQUENCE_LOOKUP,
+                Capability.OFFICIAL_LINK_LOOKUP,
                 Capability.DATASET_LOOKUP,
                 Capability.GENERIC_MCP,
             }
@@ -312,7 +316,8 @@ class RunSourceManifest(BaseModel):
 _MCP_POSITIVE = re.compile(r"(?:通过|使用|只用|仅用|调用|走)\s*MCP|MCP\s*(?:查询|查|检索|获取|调用)", re.I)
 _MCP_NEGATIVE = re.compile(r"(?:不要|不用|禁止|别)\s*(?:调用|使用|走)?\s*MCP", re.I)
 _MCP_LOOKUP_ACTION = re.compile(
-    r"(?:查|查询|检索|搜索|获取|调用|使用|通过|来自|官方(?:地址|链接|记录)|档案|注释|序列|CDS|cDNA|蛋白|文献|数据集|项目)",
+    r"(?:查|查询|检索|搜索|获取|调用|使用|通过|来自|官网|网址|URL|主页|"
+    r"官方(?:网站|网页|页面|主页|地址|链接|入口|记录)|档案|注释|序列|CDS|cDNA|蛋白|文献|数据集|项目)",
     re.I,
 )
 _KB_POSITIVE = re.compile(r"(?:只|仅)?(?:根据|使用|查询|检索|查|看)\s*(?:当前)?知识库|只用知识库", re.I)
@@ -372,6 +377,14 @@ _FIXED_SOURCE_ROUTES: tuple[tuple[re.Pattern[str], str], ...] = (
 
 def _resolve_fixed_source_route(text: str) -> str | None:
     """把明确的数据源词映射到唯一 MCP；纯介绍问题不触发调用。"""
+    frame = parse_scientific_intent(text)
+    if frame.action == ScientificAction.OFFICIAL_LINK and frame.provider in {
+        "NCBI",
+        "UNIPROT",
+        "EUROPE_PMC",
+        "PRIDE",
+    }:
+        return "gene-authority"
     if not _MCP_LOOKUP_ACTION.search(text):
         return None
     for pattern, slug in _FIXED_SOURCE_ROUTES:
@@ -459,6 +472,7 @@ def plan_turn(
     （LOCATE_AND_EXPLAIN），不进普通 Top-K 自由问答。
     """
     text = re.sub(r"\s+", " ", str(question or "")).strip()
+    scientific_intent = parse_scientific_intent(text)
     knowledge_enabled = str(knowledge_strategy or "MODEL_DECIDES").upper() != "DISABLED"
     reason_codes: list[str] = []
     question_types = set(detect_question_types(text))
@@ -622,6 +636,12 @@ def plan_turn(
         evidence_required = True
         evidence_level = EvidenceLevel.CLAIM_EVIDENCE
         capabilities = [Capability.GENE_RECORD_LOOKUP, Capability.DOCUMENT_QA]
+    elif scientific_intent.action == ScientificAction.OFFICIAL_LINK:
+        intent = TaskIntent.OFFICIAL_LINK
+        target_type = "GENE"
+        evidence_level = EvidenceLevel.DATA_PROVENANCE
+        capabilities = [Capability.OFFICIAL_LINK_LOOKUP]
+        reason_codes.append("DETERMINISTIC_OFFICIAL_LINK")
     elif _SEQUENCE_QUERY.search(text):
         intent = TaskIntent.SEQUENCE_EXPORT
         target_type = "SEQUENCE"

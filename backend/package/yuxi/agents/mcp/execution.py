@@ -108,6 +108,33 @@ def stable_digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def argument_shape(value: Any, *, _depth: int = 0) -> dict[str, Any]:
+    """Describe argument structure without persisting any argument values."""
+
+    if _depth >= 5:
+        return {"type": "truncated"}
+    if isinstance(value, dict):
+        fields = {
+            str(key): argument_shape(item, _depth=_depth + 1)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))[:100]
+        }
+        return {"type": "object", "fields": fields}
+    if isinstance(value, list | tuple):
+        item_types = sorted({argument_shape(item, _depth=_depth + 1).get("type", "unknown") for item in value[:100]})
+        return {"type": "array", "item_types": item_types}
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "boolean"}
+    if isinstance(value, int):
+        return {"type": "integer"}
+    if isinstance(value, float):
+        return {"type": "number"}
+    if isinstance(value, str):
+        return {"type": "string"}
+    return {"type": type(value).__qualname__}
+
+
 async def record_mcp_call(
     *,
     server_slug: str,
@@ -159,6 +186,11 @@ async def record_mcp_call(
                 status=status,
                 duration_ms=duration_ms,
                 data_access_level=context.data_access_level,
+                error_class=(provenance or {}).get("error_class"),
+                error_stage=(provenance or {}).get("error_stage"),
+                http_status=(provenance or {}).get("http_status"),
+                error_excerpt=(provenance or {}).get("error_excerpt"),
+                argument_shape=argument_shape(arguments),
                 provenance=dict(provenance or {}),
             )
             session.add(audit)
@@ -180,6 +212,8 @@ async def record_mcp_call(
                 "mcp_tool": capability_name,
                 "mcp_audit_id": audit_id,
                 "audit_status": status,
+                "error_class": (provenance or {}).get("error_class"),
+                "error_stage": (provenance or {}).get("error_stage"),
             },
             resource_refs=[{"type": "mcp_call_audit", "id": audit_id}],
             visibility="USER",
@@ -197,6 +231,7 @@ __all__ = [
     "set_mcp_execution_context",
     "reset_mcp_execution_context",
     "get_mcp_execution_context",
+    "argument_shape",
     "stable_digest",
     "record_mcp_call",
 ]

@@ -125,7 +125,9 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     "mcp.execution.completed": frozenset({"tool", "mcp_server", "mcp_tool", "mcp_audit_id"}),
     "mcp.execution.failed": _COMMON_ATTRIBUTES | {"mcp_audit_id"},
     "mcp.execution.interrupted": _COMMON_ATTRIBUTES,
-    "mcp.audit.recorded": frozenset({"mcp_server", "mcp_tool", "mcp_audit_id", "audit_status"}),
+    "mcp.audit.recorded": frozenset(
+        {"mcp_server", "mcp_tool", "mcp_audit_id", "audit_status", "error_class", "error_stage"}
+    ),
     # 每日 live canary（cron:mcp_live_canary）：探针级结果 + 汇总指标
     "mcp.canary.probe": frozenset(
         {"mcp_server", "probe", "ok", "provider_status", "elapsed_ms", "tool_count", "error"}

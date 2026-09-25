@@ -1078,15 +1078,27 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0061_run_artifacts", "_migration_0061_run_artifacts"),
         ("0062_canonical_fold_key", "_migration_0062_canonical_fold_key"),
         ("0063_conversation_graph_snapshot", "_migration_0063_conversation_graph_snapshot"),
+        ("0064_mcp_call_diagnostics", "_migration_0064_mcp_call_diagnostics"),
     ]
+
+    async def _migration_0064_mcp_call_diagnostics(self, conn) -> None:
+        """Persist value-free MCP failure diagnostics and argument shape."""
+
+        statements = (
+            "ALTER TABLE IF EXISTS mcp_call_audit ADD COLUMN IF NOT EXISTS error_class VARCHAR(64)",
+            "ALTER TABLE IF EXISTS mcp_call_audit ADD COLUMN IF NOT EXISTS error_stage VARCHAR(64)",
+            "ALTER TABLE IF EXISTS mcp_call_audit ADD COLUMN IF NOT EXISTS http_status INTEGER",
+            "ALTER TABLE IF EXISTS mcp_call_audit ADD COLUMN IF NOT EXISTS error_excerpt VARCHAR(500)",
+            "ALTER TABLE IF EXISTS mcp_call_audit ADD COLUMN IF NOT EXISTS argument_shape JSON",
+            "CREATE INDEX IF NOT EXISTS ix_mcp_call_audit_error_class ON mcp_call_audit(error_class)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
 
     async def _migration_0063_conversation_graph_snapshot(self, conn) -> None:
         """Persist the immutable, bounded graph projection used by a chat turn."""
         await conn.execute(
-            text(
-                "ALTER TABLE IF EXISTS knowledge_retrieval_runs "
-                "ADD COLUMN IF NOT EXISTS graph_snapshot_json JSON"
-            )
+            text("ALTER TABLE IF EXISTS knowledge_retrieval_runs ADD COLUMN IF NOT EXISTS graph_snapshot_json JSON")
         )
 
     async def _migration_0062_canonical_fold_key(self, conn) -> None:

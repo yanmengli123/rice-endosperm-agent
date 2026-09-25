@@ -1092,6 +1092,11 @@ class MCPCallAudit(Base):
     status = Column(String(32), nullable=False)
     duration_ms = Column(Integer, nullable=True)
     data_access_level = Column(String(32), nullable=False, default="PUBLIC")
+    error_class = Column(String(64), nullable=True, index=True)
+    error_stage = Column(String(64), nullable=True)
+    http_status = Column(Integer, nullable=True)
+    error_excerpt = Column(String(500), nullable=True)
+    argument_shape = Column(JSON, nullable=True)
     provenance = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
 

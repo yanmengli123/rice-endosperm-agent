@@ -233,6 +233,31 @@ def test_sequence_used_fact_ids_no_longer_empty():
     assert set(seq_only.used_fact_ids) == {f["id"] for f in _SEQUENCE_FACTS_A}
 
 
+def test_multi_audit_sequence_footer_never_cross_binds_fact_marker():
+    second = [
+        {"id": "f_0000000000000101", "path": "/data/sequence_id", "string_value": "Os06t0133000-02"},
+        {"id": "f_0000000000000102", "path": "/data/sequence_type", "string_value": "cds"},
+        {"id": "f_0000000000000103", "path": "/data/sequence_length", "numeric_value": 1830},
+        {"id": "f_0000000000000104", "path": "/data/sequence_sha256", "string_value": "b" * 64},
+    ]
+    uses = [
+        _use(390, "ricekb_sequence", _SEQUENCE_FACTS_A),
+        _use(391, "ricekb_sequence", second),
+    ]
+    projection = project_data_plane(uses)
+    assert projection is not None
+    assert "[MCP-F:390:f_0000000000000104]" not in projection.blocks
+    assert "[MCP-F:391:f_0000000000000104]" in projection.blocks
+    _, audit = guard_answer_for_evidence_level(
+        projection.blocks,
+        evidence_level="E1_DATA_PROVENANCE",
+        source_uses=uses,
+        source_policy="MCP_ONLY",
+        requires_mcp=True,
+    )
+    assert audit["status"] == "PASSED", audit
+
+
 def test_merged_projection_with_prose_passes_fact_grounding():
     """缺陷2 防护（主路径）：双工具合并投影 + 叙述整体复跑事实门禁必须通过。"""
     uses = [_use(270, "ricekb_sequence", _SEQUENCE_FACTS_A), _use(268, "ricekb_gene_profile", _PROFILE_FACTS)]

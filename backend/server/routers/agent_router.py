@@ -616,6 +616,7 @@ async def get_agent_run_evidence(
 async def export_agent_run_graph_snapshot(
     run_id: str,
     format: str = Query(default="json", pattern="^(json|csv)$"),
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -625,7 +626,7 @@ async def export_agent_run_graph_snapshot(
     ``graph_snapshot_json`` 永不作为导出源（暗发布防泄漏，ADR-0004 §7 同款纪律）。
     当时未发布（开关关闭 / 非 HIT）即 404；快照涉及的知识库必须仍在当前可见
     范围内（冻结范围 ∩ 当前可见，与证据端点同一权限语义）。导出无时钟字段，
-    同 run 字节恒定，``projection_hash`` 即 ETag。
+    同 run、同格式字节恒定；强 ETag 对实际响应字节求哈希，并支持私有条件请求。
     """
     run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_user.uid))
     if not run:
@@ -646,7 +647,12 @@ async def export_agent_run_graph_snapshot(
         await db.execute(select(Message.extra_metadata).where(Message.id == run.output_message_id))
     ).scalar_one_or_none()
     snapshot = dict(extra or {}).get("graph_snapshot") if isinstance(extra, dict) else None
-    if not isinstance(snapshot, dict) or snapshot.get("schema") != "graph_snapshot_v1":
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("schema") != "graph_snapshot_v1"
+        or snapshot.get("outcome") != "HIT"
+        or not snapshot.get("edges")
+    ):
         raise HTTPException(status_code=404, detail="本运行任务未发布关系图快照")
 
     allowed_kb_ids = await _evidence_scope_kb_ids(run, current_user)
@@ -667,14 +673,28 @@ async def export_agent_run_graph_snapshot(
         body = export_graph_snapshot_json(snapshot, run_id=run_id)
         media_type = "application/json"
     filename = export_filename(snapshot, "zip" if format == "csv" else "json")
+    import hashlib
     from urllib.parse import quote
+
+    etag = f'"{hashlib.sha256(body).hexdigest()}"'
+    cache_headers = {
+        "Cache-Control": "private, no-cache",
+        "ETag": etag,
+        "Vary": "Authorization",
+    }
+    validators = {
+        tag.strip()[2:].strip() if tag.strip().startswith("W/") else tag.strip()
+        for tag in (if_none_match or "").split(",")
+    }
+    if "*" in validators or etag in validators:
+        return Response(status_code=304, headers=cache_headers)
 
     return Response(
         content=body,
         media_type=media_type,
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
-            "ETag": f'"{snapshot.get("projection_hash")}"',
+            **cache_headers,
         },
     )
 

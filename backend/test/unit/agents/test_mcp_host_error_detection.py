@@ -25,6 +25,11 @@ def test_legacy_error_prefix_still_detected():
     assert _normalize("  Error: ToolException raised").is_error is True
 
 
+def test_bracketed_provider_exception_is_error():
+    result = _normalize("[UpstreamUnavailableError] Ensembl Plants exhausted 3 retries (last HTTP 500)")
+    assert result.is_error is True
+
+
 def test_structured_tool_message_status_wins_even_with_clean_text():
     result = _normalize(SimpleNamespace(status="error", content="partially rendered text"))
     assert result.is_error is True

@@ -377,6 +377,23 @@ async def test_conversation_graph_snapshot_has_a_versioned_migration():
 
 
 @pytest.mark.asyncio
+async def test_mcp_call_diagnostics_has_a_versioned_migration():
+    manager = PostgresManager()
+    connection = _RecordingConnection()
+
+    await manager._migration_0064_mcp_call_diagnostics(connection)
+
+    statements = "\n".join(connection.statements)
+    for column in ("error_class", "error_stage", "http_status", "error_excerpt", "argument_shape"):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in statements
+    assert "ix_mcp_call_audit_error_class" in statements
+    assert (
+        "0064_mcp_call_diagnostics",
+        "_migration_0064_mcp_call_diagnostics",
+    ) in manager._VERSIONED_MIGRATIONS
+
+
+@pytest.mark.asyncio
 async def test_evidence_span_anchor_uniqueness_is_repaired_per_revision():
     manager = PostgresManager()
     connection = _RecordingConnection()

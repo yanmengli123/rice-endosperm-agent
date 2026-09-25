@@ -79,6 +79,112 @@ def test_mcp_mention_beats_everything():
     assert "MENTION_MCP_SERVER_BOUND" in plan.reason_codes
 
 
+#: 用户验收原句（必须全部成为黄金用例）：四句都必须确定性路由 + 服务端事实发布。
+_ACCEPTANCE_SENTENCES = [
+    (
+        "详细档案",
+        "通过 MCP 查 Wx，给我详细的基因档案",
+        TaskIntent.ENTITY_PROFILE,
+        "ricekb-profile",
+        [Capability.GENE_RECORD_LOOKUP],
+    ),
+    (
+        "CDS 导出",
+        "Wx的CDS序列给我",
+        TaskIntent.SEQUENCE_EXPORT,
+        "ricekb",
+        [Capability.SEQUENCE_LOOKUP],
+    ),
+    (
+        "NCBI 官网（无 MCP 字样）",
+        "Wx的在NCBI上给我官网地址",
+        TaskIntent.OFFICIAL_LINK,
+        "gene-authority",
+        [Capability.OFFICIAL_LINK_LOOKUP],
+    ),
+    (
+        "NCBI 官网（有 MCP 字样）",
+        "通过MCP服务，Wx的在NCBI上给我官网地址",
+        TaskIntent.OFFICIAL_LINK,
+        "gene-authority",
+        [Capability.OFFICIAL_LINK_LOOKUP],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "question", "intent", "server", "capabilities"),
+    _ACCEPTANCE_SENTENCES,
+    ids=[case[0] for case in _ACCEPTANCE_SENTENCES],
+)
+def test_acceptance_sentences_route_deterministically(name, question, intent, server, capabilities):
+    """带知识库范围的真实配置下，四句验收原句仍必须走固定执行链。
+
+    回归对象：官网问法曾落到 KB_EVIDENCE_QA（required_server=None）→ 模型自由选工具、
+    自由填写 Gene ID；带 MCP 字样的那句曾变成模型自选参数。
+    """
+
+    plan = plan_turn(question, has_knowledge_scope=True, configured_mcps=_ALL_SERVERS, known_mcps=_ALL_SERVERS)
+
+    assert plan.task.primary_intent == intent, f"{name}：意图漂移为 {plan.task.primary_intent}"
+    assert plan.required_server == server, f"{name}：期望 {server}，实际 {plan.required_server}"
+    assert plan.required_capabilities == capabilities, f"{name}：能力漂移 {plan.required_capabilities}"
+    assert plan.answer.mode == "MCP_VALUE_ONLY", f"{name}：值发布必须由服务端投影承担"
+    assert plan.source.policy.value == "MCP_ONLY", f"{name}：必须限定权威数据源"
+    assert plan.satisfiable is True
+
+
+def test_official_link_never_degrades_to_free_model_tool_choice():
+    """官网问法不得回落到 ENTITY_PROFILE 那种「模型自选工具」形态。"""
+
+    plan = plan_turn(
+        "Wx的在NCBI上给我官网地址",
+        has_knowledge_scope=True,
+        configured_mcps=_ALL_SERVERS,
+        known_mcps=_ALL_SERVERS,
+    )
+    assert "DETERMINISTIC_OFFICIAL_LINK" in plan.reason_codes
+    assert plan.evidence.level.value == "E1_DATA_PROVENANCE"
+
+
+def test_official_link_intent_exposes_only_ncbi_report_tools():
+    """两阶段选择（P1）：官网轮先收敛服务器，再只放行该能力命中的 1–5 个工具。
+
+    模型不再面对七台服务器的全部工具，也无从套用其他工具的参数结构；
+    确定性执行器本就不调模型，此锁保护的是「模型若被调用也只能看到窄工具面」。
+    """
+    from yuxi.agents.middlewares.knowledge_context import filter_tools_by_turn_plan
+
+    plan = plan_turn(
+        "Wx的在NCBI上给我官网地址",
+        has_knowledge_scope=True,
+        configured_mcps=_ALL_SERVERS,
+        known_mcps=_ALL_SERVERS,
+    )
+    tools = [_fake_mcp_tool(f"t_{slug}", slug) for slug in _ALL_SERVERS]
+    tools.extend(
+        _fake_mcp_tool(name, "gene-authority")
+        for name in (
+            "ncbi_datasets_gene_report_rest",
+            "ncbi_datasets_gene_summary_cli",
+            "ncbi_datasets_gene_package_cli",
+            "uniprot_entry_rest",
+            "uniprot_search_rest",
+        )
+    )
+    tools.append(_fake_mcp_tool("ricekb_sequence", "ricekb"))
+
+    filtered = filter_tools_by_turn_plan(tools, plan)
+    names = {tool.name for tool in filtered}
+
+    assert names == {
+        "ncbi_datasets_gene_report_rest",
+        "ncbi_datasets_gene_summary_cli",
+        "ncbi_datasets_gene_package_cli",
+    }
+    assert len(filtered) <= 5
+
+
 def _fake_mcp_tool(name: str, server: str):
     from types import SimpleNamespace
 
