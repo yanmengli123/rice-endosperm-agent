@@ -45,13 +45,18 @@ from yuxi.knowledge.planning.turn_execution_plan import (
 from yuxi.knowledge.rendering.answer_draft import render_answer_draft
 from yuxi.knowledge.rendering.citation_channel import apply_citation_channel, render_locator_chip
 from yuxi.knowledge.rendering.profile_projection import project_data_plane
-from yuxi.knowledge.rendering.provider_status_view import render_provider_status_answer
+from yuxi.knowledge.rendering.provider_status_view import (
+    PROJECTION_FAILURE_COPY,
+    render_provider_status_answer,
+    resolve_projection_publish,
+)
 from yuxi.knowledge.rendering.source_output_guard import (
     fact_catalog_summary,
     guard_answer_for_evidence_level,
     guard_glossary_answer,
     render_degraded_fact_sheet,
 )
+from yuxi.knowledge.rendering.typed_value_renderers import render_for_task
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -617,10 +622,15 @@ def _deterministic_relation_answer(contract: dict[str, Any] | None) -> str | Non
         if isinstance(node, dict) and node.get("entity_id")
     }
     edges = [edge for edge in snapshot.get("edges") or [] if isinstance(edge, dict)]
-    has_pending_edges = any(str(edge.get("review_status") or "").upper() == "CANDIDATE" for edge in edges)
+    pending_count = sum(
+        int(edge.get("candidate_parallel_count") or 0)
+        if edge.get("candidate_parallel_count") is not None
+        else int(str(edge.get("review_status") or "").upper() == "CANDIDATE")
+        for edge in edges
+    )
     lines = [
         "已从规范知识图谱检索到以下关系（含标注待审核的候选关系）："
-        if has_pending_edges
+        if pending_count
         else "已从规范知识图谱检索到以下已审核关系："
     ]
     listed_max = 20
@@ -628,10 +638,16 @@ def _deterministic_relation_answer(contract: dict[str, Any] | None) -> str | Non
         source = names.get(str(edge.get("source_entity_id")), str(edge.get("source_entity_id") or "未知实体"))
         target = names.get(str(edge.get("target_entity_id")), str(edge.get("target_entity_id") or "未知实体"))
         predicate = str(edge.get("predicate") or "相关")
-        pending = "（待审核）" if str(edge.get("review_status") or "").upper() == "CANDIDATE" else ""
+        candidate_parallel = int(edge.get("candidate_parallel_count") or 0)
+        if str(edge.get("review_status") or "").upper() == "CANDIDATE":
+            pending = "（待审核）"
+        elif candidate_parallel:
+            pending = f"（另含 {candidate_parallel} 条待审核平行断言）"
+        else:
+            pending = ""
         conflict = "（存在证据冲突）" if str(edge.get("conflict_status") or "NONE") != "NONE" else ""
         parallel = int(edge.get("parallel_count") or 1)
-        parallel_note = f"（{parallel} 条平行证据）" if parallel > 1 else ""
+        parallel_note = f"（{parallel} 条平行抽取记录）" if parallel > 1 else ""
         lines.append(f"- {source} —{predicate}→ {target}{pending}{conflict}{parallel_note}")
     hidden_in_list = len(edges) - min(len(edges), listed_max)
     if hidden_in_list > 0:
@@ -795,7 +811,18 @@ def _pinned_mention_items(mention_resolution: dict | None, mention_type: str) ->
 
 #: MCP 负状态：科学上"合法无结果"或失败，不算成功调用，不参与 adoption/匹配。
 _MCP_ADOPTION_NEGATIVE_STATUSES = frozenset(
-    {"NOT_FOUND", "NO_EVIDENCE", "AMBIGUOUS", "CONFLICT", "UNAVAILABLE", "ERROR"}
+    {
+        "NOT_FOUND",
+        "NO_EVIDENCE",
+        "AMBIGUOUS",
+        "CONFLICT",
+        "UNAVAILABLE",
+        "ERROR",
+        "ARGUMENT_INVALID",
+        "CONTRACT_DRIFT",
+        "PROJECTION_INVALID",
+        "PARTIAL",
+    }
 )
 
 
@@ -2625,24 +2652,26 @@ async def stream_agent_chat(
                     source_policy=turn_plan.source.policy.value,
                     requires_mcp=True,
                 )
+                publishable, projection_status = resolve_projection_publish(validation)
                 source_output_validation = {
                     **validation,
                     "presentation_mode": "MCP_VALUE_ONLY",
                     "model_facts_published": False,
+                    "projection_status": projection_status,
                     "data_plane_projection": {
                         "kind": projection.kind,
                         "audit_id": projection.audit_id,
                         "fact_count": len(projection.used_fact_ids),
                     },
                 }
-                if validation.get("status") == "PASSED":
+                if publishable:
                     public_content = render_source_answer(internal_content)
                 else:
-                    # The deterministic projection should satisfy this guard.
-                    # If contracts drift, fail closed instead of force-marking
-                    # a rejected value sheet as publishable.
+                    # The gate actually rejected the sheet (contract drift or marker
+                    # assembly failure).  Fail closed with the fixed assembly-failure
+                    # copy instead of force-marking a rejected value sheet as publishable.
                     internal_content = guarded_content
-                    public_content = render_source_answer(guarded_content)
+                    public_content = PROJECTION_FAILURE_COPY
             else:
                 provider_answer = render_provider_status_answer(source_manifest.source_uses)
                 public_content = provider_answer or sequence_result.error_message or _plan_failure_answer(turn_plan)
@@ -2693,6 +2722,138 @@ async def stream_agent_chat(
                     "namespace": [],
                 },
                 metadata={"deterministic_sequence": True, "presentation_mode": "MCP_VALUE_ONLY"},
+                status="loading",
+                thread_id=thread_id,
+            )
+            meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+            yield make_chunk(status="finished", meta=meta)
+            return
+
+        if turn_plan.task.primary_intent == TaskIntent.OFFICIAL_LINK:
+            # Official-link lookup is also deterministic: the model neither
+            # constructs provider arguments nor invents identifiers/URLs.
+            from yuxi.knowledge.rendering.source_answer_renderer import render_source_answer
+            from yuxi.services.gene_authority_service import execute_official_link_query
+
+            authority_result = await execute_official_link_query(model_query)
+            for index, call in enumerate(authority_result.calls, start=1):
+                call_id = f"authority_{index}_{uuid.uuid4().hex[:8]}"
+                yield make_chunk(
+                    status="loading",
+                    stream_event={
+                        "type": "tool_call",
+                        "method": "tools",
+                        "namespace": [],
+                        "data": {
+                            "event": "tool-call",
+                            "tool_call_id": call_id,
+                            "tool_name": call["tool"],
+                            "args": call["arguments"],
+                        },
+                    },
+                    meta=meta,
+                )
+                yield make_chunk(
+                    status="loading",
+                    stream_event={
+                        "type": "tool_result",
+                        "method": "tools",
+                        "namespace": [],
+                        "data": {
+                            "event": "tool-finished",
+                            "tool_call_id": call_id,
+                            "tool_name": call["tool"],
+                            "output": {"is_error": call["is_error"]},
+                        },
+                    },
+                    meta=meta,
+                )
+
+            mcp_source_valid = await _finalize_mcp_manifest(
+                db,
+                run_id=meta.get("run_id"),
+                plan=turn_plan,
+                manifest=source_manifest,
+                mention_resolution=_frozen_mention_resolution(meta),
+            )
+            _settle_source_manifest_status(turn_plan, source_manifest, mcp_source_valid)
+            projection = project_data_plane(source_manifest.source_uses) if authority_result.succeeded else None
+            internal_content = projection.blocks if projection is not None else None
+            if internal_content is not None:
+                guarded_content, validation = guard_answer_for_evidence_level(
+                    internal_content,
+                    evidence_level=turn_plan.evidence.level,
+                    source_uses=source_manifest.source_uses,
+                    source_policy=turn_plan.source.policy.value,
+                    requires_mcp=True,
+                )
+                publishable, projection_status = resolve_projection_publish(validation)
+                source_output_validation = {
+                    **validation,
+                    "presentation_mode": "MCP_VALUE_ONLY",
+                    "model_facts_published": False,
+                    "projection_status": projection_status,
+                    "data_plane_projection": {
+                        "kind": projection.kind,
+                        "audit_id": projection.audit_id,
+                        "fact_count": len(projection.used_fact_ids),
+                    },
+                }
+                if publishable:
+                    public_content = render_source_answer(internal_content)
+                else:
+                    internal_content = guarded_content
+                    public_content = PROJECTION_FAILURE_COPY
+            else:
+                provider_answer = render_provider_status_answer(source_manifest.source_uses)
+                public_content = provider_answer or authority_result.error_message or _plan_failure_answer(turn_plan)
+                internal_content = public_content
+                source_output_validation = {
+                    "schema_version": "answer-evidence-output-guard.v2",
+                    "status": "DEGRADED",
+                    "presentation_mode": "MCP_VALUE_ONLY",
+                    "model_facts_published": False,
+                    "reason_code": authority_result.status,
+                }
+            source_manifest.validation_results.append(source_output_validation)
+
+            await _persist_turn_runtime(
+                db,
+                meta.get("run_id"),
+                plan=turn_plan,
+                manifest=source_manifest,
+            )
+            message_id = f"msg_{uuid.uuid4().hex}"
+            ai_message = await conv_repo.add_message_by_thread_id(
+                thread_id=thread_id,
+                role="assistant",
+                content=internal_content,
+                message_type="text",
+                extra_metadata={
+                    "id": message_id,
+                    "presentation_mode": "MCP_VALUE_ONLY",
+                    "deterministic_official_link": True,
+                    "source_output_guard": source_output_validation,
+                    "turn_execution_plan": turn_plan.public_dict(),
+                    "run_source_manifest": source_manifest.model_dump(mode="json"),
+                    **get_trace_info(langfuse_run),
+                },
+                run_id=meta.get("run_id"),
+                request_id=meta.get("request_id"),
+            )
+            if ai_message is not None and meta.get("run_id"):
+                await AgentRunRepository(db).set_output_message(str(meta["run_id"]), ai_message.id)
+            await db.commit()
+            yield make_chunk(
+                content=public_content,
+                stream_event={
+                    "type": "message_delta",
+                    "message_id": message_id,
+                    "content": public_content,
+                    "thread_id": thread_id,
+                    "namespace": [],
+                },
+                metadata={"deterministic_official_link": True, "presentation_mode": "MCP_VALUE_ONLY"},
                 status="loading",
                 thread_id=thread_id,
             )
@@ -3035,26 +3196,54 @@ async def stream_agent_chat(
             # 终态文案（UNAVAILABLE 绝不伪装成未找到），两者都无才用兜底句。
             elif turn_plan.answer.mode == "MCP_VALUE_ONLY":
                 projection = project_data_plane(source_manifest.source_uses)
-                deterministic_text = (
-                    projection.blocks
-                    if projection is not None
-                    else render_degraded_fact_sheet(source_manifest.source_uses)
+                # 类型化值卡（P1 值路径）：文献题录卡 / 数据集候选卡等按任务意图
+                # 渲染——数据面投影不认识这些信封，降级表又过宽，值卡提供任务
+                # 语义的用户视图。数据集候选卡承载发现级语义（引导官方核验）。
+                typed_segment = render_for_task(
+                    turn_plan.task.primary_intent.value,
+                    source_manifest.source_uses,
+                    server_hint=turn_plan.required_server,
                 )
+                if typed_segment is not None and turn_plan.required_server == "data-aggregator":
+                    # 发现层（data-aggregator）调用不进 adopted——候选卡直接从
+                    # 成功调用渲染，语义边界在卡内声明（非最终事实）。
+                    pass
+                deterministic_text = None
+                if projection is not None:
+                    deterministic_text = projection.blocks
+                elif typed_segment is not None:
+                    deterministic_text = typed_segment.blocks
+                else:
+                    deterministic_text = render_degraded_fact_sheet(source_manifest.source_uses)
+                # rendered_sheet：服务端渲染出的值表（投影/值卡/降级表）；None 表示只有状态文案/兜底句。
+                rendered_sheet = deterministic_text
                 if deterministic_text is None:
                     deterministic_text = render_provider_status_answer(source_manifest.source_uses)
-                guarded_source_text = deterministic_text or "未获取到可发布的数据值。"
-                _, deterministic_validation = guard_answer_for_evidence_level(
-                    guarded_source_text,
+                deterministic_candidate = deterministic_text or "未获取到可发布的数据值。"
+                guarded_deterministic_text, deterministic_validation = guard_answer_for_evidence_level(
+                    deterministic_candidate,
                     evidence_level=turn_plan.evidence.level,
                     source_uses=source_manifest.source_uses,
                     source_policy=turn_plan.source.policy.value,
                     requires_mcp=turn_plan.requires_mcp,
                 )
+                if rendered_sheet is not None:
+                    # 值表（投影或降级表）必须由门禁实际裁决，调用方不得覆盖。
+                    publishable, projection_status = resolve_projection_publish(deterministic_validation)
+                else:
+                    # 无值表可发布（只有状态文案/兜底句）：装配失败语义不适用。
+                    publishable = deterministic_validation.get("status") == "PASSED"
+                    projection_status = "NOT_APPLICABLE"
+                guarded_source_text = (
+                    deterministic_candidate
+                    if publishable
+                    else (PROJECTION_FAILURE_COPY if rendered_sheet is not None else guarded_deterministic_text)
+                )
                 source_output_validation = {
                     **deterministic_validation,
-                    "status": "PASSED" if deterministic_text else "DEGRADED",
                     "presentation_mode": "MCP_VALUE_ONLY",
                     "model_facts_published": False,
+                    "projection_status": projection_status,
                 }
                 if projection is not None:
                     source_output_validation["data_plane_projection"] = {

@@ -6,7 +6,11 @@
 
 from __future__ import annotations
 
-from yuxi.knowledge.rendering.provider_status_view import render_provider_status_answer
+from yuxi.knowledge.rendering.provider_status_view import (
+    PROJECTION_FAILURE_COPY,
+    render_provider_status_answer,
+    resolve_projection_publish,
+)
 
 
 def _use(provider: str, status: str, *, adopted: bool = False) -> dict:
@@ -43,6 +47,42 @@ def test_adopted_success_delegates_to_projection():
 def test_provider_status_is_independent_from_execution_status():
     use = _use("ricekb", "SUCCESS") | {"execution_status": "SUCCESS", "provider_status": "NOT_FOUND"}
     assert render_provider_status_answer([use]).startswith("未找到")
+
+
+def test_argument_invalid_and_partial_are_not_reported_as_not_found():
+    invalid = render_provider_status_answer([_use("gene-authority", "ARGUMENT_INVALID")])
+    assert invalid is not None and invalid.startswith("查询参数未通过")
+    assert "未找到" not in invalid
+    partial = render_provider_status_answer([_use("gene-authority", "PARTIAL")])
+    assert partial is not None and partial.startswith("数据源只返回了部分结果")
+    assert "未找到" not in partial
+
+
+def test_contract_drift_and_projection_invalid_have_distinct_copies():
+    """内部契约类故障各有独立文案，且都不要求用户「补 MCP-F」。"""
+    drift = render_provider_status_answer([_use("ricekb", "CONTRACT_DRIFT")])
+    assert drift is not None and drift.startswith("数据源返回的记录与本次请求不一致")
+    assert "MCP-F" not in drift
+    projection = render_provider_status_answer([_use("ricekb", "PROJECTION_INVALID")])
+    assert projection is not None and projection.startswith(PROJECTION_FAILURE_COPY)
+    assert "MCP-F" not in projection
+    assert drift.split("（数据源")[0] != projection.split("（数据源")[0]
+
+
+def test_projection_publish_requires_an_actual_gate_pass():
+    """发布裁决：只有门禁实际 PASSED 才允许发布；其余一律装配失败（调用方不得覆盖）。"""
+    assert resolve_projection_publish({"status": "PASSED"}) == (True, "OK")
+    for rejected in ({"status": "REJECTED"}, {"status": "DEGRADED"}, {"status": "FAILED"}, {}, None):
+        publishable, projection_status = resolve_projection_publish(rejected)
+        assert publishable is False, rejected
+        assert projection_status == "PROJECTION_INVALID", rejected
+
+
+def test_projection_failure_copy_never_demands_user_side_marker_repair():
+    """装配失败必须是服务端问题，绝不出现「补 MCP-F」这类面向用户的指引。"""
+    assert "MCP-F" not in PROJECTION_FAILURE_COPY
+    answer = render_provider_status_answer([_use("ricekb", "PROJECTION_INVALID")])
+    assert answer is not None and "MCP-F" not in answer
 
 
 def test_no_mcp_uses_or_unknown_negative_falls_back():

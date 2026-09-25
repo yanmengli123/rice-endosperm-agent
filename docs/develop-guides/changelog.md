@@ -7,6 +7,8 @@
 ## 未发布
 
 ### 新增
+- 类型化值渲染器与 bio-mcp 服务器级注册（`feat: 值路径全局化补齐`）：① 新模块 `knowledge/rendering/typed_value_renderers.py`——按任务意图注册的确定性值卡：PROTEIN_PROFILE 蛋白值卡（UniProt accession/入库类型/物种/长度/描述，实测信封字段逐字节对齐）、LITERATURE_DISCOVERY 题录卡（标题/年份/期刊/作者/DOI，上限 5 条 + 命中计数）、DATASET_DISCOVERY 候选发现卡（发现级语义边界声明——候选非核验事实，引导官方核验，与 capability_registry 的 DISCOVERY 不采纳分层一致）；中部数组索引折叠的路径索引（results/0/x → results/x，实测 UniProt length 路径命中）；接入 MCP_VALUE_ONLY 终态（投影 > 类型化值卡 > 降级表 > 五态四级出口），零幻觉纪律与 profile_projection 同源（构造性 marker、组合单元格只连接不改值）。② bio-mcp 服务器级注册：`_SERVER_SCOPED_PROFILES` 新增 bio-mcp 条目，16 个实测返回结构化记录的精确检索工具获 profile（plant_gene_lookup/pubmed_search/uniprot_annotate/geo_dataset_search 等），intelligent_analyze 等综合类与 blast_search 等分析类保持 fail-closed 滤除——受控轮能力面从 1/68 放开到 16/68，且跨服务器裸名撞车保护不变。③ 测试：类型化渲染器 6 例（marker/洁净度/语义边界/任务映射/服务器过滤）+ 注册表回归 57 例；bio-mcp fixture 对齐服务器级注册语义。全量 unit 2895 通过 / 0 失败（Shard A 2637 + Shard B 258）；ruff 三连全绿。
+
 
 - 状态模块审计收口（第三轮，四缺口之二三四 + 可访问性）：**缺口②降级遥测**——新增 `web/src/utils/traceTelemetry.js`（可注入 sink + 同 (runId,reason) 去重），traceProjection 四处静默兜底全部留痕（无效事件序列、迟到旧快照拒绝〔含回退前后游标〕、快照 run 不匹配、空投影快照、纯环 span 检出），裸 node spec 锁定「降级可计数」；**缺口④能力位消费**——`trace_stage_facets` 从声明变开关：新增 `getAgentProtocol` API + `useProtocolCapabilities`（模块级单例缓存，失败按无能力处理并留痕），Web 端阶段条按能力位显式门控（缺失=旧服务端时隐藏并上报 `capability_trace_stage_facets_missing`），不再靠数据缺席隐式兜底；**缺口③抽取（增量）**——本轮新增的三块逻辑外迁为可测单元：`useStatusPanelSections`（面板分区折叠，默认值集中）、`useConversationWindowing`（+纯函数层 `utils/conversationWindowing.js`：窗口切片/隐藏计数，不足窗口返回原引用）、`useEvidenceAnchor`（芯片互锚 + 事件驱动刷新，依赖全注入、node 无 rAF/window 时同步回退），三块均有裸 node spec（vue 在宿主可直接驱动）；AgentChatComponent 相应减重。可访问性补齐：阶段条新增视觉隐藏 `aria-live` 播报（阶段推进对读屏器可感知），证据高亮新增「已定位证据 E#」播报。组件级测试基建（vitest + @vue/test-utils）与存量 5700 行大搬家仍留待决策，未在本轮范围内。
 

@@ -77,7 +77,12 @@ async def test_named_server_passes_when_that_server_succeeded():
     )
     manifest = _initial_source_manifest(plan)
     valid = await _finalize_mcp_manifest(
-        _FakeDB([_audit(2, server="bio-mcp")]), run_id="r1", plan=plan, manifest=manifest
+        # bio-mcp 已实行服务器级注册（capability_registry）：默认工具名
+        # ricekb_resolve 在该服务器无 profile → 改用已注册的结构化检索工具。
+        _FakeDB([_audit(2, server="bio-mcp", tool="plant_gene_lookup")]),
+        run_id="r1",
+        plan=plan,
+        manifest=manifest,
     )
 
     assert valid is True

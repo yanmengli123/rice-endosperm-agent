@@ -96,7 +96,7 @@ _TRUSTED_PROFILES: dict[str, ToolCapabilityProfile] = {
     # 只支撑数据库档案事实（E1），不得用于机制结论。
     **{
         name: ToolCapabilityProfile(
-            capabilities=frozenset({Capability.GENE_RECORD_LOOKUP}),
+            capabilities=frozenset({Capability.GENE_RECORD_LOOKUP, Capability.OFFICIAL_LINK_LOOKUP}),
             source_class="AUTHORITATIVE_DATABASE",
             authority_level="PRIMARY_DATABASE",
             provider="NCBI Datasets",
@@ -366,8 +366,36 @@ RICEKB_TOOL_NAMES: frozenset[str] = frozenset(_RICEKB_VENDORED_TOOLS)
 # 服务器级限定 profile：通用上游工具名（search/resolve/...）只在其评审过的
 # 服务器内受信；命中该表的服务器实行 fail-closed（未列名工具一律无 profile），
 # 不再回落到全局裸名表，防止跨服务器裸名撞车。
+_BIO_MCP_STRUCTURED_LOOKUP = ToolCapabilityProfile(
+    capabilities=frozenset({Capability.GENE_RECORD_LOOKUP, Capability.GENERIC_MCP}),
+    source_class="STRUCTURED_DATABASE",
+    authority_level="CROSS_SOURCE_AGGREGATOR",
+)
+#: bio-mcp 评审过的精确检索工具（实测返回结构化记录）；intelligent_analyze 等
+#: 综合类与 blast_search 等分析类工具刻意不列（无 profile → 受控轮被滤除）。
+_BIO_MCP_TOOLS = frozenset(
+    {
+        "plant_gene_lookup",
+        "plant_species_list",
+        "ensembl_gene_lookup",
+        "uniprot_annotate",
+        "protein_domains",
+        "pdb_structure_summary",
+        "alphafold_structure",
+        "pubmed_search",
+        "pride_project",
+        "pride_search",
+        "geo_dataset_search",
+        "sra_search",
+        "bioproject_search",
+        "taxonomy_lookup",
+        "hgnc_gene_symbol",
+        "hgnc_search",
+    }
+)
 _SERVER_SCOPED_PROFILES: dict[str, dict[str, ToolCapabilityProfile]] = {
     "data-aggregator": {name: _DATA_AGGREGATOR_DISCOVERY for name in sorted(_DATA_AGGREGATOR_TOOLS)},
+    "bio-mcp": {name: _BIO_MCP_STRUCTURED_LOOKUP for name in sorted(_BIO_MCP_TOOLS)},
 }
 
 
