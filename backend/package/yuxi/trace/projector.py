@@ -36,6 +36,17 @@ _CATEGORY_COUNT_FIELDS = {
     "SUBAGENT": "subagent_calls",
 }
 
+# knowledge.search.* 后缀 → 阶段条状态（前端 TraceStageBar 同名同义镜像）
+_KNOWLEDGE_SEARCH_STATUS = {
+    "completed": "COMPLETED",
+    "failed": "FAILED",
+    "interrupted": "INTERRUPTED",
+    "skipped": "SKIPPED",
+}
+
+# 阶段条产物清单在 summary 里的上限（防止投影无界膨胀；与前端常量同值）
+_ARTIFACT_FACET_MAX_ITEMS = 20
+
 
 def _parse_occurred_at(event: dict[str, Any]) -> datetime | None:
     raw = event.get("occurred_at")
@@ -79,7 +90,9 @@ def new_summary_state(header: dict[str, Any]) -> dict[str, Any]:
         "error_count": 0,
         "trace_event_count": 0,
         "last_sequence": 0,
-        "attributes": {},
+        # attributes 是投影 facet 桶：已知形状先落位（前端/桌面消费 artifact_count），
+        # 其余 facet（plan/knowledge/guard/render）由对应事件写入。
+        "attributes": {"artifact_count": 0, "artifacts": []},
     }
     return state
 
@@ -109,8 +122,6 @@ def apply_event_to_summary(state: dict[str, Any], event: dict[str, Any]) -> dict
     if category == "SKILL" and event_type == "skill.runtime.resolved":
         state["skill_count"] = len(attributes.get("prompt_skills") or []) or int(attributes.get("skill_count") or 0)
 
-    if event_type.endswith(".retrying"):
-        state["retry_count"] = int(state.get("retry_count") or 0) + 1
     if event_type.endswith(".failed"):
         state["error_count"] = int(state.get("error_count") or 0) + 1
 
@@ -134,6 +145,56 @@ def apply_event_to_summary(state: dict[str, Any], event: dict[str, Any]) -> dict
         scope_version = attributes.get("knowledge_scope_version")
         if scope_version and "knowledge_scope_version" not in (state.get("attributes") or {}):
             state.setdefault("attributes", {})["knowledge_scope_version"] = scope_version
+
+    # 阶段条 facets：快照起步路径（历史轮档案 / 整页刷新 / 桌面端）不重放事件，
+    # 只拿 summary，这些投影必须随 summary.attributes 一起持久化——否则前端
+    # 阶段条在刷新或翻档案后退化为兜底推导。键名与前端 traceProjection 状态同义。
+    facets = state.setdefault("attributes", {})
+    if event_type == "run.plan.resolved":
+        facets["plan"] = {
+            "source_policy": attributes.get("source_policy"),
+            "evidence_level": attributes.get("evidence_level"),
+            "retrieval_required": attributes.get("retrieval_required"),
+            "requires_mcp": attributes.get("requires_mcp"),
+            "satisfiable": attributes.get("satisfiable"),
+            "required_server": attributes.get("required_server"),
+            "required_server_missing": attributes.get("required_server_missing"),
+            "error_code": attributes.get("error_code"),
+        }
+    elif event_type.startswith("knowledge.search."):
+        facets["knowledge"] = {
+            "status": _KNOWLEDGE_SEARCH_STATUS.get(event_type.rsplit(".", 1)[-1], "RUNNING"),
+            "intent": attributes.get("intent"),
+            "contract_status": attributes.get("contract_status"),
+            "completeness_status": attributes.get("completeness_status"),
+            "evidence_count": attributes.get("evidence_count"),
+            "claim_count": attributes.get("claim_count"),
+            "verbatim_hit_count": attributes.get("verbatim_hit_count"),
+        }
+    elif event_type == "answer.source_guard.completed":
+        facets["guard"] = {
+            "guard_status": attributes.get("guard_status"),
+            "evidence_level": attributes.get("evidence_level"),
+        }
+    elif event_type == "answer.render.applied":
+        facets["render"] = {
+            "boundary": attributes.get("boundary"),
+            "applied": attributes.get("applied"),
+            "fallback_reason": attributes.get("fallback_reason"),
+        }
+    elif event_type == "run.artifact.materialized":
+        facets["artifact_count"] = int(facets.get("artifact_count") or 0) + 1
+        artifacts = facets.get("artifacts")
+        if not isinstance(artifacts, list):
+            artifacts = facets["artifacts"] = []
+        if len(artifacts) < _ARTIFACT_FACET_MAX_ITEMS:
+            artifacts.append(
+                {
+                    "name": attributes.get("name"),
+                    "origin_source": attributes.get("origin_source"),
+                    "size_bytes": attributes.get("size_bytes"),
+                }
+            )
 
     if category == "RUN":
         if event_type == "run.execution.started":
@@ -214,9 +275,6 @@ def apply_event_to_spans(spans: dict[str, dict[str, Any]], event: dict[str, Any]
         if suffix in {"failed", "interrupted"}:
             # failed 携带异常类型；interrupted（如 worker_lost 收敛）同样保留原因
             span["error_type"] = attributes.get("error_type") or attributes.get("error.type") or span.get("error_type")
-    elif suffix == "retrying":
-        span["retry_count"] = int(span.get("retry_count") or 0) + 1
-        span["status"] = SPAN_STATUS_RUNNING
 
     merged = dict(span.get("attributes_summary") or {})
     merged.update(attributes)

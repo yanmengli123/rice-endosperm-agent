@@ -61,6 +61,7 @@ async def test_terminal_trace_and_run_status_share_transaction(monkeypatch: pyte
 
     class Recorder:
         run_id = "run-1"
+        run_terminal_message_id = None
 
         def close_running_spans(self, **kwargs):
             order.append(("close", kwargs["suffix"], kwargs["error_type"]))
@@ -106,6 +107,7 @@ async def test_terminal_trace_failure_falls_back_to_business_status(monkeypatch:
 
     class Recorder:
         run_id = "run-1"
+        run_terminal_message_id = None
 
         def close_running_spans(self, **kwargs):
             del kwargs

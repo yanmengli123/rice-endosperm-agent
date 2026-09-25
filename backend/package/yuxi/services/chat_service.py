@@ -2070,6 +2070,13 @@ async def save_messages_from_langgraph_state(
         run_repo = AgentRunRepository(conv_repo.db)
         await run_repo.set_output_message(run_id, last_ai_message.id)
         await conv_repo.db.commit()
+        # 终态轨迹回链答案消息：run.execution.completed 的 message_id 在 worker
+        # 收口时从这里读取（API 直连流式路径无 recorder，自然 no-op）。
+        from yuxi.trace.recorder import current_recorder
+
+        recorder = current_recorder()
+        if recorder is not None:
+            recorder.run_terminal_message_id = str(last_ai_message.id)
 
 
 def _extract_interrupt_info(state) -> Any | None:
@@ -2405,6 +2412,32 @@ async def stream_agent_chat(
     input_context["_run_source_manifest"] = source_manifest.model_dump(mode="json")
     meta["turn_plan_id"] = turn_plan.plan_id
     meta["source_policy"] = turn_plan.source.policy.value
+    # 权威计划对用户可见（P0）：阶段条的「计划」位由此驱动，用户在检索/生成
+    # 发生前就能看到来源策略、证据义务与点名服务器——MCP 点名失败等
+    # 拒答场景在发生前即可解释，而不是事后从失败文案反推。
+    from yuxi.trace import emit_trace
+
+    emit_trace(
+        category="RUN",
+        operation="plan",
+        event_type="run.plan.resolved",
+        title="本轮执行计划",
+        summary=(
+            f"来源策略 {turn_plan.source.policy.value}｜证据等级 {turn_plan.evidence.level.value}"
+            + (f"｜点名服务器 {turn_plan.required_server}" if turn_plan.required_server else "")
+            + ("" if turn_plan.satisfiable else f"｜计划不可满足：{turn_plan.error_code or 'UNKNOWN'}")
+        ),
+        attributes={
+            "source_policy": turn_plan.source.policy.value,
+            "evidence_level": turn_plan.evidence.level.value,
+            "retrieval_required": turn_plan.requires_document_retrieval,
+            "requires_mcp": turn_plan.requires_mcp,
+            "satisfiable": turn_plan.satisfiable,
+            "required_server": turn_plan.required_server,
+            "required_server_missing": turn_plan.required_server_missing,
+            "error_code": turn_plan.error_code,
+        },
+    )
     context = _build_agent_context(agent, input_context)
     _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
     _apply_skill_plan_dispatch(context, turn_plan, source_manifest)
@@ -2432,6 +2465,9 @@ async def stream_agent_chat(
 
     try:
         credential_context_token = await _activate_user_credential(db=db, uid=uid, meta=meta)
+        from yuxi.trace import set_model_credential_source
+
+        set_model_credential_source("user_byok" if meta.get("user_credential") else "platform")
         conv_repo = ConversationRepository(db)
         await _ensure_thread_bound_agent(
             conv_repo=conv_repo,
@@ -3504,6 +3540,9 @@ async def stream_agent_resume(
 
     try:
         credential_context_token = await _activate_user_credential(db=db, uid=uid, meta=meta)
+        from yuxi.trace import set_model_credential_source
+
+        set_model_credential_source("user_byok" if meta.get("user_credential") else "platform")
         async for mode, payload in stream_source:
             if mode == "values":
                 agent_state = extract_agent_state(payload if isinstance(payload, dict) else {})

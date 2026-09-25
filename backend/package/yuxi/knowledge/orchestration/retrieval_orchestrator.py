@@ -261,7 +261,9 @@ def _emit_knowledge_trace(
         duration_ms=duration_ms,
         attributes=attributes,
         resource_refs=[{"type": "knowledge_retrieval", "id": retrieval_id}],
-        visibility="ADMIN" if skipped else "USER",
+        # skipped 对用户可见（2026-09 可见性重分）：「为什么这轮没检索」是用户可
+        # 理解、可行动的降级语义，不是需要隐藏的技术细节；载体仍只留摘要计数。
+        visibility="USER",
     )
 
 

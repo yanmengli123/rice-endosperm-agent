@@ -267,6 +267,20 @@ export function useAgentStreamHandler({
       case 'context_compression':
         if (chunk.compression) {
           threadState.contextCompressing = chunk.compression.status === 'started'
+          // 持久标记（运行时内存态）：压缩完成后在展示流插入一条分隔线，
+          // 用户回看时能感知"此处之前的原始消息已被摘要替换"。
+          if (
+            chunk.compression.status === 'completed' &&
+            Array.isArray(threadState.compressionMarkers) &&
+            !threadState.compressionMarkers.some(
+              (marker) => marker.requestId === threadState.pendingRequestId
+            )
+          ) {
+            threadState.compressionMarkers.push({
+              requestId: threadState.pendingRequestId || null,
+              at: Date.now()
+            })
+          }
         }
         return false
 

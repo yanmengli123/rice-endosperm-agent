@@ -194,7 +194,8 @@ async def stream_run_trace_events(*, run_id: str, after_sequence: int = 0):
         heartbeat_elapsed += TRACE_STREAM_POLL_SECONDS
         if heartbeat_elapsed >= TRACE_STREAM_HEARTBEAT_SECONDS:
             heartbeat_elapsed = 0.0
-            yield ": heartbeat\n\n"
+            # 心跳携带游标 id：客户端可据 lastEventId 停滞判定假死连接。
+            yield f"id: {cursor}\n: heartbeat\n\n"
 
 
 async def rebuild_run_trace_projection(*, run_id: str, db: AsyncSession) -> int:

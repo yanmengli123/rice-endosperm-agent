@@ -7,6 +7,6 @@
 - :mod:`protocol` / :mod:`redaction` / :mod:`projector` —— 协议、脱敏与纯投影。
 """
 
-from yuxi.trace.recorder import TraceRecorder, digest_args, emit_trace
+from yuxi.trace.recorder import TraceRecorder, digest_args, emit_trace, set_model_credential_source
 
-__all__ = ["TraceRecorder", "emit_trace", "digest_args"]
+__all__ = ["TraceRecorder", "emit_trace", "digest_args", "set_model_credential_source"]

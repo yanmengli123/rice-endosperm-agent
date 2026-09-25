@@ -265,7 +265,14 @@ def _format_sse(data: dict, event: str, event_id: str | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _format_heartbeat() -> str:
+def _format_heartbeat(last_seq: str | None = None) -> str:
+    """心跳帧携带当前流位置 id：EventSource 可据此区分「安静」与「假死」。
+
+    id 字段即使没有 data 也会更新客户端 lastEventId；连接假死时 id 长期不变，
+    客户端侧的 staleness 看门狗即可判定并主动重连。
+    """
+    if last_seq:
+        return f"id: {last_seq}\n: heartbeat\n\n"
     return ": heartbeat\n\n"
 
 
@@ -1685,7 +1692,7 @@ async def stream_agent_run_events(
             elapsed_seconds = (now - started_at).total_seconds()
             heartbeat_elapsed = (now - last_heartbeat_ts).total_seconds()
             if heartbeat_elapsed >= SSE_HEARTBEAT_SECONDS:
-                yield _format_heartbeat()
+                yield _format_heartbeat(last_seq if last_seq not in {"", "0-0"} else None)
                 last_heartbeat_ts = now
 
             if elapsed_seconds >= SSE_MAX_CONNECTION_MINUTES * 60:

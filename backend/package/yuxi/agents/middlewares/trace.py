@@ -70,6 +70,41 @@ def _tool_result_is_error(result: Any) -> bool:
     return False
 
 
+def _tool_result_content(result: Any) -> Any:
+    """提取工具结果的文本面（ToolMessage.content 或 content_and_artifact 元组首元）。"""
+    content = getattr(result, "content", None)
+    if content is None and isinstance(result, tuple) and len(result) == 2:
+        content = result[0]
+    return content
+
+
+def _tool_result_digest(result: Any) -> str | None:
+    try:
+        return digest_text(_tool_result_content(result))
+    except Exception:  # noqa: BLE001 —— 摘要失败不影响 span 收口
+        return None
+
+
+def _mcp_result_audit_id(result: Any) -> int | None:
+    """从 MCP envelope artifact 里读回本次调用的审计 id（host 层写入 provenance）。"""
+    artifact = getattr(result, "artifact", None)
+    if artifact is None and isinstance(result, tuple) and len(result) == 2:
+        artifact = result[1]
+    if not isinstance(artifact, dict):
+        return None
+    payload = artifact.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    provenance = payload.get("provenance")
+    if not isinstance(provenance, dict):
+        return None
+    audit_id = provenance.get("mcp_call_audit_id")
+    try:
+        return int(audit_id) if audit_id is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class TraceMiddleware(AgentMiddleware):
     """把模型调用与工具执行映射为 yuxi.run-trace.v1 的 span 事件。"""
 
@@ -87,6 +122,8 @@ class TraceMiddleware(AgentMiddleware):
         attributes: dict[str, Any] = {}
         if model_name:
             attributes["model_spec"] = model_name
+        if recorder.model_credential_source:
+            attributes["credential_source"] = recorder.model_credential_source
         recorder.emit(
             category="MODEL",
             operation="generation",
@@ -179,16 +216,32 @@ class TraceMiddleware(AgentMiddleware):
             raise
         duration_ms = int((time.monotonic() - started) * 1000)
         if _tool_result_is_error(result):
+            failure_attributes: dict[str, Any] = {}
+            if category == "MCP":
+                audit_id = _mcp_result_audit_id(result)
+                if audit_id is not None:
+                    failure_attributes["mcp_audit_id"] = audit_id
             recorder.finish_span(
                 span_id,
                 suffix="failed",
                 error_type="tool_result_error",
                 duration_ms=duration_ms,
+                attributes=failure_attributes or None,
             )
         else:
+            completed_attributes: dict[str, Any] = {}
+            if category == "MCP":
+                audit_id = _mcp_result_audit_id(result)
+                if audit_id is not None:
+                    completed_attributes["mcp_audit_id"] = audit_id
+            elif category == "TOOL":
+                result_digest = _tool_result_digest(result)
+                if result_digest:
+                    completed_attributes["result_digest"] = result_digest
             recorder.finish_span(
                 span_id,
                 suffix="completed",
                 duration_ms=duration_ms,
+                attributes=completed_attributes or None,
             )
         return result

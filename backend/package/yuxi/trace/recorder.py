@@ -69,6 +69,16 @@ def emit_trace(
         logger.warning(f"trace emit failed for run {recorder.run_id}: {error}")
 
 
+def set_model_credential_source(source: str | None) -> None:
+    """记录本次 run 的模型凭据来源（platform / user_byok），供模型事件携带。
+
+    chat_service 在 BYOK 激活后调用一次；无活跃 recorder 时 no-op。
+    """
+    recorder = _current_recorder.get()
+    if recorder is not None:
+        recorder.model_credential_source = source
+
+
 class TraceRecorder:
     def __init__(
         self,
@@ -108,6 +118,12 @@ class TraceRecorder:
         self._emitted_once: set[str] = set()
         self._token: contextvars.Token | None = None
         self._flush_lock = asyncio.Lock()
+        # 本次 run 的模型凭据来源（platform / user_byok）；由 chat_service 在
+        # BYOK 激活后经 set_model_credential_source 写入，模型事件读取携带。
+        self.model_credential_source: str | None = None
+        # 本次 run 最终答案消息 id；save_messages_from_langgraph_state 落库时写入，
+        # worker 终态收口带进 run.execution.completed——轨迹与消息由此互链。
+        self.run_terminal_message_id: str | None = None
 
     # ------------------------------------------------------------------ 激活
 
@@ -292,7 +308,7 @@ class TraceRecorder:
                 suffix=suffix,
                 error_type=error_type,
                 title=span.get("title"),
-                attributes={"error.type": error_type},
+                attributes={"error_type": error_type},
             )
             closed += 1
         return closed

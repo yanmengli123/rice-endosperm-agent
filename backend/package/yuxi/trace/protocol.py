@@ -17,9 +17,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from yuxi.utils.logging_config import logger
+
 TRACE_SCHEMA_VERSION = "yuxi.run-trace.v1"
 
 # v1 类别集合：新增类别先在此登记，避免事件名逃逸出受控命名空间
+# （VALIDATION 类别随 2026-09 漂移清理移除：其下事件自登记起就无发射点。）
 TRACE_CATEGORIES = frozenset(
     {
         "RUN",
@@ -29,7 +32,6 @@ TRACE_CATEGORIES = frozenset(
         "SKILL",
         "KNOWLEDGE",
         "SUBAGENT",
-        "VALIDATION",
         "SYSTEM",
         "ANSWER",
     }
@@ -88,6 +90,24 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     "run.execution.failed": _COMMON_ATTRIBUTES | {"reconciled_at"},
     "run.execution.cancelled": _COMMON_ATTRIBUTES,
     "run.execution.interrupted": _COMMON_ATTRIBUTES,
+    # 本轮执行计划（权威）：plan_turn 解析完成即发射，前端据此渲染阶段条——
+    # 用户在检索/生成发生前就能看到来源策略、证据义务与点名服务器。
+    "run.plan.resolved": frozenset(
+        {
+            "source_policy",
+            "evidence_level",
+            "retrieval_required",
+            "requires_mcp",
+            "satisfiable",
+            "required_server",
+            "required_server_missing",
+            "error_code",
+        }
+    ),
+    # 产物物化（确定性通道 + 模型交付通道统一留痕）：过程中可见，不必等终态清单。
+    "run.artifact.materialized": frozenset(
+        {"origin_source", "mcp_server", "mcp_tool", "size_bytes", "media_type", "name", "sha256"}
+    ),
     "model.generation.started": frozenset({"model_spec", "credential_source"}),
     "model.generation.first_visible_token": frozenset({"model_spec"}),
     # 仅用于读取/兼容已写入的 v1 事件；新埋点使用 first_visible_token。
@@ -96,17 +116,14 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
         {"model_spec", "credential_source", "input_tokens", "output_tokens", "total_tokens"}
     ),
     "model.generation.failed": _COMMON_ATTRIBUTES,
-    "model.generation.retrying": _COMMON_ATTRIBUTES,
     "model.generation.interrupted": _COMMON_ATTRIBUTES,
     "tool.execution.started": frozenset({"tool", "args_digest"}),
     "tool.execution.completed": frozenset({"tool", "result_digest"}),
     "tool.execution.failed": _COMMON_ATTRIBUTES,
-    "tool.execution.retrying": _COMMON_ATTRIBUTES,
     "tool.execution.interrupted": _COMMON_ATTRIBUTES,
     "mcp.execution.started": frozenset({"tool", "mcp_server", "mcp_tool", "args_digest"}),
     "mcp.execution.completed": frozenset({"tool", "mcp_server", "mcp_tool", "mcp_audit_id"}),
     "mcp.execution.failed": _COMMON_ATTRIBUTES | {"mcp_audit_id"},
-    "mcp.execution.retrying": _COMMON_ATTRIBUTES,
     "mcp.execution.interrupted": _COMMON_ATTRIBUTES,
     "mcp.audit.recorded": frozenset({"mcp_server", "mcp_tool", "mcp_audit_id", "audit_status"}),
     # 每日 live canary（cron:mcp_live_canary）：探针级结果 + 汇总指标
@@ -133,10 +150,9 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
         }
     ),
     "answer.render.applied": frozenset({"renderer_version", "boundary", "eligible", "applied", "fallback_reason"}),
-    "subagent.execution.started": frozenset({"tool", "args_digest", "agent_slug", "child_run_id"}),
-    "subagent.execution.completed": frozenset({"agent_slug", "child_run_id"}),
-    "subagent.execution.failed": _COMMON_ATTRIBUTES | {"agent_slug", "child_run_id"},
-    "subagent.execution.retrying": _COMMON_ATTRIBUTES,
+    "subagent.execution.started": frozenset({"tool", "args_digest"}),
+    "subagent.execution.completed": frozenset(),
+    "subagent.execution.failed": _COMMON_ATTRIBUTES,
     "subagent.execution.interrupted": _COMMON_ATTRIBUTES,
     "skill.runtime.resolved": frozenset({"prompt_skills", "skill_count"}),
     "skill.runtime.activated": frozenset({"skill_slug"}),
@@ -145,6 +161,7 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
         {
             "claim_count",
             "evidence_count",
+            "verbatim_hit_count",
             "wiki_navigation_hit_count",
             "intent",
             "contract_status",
@@ -157,6 +174,7 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     | {
         "claim_count",
         "evidence_count",
+        "verbatim_hit_count",
         "wiki_navigation_hit_count",
         "intent",
         "contract_status",
@@ -179,11 +197,110 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     "knowledge.document_scope.resolved": frozenset({"channel", "candidate_count", "file_count"}),
     "knowledge.document_scope.ambiguous": frozenset({"channel", "candidate_count", "file_count"}),
     "knowledge.document_scope.unresolved": frozenset({"channel", "candidate_count", "file_count"}),
-    "validation.quality.passed": frozenset({"validator", "result_digest"}),
-    "validation.quality.failed": _COMMON_ATTRIBUTES | {"validator", "result_digest"},
     "system.execution.started": frozenset(),
     "system.execution.completed": frozenset(),
     "system.execution.failed": _COMMON_ATTRIBUTES,
+}
+
+# 预留/兼容事件：登记在 schema 但当前无发射点。
+# - system.execution.*：系统级脚手架，留待后续接线；
+# - model.generation.first_token：仅用于读取历史账本，新埋点一律 first_visible_token。
+# 发射点落地时必须同步把事件移入 EVENT_EMITTER_INDEX，否则一致性测试失败。
+RESERVED_EVENT_TYPES = frozenset(
+    {
+        "system.execution.started",
+        "system.execution.completed",
+        "system.execution.failed",
+        "model.generation.first_token",
+    }
+)
+
+# 发射点索引（emitter↔schema 一致性测试的单一真源，2026-09 漂移清理引入）：
+# 事件 → ((相对 yuxi 包根的文件路径, 该文件必须包含的标记串), ...)。
+# 标记串通常是事件名字面量；动态构造事件名（f-string / record_run_terminal /
+# close_running_spans）的发射点用其函数名/前缀作标记。路径或标记失效时
+# test_trace_emitter_consistency 会失败——这是 figures 事故红线的协议版。
+EVENT_EMITTER_INDEX: dict[str, tuple[tuple[str, str], ...]] = {
+    "run.execution.started": (("services/run_worker.py", "start_span"),),
+    "run.execution.completed": (
+        ("services/run_worker.py", "record_run_terminal"),
+        ("services/trace_service.py", "record_run_lost"),
+    ),
+    "run.execution.failed": (
+        ("services/run_worker.py", "record_run_terminal"),
+        ("services/trace_service.py", "record_run_lost"),
+    ),
+    "run.execution.cancelled": (
+        ("services/run_worker.py", "record_run_terminal"),
+        ("services/trace_service.py", "record_run_lost"),
+    ),
+    "run.execution.interrupted": (
+        ("services/run_worker.py", "record_run_terminal"),
+        ("services/trace_service.py", "record_run_lost"),
+    ),
+    "run.plan.resolved": (("services/chat_service.py", "run.plan.resolved"),),
+    "run.artifact.materialized": (("agents/mcp/artifact_materializer.py", "run.artifact.materialized"),),
+    "model.generation.started": (("agents/middlewares/trace.py", "model.generation.started"),),
+    "model.generation.first_visible_token": (("services/run_worker.py", "model.generation.first_visible_token"),),
+    "model.generation.completed": (("agents/middlewares/trace.py", "finish_span"),),
+    "model.generation.failed": (("agents/middlewares/trace.py", "finish_span"),),
+    "model.generation.interrupted": (("trace/recorder.py", "close_running_spans"),),
+    "tool.execution.started": (("agents/middlewares/trace.py", "awrap_tool_call"),),
+    "tool.execution.completed": (
+        ("agents/middlewares/trace.py", "finish_span"),
+        ("trace/recorder.py", "close_running_spans"),
+    ),
+    "tool.execution.failed": (("agents/middlewares/trace.py", "finish_span"),),
+    "tool.execution.interrupted": (("trace/recorder.py", "close_running_spans"),),
+    "mcp.execution.started": (("agents/middlewares/trace.py", "awrap_tool_call"),),
+    "mcp.execution.completed": (
+        ("agents/middlewares/trace.py", "finish_span"),
+        ("trace/recorder.py", "close_running_spans"),
+    ),
+    "mcp.execution.failed": (("agents/middlewares/trace.py", "finish_span"),),
+    "mcp.execution.interrupted": (("trace/recorder.py", "close_running_spans"),),
+    "mcp.audit.recorded": (("agents/mcp/execution.py", "mcp.audit.recorded"),),
+    "mcp.canary.probe": (("services/mcp_canary_service.py", "mcp.canary.probe"),),
+    "mcp.canary.completed": (("services/mcp_canary_service.py", "mcp.canary.completed"),),
+    "answer.source_guard.completed": (("services/chat_service.py", "answer.source_guard.completed"),),
+    "answer.render.applied": (("services/chat_service.py", "answer.render.applied"),),
+    "subagent.execution.started": (("agents/middlewares/trace.py", "SUBAGENT_TOOL_NAME"),),
+    "subagent.execution.completed": (
+        ("agents/middlewares/trace.py", "finish_span"),
+        ("trace/recorder.py", "close_running_spans"),
+    ),
+    "subagent.execution.failed": (("agents/middlewares/trace.py", "finish_span"),),
+    "subagent.execution.interrupted": (("trace/recorder.py", "close_running_spans"),),
+    "skill.runtime.resolved": (("agents/middlewares/skills.py", "skill.runtime.resolved"),),
+    "skill.runtime.activated": (("agents/middlewares/skills.py", "skill.runtime.activated"),),
+    "knowledge.search.started": (("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.search.started"),),
+    "knowledge.search.completed": (("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.search."),),
+    "knowledge.search.failed": (("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.search."),),
+    "knowledge.search.skipped": (("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.search."),),
+    # interrupted 不由编排器发射：run 中断时由 recorder.close_running_spans
+    # 把仍 RUNNING 的检索 span 统一以 interrupted 闭合。
+    "knowledge.search.interrupted": (("trace/recorder.py", "close_running_spans"),),
+    "knowledge.figure_projection.attached": (
+        ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.figure_projection."),
+    ),
+    "knowledge.figure_projection.suppressed": (
+        ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.figure_projection."),
+    ),
+    "knowledge.graph_snapshot.attached": (
+        ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.graph_snapshot."),
+    ),
+    "knowledge.graph_snapshot.suppressed": (
+        ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.graph_snapshot."),
+    ),
+    "knowledge.document_scope.resolved": (
+        ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.document_scope."),
+    ),
+    "knowledge.document_scope.ambiguous": (
+        ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.document_scope."),
+    ),
+    "knowledge.document_scope.unresolved": (
+        ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.document_scope."),
+    ),
 }
 
 
@@ -291,6 +408,11 @@ def build_trace_event(
         raise ValueError("parent_span_id must be 16 lowercase hexadecimal characters")
 
     safe_attributes = sanitize_attributes(attributes)
+    dropped_keys = sorted(key for key in safe_attributes if key not in allowed_attributes)
+    if dropped_keys:
+        # 发射端与 schema 漂移的运行时哨兵（verbatim_hit_count 事故的协议版）：
+        # 白名单外属性会被静默剥离，这里留下可检索的告警，便于第一时间定位发射点。
+        logger.warning(f"trace attribute schema drift: {final_event_type} dropped keys={dropped_keys}")
     safe_attributes = {key: value for key, value in safe_attributes.items() if key in allowed_attributes}
 
     event: dict[str, Any] = {

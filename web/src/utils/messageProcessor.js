@@ -315,8 +315,30 @@ export class MessageProcessor {
   static mergeMessageChunk(chunks) {
     if (chunks.length === 0) return null
 
-    // 深拷贝第一个chunk作为结果
-    const result = JSON.parse(JSON.stringify(chunks[0]))
+    // 浅拷贝第一个 chunk 作为结果（性能：流式期间每条消息首 chunk 都走这里，
+    // JSON 深拷贝是大回复下的热点）。只复制下方会被就地修改的嵌套结构：
+    // additional_kwargs.reasoning_content 与 tool_calls[].function.arguments。
+    const first = chunks[0]
+    const result = {
+      ...first,
+      additional_kwargs:
+        first.additional_kwargs && typeof first.additional_kwargs === 'object'
+          ? { ...first.additional_kwargs }
+          : first.additional_kwargs,
+      tool_calls: Array.isArray(first.tool_calls)
+        ? first.tool_calls.map((toolCall) =>
+            toolCall && typeof toolCall === 'object'
+              ? {
+                  ...toolCall,
+                  function:
+                    toolCall.function && typeof toolCall.function === 'object'
+                      ? { ...toolCall.function }
+                      : toolCall.function
+                }
+              : toolCall
+          )
+        : first.tool_calls
+    }
 
     // 处理用户消息的内容格式 - 确保显示纯文本
     if (result.type === 'human' || result.role === 'user') {

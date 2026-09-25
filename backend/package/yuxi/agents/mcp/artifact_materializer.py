@@ -161,6 +161,30 @@ async def register_run_artifact(*, context, entry: MaterializedArtifact) -> bool
         return False
 
 
+def _emit_artifact_trace(entry: MaterializedArtifact) -> None:
+    """产物物化留痕（P0）：过程中即可见，不必等终态清单。无 recorder 时 no-op。"""
+    from yuxi.trace import emit_trace
+
+    origin = entry.origin or {}
+    emit_trace(
+        category="RUN",
+        operation="artifact",
+        event_type="run.artifact.materialized",
+        title="产物已物化",
+        summary=f"{entry.name}（{entry.size_bytes} 字节，来源 {origin.get('source') or 'unknown'}）",
+        attributes={
+            "origin_source": origin.get("source"),
+            "mcp_server": origin.get("mcp_server"),
+            "mcp_tool": origin.get("mcp_tool"),
+            "size_bytes": entry.size_bytes,
+            "media_type": entry.media_type,
+            "name": entry.name,
+            "sha256": entry.sha256,
+        },
+        resource_refs=[{"type": "artifact", "id": entry.sha256}],
+    )
+
+
 async def note_delivered_artifact(entry: MaterializedArtifact) -> None:
     """登记一个已落盘产物：进 state 累积器 + 写权威表；失败只记日志。"""
     accumulator = _ARTIFACT_ACCUMULATOR.get()
@@ -171,7 +195,9 @@ async def note_delivered_artifact(entry: MaterializedArtifact) -> None:
 
     context = get_mcp_execution_context()
     if context is not None:
-        await register_run_artifact(context=context, entry=entry)
+        registered = await register_run_artifact(context=context, entry=entry)
+        if registered:
+            _emit_artifact_trace(entry)
 
 
 async def materialize_mcp_data_result(
@@ -252,7 +278,9 @@ async def materialize_mcp_data_result(
     )
     accumulator.materialized_count += 1
     accumulator.entries.append(entry)
-    await register_run_artifact(context=context, entry=entry)
+    registered = await register_run_artifact(context=context, entry=entry)
+    if registered:
+        _emit_artifact_trace(entry)
     logger.info(f"Materialized MCP data artifact: {entry.virtual_path} ({entry.size_bytes} bytes)")
     return entry
 

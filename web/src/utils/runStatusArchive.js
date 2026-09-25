@@ -19,6 +19,9 @@ export const createArchiveEntry = (runId) => ({
   trace: null,
   traceExpired: false,
   traceError: false,
+  // 服务端 run_context（冻结知识范围 + 终态执行计划）：「知识范围」板块
+  // pinned 历史轮时由此渲染，与实时线程槽位口径一致。
+  runContext: null,
   // 证据字段名与线程槽位对齐，面板分支逻辑可对称复用
   evidence: [],
   evidenceSummary: null,

@@ -37,6 +37,20 @@ const normalizeHtmlTagQuotes = (content) => {
 export const normalizeLegacyMinioPublicUrls = (content) =>
   String(content || '').replace(LEGACY_MINIO_PUBLIC_URL_RE, '/minio/public/')
 
+// 已验证引用芯片（citation_channel 发布形态）：〔证据E3｜…〕/〔引文定位｜…〕。
+// 锚化只包一层 <a>，不改写芯片文本；DOMPurify 默认保留 data-* 属性。
+const EVIDENCE_CHIP_RE = /〔[^〕]*?(证据\s*(E\d{1,3})|引文定位)[^〕]*?〕/g
+
+export const linkifyEvidenceChips = (content) => {
+  const source = String(content || '')
+  if (!source.includes('〔')) return source
+  return source.replace(EVIDENCE_CHIP_RE, (chip) => {
+    const refMatch = chip.match(/E\d{1,3}/)
+    const ref = refMatch ? refMatch[0] : ''
+    return `<a class="evidence-chip-anchor"${ref ? ` data-evidence="${ref}"` : ''}>${chip}</a>`
+  })
+}
+
 const renderFrontmatterValue = (value) => {
   if (Array.isArray(value)) {
     return value.map((item) => `<span class="fm-tag">${escapeHtml(item)}</span>`).join('')

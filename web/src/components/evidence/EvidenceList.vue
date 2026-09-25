@@ -1,5 +1,8 @@
 <template>
   <div class="evidence-list">
+    <span class="evidence-live-region" aria-live="polite">{{
+      highlightId ? `已定位证据 ${highlightId}` : ''
+    }}</span>
     <div v-if="summaryLine" class="evidence-summary">{{ summaryLine }}</div>
     <div v-if="issueLine" class="evidence-warning">{{ issueLine }}</div>
     <div v-if="evidence.length === 0" class="evidence-empty">{{ emptyLine }}</div>
@@ -7,8 +10,12 @@
       <div
         v-for="item in evidence"
         :key="item.evidence_id"
+        :id="`evidence-anchor-${item.evidence_id}`"
         class="evidence-item"
-        :class="`evidence-item--${statusClass(item)}`"
+        :class="[
+          `evidence-item--${statusClass(item)}`,
+          { 'is-flash': item.evidence_id === highlightId }
+        ]"
       >
         <div class="evidence-item-head">
           <span class="evidence-page">第 {{ pageNumber(item) }} 页</span>
@@ -57,7 +64,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { ExternalLink } from '@lucide/vue'
 
 defineEmits(['open-source'])
@@ -70,8 +77,22 @@ const props = defineProps({
   claimBindingStatus: { type: String, default: 'NOT_AVAILABLE' },
   projectionStatus: { type: String, default: null },
   retrievalCandidates: { type: Array, default: () => [] },
-  locatorStatusReason: { type: String, default: null }
+  locatorStatusReason: { type: String, default: null },
+  // 正文引用芯片互锚：非空时对应行滚动到可视区并闪烁高亮
+  highlightId: { type: String, default: '' }
 })
+
+watch(
+  () => props.highlightId,
+  (id) => {
+    if (!id) return
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`evidence-anchor-${id}`)
+        ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    })
+  }
+)
 
 const summaryLine = computed(() => {
   const s = props.summary
@@ -152,7 +173,16 @@ const metaLine = (item) => {
 .evidence-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+}
+
+.evidence-live-region {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .evidence-summary {
@@ -192,6 +222,20 @@ const metaLine = (item) => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+
+  &.is-flash {
+    animation: evidence-flash 1.6s ease-out 2;
+  }
+}
+
+@keyframes evidence-flash {
+  0%,
+  100% {
+    background-color: transparent;
+  }
+  30% {
+    background-color: var(--primary-color-soft, rgba(76, 110, 245, 0.16));
+  }
 }
 
 .evidence-item--degraded {

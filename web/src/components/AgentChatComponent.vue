@@ -78,14 +78,32 @@
         <!-- Main Chat Area -->
         <div class="chat-main" ref="chatMainRef">
           <div class="chat-box">
+            <button
+              v-if="hiddenConversationCount > 0"
+              type="button"
+              class="chat-show-earlier"
+              @click="showEarlierConversations"
+            >
+              显示更早的 {{ hiddenConversationCount }} 轮对话
+            </button>
             <template v-for="row in conversationRows" :key="row.key">
               <div v-if="row.type === 'conversation'" class="conv-box">
                 <template
                   v-for="(displayItem, itemIndex) in row.displayItems"
                   :key="displayItem.key"
                 >
+                  <div
+                    v-if="displayItem.type === 'compression-marker'"
+                    class="conv-compression-divider"
+                  >
+                    <span class="conv-compression-divider__line"></span>
+                    <span class="conv-compression-divider__text">
+                      此处之前的对话历史已压缩为摘要（原始消息不再逐条保留）
+                    </span>
+                    <span class="conv-compression-divider__line"></span>
+                  </div>
                   <AgentMessageComponent
-                    v-if="displayItem.type === 'message'"
+                    v-else-if="displayItem.type === 'message'"
                     :message="displayItem.message"
                     :is-processing="isDisplayMessageProcessing(row.conv, displayItem)"
                     :show-refs="showMsgRefs(displayItem.message, row.conv)"
@@ -96,6 +114,7 @@
                     :evidence-id-set="displayedEvidenceIdSet"
                     @openStatus="handleOpenMessageStatus"
                     @openFigureSource="openFigureSource"
+                    @locate-evidence="handleLocateEvidence"
                     @retry="retryMessage(displayItem.message)"
                   >
                   </AgentMessageComponent>
@@ -293,6 +312,7 @@
                   id="state-section-trace"
                   class="state-section-content"
                 >
+                  <TraceStageBar v-if="traceStageFacetsAvailable" :trace="displayedTrace" />
                   <TraceTimelinePanel :trace="displayedTrace" />
                 </div>
               </section>
@@ -370,8 +390,81 @@
                     :projection-status="displayedEvidenceProjectionStatus"
                     :retrieval-candidates="displayedRetrievalCandidates"
                     :locator-status-reason="displayedLocatorStatusReason"
+                    :highlight-id="evidenceHighlightId"
                     @open-source="openEvidenceSource"
                   />
+                </div>
+              </section>
+              <section
+                v-if="currentKnowledgeScope"
+                class="state-section"
+                :class="{ 'is-collapsed': !isStateSectionExpanded('scope') }"
+                aria-label="本轮知识范围"
+              >
+                <button
+                  type="button"
+                  class="state-section-header"
+                  :aria-expanded="isStateSectionExpanded('scope')"
+                  aria-controls="state-section-scope"
+                  @click="toggleStateSection('scope')"
+                >
+                  <span class="state-section-label">
+                    <span class="state-section-title">知识范围</span>
+                    <ChevronDown
+                      :size="15"
+                      class="state-section-chevron"
+                      :class="{ 'is-collapsed': !isStateSectionExpanded('scope') }"
+                    />
+                  </span>
+                  <span class="state-section-meta">
+                    {{ knowledgeScopeHeader }}
+                  </span>
+                </button>
+                <div
+                  v-show="isStateSectionExpanded('scope')"
+                  id="state-section-scope"
+                  class="state-section-content"
+                >
+                  <div class="scope-panel">
+                    <div class="scope-panel__meta">
+                      <span v-if="knowledgeScopeModeLabel">{{ knowledgeScopeModeLabel }}</span>
+                      <span v-if="currentKnowledgeScope.knowledge_strategy">
+                        策略 {{ currentKnowledgeScope.knowledge_strategy }}
+                      </span>
+                      <span v-if="currentKnowledgeScope.retrieval_mode">
+                        检索 {{ currentKnowledgeScope.retrieval_mode }}
+                      </span>
+                      <span>{{ currentKnowledgeScope.allow_web ? '含网络' : '仅知识库' }}</span>
+                    </div>
+                    <div class="state-list">
+                      <div
+                        v-for="member in currentKnowledgeScope.members || []"
+                        :key="member.kb_id"
+                        class="state-list-item"
+                        :title="member.kb_name"
+                      >
+                        <FileTypeIcon
+                          :name="member.kb_name || ''"
+                          :size="18"
+                          class="state-list-item-icon"
+                        />
+                        <div class="state-list-item-body">
+                          <div class="state-list-item-title">
+                            {{ member.kb_name || member.kb_id }}
+                          </div>
+                          <div class="state-list-item-meta">
+                            {{ knowledgeMemberChannels(member) }}
+                          </div>
+                        </div>
+                      </div>
+                      <div
+                        v-if="!(currentKnowledgeScope.members || []).length"
+                        class="scope-panel__empty"
+                      >
+                        本轮知识范围为空（未挂载知识库）
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </section>
               <section
@@ -447,7 +540,7 @@
               </section>
 
               <section
-                v-if="currentTodos.length"
+                v-if="displayedSystemPlan || currentTodos.length"
                 class="state-section"
                 :class="{ 'is-collapsed': !isStateSectionExpanded('todos') }"
               >
@@ -459,7 +552,7 @@
                   @click="toggleStateSection('todos')"
                 >
                   <span class="state-section-label">
-                    <span class="state-section-title">待办</span>
+                    <span class="state-section-title">任务清单</span>
                     <ChevronDown
                       :size="15"
                       class="state-section-chevron"
@@ -475,24 +568,93 @@
                   id="state-section-todos"
                   class="state-section-content"
                 >
-                  <div class="todo-panel-list">
-                    <div
-                      v-for="(todo, index) in currentTodos"
-                      :key="`${todo.fullContent}-${index}`"
-                      class="todo-item"
-                      :class="{ completed: todo.status === 'completed' }"
-                    >
-                      <div class="todo-item-icon" :class="todo.status || 'unknown'">
-                        <CheckCircleOutlined v-if="todo.status === 'completed'" />
-                        <SyncOutlined v-else-if="todo.status === 'in_progress'" spin />
-                        <ClockCircleOutlined v-else-if="todo.status === 'pending'" />
-                        <CloseCircleOutlined v-else-if="todo.status === 'cancelled'" />
-                        <QuestionCircleOutlined v-else />
+                  <!-- 系统计划（权威）：turn plan 的确定性投影，非模型自报 -->
+                  <div v-if="displayedSystemPlan" class="plan-panel">
+                    <div class="plan-panel__head">
+                      <span class="plan-panel__title">系统计划</span>
+                      <span class="plan-panel__badge is-authority">权威</span>
+                      <span
+                        v-if="!displayedSystemPlan.satisfiable"
+                        class="plan-panel__badge is-failed"
+                        >不可满足</span
+                      >
+                    </div>
+                    <div class="plan-panel__rows">
+                      <div v-if="displayedSystemPlan.source_policy" class="plan-panel__row">
+                        <span class="plan-panel__key">来源策略</span>
+                        <span class="plan-panel__value">{{
+                          displayedSystemPlan.source_policy
+                        }}</span>
                       </div>
-                      <div class="todo-item-body">
-                        <span class="todo-item-text" :title="todo.fullContent">
-                          {{ todo.displayContent }}
-                        </span>
+                      <div v-if="displayedSystemPlan.evidence_level" class="plan-panel__row">
+                        <span class="plan-panel__key">证据等级</span>
+                        <span class="plan-panel__value">{{
+                          displayedSystemPlan.evidence_level
+                        }}</span>
+                      </div>
+                      <div
+                        v-if="displayedSystemPlan.retrieval_required !== null"
+                        class="plan-panel__row"
+                      >
+                        <span class="plan-panel__key">检索义务</span>
+                        <span class="plan-panel__value">{{
+                          displayedSystemPlan.retrieval_required ? '需要知识检索' : '无需检索'
+                        }}</span>
+                      </div>
+                      <div v-if="displayedSystemPlan.requires_mcp !== null" class="plan-panel__row">
+                        <span class="plan-panel__key">MCP 义务</span>
+                        <span class="plan-panel__value">{{
+                          displayedSystemPlan.requires_mcp ? '需要 MCP 数据' : '不依赖 MCP'
+                        }}</span>
+                      </div>
+                      <div v-if="displayedSystemPlan.required_server" class="plan-panel__row">
+                        <span class="plan-panel__key">点名服务器</span>
+                        <span class="plan-panel__value">{{
+                          displayedSystemPlan.required_server
+                        }}</span>
+                      </div>
+                      <div
+                        v-if="displayedSystemPlan.required_server_missing"
+                        class="plan-panel__row"
+                      >
+                        <span class="plan-panel__key">未绑定</span>
+                        <span class="plan-panel__value is-warn">{{
+                          displayedSystemPlan.required_server_missing
+                        }}</span>
+                      </div>
+                      <div v-if="displayedSystemPlan.error_code" class="plan-panel__row">
+                        <span class="plan-panel__key">错误码</span>
+                        <span class="plan-panel__value is-warn">{{
+                          displayedSystemPlan.error_code
+                        }}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- 模型待办（自报）：write_todos 维护，进度由模型自行推进 -->
+                  <div v-if="currentTodos.length" class="todo-panel">
+                    <div class="plan-panel__head">
+                      <span class="plan-panel__title">模型待办</span>
+                      <span class="plan-panel__badge is-selfreported">自报</span>
+                    </div>
+                    <div class="todo-panel-list">
+                      <div
+                        v-for="(todo, index) in currentTodos"
+                        :key="`${todo.fullContent}-${index}`"
+                        class="todo-item"
+                        :class="{ completed: todo.status === 'completed' }"
+                      >
+                        <div class="todo-item-icon" :class="todo.status || 'unknown'">
+                          <CheckCircleOutlined v-if="todo.status === 'completed'" />
+                          <SyncOutlined v-else-if="todo.status === 'in_progress'" spin />
+                          <ClockCircleOutlined v-else-if="todo.status === 'pending'" />
+                          <CloseCircleOutlined v-else-if="todo.status === 'cancelled'" />
+                          <QuestionCircleOutlined v-else />
+                        </div>
+                        <div class="todo-item-body">
+                          <span class="todo-item-text" :title="todo.fullContent">
+                            {{ todo.displayContent }}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -598,7 +760,12 @@
                         />
                         <div class="state-list-item-body">
                           <div class="state-list-item-title">{{ file.name }}</div>
-                          <div class="state-list-item-meta">{{ file.meta }}</div>
+                          <div class="state-list-item-meta">
+                            <span v-if="file.originLabel" class="artifact-origin-badge">{{
+                              file.originLabel
+                            }}</span>
+                            {{ file.meta }}
+                          </div>
                         </div>
                       </button>
                       <button
@@ -635,7 +802,8 @@
                           关系图快照 · {{ stateGraphExport.snapshot.edges.length }} 组关系
                         </div>
                         <div class="state-list-item-meta">
-                          聚合自 {{
+                          聚合自
+                          {{
                             stateGraphExport.snapshot.total_raw_edge_count ||
                             stateGraphExport.snapshot.edges.length
                           }}
@@ -711,7 +879,12 @@
                           />
                           <div class="state-list-item-body">
                             <div class="state-list-item-title">{{ file.name }}</div>
-                            <div class="state-list-item-meta">{{ file.meta }}</div>
+                            <div class="state-list-item-meta">
+                              <span v-if="file.originLabel" class="artifact-origin-badge">{{
+                                file.originLabel
+                              }}</span>
+                              {{ file.meta }}
+                            </div>
                           </div>
                         </button>
                         <button
@@ -938,6 +1111,13 @@ import HumanApprovalModal from '@/components/HumanApprovalModal.vue'
 import { useApproval } from '@/composables/useApproval'
 import { useAgentThreadState } from '@/composables/useAgentThreadState'
 import { useAgentRunStream } from '@/composables/useAgentRunStream'
+import { useConversationWindowing } from '@/composables/useConversationWindowing'
+import { useEvidenceAnchor } from '@/composables/useEvidenceAnchor'
+import {
+  CAPABILITY_TRACE_STAGE_FACETS,
+  useProtocolCapabilities
+} from '@/composables/useProtocolCapabilities'
+import { useStatusPanelSections } from '@/composables/useStatusPanelSections'
 import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
@@ -954,8 +1134,14 @@ import {
   graphExportSourceForConversation,
   inlineGraphForMessage
 } from '@/utils/graphSnapshot'
-import { artifactsForConversation, sessionArtifactGroupsFromMessages } from '@/utils/runArtifacts'
+import {
+  artifactEntriesForConversation,
+  artifactsForConversation,
+  sessionArtifactGroupsFromMessages
+} from '@/utils/runArtifacts'
+import { reportTraceDegradation } from '@/utils/traceTelemetry'
 import { buildStructuredMentions, formatMentionToken } from '@/utils/mention_utils'
+import TraceStageBar from '@/components/trace/TraceStageBar.vue'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
@@ -1052,17 +1238,19 @@ const attachmentUploadModalOpen = ref(false)
 const attachmentInitialFiles = ref([])
 const attachmentInitialFilesKey = ref(0)
 const isRefreshingState = ref(false)
-const collapsedStateSections = reactive({
-  trace: false,
-  evidence: false,
-  tokenUsage: false,
-  todos: false,
-  files: false,
-  artifacts: false,
-  // 本会话产物聚合视图默认折叠（主视图是「本轮产物」）
-  sessionArtifacts: true,
-  subagents: false
+// 协议能力位门控（审计缺口④）：trace_stage_facets 缺失（旧服务端）时显式
+// 隐藏阶段条并留痕，而不是靠数据缺席隐式兜底；能力查询失败不阻塞对话。
+const { ensureCapabilities, hasCapability } = useProtocolCapabilities()
+const traceStageFacetsAvailable = computed(() => hasCapability(CAPABILITY_TRACE_STAGE_FACETS))
+ensureCapabilities().then(() => {
+  if (!traceStageFacetsAvailable.value) {
+    reportTraceDegradation({ runId: null, reason: 'capability_trace_stage_facets_missing' })
+  }
 })
+
+// 状态面板分区折叠状态（已抽 composable；默认值见 useStatusPanelSections）
+const { collapsedStateSections, isStateSectionExpanded, toggleStateSection } =
+  useStatusPanelSections()
 const threadConfigNoticeMap = ref({})
 const threadPendingConfigNoticeMap = ref({})
 const threadConfigSnapshotMap = ref({})
@@ -1542,6 +1730,104 @@ const displayedTrace = computed(() => {
   return null
 })
 
+// ==================== run_context：知识范围与系统计划（P1） ====================
+// live 模式取线程槽位（创建响应先落、终态 result 刷新）；pinned 历史轮取档案。
+const displayedRunContext = computed(() => {
+  if (focusedRunId.value) return focusedArchiveEntry.value?.runContext || null
+  return currentThreadState.value?.runContext || null
+})
+
+const refreshRunContext = async (threadId, runId) => {
+  if (!threadId || !runId) return
+  try {
+    const result = await agentApi.getAgentRunResult(runId)
+    const threadState = chatState.threadStates[threadId]
+    // 迟到响应防串轮：仅当仍是该线程最新一次刷新时写入
+    if (threadState && result?.run_context) {
+      threadState.runContext = result.run_context
+    }
+  } catch (error) {
+    console.warn(`refreshRunContext skipped for ${runId}:`, error?.message || error)
+  }
+}
+
+const currentKnowledgeScope = computed(() => displayedRunContext.value?.knowledge_scope || null)
+
+const KNOWLEDGE_SCOPE_MODE_LABELS = {
+  INHERIT_GLOBAL: '继承全局范围',
+  CUSTOM: '自定义范围',
+  GLOBAL_PLUS_CUSTOM: '全局+自定义',
+  LEGACY: '按智能体挂载',
+  DISABLED: '知识库已禁用'
+}
+
+const knowledgeScopeModeLabel = computed(() => {
+  const scope = currentKnowledgeScope.value
+  if (!scope?.scope_mode) return ''
+  const label = KNOWLEDGE_SCOPE_MODE_LABELS[scope.scope_mode]
+  const version = scope.scope_version != null ? ` v${scope.scope_version}` : ''
+  return `${label || scope.scope_mode}${version}`
+})
+
+const knowledgeScopeHeader = computed(() => {
+  const scope = currentKnowledgeScope.value
+  if (!scope) return ''
+  const parts = [`${scope.kb_count ?? (scope.members || []).length} 个知识库`]
+  if (scope.knowledge_strategy === 'KNOWLEDGE_FIRST') parts.push('知识优先')
+  return parts.join(' · ')
+})
+
+const knowledgeMemberChannels = (member) => {
+  const channels = [
+    member?.document_enabled && '文档',
+    member?.graph_enabled && '图谱',
+    member?.structured_enabled && '结构化',
+    member?.wiki_navigation_enabled && 'Wiki'
+  ].filter(Boolean)
+  return channels.length ? channels.join(' / ') : '仅授权不可检索'
+}
+
+// 系统计划（权威）：优先轨迹 plan facet（live 实时），快照路径/终态补充
+// run_context.turn_execution_plan（字段更全但仅终态可得）。
+const displayedSystemPlan = computed(() => {
+  const facet = displayedTrace.value?.plan || null
+  if (facet) {
+    return {
+      source_policy: facet.source_policy,
+      evidence_level: facet.evidence_level,
+      retrieval_required: facet.retrieval_required,
+      requires_mcp: facet.requires_mcp,
+      satisfiable: facet.satisfiable !== false,
+      required_server: facet.required_server,
+      required_server_missing: facet.required_server_missing,
+      error_code: facet.error_code
+    }
+  }
+  const plan = displayedRunContext.value?.turn_execution_plan
+  if (!plan || typeof plan !== 'object') return null
+  return {
+    source_policy: plan.source?.policy ?? null,
+    evidence_level: plan.evidence?.level ?? null,
+    retrieval_required: null,
+    requires_mcp: null,
+    satisfiable: plan.satisfiable !== false,
+    required_server: plan.required_server ?? null,
+    required_server_missing: plan.required_server_missing ?? null,
+    error_code: plan.error_code ?? null
+  }
+})
+
+// 正文引用芯片互锚 + 证据面板事件驱动刷新（P1，已抽 composable，可裸 node spec）
+const { evidenceHighlightId, handleLocateEvidence } = useEvidenceAnchor({
+  statePanelOpen,
+  collapsedStateSections,
+  openStatePanel: () => toggleStatePanel(),
+  currentChatId,
+  currentTrace,
+  getThreadState: (threadId) => chatState.threadStates[threadId],
+  loadRunEvidence: (threadId, runId) => void loadRunEvidence(threadId, runId)
+})
+
 const hasDisplayedEvidenceProjection = computed(() => {
   if (!focusedRunId.value) return hasCurrentEvidenceProjection.value
   const entry = focusedArchiveEntry.value
@@ -1876,8 +2162,8 @@ const currentPendingThreadAttachments = computed(() =>
 // 权威清单；线程级 agentState.artifacts 是跨轮累积列表，绝不入快照（泄漏根因）
 const runArtifactsByRun = computed(() => currentThreadState.value?.runArtifactsByRun || {})
 // 本轮产物（run 级权威口径）：live 模式取最新一轮；pinned 模式取所聚焦 run 的
-// 消息投影（投影键缺失的旧轮回退该 run 的快照）。
-const displayedRunArtifactPaths = computed(() => {
+// 消息投影（投影键缺失的旧轮回退该 run 的快照）。条目保留 origin 供来源徽标。
+const displayedRunArtifactEntries = computed(() => {
   if (focusedRunId.value) {
     const target = String(focusedRunId.value)
     const messages = currentThreadMessages.value || []
@@ -1886,9 +2172,20 @@ const displayedRunArtifactPaths = computed(() => {
       if (message?.type !== 'ai') continue
       if (String(message.run_id || '') !== target) continue
       if (Array.isArray(message?.run_artifacts)) {
-        return message.run_artifacts
-          .map((item) => (typeof item === 'string' ? item : item?.virtual_path))
-          .filter(Boolean)
+        return (message.run_artifacts || [])
+          .map((item) =>
+            typeof item === 'string'
+              ? { virtual_path: item, origin: null, name: null, size_bytes: null }
+              : item && typeof item === 'object'
+                ? {
+                    virtual_path: item.virtual_path || '',
+                    origin: item.origin || null,
+                    name: item.name || null,
+                    size_bytes: item.size_bytes ?? null
+                  }
+                : null
+          )
+          .filter((entry) => entry?.virtual_path)
       }
       return Array.isArray(runArtifactsByRun.value[target]) ? runArtifactsByRun.value[target] : []
     }
@@ -1896,8 +2193,19 @@ const displayedRunArtifactPaths = computed(() => {
   }
   const convs = conversations.value
   const lastConv = convs[convs.length - 1]
-  return lastConv ? artifactsForConversation(lastConv, runArtifactsByRun.value) : []
+  return lastConv ? artifactEntriesForConversation(lastConv, runArtifactsByRun.value) : []
 })
+// 产物来源徽标（P1）：MCP 服务器/工具名（确定性物化通道）或「模型交付」
+const getArtifactOriginLabel = (entry) => {
+  const origin = entry?.origin
+  if (!origin || typeof origin !== 'object') return ''
+  if (origin.source === 'mcp') {
+    const tool = origin.mcp_tool ? `·${origin.mcp_tool}` : ''
+    return `MCP ${origin.mcp_server || ''}${tool}`.trim()
+  }
+  if (origin.source === 'agent_presented') return '模型交付'
+  return String(origin.source || '')
+}
 // 状态面板产物区的关系图导出源：取当前线程最后一轮的发布快照（与产物卡同语义）
 const stateGraphExport = computed(() => {
   const convs = conversations.value
@@ -1905,23 +2213,24 @@ const stateGraphExport = computed(() => {
   return lastConv ? graphExportSourceForConversation(lastConv) : null
 })
 const displayedRunArtifactFiles = computed(() =>
-  displayedRunArtifactPaths.value
-    .map((path) => String(path || '').trim())
-    .filter(Boolean)
-    .map((path) => ({
-      path,
-      name: getPanelFileName({ path }),
-      meta: getArtifactMetaLabel(path)
+  displayedRunArtifactEntries.value
+    .filter((entry) => String(entry.virtual_path || '').trim())
+    .map((entry) => ({
+      path: entry.virtual_path,
+      name: entry.name || getPanelFileName({ path: entry.virtual_path }),
+      meta: getArtifactMetaLabel(entry.virtual_path),
+      originLabel: getArtifactOriginLabel(entry)
     }))
 )
 // 本会话产物（按轮分组、跨轮去重，折叠区聚合展示）
 const sessionArtifactGroups = computed(() =>
   sessionArtifactGroupsFromMessages(currentThreadMessages.value).map((group) => ({
     ...group,
-    files: group.paths.map((path) => ({
-      path,
-      name: getPanelFileName({ path }),
-      meta: getArtifactMetaLabel(path)
+    files: group.entries.map((entry) => ({
+      path: entry.virtual_path,
+      name: entry.name || getPanelFileName({ path: entry.virtual_path }),
+      meta: getArtifactMetaLabel(entry.virtual_path),
+      originLabel: getArtifactOriginLabel(entry)
     }))
   }))
 )
@@ -1982,10 +2291,6 @@ const openSubagentThread = (run) => {
   subagentThreadModal.subagentAvatar = getSubagentIconSrc(run)
   subagentThreadModal.subagentDefaultAvatar = getSubagentDefaultIconSrc(run)
   subagentThreadModal.open = true
-}
-const isStateSectionExpanded = (key) => !collapsedStateSections[key]
-const toggleStateSection = (key) => {
-  collapsedStateSections[key] = !collapsedStateSections[key]
 }
 const currentStateFiles = computed(() => {
   const files = []
@@ -2324,29 +2629,42 @@ const activeSubagentThreadIsStreaming = computed(
 )
 
 // 首次运行的子智能体：前端按后端同样的哈希推算 child_thread_id，缓存到映射里供面板/轨迹定位。
-watch(
-  onGoingConvMessages,
-  (messages) => {
-    const parentThreadId = currentChatId.value
-    if (!parentThreadId) return
-    messages.forEach((message) => {
-      if (message?.type !== 'ai' || !Array.isArray(message.tool_calls)) return
-      message.tool_calls.forEach((toolCall) => {
-        const name = toolCall?.name || toolCall?.function?.name
-        if (name !== 'task') return
-        if (toolCall.tool_call_result || toolCall.result) return
-        const id = toolCall?.id ? String(toolCall.id) : ''
-        if (!id || chatState.subagentThreadByToolCall[id]) return
-        const args = parseToolCallArgs(toolCall)
-        if (args.thread_id || !args.subagent_slug) return
-        makeChildThreadId(parentThreadId, String(args.subagent_slug), id).then((childThreadId) => {
-          recordSubagentThread(id, childThreadId)
-        })
+// 性能（P2）：用「待解析 task 工具调用签名」代替 deep watch——签名只依赖
+// tool_calls 的 id/name/结果标记，内容流式追加不再触发全量深遍历。
+const pendingTaskToolCallSignature = computed(() =>
+  onGoingConvMessages.value
+    .flatMap((message) =>
+      message?.type === 'ai' && Array.isArray(message.tool_calls) ? message.tool_calls : []
+    )
+    .filter(
+      (toolCall) =>
+        (toolCall?.name || toolCall?.function?.name) === 'task' &&
+        !toolCall.tool_call_result &&
+        !toolCall.result &&
+        toolCall?.id
+    )
+    .map((toolCall) => String(toolCall.id))
+    .join(',')
+)
+watch(pendingTaskToolCallSignature, () => {
+  const parentThreadId = currentChatId.value
+  if (!parentThreadId) return
+  onGoingConvMessages.value.forEach((message) => {
+    if (message?.type !== 'ai' || !Array.isArray(message.tool_calls)) return
+    message.tool_calls.forEach((toolCall) => {
+      const name = toolCall?.name || toolCall?.function?.name
+      if (name !== 'task') return
+      if (toolCall.tool_call_result || toolCall.result) return
+      const id = toolCall?.id ? String(toolCall.id) : ''
+      if (!id || chatState.subagentThreadByToolCall[id]) return
+      const args = parseToolCallArgs(toolCall)
+      if (args.thread_id || !args.subagent_slug) return
+      makeChildThreadId(parentThreadId, String(args.subagent_slug), id).then((childThreadId) => {
+        recordSubagentThread(id, childThreadId)
       })
     })
-  },
-  { deep: true }
-)
+  })
+})
 
 const historyConversations = computed(() => {
   return MessageProcessor.convertServerHistoryToMessages(currentThreadMessages.value)
@@ -2483,31 +2801,71 @@ const conversations = computed(() => {
   return activeRunHistoryConvs
 })
 
+// 会话窗口化（P2 性能，已抽 composable）：默认渲染最近 30 轮 +「显示更早」；
+// 流式新增恒定落在窗口尾部；切换线程重置回默认窗口。
+const { windowedConversationRows, hiddenConversationCount, showEarlierConversations } =
+  useConversationWindowing({
+    conversations,
+    currentChatId,
+    getScroller: () => chatMainRef.value
+  })
+
 const conversationRows = computed(() => {
   const rows = conversations.value.map((conv, index) => ({
     type: 'conversation',
     key: conv.status === 'streaming' ? 'ongoing-conversation' : `history-${index}`,
     conv,
-    displayItems: getDisplayItems(conv)
+    displayItems: withCompressionMarkers(getDisplayItems(conv))
   }))
+  const windowed = windowedConversationRows(rows)
 
   if (currentThreadConfigNotice.value) {
     const insertAfterCount = Math.max(
       0,
       Math.min(
         Number(currentThreadConfigNotice.value.insertAfterConversationCount) || 0,
-        rows.length
+        windowed.length
       )
     )
-    rows.splice(insertAfterCount, 0, {
+    windowed.splice(insertAfterCount, 0, {
       type: 'notice',
       key: currentThreadConfigNotice.value.id,
       notice: currentThreadConfigNotice.value
     })
   }
 
-  return rows
+  return windowed
 })
+
+// 压缩持久标记（P1）：在本轮第一条展示项之前插入分隔线——压缩把更早的
+// 原始消息替换成了摘要，用户回看时需要这个边界提示（运行时内存态，刷新后消失）。
+const withCompressionMarkers = (displayItems) => {
+  const markers = currentThreadState.value?.compressionMarkers
+  if (!Array.isArray(markers) || markers.length === 0 || !displayItems.length) return displayItems
+  const items = [...displayItems]
+  for (const marker of markers) {
+    if (!marker?.requestId) continue
+    const index = items.findIndex(
+      (item) =>
+        item.type === 'message' &&
+        item.message?.type === 'ai' &&
+        getMessageRequestId(item.message) === marker.requestId
+    )
+    if (index < 0) continue
+    if (
+      items.some(
+        (item) => item.type === 'compression-marker' && item.requestId === marker.requestId
+      )
+    )
+      continue
+    items.splice(index, 0, {
+      type: 'compression-marker',
+      key: `compression-${marker.requestId}`,
+      requestId: marker.requestId
+    })
+  }
+  return items
+}
 
 const isLoadingMessages = computed(() => chatUIStore.isLoadingMessages)
 const isStreaming = computed(() => {
@@ -3253,6 +3611,7 @@ const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = 
     if (runId) {
       refreshRunTraceSnapshot(threadId, runId)
       void loadRunEvidence(threadId, runId)
+      void refreshRunContext(threadId, runId)
     }
     const pendingEnhancement = pendingTitleEnhancement.get(threadId)
     if (pendingEnhancement) {
@@ -3470,6 +3829,8 @@ const handleSendMessage = async ({ image } = {}) => {
     if (!runId) {
       throw new Error('创建 run 失败：缺少 run_id')
     }
+    // run_context 携带冻结知识范围（创建时已解析）；终态后由 result 端点刷新
+    threadState.runContext = runResp?.run_context || null
     resetRunTrace(threadId, runId)
     resetRunEvidence(threadId, runId)
     await loadRunTraceSnapshot(threadId, runId)
@@ -3553,6 +3914,7 @@ const handleApprovalWithStream = async (answer) => {
     if (!runId) {
       throw new Error('创建 resume run 失败：缺少 run_id')
     }
+    threadState.runContext = runResp?.run_context || null
     resetRunTrace(threadId, runId)
     resetRunEvidence(threadId, runId)
     await loadRunTraceSnapshot(threadId, runId)
@@ -4957,6 +5319,152 @@ watch(currentChatId, (threadId, oldThreadId) => {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+// ==================== 知识范围 / 系统计划 / 压缩分隔线 / 显示更早（P1/P2） ====================
+.scope-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scope-panel__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--gray-600);
+}
+
+.scope-panel__empty {
+  font-size: 12px;
+  color: var(--gray-500);
+  padding: 4px 0;
+}
+
+.plan-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--gray-200);
+}
+
+.plan-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-panel__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gray-800);
+}
+
+.plan-panel__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 18px;
+
+  &.is-authority {
+    background-color: var(--main-bright, #4c6ef5);
+    color: #fff;
+  }
+  &.is-selfreported {
+    background-color: var(--gray-100);
+    color: var(--gray-600);
+  }
+  &.is-failed {
+    background-color: var(--danger-color, #e03131);
+    color: #fff;
+  }
+}
+
+.plan-panel__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.plan-panel__row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.plan-panel__key {
+  flex: 0 0 64px;
+  color: var(--gray-500);
+}
+
+.plan-panel__value {
+  color: var(--gray-800);
+  word-break: break-all;
+
+  &.is-warn {
+    color: var(--warning-color, #e8590c);
+  }
+}
+
+.todo-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+}
+
+.conv-compression-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  user-select: none;
+}
+
+.conv-compression-divider__line {
+  flex: 1;
+  height: 1px;
+  background: var(--gray-200);
+}
+
+.conv-compression-divider__text {
+  font-size: 11px;
+  color: var(--gray-500);
+  white-space: nowrap;
+}
+
+.chat-show-earlier {
+  display: block;
+  margin: 0 auto 12px;
+  padding: 4px 14px;
+  border: 1px solid var(--gray-200);
+  border-radius: 14px;
+  background: var(--gray-0, transparent);
+  color: var(--gray-600);
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--gray-300);
+    color: var(--gray-900);
+  }
+}
+
+.artifact-origin-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background-color: var(--gray-100);
+  color: var(--gray-600);
+  font-size: 11px;
+  line-height: 16px;
+  vertical-align: middle;
 }
 
 .todo-item {

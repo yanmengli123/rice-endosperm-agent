@@ -13,7 +13,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
-import { renderMarkdown } from '@/utils/markdown_preview'
+import { linkifyEvidenceChips, renderMarkdown } from '@/utils/markdown_preview'
 import { collectAssetUris, createAssetResolverSession } from '@/utils/asset_resolver'
 import { HTML_PREVIEW_MAX_HEIGHT, HTML_PREVIEW_MIN_HEIGHT } from '@/utils/htmlPreviewRenderer'
 import 'katex/dist/katex.min.css'
@@ -34,8 +34,16 @@ const props = defineProps({
   knowledgeBaseId: {
     type: [String, Number],
     default: ''
+  },
+  // 引用芯片锚化：把正文里的〔证据E#｜…〕芯片变成可点击锚点，
+  // 点击经 locate-evidence 事件抛给宿主（对话页滚动/高亮证据卡）。
+  evidenceLinks: {
+    type: Boolean,
+    default: false
   }
 })
+
+const emit = defineEmits(['locate-evidence'])
 
 const themeStore = useThemeStore()
 const shikiTheme = computed(() => (themeStore.isDark ? 'github-dark' : 'github-light'))
@@ -379,7 +387,10 @@ watch(
     const resolvedContent = await resolveKbassetUris(content, () => expired)
     if (resolvedContent === null) return
 
-    const html = await renderMarkdown(resolvedContent, { theme })
+    const html = await renderMarkdown(
+      props.evidenceLinks ? linkifyEvidenceChips(resolvedContent) : resolvedContent,
+      { theme }
+    )
     if (!expired) {
       replaceHtmlPreservingPreviews(html)
       cleanupHtmlPreviewFrames()
@@ -398,6 +409,13 @@ watch(
 const handleMarkdownAction = async (e) => {
   const target = e.target instanceof Element ? e.target : e.target?.parentElement
   if (!target) return
+
+  const evidenceAnchor = target.closest('.evidence-chip-anchor')
+  if (evidenceAnchor) {
+    const ref = evidenceAnchor.getAttribute('data-evidence')
+    emit('locate-evidence', { ref: ref || '', text: evidenceAnchor.textContent || '' })
+    return
+  }
 
   const codeCopyBtn = target.closest('.markdown-code-copy-btn')
   if (codeCopyBtn) {
@@ -616,6 +634,18 @@ const showCopiedFeedback = (btn) => {
 
   a {
     color: var(--main-700);
+  }
+
+  .evidence-chip-anchor {
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+    border-bottom: 1px dashed var(--main-300);
+
+    &:hover {
+      background-color: var(--gray-25);
+      border-bottom-style: solid;
+    }
   }
 
   hr {

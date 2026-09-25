@@ -38,9 +38,10 @@ export function useRunStatusArchive() {
     const entry = ensureEntry(runId)
     if (entry.loading || entry.loaded) return
     entry.loading = true
-    const [traceResult, evidenceResult] = await Promise.allSettled([
+    const [traceResult, evidenceResult, runResult] = await Promise.allSettled([
       agentApi.getAgentRunTrace(runId),
-      agentApi.getAgentRunEvidence(runId)
+      agentApi.getAgentRunEvidence(runId),
+      agentApi.getAgentRunResult(runId)
     ])
     // LRU 可能在请求期间驱逐了本条；写入脱离缓存的条目无害，重新聚焦会重建
     if (traceResult.status === 'fulfilled') {
@@ -54,6 +55,9 @@ export function useRunStatusArchive() {
       Object.assign(entry, assembleEvidenceFields(evidenceResult.value))
     } else {
       entry.evidenceError = true
+    }
+    if (runResult.status === 'fulfilled') {
+      entry.runContext = runResult.value?.run_context || null
     }
     entry.loading = false
     entry.loaded = true

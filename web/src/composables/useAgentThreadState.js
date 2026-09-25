@@ -57,7 +57,13 @@ export function useAgentThreadState({
         // 线程级 artifacts，finished 时快照进当前 run；历史回读后以 run_artifacts 投影为准）
         runArtifactsByRun: {},
         // 跨文献歧义时的候选文献（locator_candidates 事件；只含文档身份）
-        locatorCandidates: []
+        locatorCandidates: [],
+        // 当前/最近 run 的服务端上下文（run_context：知识范围冻结快照、终态
+        // 计划与检索摘要）；创建响应先落一份，终态后由 result 端点刷新。
+        runContext: null,
+        // 上下文压缩持久标记（运行时内存态）：{requestId, at}，注入展示流
+        // 成为「已压缩 N 条历史」分隔线；历史回读不重建（无服务端持久源）。
+        compressionMarkers: []
       }
     }
     return chatState.threadStates[threadId]

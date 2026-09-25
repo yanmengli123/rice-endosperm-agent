@@ -14,6 +14,9 @@
 - SSE 事件名与 ``payload`` 形状保持 additive；``verbose=false`` 压缩白名单
   （``COMPACT_CHUNK_FIELDS``）新增字段视作 minor 变更，必须同步更新
   ``test/fixtures/agent_run_contract`` 契约语料。
+- 轨迹事件 schema（``yuxi.run-trace.v1``，含 summary.attributes facets）同样
+  additive-only：新增事件/属性必须先在 ``trace/protocol.py`` 登记并补
+  ``trace_events.jsonl`` 语料与 emitter 索引，删除或改义必须升 major。
 """
 
 from __future__ import annotations
@@ -21,7 +24,10 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 # 1.5：增加确定性对话关系子图消息附件与 SSE 事件。
-AGENT_RUN_PROTOCOL_VERSION = "1.5"
+# 1.6：轨迹阶段条事件（run.plan.resolved / run.artifact.materialized）与
+#      summary.attributes facets（plan/knowledge/guard/artifacts），trace
+#      schema 纳入 additive-only 纪律并新增 trace_stage_facets 能力位。
+AGENT_RUN_PROTOCOL_VERSION = "1.6"
 # 服务端仍兼容的最低协议版本（桌面端 run_context 校验下限同源）。
 AGENT_RUN_MIN_SUPPORTED_PROTOCOL_VERSION = "1.2"
 
@@ -44,6 +50,10 @@ AGENT_RUN_CAPABILITIES: tuple[str, ...] = (
     "run_trace_endpoints",
     # /events 默认 verbose=false 白名单压缩。
     "sse_compact_default",
+    # 轨迹阶段条：run.plan.resolved / run.artifact.materialized 事件 +
+    # summary.attributes facets（plan/knowledge/guard/artifacts），阶段
+    # 状态可从快照 summary 恢复，不必重放全部事件。
+    "trace_stage_facets",
 )
 
 

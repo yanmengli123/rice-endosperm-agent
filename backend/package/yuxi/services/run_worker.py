@@ -345,7 +345,15 @@ async def _persist_terminal_trace(
         suffix="interrupted",
         error_type=error_type or f"run_{status}_with_open_span",
     )
-    recorder.record_run_terminal(status, error_type=error_type, error_message=error_message)
+    terminal_message_id = recorder.run_terminal_message_id
+    # message_id 只在 completed 的 schema 里登记；其他终态携带会被协议层
+    # 当作漂移剥离并告警，不如在发射端就不传。
+    recorder.record_run_terminal(
+        status,
+        error_type=error_type,
+        error_message=error_message,
+        attributes=({"message_id": terminal_message_id} if status == "completed" and terminal_message_id else None),
+    )
 
     async def mark_terminal_in_transaction(db) -> None:
         await mark_run_terminal(

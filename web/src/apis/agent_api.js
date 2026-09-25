@@ -130,11 +130,25 @@ export const agentApi = {
     }),
 
   /**
+   * 获取协议能力快照（公开端点）：protocol_version + capabilities 位。
+   * UI 能力驱动渲染据此门控（如 trace_stage_facets 缺失时显式隐藏阶段条），
+   * 而不是靠数据字段缺席隐式兜底。
+   */
+  getAgentProtocol: () => apiGet('/api/agent/protocol'),
+
+  /**
    * 获取 Run 状态
    * @param {string} runId - run ID
    * @returns {Promise<Object>}
    */
   getAgentRun: (runId) => apiGet(`/api/agent/runs/${runId}`),
+
+  /**
+   * 获取 Run 终态结果（status/output/run_context/run_artifacts）。
+   * run_context 含冻结知识范围、终态执行计划与检索摘要——状态面板
+   * 「知识范围」板块在终态后由此刷新。
+   */
+  getAgentRunResult: (runId) => apiGet(`/api/agent/runs/${runId}/result`),
 
   /** 获取 Run 的轻量知识检索审计记录。 */
   getAgentRunKnowledgeRetrievals: (runId) =>

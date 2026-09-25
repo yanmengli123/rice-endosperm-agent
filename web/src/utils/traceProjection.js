@@ -3,9 +3,11 @@
  *
  * 规则与服务端 projector（backend/package/yuxi/trace/projector.py）一致：
  * - 事件是不可变事实，span 状态由事件序列推导；
- * - `.started` 开 span、`.retrying` 计重试、`.completed/.failed/.interrupted` 闭合；
- * - run 级计数与 token/TTFT 汇总进 summary。
+ * - `.started` 开 span、`.completed/.failed/.interrupted` 闭合；
+ * - run 级计数与 token/TTFT 汇总进 summary；
+ * - 静默兜底路径（无效序列/迟到快照/纯环）经 traceTelemetry 留痕，降级可计数。
  */
+import { reportTraceDegradation } from './traceTelemetry.js'
 
 const TERMINAL_SUFFIX_STATUS = {
   completed: 'COMPLETED',
@@ -23,6 +25,9 @@ const CATEGORY_COUNT_FIELDS = {
   SUBAGENT: 'subagent_calls'
 }
 
+/** 阶段条产物清单上限（与服务端 projector._ARTIFACT_FACET_MAX_ITEMS 同值） */
+const ARTIFACT_FACET_MAX_ITEMS = 20
+
 const parseOccurredAt = (value) => {
   if (!value) return null
   const parsed = new Date(value)
@@ -38,7 +43,14 @@ export const createTraceState = () => ({
   snapshotSequence: 0,
   projectionSequence: 0,
   spans: {},
-  summary: null
+  summary: null,
+  // 阶段条（P0「权威计划可见」）：run.plan.resolved / knowledge.search.* /
+  // answer.source_guard.completed 的投影，buildTraceStages 据此推导四阶段状态。
+  plan: null,
+  knowledge: null,
+  guard: null,
+  render: null,
+  artifacts: []
 })
 
 export const createTraceSummary = () => ({
@@ -58,7 +70,8 @@ export const createTraceSummary = () => ({
   subagent_calls: 0,
   skill_count: 0,
   retry_count: 0,
-  error_count: 0
+  error_count: 0,
+  artifact_count: 0
 })
 
 /** 从服务端历史消息中找到最后一轮持久化 run，供页面重载后恢复权威快照。 */
@@ -77,7 +90,15 @@ export const applyTraceEvent = (state, traceEvent) => {
   if (!traceEvent || typeof traceEvent !== 'object') return
   if (traceEvent.visibility === 'ADMIN') return
   const sequence = Number(traceEvent.sequence) || 0
-  if (sequence <= 0 || sequence <= state.lastAppliedSequence) return
+  if (sequence <= 0) {
+    reportTraceDegradation({
+      runId: state?.runId,
+      reason: 'invalid_event_sequence',
+      detail: { sequence: traceEvent.sequence }
+    })
+    return
+  }
+  if (sequence <= state.lastAppliedSequence) return
 
   const summary = (state.summary = state.summary || createTraceSummary())
   const occurredAt = parseOccurredAt(traceEvent.occurred_at)
@@ -118,6 +139,59 @@ export const applyTraceEvent = (state, traceEvent) => {
     summary.skill_count = Array.isArray(skills)
       ? skills.length
       : Number(attributes.skill_count) || 0
+  }
+  if (eventType === 'run.plan.resolved') {
+    state.plan = {
+      source_policy: attributes.source_policy || null,
+      evidence_level: attributes.evidence_level || null,
+      retrieval_required: Boolean(attributes.retrieval_required),
+      requires_mcp: Boolean(attributes.requires_mcp),
+      satisfiable: attributes.satisfiable !== false,
+      required_server: attributes.required_server || null,
+      required_server_missing: attributes.required_server_missing || null,
+      error_code: attributes.error_code || null,
+      at: occurredAt
+    }
+  }
+  if (eventType === 'run.artifact.materialized') {
+    // 快照 summary 可能来自旧服务端（无 artifact_count），必须 NaN 守卫。
+    summary.artifact_count = (Number(summary.artifact_count) || 0) + 1
+    if (state.artifacts.length < ARTIFACT_FACET_MAX_ITEMS) {
+      state.artifacts.push({
+        name: attributes.name || '',
+        origin_source: attributes.origin_source || null,
+        size_bytes: Number(attributes.size_bytes) || 0
+      })
+    }
+  }
+  if (eventType.startsWith('knowledge.search.')) {
+    state.knowledge = {
+      status: suffix === 'skipped' ? 'SKIPPED' : TERMINAL_SUFFIX_STATUS[suffix] || 'RUNNING',
+      intent: attributes.intent || null,
+      contract_status: attributes.contract_status || null,
+      completeness_status: attributes.completeness_status || null,
+      evidence_count:
+        attributes.evidence_count === undefined ? null : Number(attributes.evidence_count) || 0,
+      claim_count:
+        attributes.claim_count === undefined ? null : Number(attributes.claim_count) || 0,
+      verbatim_hit_count:
+        attributes.verbatim_hit_count === undefined
+          ? null
+          : Number(attributes.verbatim_hit_count) || 0
+    }
+  }
+  if (eventType === 'answer.source_guard.completed') {
+    state.guard = {
+      guard_status: attributes.guard_status || null,
+      evidence_level: attributes.evidence_level || null
+    }
+  }
+  if (eventType === 'answer.render.applied') {
+    state.render = {
+      boundary: attributes.boundary || null,
+      applied: Boolean(attributes.applied),
+      fallback_reason: attributes.fallback_reason || null
+    }
   }
   if (category === 'RUN') {
     if (eventType === 'run.execution.started') summary.status = 'running'
@@ -176,10 +250,31 @@ export const applyTraceEvent = (state, traceEvent) => {
 /** 用服务端快照（权威投影）重置本地状态。 */
 export const applyTraceSnapshot = (state, snapshot) => {
   const snapshotRunId = snapshot?.run_id || null
-  if (state.runId && snapshotRunId && state.runId !== snapshotRunId) return false
+  if (state.runId && snapshotRunId && state.runId !== snapshotRunId) {
+    reportTraceDegradation({
+      runId: state.runId,
+      reason: 'snapshot_run_mismatch',
+      detail: { snapshotRunId }
+    })
+    return false
+  }
   const projectionSequence = Number(snapshot?.projection_sequence) || 0
   // 迟到的旧快照绝不能覆盖已消费的新事件，否则 spans 回退而游标仍前进。
-  if (projectionSequence < state.lastAppliedSequence) return false
+  if (projectionSequence < state.lastAppliedSequence) {
+    reportTraceDegradation({
+      runId: state.runId || snapshotRunId,
+      reason: 'stale_snapshot_rejected',
+      detail: { projectionSequence, lastAppliedSequence: state.lastAppliedSequence }
+    })
+    return false
+  }
+  if (snapshot && !Array.isArray(snapshot.spans) && !snapshot.summary) {
+    reportTraceDegradation({
+      runId: snapshotRunId || state.runId,
+      reason: 'snapshot_missing_projection',
+      detail: { keys: Object.keys(snapshot).slice(0, 8) }
+    })
+  }
   const spans = {}
   const spanList = Array.isArray(snapshot?.spans) ? snapshot.spans : []
   spanList.forEach((span) => {
@@ -199,6 +294,23 @@ export const applyTraceSnapshot = (state, snapshot) => {
         first_token_at: parseOccurredAt(snapshot.summary.first_token_at)
       }
     : null
+  // 阶段条 facets 水合：快照起步（历史轮档案 / 整页刷新）不重放事件，
+  // 服务端投影 summary.attributes 是唯一真源；旧数据无 facets 时保持
+  // null，让 buildTraceStages 走兜底推导而不是显示误导性状态。
+  const summaryAttributes = snapshot?.summary?.attributes || {}
+  state.plan = summaryAttributes.plan || null
+  state.knowledge = summaryAttributes.knowledge || null
+  state.guard = summaryAttributes.guard || null
+  state.render = summaryAttributes.render || null
+  state.artifacts = Array.isArray(summaryAttributes.artifacts)
+    ? summaryAttributes.artifacts.slice(0, ARTIFACT_FACET_MAX_ITEMS)
+    : []
+  if (state.summary) {
+    const snapshotArtifactCount = Number(summaryAttributes.artifact_count)
+    state.summary.artifact_count = Number.isFinite(snapshotArtifactCount)
+      ? snapshotArtifactCount
+      : Number(state.summary.artifact_count) || 0
+  }
   const snapshotSequence = Number(snapshot?.snapshot_sequence) || 0
   state.snapshotSequence = snapshotSequence
   state.projectionSequence = projectionSequence
@@ -238,6 +350,108 @@ export const buildTraceTimeline = (state) => {
   const roots = sorted.filter((span) => !span.parent_span_id || !byId.has(span.parent_span_id))
   const timeline = roots.map((span) => attach(span))
   // 损坏数据中的纯环没有根；作为独立根展示一次，不能递归爆栈。
-  sorted.filter((span) => !visited.has(span.span_id)).forEach((span) => timeline.push(attach(span)))
+  const cycleOnly = sorted.filter((span) => !visited.has(span.span_id))
+  if (cycleOnly.length) {
+    reportTraceDegradation({
+      runId: state?.runId,
+      reason: 'span_cycle_detected',
+      detail: { orphanCount: cycleOnly.length }
+    })
+  }
+  cycleOnly.forEach((span) => timeline.push(attach(span)))
   return timeline
+}
+
+/**
+ * 阶段条推导（P0「权威计划可见」）：计划 → 检索 → 生成 → 守卫。
+ *
+ * 状态来源优先级：专项事件投影（plan/knowledge/guard）> summary 兜底推导。
+ * 旧 run（无 run.plan.resolved 事件）自动落到兜底路径，不缺阶段。
+ */
+export const buildTraceStages = (state) => {
+  const summary = state?.summary || {}
+  const plan = state?.plan || null
+  const knowledge = state?.knowledge || null
+  const guard = state?.guard || null
+  const runTerminal = ['completed', 'failed', 'cancelled', 'interrupted'].includes(summary.status)
+
+  // 计划：有 run.plan.resolved 即已解析；不可满足标 FAILED；旧 run 无事件时
+  // 用「已发生任何活动」推导为隐性完成，避免阶段条永远卡在第一位。
+  let planStatus = 'PENDING'
+  let planDetail = null
+  if (plan) {
+    planStatus = plan.satisfiable ? 'COMPLETED' : 'FAILED'
+    const bits = [plan.source_policy, plan.evidence_level].filter(Boolean)
+    if (plan.required_server) bits.push(`点名 ${plan.required_server}`)
+    if (plan.required_server_missing) bits.push(`未绑定 ${plan.required_server_missing}`)
+    if (!plan.satisfiable && plan.error_code) bits.push(plan.error_code)
+    planDetail = bits.join('｜')
+  } else if (
+    summary.knowledge_calls > 0 ||
+    summary.model_calls > 0 ||
+    summary.tool_calls > 0 ||
+    summary.mcp_calls > 0
+  ) {
+    planStatus = 'SKIPPED'
+    planDetail = '旧版本运行（无计划事件）'
+  }
+
+  // 检索：knowledge.search.* 投影；计划明确判定无需检索时标 SKIPPED。
+  let retrievalStatus = 'PENDING'
+  let retrievalDetail = null
+  if (knowledge) {
+    retrievalStatus = knowledge.status
+    if (knowledge.status === 'SKIPPED') {
+      retrievalDetail = '本轮判定无需知识检索'
+    } else {
+      const bits = []
+      if (knowledge.evidence_count !== null) bits.push(`${knowledge.evidence_count} 证据`)
+      if (knowledge.claim_count !== null && knowledge.claim_count > 0)
+        bits.push(`${knowledge.claim_count} Claim`)
+      if (knowledge.completeness_status) bits.push(knowledge.completeness_status)
+      retrievalDetail = bits.join('｜') || knowledge.intent
+    }
+  } else if (summary.knowledge_calls > 0) {
+    retrievalStatus = runTerminal ? 'COMPLETED' : 'RUNNING'
+  } else if (plan && !plan.retrieval_required && !plan.requires_mcp) {
+    retrievalStatus = 'SKIPPED'
+    retrievalDetail = '本轮判定无需知识检索'
+  } else if (runTerminal) {
+    retrievalStatus = 'SKIPPED'
+  }
+
+  // 生成：模型调用驱动；run 终态时收敛。
+  let generationStatus = 'PENDING'
+  if (summary.model_calls > 0) {
+    generationStatus = runTerminal
+      ? summary.status === 'completed'
+        ? 'COMPLETED'
+        : summary.status === 'failed'
+          ? 'FAILED'
+          : 'INTERRUPTED'
+      : 'RUNNING'
+  } else if (runTerminal) {
+    generationStatus = 'SKIPPED'
+  }
+
+  // 守卫：answer.source_guard.completed 投影；REJECTED/DEGRADED 是用户必须
+  // 看见的信号，标红/标黄而非隐藏。无守卫轮（E0/闲聊）在 run 完成后标 SKIPPED。
+  let guardStatus = 'PENDING'
+  let guardDetail = null
+  if (guard) {
+    if (guard.guard_status === 'PASSED') guardStatus = 'COMPLETED'
+    else if (guard.guard_status === 'REJECTED') guardStatus = 'FAILED'
+    else if (guard.guard_status === 'DEGRADED') guardStatus = 'DEGRADED'
+    else guardStatus = 'COMPLETED'
+    guardDetail = [guard.guard_status, guard.evidence_level].filter(Boolean).join('｜')
+  } else if (runTerminal) {
+    guardStatus = 'SKIPPED'
+  }
+
+  return [
+    { key: 'plan', label: '计划', status: planStatus, detail: planDetail },
+    { key: 'retrieval', label: '检索', status: retrievalStatus, detail: retrievalDetail },
+    { key: 'generation', label: '生成', status: generationStatus, detail: null },
+    { key: 'guard', label: '守卫', status: guardStatus, detail: guardDetail }
+  ]
 }

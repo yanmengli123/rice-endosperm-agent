@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
 
 import {
+  artifactEntriesForConversation,
+  artifactEntriesFromChunk,
   artifactPathsFromChunk,
   artifactsForConversation,
-  sessionArtifactGroupsFromMessages
+  sessionArtifactGroupsFromMessages,
+  toArtifactEntry
 } from '../runArtifacts.js'
 
 const P1 = '/home/gem/user-data/outputs/mcp_results/ricekb_search_1a2b3c4d.json'
@@ -111,5 +114,61 @@ assert.strictEqual(groups[1].label, '第 2 轮')
 // P1 已在第 1 轮出现过，跨轮去重后第 2 轮只剩新文件
 assert.deepStrictEqual(groups[1].paths, ['/x/new.fa'])
 assert.deepStrictEqual(sessionArtifactGroupsFromMessages(null), [])
+
+// ── toArtifactEntry / artifactEntriesFromChunk：条目版保留 origin（来源徽标） ──
+
+assert.deepStrictEqual(toArtifactEntry(P1), {
+  virtual_path: P1,
+  origin: null,
+  name: null,
+  size_bytes: null
+})
+assert.strictEqual(toArtifactEntry(null), null)
+assert.deepStrictEqual(
+  toArtifactEntry({
+    virtual_path: P1,
+    name: 'ricekb_search_1a2b3c4d.json',
+    size_bytes: 4096,
+    origin: { source: 'mcp', mcp_server: 'ricekb', mcp_tool: 'ricekb_gene_profile' }
+  }),
+  {
+    virtual_path: P1,
+    name: 'ricekb_search_1a2b3c4d.json',
+    origin: { source: 'mcp', mcp_server: 'ricekb', mcp_tool: 'ricekb_gene_profile' },
+    size_bytes: 4096,
+    media_type: null
+  }
+)
+
+assert.strictEqual(artifactEntriesFromChunk({}), null)
+assert.deepStrictEqual(
+  artifactEntriesFromChunk({ artifacts: [{ virtual_path: P1, origin: { source: 'mcp' } }, P2, null] }),
+  [
+    { virtual_path: P1, origin: { source: 'mcp' }, name: null, size_bytes: null, media_type: null },
+    { virtual_path: P2, origin: null, name: null, size_bytes: null }
+  ]
+)
+
+// ── artifactEntriesForConversation：与 paths 版同语义，条目带 origin ──────────
+
+assert.deepStrictEqual(
+  artifactEntriesForConversation(
+    {
+      messages: [
+        {
+          type: 'ai',
+          run_id: 'r1',
+          run_artifacts: [{ virtual_path: P1, origin: { source: 'agent_presented' } }]
+        }
+      ]
+    },
+    {}
+  ),
+  [{ virtual_path: P1, origin: { source: 'agent_presented' }, name: null, size_bytes: null, media_type: null }]
+)
+// 快照兜底路径只有字符串路径：降级为无 origin 条目
+assert.deepStrictEqual(artifactEntriesForConversation({ messages: [{ type: 'ai', run_id: 'r1' }] }, { r1: [P1] }), [
+  { virtual_path: P1, origin: null, name: null, size_bytes: null }
+])
 
 console.log('runArtifacts: all assertions passed')

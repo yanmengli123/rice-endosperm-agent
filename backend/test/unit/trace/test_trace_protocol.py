@@ -56,7 +56,6 @@ def test_build_event_accepts_all_registered_categories():
         "SKILL": ("runtime", "skill.runtime.resolved"),
         "KNOWLEDGE": ("search", "knowledge.search.started"),
         "SUBAGENT": ("execution", "subagent.execution.started"),
-        "VALIDATION": ("quality", "validation.quality.passed"),
         "SYSTEM": ("execution", "system.execution.started"),
         "ANSWER": ("render", "answer.render.applied"),
     }

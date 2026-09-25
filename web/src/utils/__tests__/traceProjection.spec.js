@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   applyTraceEvent,
   applyTraceSnapshot,
+  buildTraceStages,
   buildTraceTimeline,
   createTraceState,
   createTraceSummary,
@@ -263,6 +264,185 @@ const baseEvent = (overrides = {}) => ({
   state.spans.a = { span_id: 'a', parent_span_id: 'b', started_at: null }
   state.spans.b = { span_id: 'b', parent_span_id: 'a', started_at: null }
   assert.doesNotThrow(() => buildTraceTimeline(state))
+}
+
+// 11. 阶段条 facets：plan/检索/守卫事件 → buildTraceStages 四阶段
+{
+  const state = createTraceState()
+  applyTraceEvent(
+    state,
+    baseEvent({
+      sequence: 1,
+      category: 'RUN',
+      operation: 'plan',
+      event_type: 'run.plan.resolved',
+      span_id: null,
+      attributes: {
+        source_policy: 'MCP_ONLY',
+        evidence_level: 'E1_DATA_PROVENANCE',
+        retrieval_required: true,
+        requires_mcp: true,
+        satisfiable: false,
+        required_server: 'bio-mcp',
+        required_server_missing: 'bio-mcp',
+        error_code: 'MCP_SERVER_NOT_CONFIGURED'
+      }
+    })
+  )
+  let stages = buildTraceStages(state)
+  assert.equal(stages.length, 4)
+  assert.equal(stages[0].status, 'FAILED')
+  assert.ok(stages[0].detail.includes('点名 bio-mcp'))
+  assert.ok(stages[0].detail.includes('未绑定 bio-mcp'))
+  assert.ok(stages[0].detail.includes('MCP_SERVER_NOT_CONFIGURED'))
+  assert.equal(stages[1].status, 'PENDING')
+
+  applyTraceEvent(
+    state,
+    baseEvent({
+      sequence: 2,
+      category: 'KNOWLEDGE',
+      operation: 'search',
+      event_type: 'knowledge.search.started',
+      span_id: 'kr_1',
+      attributes: { intent: 'ENTITY_LOOKUP' }
+    })
+  )
+  stages = buildTraceStages(state)
+  assert.equal(stages[1].status, 'RUNNING')
+
+  applyTraceEvent(
+    state,
+    baseEvent({
+      sequence: 3,
+      category: 'KNOWLEDGE',
+      operation: 'search',
+      event_type: 'knowledge.search.completed',
+      span_id: 'kr_1',
+      attributes: {
+        claim_count: 2,
+        evidence_count: 5,
+        verbatim_hit_count: 1,
+        intent: 'ENTITY_LOOKUP',
+        contract_status: 'COMPLETED',
+        completeness_status: 'PASS'
+      }
+    })
+  )
+  stages = buildTraceStages(state)
+  assert.equal(stages[1].status, 'COMPLETED')
+  assert.ok(stages[1].detail.includes('5 证据'))
+  assert.ok(stages[1].detail.includes('PASS'))
+
+  applyTraceEvent(
+    state,
+    baseEvent({
+      sequence: 4,
+      category: 'ANSWER',
+      operation: 'source_guard',
+      event_type: 'answer.source_guard.completed',
+      span_id: null,
+      attributes: { guard_status: 'DEGRADED', evidence_level: 'E1_DATA_PROVENANCE' }
+    })
+  )
+  stages = buildTraceStages(state)
+  assert.equal(stages[3].status, 'DEGRADED')
+
+  applyTraceEvent(
+    state,
+    baseEvent({
+      sequence: 5,
+      category: 'MODEL',
+      operation: 'generation',
+      event_type: 'model.generation.started',
+      span_id: 'm-1'
+    })
+  )
+  applyTraceEvent(
+    state,
+    baseEvent({
+      sequence: 6,
+      category: 'RUN',
+      operation: 'execution',
+      event_type: 'run.execution.completed',
+      span_id: 'run',
+      attributes: {}
+    })
+  )
+  stages = buildTraceStages(state)
+  assert.equal(stages[2].status, 'COMPLETED')
+}
+
+// 12. 快照水合：刷新/历史轮档案后阶段条必须来自服务端 summary.attributes facets
+{
+  const state = createTraceState()
+  const applied = applyTraceSnapshot(state, {
+    run_id: 'run-1',
+    snapshot_sequence: 8,
+    projection_sequence: 8,
+    summary: {
+      status: 'completed',
+      model_calls: 1,
+      attributes: {
+        model_spec: 'glm-4.6',
+        plan: {
+          source_policy: 'AUTO',
+          evidence_level: 'E3_CLAIM_EVIDENCE',
+          retrieval_required: true,
+          satisfiable: true
+        },
+        knowledge: {
+          status: 'COMPLETED',
+          evidence_count: 3,
+          claim_count: 1,
+          completeness_status: 'PASS'
+        },
+        guard: { guard_status: 'REJECTED', evidence_level: 'E3_CLAIM_EVIDENCE' },
+        artifact_count: 2,
+        artifacts: [{ name: 'a.json', origin_source: 'mcp', size_bytes: 10 }]
+      }
+    },
+    spans: []
+  })
+  assert.equal(applied, true)
+  assert.equal(state.plan.source_policy, 'AUTO')
+  assert.equal(state.knowledge.evidence_count, 3)
+  assert.equal(state.guard.guard_status, 'REJECTED')
+  assert.equal(state.artifacts.length, 1)
+  assert.equal(state.summary.artifact_count, 2)
+  const stages = buildTraceStages(state)
+  assert.equal(stages[0].status, 'COMPLETED')
+  assert.equal(stages[1].status, 'COMPLETED')
+  assert.equal(stages[3].status, 'FAILED')
+}
+
+// 13. 旧快照无 facets：不炸、走兜底；artifact 计数 NaN 守卫
+{
+  const state = createTraceState()
+  applyTraceSnapshot(state, {
+    run_id: 'run-2',
+    snapshot_sequence: 4,
+    projection_sequence: 4,
+    summary: { status: 'running', model_calls: 1 },
+    spans: []
+  })
+  assert.equal(state.plan, null)
+  assert.equal(Number.isNaN(state.summary.artifact_count), false)
+  applyTraceEvent(
+    state,
+    baseEvent({
+      sequence: 5,
+      category: 'RUN',
+      operation: 'artifact',
+      event_type: 'run.artifact.materialized',
+      span_id: null,
+      attributes: { name: 'b.json', origin_source: 'model', size_bytes: 5 }
+    })
+  )
+  assert.equal(state.summary.artifact_count, 1)
+  const stages = buildTraceStages(state)
+  assert.equal(stages[0].status, 'SKIPPED') // 旧版本运行兜底，而不是空阶段
+  assert.ok(stages[0].detail.includes('旧版本'))
 }
 
 console.log('traceProjection.spec.js: all tests passed')
