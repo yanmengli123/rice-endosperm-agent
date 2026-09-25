@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass
@@ -102,6 +103,8 @@ CANARY_CONTRACT_PROBES: dict[str, tuple[CanaryDataProbe, ...]] = {
 }
 
 _EMPTY_RESULT_STATUSES = frozenset({"NOT_FOUND", "NO_EVIDENCE", "EMPTY", "CONTRACT_MISMATCH"})
+_TRANSIENT_RESULT_STATUSES = frozenset({"ERROR", "UNAVAILABLE", "TIMEOUT", "UNAVAILABLE_ERROR"})
+_PROBE_MAX_ATTEMPTS = 2
 
 
 def _p95(samples: list[float]) -> int:
@@ -128,10 +131,16 @@ async def _probe_data(slug: str, runtime_config: dict[str, Any]) -> tuple[bool, 
     status = "OK"
     probes = (CANARY_DATA_PROBES[slug], *CANARY_CONTRACT_PROBES.get(slug, ()))
     for probe in probes:
-        result = await get_host().call_tool(slug, runtime_config, probe.tool_name, dict(probe.arguments))
+        result = None
+        for attempt in range(1, _PROBE_MAX_ATTEMPTS + 1):
+            result = await get_host().call_tool(slug, runtime_config, probe.tool_name, dict(probe.arguments))
+            status = str((result.provenance or {}).get("provider_status") or ("ERROR" if result.is_error else "OK"))
+            transient = result.is_error or status.upper() in _TRANSIENT_RESULT_STATUSES
+            if not transient or attempt == _PROBE_MAX_ATTEMPTS:
+                break
+            await asyncio.sleep(0.25 * attempt)
         elapsed = int((time.monotonic() - started) * 1000)
-        status = str((result.provenance or {}).get("provider_status") or ("ERROR" if result.is_error else "OK"))
-        if result.is_error or status.upper() in _EMPTY_RESULT_STATUSES:
+        if result is None or result.is_error or status.upper() in _EMPTY_RESULT_STATUSES | _TRANSIENT_RESULT_STATUSES:
             return False, status, elapsed
         text = str(result.text or "")
         if not text.strip():

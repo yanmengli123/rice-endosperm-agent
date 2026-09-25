@@ -86,6 +86,10 @@ def classify_mcp_failure(value: Any, *, stage_hint: str | None = None) -> McpFai
             "getaddrinfo",
             "network is unreachable",
             "connecterror",
+            "fetch failed",
+            "bad gateway",
+            "service unavailable",
+            "tunnel connection failed",
         )
     ):
         return McpFailureClassification(

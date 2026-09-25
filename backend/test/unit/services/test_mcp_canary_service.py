@@ -154,6 +154,41 @@ async def test_data_probe_requires_expected_golden_markers(monkeypatch):
     assert status == "CONTRACT_MISMATCH"
 
 
+@pytest.mark.asyncio
+async def test_data_probe_retries_one_transient_failure(monkeypatch):
+    from yuxi.agents.mcp import host as host_module
+
+    calls = 0
+
+    class _Host:
+        async def call_tool(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return SimpleNamespace(
+                    text="Error: fetch failed",
+                    is_error=True,
+                    provenance={"provider_status": "UNAVAILABLE"},
+                )
+            return SimpleNamespace(
+                text='{"status":"FOUND","resultList":{"result":[{"title":"WAXY rice endosperm"}]}}',
+                is_error=False,
+                provenance={"provider_status": "FOUND"},
+            )
+
+    monkeypatch.setattr(host_module, "get_host", lambda: _Host())
+    monkeypatch.setattr(mcp_canary_service.asyncio, "sleep", lambda _seconds: _async_noop())
+    monkeypatch.setitem(mcp_canary_service.CANARY_CONTRACT_PROBES, "gene-authority", ())
+    ok, status, _elapsed = await mcp_canary_service._probe_data("gene-authority", {})
+    assert ok is True
+    assert status == "FOUND"
+    assert calls == 2
+
+
+async def _async_noop():
+    return None
+
+
 def test_contract_probes_cover_sequence_and_all_authority_paths():
     rice_tools = {probe.tool_name for probe in mcp_canary_service.CANARY_CONTRACT_PROBES["ricekb"]}
     authority_tools = {

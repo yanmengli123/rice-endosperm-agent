@@ -19,6 +19,8 @@ from yuxi.agents.mcp.execution import argument_shape
         ("HTTP status code 429 Too Many Requests", "MCP_RATE_LIMITED", "UNAVAILABLE", "provider"),
         ("HTTP status 503", "MCP_PROVIDER_5XX", "UNAVAILABLE", "provider"),
         ("connection refused", "MCP_TRANSPORT_FAILED", "UNAVAILABLE", "transport"),
+        ("TypeError: fetch failed", "MCP_TRANSPORT_FAILED", "UNAVAILABLE", "transport"),
+        ("Tunnel connection failed: 502 Bad Gateway", "MCP_TRANSPORT_FAILED", "UNAVAILABLE", "transport"),
     ],
 )
 def test_failure_classifier_is_closed_and_structured(message, error_class, provider_status, stage):
@@ -44,4 +46,3 @@ def test_argument_shape_never_contains_values():
     assert "secret-value" not in rendered
     assert shape["fields"]["taxon"] == {"type": "string"}
     assert shape["fields"]["identifiers"] == {"type": "array", "item_types": ["string"]}
-
