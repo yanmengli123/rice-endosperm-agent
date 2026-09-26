@@ -853,6 +853,43 @@ def _record_mention_fulfillment(
         manifest.status = "DEGRADED"
 
 
+def _mention_fulfillment_summary(manifest: RunSourceManifest) -> dict[str, int]:
+    """点名兑现率原料：按执行者类别汇总 MENTION_(UN)FULFILLED 记账。
+
+    分母 = 执行者类（mcp/skill/subagent）点名总数，分子 = 兑现数；
+    REQUIRED 未兑现数是 manifest DEGRADED 的直接驱动量。键集合与
+    ``run.mentions.finalized`` 协议 schema 一一对应，多一个键都会被剥离。
+    """
+    summary: dict[str, int] = {
+        "mcp_total": 0,
+        "mcp_fulfilled": 0,
+        "skill_total": 0,
+        "skill_fulfilled": 0,
+        "subagent_total": 0,
+        "subagent_fulfilled": 0,
+        "required_total": 0,
+        "required_unfulfilled": 0,
+    }
+    for amendment in manifest.amendments:
+        if not isinstance(amendment, dict):
+            continue
+        kind = str(amendment.get("type") or "")
+        if kind not in {"MENTION_FULFILLED", "MENTION_UNFULFILLED"}:
+            continue
+        mention_type = str(amendment.get("mention_type") or "")
+        if f"{mention_type}_total" not in summary:
+            continue
+        fulfilled = kind == "MENTION_FULFILLED"
+        summary[f"{mention_type}_total"] += 1
+        if fulfilled:
+            summary[f"{mention_type}_fulfilled"] += 1
+        if amendment.get("strength") == "REQUIRED":
+            summary["required_total"] += 1
+            if not fulfilled:
+                summary["required_unfulfilled"] += 1
+    return summary
+
+
 def _append_mcp_source_uses(
     manifest: RunSourceManifest,
     *,
@@ -1493,13 +1530,19 @@ def _finalize_mention_skills(
     """技能兑现回写：预激活是确定性后端行为——slug 仍在可读闭包内即 FULFILLED。
 
     readable 集不可得时按 Run 创建时的鉴权结论记 FULFILLED（创建时已验证
-    available ∩ Agent 配置）；运行中被撤权 → UNFULFILLED（SKILL_REVOKED_MIDRUN），
-    强度语义与其他执行者一致。
+    available ∩ Agent 配置）；被 plan 分派剔除（SKILL_PLAN_DISPATCH amendment）
+    → UNFULFILLED（SKILL_PLAN_DISPATCH_DROPPED，策略性结果而非治理事件）；
+    其余 readable 缺席 → UNFULFILLED（SKILL_REVOKED_MIDRUN），强度语义与其他
+    执行者一致。
     """
     pinned = _pinned_mention_items(mention_resolution, "skill")
     if not pinned:
         return
     readable = {str(slug) for slug in (readable_skills or [])}
+    plan_dropped: set[str] = set()
+    for amendment in manifest.amendments:
+        if isinstance(amendment, dict) and amendment.get("type") == "SKILL_PLAN_DISPATCH":
+            plan_dropped.update(str(slug) for slug in amendment.get("dropped_skills") or [])
     for slug, strength in pinned:
         if not readable or slug in readable:
             _record_mention_fulfillment(
@@ -1509,6 +1552,15 @@ def _finalize_mention_skills(
                 strength=strength,
                 fulfilled=True,
                 reason_code="SKILL_PREACTIVATED",
+            )
+        elif slug in plan_dropped:
+            _record_mention_fulfillment(
+                manifest,
+                mention_type="skill",
+                resource_id=slug,
+                strength=strength,
+                fulfilled=False,
+                reason_code="SKILL_PLAN_DISPATCH_DROPPED",
             )
         else:
             _record_mention_fulfillment(
@@ -2452,6 +2504,11 @@ async def stream_agent_chat(
         summary=(
             f"来源策略 {turn_plan.source.policy.value}｜证据等级 {turn_plan.evidence.level.value}"
             + (f"｜点名服务器 {turn_plan.required_server}" if turn_plan.required_server else "")
+            + (
+                "｜多重点名 MCP：未建立单一服务器强绑定"
+                if "MENTION_MCP_MULTI_PINNED_UNBOUND" in turn_plan.reason_codes
+                else ""
+            )
             + ("" if turn_plan.satisfiable else f"｜计划不可满足：{turn_plan.error_code or 'UNKNOWN'}")
         ),
         attributes={
@@ -3163,6 +3220,22 @@ async def stream_agent_chat(
             mention_resolution=frozen_mention_resolution,
             readable_skills=getattr(context, "_readable_skills", None),
         )
+        mention_fulfillment = _mention_fulfillment_summary(source_manifest)
+        if (
+            mention_fulfillment["mcp_total"]
+            + mention_fulfillment["skill_total"]
+            + mention_fulfillment["subagent_total"]
+            > 0
+        ):
+            # 点名兑现率原料（仅存在执行者类点名时发射，事件分母即"点名轮次"）：
+            # 逐类别兑现数支撑 @ 体系健康度指标与"用户总 @ 未启用服务器"类培训信号。
+            emit_trace(
+                category="RUN",
+                operation="mentions",
+                event_type="run.mentions.finalized",
+                title="提及兑现汇总",
+                attributes=mention_fulfillment,
+            )
         if _settle_source_manifest_status(turn_plan, source_manifest, mcp_source_valid):
             accumulated_content = [_plan_failure_answer(turn_plan)]
             plan_failure_answer_active = True

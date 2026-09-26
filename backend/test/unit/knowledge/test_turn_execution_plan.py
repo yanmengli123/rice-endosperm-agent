@@ -369,6 +369,35 @@ def test_named_unbound_builtin_server_fails_explicitly_without_silent_substituti
     assert "MCP_SERVER_NOT_CONFIGURED" in plan.reason_codes
 
 
+def test_multi_mcp_mentions_record_unbound_reason_code():
+    """多重 @mcp 点名：单一强绑定让位，但必须显式留痕（此前静默）。"""
+    plan = plan_turn(
+        "查询 Wx 的官方记录",
+        has_knowledge_scope=False,
+        configured_mcps=["gene-authority", "ricekb"],
+        known_mcps=["gene-authority", "ricekb"],
+        mentioned_mcp_slugs=["gene-authority", "ricekb"],
+    )
+
+    assert plan.source.policy == SourcePolicy.MCP_ONLY
+    assert plan.required_server is None
+    assert plan.required_server_missing is None
+    assert "MENTION_MCP_MULTI_PINNED_UNBOUND" in plan.reason_codes
+
+
+def test_single_mcp_mention_does_not_record_multi_pin_code():
+    plan = plan_turn(
+        "查询 Wx 的官方记录",
+        has_knowledge_scope=False,
+        configured_mcps=["gene-authority", "ricekb"],
+        known_mcps=["gene-authority", "ricekb"],
+        mentioned_mcp_slugs=["gene-authority"],
+    )
+
+    assert plan.required_server == "gene-authority"
+    assert "MENTION_MCP_MULTI_PINNED_UNBOUND" not in plan.reason_codes
+
+
 # ── 六问 golden：非 MCP 题永不触发 MCP 义务（MCP 混乱回归锁）─────────────
 
 

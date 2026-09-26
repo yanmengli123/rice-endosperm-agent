@@ -238,6 +238,14 @@ class SkillsMiddleware(AgentMiddleware):
         mention_resolution = getattr(runtime_context, "_mention_resolution", None)
         if isinstance(mention_resolution, dict):
             mention_pinned = normalize_string_list(mention_resolution.get("skill_slugs") or [])
+        readable_skills = self._get_readable_skills(runtime_context)
+        if mention_pinned:
+            # plan 分派（_apply_skill_plan_dispatch）先于本中间件执行，可能已把
+            # MCP 依赖型 Skill 剔出可读闭包。pinned 预激活与 readable 取交集：
+            # 输出契约与依赖工具要么同时生效、要么同时不生效，避免"契约注入了
+            # 提示词、依赖工具却被 readable 过滤阻断"的分裂状态；交集同时保留
+            # 运行中被撤权时的失败关闭语义。
+            mention_pinned = [slug for slug in mention_pinned if slug in readable_skills]
 
         if self.enable_skills_prompt:
             prompt_skills = getattr(runtime_context, "_prompt_skills", None)
@@ -259,7 +267,6 @@ class SkillsMiddleware(AgentMiddleware):
         if mention_pinned:
             activated = list(dict.fromkeys([*mention_pinned, *activated]))
 
-        readable_skills = self._get_readable_skills(runtime_context)
         activated = [slug for slug in normalize_string_list(activated) if slug in readable_skills]
 
         deps_bundle = self._build_dependency_bundle(activated, runtime_context)

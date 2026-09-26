@@ -428,3 +428,55 @@ async def test_awrap_model_call_preactivates_mention_pinned_skills(monkeypatch):
 
     assert result == "ok"
     assert captured["tools"] == ["tool-a"]
+
+
+@pytest.mark.asyncio
+async def test_awrap_model_call_pinned_skill_respects_plan_dispatch_drop():
+    """pinned @skill 服从 plan 分派：被剔出可读闭包后，契约不进提示词、工具不放出。
+
+    回归锁（pinned × plan 分派分裂状态）：修复前 mention_pinned 无条件前置注入，
+    经 _runtime_skill_metadata 拿到完整元数据，输出契约照进提示词，而依赖工具
+    被 readable 过滤阻断——同一 Skill 一半生效一半失效。
+    """
+    context = SimpleNamespace(
+        _prompt_skills=["beta"],
+        _readable_skills=["beta"],
+        _runtime_skill_metadata={
+            "alpha": {"name": "Alpha", "description": "alpha desc", "path": "/home/gem/skills/alpha/SKILL.md"},
+            "beta": {"name": "Beta", "description": "beta desc", "path": "/home/gem/skills/beta/SKILL.md"},
+        },
+        _runtime_skill_dependency_map={
+            "alpha": {"tools": ["tool-a"], "mcps": [], "skills": []},
+            "beta": {"tools": ["tool-b"], "mcps": [], "skills": []},
+        },
+        mcps=[],
+        _mention_resolution={"skill_slugs": ["alpha"]},
+    )
+
+    class FakeRequest:
+        def __init__(self, *, system_message=None, tools=None):
+            self.runtime = SimpleNamespace(context=context)
+            self.state = {}
+            self.tools = tools or []
+            self.system_message = system_message or SystemMessage(content="base")
+
+        def override(self, **kwargs):
+            return FakeRequest(
+                system_message=kwargs.get("system_message", self.system_message),
+                tools=kwargs.get("tools", self.tools),
+            )
+
+    captured = {}
+
+    async def handler(request):
+        captured["system_message"] = request.system_message
+        captured["tools"] = [tool.name for tool in request.tools]
+        return "ok"
+
+    result = await SkillsMiddleware().awrap_model_call(FakeRequest(), handler)
+
+    assert result == "ok"
+    prompt_text = _system_message_text(captured["system_message"])
+    assert "Alpha" not in prompt_text
+    assert "Beta" in prompt_text
+    assert captured["tools"] == []

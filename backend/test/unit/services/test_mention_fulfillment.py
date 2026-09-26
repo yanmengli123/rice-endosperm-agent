@@ -15,6 +15,7 @@ from yuxi.knowledge.planning.turn_execution_plan import RunSourceManifest
 from yuxi.services.chat_service import (
     _finalize_mention_skills,
     _frozen_mention_resolution,
+    _mention_fulfillment_summary,
     _pinned_mention_items,
     _record_mention_fulfillment,
     _settle_source_manifest_status,
@@ -189,3 +190,83 @@ def test_mention_skills_unfulfilled_when_revoked_midrun():
     assert manifest.amendments[-1]["type"] == "MENTION_UNFULFILLED"
     assert manifest.amendments[-1]["reason_code"] == "SKILL_REVOKED_MIDRUN"
     assert manifest.status == "DEGRADED"
+
+
+# ---- pinned @skill × plan 分派：策略剔除 ≠ 撤权 ----
+
+
+def test_pinned_skill_plan_dispatch_drop_is_not_revocation():
+    """pinned @skill 命中 SKILL_PLAN_DISPATCH amendment 时记策略性 reason code，
+    不再误标治理事件 SKILL_REVOKED_MIDRUN（修复前审计口径把分派当撤权）。"""
+    resolution = {"mentions": [{"type": "skill", "resource_id": "rice-source-agent", "status": "RESOLVED"}]}
+    manifest = _manifest()
+    manifest.amendments.append(
+        {
+            "type": "SKILL_PLAN_DISPATCH",
+            "dropped_skills": ["rice-source-agent"],
+            "reason_code": "STRUCTURED_DATABASE_FORBIDDEN",
+        }
+    )
+    _finalize_mention_skills(manifest, mention_resolution=resolution, readable_skills=["glossary-agent"])
+    assert manifest.amendments[-1]["type"] == "MENTION_UNFULFILLED"
+    assert manifest.amendments[-1]["reason_code"] == "SKILL_PLAN_DISPATCH_DROPPED"
+    assert manifest.status == "DEGRADED"
+
+
+def test_pinned_skill_revocation_still_fails_closed_without_dispatch_drop():
+    resolution = {"mentions": [{"type": "skill", "resource_id": "ghost", "status": "RESOLVED"}]}
+    manifest = _manifest()
+    manifest.amendments.append(
+        {
+            "type": "SKILL_PLAN_DISPATCH",
+            "dropped_skills": ["other-skill"],
+            "reason_code": "STRUCTURED_DATABASE_FORBIDDEN",
+        }
+    )
+    _finalize_mention_skills(manifest, mention_resolution=resolution, readable_skills=["alpha"])
+    assert manifest.amendments[-1]["reason_code"] == "SKILL_REVOKED_MIDRUN"
+
+
+# ---- 点名兑现率汇总（run.mentions.finalized 事件原料）----
+
+
+def test_mention_fulfillment_summary_counts_by_type_and_strength():
+    manifest = _manifest()
+    _record_mention_fulfillment(
+        manifest, mention_type="mcp", resource_id="ricekb", strength="REQUIRED", fulfilled=True, reason_code=None
+    )
+    _record_mention_fulfillment(
+        manifest,
+        mention_type="mcp",
+        resource_id="bio-mcp",
+        strength="REQUIRED",
+        fulfilled=False,
+        reason_code="MENTION_MCP_NOT_INVOKED",
+    )
+    _record_mention_fulfillment(
+        manifest,
+        mention_type="skill",
+        resource_id="writing",
+        strength="PREFERRED",
+        fulfilled=True,
+        reason_code="SKILL_PREACTIVATED",
+    )
+    manifest.amendments.append({"type": "SKILL_PLAN_DISPATCH"})  # 非兑现记账，不计入
+
+    summary = _mention_fulfillment_summary(manifest)
+
+    assert summary["mcp_total"] == 2
+    assert summary["mcp_fulfilled"] == 1
+    assert summary["skill_total"] == 1
+    assert summary["skill_fulfilled"] == 1
+    assert summary["subagent_total"] == 0
+    assert summary["required_total"] == 2
+    assert summary["required_unfulfilled"] == 1
+
+
+def test_mention_fulfillment_summary_keys_match_protocol_schema():
+    """事件 attributes 是封闭协议：helper 返回的键集合必须与 schema 完全一致。"""
+    from yuxi.trace.protocol import EVENT_ATTRIBUTE_SCHEMAS
+
+    summary = _mention_fulfillment_summary(_manifest())
+    assert set(summary) == set(EVENT_ATTRIBUTE_SCHEMAS["run.mentions.finalized"])

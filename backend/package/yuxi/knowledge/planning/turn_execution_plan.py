@@ -522,6 +522,11 @@ def plan_turn(
             )
         if required_server:
             reason_codes.append("EXPLICIT_MCP_SERVER_BOUND")
+        if len(mentioned) > 1 and required_server is None and required_server_missing is None:
+            # 多重 @mcp 点名：单一服务器强绑定让位（required_server 后验不触发），
+            # 逐提及实调后验（MENTION_MCP_NOT_INVOKED）仍然生效。显式记录供审计，
+            # 避免"强绑定为何未生效"只能从失败文案反推。
+            reason_codes.append("MENTION_MCP_MULTI_PINNED_UNBOUND")
 
     if hybrid:
         source_policy = SourcePolicy.HYBRID_EXPLICIT

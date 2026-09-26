@@ -104,6 +104,20 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
             "error_code",
         }
     ),
+    # 提及兑现汇总（点名后验）：三个 mention finalizer 记账完成后发射，仅在存在
+    # 执行者类（mcp/skill/subagent）点名时发射——事件分母即"点名轮次"。
+    "run.mentions.finalized": frozenset(
+        {
+            "mcp_total",
+            "mcp_fulfilled",
+            "skill_total",
+            "skill_fulfilled",
+            "subagent_total",
+            "subagent_fulfilled",
+            "required_total",
+            "required_unfulfilled",
+        }
+    ),
     # 产物物化（确定性通道 + 模型交付通道统一留痕）：过程中可见，不必等终态清单。
     "run.artifact.materialized": frozenset(
         {"origin_source", "mcp_server", "mcp_tool", "size_bytes", "media_type", "name", "sha256"}
@@ -241,6 +255,7 @@ EVENT_EMITTER_INDEX: dict[str, tuple[tuple[str, str], ...]] = {
         ("services/trace_service.py", "record_run_lost"),
     ),
     "run.plan.resolved": (("services/chat_service.py", "run.plan.resolved"),),
+    "run.mentions.finalized": (("services/chat_service.py", "run.mentions.finalized"),),
     "run.artifact.materialized": (("agents/mcp/artifact_materializer.py", "run.artifact.materialized"),),
     "model.generation.started": (("agents/middlewares/trace.py", "model.generation.started"),),
     "model.generation.first_visible_token": (("services/run_worker.py", "model.generation.first_visible_token"),),

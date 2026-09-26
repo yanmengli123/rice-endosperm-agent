@@ -49,6 +49,9 @@ class MentionType(StrEnum):
     TABLE = "table"
     FILE = "file"
     MCP = "mcp"
+    # 预留二阶段（_resolve_actor 恒定 MENTION_TYPE_PENDING_PHASE_2 拒绝）：
+    # 枚举成员仅为 wire 兼容保留；本阶段不进前端弹层、不进用户文档——工具
+    # 可见性由 plan 过滤 + Skill 依赖门控控制，不暴露给用户点名。
     TOOL = "tool"
     SKILL = "skill"
     SUBAGENT = "subagent"
@@ -1016,6 +1019,10 @@ async def load_mention_authorizer(
 
         subagents = await AgentRepository(db).list_visible_subagents(user=user)
         authorizer.available_subagent_slugs = {str(item.slug) for item in subagents if item.slug}
+        # 与运行时语义刻意不对称（fail-closed）：运行时未配置 subagents（None/[]）
+        # 展开为"全部可见子智能体"（context._EMPTY_ALL_CONTEXT_FIELDS），而 @ 鉴权
+        # 在未配置时拒绝一切 @subagent——@ 是显式收窄契约，不能默认放大委派面。
+        # 因此要使用 @subagent，必须在 Agent 配置里显式列出子智能体白名单。
         allowed = _agent_allowed_slugs(agent_config, "subagents")
         authorizer.agent_subagent_slugs = set() if allowed is None else allowed
 
