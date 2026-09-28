@@ -33,7 +33,10 @@ from fastapi import HTTPException
 # 1.8：citation_ready v4 加法——tables[] 表格卡片投影（ADR-0008 P2：chunk
 #      表块受控解析为行列 JSON，table_index 独立下标域）；压缩白名单新增
 #      tables；能力位 table_cards。
-AGENT_RUN_PROTOCOL_VERSION = "1.8"
+# 1.9：followup_suggestions 加法——回答终态 finished 前附带的可点击下一问
+#      清单（custom 事件 yuxi.followup_suggestions，SSE 与消息 extra_metadata
+#      同源）；压缩白名单新增 followup_suggestions；能力位 followup_suggestions。
+AGENT_RUN_PROTOCOL_VERSION = "1.9"
 # 服务端仍兼容的最低协议版本（桌面端 run_context 校验下限同源）。
 AGENT_RUN_MIN_SUPPORTED_PROTOCOL_VERSION = "1.2"
 
@@ -66,6 +69,9 @@ AGENT_RUN_CAPABILITIES: tuple[str, ...] = (
     # summary.attributes facets（plan/knowledge/guard/artifacts），阶段
     # 状态可从快照 summary 恢复，不必重放全部事件。
     "trace_stage_facets",
+    # followup_suggestions 事件：回答终态 finished 前下发的追问建议清单
+    # （同时挂 AI 消息 extra_metadata；字段缺席 ⟺ 本轮未生成建议）。
+    "followup_suggestions",
 )
 
 

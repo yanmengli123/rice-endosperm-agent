@@ -75,7 +75,7 @@ async def main() -> int:
         try:
             # 0) 协议能力位 + 记录开关原值（finally 恢复的依据）
             proto = (await client.get("/api/agent/protocol")).json()
-            checks.append((proto.get("protocol_version") == "1.8", f"协议版本 1.8（实测 {proto.get('protocol_version')}）"))
+            checks.append((proto.get("protocol_version") == "1.9", f"协议版本 1.9（实测 {proto.get('protocol_version')}）"))
             checks.append(("figure_refs" in proto.get("capabilities", []), "能力位含 figure_refs"))
             checks.append(("table_cards" in proto.get("capabilities", []), "能力位含 table_cards"))
             config_view = (await client.get("/api/system/config")).json()

@@ -38,3 +38,16 @@ class ChatBotContext(BaseContext):
             "auth": "admin",
         },
     )
+
+    followup_suggestions: bool = field(
+        default=False,
+        metadata={
+            "name": "追问建议",
+            "description": (
+                "开启后，每轮回答完成时基于本次问答生成最多 4 个可点击的追问建议，"
+                "随回答一并下发并挂到该条回答上（刷新后仍可见）。生成复用本智能体解析出的模型，"
+                "token 计入本次运行用量；生成失败仅降级为不展示，不影响回答。"
+            ),
+            "type": "bool",
+        },
+    )

@@ -40,6 +40,7 @@ REQUIRED_EVENT_TYPES = {
     "knowledge.search.skipped",
     "answer.source_guard.completed",
     "answer.render.applied",
+    "answer.followup_suggestions.completed",
     "run.execution.completed",
 }
 

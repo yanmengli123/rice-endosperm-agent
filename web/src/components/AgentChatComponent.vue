@@ -86,7 +86,7 @@
             >
               显示更早的 {{ hiddenConversationCount }} 轮对话
             </button>
-            <template v-for="row in conversationRows" :key="row.key">
+            <template v-for="(row, rowIndex) in conversationRows" :key="row.key">
               <div v-if="row.type === 'conversation'" class="conv-box">
                 <template
                   v-for="(displayItem, itemIndex) in row.displayItems"
@@ -141,6 +141,16 @@
                   :is-latest-message="false"
                   :sources="getConversationSources(row.conv)"
                   :thread-id="currentChatId"
+                />
+                <!-- 追问建议：仅整个线程最后一条 AI 回答挂载；点击即发送 -->
+                <FollowupSuggestionsBar
+                  v-if="
+                    followupSuggestionsEnabled &&
+                    isLastConversationRow(rowIndex) &&
+                    getConvFollowupSuggestions(row.conv).length
+                  "
+                  :suggestions="getConvFollowupSuggestions(row.conv)"
+                  @select="handleFollowupQuestionSelect"
                 />
               </div>
               <div v-else class="chat-inline-notice">
@@ -1116,6 +1126,7 @@ import { useAgentRunStream } from '@/composables/useAgentRunStream'
 import { useConversationWindowing } from '@/composables/useConversationWindowing'
 import { useEvidenceAnchor } from '@/composables/useEvidenceAnchor'
 import {
+  CAPABILITY_FOLLOWUP_SUGGESTIONS,
   CAPABILITY_TRACE_STAGE_FACETS,
   useProtocolCapabilities
 } from '@/composables/useProtocolCapabilities'
@@ -1135,6 +1146,7 @@ import {
   inlineFiguresForMessage,
   tablesForMessage
 } from '@/utils/figureCard'
+import { followupSuggestionsForMessage } from '@/utils/followupSuggestions'
 import {
   exportGraphSnapshotUrl,
   extractGraphSnapshotFromHistory,
@@ -1151,6 +1163,7 @@ import { buildStructuredMentions, formatMentionToken } from '@/utils/mention_uti
 import TraceStageBar from '@/components/trace/TraceStageBar.vue'
 import TraceTimelinePanel from '@/components/trace/TraceTimelinePanel.vue'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
+import FollowupSuggestionsBar from '@/components/FollowupSuggestionsBar.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import AttachmentTmpUploadModal from '@/components/AttachmentTmpUploadModal.vue'
 import SubagentThreadModal from '@/components/SubagentThreadModal.vue'
@@ -1249,6 +1262,8 @@ const isRefreshingState = ref(false)
 // 隐藏阶段条并留痕，而不是靠数据缺席隐式兜底；能力查询失败不阻塞对话。
 const { ensureCapabilities, hasCapability } = useProtocolCapabilities()
 const traceStageFacetsAvailable = computed(() => hasCapability(CAPABILITY_TRACE_STAGE_FACETS))
+// 追问建议能力位（followup_suggestions）：旧服务端未声明时整块不渲染
+const followupSuggestionsEnabled = computed(() => hasCapability(CAPABILITY_FOLLOWUP_SUGGESTIONS))
 ensureCapabilities().then(() => {
   if (!traceStageFacetsAvailable.value) {
     reportTraceDegradation({ runId: null, reason: 'capability_trace_stage_facets_missing' })
@@ -1682,6 +1697,24 @@ const inlineTables = (message, conv) =>
 // 答案气泡内关系图：落库载荷优先，其次使用当前会话按 run 暂存的 SSE 快照
 const inlineGraph = (message, conv) =>
   inlineGraphForMessage(message, conv, currentThreadState.value?.graphsByRun)
+// 追问建议：该轮最后一条 AI 消息的数据源（落库优先 → followupSuggestionsByRun 桥接）
+const getConvFollowupSuggestions = (conv) => {
+  const messages = Array.isArray(conv?.messages) ? conv.messages : []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message && (message.type === 'ai' || message.role === 'assistant')) {
+      return followupSuggestionsForMessage(
+        message,
+        conv,
+        currentThreadState.value?.followupSuggestionsByRun
+      )
+    }
+  }
+  return []
+}
+// 仅整个线程最后一个 conversation 行挂追问建议（新一轮开始后旧建议自然消失）
+const isLastConversationRow = (rowIndex) =>
+  conversationRows.value.slice(rowIndex + 1).every((row) => row.type !== 'conversation')
 // 跨文献歧义的候选文献（只含文档身份）；点选后以 @doc 提及重新提问
 const currentLocatorCandidates = computed(() => {
   const candidates = currentChatId.value
@@ -3862,6 +3895,13 @@ const handleSendMessage = async ({ image } = {}) => {
 }
 
 // 发送或中断
+// 追问建议点击：原样作为用户消息发送（复用唯一发送路径，配额/审计与手打一致）
+const handleFollowupQuestionSelect = async (question) => {
+  if (!question || isProcessing.value || sendCooldownActive.value || props.sendDisabled) return
+  userInput.value = question
+  await handleSendMessage()
+}
+
 const handleSendOrStop = async (payload) => {
   if (sendCooldownActive.value) {
     return

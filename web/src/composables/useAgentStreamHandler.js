@@ -337,6 +337,22 @@ export function useAgentStreamHandler({
           : []
         return false
 
+      case 'followup_suggestions': {
+        // 追问建议：按 run 暂存（figuresByRun 同款桥接语义），渲染在该轮
+        // 最后一条 AI 消息下方；历史回读后以消息 extra_metadata 为准
+        const runId = String(chunk.run_id || threadState.activeRunId || '')
+        const suggestions = Array.isArray(chunk.followup_suggestions)
+          ? chunk.followup_suggestions.filter((item) => typeof item === 'string' && item.trim())
+          : []
+        if (runId && suggestions.length) {
+          threadState.followupSuggestionsByRun = {
+            ...(threadState.followupSuggestionsByRun || {}),
+            [runId]: suggestions.map((item) => item.trim())
+          }
+        }
+        return false
+      }
+
       case 'finished':
         streamSmoother?.flushThread(threadId)
         // 先标记流式结束，但保持消息显示直到历史记录加载完成

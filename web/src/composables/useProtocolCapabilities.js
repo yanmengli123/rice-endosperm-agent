@@ -14,6 +14,7 @@ const capabilities = ref(null)
 let loadPromise = null
 
 export const CAPABILITY_TRACE_STAGE_FACETS = 'trace_stage_facets'
+export const CAPABILITY_FOLLOWUP_SUGGESTIONS = 'followup_suggestions'
 
 export function useProtocolCapabilities() {
   const ensureCapabilities = () => {

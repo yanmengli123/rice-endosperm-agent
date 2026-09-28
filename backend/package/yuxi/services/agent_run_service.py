@@ -362,6 +362,8 @@ COMPACT_CHUNK_FIELDS: tuple[str, ...] = (
     # 终态 finished chunk 附带的 run 级产物清单（run_artifacts 权威投影，
     # 仅确有产物时携带；漏加白名单会被压缩层静默剥离——figures 事故红线）
     "artifacts",
+    # 追问建议（followup_suggestions 事件，finished 前附带的可点击下一问清单）
+    "followup_suggestions",
 )
 
 

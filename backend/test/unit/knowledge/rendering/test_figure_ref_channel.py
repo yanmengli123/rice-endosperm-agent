@@ -477,7 +477,8 @@ def test_protocol_capability_and_version():
 
     assert "figure_refs" in AGENT_RUN_CAPABILITIES
     assert "table_cards" in AGENT_RUN_CAPABILITIES
-    assert AGENT_RUN_PROTOCOL_VERSION == "1.8"
+    assert "followup_suggestions" in AGENT_RUN_CAPABILITIES
+    assert AGENT_RUN_PROTOCOL_VERSION == "1.9"
 
 
 def test_config_switch_defaults_off_and_independent():

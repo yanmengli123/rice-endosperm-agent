@@ -63,6 +63,9 @@ export function useAgentThreadState({
         verifiedGraphSnapshot: null,
         // run_id → graph_snapshot_v1，桥接流末事件与历史消息回读。
         graphsByRun: {},
+        // 追问建议的会话级暂存：run_id → string[]（桥接语义同 figuresByRun；
+        // 历史回读后以消息 extra_metadata.followup_suggestions 为准）
+        followupSuggestionsByRun: {},
         // MCP 物化产物按轮快照：run_id → 虚拟路径列表（agent_state 整体替换会抹掉
         // 线程级 artifacts，finished 时快照进当前 run；历史回读后以 run_artifacts 投影为准）
         runArtifactsByRun: {},

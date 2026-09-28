@@ -166,6 +166,11 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
         }
     ),
     "answer.render.applied": frozenset({"renderer_version", "boundary", "eligible", "applied", "fallback_reason"}),
+    # 追问建议生成（followup_suggestions）：status ∈ {completed, failed}；
+    # failed 轮 question_count 恒 0，token 仅成功轮携带
+    "answer.followup_suggestions.completed": frozenset(
+        {"status", "question_count", "model_spec", "input_tokens", "output_tokens", "elapsed_ms"}
+    ),
     "subagent.execution.started": frozenset({"tool", "args_digest"}),
     "subagent.execution.completed": frozenset(),
     "subagent.execution.failed": _COMMON_ATTRIBUTES,
@@ -293,6 +298,7 @@ EVENT_EMITTER_INDEX: dict[str, tuple[tuple[str, str], ...]] = {
     "mcp.canary.completed": (("services/mcp_canary_service.py", "mcp.canary.completed"),),
     "answer.source_guard.completed": (("services/chat_service.py", "answer.source_guard.completed"),),
     "answer.render.applied": (("services/chat_service.py", "answer.render.applied"),),
+    "answer.followup_suggestions.completed": (("services/chat_service.py", "answer.followup_suggestions."),),
     "subagent.execution.started": (("agents/middlewares/trace.py", "SUBAGENT_TOOL_NAME"),),
     "subagent.execution.completed": (
         ("agents/middlewares/trace.py", "finish_span"),
