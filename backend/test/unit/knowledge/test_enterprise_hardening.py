@@ -1012,6 +1012,20 @@ def test_i4_unsupported_mechanism_sentence_removed_even_with_pool():
     assert "panel" in enforced
 
 
+def test_i4_removes_dangling_connector_fragment_after_claim_deletion():
+    from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
+
+    text = "Figure S17–S20 共同从四个层面为主结论中；这说明 OsMYB73 调控 Wx。"
+    enforced, removed = enforce_explanation_grounding(
+        text,
+        policy={"mechanism_attribution_allowed": True},
+        citations=[],
+    )
+
+    assert enforced == ""
+    assert removed >= 1  # 整句一条 claim 删除（"；"非句界）；断尾残片由 _clean_truncated_fragments 在渲染层兜底
+
+
 def test_i4_supported_mechanism_sentence_kept():
     """有 VERIFIED 证据绑定的机制句保留（逐 Claim 授权，不是全局死刑）。"""
     from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding

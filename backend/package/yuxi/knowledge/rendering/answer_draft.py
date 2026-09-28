@@ -8,6 +8,8 @@ heading/paragraph/bullet + evidence_refs）继续兼容。
 
 from __future__ import annotations
 
+from yuxi.knowledge.rendering.text_normalization import fold_trailing_duplicate_punctuation
+
 import json
 import re
 from typing import Literal
@@ -164,10 +166,13 @@ def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None =
             locator_blocks += 1
             lines.append(_render_locator_block((locator_bindings or {}).get(str(block.binding_id or ""))))
             continue
-        value = re.sub(r"\s+", " ", block.text).strip()
+        # D1 源头：evidence_refs 列表级去重（保序）；D2：折叠先于空白归一，
+        # 保证块内多行的行尾重复句读在换行被合并前完成折叠
+        value = fold_trailing_duplicate_punctuation(str(block.text))[0]
+        value = re.sub(r"\s+", " ", value).strip()
         if not value:
             continue
-        refs = " ".join(f"[{ref}]" for ref in block.evidence_refs if re.fullmatch(r"E\d{1,3}", ref))
+        refs = " ".join(f"[{ref}]" for ref in dict.fromkeys(block.evidence_refs) if re.fullmatch(r"E\d{1,3}", ref))
         suffix = f" {refs}" if refs else ""
         if block.type == "heading":
             lines.append(f"## {value}")

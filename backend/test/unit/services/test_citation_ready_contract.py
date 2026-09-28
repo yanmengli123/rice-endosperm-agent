@@ -60,6 +60,48 @@ def test_config_switch_defaults_off():
     assert Config.model_fields["graph_card_enabled"].default is False
 
 
+def test_ordinary_figure_answer_removes_ungrounded_mechanism_claim(monkeypatch):
+    from yuxi.knowledge.rendering.claim_evidence_resolver import normalize_for_match
+
+    caption = "Figure 2 CRISPR/Cas9 mutant grain phenotype and grain length evaluation."
+    citation = {
+        "ref": "E1",
+        "evidence_id": "ev_1",
+        "kb_id": "kb-a",
+        "file_id": "file_1",
+        "filename": "paper.pdf",
+        "zone": "MAIN_TEXT",
+        "page_numbers": [5],
+        "primary_page": 5,
+        "quote_head": caption,
+        "anchor_ids": ["ea_1"],
+        "locatable": True,
+        "toc_line": False,
+        "secondary_of": None,
+        "_quote": caption,
+        "_quote_norm": normalize_for_match(caption),
+        "_anchor_id": "ea_1",
+        "_parse_revision_id": "pr_1",
+        "_evidence_type": "caption",
+    }
+    contract = {
+        "status": "COMPLETED",
+        "citations": [citation],
+        "locator_resolution": {},
+    }
+    monkeypatch.setattr(svc.conf, "figure_ref_anchor_enabled", True)
+    monkeypatch.setattr(svc.conf, "figure_semantic_gate_enabled", False)
+
+    guarded, validation = svc._guard_knowledge_answer(
+        "Figure 2 展示 CRISPR 突变体籽粒表型。OsMYB73 调控生长素生物合成通路。",
+        contract,
+    )
+
+    assert "〔图表F1｜Figure 2〕" in guarded
+    assert "调控生长素生物合成通路" not in guarded
+    assert validation["mechanism_claims_removed"] == 1
+
+
 def test_graph_snapshot_publish_switch_is_fail_closed(monkeypatch):
     snapshot = {
         "schema": "graph_snapshot_v1",
@@ -116,6 +158,38 @@ def test_relation_answer_uses_only_frozen_snapshot():
     )
 
 
+def test_relation_answer_discloses_candidates_in_mixed_group():
+    contract = {
+        "retrieval_plan": {"intent": "RELATION_LOOKUP"},
+        "graph_snapshot": {
+            "schema": "graph_snapshot_v1",
+            "outcome": "HIT",
+            "nodes": [
+                {"entity_id": "e1", "name": "GS3"},
+                {"entity_id": "e2", "name": "grain size"},
+            ],
+            "edges": [
+                {
+                    "triple_id": "reviewed",
+                    "source_entity_id": "e1",
+                    "target_entity_id": "e2",
+                    "predicate": "regulates",
+                    "review_status": "APPROVED",
+                    "parallel_count": 2,
+                    "candidate_parallel_count": 1,
+                    "conflict_status": "NONE",
+                }
+            ],
+            "suppressed": {"review_policy": 0},
+        },
+    }
+
+    assert svc._deterministic_relation_answer(contract) == (
+        "已从规范知识图谱检索到以下关系（含标注待审核的候选关系）：\n"
+        "- GS3 —regulates→ grain size（另含 1 条待审核平行断言）（2 条平行抽取记录）"
+    )
+
+
 def test_relation_answer_reports_pending_review_with_count():
     contract = {
         "retrieval_plan": {"intent": "RELATION_LOOKUP"},
@@ -164,7 +238,12 @@ def test_payload_carries_figures_only_when_switch_on_and_attached(monkeypatch):
     assert "figures" not in svc._citation_ready_payload({k: v for k, v in _LOCATOR.items() if k != "figure_projection"})
 
 
-async def _save_compound_turn(contract: dict) -> tuple[dict, int]:
+async def _save_compound_turn(
+    contract: dict,
+    *,
+    final_content_override: str | None = None,
+    final_additional_kwargs: dict | None = None,
+) -> tuple[dict, int]:
     """复合路径经 save_messages_from_langgraph_state 落库，返回末 AI 消息 extra_metadata 与 flush 次数。"""
 
     class FakeDB:
@@ -223,6 +302,8 @@ async def _save_compound_turn(contract: dict) -> tuple[dict, int]:
         config_dict={"configurable": {"thread_id": "thread-1", "uid": "user-1"}},
         context=object(),
         knowledge_contract=contract,
+        final_content_override=final_content_override,
+        final_additional_kwargs=final_additional_kwargs,
     )
     return repo.messages[-1].extra_metadata, db.flushes
 
@@ -242,6 +323,49 @@ async def test_compound_path_persists_binding_and_published_payload(monkeypatch)
     assert saved["citation_ready"]["citation"]["revision_id"] == "pr_1"
     assert saved["citation_ready"]["figures"] == [_FIGURE]
     assert flushes >= 1
+
+
+@pytest.mark.asyncio
+async def test_compound_path_persists_final_semantic_validation_not_state_draft():
+    contract = {"status": "COMPLETED", "retrieval_id": "kr_1", "citations": [], "locator_resolution": _LOCATOR}
+    final_validation = {
+        "status": "DEGRADED",
+        "table_claim_validation": {"status": "DEGRADED", "facts_available": 39},
+    }
+    saved, _ = await _save_compound_turn(
+        contract,
+        final_content_override="最终安全正文",
+        final_additional_kwargs={"locator_validation": final_validation},
+    )
+    assert saved["additional_kwargs"]["locator_validation"] == final_validation
+
+
+def test_table_ranking_gate_reads_question_from_retrieval_summary():
+    table = {
+        "label": "Table 1",
+        "header_rows": 1,
+        "rows": [
+            [
+                {"text": "Genotype"},
+                {"text": "Chalkiness (%)"},
+            ],
+            [{"text": "WT (ZH11)"}, {"text": "12.1"}],
+            [{"text": "osmyb73"}, {"text": "26.8"}],
+        ],
+    }
+    guarded, validation = svc._guard_knowledge_answer(
+        "osmyb73 热胁迫后垩白度为 26.8%，受影响最大。",
+        {
+            "status": "COMPLETED",
+            "citations": [],
+            "retrieval_summary": {"query": "哪个基因型的垩白度受热胁迫影响最大？"},
+        },
+        semantic_tables=[table],
+        table_semantic_ready=True,
+    )
+    assert "无法进行该比较" in guarded
+    assert "26.8" not in guarded
+    assert validation["table_claim_validation"]["status"] == "REFUSED_INCOMPLETE_OPERANDS"
 
 
 @pytest.mark.asyncio

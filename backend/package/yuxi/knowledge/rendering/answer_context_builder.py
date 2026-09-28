@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from yuxi.knowledge.graphs.graph_utils import TIER_C, predicate_tier
@@ -8,6 +9,79 @@ from yuxi.knowledge.products.authority_gate import AuthorityGate
 from yuxi.knowledge.products.registry import is_evidence_authority
 from yuxi.knowledge.rendering.citation_channel import public_citations
 from yuxi.knowledge.validation.citation_validator import redact_narrative_citation_identifiers
+
+
+_FIGURE_QUESTION = re.compile(
+    r"(?:\b(?:Figure|Fig\.)\s*S?\d+|图\s*S?\d+|图注|补充图|哪几张图|哪些图|图片)",
+    re.IGNORECASE,
+)
+_TABLE_QUESTION = re.compile(
+    r"(?:\bTable\s*S?\d+|表\s*S?\d+|表格|表注|哪几张表|哪些表)",
+    re.IGNORECASE,
+)
+
+
+def build_answer_output_profile(contract: dict[str, Any]) -> dict[str, Any]:
+    """Return the user-facing shape contract for this answer.
+
+    This is intentionally derived from the original question, not from
+    retrieved citations: an incidental Figure caption must not turn an
+    ordinary biology question into a figure-report template.
+    """
+
+    summary = contract.get("retrieval_summary") or {}
+    question = str(summary.get("query") if isinstance(summary, dict) else "")
+    asks_figure = bool(_FIGURE_QUESTION.search(question))
+    asks_table = bool(_TABLE_QUESTION.search(question))
+    if asks_figure and asks_table:
+        mode = "FIGURE_TABLE_PARALLEL"
+        sections = ["结论", "逐图依据", "逐表数据", "综合解释", "证据边界"]
+    elif asks_figure:
+        mode = "FIGURE_PARALLEL"
+        sections = ["结论", "逐图依据", "正文解释", "证据边界"]
+    elif asks_table:
+        mode = "TABLE_PARALLEL"
+        sections = ["结论", "逐表数据", "数据含义", "证据边界"]
+    else:
+        return {"schema": "answer-output-profile.v1", "mode": "STANDARD", "required_sections": []}
+
+    return {
+        "schema": "answer-output-profile.v1",
+        "mode": mode,
+        "required_sections": sections,
+        "figure_item": (
+            "每张被采用的图单独一个 bullet，以原始 Figure N/Figure SN 标签开头；"
+            "先写图注或图面直接事实，再写它对问题的支持作用。不得把正文机制冒充图中所示。"
+        )
+        if asks_figure
+        else "",
+        "table_item": (
+            "每张被采用的表单独一个 bullet，以原始 Table N/Table SN 标签开头；"
+            "数值陈述必须同时写对象、条件、指标、值和单位。差值、排名或倍数仅在成对操作数齐全时输出。"
+        )
+        if asks_table
+        else "",
+        "evidence_boundary": (
+            "只说明影响本题结论的缺失证据；证据不足时直接写无法比较或无法归因，"
+            "不得输出候选值、二选一数值、零差值或过程性占位符。"
+        ),
+        "style": "先回答结论，再列证据；不重复问题，不描述后端、检索轮次、渲染过程或内部协议。",
+    }
+
+
+def _output_profile_rules(profile: dict[str, Any]) -> str:
+    if profile.get("mode") == "STANDARD":
+        return ""
+    sections = " → ".join(str(item) for item in profile.get("required_sections") or [])
+    return (
+        "图表并联回答格式是硬约束：按顺序输出「"
+        + sections
+        + "」。结论必须直接回答用户问题；逐图/逐表部分只列本轮实际采用且有证据绑定的项目。"
+        + str(profile.get("figure_item") or "")
+        + str(profile.get("table_item") or "")
+        + str(profile.get("evidence_boundary") or "")
+        + str(profile.get("style") or "")
+    )
 
 
 def _locator_payload(contract: dict[str, Any]) -> dict[str, Any] | None:
@@ -151,11 +225,18 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
             continue
         if len(graph_edges) < 40:
             graph_edges.append(item)
+    frozen_output = contract.get("answer_output")
+    answer_output = (
+        frozen_output
+        if isinstance(frozen_output, dict) and frozen_output.get("schema") == "answer-output-profile.v1"
+        else build_answer_output_profile(contract)
+    )
     payload = {
         "intent": (contract.get("retrieval_plan") or {}).get("intent"),
         "query_mode": (contract.get("retrieval_plan") or {}).get("query_mode"),
         "answer_mode": (contract.get("retrieval_plan") or {}).get("answer_mode"),
         "answer_policy": _answer_policy_payload(contract),
+        "answer_output": answer_output,
         "count_facts": {
             "citable_claims": len(claims),
             "distinct_subjects": len(unique_subjects),
@@ -180,7 +261,10 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
                 "locatable": bool(citation.get("locatable")),
                 "secondary_of": citation.get("secondary_of"),
             }
-            for citation in public_citations((contract.get("citations") or [])[:12])
+            # citation_channel admits at most 16 rows. Do not silently hide
+            # the last four from the model: an omitted row may be the direct
+            # single-mutant caption while a comparative figure stays visible.
+            for citation in public_citations((contract.get("citations") or [])[:16])
         ],
         "locator": _locator_payload(contract),
         "sub_intents": ((contract.get("locator_intent") or {}).get("sub_intents") or []),
@@ -210,12 +294,15 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
                 )
             )
         )
+    output_profile_rules = _output_profile_rules(answer_output)
     return (
         "<AUTHORITATIVE_KNOWLEDGE_CONTRACT>\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         + "\n</AUTHORITATIVE_KNOWLEDGE_CONTRACT>\n"
         + policy_rules
         + ("\n" if policy_rules else "")
+        + output_profile_rules
+        + ("\n" if output_profile_rules else "")
         + "规则：仅依据上面的 Claim 组织科研解释。PMID、DOI、evidence_id 和完整结构化表由后端工具卡呈现，"
         "不要自行生成、补全或改写这些引文标识符；plant_gene_lookup 等工具返回的官方基因、转录本、蛋白和"
         "RAP/MSU 位点 ID 不属于引文标识，可以在正文保留。即使存在引文标识格式问题，也必须完成基于 Claim 的"
@@ -244,8 +331,10 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "图注类引文（quote_head 以 Figure/Table 开头）的含义解释必须优先依据 locator.backlinks 中"
         "正文分区（MAIN_TEXT）的讨论段，并引用其 [E#]；backlinks 为空时明示‘原文未在正文展开讨论该图’，"
         "只解释图注字面内容，不得编造实验结论。"
+        "同一表型有多张图时，主依据必须选直接回答该材料与表型的题注；单突变体问题优先单突变体图，"
+        "不得用双突变体比较图、过表达图或工作模型图冒充主证据。后几类只能作为明确标注的补充证据。"
         "输出协议：只输出 <YUXI_ANSWER_DRAFT> 与 </YUXI_ANSWER_DRAFT> 包裹的严格 JSON。"
-        'JSON 形状为 {"schema_version":"answer-draft.v1","blocks":[{"type":'
+        'JSON 形状为 {"schema_version":"answer-draft.v2","blocks":[{"type":'
         '"heading|paragraph|bullet","text":"自然语言","evidence_refs":["E1"]}]}。'
         "不要自建‘参考文献/证据引用/资料来源’章节；后端会根据 evidence_refs 完成验证、渲染 Markdown 和"
         "【证据引用】区块。不要在 text 中复制 [E#]、[citation omitted] 或任何〔…〕引用标记。"

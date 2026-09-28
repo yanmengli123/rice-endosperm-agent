@@ -569,6 +569,245 @@ def _citation_ready_payload(locator: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _visual_status_for_ref(*, published_kind: str | None, has_caption_evidence: bool) -> str:
+    """锚点视觉状态（P1-1）：载荷 ``figure_refs[].visual_status`` 的**唯一计算点**。
+
+    2026-09-27 修复：此前载荷里有两处写入同一键（字典字面量重复键），后一处
+    （循环内局部变量）覆盖前一处 → 本函数成死代码，且产出 ``VERIFIED_WITH_TABLE``
+    而枚举未定义该成员、``REFERENCE_ONLY`` 永不产出。现在只有一个来源，返回值
+    恒为 :class:`VisualStatus` 成员。
+    """
+    from yuxi.knowledge.validation.figure_semantic_gate import VisualStatus
+
+    if published_kind == "table":
+        return VisualStatus.VERIFIED_WITH_TABLE.value
+    if published_kind == "figure":
+        return VisualStatus.VERIFIED_WITH_ASSET.value
+    if has_caption_evidence:
+        return VisualStatus.VERIFIED_CAPTION_ONLY.value
+    return VisualStatus.REFERENCE_ONLY.value
+
+
+async def _figure_refs_public_payload(
+    db,
+    *,
+    text: str,
+    contract: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """图表锚点载荷（ADR-0008 citation_ready v3/v4）：终态芯片回读 + 注册表 join + mention 投影。
+
+    正文里的〔图表F#〕芯片是唯一签发事实——这里只解析 ``(ref, label)`` 并与
+    本轮注册表（题注型 E# 行 / locator Binding）join 补全身份，**绝不信芯片
+    自带字段**；mention 通道图卡走与 locator 通道完全相同的七道发布门
+    （``figure_card_enabled`` 双闸之一；锚点开关 ``figure_ref_anchor_enabled``
+    在签发侧已闸）。Table 走 ``table_asset_projection``（chunk 表块受控解析，
+    P2）；两者都失败才落 ``no_asset_row`` 级抑制（芯片与跳原文照常）。
+
+    返回 ``(public_refs, mention_figures, mention_tables)``——public_refs 供
+    ``figure_refs[]``（含 ``figure_index``/``table_index``/``suppressed_reason``
+    降级信息），mention_figures/mention_tables 供 figures[]/tables[] 合并。
+    任何异常吞掉：锚点载荷失败绝不影响文本回答与既有 citation/figures。
+    """
+    if not str(text or "").strip() or not isinstance(contract, dict):
+        return [], [], []
+    if contract.get("status") == "SKIPPED":
+        return [], [], []
+    try:
+        from yuxi.knowledge.rendering.figure_ref_channel import match_chips_to_registry
+
+        matched = match_chips_to_registry(text, contract.get("citations") or [], contract.get("locator_resolution"))
+        # 签发与落库必须消费同一份 run-local 注册表。终态 orphan 可能来自
+        # 历史/被篡改文本，不能在这里拿“第一条 citation 的 scope”去数据库
+        # 猜身份，否则多文档回答会跨文件补错图表。无法 join 就保留纯文本并
+        # 记录 unresolved，资产发布严格失败关闭。
+        refs = matched["refs"]
+        stats = matched["stats"]
+        if not refs and not stats.get("orphan"):
+            return [], [], []
+
+        from yuxi.trace import emit_trace
+
+        kind = "mixed"
+        kinds = {str(ref.get("kind")) for ref in refs}
+        if len(kinds) == 1:
+            kind = kinds.pop()
+        if refs:
+            emit_trace(
+                category="KNOWLEDGE",
+                operation="figure_ref",
+                event_type="knowledge.figure_ref.resolved",
+                attributes={"reason": "ok", "ref_count": len(refs), "kind": kind},
+                visibility="ADMIN",
+            )
+        if stats.get("orphan"):
+            emit_trace(
+                category="KNOWLEDGE",
+                operation="figure_ref",
+                event_type="knowledge.figure_ref.unresolved",
+                attributes={"reason": "orphan_chip", "ref_count": int(stats["orphan"]), "kind": kind},
+                visibility="ADMIN",
+            )
+
+        mention_figures: list[dict[str, Any]] = []
+        mention_tables: list[dict[str, Any]] = []
+        publish_allowed = bool(getattr(conf, "figure_card_enabled", False))
+        public_refs: list[dict[str, Any]] = []
+        for ref in refs:
+            suppressed_reason: str | None = None
+            attached_table_id: str | None = None
+            published_kind: str | None = None
+            if ref.get("kind") == "table" and ref.get("anchor_id") and ref.get("revision_id"):
+                # Table（P2）：题注锚点 → 含锚点脚注的 chunk → <table> 受控解析
+                from yuxi.knowledge.contracts.table_asset_projection import project_publishable_table
+
+                try:
+                    table, reason = await project_publishable_table(
+                        db,
+                        kb_id=str(ref.get("kb_id") or ""),
+                        file_id=str(ref.get("file_id") or ""),
+                        revision_id=str(ref.get("revision_id") or ""),
+                        anchor_id=str(ref.get("anchor_id") or ""),
+                        evidence_id=str(ref.get("evidence_id") or ""),
+                        page=ref.get("page"),
+                        label=str(ref.get("label") or ""),
+                        caption=str(ref.get("quote_head") or ""),
+                        publish_allowed=publish_allowed,
+                    )
+                    if table is not None:
+                        mention_tables.append(table.model_dump(mode="json"))
+                        attached_table_id = table.table_id
+                        published_kind = "table"
+                    else:
+                        suppressed_reason = reason or "table_html_missing"
+                except Exception as error:  # noqa: BLE001 - 投影失败只影响该锚点的卡片
+                    logger.warning(f"table ref mention projection failed: {error}")
+                    suppressed_reason = "projection_error"
+            elif ref.get("kind") == "figure" and ref.get("anchor_id") and ref.get("revision_id"):
+                from yuxi.knowledge.contracts.figure_asset_projection import (
+                    project_publishable_figures_for_mention,
+                )
+
+                try:
+                    figures, reason = await project_publishable_figures_for_mention(
+                        db,
+                        kb_id=str(ref.get("kb_id") or ""),
+                        file_id=str(ref.get("file_id") or ""),
+                        revision_id=str(ref.get("revision_id") or ""),
+                        anchor_id=str(ref.get("anchor_id") or ""),
+                        evidence_id=str(ref.get("evidence_id") or ""),
+                        page=ref.get("page"),
+                        publish_allowed=publish_allowed,
+                    )
+                    if figures:
+                        mention_figures.extend(figure.model_dump(mode="json") for figure in figures)
+                        published_kind = "figure"
+                    else:
+                        suppressed_reason = reason or "no_asset_row"
+                except Exception as error:  # noqa: BLE001 - 投影失败只影响该锚点的卡片
+                    logger.warning(f"figure ref mention projection failed: {error}")
+                    suppressed_reason = "projection_error"
+            else:
+                suppressed_reason = "no_asset_row"  # 注册表缺血统键（无 anchor/revision）
+            public_refs.append(
+                {
+                    "ref": str(ref.get("ref") or ""),
+                    "kind": str(ref.get("kind") or "figure"),
+                    "label": str(ref.get("label") or ""),
+                    "source": str(ref.get("source") or "caption"),
+                    "citation_ref": str(ref.get("citation_ref") or ""),
+                    "evidence_id": str(ref.get("evidence_id") or ""),
+                    "anchor_id": str(ref.get("anchor_id") or ""),
+                    "kb_id": str(ref.get("kb_id") or ""),
+                    "file_id": str(ref.get("file_id") or ""),
+                    "revision_id": str(ref.get("revision_id") or ""),
+                    "page": ref.get("page"),
+                    "figure_index": None,
+                    "table_index": None,
+                    "suppressed_reason": suppressed_reason,
+                    # 视觉状态唯一来源：Identity/provenance 对所有已发布 ref 都
+                    # 已验证，可视可用性是**另一位面**的事实——客户端不得把
+                    # caption-only ref 呈现为已完成的图/表并列答案。
+                    "visual_status": _visual_status_for_ref(
+                        published_kind=published_kind,
+                        has_caption_evidence=bool(ref.get("anchor_id") or ref.get("evidence_id")),
+                    ),
+                    **({"_table_id": attached_table_id} if attached_table_id else {}),
+                }
+            )
+        return public_refs, mention_figures, mention_tables
+    except Exception as error:  # noqa: BLE001 - 锚点载荷失败绝不影响回答链路
+        logger.warning(f"figure refs payload build failed: {error}")
+        return [], [], []
+
+
+async def _augmented_citation_ready(
+    db,
+    *,
+    locator: dict[str, Any] | None,
+    contract: dict[str, Any] | None,
+    text: str,
+) -> dict[str, Any] | None:
+    """citation_ready v3（ADR-0008）：citation（VERIFIED 时）∪ figures（locator ∪
+    mention 通道）∪ figure_refs（正文锚点绑定）。
+
+    发射解耦：定位 VERIFIED **或** figure_refs 非空任一成立即返回载荷——
+    caption 证据型回答（无引文定位 run）也能收到锚点；``citation`` 键缺席
+    ⟺ 本 run 无已验证定位（桌面端按 Option 容错）。figures 合并按
+    ``(revision_id, asset_name)`` 去重，refs 的 ``figure_index`` 回填指向合并后
+    下标（同 binding 图组取首帧下标），无卡片的 ref（suppressed）保持 None。
+    """
+    locator_verified = isinstance(locator, dict) and str(locator.get("status") or "") == "VERIFIED"
+    refs, mention_figures, mention_tables = await _figure_refs_public_payload(db, text=text, contract=contract)
+    if not locator_verified and not refs:
+        return None
+    payload: dict[str, Any] = _citation_ready_payload(locator) if locator_verified else {}
+    if refs:
+        payload["figure_refs"] = refs
+    if mention_figures:
+        merged = list(payload.get("figures") or [])
+        seen = {(str(f.get("revision_id")), str(f.get("asset_name"))) for f in merged}
+        for figure in mention_figures:
+            key = (str(figure.get("revision_id")), str(figure.get("asset_name")))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(figure)
+        if merged:
+            payload["figures"] = merged
+            first_index_by_binding: dict[str, int] = {}
+            for index, figure in enumerate(merged):
+                binding_id = str(figure.get("binding_id") or "")
+                if binding_id and binding_id not in first_index_by_binding:
+                    first_index_by_binding[binding_id] = index
+            for ref in payload["figure_refs"]:
+                anchor_binding = f"figref:{ref.get('anchor_id')}"
+                ref["figure_index"] = first_index_by_binding.get(anchor_binding)
+    if mention_tables:
+        # 表格卡片（ADR-0008 P2）：按 table_id 去重合并，ref 的 table_index 回填
+        # 指向 tables[] 下标（figure_index/table_index 为两个独立下标域）
+        merged_tables = list(payload.get("tables") or [])
+        seen_tables = {str(t.get("table_id")) for t in merged_tables}
+        for table in mention_tables:
+            key = str(table.get("table_id"))
+            if key in seen_tables:
+                continue
+            seen_tables.add(key)
+            merged_tables.append(table)
+        if merged_tables:
+            payload["tables"] = merged_tables
+            index_by_table: dict[str, int] = {}
+            for index, table in enumerate(merged_tables):
+                table_id = str(table.get("table_id") or "")
+                if table_id and table_id not in index_by_table:
+                    index_by_table[table_id] = index
+            for ref in payload["figure_refs"]:
+                anchor_table_id = ref.get("_table_id")
+                if anchor_table_id is not None:
+                    ref["table_index"] = index_by_table.get(str(anchor_table_id))
+                    ref.pop("_table_id", None)
+    return payload
+
+
 def _published_graph_snapshot(contract: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return only the already-frozen graph projection selected for publication.
 
@@ -662,10 +901,61 @@ def _deterministic_relation_answer(contract: dict[str, Any] | None) -> str | Non
     return "\n".join(lines)
 
 
-def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+async def _project_semantic_tables(db, contract: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Project active-revision table structures before answer publication.
+
+    This is a safety projection, not a UI decision, so it is independent of
+    ``figure_card_enabled``.  The same anchor/chunk/revision gates as the table
+    card are reused; only successfully verified tables enter semantic review.
+    """
+    from yuxi.knowledge.contracts.table_asset_projection import project_publishable_table
+    from yuxi.knowledge.rendering.figure_ref_channel import build_caption_registry
+
+    registry = build_caption_registry(contract.get("citations") or [], contract.get("locator_resolution"))
+    entries = [entry for entry in registry.values() if entry.get("kind") == "table" and not entry.get("ambiguous")]
+    tables: list[dict[str, Any]] = []
+    suppressed: dict[str, int] = {}
+    for entry in entries[:8]:
+        table, reason = await project_publishable_table(
+            db,
+            kb_id=str(entry.get("kb_id") or ""),
+            file_id=str(entry.get("file_id") or ""),
+            revision_id=str(entry.get("revision_id") or ""),
+            anchor_id=str(entry.get("anchor_id") or ""),
+            evidence_id=str(entry.get("evidence_id") or ""),
+            page=entry.get("page"),
+            label=str(entry.get("label") or ""),
+            caption=str(entry.get("_caption_quote") or entry.get("quote_head") or ""),
+            # Semantic safety must not disappear when the optional UI table
+            # card is disabled.  Nothing is emitted here.
+            publish_allowed=True,
+        )
+        if table is not None:
+            tables.append(table.model_dump(mode="json"))
+        else:
+            key = str(reason or "projection_error")
+            suppressed[key] = suppressed.get(key, 0) + 1
+    return tables, {
+        "requested": len(entries[:8]),
+        "projected": len(tables),
+        "suppressed": suppressed,
+    }
+
+
+def _guard_knowledge_answer(
+    text: str,
+    contract: dict[str, Any],
+    *,
+    semantic_tables: list[dict[str, Any]] | None = None,
+    table_semantic_ready: bool = False,
+) -> tuple[str, dict[str, Any]]:
     from yuxi.knowledge.contracts.locator_binding import authoritative_locator_projection
 
     locator_resolution = contract.get("locator_resolution") or {}
+    retrieval_summary = contract.get("retrieval_summary") or {}
+    semantic_question = str(
+        contract.get("query") or (retrieval_summary.get("query") if isinstance(retrieval_summary, dict) else "") or ""
+    )
     binding = locator_resolution.get("binding") or {}
     # locator block → binding → 权威芯片；缺失绑定渲染为失败关闭文案（无 Binding 就没有页码）
     locator_bindings = {str(binding["binding_id"]): binding} if binding.get("binding_id") else None
@@ -676,22 +966,93 @@ def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, d
         locator=contract.get("locator_resolution"),
         partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
         authority_policy=contract.get("answer_policy"),
+        figure_refs_enabled=getattr(conf, "figure_ref_anchor_enabled", False),
+        semantic_gate_enabled=getattr(conf, "figure_semantic_gate_enabled", False),
+        semantic_tables=semantic_tables,
+        semantic_question=semantic_question,
+        table_semantic_ready=table_semantic_ready,
     )
+    try:
+        from yuxi.trace import emit_trace
+
+        claim_gate = citation_validation.get("figure_claim_validation") or {}
+        semantic_gate = (citation_validation.get("render_normalization") or {}).get("semantic_gate") or {}
+        if int(claim_gate.get("checked_claim_count") or 0) or int(semantic_gate.get("claims_evaluated") or 0):
+            unsupported_detected = max(
+                int(claim_gate.get("unsupported_count") or 0),
+                int(semantic_gate.get("unsupported_detected") or 0),
+            )
+            unsupported_removed = int(claim_gate.get("removed_sentence_count") or 0) + int(
+                semantic_gate.get("unsupported_removed") or 0
+            )
+            emit_trace(
+                category="KNOWLEDGE",
+                operation="figure_claim",
+                event_type="knowledge.figure_claim.validated",
+                attributes={
+                    "status": "DEGRADED" if unsupported_detected else "PASS",
+                    "checked_count": int(claim_gate.get("checked_claim_count") or 0)
+                    + int(semantic_gate.get("claims_evaluated") or 0),
+                    "unsupported_detected": unsupported_detected,
+                    "unsupported_removed": unsupported_removed,
+                    "deletion_enabled": bool(
+                        claim_gate.get("deletion_enabled") or getattr(conf, "figure_semantic_gate_enabled", False)
+                    ),
+                },
+                visibility="ADMIN",
+            )
+        table_gate = citation_validation.get("table_claim_validation") or {}
+        if str(table_gate.get("status") or "") != "SKIPPED":
+            emit_trace(
+                category="KNOWLEDGE",
+                operation="table_claim",
+                event_type="knowledge.table_claim.validated",
+                attributes={
+                    "status": str(table_gate.get("status") or "PASS"),
+                    "checked_count": int(table_gate.get("checked_claim_count") or 0),
+                    "unsupported_removed": int(table_gate.get("removed_sentence_count") or 0),
+                    "facts_available": int(table_gate.get("facts_available") or 0),
+                    "missing_pair_metric_count": len(table_gate.get("missing_pair_metrics") or []),
+                },
+                visibility="ADMIN",
+            )
+    except Exception:  # 语义门禁观测失败不得影响答案发布
+        pass
     citation_validation["answer_draft"] = draft_validation
     # I4 逐 Claim 证据授权执行：机制/题注句在权限拒绝时逐句过 resolve_binding
     # 验证——有 VERIFIED 证据绑定的保留，无据（或引用池为空无法验证）的删除。
-    if isinstance(contract.get("answer_policy"), dict):
+    answer_policy = contract.get("answer_policy")
+    figure_claim_mode = bool(
+        getattr(conf, "figure_ref_anchor_enabled", False)
+        and (
+            citation_validation.get("figure_refs")
+            or citation_validation.get("figure_claim_validation", {}).get("checked_claim_count")
+        )
+    )
+    if isinstance(answer_policy, dict) or figure_claim_mode:
         from yuxi.knowledge.rendering.explanation_claims import enforce_explanation_grounding
 
-        answer_policy = contract["answer_policy"]
-        evidence_authorized = bool(
-            answer_policy.get("page_claim_allowed") is True
-            and answer_policy.get("document_citations_allowed") is True
-            and authoritative_locator_projection(binding) is not None
-        )
+        if isinstance(answer_policy, dict):
+            grounding_policy = answer_policy
+            evidence_authorized = bool(
+                answer_policy.get("page_claim_allowed") is True
+                and answer_policy.get("document_citations_allowed") is True
+                and authoritative_locator_projection(binding) is not None
+            )
+        else:
+            # Ordinary document QA has no locator answer_policy, but signed F#
+            # prose still needs per-claim mechanism grounding. Its frozen
+            # citation pool is already authoritative; caption facts may bind
+            # captions, while causal/mechanistic claims must bind a non-caption
+            # MAIN_TEXT row or be removed.
+            grounding_policy = {
+                "mechanism_attribution_allowed": True,
+                "caption_fact_allowed": True,
+            }
+            evidence_authorized = True
         guarded, mechanism_removed = enforce_explanation_grounding(
             guarded,
-            policy=answer_policy,
+            policy=grounding_policy,
             citations=(contract.get("citations") or []) if evidence_authorized else [],
             locator=locator_resolution,
         )
@@ -709,6 +1070,22 @@ def _guard_knowledge_answer(text: str, contract: dict[str, Any]) -> tuple[str, d
             observation=observation if isinstance(observation, dict) and "figure_label" in observation else None,
         )
     return guarded, citation_validation
+
+
+async def _guard_knowledge_answer_with_structured_evidence(
+    db,
+    text: str,
+    contract: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    tables, projection = await _project_semantic_tables(db, contract)
+    guarded, validation = _guard_knowledge_answer(
+        text,
+        contract,
+        semantic_tables=tables,
+        table_semantic_ready=True,
+    )
+    validation["table_semantic_projection"] = projection
+    return guarded, validation
 
 
 def _initial_source_manifest(plan: TurnExecutionPlan) -> RunSourceManifest:
@@ -1209,6 +1586,7 @@ async def _finalize_guarded_source_text(
     repair_model_spec: str | None = None,
     source_policy: str | None = None,
     requires_mcp: bool = False,
+    document_evidence_active: bool = False,
     repair_wall_budget: float | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """终态门禁 + 数据面投影兜底 + 有界修复 + 确定性降级（v4 分层）。
@@ -1220,13 +1598,46 @@ async def _finalize_guarded_source_text(
     """
     finalize_started_at = time.monotonic()
     repair_elapsed_ms = 0
+    # Plane arbitration: in an explicitly resolved document turn, an incidental
+    # MCP call made by the model is still retained in the append-only audit, but
+    # it must not hijack the document answer unless the answer actually cites an
+    # MCP-F fact.  Required-MCP and genuinely mixed answers remain strict.
+    effective_source_uses = source_uses
+    incidental_mcp_ignored = 0
+    if (
+        document_evidence_active
+        and str(source_policy or "").strip().upper() == "AUTO"
+        and not requires_mcp
+        and "[MCP-F:" not in draft
+    ):
+        effective_source_uses = []
+        for item in source_uses:
+            source_use_id = str(
+                item.get("source_use_id") if isinstance(item, dict) else getattr(item, "source_use_id", "")
+            )
+            provenance = item.get("provenance") if isinstance(item, dict) else getattr(item, "provenance", None)
+            if source_use_id.startswith("mcp:") or (
+                isinstance(provenance, dict) and provenance.get("mcp_call_audit_id") is not None
+            ):
+                incidental_mcp_ignored += 1
+                continue
+            effective_source_uses.append(item)
+
     guarded, validation = guard_answer_for_evidence_level(
         draft,
         evidence_level=evidence_level,
-        source_uses=source_uses,
+        source_uses=effective_source_uses,
         source_policy=source_policy,
         requires_mcp=requires_mcp,
     )
+    if incidental_mcp_ignored:
+        validation = {
+            **validation,
+            "plane_arbitration": {
+                "document_evidence_active": True,
+                "incidental_mcp_ignored": incidental_mcp_ignored,
+            },
+        }
     attempts: list[dict[str, Any]] = []
 
     def _passed(report: dict[str, Any]) -> bool:
@@ -1234,7 +1645,7 @@ async def _finalize_guarded_source_text(
         return bool(grounding.get("required")) is False or bool(grounding.get("passed"))
 
     if not _passed(validation):
-        projection = project_data_plane(source_uses)
+        projection = project_data_plane(effective_source_uses)
         if projection is not None:
             guarded = (
                 "数据模式：SOURCE-ONLY\n\n"
@@ -1262,7 +1673,7 @@ async def _finalize_guarded_source_text(
                 repaired = await _repair_source_fact_grounding(
                     draft,
                     validation,
-                    source_uses,
+                    effective_source_uses,
                     repair_model_spec=repair_model_spec,
                     wall_budget=per_round_budget,
                 )
@@ -1276,7 +1687,7 @@ async def _finalize_guarded_source_text(
                 guarded, validation = guard_answer_for_evidence_level(
                     repaired,
                     evidence_level=evidence_level,
-                    source_uses=source_uses,
+                    source_uses=effective_source_uses,
                     source_policy=source_policy,
                     requires_mcp=requires_mcp,
                 )
@@ -1288,7 +1699,7 @@ async def _finalize_guarded_source_text(
                 if _passed(validation):
                     break
             if not _passed(validation):
-                degraded = render_degraded_fact_sheet(source_uses)
+                degraded = render_degraded_fact_sheet(effective_source_uses)
                 if degraded is not None:
                     guarded = degraded
                     validation = {**validation, "status": "DEGRADED", "degraded_render": True}
@@ -1803,6 +2214,8 @@ async def _save_ai_message(
             locator=knowledge_contract.get("locator_resolution"),
             partition_intent=(knowledge_contract.get("locator_intent") or {}).get("partition_intent"),
             authority_policy=knowledge_contract.get("answer_policy"),
+            figure_refs_enabled=getattr(conf, "figure_ref_anchor_enabled", False),
+            semantic_gate_enabled=getattr(conf, "figure_semantic_gate_enabled", False),
         )
         if citation_validation.get("changed"):
             extra_metadata["locator_validation"] = citation_validation
@@ -2063,8 +2476,17 @@ async def save_messages_from_langgraph_state(
     request_id: str | None = None,
     knowledge_contract: dict[str, Any] | None = None,
     final_content_override: str | None = None,
+    final_additional_kwargs: dict[str, Any] | None = None,
     run_metadata: dict[str, Any] | None = None,
 ) -> None:
+    # 契约回退（ADR-0008）：生成器侧各调用点对 knowledge_contract 的传参条件
+    # 不一（中断/受保护流可能不传），但编排期已把契约会挂在 context 上——
+    # 这里统一回退，保证正文含锚点芯片/引用时 citation_ready 恒可落库，
+    # 与 SSE 发射条件一致（否则刷新后锚点绑定丢失）。
+    if knowledge_contract is None and context is not None:
+        _context_contract = getattr(context, "_knowledge_contract", None)
+        if isinstance(_context_contract, dict):
+            knowledge_contract = _context_contract
     messages = await _get_langgraph_messages(agent_instance, config_dict, context=context)
     if messages is None:
         return
@@ -2115,6 +2537,14 @@ async def save_messages_from_langgraph_state(
 
     if last_ai_message and final_content_override is not None:
         last_ai_message.content = normalize_markdown_tables(sanitize_visible_text(final_content_override))
+    if last_ai_message and final_additional_kwargs:
+        persisted_metadata = dict(last_ai_message.extra_metadata or {})
+        persisted_additional = persisted_metadata.get("additional_kwargs")
+        persisted_metadata["additional_kwargs"] = {
+            **(persisted_additional if isinstance(persisted_additional, dict) else {}),
+            **dict(final_additional_kwargs),
+        }
+        last_ai_message.extra_metadata = persisted_metadata
     if last_ai_message and run_metadata:
         last_ai_message.extra_metadata = {
             **dict(last_ai_message.extra_metadata or {}),
@@ -2123,17 +2553,31 @@ async def save_messages_from_langgraph_state(
         await conv_repo.db.flush()
     if last_ai_message and knowledge_contract and knowledge_contract.get("status") != "SKIPPED":
         # 与确定性定位路径（citation_binding）同形落库：历史恢复可读回 Binding 与
-        # figure_projection，刷新页面后定位芯片/图卡不丢失
+        # figure_projection，刷新页面后定位芯片/图卡不丢失。
+        # ADR-0008：纯 mention 通道（无定位 run，locator_resolution 为空）但正文已
+        # 签发图表锚点时同样必须落库 citation_ready——否则 SSE 有 figure_refs 而
+        # 刷新后锚点绑定丢失；citation_binding 键缺席 ⟺ 本 run 无定位审计数据。
         locator = knowledge_contract.get("locator_resolution")
-        if isinstance(locator, dict) and locator:
+        locator = locator if isinstance(locator, dict) else {}
+        _answer_has_chips = "〔图表F" in str(last_ai_message.content or "")
+        if locator or _answer_has_chips:
             persisted = {
                 **dict(last_ai_message.extra_metadata or {}),
                 "knowledge_retrieval_id": knowledge_contract.get("retrieval_id"),
-                "citation_binding": locator,
             }
-            if str(locator.get("status") or "") == "VERIFIED":
-                # 与流末 citation_ready 事件同一载荷（历史恢复只读它，不读审计用的 binding）
-                persisted["citation_ready"] = _citation_ready_payload(locator)
+            if locator:
+                persisted["citation_binding"] = locator
+            if str(locator.get("status") or "") == "VERIFIED" or _answer_has_chips:
+                # 与流末 citation_ready 事件同一载荷（历史恢复只读它，不读审计用的
+                # binding）：定位 VERIFIED 或正文已签发图表锚点（ADR-0008 发射解耦）。
+                augmented_payload = await _augmented_citation_ready(
+                    conv_repo.db,
+                    locator=locator,
+                    contract=knowledge_contract,
+                    text=str(last_ai_message.content or ""),
+                )
+                if augmented_payload is not None:
+                    persisted["citation_ready"] = augmented_payload
             last_ai_message.extra_metadata = persisted
             await conv_repo.db.flush()
         graph_snapshot = _published_graph_snapshot(knowledge_contract)
@@ -2932,6 +3376,20 @@ async def stream_agent_chat(
             )
             input_context["_knowledge_contract"] = knowledge_contract
             setattr(context, "_knowledge_contract", knowledge_contract)
+            # ADR-0008 边界修复（来源透明）：问题中的 @doc/DOI/标题片段等显式文献
+            # 引用在作用域内解析不到（document_scope=UNRESOLVED）时，绝不静默降级
+            # 为全库检索——先发一条非阻塞 warning（回答权威与检索范围不受影响，
+            # web/桌面端均有既有 warning 渲染通道；定位路径已有同语义失败关闭）。
+            _document_scope_status = str((knowledge_contract.get("document_scope") or {}).get("status") or "")
+            if _document_scope_status == "UNRESOLVED":
+                yield make_chunk(
+                    status="warning",
+                    message=(
+                        "问题中显式引用的文献（@doc/DOI/标题片段）未在当前知识范围内解析到，"
+                        "本次回答基于库内其他文献，请核对结论与来源是否匹配。"
+                    ),
+                    meta=meta,
+                )
             knowledge_source_used = knowledge_contract.get("status") != "SKIPPED"
             citation_sensitive_output = knowledge_source_used and turn_plan.evidence.level in {
                 EvidenceLevel.CLAIM_EVIDENCE,
@@ -3325,25 +3783,55 @@ async def stream_agent_chat(
                         "fact_count": len(projection.used_fact_ids),
                     }
             else:
+                # Structured answer drafts must be rendered before any line-level
+                # source guard.  Scanning the one-line JSON envelope first makes
+                # every Figure/Table number look like one giant ungrounded MCP
+                # claim and can replace a valid document answer with an unrelated
+                # fact sheet (the order trap fixed by ADR-0008).
+                _source_candidate = "".join(accumulated_content)
+                _locator_resolution = (knowledge_contract or {}).get("locator_resolution") or {}
+                _locator_binding = _locator_resolution.get("binding") or {}
+                _locator_bindings = (
+                    {str(_locator_binding["binding_id"]): _locator_binding}
+                    if _locator_binding.get("binding_id")
+                    else None
+                )
+                _source_candidate, _pre_source_draft_validation = render_answer_draft(
+                    _source_candidate,
+                    locator_bindings=_locator_bindings,
+                )
+                _document_scope = (knowledge_contract or {}).get("document_scope") or {}
+                _document_evidence_active = bool(
+                    str(_document_scope.get("status") or "") == "RESOLVED"
+                    and (knowledge_contract or {}).get("evidence")
+                )
                 guarded_source_text, source_output_validation = await _finalize_guarded_source_text(
-                    "".join(accumulated_content),
+                    _source_candidate,
                     evidence_level=turn_plan.evidence.level,
                     source_uses=source_manifest.source_uses,
                     repair_model_spec=meta.get("model_spec"),
                     source_policy=turn_plan.source.policy.value,
                     requires_mcp=turn_plan.requires_mcp,
+                    document_evidence_active=_document_evidence_active,
                     # 修复预算纳入 run 剩余时限（v4）：修复抢不过看门狗就没有意义
                     repair_wall_budget=max(
                         0.0,
                         _RUN_STREAM_TOTAL_REFERENCE_SECONDS - (asyncio.get_event_loop().time() - start_time),
                     ),
                 )
+                source_output_validation = {
+                    **source_output_validation,
+                    "answer_draft_pre_source_guard": _pre_source_draft_validation,
+                }
             # 数据面投影（呈现层 v3）：模型只写叙述，数据表由服务端从 manifest
             # 确定性构造（构造性 marker，降级表同款零幻觉链路）。组合文本整体
             # 复跑事实门禁，通过才发布；失败回退纯叙述并记日志，绝不带病拼接。
             if (
                 turn_plan.answer.mode != "MCP_VALUE_ONLY"
                 and str((source_output_validation or {}).get("status") or "") == "PASSED"
+                and not int(
+                    ((source_output_validation or {}).get("plane_arbitration") or {}).get("incidental_mcp_ignored") or 0
+                )
             ):
                 projection = project_data_plane(source_manifest.source_uses)
                 if projection is not None:
@@ -3443,8 +3931,10 @@ async def stream_agent_chat(
                     },
                 }
             else:
-                guarded_content, locator_validation = _guard_knowledge_answer(
-                    "".join(accumulated_content), knowledge_contract
+                guarded_content, locator_validation = await _guard_knowledge_answer_with_structured_evidence(
+                    db,
+                    "".join(accumulated_content),
+                    knowledge_contract,
                 )
                 accumulated_content = [guarded_content]
                 full_msg = AIMessage(
@@ -3511,6 +4001,13 @@ async def stream_agent_chat(
             agent_state = {}
             state = None
         run_total_tokens = _token_usage_delta(_extract_total_tokens(state), token_usage_baseline)
+        _state_values = getattr(state, "values", None) or {}
+        _state_messages = _state_values.get("messages") or []
+        _state_last_ai_content = ""
+        for _state_message in reversed(_state_messages):
+            if getattr(_state_message, "type", "") == "ai":
+                _state_last_ai_content = str(getattr(_state_message, "content", "") or "")
+                break
 
         final_signature = _agent_state_signature(agent_state)
         if final_signature and final_signature != last_agent_state_signature:
@@ -3531,13 +4028,27 @@ async def stream_agent_chat(
             }
             if protected_output:
                 save_kwargs["final_content_override"] = str(full_msg.content or "") if full_msg else None
+                if full_msg is not None and isinstance(getattr(full_msg, "additional_kwargs", None), dict):
+                    save_kwargs["final_additional_kwargs"] = dict(full_msg.additional_kwargs)
                 save_kwargs["run_metadata"] = {
                     "turn_execution_plan": turn_plan.public_dict(),
                     "run_source_manifest": source_manifest.model_dump(mode="json"),
                 }
                 if source_output_validation is not None:
                     save_kwargs["run_metadata"]["source_output_guard"] = source_output_validation
-            if citation_sensitive_output or _published_graph_snapshot(knowledge_contract) is not None:
+            # 正文含图表锚点芯片（ADR-0008）时同样必须落库 citation_ready——
+            # 发射与持久化条件保持一致，否则 SSE 有 figure_refs 而刷新后丢失锚定
+            # （普通检索级 evidence.level 不在 citation_sensitive 集合，但锚点
+            # 签发本身已证明本 run 依赖知识引用）。full_msg 可能缺席（受保护流
+            # 以状态消息持久化正文），故同时检查状态里的末条 AI 消息。
+            _answer_has_figure_chips = "〔图表F" in (
+                (str(full_msg.content or "") if full_msg is not None else "") + _state_last_ai_content
+            )
+            if (
+                citation_sensitive_output
+                or _answer_has_figure_chips
+                or _published_graph_snapshot(knowledge_contract) is not None
+            ):
                 save_kwargs["knowledge_contract"] = knowledge_contract
             await save_messages_from_langgraph_state(**save_kwargs)
         except Exception as e:
@@ -3560,14 +4071,21 @@ async def stream_agent_chat(
         if interrupted:
             return
 
-        # 复合意图流的 citation_ready：定位行已验证并随守卫渲染进答案后发出，
-        # 前端据此展示结构化引用（不重新在浏览器侧解析页码）。
-        if (
-            knowledge_contract is not None
-            and (knowledge_contract.get("locator_resolution") or {}).get("status") == "VERIFIED"
-        ):
+        # 复合意图流的 citation_ready（ADR-0008 v3）：定位行已验证并随守卫渲染进答案
+        # 后发出，前端据此展示结构化引用（不重新在浏览器侧解析页码）。发射解耦：
+        # 定位 VERIFIED **或** 正文已签发图表锚点（figure_refs 非空）任一成立即发——
+        # caption 证据型回答（无引文定位 run）也能收到锚点载荷。
+        if knowledge_contract is not None:
             locator_terminal = knowledge_contract.get("locator_resolution") or {}
-            yield make_chunk(status="citation_ready", meta=meta, **_citation_ready_payload(locator_terminal))
+            terminal_text = (str(full_msg.content or "") if full_msg is not None else "") or _state_last_ai_content
+            citation_ready_v3 = await _augmented_citation_ready(
+                db,
+                locator=locator_terminal,
+                contract=knowledge_contract,
+                text=terminal_text,
+            )
+            if citation_ready_v3 is not None:
+                yield make_chunk(status="citation_ready", meta=meta, **citation_ready_v3)
         if knowledge_contract is not None:
             _terminal_locator = knowledge_contract.get("locator_resolution") or {}
             if _terminal_locator.get("status") == "MULTIPLE_MATCHES":

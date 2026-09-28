@@ -1,5 +1,8 @@
 from yuxi.knowledge.contracts.schemas import claim_id, evidence_key, relation_group
-from yuxi.knowledge.rendering.answer_context_builder import build_answer_context
+from yuxi.knowledge.rendering.answer_context_builder import (
+    build_answer_context,
+    build_answer_output_profile,
+)
 from yuxi.knowledge.rendering.structured_renderer import render_structured_rows
 from yuxi.knowledge.validation.completeness_validator import validate_completeness
 
@@ -132,3 +135,94 @@ def test_llm_context_distinguishes_claims_from_unique_genes():
     assert "回答基因数量只能使用 distinct_subjects" in context
     assert "不得暴露 JSON 字段名" in context
     assert "不得称为知识库收录总数" in context
+
+
+def test_llm_context_exposes_full_citation_channel_budget_and_primary_figure_rule():
+    citations = [
+        {
+            "ref": f"E{index}",
+            "filename": "paper.pdf",
+            "zone": "MAIN_TEXT",
+            "quote_head": f"Figure {index}. Caption {index}",
+            "locatable": True,
+        }
+        for index in range(1, 18)
+    ]
+
+    context = build_answer_context({"claims": [], "evidence": [], "citations": citations})
+
+    assert '"ref":"E16"' in context
+    assert '"ref":"E17"' not in context
+    assert "单突变体问题优先单突变体图" in context
+    assert "不得用双突变体比较图、过表达图或工作模型图冒充主证据" in context
+
+
+def test_figure_question_receives_parallel_answer_output_contract():
+    context = build_answer_context(
+        {
+            "claims": [],
+            "evidence": [],
+            "retrieval_summary": {"query": "请解释 Figure 2 的表型，并注明依据来自哪个图。"},
+        }
+    )
+
+    assert '"mode":"FIGURE_PARALLEL"' in context
+    assert '"required_sections":["结论","逐图依据","正文解释","证据边界"]' in context
+    assert "每张被采用的图单独一个 bullet" in context
+    assert "不得把正文机制冒充图中所示" in context
+    assert '"schema_version":"answer-draft.v2"' in context
+
+
+def test_table_question_receives_coordinate_complete_output_contract():
+    context = build_answer_context(
+        {
+            "claims": [],
+            "evidence": [],
+            "retrieval_summary": {"query": "依据 Table 1 和 Table 2 比较热胁迫下各基因型。"},
+        }
+    )
+
+    assert '"mode":"TABLE_PARALLEL"' in context
+    assert '"required_sections":["结论","逐表数据","数据含义","证据边界"]' in context
+    assert "对象、条件、指标、值和单位" in context
+    assert "成对操作数齐全时输出" in context
+
+
+def test_phenotype_word_alone_does_not_trigger_table_profile():
+    context = build_answer_context(
+        {
+            "claims": [],
+            "evidence": [],
+            "retrieval_summary": {"query": "解释突变体籽粒表型变化的原因。"},
+        }
+    )
+
+    assert '"mode":"STANDARD"' in context
+    assert "逐表数据" not in context
+
+
+def test_mixed_figure_table_question_requires_both_evidence_sections():
+    context = build_answer_context(
+        {
+            "claims": [],
+            "evidence": [],
+            "retrieval_summary": {"query": "结合 Figure 2 和 Table 1 解释差异。"},
+        }
+    )
+
+    assert '"mode":"FIGURE_TABLE_PARALLEL"' in context
+    assert '"required_sections":["结论","逐图依据","逐表数据","综合解释","证据边界"]' in context
+
+
+def test_frozen_answer_output_profile_is_reusable_in_contract_hash_input():
+    contract = {
+        "retrieval_summary": {"query": "Figure 2 展示什么？"},
+        "answer_output": {
+            "schema": "answer-output-profile.v1",
+            "mode": "STANDARD",
+            "required_sections": [],
+        },
+    }
+
+    assert build_answer_output_profile(contract)["mode"] == "FIGURE_PARALLEL"
+    assert '"mode":"STANDARD"' in build_answer_context(contract)

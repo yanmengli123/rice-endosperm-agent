@@ -67,6 +67,23 @@ class Config(BaseModel):
         default=False,
         description="对话流图卡：是否随 citation_ready 发布论文原图（投影与审计恒开启，本开关只控制 SSE 发布）",
     )
+    figure_ref_anchor_enabled: bool = Field(
+        default=False,
+        description=(
+            "图表锚点（ADR-0008）：是否在回答正文签发〔图表F#〕锚点芯片并随 citation_ready 发布"
+            " figure_refs（解析与审计恒开启，与 figure_card_enabled 分立）"
+        ),
+    )
+    figure_semantic_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "图表语义门禁【破坏性】：是否允许按条件/数值判据**删除**断言句。默认关闭。"
+            "独立于 figure_ref_anchor_enabled——删句不可搭在渲染特性开关上"
+            "（2026-09-27 事故：门禁绑在锚点开关上，且判据缺省时 fail-open 未实现，"
+            "开关全开即删真实正文）。仅当条件/表格数据确实随调用传入时才可能删句；"
+            "无数据时不判断。"
+        ),
+    )
     graph_card_enabled: bool = Field(
         default=False,
         description="对话关系图：是否发布规范关系子图（投影与审计恒开启，本开关只控制 SSE 与消息附件）",

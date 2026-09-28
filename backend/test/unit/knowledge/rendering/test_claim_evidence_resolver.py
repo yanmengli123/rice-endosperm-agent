@@ -67,3 +67,37 @@ def test_toc_line_and_unrelated_valid_ref_fail_closed():
         citations=[_citation("E1", file_id="f", page=17, quote=quote, toc_line=True)],
     )
     assert result["status"] == BINDING_UNSUPPORTED
+
+
+def test_single_topic_identifier_cannot_authorize_unrelated_mechanism():
+    result = resolve_binding(
+        claim_context="OsMYB73 is a negative regulator of endosperm filling.",
+        citations=[
+            _citation(
+                "E1",
+                file_id="f",
+                page=5,
+                quote="CRISPR mutation of OsMYB73 produced longer grains and white-belly chalkiness.",
+            )
+        ],
+    )
+    assert result["status"] == BINDING_UNSUPPORTED
+
+
+def test_platform_acronym_plus_one_gene_does_not_authorize_wrong_figure():
+    result = resolve_binding(
+        claim_context="CRISPR/Cas9 敲除 OsMYB73 后 T1 代籽粒粒长变长，并出现腹白垩白外观。",
+        proposed_ref="E2",
+        citations=[
+            _citation(
+                "E2",
+                file_id="f",
+                page=10,
+                quote=(
+                    "Figure 5 CRISPR/Cas9 target mutagenesis of OsMYB73 and OsNF-YB1 double mutants grains evaluation."
+                ),
+            )
+        ],
+    )
+
+    assert result["status"] == BINDING_UNSUPPORTED

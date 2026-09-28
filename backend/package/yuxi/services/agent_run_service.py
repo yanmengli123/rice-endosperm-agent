@@ -351,6 +351,10 @@ COMPACT_CHUNK_FIELDS: tuple[str, ...] = (
     "citation",
     # 图卡投影（citation_ready.figures）
     "figures",
+    # 图表锚点绑定（citation_ready.figure_refs，ADR-0008：正文〔图表F#〕芯片 ↔ 卡片桥接）
+    "figure_refs",
+    # 表格卡片投影（citation_ready.tables，ADR-0008 P2：受控解析的行列 JSON）
+    "tables",
     # 确定性关系图快照（graph_snapshot_ready）
     "graph_snapshot",
     # 跨文献歧义时的候选文献清单（locator_candidates 事件，只含文档身份）

@@ -60,7 +60,7 @@ _FIGURE_KINDS = {LOCATOR_KIND_FIGURE_IMAGE, LOCATOR_KIND_FIGURE_CAPTION}
 # 图组投影：primary（合成整图/最大块）优先，其余按阅读序；单条 SSE 最多发布的资产数
 _SELECTION_RULE = "primary_first_then_reading_order"
 ROLE_PRIMARY = "primary"
-_MAX_GROUP_FIGURES = 24
+_MAX_GROUP_FIGURES = 6  # P1-2 收敛（2026-09-27）：默认 primary + 关键 panel ≤5，其余进「展开全部」
 
 # 以下三组常量镜像 services/knowledge_asset_service（该模块拖 FastAPI/MinIO
 # 依赖，contracts 层不做生产期 import）；与签发方的等价性由
@@ -238,12 +238,117 @@ async def project_publishable_figures(
     # 门7：发布授权位（与 visual_explanation_allowed 分立）
     if not publish_allowed:
         return [], SUPPRESS_PUBLISH_NOT_ALLOWED
-
-    # A2 图组投影：同一实体（Figure N）的全部资产按 primary → 阅读序发布；成员各自过门 5/6，
-    # 不合格的 panel 跳过而不抑制整组；页码仍只来自 Binding（I2）
-    group_rows = await _fetch_group_assets(db, entity_id=int(entity.id), revision_id=revision_id)
-    ordered = group_rows or [asset]
     page = int(parsed.asset_pdf_page_number or parsed.page_number)
+    return await _project_entity_group(
+        db,
+        kb_id=kb_id,
+        file_id=file_id,
+        revision_id=revision_id,
+        binding_id=parsed.binding_id,
+        evidence_id=str(parsed.physical_evidence_id),
+        page=page,
+        panel_match=parsed.panel_match,
+        entity=entity,
+        primary_asset=asset,
+    )
+
+
+async def project_publishable_figures_for_mention(
+    db: AsyncSession,
+    *,
+    kb_id: str,
+    file_id: str,
+    revision_id: str,
+    anchor_id: str,
+    evidence_id: str,
+    page: int | None,
+    publish_allowed: bool = False,
+) -> tuple[list[PublishableFigure], str | None]:
+    """mention 通道投影（ADR-0008 P1）：题注锚点 → 实体 → 资产，同一套发布门。
+
+    与 locator 通道的差别只在门 1 的验证来源：locator 通道是 ``VerifiedLocatorBinding``
+    （QUOTE/FIGURE 定位裁决），mention 通道是**本轮引用池的题注型 E# 行**——
+    其锚点血统已在 ``build_citation_rows`` 经 active-revision + scope 一致性校验。
+    门 2-7（scope/active/asset_name/指纹/发布授权/图组聚合）与 locator 通道逐门相同；
+    ``binding_id`` 为合成身份 ``figref:{anchor_id}```（非 vlb_ 绑定，前端按其分组）。
+    Table 题注在此通道必然 ``no_asset_row``（表格无资产，P1 跳原文、P2 TableAsset），
+    属预期抑制，观测按 ``kind=table`` 单独口径统计。
+    """
+    if not (kb_id and file_id and revision_id and anchor_id):
+        return [], SUPPRESS_NO_ASSET_ROW
+    rows = await _fetch_figure_rows(
+        db,
+        locator_kind=LOCATOR_KIND_FIGURE_CAPTION,
+        revision_id=revision_id,
+        anchor_id=anchor_id,
+        kb_id=kb_id,
+        file_id=file_id,
+    )
+    if not rows:
+        # 抑制分级诊断（与 locator 通道同款三级探针）：区分「无资产行（Table 的
+        # 预期态）/ 非 active revision / scope 不一致」——观测按 kind 分开口径
+        # 统计，Table 的 no_asset_row 不被 stale revision 污染。
+        any_scope_rows = await _fetch_figure_rows(
+            db,
+            locator_kind=LOCATOR_KIND_FIGURE_CAPTION,
+            revision_id=revision_id,
+            anchor_id=anchor_id,
+            require_active=False,
+        )
+        if not any_scope_rows:
+            return [], SUPPRESS_NO_ASSET_ROW
+        scope_rows = await _fetch_figure_rows(
+            db,
+            locator_kind=LOCATOR_KIND_FIGURE_CAPTION,
+            revision_id=revision_id,
+            anchor_id=anchor_id,
+            kb_id=kb_id,
+            file_id=file_id,
+            require_active=False,
+        )
+        return [], (SUPPRESS_REVISION_NOT_ACTIVE if scope_rows else SUPPRESS_SCOPE_MISMATCH)
+    asset, entity = rows[0]
+    if derive_asset_name(str(asset.object_name or "")) is None:
+        return [], SUPPRESS_ASSET_NAME_UNRESOLVABLE
+    if not str(asset.asset_sha256 or ""):
+        return [], SUPPRESS_ASSET_UNFINGERPRINTED
+    if not publish_allowed:
+        return [], SUPPRESS_PUBLISH_NOT_ALLOWED
+    return await _project_entity_group(
+        db,
+        kb_id=kb_id,
+        file_id=file_id,
+        revision_id=revision_id,
+        binding_id=f"figref:{anchor_id}",
+        evidence_id=str(evidence_id or ""),
+        page=int(page) if page else 0,
+        panel_match=None,
+        entity=entity,
+        primary_asset=asset,
+    )
+
+
+async def _project_entity_group(
+    db: AsyncSession,
+    *,
+    kb_id: str,
+    file_id: str,
+    revision_id: str,
+    binding_id: str,
+    evidence_id: str,
+    page: int,
+    panel_match: str | None,
+    entity: FigureEntityRecord,
+    primary_asset: FigureAssetRecord,
+) -> tuple[list[PublishableFigure], str | None]:
+    """A2 图组投影：同一实体（Figure N）的全部资产按 primary → 阅读序发布。
+
+    成员各自过门 5/6，不合格的 panel 跳过而不抑制整组；页码只来自 Binding
+    （locator 通道）或题注引用行锚点（mention 通道），永不读 ``figure_assets.page``
+    上屏。
+    """
+    group_rows = await _fetch_group_assets(db, entity_id=int(entity.id), revision_id=revision_id)
+    ordered = group_rows or [primary_asset]
     figures: list[PublishableFigure] = []
     for member in ordered[:_MAX_GROUP_FIGURES]:
         member_name = derive_asset_name(str(member.object_name or ""))
@@ -252,7 +357,7 @@ async def project_publishable_figures(
             continue
         figures.append(
             PublishableFigure(
-                binding_id=parsed.binding_id,
+                binding_id=binding_id,
                 kb_id=kb_id,
                 file_id=file_id,
                 revision_id=revision_id,
@@ -260,8 +365,8 @@ async def project_publishable_figures(
                 asset_sha256=member_sha,
                 media_type=_MEDIA_TYPE_BY_SUFFIX[posixpath.splitext(member_name)[1].lower()],
                 page=page,
-                panel_match=parsed.panel_match,
-                evidence_id=str(parsed.physical_evidence_id),
+                panel_match=panel_match,
+                evidence_id=evidence_id,
                 figure_label=str(entity.container_label or ""),
                 caption=str(entity.caption or ""),
                 width=int(member.width or 0),
@@ -345,4 +450,5 @@ __all__ = [
     "figure_projection_envelope",
     "media_type_for_asset_name",
     "project_publishable_figures",
+    "project_publishable_figures_for_mention",
 ]

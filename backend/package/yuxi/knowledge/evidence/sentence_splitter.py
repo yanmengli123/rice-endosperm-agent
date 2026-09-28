@@ -16,13 +16,28 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-SPLITTER_VERSION = "1.2"
+SPLITTER_VERSION = "1.4"
 
 # 句边界：全角 。！？ 无歧义直接切；ASCII .!? 需后随空白/闭合引号括号或文末
 # （小数 "7.0"、URL 因后随非空白不会被切）。1.1 起纳入 ASCII 句号。
 _SENTENCE_END = re.compile(r"(?<=[。！？])|(?<=[.!?])(?=[“”\"'）)\]》\s]|$)")
 # 图/表标题行：Figure/Fig./Table/图/表 + 编号（字面量，非浮点/范围）
-_CAPTION_START = re.compile(r"^(?:Figure|Fig\.?|Table|图|表)\s*([0-9]+[A-Za-z]?)", re.IGNORECASE)
+# 必须支持补充材料编号的 S 前缀（Figure S21 / Supplementary Figure 2 /
+# 图S5）：此前只认「关键词 + 直接数字」，导致所有补充图题注行被判成普通
+# sentence、container_label=None → 既进不了 figure_entities、也拿不到权威
+# 芯片，正文引用 S 图只能落 no_registry_match（2026-09-26 Q3 实测：S21/S22
+# 描述错误且全文无芯片）。此处与 caption_locator._LABEL_PATTERN 的限定词
+# 口径对齐（Supplementary/Supplemental/Extended Data）。
+_CAPTION_START = re.compile(
+    r"^(?:(?:supplementa(?:ry|l)|extended\s+data|ext\.?\s*data)\s+)?"
+    r"(?:Figure|Fig\.?|Table|图|表)\.?\s*([sS])?\.?\s*([0-9]+[A-Za-z]?)",
+    re.IGNORECASE,
+)
+_CAPTION_ANY = re.compile(
+    r"(?:(?:supplementa(?:ry|l)|extended\s+data|ext\.?\s*data)\s+)?"
+    r"(?:Figure|Fig\.?|Table|图|表)\.?\s*([sS])?\.?\s*([0-9]+[A-Za-z]?)",
+    re.IGNORECASE,
+)
 # 表格行：以管线或首列单元开头的单行（如 "| OsMYB73 | 115-164 |"）
 _TABLE_ROW = re.compile(r"^\s*\|?\s*[^\s|]+\s*\|")
 _DOI_IN_SENTENCE = re.compile(r"doi[:：]?\s*\S+", re.IGNORECASE)
@@ -65,20 +80,28 @@ def split_evidence_units(
         quote = str(getattr(anchor, "quote", "") or "").strip()
         if not quote or quote in seen_quotes:
             continue
-        seen_quotes.add(quote)
         anchor_id = str(getattr(anchor, "anchor_id", "") or "")
-        evidence_type, container_label, row_key = _classify_quote(quote)
-        units.append(
-            EvidenceUnit(
-                evidence_type=evidence_type,
-                quote=quote,
-                container_label=container_label,
-                row_key=row_key,
-                sentence_index=index,
-                anchor_id=anchor_id,
+        # Some PDF extractors concatenate consecutive supplementary captions
+        # into one physical anchor ("Figure S5 ... Figure S6 ...").  Treating
+        # that blob as S5 poisons both identities.  Split only when the quote
+        # starts with a caption and another label begins after a sentence
+        # boundary; every child retains the same physical anchor/page lineage.
+        parts = split_caption_sequence(quote)
+        seen_quotes.add(quote)
+        for part in parts:
+            seen_quotes.add(part)
+            evidence_type, container_label, row_key = _classify_quote(part)
+            units.append(
+                EvidenceUnit(
+                    evidence_type=evidence_type,
+                    quote=part,
+                    container_label=container_label,
+                    row_key=row_key,
+                    sentence_index=index,
+                    anchor_id=anchor_id,
+                )
             )
-        )
-        index += 1
+            index += 1
 
     body_units = _split_body_lines(markdown_body or "", seen_quotes)
     for unit in body_units:
@@ -117,6 +140,28 @@ def _classify_quote(quote: str) -> tuple[str, str | None, str | None]:
     return "sentence", None, None
 
 
+def split_caption_sequence(text: str) -> list[str]:
+    """Split a parser-merged sequence of captions without losing characters.
+
+    A mid-sentence reference ("as shown in Figure 2") is never a split point:
+    the first label must start the quote and later labels must follow terminal
+    punctuation.  This keeps ordinary multi-sentence captions intact while
+    separating the observed S5/S6 and S9/S10 extraction artefacts.
+    """
+    source = str(text or "").strip()
+    if not source or _CAPTION_START.match(source) is None:
+        return [source] if source else []
+    starts = [0]
+    for match in list(_CAPTION_ANY.finditer(source))[1:]:
+        prefix = source[: match.start()].rstrip()
+        if prefix and prefix[-1] in ".!?。！？;；":
+            starts.append(match.start())
+    if len(starts) == 1:
+        return [source]
+    starts.append(len(source))
+    return [source[starts[index] : starts[index + 1]].strip() for index in range(len(starts) - 1)]
+
+
 def _looks_like_formula(quote: str) -> bool:
     if len(quote) > 200:
         return False
@@ -137,8 +182,10 @@ def _split_body_lines(markdown_body: str, seen_quotes: set[str]) -> list[tuple[s
             continue
         caption_match = _CAPTION_START.match(line)
         if caption_match:
-            if line not in seen_quotes:
-                units.append(("caption", line, caption_match.group(0), None))
+            for part in split_caption_sequence(line):
+                if part not in seen_quotes:
+                    part_match = _CAPTION_START.match(part)
+                    units.append(("caption", part, part_match.group(0) if part_match else None, None))
             continue
         if _TABLE_ROW.match(line):
             if line not in seen_quotes:

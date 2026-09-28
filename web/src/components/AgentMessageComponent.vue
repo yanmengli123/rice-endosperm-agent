@@ -49,18 +49,40 @@
         :content="parsedData.content"
         code-copy
         evidence-links
+        figure-ref-links
         class="message-md"
         @locate-evidence="emit('locateEvidence', $event)"
+        @figure-ref-click="handleFigureRefClick"
       />
+
+      <!-- 题注已核验但没有可发布视觉资产：明确披露降级，避免 F# 让用户
+           误以为已经完成图文并联。仍可点击芯片跳转原文证据。 -->
+      <div v-if="captionOnlyRefs.length" class="figure-caption-only-notice" role="status">
+        以下图表仅完成题注与原文定位，当前解析版本没有可展示的图像/表格卡片：
+        {{ captionOnlyRefs.map((item) => item.label).join('、') }}。
+      </div>
 
       <!-- 已验证定位的论文原图：消息级附件，与状态面板同源（citation_ready.figures），不进 Markdown 正文 -->
       <FigureCardGroup
         v-if="figures && figures.length"
+        ref="figureCardsRef"
         class="message-figure-cards"
         :figures="figures"
         :evidence-ids="evidenceIdSet"
         @open-source="emit('openFigureSource', $event)"
       />
+
+      <!-- 表格卡片（ADR-0008 P2）：受控渲染的行列 JSON（citation_ready.tables），不进 Markdown 正文 -->
+      <div v-if="tables && tables.length" ref="tableCardsRef" class="message-table-cards">
+        <TableCard
+          v-for="(table, tableIndex) in tables"
+          :key="table.table_id"
+          :ref="(component) => setTableCardRef(tableIndex, component)"
+          :table="table"
+          :can-open-source="evidenceIdSet ? evidenceIdSet.has(table.evidence_id) : false"
+          @open-source="emit('openFigureSource', $event)"
+        />
+      </div>
 
       <!-- 规范关系子图：消息级附件，数据来自后端冻结的 graph_snapshot_v1 -->
       <GraphSnapshotCard
@@ -174,6 +196,8 @@ import { buildMentionDisplayLabels } from '@/utils/mention_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import GraphSnapshotCard from '@/components/evidence/GraphSnapshotCard.vue'
+import TableCard from '@/components/evidence/TableCard.vue'
+import { figureRefClickAction } from '@/utils/figureCard'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 
 const props = defineProps({
@@ -215,6 +239,17 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  // 图表锚点绑定（ADR-0008 citation_ready.figure_refs）：正文〔图表F#〕芯片
+  // 点击时的联动裁决数据（figure_index → 图卡滚动 / evidence_id → 跳原文）
+  figureRefs: {
+    type: Array,
+    default: () => []
+  },
+  // 表格卡片（ADR-0008 P2 citation_ready.tables）：受控解析的行列 JSON
+  tables: {
+    type: Array,
+    default: () => []
+  },
   // 已审核知识关系的确定性子图（消息级附件；禁止从 Markdown/模型文本反向解析）
   graphSnapshot: {
     type: Object,
@@ -243,6 +278,50 @@ const emit = defineEmits([
 
 // 图片全屏预览
 const imagePreview = ref({ visible: false, src: '', alt: '' })
+
+// 图卡组根元素（芯片点击联动的滚动/高亮目标）
+const figureCardsRef = ref(null)
+const tableCardsRef = ref(null)
+const tableCardRefs = ref([])
+const setTableCardRef = (index, component) => {
+  tableCardRefs.value[index] = component || null
+}
+
+const captionOnlyRefs = computed(() =>
+  (Array.isArray(props.figureRefs) ? props.figureRefs : []).filter((item) => {
+    if (!item || typeof item !== 'object') return false
+    if (item.visual_status === 'VERIFIED_CAPTION_ONLY') return true
+    // Backward-compatible history rows created before visual_status existed.
+    return Boolean(item.suppressed_reason && item.figure_index == null && item.table_index == null)
+  })
+)
+
+// 图表锚点芯片点击（ADR-0008）：有卡片 → 滚动联动 + 闪烁高亮；
+// 无卡片但有证据（Table / suppressed：P1 跳原文）→ 复用 openFigureSource 链路；
+// 其余不动作（绝不猜）。裁决逻辑在纯函数 figureRefClickAction（裸 node spec 覆盖）。
+const flashElement = (root) => {
+  if (!(root instanceof Element)) return
+  root.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  root.classList.add('figure-card-flash')
+  setTimeout(() => root.classList.remove('figure-card-flash'), 1600)
+}
+
+const handleFigureRefClick = ({ ref }) => {
+  const action = figureRefClickAction(ref, props.figureRefs, props.figures, props.tables)
+  if (action.type === 'scroll') {
+    flashElement(
+      figureCardsRef.value?.elementForFigure?.(action.figureIndex) || figureCardsRef.value?.$el
+    )
+    return
+  }
+  if (action.type === 'scroll-table') {
+    flashElement(tableCardRefs.value[action.tableIndex]?.cardRoot || tableCardsRef.value)
+    return
+  }
+  if (action.type === 'open-source') {
+    emit('openFigureSource', { evidence_id: action.evidenceId, figure_ref: action.entry })
+  }
+}
 
 const handleImagePreviewKeydown = (e) => {
   if (e.key === 'Escape') {
@@ -686,8 +765,39 @@ const parsedData = computed(() => {
   }
 }
 
+.message-table-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0;
+  transition:
+    box-shadow 0.3s ease,
+    border-radius 0.3s ease;
+}
+
 .message-figure-cards {
   margin: 10px 0 4px;
+  transition:
+    box-shadow 0.3s ease,
+    border-radius 0.3s ease;
+}
+
+.figure-caption-only-notice {
+  margin: 6px 0 8px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--gray-300);
+  border-radius: 4px;
+  background: var(--gray-25);
+  color: var(--gray-600);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+// 芯片点击联动时图卡组的短暂高亮（滚动定位成功的视觉反馈）
+:deep(.figure-card-flash),
+.figure-card-flash {
+  box-shadow: 0 0 0 2px var(--main-300);
+  border-radius: 8px;
 }
 
 .message-md {

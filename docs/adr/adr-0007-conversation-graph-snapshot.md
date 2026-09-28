@@ -15,10 +15,11 @@
 2. `RELATION_LOOKUP` 先进行精确规范名/别名解析，再查询一跳关系；实体缺失、歧义或数据源失败必须显式返回 `MISS`、`AMBIGUOUS` 或 `UNAVAILABLE`，不得回退到模型常识补边。裁决四态之外增加 `PENDING_REVIEW`：闭世界内存在候选关系、但全部被成员证据策略拦截时，不得伪装成 `MISS`，必须返回被拦截计数与可行动指引（审核工作台 / 成员策略）。
 3. 关系准入对齐平台既有治理词表——scope 成员级证据策略位（与 claim 通道 `_policy_allows` 同源）：
    `APPROVED`/`CANONICAL` 关系恒可发布；`CANDIDATE` 关系仅当成员显式开启 `evidence_candidate`
-   时发布，且必须分层标注（边样式虚线 + 「待审核」徽章），不得打开证据抽屉（无 claim 级
-   合格证据可发布）；`REJECTED` 及其他状态一律抑制并计数。默认 fail-closed：策略位关闭时
+   时发布，且必须分层标注（边样式虚线 + 「待审核」徽章）；纯候选聚合边不得打开证据抽屉
+   （无 claim 级合格证据可发布），混合聚合边以已审核边作为证据入口并单独披露候选计数；
+   `REJECTED` 及其他状态一律抑制并计数。默认 fail-closed：策略位关闭时
    行为与全量门禁等价。候选边只属导航/展示平面，不进 `EvidenceEnvelope`、不支撑 E3 claim。
-4. 快照在检索契约哈希前生成，使用稳定业务 ID，限制为 25 个节点、40 条边，并记录截断、冲突、审核版本、范围版本和投影哈希。
+4. 快照在检索契约哈希前生成，使用稳定业务 ID，默认限制为 400 个展示节点、500 组聚合边，并记录截断、冲突、审核版本、范围版本和投影哈希。
 5. 文本关系清单与图形均由同一快照确定性渲染。模型可解释已冻结事实，但无权生成、删除或改写图结构。
 6. 快照通过 `graph_snapshot_ready` SSE 事件实时发送，同时写入 assistant message 的 `extra_metadata.graph_snapshot`，保证刷新恢复与实时结果一致。
 7. 发布由 `graph_card_enabled` 控制。关闭时快照仍进入检索审计表，但不进入消息或 SSE，避免暗发布数据泄漏。
@@ -32,9 +33,11 @@
 `suppressed` 按原因闭合计数：`review_policy`（被成员策略拦截的候选边）、`rejected`、`edge_budget`、`node_budget`。
 只有 `HIT`（存在可发布边）才随消息附卡与发 SSE；其余裁决由确定性答案文本承载，不渲染空卡片。
 
-节点使用 `entity_id`（展示代表节点）；边使用代表 `triple_id`，并携带 `review_status`、`review_version`、证据数量、冲突状态、风险分，以及聚合字段
+节点使用 `entity_id`（展示代表节点）；边使用已审核优先的代表 `triple_id`，并携带全部
+`triple_ids[]`、已审核/候选 ID 与计数、`review_status`、`review_version`、证据数量、冲突状态、风险分，以及聚合字段
 （`relation_group`、`predicates[]`、`parallel_count`）。显示层聚合规则：mention 命中的种子变体折叠为一个展示种子节点；
-平行原始边按 `(展示谓词桶, 目标 normalized 身份, 方向)` 合并为一组（展示谓词桶 = claim 通道 `relation_group`
+平行原始边按 `(kb_id, 展示谓词桶, 目标 normalized 身份, 方向)` 合并为一组，严禁跨知识库聚合
+（展示谓词桶 = claim 通道 `relation_group`
 + 仅作用于显示聚合的中文同义映射，claim 语义桶不动）；种子间互指边视为自环噪声不展示。快照携带
 `total_raw_edge_count`、`aggregation{strategy, group_count, seed_variant_count}`、`seed_display_name`；
 预算（默认 400 节点 / 500 组）作用于聚合后的展示边——真实规模（731 条原始 → 257 组）可全量进快照，
@@ -46,7 +49,8 @@
   （`agent_runs.output_message_id → message.extra_metadata.graph_snapshot`）生成文件；审计行
   `graph_snapshot_json` 永不作为导出源（暗发布防泄漏，ADR-0004 §7 同款纪律）；当时未发布即 404。
 - 权限与证据端点同语义：run 归属校验 + 冻结范围 ∩ 当前可见的 KB 交集（Scope 收缩后拒绝导出）。
-- 字节确定性：导出不含任何时钟字段，同 run 重复导出字节恒定，`projection_hash` 同时充当 ETag。
+- 字节确定性：导出不含时钟或宿主相关 ZIP 元数据，同 run、同格式重复导出字节恒定；
+  `projection_hash` 校验内嵌快照，HTTP 强 ETag 对最终响应字节求 SHA-256，并支持带鉴权的私有条件请求。
 - 格式对齐 roundtrip 约定：CSV 为 zip（`nodes.csv` / `edges.csv` / `manifest.json`，utf-8-sig BOM、
   标准 quoting）；manifest 携带投影哈希与计数，文件可独立校验。
 - 入口：关系图卡头部（JSON / CSV）与状态面板产物区逐轮行；前端只做触发与文件名解析，
@@ -54,7 +58,7 @@
 
 ## 可观测性与兼容性
 
-- AgentRun 协议提升至 `1.5`，能力声明增加 `graph_snapshot_card`。
+- AgentRun 协议自 `1.5` 起提供 `graph_snapshot_card`；当前协议 `1.6` 继续保持该附件契约 additive-only。
 - 轨迹事件为 `knowledge.graph_snapshot.attached|suppressed`，记录 outcome、节点/边数量、截断与审核策略。
 - `knowledge_retrieval_runs.graph_snapshot_json` 保存审计快照；消息附件只保存当时真实发布的载荷。
 - 新客户端按能力消费事件；旧客户端忽略未知 SSE 状态，文本回答仍可用。
@@ -88,3 +92,6 @@
   库切换让位分支改为重新调度而非静默中止。大图性能预算落地：力导向迭代数随节点规模自适应
   （≥300/≥600 降档）。桌面端契约对齐（PENDING_REVIEW 等 7 字段 + 聚合字段）按所有者指示
   再次冻结挂起，解冻时按本 ADR 契约清单补齐即可。
+- 2026-09-25（v6，来源与导出完整性）：聚合键加入 `kb_id`，禁止跨知识库合并同名关系；
+  混合审核组改为已审核代表优先，保留全部原始 triple ID 并分别披露已审核/候选计数。ZIP 固定成员
+  时间戳、权限位与宿主类型，强 ETag 改为最终字节哈希并支持私有条件请求，消除缓存与可复现性歧义。

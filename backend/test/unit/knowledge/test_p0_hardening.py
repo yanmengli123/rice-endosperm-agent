@@ -57,14 +57,15 @@ def _citation(ref: str, page: int, quote: str) -> dict:
 
 
 def test_authority_marker_parser_single_source():
-    text = "结论如下 〔证据E3｜正文·第6页｜paper.pdf〕，定位 〔引文定位｜正文·第7页｜paper.pdf〕。"
+    text = "结论如下 〔证据E3｜正文·第6页｜paper.pdf〕，定位 〔引文定位｜正文·第7页｜paper.pdf〕，图表 〔图表F1｜Figure 2〕。"
     markers = parse_authority_markers(text)
     assert [marker["kind"] for marker in markers] == [
         AuthorityMarkerKind.EVIDENCE_CITATION,
         AuthorityMarkerKind.LOCATOR_CITATION,
+        AuthorityMarkerKind.FIGURE_REFERENCE,
     ]
-    assert markers[0]["ref"] == "E3" and markers[1]["ref"] is None
-    assert count_authority_markers(text) == {"EVIDENCE_CITATION": 1, "LOCATOR_CITATION": 1}
+    assert markers[0]["ref"] == "E3" and markers[1]["ref"] is None and markers[2]["ref"] == "F1"
+    assert count_authority_markers(text) == {"EVIDENCE_CITATION": 1, "LOCATOR_CITATION": 1, "FIGURE_REFERENCE": 1}
 
 
 # ---- AC12：双重 guard 字节稳定 ----

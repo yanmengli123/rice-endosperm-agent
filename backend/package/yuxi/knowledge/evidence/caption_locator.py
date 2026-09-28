@@ -92,6 +92,43 @@ def extract_figure_label(text: str | None) -> str | None:
     return re.sub(r"\s+", " ", match.group(0)).strip() if match else None
 
 
+def iter_figure_labels(text: str | None) -> list[dict[str, Any]]:
+    """抽取文本中**全部**图表编号提及（多值版，ADR-0008 图表锚点通道用）。
+
+    与 :func:`extract_figure_label` 共用 ``_LABEL_PATTERN``（单值版保持兼容，
+    定位链语义不变）。每项::
+
+        {"raw": "Figure 2", "start": 12, "end": 21,
+         "canonical": "figure 2", "base_key": "figure 2",
+         "kind": "figure", "panel": ""}
+
+    ``base_key`` 剥掉 panel 字母（``figure 2a`` → ``figure 2``）——锚点绑定按
+    图表整体解析，panel 字母保留在展示层（P3 panel 级联动用），不参与实体
+    匹配，避免同图多 panel 分裂成多个键互相撞歧义。
+    """
+    mentions: list[dict[str, Any]] = []
+    for match in _LABEL_PATTERN.finditer(str(text or "")):
+        raw = re.sub(r"\s+", " ", match.group(0)).strip()
+        canonical = canonical_figure_label(raw)
+        if canonical is None:
+            continue
+        base_key = re.sub(r"(?<=\d)[A-Za-z]$", "", canonical)
+        kind = "table" if canonical.startswith("table") else "figure"
+        panel = canonical[len(base_key) :]
+        mentions.append(
+            {
+                "raw": raw,
+                "start": match.start(),
+                "end": match.end(),
+                "canonical": canonical,
+                "base_key": base_key,
+                "kind": kind,
+                "panel": panel,
+            }
+        )
+    return mentions
+
+
 def label_conflicts(input_label: str | None, candidate_label: str | None) -> bool:
     """label 硬约束：双方编号都明确且规范键不同 → 冲突（REJECT，绝不降权）。"""
     input_key = canonical_figure_label(input_label)

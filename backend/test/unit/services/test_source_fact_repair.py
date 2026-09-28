@@ -102,6 +102,56 @@ async def test_factless_custom_mcp_sources_impose_no_fact_obligation(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_resolved_document_turn_ignores_uncited_incidental_mcp_for_publication(monkeypatch):
+    """An unrequested MCP call stays auditable but cannot replace an @doc answer."""
+
+    async def unexpected_repair(*args, **kwargs):
+        raise AssertionError("incidental MCP must not trigger a repair round")
+
+    monkeypatch.setattr("yuxi.services.chat_service._repair_source_fact_grounding", unexpected_repair)
+    draft = "Figure 2 展示了突变体籽粒表型。"
+    guarded, validation = await _finalize_guarded_source_text(
+        draft,
+        evidence_level="E3_CLAIM_EVIDENCE",
+        source_uses=_SOURCE_USES,
+        source_policy="AUTO",
+        requires_mcp=False,
+        document_evidence_active=True,
+    )
+
+    assert guarded == draft
+    assert validation["status"] == "PASSED"
+    assert validation["fact_grounding"]["required"] is False
+    assert validation["plane_arbitration"] == {
+        "document_evidence_active": True,
+        "incidental_mcp_ignored": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolved_document_turn_keeps_strict_gate_when_mcp_fact_is_cited(monkeypatch):
+    """A genuinely mixed answer carrying MCP-F does not receive the document exemption."""
+
+    async def failed_repair(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("yuxi.services.chat_service._repair_source_fact_grounding", failed_repair)
+    draft = "Figure 2 的数值为 2。[MCP-F:42:f_1234567890abcdef]"
+    guarded, validation = await _finalize_guarded_source_text(
+        draft,
+        evidence_level="E3_CLAIM_EVIDENCE",
+        source_uses=_SOURCE_USES,
+        source_policy="AUTO",
+        requires_mcp=False,
+        document_evidence_active=True,
+    )
+
+    assert validation["status"] == "DEGRADED"
+    assert "plane_arbitration" not in validation
+    assert "Figure 2 的数值为 2" not in guarded
+
+
+@pytest.mark.asyncio
 async def test_repair_prompt_rejects_model_answers_without_source_header(monkeypatch):
     class StubResponse:
         content = "这是修复后的回答（缺 SOURCE-ONLY 头）"

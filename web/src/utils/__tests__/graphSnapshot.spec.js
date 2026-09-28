@@ -40,7 +40,10 @@ const run = () => {
 
   const dangling = normalizeGraphSnapshot({
     ...snapshot,
-    edges: [...snapshot.edges, { ...snapshot.edges[0], triple_id: 'bad', target_entity_id: 'missing' }]
+    edges: [
+      ...snapshot.edges,
+      { ...snapshot.edges[0], triple_id: 'bad', target_entity_id: 'missing' }
+    ]
   })
   assert.deepEqual(dangling.edges, snapshot.edges)
 
@@ -64,14 +67,27 @@ const run = () => {
       .retrieval_id,
     'persisted'
   )
-  assert.deepEqual(extractGraphSnapshotFromHistory([human, persisted]), persisted.extra_metadata.graph_snapshot)
+  assert.deepEqual(
+    extractGraphSnapshotFromHistory([human, persisted]),
+    persisted.extra_metadata.graph_snapshot
+  )
 
   const mixed = {
     ...snapshot,
-    edges: [...snapshot.edges, { ...snapshot.edges[0], triple_id: 't2', review_status: 'CANDIDATE' }],
+    edges: [
+      ...snapshot.edges,
+      { ...snapshot.edges[0], triple_id: 't2', review_status: 'CANDIDATE' }
+    ],
     suppressed: { review_policy: 3 }
   }
   assert.equal(pendingEdgeCount(mixed), 1)
+  assert.equal(
+    pendingEdgeCount({
+      ...mixed,
+      edges: [{ ...mixed.edges[0], candidate_parallel_count: 4, review_status: 'APPROVED' }]
+    }),
+    4
+  )
   assert.equal(pendingEdgeCount(snapshot), 0)
   assert.equal(suppressedCandidateCount(mixed), 3)
   assert.equal(suppressedCandidateCount(snapshot), 0)

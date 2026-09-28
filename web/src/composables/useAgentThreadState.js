@@ -50,6 +50,16 @@ export function useAgentThreadState({
         // 答案气泡内图卡的会话级暂存：run_id → figures（线程生命周期内不随新一轮重置，
         // 桥接"流结束 → 历史回读"之间；历史回读后以消息 extra_metadata.citation_ready 为准）
         figuresByRun: {},
+        // 图表锚点（ADR-0008 citation_ready.figure_refs）：本轮签发的正文锚点绑定；
+        // 字段缺席 ⟺ 未签发（开关关闭/无可解析提及）
+        verifiedFigureRefs: [],
+        // 锚点的会话级暂存：run_id → figure_refs（桥接语义同 figuresByRun）
+        figureRefsByRun: {},
+        // 表格卡片（ADR-0008 P2 citation_ready.tables）：受控解析的行列 JSON；
+        // 字段缺席 ⟺ 未发布
+        verifiedTables: [],
+        // 表格卡片的会话级暂存：run_id → tables（桥接语义同 figuresByRun）
+        tablesByRun: {},
         verifiedGraphSnapshot: null,
         // run_id → graph_snapshot_v1，桥接流末事件与历史消息回读。
         graphsByRun: {},

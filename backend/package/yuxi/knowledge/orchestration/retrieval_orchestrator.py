@@ -1302,6 +1302,41 @@ async def prepare_knowledge_context(
                     "warnings": result.get("warnings") or [],
                 }
             )
+            # Direct-caption recall: semantic chunk retrieval can prefer a
+            # later comparison figure and omit the figure that directly
+            # answers a scoped "which figure/caption" question. Recall only
+            # active caption spans from the explicitly mentioned document,
+            # then prepend them so both the model context and citation channel
+            # see the same frozen evidence set.
+            if scope_tenant_id is not None and scope_file_ids:
+                from yuxi.knowledge.evidence.caption_recall import (
+                    CAPTION_RECALL_VERSION,
+                    recall_scoped_caption_evidence,
+                )
+
+                recalled_captions = await recall_scoped_caption_evidence(
+                    db,
+                    tenant_id=int(scope_tenant_id),
+                    kb_ids=[str(member["kb_id"]) for member in raw_members],
+                    file_ids=scope_file_ids,
+                    question=question,
+                    existing_evidence_ids={
+                        str(row.get("evidence_id"))
+                        for row in contract.get("evidence") or []
+                        if isinstance(row, dict) and row.get("evidence_id")
+                    },
+                )
+                if recalled_captions:
+                    contract["evidence"] = [*recalled_captions, *(contract.get("evidence") or [])]
+                    contract["context_evidence"] = [
+                        *recalled_captions,
+                        *(contract.get("context_evidence") or []),
+                    ]
+                    contract["caption_recall"] = {
+                        "version": CAPTION_RECALL_VERSION,
+                        "count": len(recalled_captions),
+                        "evidence_ids": [row["evidence_id"] for row in recalled_captions],
+                    }
             if plan.get("intent") == "MECHANISM_EXPLANATION":
                 graph_expansion = await retrieve_neo4j_paths(question=question, members=raw_members)
                 contract["graph_expansion"] = {
@@ -1643,6 +1678,12 @@ async def prepare_knowledge_context(
             "本题含数值事实：数字、区间与单位必须与证据原文逐字一致，不得换算、"
             "四舍五入或改写表述；证据未给出的数值一律回答未提供。"
         )
+    # 用户可见输出形态是 Retrieval Contract 的一部分，而不是临时 prompt
+    # 偏好。它进入 contract_hash 和审计快照，使图题/表题/混合题的格式裁决
+    # 可复现；模型上下文只消费这份冻结结果。
+    from yuxi.knowledge.rendering.answer_context_builder import build_answer_output_profile
+
+    contract["answer_output"] = build_answer_output_profile(contract)
     contract["contract_hash"] = _hash_contract(contract)
     await _persist_audit(
         db,

@@ -3,7 +3,11 @@ import { handleChatError } from '@/utils/errorHandler'
 import { unref } from 'vue'
 import { extractPendingInterrupt } from '@/composables/useApproval'
 import { ReasoningVisibilityBuffer } from '@/utils/reasoningVisibility'
-import { normalizeVerifiedFigures } from '@/utils/figureCard'
+import {
+  normalizeFigureRefs,
+  normalizeVerifiedFigures,
+  normalizeVerifiedTables
+} from '@/utils/figureCard'
 import { normalizeGraphSnapshot } from '@/utils/graphSnapshot'
 import { artifactPathsFromChunk } from '@/utils/runArtifacts'
 
@@ -291,11 +295,26 @@ export function useAgentStreamHandler({
         // 图卡只接受后端确定性投影（figures 字段缺席 ⟺ 未发布，此时清空）
         const figures = normalizeVerifiedFigures(chunk.figures)
         threadState.verifiedFigures = figures
-        // 答案气泡内图卡：按 run 暂存（新一轮 resetRunEvidence 不清），让上一条答案的
-        // 图卡在历史回读前不消失
+        // 图表锚点（ADR-0008）：figure_refs 字段缺席 ⟺ 本 run 未签发，此时清空
+        const figureRefs = normalizeFigureRefs(chunk.figure_refs)
+        threadState.verifiedFigureRefs = figureRefs
+        // 表格卡片（P2）：tables 字段缺席 ⟺ 未发布，此时清空
+        const tables = normalizeVerifiedTables(chunk.tables)
+        threadState.verifiedTables = tables
+        // 答案气泡内图卡/锚点：按 run 暂存（新一轮 resetRunEvidence 不清），让上一条答案的
+        // 图卡与锚点绑定在历史回读前不消失
         const runId = String(chunk.run_id || threadState.activeRunId || '')
         if (runId && figures.length) {
           threadState.figuresByRun = { ...(threadState.figuresByRun || {}), [runId]: figures }
+        }
+        if (runId && figureRefs.length) {
+          threadState.figureRefsByRun = {
+            ...(threadState.figureRefsByRun || {}),
+            [runId]: figureRefs
+          }
+        }
+        if (runId && tables.length) {
+          threadState.tablesByRun = { ...(threadState.tablesByRun || {}), [runId]: tables }
         }
         return false
       }

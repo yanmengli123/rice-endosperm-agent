@@ -110,6 +110,8 @@
                     :hide-tool-calls="true"
                     :mention="mentionConfigWithDocuments"
                     :figures="inlineFigures(displayItem.message, row.conv)"
+                    :figure-refs="inlineFigureRefs(displayItem.message, row.conv)"
+                    :tables="inlineTables(displayItem.message, row.conv)"
                     :graph-snapshot="inlineGraph(displayItem.message, row.conv)"
                     :evidence-id-set="displayedEvidenceIdSet"
                     @openStatus="handleOpenMessageStatus"
@@ -1127,7 +1129,12 @@ import { useRunStatusArchive } from '@/composables/useRunStatusArchive'
 import EvidenceList from '@/components/evidence/EvidenceList.vue'
 import EvidencePdfDrawer from '@/components/evidence/EvidencePdfDrawer.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
-import { extractCitationReadyFromHistory, inlineFiguresForMessage } from '@/utils/figureCard'
+import {
+  extractCitationReadyFromHistory,
+  figureRefsForMessage,
+  inlineFiguresForMessage,
+  tablesForMessage
+} from '@/utils/figureCard'
 import {
   exportGraphSnapshotUrl,
   extractGraphSnapshotFromHistory,
@@ -1624,6 +1631,8 @@ const resetRunEvidence = (threadId, runId = null) => {
   ts.sourceManifest = null
   ts.verifiedCitation = null
   ts.verifiedFigures = []
+  ts.verifiedFigureRefs = []
+  ts.verifiedTables = []
   ts.verifiedGraphSnapshot = null
   ts.locatorCandidates = []
 }
@@ -1666,6 +1675,10 @@ const currentVerifiedFigures = computed(() => {
 // 答案气泡内图卡（消息级附件）：已落库载荷优先，其次本会话按 run 暂存；只挂该轮最后一条 AI 消息
 const inlineFigures = (message, conv) =>
   inlineFiguresForMessage(message, conv, currentThreadState.value?.figuresByRun)
+const inlineFigureRefs = (message, conv) =>
+  figureRefsForMessage(message, conv, currentThreadState.value?.figureRefsByRun)
+const inlineTables = (message, conv) =>
+  tablesForMessage(message, conv, currentThreadState.value?.tablesByRun)
 // 答案气泡内关系图：落库载荷优先，其次使用当前会话按 run 暂存的 SSE 快照
 const inlineGraph = (message, conv) =>
   inlineGraphForMessage(message, conv, currentThreadState.value?.graphsByRun)
@@ -3267,6 +3280,8 @@ const restoreCitationReadyFromHistory = (threadId, history) => {
   const restored = extractCitationReadyFromHistory(history)
   ts.verifiedCitation = restored?.citation || null
   ts.verifiedFigures = restored?.figures || []
+  ts.verifiedFigureRefs = restored?.figureRefs || []
+  ts.verifiedTables = restored?.tables || []
   ts.verifiedGraphSnapshot = extractGraphSnapshotFromHistory(history)
 }
 

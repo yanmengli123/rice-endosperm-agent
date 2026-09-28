@@ -51,6 +51,19 @@ export const linkifyEvidenceChips = (content) => {
   })
 }
 
+// 图表锚点芯片（ADR-0008 后端签发形态）：〔图表F1｜Figure 2〕。
+// 锚化语义与 evidence 芯片一致：只包一层 <a> 并挂 data-ref，不改写芯片文本；
+// 身份/联动数据来自 citation_ready.figure_refs（宿主组件裁决），此处绝不解析身份。
+const FIGURE_REF_CHIP_RE = /〔图表(F\d{1,3})｜[^〕]+〕/g
+
+export const linkifyFigureRefChips = (content) => {
+  const source = String(content || '')
+  if (!source.includes('〔图表')) return source
+  return source.replace(FIGURE_REF_CHIP_RE, (chip, ref) => {
+    return `<a class="figure-ref-chip-anchor" data-ref="${ref}">${chip}</a>`
+  })
+}
+
 const renderFrontmatterValue = (value) => {
   if (Array.isArray(value)) {
     return value.map((item) => `<span class="fm-tag">${escapeHtml(item)}</span>`).join('')

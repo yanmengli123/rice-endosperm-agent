@@ -31,6 +31,7 @@ from yuxi.knowledge.contracts.figure_asset_projection import (
     derive_asset_name,
     figure_projection_envelope,
     project_publishable_figures,
+    project_publishable_figures_for_mention,
 )
 from yuxi.knowledge.contracts.locator_binding import (
     LOCATOR_KIND_FIGURE_CAPTION,
@@ -38,8 +39,10 @@ from yuxi.knowledge.contracts.locator_binding import (
     LOCATOR_KIND_QUOTE,
 )
 from yuxi.storage.postgres.models_knowledge import (
+    EvidenceAnchorRecord,
     FigureAssetRecord,
     FigureEntityRecord,
+    KnowledgeChunk,
     KnowledgeFile,
     KnowledgeParseRevision,
 )
@@ -61,6 +64,9 @@ async def figure_session():
         await connection.run_sync(KnowledgeParseRevision.__table__.create)
         await connection.run_sync(FigureEntityRecord.__table__.create)
         await connection.run_sync(FigureAssetRecord.__table__.create)
+        # 表格卡片投影（P2）：锚点 + chunk 只读链路
+        await connection.run_sync(EvidenceAnchorRecord.__table__.create)
+        await connection.run_sync(KnowledgeChunk.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         yield session
@@ -109,6 +115,7 @@ async def _seed_source(session, *, active_revision: str = "pr_1", row_id: int = 
             kb_id="kb-a",
             filename="paper-a.pdf",
             active_parse_revision_id=active_revision,
+            active_index_revision_id="ir_1",
         )
     )
 
@@ -567,3 +574,253 @@ def test_trace_event_types_registered_for_sla():
 
     for event_type in ("knowledge.figure_projection.attached", "knowledge.figure_projection.suppressed"):
         assert {"reason", "figure_count", "locator_kind"} <= EVENT_ATTRIBUTE_SCHEMAS[event_type]
+
+
+# ---- M 系列（ADR-0008）：mention 通道投影——题注锚点 → 实体 → 资产，真实会话过门 ----
+
+
+async def _seed_mention_figure_2(session) -> None:
+    """Figure 2 实体（题注锚点 ea_cap2）+ primary（合成整图）+ panel 一枚。"""
+    await _seed_source(session)
+    await _seed_figure(
+        session,
+        entity_id=20,
+        asset_id=200,
+        asset_key="images/fig2.jpg",
+        asset_anchor_id="ea_fig2_k",
+        object_name=f"tenants/1/documents/{_SHA_A}/mineru/pr_1/images/{'e' * 24}-fig2.jpg",
+        sha="e" * 64,
+        label="Figure 2",
+        caption="Figure 2. Phenotypes of osmyb73 mutants in rice endosperm.",
+        caption_anchor_id="ea_cap2",
+    )
+    await _seed_asset(
+        session,
+        entity_id=20,
+        asset_id=201,
+        asset_key="synthetic:figure 2",
+        asset_anchor_id="ea_fig2_k",
+        object_name=f"tenants/1/documents/{_SHA_A}/mineru/pr_1/images/{'f' * 24}-synthetic_figure_2.png",
+        sha="f" * 64,
+        role="primary",
+        group_index=-1,
+    )
+    await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_m1_mention_projection_attaches_group(figure_session):
+    await _seed_mention_figure_2(figure_session)
+    figures, reason = await project_publishable_figures_for_mention(
+        figure_session,
+        kb_id="kb-a",
+        file_id="file-a",
+        revision_id="pr_1",
+        anchor_id="ea_cap2",
+        evidence_id="ev_mention_1",
+        page=8,
+        publish_allowed=True,
+    )
+    assert reason is None
+    assert [figure.role for figure in figures] == ["primary", "panel"]  # primary 优先 + 阅读序
+    assert figures[0].binding_id == "figref:ea_cap2"  # 合成身份（非 vlb_），前端按其分组
+    assert all(figure.page == 8 for figure in figures)  # 页码唯一来源 = 题注引用行锚点，不读 figure_assets.page
+    assert figures[0].evidence_id == "ev_mention_1"
+    assert figures[0].figure_label == "Figure 2" and figures[0].caption.startswith("Figure 2.")
+
+
+@pytest.mark.asyncio
+async def test_m2_mention_projection_publish_gate(figure_session):
+    await _seed_mention_figure_2(figure_session)
+    figures, reason = await project_publishable_figures_for_mention(
+        figure_session,
+        kb_id="kb-a",
+        file_id="file-a",
+        revision_id="pr_1",
+        anchor_id="ea_cap2",
+        evidence_id="ev_mention_1",
+        page=8,
+        publish_allowed=False,
+    )
+    assert figures == [] and reason == SUPPRESS_PUBLISH_NOT_ALLOWED
+
+
+@pytest.mark.asyncio
+async def test_m3_mention_projection_table_caption_is_expected_no_asset(figure_session):
+    """Table 题注锚点在 P1 必然 no_asset_row（表格无资产）——预期抑制，不是缺陷。"""
+    await _seed_source(figure_session)
+    figures, reason = await project_publishable_figures_for_mention(
+        figure_session,
+        kb_id="kb-a",
+        file_id="file-a",
+        revision_id="pr_1",
+        anchor_id="ea_tab1",
+        evidence_id="ev_mention_t",
+        page=11,
+        publish_allowed=True,
+    )
+    assert figures == [] and reason == SUPPRESS_NO_ASSET_ROW
+
+
+@pytest.mark.asyncio
+async def test_m4_mention_projection_revision_not_active(figure_session):
+    """引用行携带旧 revision（文件已重解析）：抑制原因是 revision_not_active 而非 no_asset_row。"""
+    await _seed_mention_figure_2(figure_session)
+    file_row = (
+        (await figure_session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == "file-a"))).scalars().one()
+    )
+    file_row.active_parse_revision_id = "pr_2"
+    await figure_session.flush()
+    figures, reason = await project_publishable_figures_for_mention(
+        figure_session,
+        kb_id="kb-a",
+        file_id="file-a",
+        revision_id="pr_1",
+        anchor_id="ea_cap2",
+        evidence_id="ev_mention_1",
+        page=8,
+        publish_allowed=True,
+    )
+    assert figures == [] and reason == SUPPRESS_REVISION_NOT_ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_m5_augmented_citation_ready_full_mention_flow(figure_session, monkeypatch):
+    """v3 载荷端到端（发射解耦 + mention 投影 + figure_index 回填）：
+
+    caption 证据型回答（locator=None，无已验证定位）经正文芯片回读 → 注册表
+    join → mention 通道 DB 投影 → ``figure_refs[]`` + ``figures[]`` 合并；
+    ``citation`` 键缺席 ⟺ 本 run 无已验证定位。Figure 出图组、Table 抑制
+    （no_asset_row）但保留 evidence_id 跳原文。
+    """
+    import yuxi.services.chat_service as svc
+
+    monkeypatch.setattr(svc.conf, "figure_card_enabled", True, raising=False)
+    await _seed_mention_figure_2(figure_session)
+    citations = [
+        {
+            "ref": "E1",
+            "evidence_id": "ev_mention_1",
+            "kb_id": "kb-a",
+            "file_id": "file-a",
+            "filename": "paper-a.pdf",
+            "zone": "MAIN_TEXT",
+            "page_numbers": [8],
+            "primary_page": 8,
+            "quote_head": "Figure 2. Phenotypes of osmyb73 mutants",
+            "anchor_ids": ["ea_cap2"],
+            "locatable": True,
+            "toc_line": False,
+            "secondary_of": None,
+            "_quote": "Figure 2. Phenotypes of osmyb73 mutants in rice endosperm.",
+            "_quote_norm": "figure 2 phenotypes of osmyb73 mutants in rice endosperm",
+            "_anchor_id": "ea_cap2",
+            "_parse_revision_id": "pr_1",
+            "_evidence_type": "caption",
+        },
+        {
+            "ref": "E2",
+            "evidence_id": "ev_mention_t",
+            "kb_id": "kb-a",
+            "file_id": "file-a",
+            "filename": "paper-a.pdf",
+            "zone": "MAIN_TEXT",
+            "page_numbers": [11],
+            "primary_page": 11,
+            "quote_head": "Table 1. Physicochemical properties",
+            "anchor_ids": ["ea_tab1"],
+            "locatable": True,
+            "toc_line": False,
+            "secondary_of": None,
+            "_quote": "Table 1. Physicochemical properties of grains",
+            "_quote_norm": "table 1 physicochemical properties of grains",
+            "_anchor_id": "ea_tab1",
+            "_parse_revision_id": "pr_1",
+            "_evidence_type": "caption",
+        },
+    ]
+    # Table P2 正路径种子：table 锚点（quote 为纯文本——MinerU _normalize 剥标签）
+    # + 含 <table> HTML 与锚点脚注的 chunk（academic 分块器的权威形态）
+    figure_session.add(
+        EvidenceAnchorRecord(
+            id=300,
+            anchor_id="ea_tab1",
+            parse_revision_id="pr_1",
+            page=11,
+            bbox=[40.0, 300.0, 560.0, 480.0],
+            word_start=0,
+            word_end=0,
+            quote_hash="c" * 64,
+            prefix_hash="0" * 64,
+            suffix_hash="0" * 64,
+            quote=(
+                "Table 1. Physicochemical properties of grains Material Starch Protein WT 75.2 8.9 osmyb73 68.4 10.2"
+            ),
+            fragments=[],
+            anchor_type="table",
+            locator_quality="HIGH",
+            confidence=1.0,
+            locatable=True,
+            source="mineru",
+        )
+    )
+    table_html = (
+        "<table><thead><tr><th>Material</th><th>Starch</th><th>Protein</th></tr></thead>"
+        "<tbody><tr><td>WT</td><td>75.2</td><td>8.9</td></tr>"
+        "<tr><td>osmyb73</td><td>68.4</td><td>10.2</td></tr></tbody></table>"
+    )
+    figure_session.add(
+        KnowledgeChunk(
+            id=400,
+            chunk_id="file-a_rev_1_chunk_0",
+            file_id="file-a",
+            kb_id="kb-a",
+            chunk_index=0,
+            content=(
+                "Table 1. Physicochemical properties of grains\n"
+                + table_html
+                + "\n【章节】Results\n【页码】11\n【证据锚点】ea_tab1"
+            ),
+            source_provenance={
+                "schema_version": "scientific_pdf_chunk_v2",
+                "page_numbers": [11],
+                "parse_revision_id": "pr_1",
+                "index_revision_id": "ir_1",
+            },
+        )
+    )
+    await figure_session.flush()
+
+    payload = await svc._augmented_citation_ready(
+        figure_session,
+        locator=None,
+        contract={"status": "COMPLETED", "citations": citations},
+        text="表型变化见〔图表F1｜Figure 2〕，数值见〔图表F2｜Table 1〕。",
+    )
+    assert payload is not None  # 发射解耦：无 VERIFIED 定位也发布锚点
+    assert "citation" not in payload  # citation 键缺席 ⟺ 无已验证定位
+    refs = payload["figure_refs"]
+    assert [(ref["ref"], ref["kind"], ref["suppressed_reason"]) for ref in refs] == [
+        ("F1", "figure", None),
+        ("F2", "table", None),  # P2：表格卡片 attached，不再 no_asset_row
+    ]
+    assert refs[0]["figure_index"] == 0 and refs[1]["figure_index"] is None
+    assert refs[0]["visual_status"] == "VERIFIED_WITH_ASSET"
+    assert refs[1]["table_index"] == 0  # table_index 独立下标域
+    assert refs[1]["visual_status"] == "VERIFIED_WITH_TABLE"
+    assert refs[1]["evidence_id"] == "ev_mention_t"
+    figures = payload["figures"]
+    assert [figure["role"] for figure in figures] == ["primary", "panel"]
+    assert figures[0]["binding_id"] == "figref:ea_cap2" and figures[0]["page"] == 8
+    tables = payload["tables"]
+    assert len(tables) == 1
+    table = tables[0]
+    assert table["anchor_id"] == "ea_tab1" and table["page"] == 11
+    assert table["label"] == "Table 1" and table["row_count"] == 3 and table["header_rows"] == 1
+    for cell in table["rows"][1]:
+        assert cell["text"] in ("WT", "75.2", "8.9")
+        assert cell["row_key"] == "WT"
+    assert not any("_table_id" in ref for ref in refs)  # 内部标记不泄漏
+    import json
+
+    json.dumps(payload)  # 载荷整体可序列化（回归锁）

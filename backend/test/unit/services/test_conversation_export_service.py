@@ -538,6 +538,45 @@ async def test_figure_card_missing_asset_renders_placeholder():
     assert "Figure 3B" in card.get_text() and "未内联" in card.get_text()
 
 
+async def test_table_cards_from_citation_ready_are_escaped_and_structured():
+    metadata = {
+        "citation_ready": {
+            "tables": [
+                {
+                    "table_id": "tbl-1",
+                    "label": "Table 1",
+                    "caption": "Table 1. <危险题注>",
+                    "page": 11,
+                    "rows": [
+                        [
+                            {"text": "Material", "header": True, "rowspan": 1, "colspan": 1},
+                            {"text": "Value", "header": True, "rowspan": 1, "colspan": 2},
+                        ],
+                        [
+                            {"text": "<script>alert(1)</script>", "header": False, "rowspan": 1, "colspan": 1},
+                            {"text": "75.2", "header": False, "rowspan": 1, "colspan": 1},
+                        ],
+                    ],
+                    "truncated": True,
+                    "limited": False,
+                }
+            ]
+        }
+    }
+    html = _render(
+        [dict(_msg("human", "q"), id=1), dict(_msg("ai", "见表。", extra_metadata=metadata), id=2)]
+    )
+    soup = _soup(html)
+
+    card = soup.select_one("figure.table-card")
+    assert card is not None
+    assert "Table 1. <危险题注>" in card.select_one("figcaption").get_text()
+    assert card.select_one("script") is None
+    assert card.select_one("th[colspan='2']").get_text() == "Value"
+    assert "第11页" in card.select_one(".table-page").get_text()
+    assert "跨页" in card.select_one(".table-note").get_text()
+
+
 async def test_data_image_uri_allowed_but_data_links_still_neutralized():
     content = "![ok](data:image/png;base64,QUJD) 与 [x](data:text/html;base64,PGI+KSk=)"
     html = _render([_msg("human", "q"), _msg("ai", content)])

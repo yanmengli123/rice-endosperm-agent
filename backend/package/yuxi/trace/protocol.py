@@ -203,6 +203,18 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     # 图卡资产投影（ADR-0004 P0-4 SLA 采集点）：reason 为 9 种抑制原因闭合枚举之一
     "knowledge.figure_projection.attached": frozenset({"reason", "figure_count", "locator_kind"}),
     "knowledge.figure_projection.suppressed": frozenset({"reason", "figure_count", "locator_kind"}),
+    # 图表锚点（ADR-0008 SLA 采集点）：resolved 的 reason 固定 "ok"；unresolved 的
+    # reason 为闭合枚举（orphan_chip；签发侧统计 no_registry_match/ambiguous_scope/
+    # budget_exceeded 走 locator_validation 审计字段）；kind = figure|table|mixed
+    "knowledge.figure_ref.resolved": frozenset({"reason", "ref_count", "kind"}),
+    "knowledge.figure_ref.unresolved": frozenset({"reason", "ref_count", "kind"}),
+    # 图表 Claim 发布门禁：检测与实际删除分开计数，便于暗发布评估误伤率。
+    "knowledge.figure_claim.validated": frozenset(
+        {"status", "checked_count", "unsupported_detected", "unsupported_removed", "deletion_enabled"}
+    ),
+    "knowledge.table_claim.validated": frozenset(
+        {"status", "checked_count", "unsupported_removed", "facts_available", "missing_pair_metric_count"}
+    ),
     "knowledge.graph_snapshot.attached": frozenset(
         {"outcome", "node_count", "edge_count", "truncated", "review_policy"}
     ),
@@ -303,6 +315,11 @@ EVENT_EMITTER_INDEX: dict[str, tuple[tuple[str, str], ...]] = {
     "knowledge.figure_projection.suppressed": (
         ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.figure_projection."),
     ),
+    # 图表锚点（ADR-0008）：chat 层在 citation_ready v3 载荷构建时发射
+    "knowledge.figure_ref.resolved": (("services/chat_service.py", "knowledge.figure_ref."),),
+    "knowledge.figure_ref.unresolved": (("services/chat_service.py", "knowledge.figure_ref."),),
+    "knowledge.figure_claim.validated": (("services/chat_service.py", "knowledge.figure_claim.validated"),),
+    "knowledge.table_claim.validated": (("services/chat_service.py", "knowledge.table_claim.validated"),),
     "knowledge.graph_snapshot.attached": (
         ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.graph_snapshot."),
     ),

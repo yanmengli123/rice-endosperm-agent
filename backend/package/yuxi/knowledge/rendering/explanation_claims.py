@@ -187,6 +187,30 @@ _CAPTION_FACT_CLAIM_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_DANGLING_CLAIM_TAIL = re.compile(
+    r"(?:为|与|和|及|或|在|从|对|由|向|中|内|上|下|的|了|并|以及|包括|通过|基于|"
+    r"support(?:s|ed|ing)?|because|through|via|and|or|of|to|in|for)\s*[,，;；：:]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _drop_dangling_grounding_fragments(text: str) -> tuple[str, int]:
+    """Remove high-confidence fragments left after an unsupported clause is cut."""
+
+    removed = 0
+    kept: list[str] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if (
+            stripped
+            and not stripped.startswith(("【", "（注：", "###"))
+            and _DANGLING_CLAIM_TAIL.search(stripped)
+        ):
+            removed += 1
+            continue
+        kept.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)), removed
+
 
 def enforce_explanation_grounding(
     answer_text: str,
@@ -266,7 +290,8 @@ def enforce_explanation_grounding(
     cleaned = "\n".join(kept_lines)
     cleaned = re.sub(r"^[，。；,.;]+", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned, removed
+    cleaned, dangling_removed = _drop_dangling_grounding_fragments(cleaned)
+    return cleaned, removed + dangling_removed
 
 
 __all__.append("enforce_explanation_grounding")

@@ -10,6 +10,7 @@ from deepagents.middleware._utils import append_to_system_message
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, ToolMessage
 
+from yuxi import config as conf
 from yuxi.agents.mcp.capability_registry import is_mcp_tool, profile_for_tool
 from yuxi.knowledge.planning.turn_execution_plan import SourceClass, SourcePolicy, TurnExecutionPlan
 from yuxi.knowledge.rendering.answer_context_builder import build_answer_context
@@ -232,6 +233,8 @@ def _apply_citation_guard(text: str, *, contract: dict | None) -> tuple[str, dic
         locator=contract.get("locator_resolution"),
         partition_intent=(contract.get("locator_intent") or {}).get("partition_intent"),
         authority_policy=contract.get("answer_policy"),
+        figure_refs_enabled=getattr(conf, "figure_ref_anchor_enabled", False),
+        semantic_gate_enabled=getattr(conf, "figure_semantic_gate_enabled", False),
     )
     validation["answer_draft"] = draft_validation
     if not validation.get("changed") and rendered == text:

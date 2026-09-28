@@ -332,6 +332,9 @@ def _render_qa_card(*, index: int, entry: dict, question_images: dict, kbassets:
     figure_cards = _render_figure_cards(entry, kbassets)
     if figure_cards:
         answer_parts.append(figure_cards)
+    table_cards = _render_table_cards(entry)
+    if table_cards:
+        answer_parts.append(table_cards)
     if not answer_parts:
         return ""
     return (
@@ -465,6 +468,67 @@ def _render_figure_cards(entry: dict, kbassets: dict) -> str:
                 f'<figure class="figure-card figure-missing"><figcaption>{escape_html(caption)}{page_html}'
                 '<span class="figure-missing-note">图片资产不可用或超预算，未内联</span></figcaption></figure>'
             )
+    return "".join(cards)
+
+
+# ── 表卡（citation_ready.tables；仅消费服务端受控 JSON，绝不回放原始 HTML） ─
+
+
+def _verified_tables(entry: dict) -> list[dict]:
+    """取最后一条 citation_ready 的结构化表卡；非法/空载荷失败关闭。"""
+    for answer in reversed(entry["answers"]):
+        payload = ((answer.get("extra_metadata") or {}).get("citation_ready") or {}).get("tables")
+        if isinstance(payload, list) and payload:
+            return [table for table in payload if isinstance(table, dict) and isinstance(table.get("rows"), list)]
+    return []
+
+
+def _safe_span(value) -> int:  # noqa: ANN001
+    """导出边界再次 clamp，避免历史/手工载荷制造异常表格布局。"""
+    return max(1, min(_as_int(value, 1), 50))
+
+
+def _render_table_cards(entry: dict) -> str:
+    cards: list[str] = []
+    for table in _verified_tables(entry):
+        rows_html: list[str] = []
+        for row in table.get("rows")[:200]:
+            if not isinstance(row, list):
+                continue
+            cells_html: list[str] = []
+            for cell in row[:60]:
+                if not isinstance(cell, dict):
+                    continue
+                tag = "th" if cell.get("header") is True else "td"
+                rowspan = _safe_span(cell.get("rowspan"))
+                colspan = _safe_span(cell.get("colspan"))
+                cells_html.append(
+                    f'<{tag} rowspan="{rowspan}" colspan="{colspan}">'
+                    f'{escape_html(str(cell.get("text") or "")[:2000])}</{tag}>'
+                )
+            if cells_html:
+                rows_html.append(f'<tr>{"".join(cells_html)}</tr>')
+        if not rows_html:
+            continue
+        page = _as_int(table.get("page"))
+        title = (
+            str(table.get("caption") or "").strip()
+            or str(table.get("label") or "").strip()
+            or (f"表 · 第{page}页" if page >= 1 else "表")
+        )
+        page_html = f'<span class="table-page">第{page}页</span>' if page >= 1 else ""
+        if table.get("limited") is True:
+            note = '<p class="table-note">表格较大，当前仅展示受控截取内容。</p>'
+        elif table.get("truncated") is True:
+            note = '<p class="table-note">该表可能跨页，当前展示与题注匹配度最高的表块。</p>'
+        else:
+            note = ""
+        cards.append(
+            '<figure class="table-card">'
+            f'<figcaption>{escape_html(title)}{page_html}</figcaption>'
+            f'<div class="table-scroll"><table><tbody>{"".join(rows_html)}</tbody></table></div>'
+            f"{note}</figure>"
+        )
     return "".join(cards)
 
 
@@ -1557,6 +1621,53 @@ body {
   background: var(--accent-soft);
   color: var(--accent);
   font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.table-card {
+  margin: 16px 0;
+  break-inside: avoid;
+}
+
+.table-card figcaption {
+  margin-bottom: 8px;
+  color: var(--ink-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.table-page {
+  margin-left: 8px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.table-card table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.table-card th,
+.table-card td {
+  padding: 6px 8px;
+  border: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.table-card th {
+  background: var(--page);
+}
+
+.table-note {
+  margin: 6px 0 0;
+  color: var(--muted);
   font-size: 11px;
 }
 

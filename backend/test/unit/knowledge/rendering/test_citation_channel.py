@@ -420,3 +420,75 @@ def test_reverse_bind_never_inserts_chip_inside_decimal_numbers():
     # 绑定成功：芯片在真实句末（panels. 之后），不在句中
     assert bound == 1
     assert "panels. 〔证据E1｜正文·第7页｜paper.pdf〕" in out
+
+
+# ---- F4：表格依据芯片每表一枚（2026-09-26 Q2 实测同号 ×5 的治理回归）----
+
+_TABLE_FOOTNOTE_PREFIX = "> 表格依据："
+
+
+def _table_citation(ref: str, quote: str) -> dict:
+    import re as _re
+    import unicodedata as _ud
+
+    return {
+        "ref": ref,
+        "evidence_id": f"ev-{ref}",
+        "kb_id": "kb-a",
+        "file_id": "file-a",
+        "filename": "paper.pdf",
+        "zone": "MAIN_TEXT",
+        "page_numbers": [7],
+        "primary_page": 7,
+        "quote_head": quote[:80],
+        "anchor_ids": [f"ea-{ref}"],
+        "locatable": True,
+        "toc_line": False,
+        "secondary_of": None,
+        "_anchor_id": f"ea-{ref}",
+        "_physical_evidence_id": f"ev-{ref}",
+        "_quote": quote,
+        "_quote_norm": _re.sub(r"\s+", " ", _ud.normalize("NFKC", quote).casefold()),
+    }
+
+
+_SANT_TABLE = (
+    "| 基因型 | 结构域 |\n"
+    "| --- | --- |\n"
+    "| WT | OsMYB73 SANT 结构域 115-164 |\n"
+    "| osmyb73 | OsMYB73 SANT 结构域 115-164 |\n"
+    "| osnf-yb1 | OsMYB73 SANT 结构域 167-215 |\n"
+    "| osisa2 | OsMYB73 SANT 结构域 115-164 |\n"
+    "| Complemented | OsMYB73 SANT 结构域 167-215 |"
+)
+
+
+def test_f4_table_footnote_one_per_table():
+    """同证据 5 行表 → 恰 1 枚脚注（首行绑定后整表跳过）。"""
+    citations = [_table_citation("E1", MAIN_PARAGRAPH_QUOTE)]
+    out, _bound, _uncovered = reverse_bind_citations(_SANT_TABLE, citations)
+    assert out.count(_TABLE_FOOTNOTE_PREFIX) == 1
+
+
+def test_f4_two_tables_get_one_footnote_each():
+    """每表独立：两张表各绑同一证据 → 共 2 枚（每表一枚，不是每答一枚）。"""
+    citations = [_table_citation("E1", MAIN_PARAGRAPH_QUOTE)]
+    out, _bound, _uncovered = reverse_bind_citations(
+        "表一：\n" + _SANT_TABLE + "\n\n表二：\n" + _SANT_TABLE, citations
+    )
+    assert out.count(_TABLE_FOOTNOTE_PREFIX) == 2
+
+
+def test_f4_table_without_binding_rows_gets_no_footnote():
+    rows = "| a | b |\n| --- | --- |\n| c | d |"
+    citations = [_table_citation("E1", MAIN_PARAGRAPH_QUOTE)]
+    out, _bound, _uncovered = reverse_bind_citations(rows, citations)
+    assert _TABLE_FOOTNOTE_PREFIX not in out
+
+
+def test_f4_idempotent_double_application():
+    citations = [_table_citation("E1", MAIN_PARAGRAPH_QUOTE)]
+    once, _bound, _uncovered = reverse_bind_citations(_SANT_TABLE, citations)
+    assert once.count(_TABLE_FOOTNOTE_PREFIX) == 1
+    twice, _bound2, _uncovered2 = reverse_bind_citations(once, citations)
+    assert twice.count(_TABLE_FOOTNOTE_PREFIX) == 1 and twice == once

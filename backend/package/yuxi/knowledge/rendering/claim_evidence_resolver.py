@@ -60,6 +60,24 @@ _GENE_LIKE = re.compile(r"\b(?=[A-Za-z]{2,}\d)[A-Za-z][A-Za-z0-9]{2,}\b")
 _ACRONYM = re.compile(r"\b[A-Z]{3,}\b")
 # 图表编号：Figure S1 / Fig. 3 / Table S2
 _FIGURE_LABEL = re.compile(r"\b(?:fig(?:ure)?|table)\s*S?\d+[a-z]?\b", flags=re.IGNORECASE)
+# Experimental/platform acronyms are common across an entire paper. They can
+# constrain an already-discriminative claim, but cannot combine with one gene
+# symbol to make layer 2 unique (CRISPR + OsMYB73 previously authorized any
+# CRISPR/OsMYB73 caption, including a later multi-mutant comparison figure).
+_NON_DISCRIMINATIVE_IDENTIFIERS = {
+    "crispr",
+    "cas9",
+    "rna",
+    "rna-seq",
+    "pcr",
+    "qrt-pcr",
+    "rt-pcr",
+    "gus",
+    "gfp",
+    "sem",
+    "tem",
+    "kegg",
+}
 
 
 def normalize_for_match(text: str) -> str:
@@ -89,11 +107,18 @@ def normalize_for_match(text: str) -> str:
 def extract_hard_constraints(text: str) -> dict[str, list[str]]:
     """抽取科研硬约束：数字、基因样式 token、大写缩写、图表编号（保留原始大小写）。"""
     source = str(text or "")
-    numbers = sorted({match.group(0) for match in re.finditer(r"\d+(?:\.\d+)?", source)})
+    # Measurements/standalone numbers only. Digits embedded in identifiers
+    # (OsMYB73, T1, S21) are represented by the identifier layer and must not
+    # independently activate numeric exact matching.
+    numbers = sorted({match.group(0) for match in re.finditer(r"(?<![A-Za-z])\d+(?:\.\d+)?(?![A-Za-z0-9])", source)})
     identifiers: set[str] = set()
     identifiers.update(match.group(0) for match in _GENE_LIKE.finditer(source))
     identifiers.update(match.group(0) for match in _ACRONYM.finditer(source))
-    identifiers.update(match.group(0).replace(" ", "") for match in _FIGURE_LABEL.finditer(source))
+    # Preserve the separator: normalize_for_match("Figure 2") is "figure 2".
+    # Removing it produced "figure2", which could never match normalized
+    # caption text and caused valid caption facts to fail closed after F#
+    # signing.
+    identifiers.update(match.group(0) for match in _FIGURE_LABEL.finditer(source))
     return {"numbers": numbers, "identifiers": sorted(identifiers)}
 
 
@@ -112,6 +137,28 @@ def _constraints_satisfied(hard: dict[str, list[str]], quote_norm: str) -> bool:
         if normalize_for_match(identifier) not in quote_norm:
             return False
     return True
+
+
+def _hard_constraints_discriminative(hard: dict[str, list[str]]) -> bool:
+    """Whether layer-2 constraints are strong enough to identify evidence.
+
+    A single ubiquitous gene symbol (for example ``OsMYB73``) identifies the
+    paper topic, not the asserted relation.  Treating it as sufficient allowed
+    any OsMYB73 paragraph to authorize an unrelated mechanism sentence.  A
+    numeric constraint or at least two independent identifiers is required;
+    weaker claims continue to the lexical/semantic layers and fail closed when
+    their relation words are unsupported.
+
+    Numbers that are substrings of identifiers (the ``73`` inside ``OsMYB73``)
+    do not count — they are gene-symbol suffixes, not independent measurements.
+    """
+    identifiers_lower = {str(identifier).lower() for identifier in hard["identifiers"]}
+    discriminative_identifiers = identifiers_lower - _NON_DISCRIMINATIVE_IDENTIFIERS
+    has_figure_label = any(re.fullmatch(r"(?:fig(?:ure)?|table)\s*s?\d+[a-z]?", value) for value in identifiers_lower)
+    independent_numbers = [
+        number for number in hard["numbers"] if not any(number in identifier for identifier in identifiers_lower)
+    ]
+    return bool(has_figure_label or independent_numbers or len(discriminative_identifiers) >= 2)
 
 
 def _sentences(text_norm: str) -> list[str]:
@@ -235,7 +282,9 @@ def resolve_binding(
             )
 
     # 层 2：科研硬约束（数字/基因/缩写必须逐个出现在引文中）。
-    if hard["numbers"] or hard["identifiers"]:
+    # 非区分性约束（单基因符号，且数字只是符号后缀如 OsMYB73 的 73）跳过
+    # 本层——单基因名只标识论文主题不验证关系，落入层 3 词面重叠判定。
+    if _hard_constraints_discriminative(hard):
         satisfied = [
             citation for citation in pool if _constraints_satisfied(hard, str(citation.get("_quote_norm") or ""))
         ]

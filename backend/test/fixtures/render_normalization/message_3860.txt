@@ -1,0 +1,26 @@
+## CRISPR突变体粒长变长与腹白垩白表型的原因解析
+
+该研究通过CRISPR/Cas9系统分别敲除水稻OsMYB73、OsNF-YB1、OsISA2、OsLTPL36以及构建双基因组合突变体（cr-myb73、cr-nf-yb1、cr-isa2、cr-ltpl36及其组合），T0和T1代植株在田间自然条件下种植观察表型 〔证据E1｜正文·第10页｜Plant Biotechnology Jou…〕。 〔证据E1｜正文·第10页｜Plant Biotechnology Jou…〕
+
+OsMYB73功能缺失导致粒长变长并出现腹白垩白表型。对cr-myb73突变体籽粒的表型评估显示，其成熟籽粒相较于野生型（ZH11）显著变长，同时胚乳呈现典型的腹白（white-belly）粉质垩白外观。图5直观呈现了OsMYB73、OsNF-YB1、OsISA2、OsLTPL36各自单敲除及部分双敲除组合突变体的籽粒表型差异，标尺为1.0 cm 〔证据E1｜正文·第10页｜Plant Biotechnology Jou…〕。   
+
+OsISA2单独敲除也在T1代糙米中引发类似的粒型与垩白表型变化，支持这些基因参与调控胚乳储藏物质积累这一共同通路。  
+
+从机制层面看，论文标题与正文结论指出，OsMYB73作为新型转录因子，通过介导生长素（auxin）生物合成信号通路来调控胚乳储藏物质的积累，进而影响粒长与垩白度——敲除后储藏物质（淀粉与蛋白等）积累异常，胚乳充实不良，导致腹白垩白，同时粒长增加。  
+
+作为反向验证，OsMYB73过表达则导致籽粒变小并出现垩白（图6），表明该基因表达水平偏离正常范围均会破坏胚乳储藏物质的有序积累，从而影响粒型与外观品质。 〔证据E4｜正文·第3页｜Plant Biotechnology Jou…〕
+
+## 依据图汇总
+
+- 图5（Figure 5）：CRISPR/Cas9敲除OsMYB73、OsNF-YB1、OsISA2、OsLTPL36及其组合的籽粒表型，标尺1.0 cm 〔证据E1｜正文·第10页｜Plant Biotechnology Jou…〕。 〔证据E1｜正文·第10页｜Plant Biotechnology Jou…〕
+
+- 图S21（Figure S21）：OsISA2时空表达及cr-isa2突变体T1代糙米粒型与垩白表型。 
+
+- 图6（Figure 6）：OsMYB73过表达导致籽粒变小且垩白，作为功能反向验证。 
+
+补充说明：上述结论基于论文正文与图注的现有证据。粒长与垩白形成的精细细胞学与生化证据（如扫描/透射电镜观察、储藏物质定量）需查阅正文对应章节及相关补充图（图S5等）进一步核验。
+
+（注：以下结论未在原文中定位到对应依据，请谨慎采信以下结论）
+【证据引用】（后端渲染，页码来自证据锚点）
+- E1｜正文·第10页｜Plant Biotechnology Jou…｜ea_599036c9499608ae4662712c1a49e68f965c4579
+- E4｜正文·第3页｜Plant Biotechnology Jou…｜ea_75d90fd472701c8b5490cc8af9b4e7abd01d1631

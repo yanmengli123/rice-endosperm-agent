@@ -44,6 +44,119 @@ export const normalizeVerifiedFigures = (figures) => {
   )
 }
 
+/**
+ * 图表锚点（ADR-0008 figure_refs[]）归一化：只接受后端签发条目
+ * （ref + label 必填）；evidence_id / figure_index / suppressed_reason 为
+ * 可选降级信息。前端不从芯片文本推断身份——身份只来自这份结构化载荷。
+ */
+export const normalizeFigureRefs = (refs) => {
+  if (!Array.isArray(refs)) return []
+  const allowedVisualStatuses = new Set([
+    'VERIFIED_WITH_ASSET',
+    'VERIFIED_WITH_TABLE',
+    'VERIFIED_CAPTION_ONLY',
+    'REFERENCE_ONLY'
+  ])
+  return refs
+    .filter(
+      (ref) =>
+        ref &&
+        typeof ref === 'object' &&
+        /^F\d{1,3}$/.test(String(ref.ref || '')) &&
+        String(ref.label || '').trim()
+    )
+    .map((ref) => {
+      const status = String(ref.visual_status || '')
+      // Missing status is a supported legacy shape. An unknown new value is
+      // fail-closed to REFERENCE_ONLY so the UI never implies that an image or
+      // table was verified merely because a future/invalid enum arrived.
+      if (!status || allowedVisualStatuses.has(status)) return ref
+      return { ...ref, visual_status: 'REFERENCE_ONLY' }
+    })
+}
+
+/**
+ * 表格卡片（ADR-0008 P2 citation_ready.tables[]）归一化：只接受后端受控解析
+ * 的条目（table_id + kb_id + rows 数组）。rows 为纯文本 cell
+ * （{text,rowspan,colspan,header}），前端永不渲染 HTML。
+ */
+export const normalizeVerifiedTables = (tables) => {
+  if (!Array.isArray(tables)) return []
+  return tables.filter(
+    (table) =>
+      table &&
+      typeof table === 'object' &&
+      String(table.table_id || '').trim() &&
+      String(table.kb_id || '').trim() &&
+      Array.isArray(table.rows)
+  )
+}
+
+/**
+ * 芯片点击 → 锚点行为裁决（纯函数，供事件处理器调用）：
+ * - figure ref 有卡片（figure_index 指向 figures 下标）→ 滚动联动图卡；
+ * - table ref 有卡片（table_index 指向 tables 下标）→ 滚动联动表格卡片；
+ * - 无卡片但有 evidence_id（suppressed：跳原文）→ 经证据抽屉打开原文；
+ * - 其余（orphan / 无血统）→ 无操作（绝不猜）。
+ */
+export const figureRefClickAction = (refId, refs, figures, tables) => {
+  const entry = normalizeFigureRefs(refs).find((ref) => ref.ref === String(refId || ''))
+  if (!entry) return { type: 'none' }
+  if (String(entry.kind || '') === 'table') {
+    // 注意先判空：Number(null) === 0 会让"无卡片"的 ref 误命中第 0 张表
+    const tableIndex = entry.table_index == null ? NaN : Number(entry.table_index)
+    if (
+      Number.isInteger(tableIndex) &&
+      tableIndex >= 0 &&
+      Array.isArray(tables) &&
+      tables[tableIndex]
+    ) {
+      return { type: 'scroll-table', entry, table: tables[tableIndex], tableIndex }
+    }
+  } else {
+    // 注意先判空：Number(null) === 0 会让"无卡片"的 ref 误命中第 0 张卡
+    const index = entry.figure_index == null ? NaN : Number(entry.figure_index)
+    if (Number.isInteger(index) && index >= 0 && Array.isArray(figures) && figures[index]) {
+      return { type: 'scroll', entry, figure: figures[index], figureIndex: index }
+    }
+  }
+  const evidenceId = String(entry.evidence_id || '').trim()
+  if (evidenceId) return { type: 'open-source', entry, evidenceId }
+  return { type: 'none' }
+}
+
+/**
+ * 消息级图表锚点数据源（与 inlineFiguresForMessage 同语义）：
+ * 1. 已落库的 `extra_metadata.citation_ready.figure_refs`（历史/刷新）；
+ * 2. `figureRefsByRun[run_id]`（流结束到历史回读之间的桥）。
+ * 只挂该轮最后一条 AI 消息。
+ */
+export const figureRefsForMessage = (message, conv, figureRefsByRun) => {
+  if (!isAssistantMessage(message)) return []
+  const last = lastAssistantMessage(conv)
+  if (!last || (last !== message && !(last.id && last.id === message.id))) return []
+  const persisted = normalizeFigureRefs(message?.extra_metadata?.citation_ready?.figure_refs)
+  if (persisted.length) return persisted
+  const runId = String(message.run_id || message?.extra_metadata?.run_id || '')
+  if (!runId || !figureRefsByRun || typeof figureRefsByRun !== 'object') return []
+  return normalizeFigureRefs(figureRefsByRun[runId])
+}
+
+/**
+ * 消息级表格卡片数据源（ADR-0008 P2，与图卡同语义）：
+ * 落库 `citation_ready.tables` 优先 → `tablesByRun[run_id]` 桥接。
+ */
+export const tablesForMessage = (message, conv, tablesByRun) => {
+  if (!isAssistantMessage(message)) return []
+  const last = lastAssistantMessage(conv)
+  if (!last || (last !== message && !(last.id && last.id === message.id))) return []
+  const persisted = normalizeVerifiedTables(message?.extra_metadata?.citation_ready?.tables)
+  if (persisted.length) return persisted
+  const runId = String(message.run_id || message?.extra_metadata?.run_id || '')
+  if (!runId || !tablesByRun || typeof tablesByRun !== 'object') return []
+  return normalizeVerifiedTables(tablesByRun[runId])
+}
+
 const isAssistantMessage = (message) =>
   Boolean(message) && (message.type === 'ai' || message.role === 'assistant')
 
@@ -75,7 +188,7 @@ export const inlineFiguresForMessage = (message, conv, figuresByRun) => {
 /**
  * 历史恢复：取最后一条 AI 消息的 `extra_metadata.citation_ready`。
  * 最后一条 AI 消息没有该载荷时返回 null（不回退到更早轮次——芯片/图卡表示的是最新一轮）。
- * @returns {{ citation: object|null, figures: object[] } | null}
+ * @returns{{ citation: object|null, figures: object[], figureRefs: object[], tables: object[] } | null}
  */
 export const extractCitationReadyFromHistory = (history) => {
   if (!Array.isArray(history)) return null
@@ -86,7 +199,12 @@ export const extractCitationReadyFromHistory = (history) => {
     if (!payload || typeof payload !== 'object') return null
     const citation =
       payload.citation && typeof payload.citation === 'object' ? payload.citation : null
-    return { citation, figures: normalizeVerifiedFigures(payload.figures) }
+    return {
+      citation,
+      figures: normalizeVerifiedFigures(payload.figures),
+      figureRefs: normalizeFigureRefs(payload.figure_refs),
+      tables: normalizeVerifiedTables(payload.tables)
+    }
   }
   return null
 }

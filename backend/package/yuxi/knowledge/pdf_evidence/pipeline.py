@@ -11,6 +11,7 @@ from typing import Any
 
 from yuxi.knowledge.chunking.ragflow_like.parsers.academic import ACADEMIC_CHUNKER_VERSION
 from yuxi.knowledge.evidence.document_partition import classify_anchor_partitions
+from yuxi.knowledge.evidence.sentence_splitter import SPLITTER_VERSION as SENTENCE_SPLITTER_VERSION
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
 from yuxi.knowledge.pdf_evidence.aligner import ALIGNER_VERSION, align_texts_to_anchors
 from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact, PipelineResult, UnifiedArticle
@@ -52,6 +53,7 @@ def build_parser_fingerprint(source_sha256: str, params: dict[str, Any]) -> str:
         "aligner": ALIGNER_VERSION,
         "mineru_layout_adapter": MINERU_LAYOUT_ADAPTER_VERSION,
         "figure_ingestor": FIGURE_INGESTOR_VERSION,
+        "sentence_splitter": SENTENCE_SPLITTER_VERSION,
         "academic_chunker": ACADEMIC_CHUNKER_VERSION,
         "quality_profile": QUALITY_PROFILE_VERSION,
     }

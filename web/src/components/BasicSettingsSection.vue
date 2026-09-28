@@ -177,6 +177,13 @@
             />
           </div>
           <div class="card">
+            <span class="label">{{ items?.figure_ref_anchor_enabled?.des || '图表引用锚点' }}</span>
+            <a-switch
+              :checked="configStore.config?.figure_ref_anchor_enabled"
+              @change="handleChange('figure_ref_anchor_enabled', $event)"
+            />
+          </div>
+          <div class="card">
             <span class="label">{{ items?.graph_card_enabled?.des || '对话关系图' }}</span>
             <a-switch
               :checked="configStore.config?.graph_card_enabled"

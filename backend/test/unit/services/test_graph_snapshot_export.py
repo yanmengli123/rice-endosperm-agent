@@ -17,12 +17,24 @@ _SNAPSHOT = {
     "review_policy": "approved_plus_candidate",
     "projection_hash": "h" * 64,
     "total_raw_edge_count": 733,
-    "aggregation": {"strategy": "relation_group+target_normalized+direction", "group_count": 257},
+    "aggregation": {"strategy": "kb_id+relation_group+target_normalized+direction", "group_count": 257},
     "nodes": [
-        {"entity_id": "e1", "kb_id": "kb-a", "name": "OsMYB73", "label": "Gene",
-         "canonical_identity": "osmyb73", "is_seed": True},
-        {"entity_id": "e2", "kb_id": "kb-a", "name": 'chalky, "endosperm"\n现象',
-         "label": "Trait", "canonical_identity": "chalkiness", "is_seed": False},
+        {
+            "entity_id": "e1",
+            "kb_id": "kb-a",
+            "name": "OsMYB73",
+            "label": "Gene",
+            "canonical_identity": "osmyb73",
+            "is_seed": True,
+        },
+        {
+            "entity_id": "e2",
+            "kb_id": "kb-a",
+            "name": 'chalky, "endosperm"\n现象',
+            "label": "Trait",
+            "canonical_identity": "chalkiness",
+            "is_seed": False,
+        },
     ],
     "edges": [
         {
@@ -63,6 +75,8 @@ def test_csv_zip_contains_bom_csv_manifest_and_escapes():
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
         names = set(archive.namelist())
         assert names == {"nodes.csv", "edges.csv", "manifest.json"}
+        assert {item.date_time for item in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
+        assert {item.create_system for item in archive.infolist()} == {3}
 
         nodes = archive.read("nodes.csv").decode("utf-8-sig")
         assert nodes.startswith("entity_id,kb_id,name,label,canonical_identity,is_seed")

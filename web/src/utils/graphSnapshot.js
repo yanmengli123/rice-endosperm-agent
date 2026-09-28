@@ -52,9 +52,11 @@ export const extractGraphSnapshotFromHistory = (history) => {
 
 /** 成员策略放行的候选边数（已在卡上、以待审核样式渲染）。 */
 export const pendingEdgeCount = (snapshot) =>
-  (snapshot?.edges || []).filter(
-    (edge) => String(edge.review_status || '').toUpperCase() === 'CANDIDATE'
-  ).length
+  (snapshot?.edges || []).reduce((count, edge) => {
+    const explicit = Number(edge?.candidate_parallel_count)
+    if (Number.isFinite(explicit) && explicit >= 0) return count + explicit
+    return count + (String(edge?.review_status || '').toUpperCase() === 'CANDIDATE' ? 1 : 0)
+  }, 0)
 
 /** 被成员证据策略拦截、未上卡的候选边数（suppressed.review_policy）。 */
 export const suppressedCandidateCount = (snapshot) =>
@@ -75,7 +77,9 @@ export const graphCanvasData = (snapshot, canvasEdgeLimit = 60) => {
   const normalized = normalizeGraphSnapshot(snapshot)
   if (!normalized) return { nodes: [], edges: [] }
   const edges = normalized.edges.slice(0, Math.max(1, canvasEdgeLimit))
-  const kept = new Set(edges.flatMap((edge) => [String(edge.source_entity_id), String(edge.target_entity_id)]))
+  const kept = new Set(
+    edges.flatMap((edge) => [String(edge.source_entity_id), String(edge.target_entity_id)])
+  )
   const nodes = normalized.nodes.filter((node) => kept.has(String(node.entity_id)))
   return {
     nodes: nodes.map((node) => ({
@@ -135,12 +139,9 @@ export const graphWorkbenchRoute = (snapshot) => {
   if (!normalized) return null
   const kbId = String(normalized.nodes?.[0]?.kb_id || '').trim()
   if (!kbId) return null
-  const seed = String(
-    normalized.seed_display_name || (normalized.seed_names || [])[0] || ''
-  ).trim()
+  const seed = String(normalized.seed_display_name || (normalized.seed_names || [])[0] || '').trim()
   return {
     path: `/extensions/knowledgebase/${encodeURIComponent(kbId)}`,
     query: { tab: 'graph', ws: 'explorer', ...(seed ? { seed } : {}) }
   }
 }
-

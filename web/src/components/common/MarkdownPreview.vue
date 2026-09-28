@@ -13,7 +13,11 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
-import { linkifyEvidenceChips, renderMarkdown } from '@/utils/markdown_preview'
+import {
+  linkifyEvidenceChips,
+  linkifyFigureRefChips,
+  renderMarkdown
+} from '@/utils/markdown_preview'
 import { collectAssetUris, createAssetResolverSession } from '@/utils/asset_resolver'
 import { HTML_PREVIEW_MAX_HEIGHT, HTML_PREVIEW_MIN_HEIGHT } from '@/utils/htmlPreviewRenderer'
 import 'katex/dist/katex.min.css'
@@ -40,10 +44,16 @@ const props = defineProps({
   evidenceLinks: {
     type: Boolean,
     default: false
+  },
+  // 图表锚点芯片锚化（ADR-0008）：把正文里的〔图表F#｜…〕签发芯片变成可点击
+  // 锚点，点击经 figure-ref-click 事件抛给宿主（联动消息级图卡 / 跳证据原文）。
+  figureRefLinks: {
+    type: Boolean,
+    default: false
   }
 })
 
-const emit = defineEmits(['locate-evidence'])
+const emit = defineEmits(['locate-evidence', 'figure-ref-click'])
 
 const themeStore = useThemeStore()
 const shikiTheme = computed(() => (themeStore.isDark ? 'github-dark' : 'github-light'))
@@ -387,10 +397,11 @@ watch(
     const resolvedContent = await resolveKbassetUris(content, () => expired)
     if (resolvedContent === null) return
 
-    const html = await renderMarkdown(
-      props.evidenceLinks ? linkifyEvidenceChips(resolvedContent) : resolvedContent,
-      { theme }
-    )
+    let linkified = props.evidenceLinks ? linkifyEvidenceChips(resolvedContent) : resolvedContent
+    if (props.figureRefLinks) {
+      linkified = linkifyFigureRefChips(linkified)
+    }
+    const html = await renderMarkdown(linkified, { theme })
     if (!expired) {
       replaceHtmlPreservingPreviews(html)
       cleanupHtmlPreviewFrames()
@@ -414,6 +425,15 @@ const handleMarkdownAction = async (e) => {
   if (evidenceAnchor) {
     const ref = evidenceAnchor.getAttribute('data-evidence')
     emit('locate-evidence', { ref: ref || '', text: evidenceAnchor.textContent || '' })
+    return
+  }
+
+  // 图表锚点芯片（ADR-0008）：只上抛 ref 编号，身份/联动裁决在宿主
+  // （figure_refs 结构化载荷 + 图卡组），此处绝不解析芯片文本。
+  const figureRefAnchor = target.closest('.figure-ref-chip-anchor')
+  if (figureRefAnchor) {
+    const ref = figureRefAnchor.getAttribute('data-ref')
+    emit('figure-ref-click', { ref: ref || '', text: figureRefAnchor.textContent || '' })
     return
   }
 
@@ -640,6 +660,20 @@ const showCopiedFeedback = (btn) => {
     color: inherit;
     text-decoration: none;
     cursor: pointer;
+    border-bottom: 1px dashed var(--main-300);
+
+    &:hover {
+      background-color: var(--gray-25);
+      border-bottom-style: solid;
+    }
+  }
+
+  // 图表锚点芯片（ADR-0008）：后端签发的〔图表F#｜…〕，点击联动图卡/原文
+  .figure-ref-chip-anchor {
+    color: var(--main-700);
+    text-decoration: none;
+    cursor: pointer;
+    white-space: nowrap;
     border-bottom: 1px dashed var(--main-300);
 
     &:hover {

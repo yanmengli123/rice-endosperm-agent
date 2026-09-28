@@ -99,6 +99,20 @@ def test_sse_chunk_keys_within_whitelist() -> None:
             assert not extra, f"帧 {frame['id']} 的 chunk 字段 {extra} 不在白名单内"
 
 
+def test_sse_fixture_contains_decoupled_v4_table_frame() -> None:
+    """跨端语料必须真实覆盖 citation 缺席、figure_refs/tables 独立发布。"""
+    chunks = [
+        (frame.get("data") or {}).get("payload", {}).get("chunk", {}) for frame in _load_frames()
+    ]
+    assert any(
+        chunk.get("status") == "citation_ready"
+        and "citation" not in chunk
+        and chunk.get("figure_refs")
+        and chunk.get("tables")
+        for chunk in chunks
+    )
+
+
 def test_create_and_resume_requests_accepted_by_pydantic() -> None:
     from server.routers.agent_router import AgentRunCreate
 

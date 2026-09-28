@@ -5,7 +5,12 @@
       <span class="figure-card-group__hint">来自已验证定位 · 页码由后端确定</span>
     </div>
     <div class="figure-card-group__list">
-      <div v-for="group in groups" :key="group.key" class="figure-card-group__figure">
+      <div
+        v-for="group in groups"
+        :key="group.key"
+        :ref="(element) => setGroupElement(group.key, element)"
+        class="figure-card-group__figure"
+      >
         <FigureCard
           :figure="group.primary"
           :state="stateFor(group.primary)"
@@ -19,7 +24,7 @@
           :aria-label="`${group.panels.length} 个分图`"
         >
           <button
-            v-for="panel in group.panels"
+            v-for="panel in visiblePanels(group)"
             :key="figureKey(panel)"
             type="button"
             role="listitem"
@@ -37,6 +42,19 @@
             <span v-else class="figure-card-group__panel-fallback" aria-hidden="true">
               {{ stateFor(panel).status === 'loading' ? '…' : '×' }}
             </span>
+          </button>
+          <button
+            v-if="group.panels.length > PANEL_PREVIEW_LIMIT"
+            type="button"
+            class="figure-card-group__panel-toggle"
+            :aria-expanded="isGroupExpanded(group.key)"
+            @click="toggleGroup(group.key)"
+          >
+            {{
+              isGroupExpanded(group.key)
+                ? '收起'
+                : `+${group.panels.length - PANEL_PREVIEW_LIMIT}`
+            }}
           </button>
         </div>
       </div>
@@ -81,6 +99,7 @@ defineEmits(['open-source'])
 
 const LOADING = Object.freeze({ status: 'loading', url: null })
 const FAILED = Object.freeze({ status: 'error', url: null })
+const PANEL_PREVIEW_LIMIT = 4
 
 const session = createAssetResolverSession()
 const states = ref({})
@@ -117,6 +136,34 @@ const groups = computed(() => {
   })
 })
 
+// A parsed multi-panel figure may contain tens of assets.  Keep the answer
+// scannable by showing four thumbnails by default; the user can explicitly
+// expand the complete, still-authoritative group.
+const expandedGroups = ref(new Set())
+const isGroupExpanded = (key) => expandedGroups.value.has(key)
+const visiblePanels = (group) =>
+  isGroupExpanded(group.key) ? group.panels : group.panels.slice(0, PANEL_PREVIEW_LIMIT)
+const toggleGroup = (key) => {
+  const next = new Set(expandedGroups.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedGroups.value = next
+}
+
+const groupElements = new Map()
+const setGroupElement = (key, element) => {
+  if (element) groupElements.set(key, element)
+  else groupElements.delete(key)
+}
+const elementForFigure = (index) => {
+  const figure = Array.isArray(props.figures) ? props.figures[index] : null
+  if (!figure) return null
+  const key = String(figure.binding_id || figureKey(figure))
+  return groupElements.get(key) || null
+}
+
+defineExpose({ elementForFigure })
+
 const panelTitle = (panel) => {
   const label = String(panel?.panel_label || '').trim()
   if (label) return `分图 ${label}`
@@ -144,6 +191,7 @@ const resolveAll = async (figures) => {
   session.abortAll()
   session.revokeAll()
   closePanelPreview()
+  expandedGroups.value = new Set()
   generation += 1
   const current = generation
 
@@ -267,6 +315,23 @@ onBeforeUnmount(() => {
     height: 100%;
     object-fit: cover;
     display: block;
+  }
+}
+
+.figure-card-group__panel-toggle {
+  min-width: 44px;
+  height: 44px;
+  padding: 0 6px;
+  border: 1px dashed var(--gray-250);
+  border-radius: 6px;
+  background: var(--gray-25);
+  color: var(--main-700);
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--main-300);
+    background: var(--gray-50);
   }
 }
 

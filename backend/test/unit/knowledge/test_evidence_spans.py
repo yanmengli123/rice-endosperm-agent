@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from yuxi.knowledge.evidence.sentence_splitter import (
+    _classify_quote,
     split_evidence_units,
 )
 from yuxi.knowledge.evidence.span_builder import (
@@ -21,6 +22,75 @@ class _FakeAnchor:
         self.anchor_id = anchor_id
         self.quote = quote
         self.page = page
+
+
+# ---- 补充材料图表题注（2026-09-26 修复）----
+# 事故：_CAPTION_START 只认「关键词 + 直接数字」，Figure S21 / Table S2 /
+# Supplementary Figure 3 全部落成普通 sentence、container_label=None →
+# 进不了 figure_entities、正文引用 S 图只能 no_registry_match。
+
+
+def test_splitter_recognizes_supplementary_figure_captions():
+    evidence_type, container_label, row_key = _classify_quote(
+        "Figure S21 Rice OsISA2 spatiotemporal expression pattern and "
+        "CRISPR/Cas9-mediated target mutagenesis of OsISA2-mutant brown rice grains."
+    )
+    assert evidence_type == "caption"
+    assert container_label == "Figure S21"
+    assert row_key is None
+
+
+def test_splitter_recognizes_supplementary_table_and_qualifier_forms():
+    for quote, expected in (
+        ("Table S2 Absolute values of all detected fatty acid components.", "Table S2"),
+        ("Supplementary Figure 3 Primer sequences used in this study.", "Supplementary Figure 3"),
+        ("Supplemental Figure 1 Schematic of the vector.", "Supplemental Figure 1"),
+        ("图S5 野生型与突变体胚乳细胞电镜观察。", "图S5"),
+        ("Fig. S7 Metabolic heat map of the double mutants.", "Fig. S7"),
+    ):
+        evidence_type, container_label, _row_key = _classify_quote(quote)
+        assert evidence_type == "caption", quote
+        assert container_label == expected, quote
+
+
+def test_supplementary_caption_label_canonicalizes_to_registry_key():
+    # 题注 span 的 container_label 必须能被 canonical_figure_label 归一成
+    # figure sN 注册键，否则签发阶段仍会 no_registry_match（闭环校验）
+    from yuxi.knowledge.evidence.caption_locator import canonical_figure_label
+
+    _type, container_label, _row = _classify_quote("Figure S22 Screening binding motifs of OsMYB73.")
+    assert canonical_figure_label(container_label) == "figure s22"
+
+
+def test_main_figure_and_plain_sentence_unchanged():
+    # 回归：主图题注判定不受影响
+    assert _classify_quote("Figure 5 CRISPR/Cas9 mediated target mutagenesis.")[:2] == (
+        "caption",
+        "Figure 5",
+    )
+    # 普通句子仍不是题注（不得因 S 前缀放宽而误判）
+    assert _classify_quote("This sentence merely mentions figure quality.")[0] == "sentence"
+
+
+def test_splitter_separates_parser_merged_supplementary_captions():
+    merged = (
+        "Figure S5 SEM and TEM observations of mature endosperm in ZH11 and cr-myb73 mutants. "
+        "Figure S6 Rice starch particles of WT and cr-myb73 mutants."
+    )
+    units = split_evidence_units(anchors=[_FakeAnchor("a-merged", merged, page=17)], markdown_body="")
+    assert [(unit.container_label, unit.anchor_id) for unit in units] == [
+        ("Figure S5", "a-merged"),
+        ("Figure S6", "a-merged"),
+    ]
+    assert units[0].quote.endswith("mutants.")
+    assert units[1].quote.startswith("Figure S6")
+
+
+def test_splitter_does_not_split_mid_sentence_figure_reference():
+    quote = "Figure S5 SEM observations are compared with Figure S6 in the following analysis."
+    units = split_evidence_units(anchors=[_FakeAnchor("a1", quote)], markdown_body="")
+    assert len(units) == 1
+    assert units[0].container_label == "Figure S5"
 
 
 def test_splitter_detects_caption_table_row_sentence_and_formula():

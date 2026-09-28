@@ -33,6 +33,7 @@ from yuxi.knowledge.evidence.document_partition import (
     effective_partition,
 )
 from yuxi.knowledge.rendering.authority_markers import authority_marker_pattern
+from yuxi.knowledge.rendering.text_normalization import fold_trailing_duplicate_punctuation
 from yuxi.knowledge.rendering.claim_evidence_resolver import (
     BINDING_VERIFIED,
     extract_hard_constraints,
@@ -49,7 +50,7 @@ from yuxi.utils import logger
 
 CITATION_CHANNEL_VERSION = "citation_channel_v3"
 
-MAX_CITATIONS = 12
+MAX_CITATIONS = 16  # G2（2026-09-26）：12→16，caption span 覆盖率提升（Q3 no_registry_match=31 实测）
 MAX_ANCHORS_PER_CITATION = 4
 CHIP_FILENAME_CHARS = 24
 _QUOTE_FINGERPRINT_CHARS = 80
@@ -71,10 +72,11 @@ LEGACY_NARRATIVE_LOCATOR_MARKER = "〔页码与锚点以后端引用为准〕"
 HISTORY_CITATION_PLACEHOLDER = "[citation omitted]"
 
 _PLACEHOLDER_PATTERN = re.compile(r"\[(E\d{1,3})\]")
-# 伪造芯片：模型模仿渲染产物手写的任何「〔…证据E#…〕/〔…引文定位…〕」形态
-# （含嵌套损坏形态）。引文定位形态 2026-09 起纳入——伪造定位芯片此前既不被
-# 伪造判定覆盖、又被权威保护模式放行（D3 漏洞）。
-_FABRICATED_CHIP_PATTERN = re.compile(r"〔[^〕]*(?:证据\s*E\d{1,3}|引文定位)[^〕]*〕")
+# 伪造芯片：模型模仿渲染产物手写的任何「〔…证据E#…〕/〔…引文定位…〕/〔…图表F#…〕」
+# 形态（含嵌套损坏形态）。引文定位形态 2026-09 起纳入——伪造定位芯片此前既不被
+# 伪造判定覆盖、又被权威保护模式放行（D3 漏洞）；图表锚点形态随 ADR-0008 同批
+# 纳入（同一漏洞类别的提前收敛，不重演 D3）。
+_FABRICATED_CHIP_PATTERN = re.compile(r"〔[^〕]*(?:证据\s*E\d{1,3}|引文定位|图表\s*F\d{1,3})[^〕]*〕")
 _BARE_PAGE_PATTERNS = (
     re.compile(r"第\s*[0-9]{1,4}\s*页"),
     re.compile(r"\bp\.\s*[0-9]{1,3}\b", flags=re.IGNORECASE),
@@ -316,6 +318,51 @@ _REFERENCES_SECTION_HEADER = "【证据引用】"
 _UNCOVERED_NOTICE_PREFIX = "（注：以下结论未在原文中定位到对应依据"
 
 
+def _drop_orphan_list_markers(text: str) -> str:
+    """删除被掏空的列表项/引用块行，避免留下悬空 "-" "1." "> " 残骸。
+
+    成因：语义门禁按句删除时，若整句是某个列表项的全部内容，行内会只剩标记
+    （实测 msg 4024 输出里出现孤立的 "-"）。只删**确实没有任何内容**的行；
+    带内容的列表项原样保留（缩进层级信息不丢）。
+    """
+    kept: list[str] = []
+    for line in str(text or "").split("\n"):
+        stripped = line.strip()
+        if stripped and re.fullmatch(r"(?:[-*+]|\d{1,2}[.)]|>)[ \t]*", stripped):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+_SENTENCE_TERMINATORS = "。．.．!！?？;；:：)）\u3002"
+
+
+def _clean_truncated_fragments(text: str) -> str:
+    """清理删句后的断尾残片（2026-09-27 用户实测发现"为主结论中"残留）。
+
+    成因：figure/table_claim_validator 按 Claim 粒度删句时，若删的是句子的
+    后半部分（从句/宾语从句），前半部分"这些图为主结论中"留下来成为无终止
+    标点的悬空片段。本函数删除：
+    - 不以句读结尾且 <12 字符的段内行尾残片
+    - 列表项内不以句读结尾且整行 <16 字符的残片
+    不删除：标题行（#）、表格行（|）、代码块、正常长句。
+    """
+    lines = str(text or "").split("\n")
+    cleaned: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if (
+            stripped
+            and not stripped.startswith(("#", "|", "```", "~~~", ">", "【"))
+            and len(stripped) < 12
+            and stripped[-1] not in _SENTENCE_TERMINATORS
+            and not re.match(r"^[-*+\d]", stripped)
+        ):
+            continue  # 残片：删除
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
 def _iter_markdown_blocks(text: str) -> tuple[list[str], list[tuple[str, int, int]]]:
     """按行把文本切成 (kind, 起行, 止行) 块：codefence/table/heading/paragraph。
 
@@ -434,19 +481,21 @@ def reverse_bind_citations(
             already_annotated = any(
                 lines[peek].strip().startswith("> 表格依据：") for peek in range(end + 1, min(end + 3, len(lines)))
             )
-            footnotes: list[str] = []
+            # 每表只挂一枚依据芯片：同一 E# 逐行重复属观感噪声（2026-09-26 实测
+            # Q2 出现 5 枚同号芯片），且 D1 相邻折叠按设计不跨行折叠；表格整体
+            # 共享同一组证据，尾行一枚即可承载"本表数据出处"。
+            footnote: str | None = None
             for row_index in range(start, end + 1):
                 row = lines[row_index]
-                if already_annotated:
-                    output_lines.append(row)
+                output_lines.append(row)
+                if footnote is not None or already_annotated:
                     continue
                 chip = _bind(row.replace("|", " "))
                 if chip:
-                    footnotes.append("> 表格依据：" + chip)
-                output_lines.append(row)
-            if footnotes:
-                output_lines.extend(footnotes)
-                bound_count += len(footnotes)
+                    footnote = "> 表格依据：" + chip
+            if footnote:
+                output_lines.append(footnote)
+                bound_count += 1
             continue
         # 段落：逐行、句内绑定，尾随空白原位保留。
         # 行级芯片防重（幂等）：本行已含后端芯片（上一轮绑定产物）时整行
@@ -518,6 +567,14 @@ def _strip_display_placeholders(text: str) -> tuple[str, int, int]:
     result = str(text or "")
     placeholder_count = result.count(HISTORY_CITATION_PLACEHOLDER)
     result = result.replace(HISTORY_CITATION_PLACEHOLDER, "")
+    # Natural-language placeholders used by prompts/older model templates are
+    # internal protocol tokens too.  They must never survive as user-visible
+    # prose when no deterministic locator line was produced.
+    result, internal_placeholder_count = re.subn(
+        r"(?im)^\s*\[(?:后端渲染)?(?:定位行|引用行|证据行)\]\s*$",
+        "",
+        result,
+    )
     # 整块剥除模型仿写/上一轮渲染的引用区块（头行 + 连续数据行/分隔线/空行）
     stripped_lines: list[str] = []
     skipping_references = False
@@ -545,7 +602,11 @@ def _strip_display_placeholders(text: str) -> tuple[str, int, int]:
     # 剥离残留清理：标点前多余空格、纯空白行收敛（不动表格对齐空白）
     result = re.sub(r"[ \t]+([,，.。;；、])", r"\1", result)
     result = re.sub(r"\n{3,}", "\n\n", result)
-    return result, marker_count, placeholder_count + header_count + dangling_locator_prefix
+    return (
+        result,
+        marker_count,
+        placeholder_count + internal_placeholder_count + header_count + dangling_locator_prefix,
+    )
 
 
 def _render_references_section(text: str, citations: list[dict[str, Any]]) -> tuple[str, bool]:
@@ -682,6 +743,9 @@ def _rewrite_fabricated_chips(
     引文定位形态没有 ref 可信：唯一合法判据是与本 run 后端签发的定位芯片
     **完全一致**；模型构造的定位芯片（即使数值碰巧正确）一律按伪造剥离，
     单独计入 ``fabricated_locator_removed``（AC13）。
+    图表锚点芯片（ADR-0008）没有可由模型携带的认证字段：任何入站 ``F#``
+    都先退回其纯文本标签，再由后端注册表重新签发。即使标签可解析，也绝不
+    信任模型选择的编号或芯片外形；双重应用时仍会确定性重签，保持幂等。
     幂等防线：与当前引用池渲染产物**完全一致**的芯片是后端上一轮生成的合法
     芯片（守卫+落库双重应用场景），原样保留，不进入伪造判定。
     """
@@ -689,15 +753,22 @@ def _rewrite_fabricated_chips(
     rewritten = 0
     removed = 0
     locator_removed = 0
+    figure_removed = 0
     legitimate_chips = {render_citation_chip(citation) for citation in _citation_pool(citations)}
     if locator_chip:
         legitimate_chips.add(locator_chip)
 
     def _substitute(match: re.Match) -> str:
-        nonlocal rewritten, removed, locator_removed
+        nonlocal rewritten, removed, locator_removed, figure_removed
         chip = match.group(0)
         if chip in legitimate_chips:
             return chip
+        if "图表" in chip:
+            figure_removed += 1
+            label_match = re.fullmatch(r"〔图表F\d{1,3}｜([^〕]+)〕", chip)
+            # 只保留受限芯片语法内的展示标签；编号与外壳一律销毁。下一步骤
+            # 会基于本轮可信注册表重签。无法重签时它只是普通文本，不具权威性。
+            return re.sub(r"\s+", " ", label_match.group(1)).strip() if label_match else fallback
         if "引文定位" in chip:
             # 定位芯片合法性只来自后端签发（数值碰巧正确不构成权威，AC13）
             locator_removed += 1
@@ -723,6 +794,7 @@ def _rewrite_fabricated_chips(
         "fabricated_rewritten": rewritten,
         "fabricated_removed": removed,
         "fabricated_locator_removed": locator_removed,
+        "fabricated_figure_removed": figure_removed,
     }
 
 
@@ -731,7 +803,7 @@ def sanitize_history_text(text: str) -> str:
 
     渲染产物绝不回流：芯片、失败关闭标记与附录行折叠为 ``[citation omitted]``。
     注意不折叠回 ``[E#]``——ref 是单次 retrieval run 的局部编号，回流会让模型
-    把它当稳定引用标识，制造下一轮错绑。
+    把它当稳定引用标识，制造下一轮错绑（``F#`` 同理，随同一形态族折叠）。
     """
     value = str(text or "")
     if not value:
@@ -744,6 +816,249 @@ def sanitize_history_text(text: str) -> str:
     return value
 
 
+def _sign_figure_refs(
+    text: str,
+    citations: list[dict[str, Any]],
+    locator: dict[str, Any] | None,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """图表锚点签发（ADR-0008 步骤 1b）：可解析提及原地替换为 ``〔图表F#｜…〕``。
+
+    Markdown 结构感知（与 reverse_bind 同规则）：codefence/表格/标题/【证据引用】
+    区块整块跳过——芯片永不进代码块与表格单元格；已含图表芯片的行不再改写
+    （守卫+落库双重应用幂等）。F# 按**实际签发顺序**编号（表格内提及不签发也
+    不占号），并避开文本中既存芯片已占用的编号。
+    """
+    from yuxi.knowledge.evidence.caption_locator import iter_figure_labels
+    from yuxi.knowledge.rendering.figure_ref_channel import (
+        parse_figure_ref_chips,
+        render_figure_ref_chip,
+        resolve_figure_refs,
+    )
+
+    plan = resolve_figure_refs(text, citations, locator)
+    resolvable = {entry["key"]: entry for entry in plan["refs"]}
+    if not resolvable:
+        return str(text or ""), [], plan["stats"]
+
+    claimed_refs = {chip["ref"] for chip in parse_figure_ref_chips(text)}
+    counter = 0
+
+    def _next_ref() -> str:
+        nonlocal counter
+        while True:
+            counter += 1
+            candidate = f"F{counter}"
+            if candidate not in claimed_refs:
+                return candidate
+
+    signed: dict[str, dict[str, Any]] = {}
+
+    def _sign_line(line: str) -> str:
+        mentions = iter_figure_labels(line)
+        if not mentions:
+            return line
+        rebuilt: list[str] = []
+        cursor = 0
+        changed = False
+        for mention in mentions:
+            entry = resolvable.get(mention["canonical"]) or resolvable.get(mention["base_key"])
+            if entry is None:
+                continue
+            key_id = str(entry["key"])
+            if key_id not in signed:
+                signed[key_id] = {**entry, "ref": _next_ref(), "occurrences": 0, "mention_raw": mention["raw"]}
+            signed[key_id]["occurrences"] += 1
+            rebuilt.append(line[cursor : mention["start"]])
+            rebuilt.append(render_figure_ref_chip(signed[key_id]["ref"], mention["raw"]))
+            cursor = mention["end"]
+            changed = True
+        if not changed:
+            return line
+        rebuilt.append(line[cursor:])
+        return "".join(rebuilt)
+
+    lines, blocks = _iter_markdown_blocks(str(text or ""))
+    output_lines: list[str] = []
+    for kind, start, end in blocks:
+        if kind in ("codefence", "heading", "references", "table"):
+            output_lines.extend(lines[start : end + 1])
+            continue
+        for line_index in range(start, end + 1):
+            line = lines[line_index]
+            if "〔图表" in line:
+                output_lines.append(line)
+                continue
+            output_lines.append(_sign_line(line))
+    stats = {**plan["stats"], "signed": len(signed)}
+    return "\n".join(output_lines), list(signed.values()), stats
+
+
+_FIGURE_RANGE_PATTERN = re.compile(
+    r"(?P<head>(?:Figure|Fig\.?|图|Table|表)\s*)(?P<prefix>S?)(?P<start>\d{1,3})"
+    r"\s*(?:[-–—~～]|至|到)\s*(?:(?:Figure|Fig\.?|图|Table|表)\s*)?"
+    r"(?P<end_prefix>S?)(?P<end>\d{1,3})",
+    re.IGNORECASE,
+)
+
+
+def _expand_verified_figure_ranges(text: str, registry: dict[str, dict[str, Any]]) -> tuple[str, int]:
+    """Expand a compact verified range so every member receives its own F#.
+
+    ``Figure S17–S20`` must not publish one signed chip followed by three
+    unsigned implied figures.  Expansion is allowed only when every member is
+    present and unambiguous in the frozen run-local registry; otherwise the
+    original range is retained for the ordinary fail-closed path.
+    """
+
+    expanded = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal expanded
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        prefix = (match.group("prefix") or match.group("end_prefix") or "").lower()
+        if end < start or end - start > 7:
+            return match.group(0)
+        kind = "table" if match.group("head").strip().casefold().startswith(("table", "表")) else "figure"
+        keys = [f"{kind} {prefix}{number}" for number in range(start, end + 1)]
+        entries = [registry.get(key) for key in keys]
+        if any(not entry or entry.get("ambiguous") for entry in entries):
+            return match.group(0)
+        expanded += 1
+        return "、".join(str(entry.get("label") or key) for entry, key in zip(entries, keys, strict=True))
+
+    return _FIGURE_RANGE_PATTERN.sub(_replace, str(text or "")), expanded
+
+
+_SUPPLEMENT_FIGURE_PATTERN = re.compile(r"\b(?:Figure|Fig\.?)\s*S\s*(\d{1,3})\b", re.IGNORECASE)
+_FIGURE_LIST_QUESTION_PATTERN = re.compile(r"(?:哪几张|哪些|指明|列出|分别).{0,12}(?:补充)?图")
+_DECLARED_FIGURE_COUNT_PATTERN = re.compile(r"(?:这|上述|以上|下列)?\s*([三四五六七八]|[3-8])\s*张")
+_FIGURE_COUNT_VALUES = {"三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8}
+
+
+def _repair_unique_supplement_inventory(
+    text: str,
+    *,
+    question: str,
+    registry: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Repair a model-omitted member of an otherwise provable figure list.
+
+    This is deliberately narrower than general answer completion.  It runs
+    only when the user explicitly asks *which figures*, the draft declares a
+    small cardinality, and the already listed supplementary figures have one
+    and only one contiguous completion in the frozen caption registry.  A
+    second possible interval, an ambiguous caption, or missing caption text
+    fails closed and leaves the draft untouched.
+    """
+
+    report: dict[str, Any] = {
+        "version": "supplement_inventory_repair_v1",
+        "status": "SKIPPED",
+        "declared_count": 0,
+        "listed_count": 0,
+        "added_labels": [],
+        "inventory_labels": [],
+    }
+    source = str(text or "")
+    if not _FIGURE_LIST_QUESTION_PATTERN.search(str(question or "")):
+        return source, report
+    count_match = _DECLARED_FIGURE_COUNT_PATTERN.search(source)
+    if count_match is None:
+        return source, report
+    raw_count = count_match.group(1)
+    declared = _FIGURE_COUNT_VALUES.get(raw_count, int(raw_count) if raw_count.isdigit() else 0)
+    listed = sorted({int(value) for value in _SUPPLEMENT_FIGURE_PATTERN.findall(source)})
+    report.update({"declared_count": declared, "listed_count": len(listed)})
+    if len(listed) < 2 or declared < len(listed) or declared - len(listed) > 2:
+        report["status"] = "NO_UNIQUE_COMPLETION"
+        return source, report
+
+    candidates: list[list[int]] = []
+    for start in range(max(1, max(listed) - declared + 1), min(listed) + 1):
+        interval = list(range(start, start + declared))
+        if not set(listed).issubset(interval):
+            continue
+        entries = [registry.get(f"figure s{number}") for number in interval]
+        if all(
+            entry
+            and not entry.get("ambiguous")
+            and str(entry.get("_caption_quote") or entry.get("quote_head") or "").strip()
+            for entry in entries
+        ):
+            candidates.append(interval)
+    if len(candidates) != 1:
+        report["status"] = "AMBIGUOUS" if candidates else "NO_UNIQUE_COMPLETION"
+        return source, report
+
+    verified_interval = candidates[0]
+    missing = [number for number in verified_interval if number not in listed]
+    bullets: list[tuple[int, str]] = []
+    for number in missing:
+        entry = registry[f"figure s{number}"]
+        label = str(entry.get("label") or f"Figure S{number}").strip()
+        caption = re.sub(r"\s+", " ", str(entry.get("_caption_quote") or entry.get("quote_head") or "")).strip()
+        caption = re.sub(
+            rf"^\s*(?:Figure|Fig\.?)\s*S\s*{number}\s*[.:：-]?\s*",
+            "",
+            caption,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not caption:
+            report["status"] = "NO_UNIQUE_COMPLETION"
+            return source, report
+        bullets.append((number, f"- {label}：{caption}"))
+
+    repaired = source
+    for number, bullet in bullets:
+        following = next(
+            (match for match in _SUPPLEMENT_FIGURE_PATTERN.finditer(repaired) if int(match.group(1)) > number),
+            None,
+        )
+        if following is not None:
+            insertion_at = repaired.rfind("\n", 0, following.start()) + 1
+        else:
+            current_count = _DECLARED_FIGURE_COUNT_PATTERN.search(repaired)
+            insertion_at = repaired.rfind("\n", 0, current_count.start()) + 1 if current_count else len(repaired)
+        repaired = repaired[:insertion_at] + bullet + "\n" + repaired[insertion_at:]
+    report.update(
+        {
+            "status": "REPAIRED" if missing else "VERIFIED",
+            "added_labels": [f"Figure S{number}" for number in missing],
+            "listed_count_after": len(listed) + len(missing),
+        }
+    )
+
+    # A compact aggregate mention proves identity but does not explain each
+    # requested figure.  If any member lacks a dedicated single-figure line,
+    # append a backend-owned inventory made only from frozen captions.
+    dedicated: set[int] = set()
+    for line in repaired.splitlines():
+        line_numbers = {int(value) for value in _SUPPLEMENT_FIGURE_PATTERN.findall(line)}
+        if len(line_numbers) == 1 and not re.search(r"综上|汇总|总体|整体|共同", line):
+            dedicated.update(line_numbers)
+    if not set(verified_interval).issubset(dedicated):
+        inventory = ["### 已核验图注清单"]
+        for number in verified_interval:
+            entry = registry[f"figure s{number}"]
+            label = str(entry.get("label") or f"Figure S{number}").strip()
+            caption = re.sub(
+                r"\s+", " ", str(entry.get("_caption_quote") or entry.get("quote_head") or "")
+            ).strip()
+            caption = re.sub(
+                rf"^\s*(?:Figure|Fig\.?)\s*S\s*{number}\s*[.:：-]?\s*",
+                "",
+                caption,
+                flags=re.IGNORECASE,
+            ).strip()
+            inventory.append(f"- {label}：{caption[:500].rstrip()}")
+        repaired = repaired.rstrip() + "\n\n" + "\n".join(inventory)
+        report["inventory_labels"] = [f"Figure S{number}" for number in verified_interval]
+        if report["status"] == "VERIFIED":
+            report["status"] = "ENRICHED"
+    return repaired, report
+
+
 def apply_citation_channel(
     text: str,
     citations: list[dict[str, Any]],
@@ -751,6 +1066,13 @@ def apply_citation_channel(
     locator: dict[str, Any] | None = None,
     partition_intent: str | None = None,
     authority_policy: dict[str, Any] | None = None,
+    figure_refs_enabled: bool = False,
+    semantic_gate_enabled: bool = False,
+    available_conditions: set[str] | None = None,
+    table_rows: list[list[dict[str, Any]]] | None = None,
+    semantic_tables: list[dict[str, Any]] | None = None,
+    semantic_question: str = "",
+    table_semantic_ready: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """输出门禁：剥离 → 伪造重写 → 提议验证展开。页码只可能经权威路径上屏。
 
@@ -761,8 +1083,13 @@ def apply_citation_channel(
     当 ``document_citations_allowed=False``（图片定位未验证）时**独立收权**：
     即使调用方误传了 citations，引用池也按空处理——文献芯片/【证据引用】
     区块/定位芯片一律不得出境；``figure_label_allowed=False`` 时 Figure/Fig/
-    图+编号的确定性声明整体剥离；最后按 ``required_disclosure`` 追加标准化
-    未定位声明（幂等）。
+    图+编号的确定性声明整体剥离（后端签发的 ``〔图表F#〕`` 锚点除外——它由
+    本轮注册表确定性解析而来，marker-aware 剥离保护之）；最后按
+    ``required_disclosure`` 追加标准化未定位声明（幂等）。
+
+    ``figure_refs_enabled``（ADR-0008）：图表锚点开关（``figure_ref_anchor_enabled``
+    配置注入）。开启且注册表非空时，步骤 1b 把可解析提及原地替换为权威锚点
+    芯片；关闭时行为与历史版本逐字节一致（暗发布纪律）。
     """
     original = str(text or "")
     policy = authority_policy if isinstance(authority_policy, dict) else None
@@ -802,10 +1129,176 @@ def apply_citation_channel(
         locator_chip or NARRATIVE_LOCATOR_MARKER,
     )
 
+    # 图表锚点注册表（本轮可信作用域）：只在开关开启且引用未收权时构建；
+    # 入站 F# 一律剥壳，签发只认该注册表，模型选择的编号不参与任何裁决。
+    figure_registry: dict[str, dict[str, Any]] = {}
+    if figure_refs_enabled and effective_citations:
+        from yuxi.knowledge.rendering.figure_ref_channel import build_caption_registry
+
+        figure_registry = build_caption_registry(effective_citations, effective_locator)
+
     # 1) 伪造芯片先进入 resolver。若先剥裸页码，芯片会被破坏成嵌套乱码。
     rewritten, fabrication = _rewrite_fabricated_chips(
-        source, effective_citations, partition_intent=partition_intent, locator_chip=locator_chip
+        source,
+        effective_citations,
+        partition_intent=partition_intent,
+        locator_chip=locator_chip,
     )
+    rewritten, figure_ranges_expanded = _expand_verified_figure_ranges(rewritten, figure_registry)
+    rewritten, supplement_inventory_repair = _repair_unique_supplement_inventory(
+        rewritten,
+        question=semantic_question,
+        registry=figure_registry,
+    )
+
+    # 1a) 图表语义发布门禁：身份可解析不等于描述正确。任何声称某 Figure/Table
+    # “展示/证明/支持”具体内容的句子，必须先与本轮冻结题注证据相容，才有资格
+    # 进入 F# 签发。失败句直接删除而不是追加“未核验”免责声明；导航型“见图 N”
+    # 不属于事实 Claim，仍可正常签发。门禁在签发前执行，因此被拒句不会留下
+    # orphan figure_refs，也不会让一个权威芯片替错误语义背书。
+    figure_claim_validation: dict[str, Any] = {
+        "version": "figure_claim_validator_v1",
+        "status": "SKIPPED",
+        "checked_claim_count": 0,
+        "unsupported_count": 0,
+        "removed_sentence_count": 0,
+        "claims": [],
+    }
+    if figure_refs_enabled and not policy_revokes_citations:
+        from yuxi.knowledge.validation.figure_claim_validator import validate_figure_claims
+
+        semantic_candidate, figure_claim_validation = validate_figure_claims(
+            rewritten,
+            registry=figure_registry,
+            citations=effective_citations,
+        )
+        would_remove = int(figure_claim_validation.get("removed_sentence_count") or 0)
+        figure_claim_validation = {
+            **figure_claim_validation,
+            "would_remove_sentence_count": would_remove,
+            # Caption-identity conflicts are a signing precondition, not an
+            # experimental repair feature. Once figure anchors are enabled,
+            # an F# chip must never authenticate prose that contradicts the
+            # frozen caption. The separate feature flag below only controls
+            # condition/numeric checks that need richer structured inputs.
+            "removed_sentence_count": would_remove,
+            "deletion_enabled": True,
+            "enforcement_scope": "CAPTION_IDENTITY",
+        }
+        rewritten = semantic_candidate
+
+    # 1a.1) Structured table release gate.  This runs before F# signing so a
+    # valid Table identity can never authenticate a value taken from the wrong
+    # row/column/condition.  ``table_semantic_ready`` means the async chat
+    # boundary completed active-revision table projection; absence is not
+    # silently interpreted as an empty table.
+    table_claim_validation: dict[str, Any] = {
+        "version": "table_claim_validator_v1",
+        "status": "SKIPPED",
+        "facts_available": 0,
+        "checked_claim_count": 0,
+        "removed_sentence_count": 0,
+    }
+    if table_semantic_ready:
+        from yuxi.knowledge.validation.table_claim_validator import validate_table_claims
+
+        rewritten, table_claim_validation = validate_table_claims(
+            rewritten,
+            question=semantic_question,
+            tables=semantic_tables or [],
+        )
+        # A model-authored source sentence can be removed together with an
+        # invalid mixed Table 1/Table 2 claim.  Reconstruct attribution only
+        # from tables that actually supported retained claims so a correct
+        # answer never loses its F# navigation card, while a refusal publishes
+        # no misleading table identity.
+        supporting_table_labels = [
+            str(label).strip()
+            for label in table_claim_validation.get("supporting_table_labels") or []
+            if str(label).strip()
+        ]
+        if supporting_table_labels:
+            source_line = "> 数据出处：" + "、".join(dict.fromkeys(supporting_table_labels)) + "。"
+            if source_line not in rewritten:
+                rewritten = rewritten.rstrip() + "\n\n" + source_line
+
+    # 1b) 图表锚点签发（ADR-0008）：可解析提及原地替换为〔图表F#｜…〕——
+    #     必须在权威保护（步骤 2）之前进入文本，从而获得与 E# 芯片完全相同的
+    #     保护/清理/导出路径；发生在步骤 9 之前，签发即替代剥离。
+    #
+    #     条件/表格数据派生（2026-09-27）：从 semantic_tables（P2 表格投影）
+    #     提取 available_conditions 和 table_rows——语义门禁据此检测条件错配。
+    #     Table 1 只有基因型行无 Control/Heat 列 → conditions 为空集 →
+    #     含"热胁迫"的断言触发 CONDITION_MISMATCH。
+    if semantic_tables and not available_conditions:
+        available_conditions = set()
+        for _tbl in semantic_tables:
+            for _cond in _tbl.get("available_conditions") or []:
+                available_conditions.add(str(_cond))
+    if semantic_tables and not table_rows:
+        table_rows = []
+        for _tbl in semantic_tables:
+            table_rows.extend(_tbl.get("rows") or [])
+    #
+    #     语义门禁（P3）：签发前跑确定性条件/数值/标签校验。
+    #     **删句是破坏性操作，受独立开关 semantic_gate_enabled 管控（默认 False）**
+    #     —— 2026-09-27 事故：门禁原绑定在 figure_ref_anchor_enabled（渲染特性
+    #     开关）上，且两个判据校验器在**空输入**下 fail-open 未实现，把"调用方没给
+    #     数据"当成"断言不成立"；而生产调用点本就拿不到表格/条件数据（步骤 1b 在
+    #     chat 层表格投影之前）→ 开关全开即删真实正文（实测 205 字符段→20 字符，
+    #     并留下悬空空列表项）。现在：判据缺失时不做判断（见 figure_semantic_gate
+    #     的 fail-open 守卫），且删句必须显式开闸。
+    figure_refs: list[dict[str, Any]] = []
+    figure_ref_stats: dict[str, Any] = {}
+    semantic_gate_stats: dict[str, Any] = {}
+    if figure_refs_enabled and figure_registry:
+        from yuxi.knowledge.validation.figure_semantic_gate import Verdict, run_semantic_gate
+
+        registry_labels = {str(entry.get("label") or entry.get("key") or "") for entry in figure_registry.values()}
+        semantic_verdicts = run_semantic_gate(
+            rewritten,
+            figure_labels_in_registry=registry_labels,
+            available_conditions=available_conditions,
+            table_rows=table_rows,
+        )
+        # 只删除 CONDITION_MISMATCH 和 NUMERIC_NOT_IN_SOURCE（有据可查的失败）
+        # UNKNOWN_FIGURE_LABEL 不删（可能只是模型写法变体，后续锚定通道处理）
+        removable = [
+            verdict
+            for verdict in semantic_verdicts
+            if (
+                verdict.verdict == Verdict.UNSUPPORTED
+                and verdict.claim
+                and verdict.reason_code in ("CONDITION_MISMATCH", "NUMERIC_NOT_IN_SOURCE")
+            )
+        ]
+        removed_sentences = 0
+        if semantic_gate_enabled:
+            for verdict in removable:
+                assert verdict.claim is not None  # 上面的推导已保证
+                if verdict.claim.text and verdict.claim.text in rewritten:
+                    rewritten = rewritten.replace(verdict.claim.text, "", 1)
+                    removed_sentences += 1
+            if removed_sentences:
+                # 删句可能掏空列表项/引用块，留下悬空 "-" "> " 残骸（实测 msg 4024）
+                rewritten = _drop_orphan_list_markers(rewritten)
+                rewritten = _clean_truncated_fragments(rewritten)
+                rewritten = re.sub(r"\n{3,}", "\n\n", rewritten)
+                rewritten = re.sub(r"[ \t]{2,}", " ", rewritten)
+        semantic_gate_stats = {
+            "claims_evaluated": len(semantic_verdicts),
+            # 可删但未删（开关关闭）：把"该删多少"与"删了多少"分开留痕，
+            # 否则关闭态看起来像"门禁没发现问题"
+            "unsupported_detected": len(removable),
+            "unsupported_removed": removed_sentences,
+            "deletion_enabled": bool(semantic_gate_enabled),
+            "conditions_available": sorted(available_conditions or []),
+            "table_rows_available": len(table_rows or []),
+            "condition_mismatch": sum(1 for v in semantic_verdicts if v.reason_code == "CONDITION_MISMATCH"),
+            "numeric_not_in_source": sum(1 for v in semantic_verdicts if v.reason_code == "NUMERIC_NOT_IN_SOURCE"),
+            "unknown_figure_label": sum(1 for v in semantic_verdicts if v.reason_code == "UNKNOWN_FIGURE_LABEL"),
+        }
+        rewritten, figure_refs, figure_ref_stats = _sign_figure_refs(rewritten, effective_citations, effective_locator)
 
     # 2) 暂时保护刚由后端生成的权威芯片，再剥离剩余裸页码/锚点。
     protected: dict[str, str] = {}
@@ -843,14 +1336,35 @@ def apply_citation_channel(
     #    F5：不再罗列未覆盖原句——曾把模型泄漏的过程叙述（"Let me try…"）展示
     #    进提示正文，形成二次噪声；固定一句通用提示，明细走 validation 载荷。
     notice_needed = bool(uncovered) or markers_stripped > 0
+    # D3 第一层（幂等）：精确数值未绑定权威芯片的行计数——仅数据型回答
+    # （正文含图表编号提及）披露，普通回答的零散数字不污染提示。
+    numeric_ungrounded = _count_ungrounded_numeric_lines(expanded)
+    numeric_disclosure = (
+        numeric_ungrounded if numeric_ungrounded and _FIGURE_LABEL_CLAIM_PATTERN.search(expanded) else 0
+    )
     if notice_needed and _UNCOVERED_NOTICE_PREFIX not in expanded:
+        numeric_clause = (
+            f"；其中 {numeric_disclosure} 处含具体数值但未绑定{_NUMERIC_DISCLOSURE_MARKER}"
+            if numeric_disclosure
+            else ""
+        )
         expanded = (
             expanded.rstrip()
             + "\n\n"
             + _UNCOVERED_NOTICE_PREFIX
+            + numeric_clause
             + "，请谨慎采信"
             + ("以下结论" if uncovered else "个别结论")
+            + "。"
+            + (_TABLE_CARD_HINT if numeric_disclosure else "")
             + "）"
+        )
+    elif numeric_disclosure and _NUMERIC_DISCLOSURE_MARKER not in expanded:
+        expanded = (
+            expanded.rstrip()
+            + "\n\n（注："
+            + f"{numeric_disclosure} 处具体数值未绑定{_NUMERIC_DISCLOSURE_MARKER}，"
+            + f"请以原文表格为准。{_TABLE_CARD_HINT}）"
         )
 
     # 7) P4 引用平面模板化：已验证引用渲染为后端拥有的【证据引用】区块
@@ -917,6 +1431,18 @@ def apply_citation_channel(
         expanded, _unlocated_success_removed = _strip_locator_contradiction_claims(expanded, direction="UNLOCATED")
         locator_contradiction_claims_removed = _unlocated_success_removed
 
+    # 13) 渲染质量终态归一（D1/D2/D3 第二层；与锚点特性正交、不依赖开关、
+    #     幂等——守卫+落库双重应用安全；附录与失败关闭标记不受影响）
+    # 顺序：形态归一先行（后续判定器只见规范形态），再折叠/标点/标记/元描述。
+    expanded, chip_shapes_canonicalized = _canonicalize_authority_chip_shapes(expanded)
+    expanded, chips_collapsed = _collapse_adjacent_duplicate_chips(expanded)
+    expanded, punctuation_folded = fold_trailing_duplicate_punctuation(expanded)
+    expanded, unverified_items_marked = _mark_unverified_bullet_items(expanded)
+    # G3：已签芯片的图表标签与 citation 题注的确定性类型词比对——标签含
+    # "Venn" 而题注写 "RNA-seq" 属描述与原文不一致（不删文本，追加固定标记）
+    expanded, figure_label_mismatches = _check_figure_label_consistency(expanded, effective_citations)
+    expanded, meta_descriptions_stripped = _strip_model_meta_descriptions(expanded)
+
     validation = {
         "version": CITATION_CHANNEL_VERSION,
         "locator": locator_validation,
@@ -938,6 +1464,22 @@ def apply_citation_channel(
             "locator_contradiction_claims_removed": locator_contradiction_claims_removed,
         },
         "bindings": bindings[:8],
+        "render_normalization": {
+            "chip_shapes_canonicalized": chip_shapes_canonicalized,
+            "chips_collapsed": chips_collapsed,
+            "punctuation_folded": punctuation_folded,
+            "numeric_disclosure": numeric_disclosure,
+            "unverified_items_marked": unverified_items_marked,
+            "meta_descriptions_stripped": meta_descriptions_stripped,
+            "figure_label_mismatches": figure_label_mismatches,
+            "semantic_gate": semantic_gate_stats,
+        },
+        "figure_claim_validation": figure_claim_validation,
+        "table_claim_validation": table_claim_validation,
+        "figure_ranges_expanded": figure_ranges_expanded,
+        "supplement_inventory_repair": supplement_inventory_repair,
+        "figure_refs": figure_refs[:8],
+        "figure_ref_stats": figure_ref_stats,
         "citation_count": len(effective_citations),
         "changed": expanded != original,
     }
@@ -947,6 +1489,87 @@ def apply_citation_channel(
 _FIGURE_LABEL_CLAIM_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?:Fig(?:ure)?\.?|图|表)\s*S?\d{1,3}[A-Za-z]?(?![A-Za-z0-9])",
     flags=re.IGNORECASE,
+)
+
+# ---- 渲染质量终态归一（D1/D3，2026-09-26；与锚点特性正交、不依赖开关）----
+
+# D1：仅被标点/空白分隔的同 ref 相邻证据芯片（反向引用组 2 锁同号）。
+# 只匹配〔证据E#｜…〕形态——天然不触及【证据引用】附录（无〔〕包裹）与
+# 失败关闭标记；两枚之间有正文内容（跨句合法重复引用）不匹配。
+_ADJACENT_DUPLICATE_CHIP_PATTERN = re.compile(
+    r"(〔证据(E\d{1,3})｜[^〕]+〕)((?:[。．.!！？?、,，;；:\s])*)〔证据\2｜[^〕]+〕"
+)
+# D3 第二层：未验证数据型列表项的固定标记（零内容回显，幂等）
+_UNVERIFIED_MARKER = "（未核验）"
+# 已自述不确定性的段落不再叠加标记：模型已经说「需…进一步核验 / 未能定位 /
+# 建议查阅」，再打「（未核验）」既冗余又让读者误以为该段在替结论背书
+# （2026-09-26 3860 实测：限制说明段被误标）。仅豁免**裸段落**，列表/标题
+# 仍按原规则逐条标记。
+_HEDGE_DISCLOSURE_PATTERN = re.compile(
+    r"(?:需|应|建议|有待)(?:要)?[^。；]{0,20}?"
+    r"(?:查阅|核验|核实|定位|确认|以原文|进一步)|"
+    r"未能定位|未直接(?:出现|给出|定位)|无法确认|不在本次证据范围|"
+    r"证据不足|有待确认|需进一步"
+)
+# D3 第一层：精确数值（百分比或小数）——整数页码/编号不触发
+_NUMERIC_CLAIM_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*%|\d+\.\d+")
+# 披露文案只列后端在**渲染期**确能核验的绑定形态。
+# 历史文案写「未绑定证据芯片或表格卡片」，但表格卡片由 chat 层在渲染**之后**
+# 才投影（chat_service._augmented_citation_ready），渲染期无从知晓它是否发布
+# ——于是同一回答既发布 Table 1/2 卡片又自述「数值未绑定表格卡片」，当着用户
+# 自相矛盾（2026-09-26 Q2 实测）。去掉不可证断言，只保留芯片这一确定性事实。
+_NUMERIC_DISCLOSURE_MARKER = "证据芯片"
+# G1：数值未绑定时引导用户引用可用的图表卡片（可行动提示而非仅警示）
+_TABLE_CARD_HINT = "如需核验数值，可在提问中注明 Table N 或 Figure N 以取回对应表格/图表卡片"
+# G3：已签芯片的图表标签与 citation 题注首句的确定性一致性检查
+# 常见图表类型词——出现在标签但不出现在题注中（或反之），提示"描述与原文题注不一致"
+_FIGURE_TYPE_TERMS = frozenset(
+    {
+        "Venn",
+        "venn",
+        "韦恩",
+        "KEGG",
+        "barplot",
+        "柱状",
+        "气泡",
+        "bubble",
+        "PCA",
+        "主成分",
+        "Heat map",
+        "Heatmap",
+        "heatmap",
+        "热图",
+        "GO",
+        "注释",
+        "annotation",
+        "RNA-seq",
+        "RNA-seq",
+        "RNAseq",
+        "转录组",
+        "qRT-PCR",
+        "定量",
+        "电镜",
+        "SEM",
+        "TEM",
+        "扫描",
+        "透射",
+        "表达",
+        "expression",
+        "表型",
+        "phenotype",
+        "phenotypic",
+        "田间",
+        "field",
+        "pull-down",
+        "互作",
+        "interaction",
+        "生长素",
+        "auxin",
+        "IAA",
+        "代谢",
+        "metabolite",
+        "metabolomic",
+    }
 )
 
 # 文献身份断言（H1→I2 升级）：独立 Source 子句、出处动词、作者-年份与
@@ -1075,12 +1698,306 @@ def _strip_locator_contradiction_claims(text: str, *, direction: str) -> tuple[s
 
 
 def _strip_figure_label_claims(text: str) -> tuple[str, int]:
-    """剥离 Figure/Fig/图/表 + 编号 的确定性声明（保留 panel 字母与普通文字）。"""
+    """剥离 Figure/Fig/图/表 + 编号 的确定性声明（保留 panel 字母与普通文字）。
+
+    marker-aware（ADR-0008）：权威芯片（含 ``〔图表F1｜Figure 2〕`` 锚点）整体
+    token 化保护后再剥离——签发芯片载荷里的编号是后端产物，绝不能被裸正则
+    误删成 ``〔图表F1｜〕``（历史保护只覆盖 strip_bare_locators 一步，救不了
+    本步骤，必须自带保护）。同时保护未来任何新增的剥离形态。
+    """
     result = str(text or "")
-    matches = _FIGURE_LABEL_CLAIM_PATTERN.findall(result)
-    result = _FIGURE_LABEL_CLAIM_PATTERN.sub("", result)
-    result = re.sub(r"[ \t]{2,}", " ", result)
-    return result, len(matches)
+    protected: dict[str, str] = {}
+
+    def _protect(match: re.Match) -> str:
+        token = f"__YUXI_MARKER_{len(protected)}__"
+        protected[token] = match.group(0)
+        return token
+
+    masked = authority_marker_pattern().sub(_protect, result)
+    matches = _FIGURE_LABEL_CLAIM_PATTERN.findall(masked)
+    masked = _FIGURE_LABEL_CLAIM_PATTERN.sub("", masked)
+    masked = re.sub(r"[ \t]{2,}", " ", masked)
+    for token, chip in protected.items():
+        masked = masked.replace(token, chip)
+    return masked, len(matches)
+
+
+def _collapse_adjacent_duplicate_chips(text: str) -> tuple[str, int]:
+    """折叠仅被标点/空白分隔的同 ref 相邻证据芯片（D1，2026-09-26）。
+
+    成因：模型在正文写 ``[E1]`` 且 draft 块 ``evidence_refs`` 再挂一枚 →
+    展开后「〔证据E1…〕。 〔证据E1…〕」。保留第一枚与分隔符；两枚之间有
+    正文内容（跨句合法重复引用）不折叠；【证据引用】附录（无〔〕包裹）与
+    失败关闭标记天然不匹配。幂等：折叠产物不再匹配（链式重复由循环收敛）。
+    """
+    result = str(text or "")
+    collapsed = 0
+    while True:
+        new_result, count = _ADJACENT_DUPLICATE_CHIP_PATTERN.subn(lambda match: match.group(1) + match.group(3), result)
+        collapsed += count
+        if not count or new_result == result:
+            break
+        result = new_result
+    return result, collapsed
+
+
+# 终态形态不变量：权威芯片的规范分隔符只有全角「｜」（与 authority_markers 的
+# _AUTHORITY_MARKER_PATTERN、render_citation_chip/render_locator_chip/render_figure_ref_chip
+# 同一口径）。真实落库曾观测到每条回答各 1 枚半角「|」形态：伪造判定
+# （_FABRICATED_CHIP_PATTERN 形如 〔…证据E#…〕）虽能覆盖其形状，但当 resolver 判定
+# VERIFIED 时会**重写为规范芯片**、判定不成立时替换为失败关闭标记——两种情形都不该
+# 让「非规范分隔符的权威芯片」留在正文里。此处只在通道末端把分隔符收敛为「｜」，
+# 不删内容、不改判权威性（内容仍以 resolver 裁决为准），幂等（规范形态不再匹配）。
+_ANY_AUTHORITY_CHIP = re.compile(r"〔\s*(?:证据\s*E\d{1,3}|引文定位|图表\s*F\d{1,3})([^〕]*)〕")
+_NONCANONICAL_CHIP_SEPARATOR = re.compile(r"\s*[|:：;；]\s*")
+
+
+def _canonicalize_authority_chip_shapes(text: str) -> tuple[str, int]:
+    """把权威芯片内的非规范分隔符收敛为全角「｜」（D1 补充，2026-09-26）。"""
+    result = str(text or "")
+    normalized = 0
+
+    def _substitute(match: re.Match[str]) -> str:
+        nonlocal normalized
+        whole = match.group(0)
+        # 无非规范分隔符即不处理：规范形态（〔图表F1｜Figure 2〕短形态只含一个分隔符，
+        # 属正常）与单段载荷（〔证据E1 无法定位〕）都保持原样 → 幂等且不替模型造芯片
+        if not _NONCANONICAL_CHIP_SEPARATOR.search(match.group(1)):
+            return whole
+        parts = [part.strip() for part in _NONCANONICAL_CHIP_SEPARATOR.split(match.group(1))]
+        parts = [part for part in parts if part]
+        if not parts:
+            return whole
+        head = _NONCANONICAL_CHIP_SEPARATOR.split(whole[1:].split("〕")[0])[0].strip()
+        normalized += 1
+        return "〔" + head + "｜" + "｜".join(parts) + "〕"
+
+    return _ANY_AUTHORITY_CHIP.sub(_substitute, result), normalized
+
+
+# 模型自述渲染机制 / 自报页码（元描述泄漏，D3 第三层）：
+# ①「引用标记说明：…由后端按 Contract 渲染」类解释行——用户不需要也不该看到；
+# ②「正文/补充材料 页码 N」式自述页码——页码只允许由权威芯片承载。
+# 只命中这两类确定性形态，零内容回显、幂等、不触碰含权威芯片或附录的行。
+_META_DESCRIPTION_LINE = re.compile(r"^\s*>?\s*(?:引用标记说明|关于引用标记|引用标记解释)\s*[:：]")
+_SELF_REPORTED_PAGE = re.compile(r"(?:正文|补充材料|Supporting\s*information)\s*页码\s*\d+", re.IGNORECASE)
+_INTERNAL_RETRIEVAL_PREFIX = re.compile(
+    r"^(?:支撑说明\s*[:：]\s*)?(?:本轮|此次)(?:仅)?(?:返回|检索到|获得)\s*\d+\s*条证据[^，,。！？]*[，,]\s*"
+)
+_INTERNAL_RETRIEVAL_SENTENCE = re.compile(
+    r"(?:范围限定为|仅限于)(?:后端|系统)?(?:返回|检索到)的\s*E\d+\s*[-–—至到]\s*E\d+[^。！？]*[。！？]?",
+    re.IGNORECASE,
+)
+_MALFORMED_EVIDENCE_LIMIT = re.compile(r"^\s*(?:证据局限|局限)\s*[:：]\s*(?:与\s*)?完整正文")
+
+
+def _strip_model_meta_descriptions(text: str) -> tuple[str, int]:
+    """剥除模型对渲染机制的解释行与自述页码（D3 第三层，2026-09-26）。"""
+    lines, blocks = _iter_markdown_blocks(str(text or ""))
+    skip: set[int] = set()
+    for kind, start, end in blocks:
+        if kind in ("codefence", "table", "references"):
+            skip.update(range(start, end + 1))
+    removed = 0
+    output: list[str] = []
+    for index, line in enumerate(lines):
+        if index in skip:
+            output.append(line)
+            continue
+        line, prefix_count = _INTERNAL_RETRIEVAL_PREFIX.subn("", line)
+        line, sentence_count = _INTERNAL_RETRIEVAL_SENTENCE.subn("", line)
+        removed += prefix_count + sentence_count
+        if "〔" in line:
+            output.append(line)
+            continue
+        if _META_DESCRIPTION_LINE.match(line):
+            removed += 1
+            continue
+        if _MALFORMED_EVIDENCE_LIMIT.match(line):
+            removed += 1
+            continue
+        replaced, count = _SELF_REPORTED_PAGE.subn("该页", line)
+        if count:
+            removed += count
+            output.append(replaced)
+            continue
+        output.append(line)
+    return "\n".join(output), removed
+
+
+def _count_ungrounded_numeric_lines(text: str) -> int:
+    """D3 第一层：含精确数值（百分比/小数）且行内无任何权威芯片的行数。
+
+    块感知：codefence/table/references（【证据引用】附录）整块跳过——附录
+    行带页码/锚点属合法审计信息。纯计数、不回显内容（F5 红线）。
+    """
+    lines, blocks = _iter_markdown_blocks(str(text or ""))
+    skip: set[int] = set()
+    for kind, start, end in blocks:
+        if kind in ("codefence", "table", "references"):
+            skip.update(range(start, end + 1))
+    count = 0
+    for index, line in enumerate(lines):
+        if index in skip:
+            continue
+        if "〔证据E" in line or "〔图表F" in line or "〔引文定位" in line:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("【") or stripped.startswith("（注："):
+            continue
+        if _NUMERIC_CLAIM_PATTERN.search(line):
+            count += 1
+    return count
+
+
+def _resolved_figure_keys(text: str) -> set[str]:
+    """全文中已被权威芯片（〔图表F#｜…〕）绑定的图号规范键集合。
+
+    裸段落标记的安全阀：模型在正文 A 处引用 Figure 3（已签芯片），在 B 处又写
+    「如图 3 所示」——B 处无芯片但**并非未核验**（同一图号全文已有绑定）。用全文
+    已绑定键过滤，避免把合法跨句回指误标为未核验。
+    """
+    from yuxi.knowledge.evidence.caption_locator import canonical_figure_label
+
+    keys: set[str] = set()
+    for match in re.finditer(r"〔图表F\d{1,3}｜([^〕]+)〕", str(text or "")):
+        key = canonical_figure_label(match.group(1).strip())
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _mark_unverified_bullet_items(text: str) -> tuple[str, int]:
+    """D3 第二层：未验证数据型列表项/段落逐条固定标记（零内容回显，幂等）。
+
+    只标记「含图表编号提及、该图号全文无权威芯片绑定」的 bullet/标题/有序列表/**裸段落**
+    ——纯叙述不标；块感知排除 codefence/table/references（附录列表项不得被标记）；
+    已含标记的行跳过（守卫+落库双重应用幂等）。裸段落覆盖解决「模型用普通段落
+    而非列表承载逐图断言」时的治理逃逸（2026-09-26 Q3 实测：S21/S22 错误描述在
+    段内、且两图全文无芯片绑定 → 应被标记）。
+    """
+    from yuxi.knowledge.evidence.caption_locator import canonical_figure_label
+
+    source = str(text or "")
+    resolved = _resolved_figure_keys(source)
+    lines, blocks = _iter_markdown_blocks(source)
+    skip: set[int] = set()
+    for kind, start, end in blocks:
+        if kind in ("codefence", "table", "references"):
+            skip.update(range(start, end + 1))
+    marked = 0
+    output: list[str] = []
+    for index, line in enumerate(lines):
+        if index in skip:
+            output.append(line)
+            continue
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+        has_chip = "〔证据E" in line or "〔图表F" in line or "〔引文定位" in line
+        already = _UNVERIFIED_MARKER in line
+        # 枚举体例覆盖：bullet（- ）/ 标题（### …）/ 有序列表（1. 2.）/ 裸段落。
+        # 真实回答里模型会用任意一种承载「逐图说明」，只覆盖 bullet 等于治理失效
+        # （2026-09-26 Q3 实测：模型改用 ### 标题 + 段落 → unverified_items_marked=0）。
+        prefix: str | None = None
+        body = ""
+        is_paragraph = False
+        if stripped.startswith("- "):
+            prefix, body = "- ", stripped[2:]
+        else:
+            heading = re.match(r"^(#{1,6}\s+)(.*)$", stripped)
+            ordered = re.match(r"^(\d{1,2}[.)]\s+)(.*)$", stripped)
+            if heading:
+                prefix, body = heading.group(1), heading.group(2)
+            elif ordered:
+                prefix, body = ordered.group(1), ordered.group(2)
+            elif stripped and not stripped.startswith(("【", ">", "#")):
+                # 裸段落：仅当其提及的图号全文均无芯片绑定时，按段首整体标记
+                prefix, body = "", stripped
+                is_paragraph = True
+        if prefix is not None and not already and not has_chip and _FIGURE_LABEL_CLAIM_PATTERN.search(body):
+            # 所有展示体例共用全文绑定安全阀。标题、列表与正文只是 Markdown
+            # 形态差异，不能让同一已签 Figure 在标题中被误标为“未核验”。
+            # 行内部分已绑定时沿用保守策略：整行视为有据，避免对混合标题做破坏性改写。
+            keys = [canonical_figure_label(m.group(0)) for m in _FIGURE_LABEL_CLAIM_PATTERN.finditer(body)]
+            if any(k and k in resolved for k in keys):
+                output.append(line)
+                continue
+            if is_paragraph:
+                # 模型已自述不确定性（限制说明段）→ 不叠加标记
+                if _HEDGE_DISCLOSURE_PATTERN.search(body):
+                    output.append(line)
+                    continue
+            output.append(f"{indent}{prefix}{_UNVERIFIED_MARKER}{body}")
+            marked += 1
+            continue
+        output.append(line)
+    return "\n".join(output), marked
+
+
+def _check_figure_label_consistency(text: str, citations: list[dict[str, Any]]) -> tuple[str, int]:
+    """G3（2026-09-26）：已签〔图表F#〕芯片的标签与 citation 题注的确定性类型词比对。
+
+    场景（Q3 实测）：模型说"Fig. S10 是 KEGG 富集散点图"但该图题注入库为
+    "RNA-sequencing transcriptomic analysis"——芯片已签发（标签可跳原文核对）
+    但正文描述与题注的核心类型词完全不同。本函数检测"标签含某类型词而对应
+    citation 题注不含（或反之）"的不一致，在该芯片后追加固定不一致标记。
+
+    确定性规则：标签提取的类型词集合与题注 quote_head 提取的集合做交集——
+    若标签有 ≥1 个类型词且交集为空 → 不一致（标签写了"Venn"但题注零命中）。
+    零类型词的标签不比对（如"Figure 2"无类型词 → 不判）。幂等：标记已存在
+    则跳过。不删除、不改写模型文本——只追加「（与原文题注不一致，请以下方
+    原文题注为准）」固定标记。
+    """
+    if not citations:
+        return str(text or ""), 0
+    # 构造 caption quote_head 查找表：E# ref → quote_head
+    quote_by_ref = {}
+    for citation in citations:
+        ref = str(citation.get("ref") or "")
+        head = str(citation.get("quote_head") or citation.get("_quote") or "")
+        if ref and head:
+            quote_by_ref[ref] = head
+    if not quote_by_ref:
+        return str(text or ""), 0
+
+    chip_pattern = re.compile(r"〔图表F\d{1,3}｜([^〕]+)〕")
+    mismatches = 0
+    result = str(text or "")
+
+    def _extract_terms(source: str) -> set[str]:
+        return {term for term in _FIGURE_TYPE_TERMS if term in source}
+
+    def _check_and_mark(match: re.Match) -> str:
+        nonlocal mismatches
+        chip = match.group(0)
+        label = match.group(1)
+        if "（与原文题注不一致" in result[max(0, match.end()) : match.end() + 30]:
+            return chip  # 已有标记
+        label_terms = _extract_terms(label)
+        if not label_terms:
+            return chip  # 无类型词 → 不比对
+        # 从上下文找最近的 E# citation（芯片旁通常有 E# 芯片或该段引用的 E#）
+        context = result[max(0, match.start() - 200) : match.end() + 200]
+        nearby_refs = re.findall(r"证据E(\d{1,3})", context)
+        caption_heads = []
+        if nearby_refs:
+            for ref_num in nearby_refs[:2]:
+                head = quote_by_ref.get(f"E{ref_num}")
+                if head:
+                    caption_heads.append(head)
+        # 若找不到附近 E#，退化为查全部 caption 是否有任何题注含标签的类型词
+        if caption_heads:
+            caption_text = " ".join(caption_heads)
+        else:
+            caption_text = " ".join(quote_by_ref.values())
+        caption_terms = _extract_terms(caption_text)
+        if label_terms and not (label_terms & caption_terms):
+            mismatches += 1
+            return chip + "（与原文题注不一致，请以原文题注为准）"
+        return chip
+
+    result = chip_pattern.sub(_check_and_mark, result)
+    return result, mismatches
 
 
 def _quote_fingerprint(quote: Any) -> str:
@@ -1105,7 +2022,16 @@ def build_citation_rows(
     citations: list[dict[str, Any]] = []
     fingerprints: dict[str, str] = {}
     seen_anchor_keys: set[tuple[str, str]] = set()
-    for row in evidence_rows or []:
+    # G2（2026-09-26）：caption 行优先入池——题注证据是图表锚定的唯一血统
+    # 来源，排在前面可确保其在 MAX_CITATIONS 截断前进入引用池（Q3 实测
+    # no_registry_match=31 的根因是 caption citation 被 12 条上限挤出）。
+    ordered_rows = sorted(
+        (evidence_rows or []),
+        key=lambda row: (
+            0 if str(row.get("evidence_type") or row.get("span_evidence_type") or "").casefold() == "caption" else 1
+        ),
+    )
+    for row in ordered_rows:
         if len(citations) >= MAX_CITATIONS:
             break
         anchor_ids: list[str] = []

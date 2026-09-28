@@ -27,7 +27,13 @@ from fastapi import HTTPException
 # 1.6：轨迹阶段条事件（run.plan.resolved / run.artifact.materialized）与
 #      summary.attributes facets（plan/knowledge/guard/artifacts），trace
 #      schema 纳入 additive-only 纪律并新增 trace_stage_facets 能力位。
-AGENT_RUN_PROTOCOL_VERSION = "1.6"
+# 1.7：citation_ready v3 加法——figure_refs 图表锚点绑定（ADR-0008：正文
+#      〔图表F#〕芯片 ↔ 消息级图卡桥接；发射解耦后 citation 键可缺席 ⟺ 本
+#      run 无已验证定位）；压缩白名单新增 figure_refs（minor 变更纪律）。
+# 1.8：citation_ready v4 加法——tables[] 表格卡片投影（ADR-0008 P2：chunk
+#      表块受控解析为行列 JSON，table_index 独立下标域）；压缩白名单新增
+#      tables；能力位 table_cards。
+AGENT_RUN_PROTOCOL_VERSION = "1.8"
 # 服务端仍兼容的最低协议版本（桌面端 run_context 校验下限同源）。
 AGENT_RUN_MIN_SUPPORTED_PROTOCOL_VERSION = "1.2"
 
@@ -42,6 +48,12 @@ AGENT_RUN_CAPABILITIES: tuple[str, ...] = (
     "citation_v2",
     # citation_ready.figures 图卡投影（字段缺席即本 run 未发布图卡）。
     "figures_card",
+    # citation_ready.figure_refs 图表锚点绑定（ADR-0008：正文〔图表F#〕芯片 ↔
+    # 卡片桥接；字段缺席即本 run 未签发锚点）。
+    "figure_refs",
+    # citation_ready.tables 表格卡片投影（ADR-0008 P2：受控解析的行列 JSON，
+    # 永不携带原始 HTML；字段缺席即本 run 未发布表格卡片）。
+    "table_cards",
     # graph_snapshot_ready 确定性规范关系子图（消息级附件）。
     "graph_snapshot_card",
     # 跨文献歧义时候选清单（locator_candidates）。

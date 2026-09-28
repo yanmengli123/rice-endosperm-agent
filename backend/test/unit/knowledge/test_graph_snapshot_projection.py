@@ -121,24 +121,49 @@ async def test_projection_reports_pending_review_when_only_candidates_exist(db):
     db.add_all(
         [
             m.KnowledgeGraphEntity(
-                entity_id="e1", kb_id="kb", canonical_identity="gene:x", normalized_name="x",
-                label="Gene", name="X", review_status="CANDIDATE",
+                entity_id="e1",
+                kb_id="kb",
+                canonical_identity="gene:x",
+                normalized_name="x",
+                label="Gene",
+                name="X",
+                review_status="CANDIDATE",
             ),
             m.KnowledgeGraphEntity(
-                entity_id="e2", kb_id="kb", canonical_identity="trait:y", normalized_name="y",
-                label="Trait", name="Y", review_status="CANDIDATE",
+                entity_id="e2",
+                kb_id="kb",
+                canonical_identity="trait:y",
+                normalized_name="y",
+                label="Trait",
+                name="Y",
+                review_status="CANDIDATE",
             ),
             m.KnowledgeGraphTriple(
-                triple_id="t-c1", kb_id="kb", source_entity_id="e1", target_entity_id="e2",
-                relation_type="affects", content="c1", review_status="CANDIDATE",
+                triple_id="t-c1",
+                kb_id="kb",
+                source_entity_id="e1",
+                target_entity_id="e2",
+                relation_type="affects",
+                content="c1",
+                review_status="CANDIDATE",
             ),
             m.KnowledgeGraphTriple(
-                triple_id="t-c2", kb_id="kb", source_entity_id="e1", target_entity_id="e2",
-                relation_type="affects", content="c2", review_status="CANDIDATE",
+                triple_id="t-c2",
+                kb_id="kb",
+                source_entity_id="e1",
+                target_entity_id="e2",
+                relation_type="affects",
+                content="c2",
+                review_status="CANDIDATE",
             ),
             m.KnowledgeGraphTriple(
-                triple_id="t-r1", kb_id="kb", source_entity_id="e1", target_entity_id="e2",
-                relation_type="affects", content="r1", review_status="REJECTED",
+                triple_id="t-r1",
+                kb_id="kb",
+                source_entity_id="e1",
+                target_entity_id="e2",
+                relation_type="affects",
+                content="r1",
+                review_status="REJECTED",
             ),
         ]
     )
@@ -173,9 +198,7 @@ async def test_projection_is_scope_restricted_and_reports_miss(db):
     assert empty["nodes"] == []
     assert empty["edges"] == []
 
-    foreign = await project_graph_snapshot(
-        db, _contract(), members=[{"kb_id": "kb-other", "structured_enabled": True}]
-    )
+    foreign = await project_graph_snapshot(db, _contract(), members=[{"kb_id": "kb-other", "structured_enabled": True}])
     assert foreign["outcome"] == "MISS"
     assert foreign["edges"] == []
 
@@ -195,34 +218,67 @@ def test_graph_snapshot_is_hash_covered():
     changed = {**base, "graph_snapshot": {"schema": "graph_snapshot_v1", "edges": [{"triple_id": "t-2"}]}}
     assert _hash_contract(base) != _hash_contract(changed)
 
+
 async def test_projection_aggregates_parallel_bilingual_edges(db):
     """双语平行断言（调控/regulates → 同一 normalized 目标）聚合为一组展示边。"""
     db.add(m.KnowledgeBase(kb_id="kb", tenant_id=7, name="KB", kb_type="milvus", share_config={}))
     db.add_all(
         [
             m.KnowledgeGraphEntity(
-                entity_id="s1", kb_id="kb", canonical_identity="gene:x", normalized_name="x",
-                label="Gene", name="X", review_status="CANDIDATE",
+                entity_id="s1",
+                kb_id="kb",
+                canonical_identity="gene:x",
+                normalized_name="x",
+                label="Gene",
+                name="X",
+                review_status="CANDIDATE",
             ),
             m.KnowledgeGraphEntity(
-                entity_id="t1", kb_id="kb", canonical_identity="trait:chalky", normalized_name="chalkiness",
-                label="Trait", name="chalkiness", review_status="CANDIDATE",
+                entity_id="t1",
+                kb_id="kb",
+                canonical_identity="trait:chalky",
+                normalized_name="chalkiness",
+                label="Trait",
+                name="chalkiness",
+                review_status="CANDIDATE",
             ),
             m.KnowledgeGraphEntity(
-                entity_id="t2", kb_id="kb", canonical_identity="trait:chalky-alt", normalized_name="chalkiness",
-                label="Trait", name="chalkiness ", review_status="CANDIDATE",
+                entity_id="t2",
+                kb_id="kb",
+                canonical_identity="trait:chalky-alt",
+                normalized_name="chalkiness",
+                label="Trait",
+                name="chalkiness ",
+                review_status="CANDIDATE",
             ),
             m.KnowledgeGraphTriple(
-                triple_id="p-zh", kb_id="kb", source_entity_id="s1", target_entity_id="t1",
-                relation_type="调控", content="zh", review_status="CANDIDATE", support_count=5,
+                triple_id="p-zh",
+                kb_id="kb",
+                source_entity_id="s1",
+                target_entity_id="t1",
+                relation_type="调控",
+                content="zh",
+                review_status="CANDIDATE",
+                support_count=5,
             ),
             m.KnowledgeGraphTriple(
-                triple_id="p-en", kb_id="kb", source_entity_id="s1", target_entity_id="t2",
-                relation_type="regulates", content="en", review_status="CANDIDATE", support_count=2,
+                triple_id="p-en",
+                kb_id="kb",
+                source_entity_id="s1",
+                target_entity_id="t2",
+                relation_type="regulates",
+                content="en",
+                review_status="CANDIDATE",
+                support_count=2,
             ),
             m.KnowledgeGraphTriple(
-                triple_id="p-seed-loop", kb_id="kb", source_entity_id="s1", target_entity_id="s1",
-                relation_type="regulates", content="loop", review_status="CANDIDATE",
+                triple_id="p-seed-loop",
+                kb_id="kb",
+                source_entity_id="s1",
+                target_entity_id="s1",
+                relation_type="regulates",
+                content="loop",
+                review_status="CANDIDATE",
             ),
         ]
     )
@@ -252,3 +308,157 @@ async def test_projection_aggregates_parallel_bilingual_edges(db):
     assert snapshot["aggregation"]["group_count"] == 1
     assert snapshot["seed_variant_count"] == 1
 
+
+async def test_projection_mixed_review_group_keeps_reviewed_representative(db):
+    """候选支持度更高也不能把含已审核事实的聚合组整体降级。"""
+    db.add(m.KnowledgeBase(kb_id="kb", tenant_id=7, name="KB", kb_type="milvus", share_config={}))
+    db.add_all(
+        [
+            m.KnowledgeGraphEntity(
+                entity_id="s1",
+                kb_id="kb",
+                canonical_identity="gene:x",
+                normalized_name="x",
+                label="Gene",
+                name="X",
+                review_status="APPROVED",
+            ),
+            m.KnowledgeGraphEntity(
+                entity_id="t1",
+                kb_id="kb",
+                canonical_identity="trait:y",
+                normalized_name="y",
+                label="Trait",
+                name="Y",
+                review_status="APPROVED",
+            ),
+            m.KnowledgeGraphTriple(
+                triple_id="reviewed",
+                kb_id="kb",
+                source_entity_id="s1",
+                target_entity_id="t1",
+                relation_type="regulates",
+                content="reviewed",
+                review_status="APPROVED",
+                support_count=1,
+            ),
+            m.KnowledgeGraphTriple(
+                triple_id="candidate",
+                kb_id="kb",
+                source_entity_id="s1",
+                target_entity_id="t1",
+                relation_type="调控",
+                content="candidate",
+                review_status="CANDIDATE",
+                support_count=99,
+            ),
+        ]
+    )
+    await db.flush()
+
+    snapshot = await project_graph_snapshot(
+        db,
+        {
+            "retrieval_id": "kr-mixed",
+            "status": "COMPLETED",
+            "retrieval_plan": {"intent": "RELATION_LOOKUP", "target_mention": "X"},
+            "resolved_entities": [{"entity_id": "s1", "name": "X"}],
+            "claims": [],
+        },
+        members=_CANDIDATE_MEMBERS,
+    )
+
+    edge = snapshot["edges"][0]
+    assert edge["triple_id"] == "reviewed"
+    assert edge["review_status"] == "APPROVED"
+    assert edge["triple_ids"] == ["candidate", "reviewed"]
+    assert edge["reviewed_triple_ids"] == ["reviewed"]
+    assert edge["candidate_triple_ids"] == ["candidate"]
+    assert edge["reviewed_parallel_count"] == 1
+    assert edge["candidate_parallel_count"] == 1
+
+
+async def test_projection_never_aggregates_parallel_edges_across_knowledge_bases(db):
+    """同名实体和同类谓词也必须保留知识库来源边界。"""
+    db.add_all(
+        [
+            m.KnowledgeBase(kb_id="kb-a", tenant_id=7, name="A", kb_type="milvus", share_config={}),
+            m.KnowledgeBase(kb_id="kb-b", tenant_id=7, name="B", kb_type="milvus", share_config={}),
+            m.KnowledgeGraphEntity(
+                entity_id="seed-a",
+                kb_id="kb-a",
+                canonical_identity="gene:x:a",
+                normalized_name="x",
+                label="Gene",
+                name="X",
+                review_status="APPROVED",
+            ),
+            m.KnowledgeGraphEntity(
+                entity_id="seed-b",
+                kb_id="kb-b",
+                canonical_identity="gene:x:b",
+                normalized_name="x",
+                label="Gene",
+                name="X",
+                review_status="APPROVED",
+            ),
+            m.KnowledgeGraphEntity(
+                entity_id="target-a",
+                kb_id="kb-a",
+                canonical_identity="trait:y:a",
+                normalized_name="y",
+                label="Trait",
+                name="Y",
+                review_status="APPROVED",
+            ),
+            m.KnowledgeGraphEntity(
+                entity_id="target-b",
+                kb_id="kb-b",
+                canonical_identity="trait:y:b",
+                normalized_name="y",
+                label="Trait",
+                name="Y",
+                review_status="APPROVED",
+            ),
+            m.KnowledgeGraphTriple(
+                triple_id="edge-a",
+                kb_id="kb-a",
+                source_entity_id="seed-a",
+                target_entity_id="target-a",
+                relation_type="regulates",
+                content="a",
+                review_status="APPROVED",
+            ),
+            m.KnowledgeGraphTriple(
+                triple_id="edge-b",
+                kb_id="kb-b",
+                source_entity_id="seed-b",
+                target_entity_id="target-b",
+                relation_type="regulates",
+                content="b",
+                review_status="APPROVED",
+            ),
+        ]
+    )
+    await db.flush()
+
+    snapshot = await project_graph_snapshot(
+        db,
+        {
+            "retrieval_id": "kr-cross-kb",
+            "status": "COMPLETED",
+            "retrieval_plan": {"intent": "RELATION_LOOKUP", "target_mention": "X"},
+            "resolved_entities": [
+                {"entity_id": "seed-a", "name": "X"},
+                {"entity_id": "seed-b", "name": "X"},
+            ],
+            "claims": [],
+        },
+        members=[{"kb_id": "kb-a"}, {"kb_id": "kb-b"}],
+    )
+
+    assert snapshot["aggregation"]["strategy"].startswith("kb_id+")
+    assert snapshot["aggregation"]["group_count"] == 2
+    assert {edge["kb_id"] for edge in snapshot["edges"]} == {"kb-a", "kb-b"}
+    assert {edge["triple_id"] for edge in snapshot["edges"]} == {"edge-a", "edge-b"}
+    assert {node["entity_id"] for node in snapshot["nodes"]} == {"seed-a", "target-a", "target-b"}
