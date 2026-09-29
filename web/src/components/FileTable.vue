@@ -136,6 +136,23 @@
       />
     </a-modal>
 
+    <a-modal
+      v-model:open="moveModalVisible"
+      title="移动到文件夹"
+      :confirm-loading="moveLoading"
+      @ok="handleMoveConfirm"
+    >
+      <a-tree-select
+        v-model:value="moveTargetId"
+        :tree-data="moveTreeData"
+        :dropdown-style="{ maxHeight: '420px', overflow: 'auto' }"
+        placeholder="根目录"
+        allow-clear
+        tree-default-expand-all
+      />
+      <p class="move-folder-hint">不选择目标文件夹时将移动到知识库根目录。</p>
+    </a-modal>
+
     <FileBrowserTable
       class="knowledge-file-browser"
       :rows="files"
@@ -276,6 +293,14 @@
             </a-button>
             <a-button
               type="link"
+              @click="showMoveModal(selectedRowsForAction)"
+              :disabled="!canBatchMove"
+              :icon="h(FolderInput, { size: 16 })"
+            >
+              批量移动
+            </a-button>
+            <a-button
+              type="link"
               danger
               @click="handleBatchDelete"
               :loading="batchDeleting"
@@ -373,12 +398,20 @@
                     <template #icon><component :is="h(FolderPlus)" size="14" /></template>
                     新建子文件夹
                   </a-button>
+                  <a-button type="text" block @click="showMoveModal([row])">
+                    <template #icon><component :is="h(FolderInput)" size="14" /></template>
+                    移动到
+                  </a-button>
                   <a-button type="text" block danger @click="handleDeleteFolder(row)">
                     <template #icon><component :is="h(Trash2)" size="14" /></template>
                     删除文件夹
                   </a-button>
                 </template>
                 <template v-else>
+                  <a-button type="text" block @click="showMoveModal([row])">
+                    <template #icon><component :is="h(FolderInput)" size="14" /></template>
+                    移动到
+                  </a-button>
                   <a-button
                     type="text"
                     block
@@ -508,7 +541,8 @@ import {
   Database,
   ShieldCheck,
   Filter,
-  MoreHorizontal
+  MoreHorizontal,
+  FolderInput
 } from '@lucide/vue'
 
 const store = useDatabaseStore()
@@ -722,9 +756,10 @@ const currentStatusLabel = computed(() => {
   return opt ? opt.label : ''
 })
 
-const allSelectableFiles = computed(() =>
-  files.value.filter((file) => canSelectFile(file, lock.value))
-)
+const canSelectRow = (file) =>
+  !lock.value && !file?.is_virtual_folder && (file?.is_folder || canSelectFile(file, lock.value))
+
+const allSelectableFiles = computed(() => files.value.filter(canSelectRow))
 
 const isAllSelected = computed(() => {
   const selectableIds = allSelectableFiles.value.map((f) => f.file_id)
@@ -812,6 +847,68 @@ const handleCreateFolder = async () => {
     message.error('创建失败: ' + (error.message || '未知错误'))
   } finally {
     createFolderLoading.value = false
+  }
+}
+
+const moveModalVisible = ref(false)
+const moveLoading = ref(false)
+const moveTargetId = ref(undefined)
+const moveFolders = ref([])
+const moveRecords = ref([])
+
+const moveTreeData = computed(() => {
+  const selectedIds = new Set(moveRecords.value.map((record) => record.file_id))
+  const transform = (nodes, ancestorBlocked = false) =>
+    (nodes || []).map((node) => {
+      const blocked = ancestorBlocked || selectedIds.has(node.file_id)
+      return {
+        title: node.filename,
+        value: node.file_id,
+        key: node.file_id,
+        disabled: blocked,
+        children: transform(node.children, blocked)
+      }
+    })
+  return transform(moveFolders.value)
+})
+
+const selectedRowsForAction = computed(() =>
+  selectedRowKeys.value.map((key) => files.value.find((file) => file.file_id === key)).filter(Boolean)
+)
+const canBatchMove = computed(() => selectedRowsForAction.value.length > 0 && !lock.value)
+
+const showMoveModal = async (records) => {
+  moveRecords.value = (records || []).filter((record) => record && !record.is_virtual_folder)
+  if (!moveRecords.value.length) return
+  for (const record of moveRecords.value) closePopover(record.file_id)
+  moveTargetId.value = undefined
+  try {
+    const response = await documentApi.getFolderTree(store.kbId)
+    moveFolders.value = response?.items || []
+    moveModalVisible.value = true
+  } catch (error) {
+    message.error(`加载文件夹树失败: ${error.message || '未知错误'}`)
+  }
+}
+
+const handleMoveConfirm = async () => {
+  moveLoading.value = true
+  try {
+    const response = await documentApi.moveDocuments(
+      store.kbId,
+      moveRecords.value.map((record) => record.file_id),
+      moveTargetId.value || null
+    )
+    const failedCount = response?.failed?.length || 0
+    if (failedCount) message.warning(`已移动 ${response?.moved?.length || 0} 项，${failedCount} 项失败`)
+    else message.success('移动成功')
+    moveModalVisible.value = false
+    selectedRowKeys.value = []
+    handleRefresh()
+  } catch (error) {
+    message.error(`移动失败: ${error.message || '未知错误'}`)
+  } finally {
+    moveLoading.value = false
   }
 }
 
@@ -909,7 +1006,7 @@ const emptyText = computed(() => {
 const canBatchDelete = computed(() => {
   return selectedRowKeys.value.some((key) => {
     const file = files.value.find((f) => f.file_id === key)
-    return canSelectFile(file, lock.value)
+    return canSelectRow(file)
   })
 })
 
@@ -952,14 +1049,11 @@ const handleOpenRow = (record) => {
 }
 
 const onSelectChange = (keys, selectedRows) => {
-  // 只保留非文件夹的文件ID
-  const fileKeys = selectedRows.filter((row) => !row.is_folder).map((row) => row.file_id)
-
-  selectedRowKeys.value = fileKeys
+  selectedRowKeys.value = selectedRows.filter(canSelectRow).map((row) => row.file_id)
 }
 
 const getCheckboxProps = (record) => ({
-  disabled: !canSelectFile(record, lock.value)
+  disabled: !canSelectRow(record)
 })
 
 const tableSelection = computed(() => {

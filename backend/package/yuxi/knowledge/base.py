@@ -297,10 +297,20 @@ class KnowledgeBase(ABC):
         Returns:
             File metadata record
         """
-        from yuxi.knowledge.utils.kb_utils import prepare_item_metadata
+        from yuxi.knowledge.utils.kb_utils import normalize_source_path, prepare_item_metadata
 
         params = params or {}
         content_type = params.get("content_type", "file")
+
+        source_path = normalize_source_path(params.get("source_path"))
+        if source_path and "/" in source_path:
+            parent_id = await self.ensure_folder_path(
+                kb_id,
+                source_path.split("/")[:-1],
+                parent_id=params.get("parent_id"),
+                operator_id=operator_id,
+            )
+            params = {**params, "parent_id": parent_id, "source_path": source_path}
 
         # Prepare metadata
         metadata = await prepare_item_metadata(item, content_type, kb_id, params=params)
@@ -1053,9 +1063,52 @@ class KnowledgeBase(ABC):
 
         return {"message": "删除成功"}
 
-    async def create_folder(self, kb_id: str, folder_name: str, parent_id: str | None = None) -> dict:
+    @staticmethod
+    def _normalize_folder_name(folder_name: str) -> str:
+        normalized = str(folder_name or "").strip()
+        if not normalized:
+            raise ValueError("Folder name must not be empty")
+        if normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
+            raise ValueError("Folder name must be a single path segment")
+        if len(normalized) > 255:
+            raise ValueError("Folder name must not exceed 255 characters")
+        return normalized
+
+    async def ensure_folder_path(
+        self,
+        kb_id: str,
+        segments: list[str],
+        *,
+        parent_id: str | None = None,
+        operator_id: str | None = None,
+    ) -> str | None:
+        current_parent = parent_id
+        for segment in segments:
+            folder = await self.create_folder(
+                kb_id,
+                segment,
+                current_parent,
+                operator_id=operator_id,
+                allow_existing=True,
+            )
+            current_parent = folder["file_id"]
+        return current_parent
+
+    async def create_folder(
+        self,
+        kb_id: str,
+        folder_name: str,
+        parent_id: str | None = None,
+        *,
+        operator_id: str | None = None,
+        allow_existing: bool = False,
+    ) -> dict:
         """Create a folder in the database."""
         import uuid
+
+        from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
+        folder_name = self._normalize_folder_name(folder_name)
 
         if parent_id:
             parent_meta = await self._load_file_meta(kb_id, parent_id)
@@ -1063,20 +1116,23 @@ class KnowledgeBase(ABC):
                 raise ValueError("Parent is not a folder")
 
         folder_id = f"folder-{uuid.uuid4()}"
-
-        folder_meta = {
-            "file_id": folder_id,
-            "filename": folder_name,
-            "is_folder": True,
-            "parent_id": parent_id,
-            "kb_id": kb_id,
-            "created_at": utc_isoformat(),
-            "status": "done",
-            "path": folder_name,
-            "file_type": "folder",
-        }
-        await self._persist_file_meta(folder_id, folder_meta)
-        return folder_meta
+        repository = KnowledgeFileRepository()
+        record, created = await repository.create_folder(
+            kb_id=kb_id,
+            file_id=folder_id,
+            folder_name=folder_name,
+            parent_id=parent_id,
+            created_by=operator_id,
+        )
+        if not created and not allow_existing:
+            raise ValueError(f'Folder "{folder_name}" already exists in this directory')
+        await repository.adopt_virtual_children(
+            kb_id=kb_id,
+            folder_id=record.file_id,
+            folder_name=folder_name,
+            previous_parent_id=parent_id,
+        )
+        return self._file_record_to_meta(record)
 
     @abstractmethod
     async def update_content(self, kb_id: str, file_ids: list[str], params: dict | None = None) -> list[dict]:
@@ -1389,6 +1445,9 @@ class KnowledgeBase(ABC):
         """
         meta = await self._load_file_meta(kb_id, file_id)
 
+        if meta.get("parent_id") == new_parent_id:
+            return meta
+
         # Basic cycle detection for folders
         if meta.get("is_folder") and new_parent_id:
             # Check if new_parent_id is a child of file_id (or is file_id itself)
@@ -1408,6 +1467,22 @@ class KnowledgeBase(ABC):
             parent_meta = await self._load_file_meta(kb_id, new_parent_id)
             if not parent_meta.get("is_folder"):
                 raise ValueError("Parent is not a folder")
+
+        from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
+        target_children = await KnowledgeFileRepository().list_children(kb_id=kb_id, parent_id=new_parent_id)
+        filename = str(meta.get("filename") or "")
+        if not meta.get("is_folder") and "/" in filename:
+            processing_params = dict(meta.get("processing_params") or {})
+            processing_params.setdefault("source_path", filename)
+            meta["processing_params"] = processing_params
+            filename = filename.rsplit("/", 1)[-1]
+            meta["filename"] = filename
+        if any(
+            child.file_id != file_id and str(child.filename or "").lower() == filename.lower()
+            for child in target_children
+        ):
+            raise ValueError(f'An item named "{filename}" already exists in the target folder')
 
         meta["parent_id"] = new_parent_id
         await self._persist_file_meta(file_id, meta)

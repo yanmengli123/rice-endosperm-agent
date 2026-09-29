@@ -149,6 +149,11 @@ class AddUploadedDocumentsRequest(BaseModel):
     params: dict | None = None
 
 
+class MoveDocumentsRequest(BaseModel):
+    file_ids: list[str] = Field(..., min_length=1, max_length=1000)
+    new_parent_id: str | None = None
+
+
 class PendingIndexDocumentsRequest(BaseModel):
     params: dict | None = None
 
@@ -208,6 +213,24 @@ async def _delete_document_storage_objects(kb_id: str, doc_id: str, file_path: s
         await minio_client.adelete_file(minio_client.KB_BUCKETS["parsed"], f"{kb_id}/preview/{doc_id}.pdf")
     except Exception as minio_error:
         logger.warning(f"从MinIO删除预览 PDF 失败: {minio_error}")
+
+
+async def _cleanup_folder_storage_objects(kb_id: str, folder_id: str) -> list[tuple[str, str]]:
+    """Clean every file artifact before recursive metadata/vector deletion."""
+    from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
+    repository = KnowledgeFileRepository()
+    pending = [folder_id]
+    removed_files: list[tuple[str, str]] = []
+    while pending:
+        parent_id = pending.pop()
+        for child in await repository.list_children(kb_id=kb_id, parent_id=parent_id):
+            if child.is_folder:
+                pending.append(child.file_id)
+                continue
+            await _delete_document_storage_objects(kb_id, child.file_id, child.path or "")
+            removed_files.append((child.file_id, child.filename or ""))
+    return removed_files
 
 
 async def _ensure_database_supports_documents(kb_id: str, operation: str, command: str | None = None):
@@ -377,6 +400,15 @@ def _params_for_uploaded_document_item(item: str, params: dict) -> dict:
     item_params.pop("source_paths", None)
     if isinstance(source_paths, dict) and source_paths.get(item):
         item_params["source_path"] = source_paths[item]
+    candidate_name = str(item_params.get("source_path") or item).split("?", 1)[0]
+    if candidate_name.lower().endswith(".csv") and not item_params.get("chunk_preset_id"):
+        item_params["chunk_preset_id"] = "separator"
+        item_params["chunk_parser_config"] = {
+            **dict(item_params.get("chunk_parser_config") or {}),
+            "delimiter": "\\n\\n",
+            "chunk_token_num": 512,
+            "overlapped_percent": 0,
+        }
     return item_params
 
 
@@ -1925,7 +1957,7 @@ async def add_uploaded_documents(
 ):
     """将已上传的 MinIO 文件同步添加为知识库文档记录，不解析、不入库。"""
     logger.debug(f"Add uploaded documents for kb_id {kb_id}: {payload.items} params={payload.params}")
-    await _ensure_database_supports_documents(kb_id, "文档添加", COMMAND_DOCUMENT_ADD)
+    contract_spec = await _ensure_database_supports_documents(kb_id, "文档添加", COMMAND_DOCUMENT_ADD)
 
     params = _ensure_document_params(payload.params)
     content_type = params.get("content_type", "file")
@@ -1934,7 +1966,7 @@ async def add_uploaded_documents(
     if content_type != "file":
         raise HTTPException(status_code=400, detail=f"Unsupported content_type: {content_type}")
 
-    _validate_uploaded_document_items(payload.items, params)
+    _validate_uploaded_document_items(payload.items, params, contract_spec=contract_spec)
 
     added_items: list[dict] = []
     failed_items: list[dict] = []
@@ -2504,6 +2536,7 @@ async def batch_delete_documents(
             # Check if it is a folder
             is_folder = file_meta_info.get("meta", {}).get("is_folder", False)
             if is_folder:
+                mindmap_removals.extend(await _cleanup_folder_storage_objects(kb_id, doc_id))
                 await knowledge_base.delete_folder(kb_id, doc_id)
                 deleted_count += 1
                 continue
@@ -2550,7 +2583,9 @@ async def delete_document(kb_id: str, doc_id: str, current_user: User = Depends(
         # Check if it is a folder
         is_folder = file_meta_info.get("meta", {}).get("is_folder", False)
         if is_folder:
+            removed_files = await _cleanup_folder_storage_objects(kb_id, doc_id)
             await knowledge_base.delete_folder(kb_id, doc_id)
+            await batch_remove_files_from_mindmap(kb_id, removed_files)
             return {"message": "文件夹删除成功"}
 
         file_path = file_meta_info.get("meta", {}).get("path", "")
@@ -2873,12 +2908,46 @@ async def create_folder(
     """创建文件夹"""
     try:
         await _ensure_database_supports_documents(kb_id, "文件夹创建", COMMAND_FOLDER_CREATE)
-        return await knowledge_base.create_folder(kb_id, folder_name, parent_id)
+        return await knowledge_base.create_folder(
+            kb_id,
+            folder_name,
+            parent_id,
+            operator_id=current_user.uid,
+        )
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"创建文件夹失败 {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@knowledge.get("/databases/{kb_id}/folders/tree")
+async def get_folder_tree(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """获取知识库完整真实文件夹树。"""
+    await _ensure_database_supports_documents(kb_id, "文件夹查看")
+    return {"items": await knowledge_base.get_folder_tree(kb_id)}
+
+
+@knowledge.put("/databases/{kb_id}/documents/move")
+async def move_documents(
+    kb_id: str,
+    payload: MoveDocumentsRequest,
+    current_user: User = Depends(get_admin_user),
+):
+    """批量移动文件或文件夹。"""
+    await _ensure_database_supports_documents(kb_id, "批量文件移动", COMMAND_DOCUMENT_MOVE)
+    moved: list[dict] = []
+    failed: list[dict] = []
+    for file_id in dict.fromkeys(payload.file_ids):
+        try:
+            moved.append(await knowledge_base.move_file(kb_id, file_id, payload.new_parent_id))
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"file_id": file_id, "error": str(exc)})
+    if failed and not moved:
+        raise HTTPException(status_code=400, detail={"message": "移动失败", "failed": failed})
+    return {"moved": moved, "failed": failed}
 
 
 @knowledge.put("/databases/{kb_id}/documents/{doc_id}/move")
@@ -3118,6 +3187,16 @@ async def upload_file(
     same_name_files = await knowledge_base.get_same_name_files(kb_id, filename)
     has_same_name = len(same_name_files) > 0
 
+    ingest_advisory = None
+    if ext == ".csv":
+        approximate_rows = max(file_bytes.count(b"\n") - 1, 0)
+        if approximate_rows >= 1000 or len(file_bytes) >= 5 * 1024 * 1024:
+            ingest_advisory = {
+                "code": "CSV_DATASET_RECOMMENDED",
+                "message": "该 CSV 较大；若需要按字段、业务主键或行级来源准确查询，建议改用 CSV 结构化数据集知识库。",
+                "approximate_rows": approximate_rows,
+            }
+
     return {
         "message": "File successfully uploaded",
         "file_path": minio_url,  # MinIO路径作为主要路径
@@ -3132,6 +3211,7 @@ async def upload_file(
         "bucket_name": bucket_name,  # MinIO存储桶名称
         "same_name_files": same_name_files,  # 同名文件列表
         "has_same_name": has_same_name,  # 是否包含同名文件标志
+        "ingest_advisory": ingest_advisory,
     }
 
 

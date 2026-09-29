@@ -472,7 +472,7 @@
               <a-switch
                 v-model:checked="scopeForm.graph_enabled"
                 size="small"
-                :disabled="isWikiScopeProduct"
+                :disabled="isWikiScopeProduct || hasFolderScope"
               />
             </label>
             <label class="scope-option" :class="{ 'scope-option-locked': isWikiScopeProduct }">
@@ -480,7 +480,7 @@
               <a-switch
                 v-model:checked="scopeForm.structured_enabled"
                 size="small"
-                :disabled="isWikiScopeProduct"
+                :disabled="isWikiScopeProduct || hasFolderScope"
               />
             </label>
             <label class="scope-option" :class="{ 'scope-option-locked': !isWikiScopeProduct }">
@@ -496,6 +496,31 @@
               </a-tooltip>
             </label>
           </div>
+        </div>
+
+        <div v-if="!isWikiScopeProduct" class="scope-section">
+          <div class="scope-section-title">文件夹检索范围</div>
+          <div class="scope-section-hint">
+            留空代表整个知识库；选择后只检索这些文件夹及其子目录中的文档。
+          </div>
+          <a-tree-select
+            v-model:value="scopeForm.folder_ids"
+            class="scope-folder-select"
+            :tree-data="scopeFolderTreeData"
+            :loading="scopeFolderTreeLoading"
+            tree-checkable
+            allow-clear
+            show-search
+            tree-node-filter-prop="title"
+            placeholder="选择一个或多个文件夹（留空为全库）"
+          />
+          <a-alert
+            v-if="hasFolderScope"
+            class="scope-folder-alert"
+            type="warning"
+            show-icon
+            message="文件夹范围已启用：图谱与结构化证据没有文件夹粒度，将自动关闭以防止全库证据越界。"
+          />
         </div>
 
         <div v-if="!isWikiScopeProduct" class="scope-section">
@@ -647,6 +672,7 @@ import {
 import { message, Modal } from 'ant-design-vue'
 import {
   databaseApi,
+  documentApi,
   knowledgeScopeApi,
   sourceContractApi,
   typeApi,
@@ -693,6 +719,7 @@ const scopeState = reactive({ scope: null, members: new Map(), loading: false })
 
 const emptyScopeForm = () => ({
   enabled: false,
+  folder_ids: [],
   document_enabled: true,
   graph_enabled: true,
   structured_enabled: true,
@@ -709,6 +736,29 @@ const emptyScopeForm = () => ({
 const scopeForm = reactive(emptyScopeForm())
 const scopeModal = reactive({ open: false, saving: false, database: null })
 const isWikiScopeProduct = computed(() => scopeModal.database?.kb_type === 'llmwiki')
+const hasFolderScope = computed(() => (scopeForm.folder_ids || []).length > 0)
+const scopeFolderTree = ref([])
+const scopeFolderTreeLoading = ref(false)
+const scopeFolderTreeData = computed(() => {
+  const transform = (nodes) =>
+    (nodes || []).map((node) => ({
+      title: node.filename,
+      value: node.file_id,
+      key: node.file_id,
+      children: transform(node.children)
+    }))
+  return transform(scopeFolderTree.value)
+})
+watch(
+  () => scopeForm.folder_ids,
+  (folderIds) => {
+    if ((folderIds || []).length > 0) {
+      scopeForm.graph_enabled = false
+      scopeForm.structured_enabled = false
+    }
+  },
+  { deep: true }
+)
 const emptyWikiForm = () => ({
   name: '',
   description: '',
@@ -783,7 +833,7 @@ const scopeStateClass = (database) => {
   return 'is-warning'
 }
 
-const openScopeModal = (database) => {
+const openScopeModal = async (database) => {
   const member = scopeState.members.get(database.kb_id) || emptyScopeForm()
   Object.assign(scopeForm, emptyScopeForm(), member)
   if (database.kb_type === 'llmwiki') {
@@ -798,11 +848,24 @@ const openScopeModal = (database) => {
   }
   scopeModal.database = database
   scopeModal.open = true
+  scopeFolderTree.value = []
+  if (database.kb_type !== 'llmwiki') {
+    scopeFolderTreeLoading.value = true
+    try {
+      const data = await documentApi.getFolderTree(database.kb_id)
+      scopeFolderTree.value = data.items || []
+    } catch (error) {
+      message.error(error.message || '文件夹树加载失败')
+    } finally {
+      scopeFolderTreeLoading.value = false
+    }
+  }
 }
 
 const closeScopeModal = () => {
   scopeModal.open = false
   scopeModal.database = null
+  scopeFolderTree.value = []
   Object.assign(scopeForm, emptyScopeForm())
 }
 
@@ -841,9 +904,10 @@ const saveScopeMember = async () => {
     const payload = {
       expected_version: scopeState.scope.version,
       enabled: scopeForm.enabled,
+      folder_ids: scopeForm.folder_ids || [],
       document_enabled: scopeForm.document_enabled,
-      graph_enabled: scopeForm.graph_enabled,
-      structured_enabled: scopeForm.structured_enabled,
+      graph_enabled: hasFolderScope.value ? false : scopeForm.graph_enabled,
+      structured_enabled: hasFolderScope.value ? false : scopeForm.structured_enabled,
       wiki_navigation_enabled: scopeForm.wiki_navigation_enabled,
       evidence_strict: scopeForm.evidence_strict,
       evidence_supporting: scopeForm.evidence_supporting,
@@ -1573,6 +1637,15 @@ defineExpose({
 .scope-option-locked {
   opacity: 0.6;
   background: var(--gray-25);
+}
+
+.scope-folder-select {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.scope-folder-alert {
+  margin-top: 10px;
 }
 
 .derived-product-hint {

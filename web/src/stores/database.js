@@ -229,7 +229,7 @@ export const useDatabaseStore = defineStore('database', () => {
     const files = database.value.files || {}
     const validFileIds = selectedRowKeys.value.filter((fileId) => {
       const file = files[fileId]
-      return canSelectFile(file)
+      return file?.is_folder ? !file?.is_virtual_folder : canSelectFile(file)
     })
 
     if (validFileIds.length === 0) {

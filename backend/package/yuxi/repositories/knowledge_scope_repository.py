@@ -44,6 +44,7 @@ def serialize_member(member: KnowledgeScopeMember) -> dict[str, Any]:
     return {
         "kb_id": member.kb_id,
         "enabled": bool(member.enabled),
+        "folder_ids": [str(value) for value in (member.folder_ids or []) if str(value).strip()],
         "document_enabled": bool(member.document_enabled),
         "graph_enabled": bool(member.graph_enabled),
         "structured_enabled": bool(member.structured_enabled),

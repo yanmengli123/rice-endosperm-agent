@@ -1474,6 +1474,9 @@ const runUploadTask = (task) => {
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const response = JSON.parse(xhr.responseText)
+          if (response?.ingest_advisory?.message) {
+            message.warning(response.ingest_advisory.message, 8)
+          }
           if (fileUid) {
             uploadTaskStatus.value[fileUid] = 'done'
             uploadTaskProgress.value[fileUid] = 100

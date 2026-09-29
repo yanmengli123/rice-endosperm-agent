@@ -291,3 +291,92 @@ async def test_scope_timeout_keeps_successful_graph_evidence(monkeypatch: pytest
 
     assert [item["evidence_id"] for item in result["evidence"]] == ["ev-kb-a"]
     assert any("DOCUMENT_TIMEOUT" in warning for warning in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_folder_scope_filters_documents_and_fails_closed_other_channels(monkeypatch):
+    captured = {}
+
+    async def document_source(member, query_text, *, file_ids=None):
+        del query_text
+        captured["document"] = (member["kb_id"], file_ids)
+        return [], None
+
+    async def forbidden_graph(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("folder scope must not query whole-KB graph channels")
+
+    monkeypatch.setattr(scope_gateway, "_query_document_source", document_source)
+    monkeypatch.setattr(scope_gateway, "_query_managed_graph_source", forbidden_graph)
+
+    result = await query_knowledge_scope_gateway(
+        query_text="OsFIE1",
+        scope_snapshot={
+            "members": [
+                {
+                    "kb_id": "kb-a",
+                    "kb_name": "Folder scoped",
+                    "priority": 100,
+                    "document_enabled": True,
+                    "graph_enabled": False,
+                    "structured_enabled": False,
+                    "folder_scope_restricted": True,
+                    "folder_file_ids": ["file-a", "file-b"],
+                    "evidence_strict": True,
+                    "evidence_supporting": True,
+                    "evidence_candidate": False,
+                    "evidence_rejected": False,
+                }
+            ],
+            "effective_kb_ids": ["kb-a"],
+        },
+        top_k=5,
+    )
+
+    assert captured["document"] == ("kb-a", ["file-a", "file-b"])
+    assert result["knowledge_source_status"][0]["graph_status"] == "DOCUMENT_SCOPE_EXCLUDED"
+    assert result["knowledge_source_status"][0]["structured_status"] == "DOCUMENT_SCOPE_EXCLUDED"
+
+
+@pytest.mark.asyncio
+async def test_folder_scope_with_deleted_folders_excludes_kb_instead_of_widening(monkeypatch):
+    async def forbidden_document(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("empty folder scope must not query the whole KB")
+
+    async def forbidden_graph(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("empty folder scope must not query whole-KB graph channels")
+
+    monkeypatch.setattr(scope_gateway, "_query_document_source", forbidden_document)
+    monkeypatch.setattr(scope_gateway, "_query_managed_graph_source", forbidden_graph)
+
+    result = await query_knowledge_scope_gateway(
+        query_text="OsFIE1",
+        scope_snapshot={
+            "members": [
+                {
+                    "kb_id": "kb-a",
+                    "kb_name": "Folder scoped",
+                    "priority": 100,
+                    "document_enabled": True,
+                    "graph_enabled": False,
+                    "structured_enabled": False,
+                    "folder_scope_restricted": True,
+                    "folder_file_ids": [],
+                    "evidence_strict": True,
+                    "evidence_supporting": True,
+                    "evidence_candidate": False,
+                    "evidence_rejected": False,
+                }
+            ],
+            "effective_kb_ids": ["kb-a"],
+        },
+        top_k=5,
+    )
+
+    assert result["evidence"] == []
+    assert "kb-a" in result["document_scope_excluded_kbs"]
+    status = result["knowledge_source_status"][0]
+    assert status["document_status"] == "NO_MATCHING_DOCUMENT"
+    assert status["graph_status"] == "DOCUMENT_SCOPE_EXCLUDED"

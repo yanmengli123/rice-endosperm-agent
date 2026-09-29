@@ -1,4 +1,32 @@
-from yuxi.services.knowledge_scope_service import compute_effective_scope_ids, replay_scope_member_audits
+from types import SimpleNamespace
+
+import pytest
+
+from yuxi.services.knowledge_scope_service import (
+    _resolve_folder_scope,
+    compute_effective_scope_ids,
+    replay_scope_member_audits,
+)
+
+
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _RowsDb:
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def execute(self, statement):
+        del statement
+        return _RowsResult(self.rows)
 
 
 def test_inherit_global_applies_access_and_session_intersections():
@@ -62,3 +90,29 @@ def test_scope_history_replay_reconstructs_exact_member_policies():
 
     version_four = replay_scope_member_audits(audits, target_version=4)
     assert next(item for item in version_four if item["kb_id"] == "kb-a")["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_folder_scope_freezes_all_descendant_documents_and_deduplicates_roots():
+    rows = [
+        SimpleNamespace(file_id="root", parent_id=None, is_folder=True),
+        SimpleNamespace(file_id="nested", parent_id="root", is_folder=True),
+        SimpleNamespace(file_id="file-a", parent_id="root", is_folder=False),
+        SimpleNamespace(file_id="file-b", parent_id="nested", is_folder=False),
+        SimpleNamespace(file_id="outside", parent_id=None, is_folder=False),
+    ]
+
+    folder_ids, file_ids = await _resolve_folder_scope(
+        _RowsDb(rows), kb_id="kb-a", folder_ids=["root", "nested", "root"]
+    )
+
+    assert folder_ids == ["root", "nested"]
+    assert file_ids == ["file-a", "file-b"]
+
+
+@pytest.mark.asyncio
+async def test_folder_scope_rejects_document_ids_as_roots():
+    rows = [SimpleNamespace(file_id="file-a", parent_id=None, is_folder=False)]
+
+    with pytest.raises(ValueError, match="file-a"):
+        await _resolve_folder_scope(_RowsDb(rows), kb_id="kb-a", folder_ids=["file-a"])

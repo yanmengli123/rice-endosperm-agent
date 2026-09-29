@@ -449,7 +449,7 @@ import DatasetImportPanel from '@/components/DatasetImportPanel.vue'
 import SearchConfigPanel from '@/components/SearchConfigPanel.vue'
 import AiTextarea from '@/components/AiTextarea.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
-import { databaseApi } from '@/apis/knowledge_api'
+import { databaseApi, documentApi } from '@/apis/knowledge_api'
 import { departmentApi } from '@/apis/department_api'
 import { authApi } from '@/apis/auth_api'
 import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
@@ -707,8 +707,22 @@ const isInitialLoad = ref(true)
 const detailLoading = ref(true)
 const fileTableRef = ref(null)
 
-const showAddFilesModal = (options = {}) => {
+const folderTree = ref([])
+
+const loadFolderTree = async () => {
+  if (!kbId.value) return
+  try {
+    const response = await documentApi.getFolderTree(kbId.value)
+    folderTree.value = response?.items || []
+  } catch (error) {
+    console.error('加载文件夹树失败:', error)
+    folderTree.value = []
+  }
+}
+
+const showAddFilesModal = async (options = {}) => {
   const { isFolder = false, mode = 'file' } = options
+  await loadFolderTree()
   isFolderUploadMode.value = isFolder
   addFilesMode.value = mode
   addFilesModalVisible.value = true
@@ -720,26 +734,9 @@ const showCreateFolderModal = () => {
   fileTableRef.value?.showCreateFolderModal()
 }
 
-const folderTree = computed(() => {
-  const roots = []
-  let currentLevel = roots
-  for (const item of (store.folderBreadcrumbs || [])
-    .slice(1)
-    .filter((node) => !node.is_virtual_folder)) {
-    const node = {
-      file_id: item.file_id,
-      filename: item.filename,
-      is_folder: true,
-      children: []
-    }
-    currentLevel.push(node)
-    currentLevel = node.children
-  }
-  return roots
-})
-
 const onFileUploadSuccess = () => {
   taskerStore.loadTasks()
+  loadFolderTree()
 }
 
 const resetFileSelectionState = () => {

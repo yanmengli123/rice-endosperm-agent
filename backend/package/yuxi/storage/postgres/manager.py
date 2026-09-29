@@ -1079,7 +1079,14 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0062_canonical_fold_key", "_migration_0062_canonical_fold_key"),
         ("0063_conversation_graph_snapshot", "_migration_0063_conversation_graph_snapshot"),
         ("0064_mcp_call_diagnostics", "_migration_0064_mcp_call_diagnostics"),
+        ("0065_knowledge_scope_folders", "_migration_0065_knowledge_scope_folders"),
     ]
+
+    async def _migration_0065_knowledge_scope_folders(self, conn) -> None:
+        """Allow a knowledge-scope member to freeze selected real folders."""
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS knowledge_scope_members ADD COLUMN IF NOT EXISTS folder_ids JSONB")
+        )
 
     async def _migration_0064_mcp_call_diagnostics(self, conn) -> None:
         """Persist value-free MCP failure diagnostics and argument shape."""

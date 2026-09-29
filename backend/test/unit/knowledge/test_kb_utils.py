@@ -16,7 +16,7 @@ async def test_prepare_item_metadata_preserves_uploaded_file_size():
     assert "file_sizes" not in (metadata.get("processing_params") or {})
 
 
-async def test_prepare_item_metadata_uses_source_path_as_display_filename():
+async def test_prepare_item_metadata_uses_source_path_leaf_as_display_filename():
     item = "minio://knowledgebases/db/upload/intro_1710000000000.md"
     params = {
         "content_hashes": {item: "hash"},
@@ -25,9 +25,10 @@ async def test_prepare_item_metadata_uses_source_path_as_display_filename():
 
     metadata = await prepare_item_metadata(item, "file", "db", params=params)
 
-    assert metadata["filename"] == "guides/setup/Intro.MD"
+    assert metadata["filename"] == "Intro.MD"
     assert metadata["file_type"] == "md"
     assert metadata["path"] == item
+    assert metadata["processing_params"]["source_path"] == "guides/setup/Intro.MD"
 
 
 async def test_prepare_item_metadata_preserves_preprocessed_file_size():

@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import DateTime, String, case, cast, func, literal, or_, select, union_all, update
 
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_knowledge import KnowledgeFile
+from yuxi.storage.postgres.models_knowledge import KnowledgeBase, KnowledgeFile
 from yuxi.utils.datetime_utils import utc_now_naive
 
 # asyncpg 单条 SQL 参数上限为 32767；按 file_id 批量查询时统一分批，避免
@@ -164,6 +164,91 @@ class KnowledgeFileRepository:
                 select(KnowledgeFile)
                 .where(KnowledgeFile.kb_id == kb_id, self._parent_condition(parent_id))
                 .order_by(KnowledgeFile.is_folder.desc(), func.lower(KnowledgeFile.filename).asc())
+            )
+            return list(result.scalars().all())
+
+    async def create_folder(
+        self,
+        *,
+        kb_id: str,
+        file_id: str,
+        folder_name: str,
+        parent_id: str | None,
+        created_by: str | None = None,
+    ) -> tuple[KnowledgeFile, bool]:
+        """Create one sibling folder atomically for a knowledge base."""
+        async with pg_manager.get_async_session_context() as session:
+            kb_result = await session.execute(
+                select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id).with_for_update()
+            )
+            if kb_result.scalar_one_or_none() is None:
+                raise ValueError(f"Knowledge base not found: {kb_id}")
+
+            parent_condition = self._parent_condition(parent_id)
+            existing_result = await session.execute(
+                select(KnowledgeFile).where(
+                    KnowledgeFile.kb_id == kb_id,
+                    parent_condition,
+                    func.lower(KnowledgeFile.filename) == folder_name.lower(),
+                )
+            )
+            existing_rows = list(existing_result.scalars().all())
+            if existing_rows:
+                if any(not row.is_folder for row in existing_rows):
+                    raise ValueError(f'File "{folder_name}" already exists in this directory')
+                return existing_rows[0], False
+
+            record = KnowledgeFile(
+                file_id=file_id,
+                kb_id=kb_id,
+                parent_id=parent_id,
+                filename=folder_name,
+                original_filename=folder_name,
+                file_type="folder",
+                path=folder_name,
+                status="done",
+                is_folder=True,
+                created_by=created_by,
+                updated_by=created_by,
+            )
+            session.add(record)
+            await session.flush()
+            return record, True
+
+    async def adopt_virtual_children(
+        self,
+        *,
+        kb_id: str,
+        folder_id: str,
+        folder_name: str,
+        previous_parent_id: str | None,
+    ) -> int:
+        """Move legacy ``folder/file`` rows under a newly materialized real folder."""
+        prefix = f"{folder_name}/"
+        escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                update(KnowledgeFile)
+                .where(
+                    KnowledgeFile.kb_id == kb_id,
+                    self._parent_condition(previous_parent_id),
+                    KnowledgeFile.is_folder.is_(False),
+                    func.lower(KnowledgeFile.filename).like(f"{escaped_prefix.lower()}%", escape="\\"),
+                )
+                .values(
+                    parent_id=folder_id,
+                    filename=func.substr(KnowledgeFile.filename, len(prefix) + 1),
+                    updated_at=utc_now_naive(),
+                )
+            )
+            return int(result.rowcount or 0)
+
+    async def list_real_folders(self, *, kb_id: str) -> list[KnowledgeFile]:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(KnowledgeFile)
+                .where(KnowledgeFile.kb_id == kb_id, KnowledgeFile.is_folder.is_(True))
+                .order_by(func.lower(KnowledgeFile.filename).asc(), KnowledgeFile.file_id.asc())
             )
             return list(result.scalars().all())
 

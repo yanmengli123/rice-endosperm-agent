@@ -55,6 +55,7 @@ def _validate_retrieval_policy(policy: dict) -> None:
 class ScopeMemberUpdate(BaseModel):
     expected_version: int = Field(..., ge=1)
     enabled: bool = False
+    folder_ids: list[str] = Field(default_factory=list, max_length=100)
     document_enabled: bool = True
     graph_enabled: bool = True
     structured_enabled: bool = True
@@ -135,6 +136,9 @@ async def put_default_qa_scope_member(
     except LookupError as exc:
         await db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @knowledge_scope.post("/resolve")

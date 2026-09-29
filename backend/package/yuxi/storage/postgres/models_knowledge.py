@@ -107,6 +107,7 @@ class KnowledgeScopeMember(Base):
     )
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
     enabled = Column(Boolean, nullable=False, default=False)
+    folder_ids = Column(JSON_VALUE)
     document_enabled = Column(Boolean, nullable=False, default=True)
     graph_enabled = Column(Boolean, nullable=False, default=True)
     structured_enabled = Column(Boolean, nullable=False, default=True)

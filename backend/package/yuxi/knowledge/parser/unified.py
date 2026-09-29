@@ -300,6 +300,40 @@ async def parse_image_async(file, params=None):
     return await asyncio.to_thread(parse_image, file, params=params)
 
 
+async def _enrich_sparse_image_text(file_path: Path, ocr_text: str, params: dict | None) -> str:
+    """Add a bounded visual observation when OCR alone cannot describe an image."""
+    params = params or {}
+    if params.get("vision_enrichment", True) is False:
+        return ocr_text
+    if len(re.sub(r"\s+", "", str(ocr_text or ""))) >= 80:
+        return ocr_text
+
+    from yuxi.knowledge.vision.provider import get_vision_provider
+
+    provider = get_vision_provider()
+    if not provider.ready:
+        return ocr_text
+    observation = await provider.describe(await asyncio.to_thread(file_path.read_bytes))
+    if observation is None:
+        return ocr_text
+
+    lines = ["## 图片视觉观察"]
+    if observation.figure_label:
+        lines.append(f"- 图表编号：{observation.figure_label}")
+    if observation.panel_labels:
+        lines.append(f"- 分图标签：{', '.join(observation.panel_labels)}")
+    if observation.visible_entities:
+        lines.append(f"- 可见实体：{', '.join(observation.visible_entities)}")
+    if observation.visible_text:
+        lines.append(f"- 可见文字：{'；'.join(observation.visible_text)}")
+    structures = [name.replace("_", " ") for name, enabled in observation.visual_structure.items() if enabled]
+    if structures:
+        lines.append(f"- 视觉结构：{', '.join(structures)}")
+    if len(lines) == 1:
+        return ocr_text
+    return "\n\n".join(part for part in [str(ocr_text or "").strip(), "\n".join(lines)] if part)
+
+
 async def _process_file_to_markdown_core(
     file_path: str, params: dict | None = None
 ) -> tuple[str, str | None, dict[str, Any]]:
@@ -374,7 +408,7 @@ async def _process_file_to_markdown_core(
 
         elif file_ext in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]:
             text = await parse_image_async(str(file_path_obj), params=params)
-            result = f"{text}"
+            result = await _enrich_sparse_image_text(file_path_obj, f"{text}", params)
 
         elif file_ext in [".html", ".htm"]:
             async with aiofiles.open(file_path_obj, encoding="utf-8") as f:

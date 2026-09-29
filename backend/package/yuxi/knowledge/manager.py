@@ -93,6 +93,32 @@ class KnowledgeBaseManager:
         kb_instance = await self._get_kb_for_database(kb_id)
         return await kb_instance.move_file(kb_id, file_id, new_parent_id)
 
+    async def get_folder_tree(self, kb_id: str) -> list[dict]:
+        """Return the complete real-folder tree for one knowledge base."""
+        from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
+        await self._get_kb_for_database(kb_id)
+        records = await KnowledgeFileRepository().list_real_folders(kb_id=kb_id)
+        nodes = {
+            record.file_id: {
+                "file_id": record.file_id,
+                "filename": record.filename,
+                "parent_id": record.parent_id,
+                "is_folder": True,
+                "children": [],
+            }
+            for record in records
+        }
+        roots: list[dict] = []
+        for record in records:
+            node = nodes[record.file_id]
+            parent = nodes.get(record.parent_id)
+            if parent is None:
+                roots.append(node)
+            else:
+                parent["children"].append(node)
+        return roots
+
     async def _get_kb_for_database(self, kb_id: str) -> KnowledgeBase:
         """
         根据数据库ID获取对应的知识库实例
@@ -391,10 +417,17 @@ class KnowledgeBaseManager:
                 return True
         return False
 
-    async def create_folder(self, kb_id: str, folder_name: str, parent_id: str = None) -> dict:
+    async def create_folder(
+        self,
+        kb_id: str,
+        folder_name: str,
+        parent_id: str | None = None,
+        *,
+        operator_id: str | None = None,
+    ) -> dict:
         """Create a folder in the database."""
         kb_instance = await self._get_kb_for_database(kb_id)
-        return await kb_instance.create_folder(kb_id, folder_name, parent_id)
+        return await kb_instance.create_folder(kb_id, folder_name, parent_id, operator_id=operator_id)
 
     async def create_database(
         self,

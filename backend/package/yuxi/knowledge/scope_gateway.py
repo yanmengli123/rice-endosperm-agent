@@ -952,10 +952,31 @@ async def query_knowledge_scope_gateway(
     # 图谱/结构化通道（无文献粒度）直接排除并记录状态，绝不静默忽略过滤条件。
     document_scope_files = [str(value).strip() for value in (file_ids or []) if str(value).strip()]
     files_by_kb = await _partition_document_ids_by_kb(document_scope_files)
-    verbatim_member_kb_ids = {str(member["kb_id"]) for member in verbatim_members}
-    verbatim_file_ids = [
-        file_id for kb_id, ids in files_by_kb.items() if kb_id in verbatim_member_kb_ids for file_id in ids
+    effective_document_ids: dict[str, list[str]] = {}
+    document_filter_active: dict[str, bool] = {}
+    for member in members:
+        kb_id = str(member["kb_id"])
+        mentioned = files_by_kb.get(kb_id) or []
+        folder_restricted = bool(member.get("folder_scope_restricted"))
+        folder_files = {
+            str(value).strip() for value in (member.get("folder_file_ids") or []) if str(value).strip()
+        }
+        document_filter_active[kb_id] = bool(document_scope_files or folder_restricted)
+        if document_scope_files:
+            effective_document_ids[kb_id] = [
+                file_id for file_id in mentioned if not folder_restricted or file_id in folder_files
+            ]
+        elif folder_restricted:
+            effective_document_ids[kb_id] = sorted(folder_files)
+        else:
+            effective_document_ids[kb_id] = []
+    verbatim_members = [
+        member
+        for member in verbatim_members
+        if not document_filter_active[str(member["kb_id"])]
+        or effective_document_ids[str(member["kb_id"])]
     ]
+    verbatim_member_kb_ids = {str(member["kb_id"]) for member in verbatim_members}
     # VERBATIM 通道只在调用方携带字面信号（patterns/题型）且租户可解析时启用；
     # 单次跨库任务（本地 PG 查询），不随成员数放大往返。
     verbatim_active = bool(
@@ -972,8 +993,9 @@ async def query_knowledge_scope_gateway(
             # Wiki Navigator 单独供给 navigation_hits（P4）。
             logger.warning(f"Scope member {kb_id} is a derived product; evidence channels skipped")
             continue
-        member_document_ids = files_by_kb.get(str(kb_id)) or []
-        if document_scope_files and not member_document_ids:
+        member_document_ids = effective_document_ids.get(str(kb_id)) or []
+        member_filter_active = document_filter_active.get(str(kb_id), False)
+        if member_filter_active and not member_document_ids:
             # 该库在文献硬约束下不可能有命中：文档任务不开，图谱任务排除。
             scope_excluded_kbs.append(str(kb_id))
             continue
@@ -986,7 +1008,7 @@ async def query_knowledge_scope_gateway(
             )
         )
         task_labels.append((kb_id, "DOCUMENT"))
-        if document_scope_files:
+        if member_filter_active:
             # 图谱/结构化证据不带文献粒度：文献硬约束生效时整通道排除（失败关闭）。
             scope_excluded_kbs.append(str(kb_id))
             continue
@@ -1000,26 +1022,31 @@ async def query_knowledge_scope_gateway(
         )
         task_labels.append((kb_id, "GRAPH_STRUCTURED"))
     if verbatim_active:
-        tasks.append(
-            _query_source_with_timeout(
-                _query_verbatim_scope_source(
-                    verbatim_members,
-                    query_text,
-                    verbatim=verbatim,
-                    limit=per_source_limit,
-                    file_ids=verbatim_file_ids or None,
-                ),
-                kb_id="__scope__",
-                source_type="VERBATIM",
-                timeout_seconds=KNOWLEDGE_VERBATIM_SOURCE_TIMEOUT_SECONDS,
+        # Run per member so a folder-restricted member can never widen another
+        # member's verbatim query (or be widened by an unrestricted member).
+        for member in verbatim_members:
+            kb_id = str(member["kb_id"])
+            member_file_ids = effective_document_ids.get(kb_id) or []
+            tasks.append(
+                _query_source_with_timeout(
+                    _query_verbatim_scope_source(
+                        [member],
+                        query_text,
+                        verbatim=verbatim,
+                        limit=per_source_limit,
+                        file_ids=member_file_ids if document_filter_active.get(kb_id) else None,
+                    ),
+                    kb_id=kb_id,
+                    source_type="VERBATIM",
+                    timeout_seconds=KNOWLEDGE_VERBATIM_SOURCE_TIMEOUT_SECONDS,
+                )
             )
-        )
-        task_labels.append(("__scope__", "VERBATIM"))
+            task_labels.append((kb_id, "VERBATIM"))
 
     results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
     all_rows: list[dict[str, Any]] = []
     source_errors: list[str] = []
-    verbatim_error: str | None = None
+    verbatim_errors: dict[str, str] = {}
     for (kb_id, source_type), result in zip(task_labels, results):
         if isinstance(result, BaseException):
             if isinstance(result, asyncio.CancelledError):
@@ -1030,7 +1057,8 @@ async def query_knowledge_scope_gateway(
             rows, error = result
         if source_type == "VERBATIM":
             # VERBATIM 任务跨成员；错误只记一次，命中行在 merge 阶段回填各 kb telemetry。
-            verbatim_error = error
+            if error:
+                verbatim_errors[str(kb_id)] = error
         all_rows.extend(rows)
         if error:
             logger.warning(f"Scope source unavailable: kb={kb_id}, source={source_type}, error={error}")
@@ -1133,12 +1161,15 @@ async def query_knowledge_scope_gateway(
         }
         if verbatim_active and member["kb_id"] in verbatim_member_kb_ids:
             # VERBATIM 状态只在通道实际运行的 Run 里出现（contract 1.1 增量字段）。
-            status_row["verbatim_status"] = "UNAVAILABLE" if verbatim_error else "AVAILABLE"
-        if document_scope_files:
+            status_row["verbatim_status"] = (
+                "UNAVAILABLE" if str(member["kb_id"]) in verbatim_errors else "AVAILABLE"
+            )
+        member_filter_active = document_filter_active.get(str(member["kb_id"]), False)
+        if member_filter_active:
             # 文献硬约束审计：图谱/结构化通道被排除；本库无指定文献时文档通道也不执行。
             status_row["graph_status"] = "DOCUMENT_SCOPE_EXCLUDED"
             status_row["structured_status"] = "DOCUMENT_SCOPE_EXCLUDED"
-            if not (files_by_kb.get(member["kb_id"]) or []):
+            if not (effective_document_ids.get(str(member["kb_id"])) or []):
                 status_row["document_status"] = "NO_MATCHING_DOCUMENT"
         knowledge_source_status.append(status_row)
     verbatim_hit_count = sum(
@@ -1171,7 +1202,7 @@ async def query_knowledge_scope_gateway(
         "sources_used": sources_used,
         "knowledge_source_status": knowledge_source_status,
         "document_scope_files": document_scope_files,
-        "document_scope_excluded_kbs": scope_excluded_kbs,
+        "document_scope_excluded_kbs": sorted(set(scope_excluded_kbs)),
         "retrieval_summary": {
             "query": query_text,
             "raw_hits": len(all_rows),

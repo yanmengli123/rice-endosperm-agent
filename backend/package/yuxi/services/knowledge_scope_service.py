@@ -45,6 +45,7 @@ DEFAULT_RETRIEVAL_POLICY = {
 
 DEFAULT_MEMBER_POLICY = {
     "enabled": True,
+    "folder_ids": [],
     "document_enabled": True,
     "graph_enabled": True,
     "structured_enabled": True,
@@ -58,6 +59,50 @@ DEFAULT_MEMBER_POLICY = {
     "health_details": {},
     "last_validated_at": None,
 }
+
+
+async def _resolve_folder_scope(
+    db: AsyncSession, *, kb_id: str, folder_ids: list[str] | None, strict: bool = True
+) -> tuple[list[str], list[str]]:
+    """Validate real folders and freeze all descendant document ids for one KB."""
+    normalized = list(dict.fromkeys(str(value).strip() for value in (folder_ids or []) if str(value).strip()))
+    if not normalized:
+        return [], []
+
+    rows = list(
+        (
+            await db.execute(
+                select(KnowledgeFile).where(KnowledgeFile.kb_id == kb_id).order_by(KnowledgeFile.file_id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_id = {str(row.file_id): row for row in rows}
+    invalid = [folder_id for folder_id in normalized if not by_id.get(folder_id) or not by_id[folder_id].is_folder]
+    if invalid and strict:
+        raise ValueError(f"文件夹不存在或不属于当前知识库：{', '.join(invalid)}")
+
+    children: dict[str, list[KnowledgeFile]] = {}
+    for row in rows:
+        if row.parent_id:
+            children.setdefault(str(row.parent_id), []).append(row)
+
+    visited: set[str] = set()
+    document_ids: set[str] = set()
+    pending = list(normalized)
+    while pending:
+        current_id = pending.pop()
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+        for child in children.get(current_id, []):
+            child_id = str(child.file_id)
+            if child.is_folder:
+                pending.append(child_id)
+            else:
+                document_ids.add(child_id)
+    return normalized, sorted(document_ids)
 
 
 def replay_scope_member_audits(audits: list[dict[str, Any]], *, target_version: int) -> list[dict[str, Any]]:
@@ -276,6 +321,18 @@ async def resolve_effective_knowledge_scope(
         policy["governance_status"] = frozen_kb.governance_status
         policy["active_release_id"] = frozen_kb.active_release_id
         policy["included_via"] = "GLOBAL" if kb_id in global_ids else "CUSTOM"
+        stored_folder_ids = [str(value).strip() for value in (policy.get("folder_ids") or []) if str(value).strip()]
+        folder_ids, folder_file_ids = await _resolve_folder_scope(
+            db,
+            kb_id=kb_id,
+            folder_ids=stored_folder_ids,
+            strict=False,
+        )
+        policy["folder_ids"] = folder_ids
+        # 受限与否以存储的策略为准：文件夹被删除后解析结果为空集，网关按
+        # NO_MATCHING_DOCUMENT 排除该库，绝不放宽回全库检索。
+        policy["folder_scope_restricted"] = bool(stored_folder_ids)
+        policy["folder_file_ids"] = folder_file_ids
         if not is_derived_product(str(policy.get("kb_type") or "")) and not is_evidence_authority(
             str(policy.get("kb_type") or "")
         ):
@@ -539,6 +596,7 @@ async def update_default_scope_member(
     if is_derived_product(str(kb.kb_type or "")):
         values.update(
             {
+                "folder_ids": [],
                 "document_enabled": False,
                 "graph_enabled": False,
                 "structured_enabled": False,
@@ -549,6 +607,15 @@ async def update_default_scope_member(
         )
     else:
         values["wiki_navigation_enabled"] = False
+        folder_ids, _ = await _resolve_folder_scope(db, kb_id=kb_id, folder_ids=values.get("folder_ids"))
+        values["folder_ids"] = folder_ids
+        if folder_ids:
+            if not values.get("document_enabled", True):
+                raise ValueError("选择文件夹范围时必须启用文档 Chunk 通道")
+            # Graph and structured evidence do not carry folder/document granularity.
+            # Fail closed instead of silently leaking evidence from the whole KB.
+            values["graph_enabled"] = False
+            values["structured_enabled"] = False
     policy = {**DEFAULT_MEMBER_POLICY, **values}
     status, details = await validate_member_health(db=db, kb_id=kb_id, policy=policy)
     values = {

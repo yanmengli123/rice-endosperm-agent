@@ -238,6 +238,17 @@ export const documentApi = {
     })
   },
 
+  getFolderTree: async (kbId) => {
+    return apiAdminGet(`/api/knowledge/databases/${kbId}/folders/tree`)
+  },
+
+  moveDocuments: async (kbId, fileIds, newParentId = null) => {
+    return apiAdminPut(`/api/knowledge/databases/${kbId}/documents/move`, {
+      file_ids: fileIds,
+      new_parent_id: newParentId
+    })
+  },
+
   /**
    * 添加文档到知识库
    * @param {string} kbId - 知识库ID
