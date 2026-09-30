@@ -1507,6 +1507,9 @@ routes:
               maxItems: 20
               items:
                 type: object
+            # 本机浏览器开关：冻结/门控/配对校验由上游 AgentRunCreate 承担。
+            browser_enabled:
+              type: boolean
           # query 与 resume 二选一：resume run（人工审批续跑）不带 query。
           anyOf:
             - required:
@@ -1749,4 +1752,232 @@ routes:
         rejected_code: 429
         show_limit_quota_header: true
         allow_degradation: true
+
+  # ------------------------------------------------------------------
+  # 本机浏览器接入（Browser Gateway）：配对/设备/扩展 WS。
+  # 认证模型：REST 用户接口由 Yuxi JWT 承担；扩展 authorize 以一次性码即凭证；
+  # 扩展 WS 以设备令牌（Sec-WebSocket-Protocol 承载，网关不记录其值）在上游校验。
+  # /api/browser/internal/* 不在此声明——内部 dispatch 仅限 compose 内网（worker→api），
+  # 网关永不代理该前缀（对齐 WeKnora 对 internal 路径的入口拦截要求）。
+  # ------------------------------------------------------------------
+  - id: yuxi-browser-pairing-link-create
+    name: yuxi-browser-pairing-link-create
+    uri: /api/browser/pairing-links
+    methods:
+      - POST
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 6
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-browser-status
+    name: yuxi-browser-status
+    uri: /api/browser/status
+    methods:
+      - GET
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-browser-device-list
+    name: yuxi-browser-device-list
+    uri: /api/browser/devices
+    methods:
+      - GET
+    priority: 121
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  - id: yuxi-browser-device-revoke
+    name: yuxi-browser-device-revoke
+    uri: /api/browser/devices/*
+    methods:
+      - DELETE
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 60
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  # 扩展配对（匿名，一次性码即凭证）：与 CLI 设备码同级的低阈值限流。
+  - id: yuxi-public-browser-extension-authorize
+    name: yuxi-public-browser-extension-authorize
+    uri: /api/browser/extension/authorize
+    methods:
+      - POST
+    priority: 130
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 10
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
+  # 扩展 WS 长连接：enable_websocket 打开 Upgrade 代理；令牌在 Sec-WebSocket-Protocol
+  # 中承载（网关访问日志避免记录该值），上游 authenticate_extension 裁决。
+  - id: yuxi-browser-extension-ws
+    name: yuxi-browser-extension-ws
+    uri: /api/browser/extension/ws
+    methods:
+      - GET
+    priority: 130
+    enable_websocket: true
+    upstream_id: yuxi-backend
+    plugins:
+      request-id:
+        header_name: X-Gateway-Trace-ID
+        include_in_response: true
+        algorithm: uuid
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 30
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        show_limit_quota_header: true
+        allow_degradation: true
+
 #END

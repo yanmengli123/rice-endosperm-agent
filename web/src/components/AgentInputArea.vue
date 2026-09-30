@@ -60,6 +60,19 @@
     </template>
     <template #actions-left>
       <div class="input-actions-left">
+        <button
+          type="button"
+          class="input-action-btn browser-toggle-chip"
+          :class="{ active: browserEnabled, offline: browserPaired && browserOnline === false }"
+          :title="browserToggleTitle"
+          :aria-pressed="browserEnabled"
+          @click.stop="toggleBrowserChip"
+          @mousedown.stop
+        >
+          <Monitor :size="15" />
+          <span class="hide-text">本机浏览器</span>
+          <span class="browser-health-dot" :class="browserHealthKind"></span>
+        </button>
         <slot name="actions-left-extra"></slot>
       </div>
     </template>
@@ -72,14 +85,16 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { message } from 'ant-design-vue'
 import MessageInputComponent from '@/components/MessageInputComponent.vue'
 import ImagePreviewComponent from '@/components/ImagePreviewComponent.vue'
 import AttachmentOptionsComponent from '@/components/AttachmentOptionsComponent.vue'
-import { X } from '@lucide/vue'
+import { Monitor, X } from '@lucide/vue'
 import { normalizeAttachmentPreviews } from '@/utils/file_utils'
 import { uploadMultimodalImage } from '@/utils/multimodal_image_upload'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
+import { browserApi } from '@/apis/browser_api'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -106,6 +121,76 @@ const emit = defineEmits([
 const inputRef = ref(null)
 const currentImage = ref(null)
 const placeholder = '问点什么？使用 @ 可以提及哦~'
+
+// 本机浏览器开关：默认关闭；在线状态持续刷新，run 创建时冻结用户选择。
+const browserEnabled = ref(false)
+const browserPaired = ref(null)
+const browserOnline = ref(null)
+let browserStatusTimer = null
+let browserStatusMounted = false
+
+const browserHealthKind = computed(() => {
+  if (browserOnline.value === true) return 'online'
+  if (browserPaired.value === false || browserOnline.value === false) return 'offline'
+  return 'unknown'
+})
+
+const browserToggleTitle = computed(() => {
+  if (browserEnabled.value) return '本机浏览器：本轮已开启'
+  if (browserOnline.value === true) return '本机浏览器：已连接，点击为本轮开启'
+  if (browserPaired.value === false) return '本机浏览器：尚未配置'
+  return '本机浏览器：当前离线'
+})
+
+const scheduleBrowserStatus = () => {
+  if (browserStatusTimer) clearTimeout(browserStatusTimer)
+  if (!browserStatusMounted) return
+  browserStatusTimer = setTimeout(refreshBrowserStatus, browserOnline.value ? 60000 : 10000)
+}
+
+const refreshBrowserStatus = async () => {
+  try {
+    const status = await browserApi.getBrowserStatus()
+    browserPaired.value = !!status?.paired
+    browserOnline.value = !!status?.online
+  } catch (error) {
+    console.error('查询本机浏览器配对状态失败:', error)
+    browserPaired.value = null
+    browserOnline.value = null
+  } finally {
+    scheduleBrowserStatus()
+  }
+}
+
+const handleBrowserVisibility = () => {
+  if (document.visibilityState === 'visible') refreshBrowserStatus()
+}
+
+onMounted(() => {
+  browserStatusMounted = true
+  refreshBrowserStatus()
+  document.addEventListener('visibilitychange', handleBrowserVisibility)
+})
+
+onUnmounted(() => {
+  browserStatusMounted = false
+  if (browserStatusTimer) clearTimeout(browserStatusTimer)
+  document.removeEventListener('visibilitychange', handleBrowserVisibility)
+})
+
+const toggleBrowserChip = () => {
+  if (props.disabled) return
+  if (!browserEnabled.value && browserPaired.value === false) {
+    message.warning('本机浏览器尚未配对，请前往「智能体扩展 → 浏览器连接」生成配对链接')
+    return
+  }
+  if (!browserEnabled.value && browserOnline.value === false) {
+    message.warning('BrowserSkill 当前离线，请先打开 Chrome 并确认扩展已连接')
+    refreshBrowserStatus()
+    return
+  }
+  browserEnabled.value = !browserEnabled.value
+}
 
 const previewAttachments = computed(() => normalizeAttachmentPreviews(props.attachments))
 
@@ -154,7 +239,8 @@ const handleAttachmentRemoved = (attachment) => {
 }
 
 const handleSend = () => {
-  emit('send', { image: currentImage.value })
+  // 开关状态随 send 事件传出，发送后保持用户选择（不自动复位）
+  emit('send', { image: currentImage.value, browserEnabled: browserEnabled.value })
   currentImage.value = null
 }
 
@@ -325,6 +411,21 @@ defineExpose({
 :deep(.hide-text) {
   @media (max-width: 768px) {
     display: none;
+  }
+}
+
+.browser-health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gray-300);
+
+  &.online {
+    background: var(--color-success-500);
+  }
+
+  &.offline {
+    background: var(--color-warning-500);
   }
 }
 

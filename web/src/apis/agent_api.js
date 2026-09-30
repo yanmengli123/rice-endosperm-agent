@@ -113,6 +113,7 @@ export const agentApi = {
   /**
    * 创建异步运行任务（Run）
    * @param {Object} data - run 请求体
+   * @param {boolean} [data.browser_enabled] - 本机浏览器接入开关；仅在显式为 true 时携带该字段
    * @returns {Promise<Object>}
    */
   createAgentRun: (data) =>
@@ -126,7 +127,8 @@ export const agentApi = {
       resume: data.resume ?? null,
       created_by_run_id: data.created_by_run_id || null,
       mention_protocol: data.mention_protocol || null,
-      mentions: data.mentions || null
+      mentions: data.mentions || null,
+      ...(data.browser_enabled === true ? { browser_enabled: true } : {})
     }),
 
   /**

@@ -2985,10 +2985,20 @@ async def stream_agent_chat(
 
     from yuxi.agents.mcp.artifact_materializer import begin_artifact_accumulation
     from yuxi.agents.mcp.execution import McpExecutionContext, set_mcp_execution_context
+    from yuxi.agents.toolkits.browser.gateway_client import BrowserExecutionContext, set_browser_execution_context
     from yuxi.services.principal import resolve_tenant_id
 
     mcp_context_token = set_mcp_execution_context(
         McpExecutionContext(
+            tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
+            uid=uid,
+            thread_id=thread_id,
+            run_id=meta.get("run_id"),
+            agent_slug=agent_slug,
+        )
+    )
+    browser_context_token = set_browser_execution_context(
+        BrowserExecutionContext(
             tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
             uid=uid,
             thread_id=thread_id,
@@ -3010,8 +3020,10 @@ async def stream_agent_chat(
         # 该分支发生在主流式 try/finally 之前，必须在返回前显式清理。
         from yuxi.agents.mcp.artifact_materializer import end_artifact_accumulation
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
+        from yuxi.agents.toolkits.browser.gateway_client import reset_browser_execution_context
 
         reset_mcp_execution_context(mcp_context_token)
+        reset_browser_execution_context(browser_context_token)
         end_artifact_accumulation(artifact_accumulation_token)
         yield make_chunk(status="error", error_type="invalid_agent", error_message=str(e), meta=meta)
         return
@@ -3044,6 +3056,9 @@ async def stream_agent_chat(
     _apply_model_override(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
+    # 本机浏览器（P1）：run 冻结的开关绑定到 runtime，toolkits 据此装配 browser 工具组
+    if meta.get("browser_enabled"):
+        input_context["browser_enabled"] = True
     # mention.v2：把冻结的提及解析结论绑定到 runtime，供 MODEL_DECIDES 路径的
     # 统一检索工具同样施加文献硬约束（@doc 不再只约束定位链）。
     input_context["_mention_resolution"] = _frozen_mention_resolution(meta)
@@ -4377,8 +4392,14 @@ async def stream_agent_chat(
             reset_user_credential_override(credential_context_token)
         from yuxi.agents.mcp.artifact_materializer import end_artifact_accumulation
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
+        from yuxi.agents.toolkits.browser.gateway_client import (
+            end_browser_task_best_effort,
+            reset_browser_execution_context,
+        )
 
+        await end_browser_task_best_effort()
         reset_mcp_execution_context(mcp_context_token)
+        reset_browser_execution_context(browser_context_token)
         end_artifact_accumulation(artifact_accumulation_token)
         flush_langfuse()
 
@@ -4410,10 +4431,20 @@ async def stream_agent_resume(
     uid = str(current_user.uid)
     from yuxi.agents.mcp.artifact_materializer import begin_artifact_accumulation
     from yuxi.agents.mcp.execution import McpExecutionContext, set_mcp_execution_context
+    from yuxi.agents.toolkits.browser.gateway_client import BrowserExecutionContext, set_browser_execution_context
     from yuxi.services.principal import resolve_tenant_id
 
     mcp_context_token = set_mcp_execution_context(
         McpExecutionContext(
+            tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
+            uid=uid,
+            thread_id=thread_id,
+            run_id=meta.get("run_id"),
+            agent_slug=meta.get("agent_slug"),
+        )
+    )
+    browser_context_token = set_browser_execution_context(
+        BrowserExecutionContext(
             tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
             uid=uid,
             thread_id=thread_id,
@@ -4433,8 +4464,10 @@ async def stream_agent_resume(
         # 该分支同样尚未进入下方主 try/finally。
         from yuxi.agents.mcp.artifact_materializer import end_artifact_accumulation
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
+        from yuxi.agents.toolkits.browser.gateway_client import reset_browser_execution_context
 
         reset_mcp_execution_context(mcp_context_token)
+        reset_browser_execution_context(browser_context_token)
         end_artifact_accumulation(artifact_accumulation_token)
         yield make_resume_chunk(status="error", error_type="invalid_agent", error_message=str(e), meta=meta)
         return
@@ -4459,6 +4492,9 @@ async def stream_agent_resume(
     )
     _apply_model_override(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
+    # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）
+    if meta.get("browser_enabled"):
+        input_context["browser_enabled"] = True
     context = _build_agent_context(agent, input_context)
     _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
     langfuse_run = _build_langfuse_run_context(
@@ -4694,8 +4730,14 @@ async def stream_agent_resume(
             reset_user_credential_override(credential_context_token)
         from yuxi.agents.mcp.artifact_materializer import end_artifact_accumulation
         from yuxi.agents.mcp.execution import reset_mcp_execution_context
+        from yuxi.agents.toolkits.browser.gateway_client import (
+            end_browser_task_best_effort,
+            reset_browser_execution_context,
+        )
 
+        await end_browser_task_best_effort()
         reset_mcp_execution_context(mcp_context_token)
+        reset_browser_execution_context(browser_context_token)
         end_artifact_accumulation(artifact_accumulation_token)
         flush_langfuse()
 

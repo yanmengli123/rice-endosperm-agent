@@ -166,6 +166,9 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
         }
     ),
     "answer.render.applied": frozenset({"renderer_version", "boundary", "eligible", "applied", "fallback_reason"}),
+    # 本机浏览器核验（browser_enabled 轮收口）：审计表为唯一权威，
+    # 零审计明示「回答中的浏览器操作描述未经实际执行」（幻觉式合规防线）。
+    "answer.browser_guard.completed": frozenset({"browser_audit_count", "invoked"}),
     # 追问建议生成（followup_suggestions）：status ∈ {completed, failed}；
     # failed 轮 question_count 恒 0，token 仅成功轮携带
     "answer.followup_suggestions.completed": frozenset(
@@ -297,6 +300,7 @@ EVENT_EMITTER_INDEX: dict[str, tuple[tuple[str, str], ...]] = {
     "mcp.canary.probe": (("services/mcp_canary_service.py", "mcp.canary.probe"),),
     "mcp.canary.completed": (("services/mcp_canary_service.py", "mcp.canary.completed"),),
     "answer.source_guard.completed": (("services/chat_service.py", "answer.source_guard.completed"),),
+    "answer.browser_guard.completed": (("services/run_worker.py", "answer.browser_guard.completed"),),
     "answer.render.applied": (("services/chat_service.py", "answer.render.applied"),),
     "answer.followup_suggestions.completed": (("services/chat_service.py", "answer.followup_suggestions."),),
     "subagent.execution.started": (("agents/middlewares/trace.py", "SUBAGENT_TOOL_NAME"),),

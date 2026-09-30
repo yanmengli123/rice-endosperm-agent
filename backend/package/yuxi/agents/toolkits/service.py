@@ -199,6 +199,17 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
         selected_tools.append(tool)
         selected_tool_names.add(tool.name)
 
+    # 本机浏览器工具组：仅当 run 冻结了 browser_enabled（输入框开关）才装配；
+    # 未配对/离线在工具执行期以结构化错误返回（BROWSER_NOT_PAIRED / BROWSER_OFFLINE）。
+    if getattr(context, "browser_enabled", False):
+        from yuxi.agents.toolkits.browser.tools import get_browser_runtime_tools
+
+        for browser_tool in get_browser_runtime_tools():
+            if browser_tool.name in selected_tool_names:
+                continue
+            selected_tools.append(browser_tool)
+            selected_tool_names.add(browser_tool.name)
+
     scope = getattr(context, "_effective_knowledge_scope", None)
     if isinstance(scope, dict) and not scope.get("allow_web", False):
         web_names = {"tavily_search", "web_search", "search_web"}

@@ -1081,6 +1081,8 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0064_mcp_call_diagnostics", "_migration_0064_mcp_call_diagnostics"),
         ("0065_knowledge_scope_folders", "_migration_0065_knowledge_scope_folders"),
         ("0066_channel_gateway", "_migration_0066_channel_gateway"),
+        ("0067_local_browser_gateway", "_migration_0067_local_browser_gateway"),
+        ("0068_browser_policy_and_leases", "_migration_0068_browser_policy_and_leases"),
     ]
 
     async def _migration_0066_channel_gateway(self, conn) -> None:
@@ -1233,11 +1235,201 @@ class PostgresManager(metaclass=SingletonMeta):
         for statement in statements:
             await conn.execute(text(statement))
 
+    async def _migration_0067_local_browser_gateway(self, conn) -> None:
+        """本机浏览器网关：配对链接 / 设备授权 / 命令审计（append-only）三表 + 租户 RLS。
+
+        表结构由 ORM metadata create 兜底（Fresh install 走 create_business_tables），
+        本迁移覆盖存量库；RLS 策略与 0021 Wiki 相同的 yuxi.tenant_id 会话变量。
+        """
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS browser_pairing_links (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT REFERENCES tenants(id),
+                    uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                    code_hash VARCHAR(64) NOT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    device_name VARCHAR(128) NOT NULL DEFAULT '',
+                    extension_version VARCHAR(32),
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    consumed_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS browser_device_authorizations (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT REFERENCES tenants(id),
+                    uid VARCHAR NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                    device_id VARCHAR(64) NOT NULL,
+                    device_name VARCHAR(128) NOT NULL DEFAULT '',
+                    extension_version VARCHAR(32),
+                    token_hash VARCHAR(64) NOT NULL,
+                    token_expires_at TIMESTAMPTZ NOT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'active',
+                    last_seen_at TIMESTAMPTZ,
+                    revoked_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS browser_command_audit (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT REFERENCES tenants(id),
+                    uid VARCHAR NOT NULL,
+                    run_id VARCHAR(64),
+                    device_id VARCHAR(64) NOT NULL,
+                    op VARCHAR(32) NOT NULL,
+                    status VARCHAR(16) NOT NULL DEFAULT 'ok',
+                    error_code VARCHAR(64),
+                    args_digest VARCHAR(80),
+                    result_digest VARCHAR(80),
+                    duration_ms INTEGER,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        statements = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_pairing_links_code ON browser_pairing_links(code_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_pairing_links_uid ON browser_pairing_links(uid)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_device_authorizations_device "
+                "ON browser_device_authorizations(device_id)"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_device_authorizations_token "
+                "ON browser_device_authorizations(token_hash)"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_device_active "
+                "ON browser_device_authorizations(tenant_id, uid) WHERE status = 'active'"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_run ON browser_command_audit(run_id)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_device ON browser_command_audit(device_id)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_created ON browser_command_audit(created_at)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+        # append-only 纪律：审计表数据库层拒绝 UPDATE/DELETE（与 0023 账本同思路）
+        await conn.execute(
+            text(
+                """
+                CREATE OR REPLACE FUNCTION browser_command_audit_append_only() RETURNS trigger AS $$
+                BEGIN
+                    RAISE EXCEPTION 'browser_command_audit is append-only';
+                END;
+                $$ LANGUAGE plpgsql
+                """
+            )
+        )
+        trigger_exists = (
+            await conn.execute(text("SELECT 1 FROM pg_trigger WHERE tgname = 'tr_browser_command_audit_append_only'"))
+        ).scalar()
+        if not trigger_exists:
+            await conn.execute(
+                text(
+                    "CREATE TRIGGER tr_browser_command_audit_append_only "
+                    "BEFORE UPDATE OR DELETE ON browser_command_audit "
+                    "FOR EACH ROW EXECUTE FUNCTION browser_command_audit_append_only()"
+                )
+            )
+        # 租户 RLS（纵深防御；主边界仍是 repository 过滤）
+        for table in (
+            "browser_pairing_links",
+            "browser_device_authorizations",
+            "browser_command_audit",
+        ):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            policy_name = f"p_{table}_tenant"
+            policy_exists = (
+                await conn.execute(
+                    text("SELECT 1 FROM pg_policies WHERE tablename = :table AND policyname = :policy"),
+                    {"table": table, "policy": policy_name},
+                )
+            ).scalar()
+            if not policy_exists:
+                await conn.execute(
+                    text(
+                        f"CREATE POLICY {policy_name} ON {table} "
+                        "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT) "
+                        "WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)"
+                    )
+                )
+
     async def _migration_0065_knowledge_scope_folders(self, conn) -> None:
         """Allow a knowledge-scope member to freeze selected real folders."""
         await conn.execute(
             text("ALTER TABLE IF EXISTS knowledge_scope_members ADD COLUMN IF NOT EXISTS folder_ids JSONB")
         )
+
+    async def _migration_0068_browser_policy_and_leases(self, conn) -> None:
+        """本机浏览器 Phase2/3：租户域名策略（每租户一行）+ WSS 通道连接租约（多副本路由）。"""
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS browser_domain_policies (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT REFERENCES tenants(id),
+                    mode VARCHAR(16) NOT NULL DEFAULT 'off',
+                    domains JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    updated_by VARCHAR(64),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS browser_connection_leases (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT REFERENCES tenants(id),
+                    device_id VARCHAR(64) NOT NULL,
+                    node_id VARCHAR(128) NOT NULL,
+                    node_url VARCHAR(255) NOT NULL,
+                    lease_until TIMESTAMPTZ NOT NULL,
+                    renewed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        statements = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_domain_policy_tenant ON browser_domain_policies(tenant_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_connection_lease_device ON browser_connection_leases(device_id)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_connection_leases_until ON browser_connection_leases(lease_until)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+        # 租户 RLS（纵深防御；主边界仍是 repository 过滤）
+        for table in ("browser_domain_policies", "browser_connection_leases"):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            policy_name = f"p_{table}_tenant"
+            policy_exists = (
+                await conn.execute(
+                    text("SELECT 1 FROM pg_policies WHERE tablename = :table AND policyname = :policy"),
+                    {"table": table, "policy": policy_name},
+                )
+            ).scalar()
+            if not policy_exists:
+                await conn.execute(
+                    text(
+                        f"CREATE POLICY {policy_name} ON {table} "
+                        "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT) "
+                        "WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)"
+                    )
+                )
 
     async def _migration_0064_mcp_call_diagnostics(self, conn) -> None:
         """Persist value-free MCP failure diagnostics and argument shape."""

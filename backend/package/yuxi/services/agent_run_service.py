@@ -749,6 +749,7 @@ async def create_agent_run_view(
     resume: object | None = None,
     created_by_run_id: str | None = None,
     mentions: list[dict[str, Any]] | None = None,
+    browser_enabled: bool = False,
 ) -> dict:
     """创建 chat/resume run 的 HTTP 入口，输入正文由 Message 承载，run 只登记运行元数据。"""
     meta = meta or {}
@@ -921,6 +922,13 @@ async def create_agent_run_view(
     if mention_resolution_audit is not None:
         # 冻结的提及解析结论（含 query_raw / clean_question / 每条提及的解析状态）
         input_payload["mention_resolution"] = mention_resolution_audit
+    # 本机浏览器开关（run 创建时冻结；resume 沿用父运行，行为对齐 model_spec）
+    if run_type == "resume":
+        frozen_browser = parent_payload.get("browser_enabled") if isinstance(parent_payload, dict) else None
+        if frozen_browser:
+            input_payload["browser_enabled"] = True
+    elif browser_enabled:
+        input_payload["browser_enabled"] = True
 
     run, created = await persist_agent_run_record(
         agent_slug=agent_slug,

@@ -23,6 +23,9 @@
       <div v-if="userStore.isAdmin && activeTab === 'mcp'" class="tab-panel">
         <McpCardList ref="mcpRef" />
       </div>
+      <div v-if="activeTab === 'browser'" class="tab-panel">
+        <BrowserConnectionPanel ref="browserRef" />
+      </div>
     </div>
 
     <router-view v-else />
@@ -35,6 +38,7 @@ import { useRoute, useRouter } from 'vue-router'
 import ToolsCardList from '@/components/extensions/ToolsCardList.vue'
 import McpCardList from '@/components/extensions/McpCardList.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
+import BrowserConnectionPanel from '@/components/extensions/BrowserConnectionPanel.vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import DataBaseView from '@/views/DataBaseView.vue'
 import { useUserStore } from '@/stores/user'
@@ -47,14 +51,19 @@ const knowledgeRef = ref(null)
 const skillsRef = ref(null)
 const mcpRef = ref(null)
 const toolsRef = ref(null)
+const browserRef = ref(null)
 
 const adminExtensionTabs = [
   { key: 'knowledge', label: '知识库' },
   { key: 'tools', label: '工具' },
   { key: 'mcp', label: 'MCP' },
-  { key: 'skills', label: 'Skills' }
+  { key: 'skills', label: 'Skills' },
+  { key: 'browser', label: '浏览器连接' }
 ]
-const userExtensionTabs = [{ key: 'skills', label: 'Skills' }]
+const userExtensionTabs = [
+  { key: 'skills', label: 'Skills' },
+  { key: 'browser', label: '浏览器连接' }
+]
 const extensionTabs = computed(() => (userStore.isAdmin ? adminExtensionTabs : userExtensionTabs))
 const allowedTabKeys = computed(() => extensionTabs.value.map((tab) => tab.key))
 const defaultTabKey = computed(() => extensionTabs.value[0]?.key || 'skills')
@@ -87,7 +96,8 @@ const activeChildLoading = computed(() => {
     knowledge: knowledgeRef,
     tools: toolsRef,
     skills: skillsRef,
-    mcp: mcpRef
+    mcp: mcpRef,
+    browser: browserRef
   }
   const child = refMap[activeTab.value]
   return child?.value?.loading || false

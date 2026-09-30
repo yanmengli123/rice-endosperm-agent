@@ -253,6 +253,13 @@ class BaseContext:
         },
     )
 
+    # 本机浏览器（run 创建时冻结进 input_payload，经 input_context 传入）：
+    # True 时 resolve_configured_runtime_tools 装配 browser 工具组。
+    browser_enabled: bool = field(
+        default=False,
+        metadata={"name": "本机浏览器", "configurable": False, "hide": True},
+    )
+
     summary_threshold: int = field(
         default=DEFAULT_SUMMARY_THRESHOLD_K,
         metadata={

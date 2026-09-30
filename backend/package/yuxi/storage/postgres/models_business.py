@@ -1785,7 +1785,117 @@ class ChannelPairing(Base):
     consumed_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class BrowserPairingLink(Base):
+    """本机浏览器一次性配对链接：5 分钟有效、单次使用，只存 SHA-256 哈希。"""
+
+    __tablename__ = "browser_pairing_links"
+
+    STATUS_PENDING = "pending"
+    STATUS_CONSUMED = "consumed"
+    STATUS_EXPIRED = "expired"
+    STATUS_SUPERSEDED = "superseded"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    code_hash = Column(String(64), nullable=False, unique=True, index=True)
+    status = Column(String(32), nullable=False, default=STATUS_PENDING, index=True)
+    device_name = Column(String(128), nullable=False, default="")
+    extension_version = Column(String(32), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
+class BrowserDeviceAuthorization(Base):
+    """(tenant_id, uid) 粒度的本机浏览器设备授权：同粒度只保留一个 active，新激活替换旧设备。
+
+    设备令牌只存 SHA-256 哈希；90 天有效期，扩展续连时余量不足 60 天触发轮换
+    （服务端下发 token_rotated 帧，扩展持久化新令牌）。
+    """
+
+    __tablename__ = "browser_device_authorizations"
+    __table_args__ = (
+        Index(
+            "uq_browser_device_active",
+            "tenant_id",
+            "uid",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+    STATUS_ACTIVE = "active"
+    STATUS_REVOKED = "revoked"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    device_id = Column(String(64), nullable=False, unique=True, index=True)
+    device_name = Column(String(128), nullable=False, default="")
+    extension_version = Column(String(32), nullable=True)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    token_expires_at = Column(DateTime(timezone=True), nullable=False)
+    status = Column(String(32), nullable=False, default=STATUS_ACTIVE, index=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
+class BrowserCommandAudit(Base):
+    """本机浏览器命令审计：append-only（与 usage_ledger 同纪律，禁 UPDATE/DELETE）。"""
+
+    __tablename__ = "browser_command_audit"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    uid = Column(String, nullable=False, index=True)
+    run_id = Column(String(64), nullable=True, index=True)
+    device_id = Column(String(64), nullable=False, index=True)
+    op = Column(String(32), nullable=False)
+    status = Column(String(16), nullable=False, default="ok")
+    error_code = Column(String(64), nullable=True, index=True)
+    args_digest = Column(String(80), nullable=True)
+    result_digest = Column(String(80), nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, index=True)
+
+
+class BrowserDomainPolicy(Base):
+    """租户级本机浏览器域名策略：allowlist/denylist 作用于 navigate 的目标 host。
+
+    每租户一行；domains 为后缀匹配域名列表（"example.com" 覆盖其子域）。
+    """
+
+    __tablename__ = "browser_domain_policies"
+    __table_args__ = (Index("uq_browser_domain_policy_tenant", "tenant_id", unique=True),)
+
+    MODE_OFF = "off"
+    MODE_ALLOWLIST = "allowlist"
+    MODE_DENYLIST = "denylist"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    mode = Column(String(16), nullable=False, default=MODE_OFF)
+    domains = Column(JSON, nullable=False, default=list)
+    updated_by = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class BrowserConnectionLease(Base):
+    """WSS 通道的扩展连接租约（Phase 3 多副本路由）：连接所在节点登记租约，
+    心跳续租（45s 过期）；dispatch 未命中本地注册表时按租约直连目标节点中继。"""
+
+    __tablename__ = "browser_connection_leases"
+    __table_args__ = (Index("uq_browser_connection_lease_device", "device_id", unique=True),)
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    device_id = Column(String(64), nullable=False, index=True)
+    node_id = Column(String(128), nullable=False)
+    node_url = Column(String(255), nullable=False)
+    lease_until = Column(DateTime(timezone=True), nullable=False, index=True)
+    renewed_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)

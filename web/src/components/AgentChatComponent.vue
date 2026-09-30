@@ -179,6 +179,73 @@
               @cancel="handleQuestionCancel"
             />
 
+            <!-- 本机浏览器实时预览条：本轮出现 browser_* 工具事件时自动出现 -->
+            <div v-if="chatBrowserPreviewVisible" class="browser-live-bar">
+              <div class="browser-live-bar__head">
+                <span class="browser-live-bar__title">
+                  <Monitor :size="14" class="browser-live-bar__icon" />
+                  本机浏览器实时画面
+                </span>
+                <span
+                  v-if="chatBrowserPreviewRunId"
+                  class="browser-live-bar__run"
+                  :title="chatBrowserPreviewRunId"
+                >
+                  运行 {{ chatBrowserPreviewRunId.slice(0, 12) }}…
+                </span>
+                <button
+                  type="button"
+                  class="browser-live-bar__close"
+                  title="关闭预览"
+                  aria-label="关闭浏览器实时预览"
+                  @click="handleChatBrowserPreviewClose"
+                >
+                  <X :size="14" />
+                </button>
+              </div>
+              <div class="browser-live-bar__body">
+                <img
+                  v-if="chatBrowserPreviewFrame"
+                  :src="chatBrowserPreviewFrame"
+                  class="browser-live-bar__frame"
+                  alt="本机浏览器实时画面"
+                />
+                <div v-else class="browser-live-bar__placeholder">
+                  {{ chatBrowserPreviewPlaceholderText }}
+                </div>
+                <div class="browser-live-bar__controls">
+                  <a-button
+                    size="small"
+                    :disabled="chatBrowserPreviewEnded"
+                    :loading="chatBrowserPreviewControlPending === 'pause'"
+                    @click="handleChatBrowserPreviewControl('pause')"
+                  >
+                    暂停
+                  </a-button>
+                  <a-button
+                    size="small"
+                    :disabled="chatBrowserPreviewEnded"
+                    :loading="chatBrowserPreviewControlPending === 'resume'"
+                    @click="handleChatBrowserPreviewControl('resume')"
+                  >
+                    继续
+                  </a-button>
+                  <a-button
+                    size="small"
+                    danger
+                    :disabled="chatBrowserPreviewEnded"
+                    :loading="chatBrowserPreviewControlPending === 'end'"
+                    @click="handleChatBrowserPreviewControl('end')"
+                  >
+                    结束
+                  </a-button>
+                </div>
+              </div>
+              <div v-if="chatBrowserPreviewFootText" class="browser-live-bar__foot">
+                {{ chatBrowserPreviewFootText }}
+              </div>
+            </div>
+
             <div class="message-input-wrapper">
               <!-- 加载状态：加载消息 -->
               <div v-if="isLoadingMessages" class="chat-loading">
@@ -1087,8 +1154,10 @@ import {
   History,
   LayoutList,
   LoaderCircle,
+  Monitor,
   RefreshCw,
-  Save
+  Save,
+  X
 } from '@lucide/vue'
 import { formatFileSize } from '@/utils/file_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
@@ -1132,6 +1201,7 @@ import {
 } from '@/composables/useProtocolCapabilities'
 import { useStatusPanelSections } from '@/composables/useStatusPanelSections'
 import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
+import { useBrowserPreview } from '@/composables/useBrowserPreview'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
 import { useConversationExport } from '@/composables/useConversationExport'
@@ -3582,13 +3652,101 @@ const restorePendingInterruptForThread = (threadId) => {
   return restoreInterruptFromThreadState(threadId)
 }
 
-const { handleStreamChunk } = useAgentStreamHandler({
+// ==================== 本机浏览器实时预览条 ====================
+// 本轮对话出现 browser_* 工具事件时，在输入框上方内嵌展示小尺寸实时画面，
+// 与扩展页 BrowserConnectionPanel 共用 useBrowserPreview 的 SSE 消费逻辑。
+const CHAT_BROWSER_PREVIEW_AUTO_CLOSE_MS = 8000
+
+const chatBrowserPreviewVisible = ref(false)
+const {
+  activeRunId: chatBrowserPreviewRunId,
+  starting: chatBrowserPreviewStarting,
+  ended: chatBrowserPreviewEnded,
+  endReasonText: chatBrowserPreviewEndReasonText,
+  error: chatBrowserPreviewError,
+  frameDataUrl: chatBrowserPreviewFrame,
+  controlPending: chatBrowserPreviewControlPending,
+  startPreview: startChatBrowserPreviewStream,
+  closePreview: closeChatBrowserPreviewStream,
+  sendControl: sendChatBrowserPreviewControl,
+  notifyRunTerminal: notifyChatBrowserPreviewRunTerminal
+} = useBrowserPreview({
+  autoCloseMs: CHAT_BROWSER_PREVIEW_AUTO_CLOSE_MS,
+  // run 终态（或预览 end 帧）后延时自动关闭，收起预览条
+  onAutoClose: () => {
+    chatBrowserPreviewVisible.value = false
+  }
+})
+
+const startChatBrowserPreview = (runId) => {
+  if (!runId) return
+  chatBrowserPreviewVisible.value = true
+  // 防重入由 useBrowserPreview 保证：同一 runId 只有一条预览流
+  void startChatBrowserPreviewStream(runId)
+}
+
+const handleChatBrowserPreviewClose = () => {
+  chatBrowserPreviewVisible.value = false
+  closeChatBrowserPreviewStream()
+}
+
+const handleChatBrowserPreviewControl = async (action) => {
+  try {
+    await sendChatBrowserPreviewControl(action)
+    if (action === 'end') {
+      message.success('已请求结束浏览器会话')
+    } else {
+      message.success(action === 'pause' ? '已请求暂停浏览器操作' : '已请求继续浏览器操作')
+    }
+  } catch (error) {
+    message.error(error.message || '控制请求失败')
+  }
+}
+
+const chatBrowserPreviewFootText = computed(() => {
+  if (!chatBrowserPreviewVisible.value) return ''
+  if (chatBrowserPreviewError.value) return chatBrowserPreviewError.value
+  if (chatBrowserPreviewEnded.value) {
+    return chatBrowserPreviewEndReasonText.value
+      ? `预览已结束：${chatBrowserPreviewEndReasonText.value}`
+      : '预览已结束'
+  }
+  return ''
+})
+
+const chatBrowserPreviewPlaceholderText = computed(() => {
+  if (chatBrowserPreviewStarting.value) return '正在建立预览连接…'
+  if (chatBrowserPreviewError.value) return chatBrowserPreviewError.value
+  return '已连接，等待浏览器操作画面…'
+})
+
+// 识别 SSE 消费路径中的浏览器工具事件（chunk.event.method === 'tools'），
+// tool_name 带 browser_ 前缀即视为本轮使用了本机浏览器。
+const trackBrowserToolUsage = (chunk, threadId) => {
+  const event = chunk?.event
+  if (!event || event.method !== 'tools') return
+  const data = event.data
+  if (!data || (data.event !== 'tool-started' && data.event !== 'tool-finished')) return
+  const toolName = String(data.tool_name || data.name || '')
+  if (!toolName.startsWith('browser_')) return
+  const threadState = getThreadState(threadId)
+  const runId = String(chunk.run_id || threadState?.activeRunId || '')
+  if (!runId) return
+  startChatBrowserPreview(runId)
+}
+
+const { handleStreamChunk: processAgentStreamChunk } = useAgentStreamHandler({
   getThreadState,
   processApprovalInStream,
   currentAgentId,
   supportsFiles,
   streamSmoother
 })
+// 包装流式分块处理：先做浏览器工具事件检测（旁路，不影响原有解析）
+const handleStreamChunk = (chunk, threadId) => {
+  trackBrowserToolUsage(chunk, threadId)
+  return processAgentStreamChunk(chunk, threadId)
+}
 const { handleTraceEvent, loadRunTraceSnapshot, refreshRunTraceSnapshot, resetRunTrace } =
   useRunTrace({ getThreadState })
 // ==================== 会话命名 ====================
@@ -3660,6 +3818,8 @@ const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = 
       refreshRunTraceSnapshot(threadId, runId)
       void loadRunEvidence(threadId, runId)
       void refreshRunContext(threadId, runId)
+      // 本轮若在观看浏览器实时画面，run 终态后延时 8 秒自动收起预览条
+      notifyChatBrowserPreviewRunTerminal(runId)
     }
     const pendingEnhancement = pendingTitleEnhancement.get(threadId)
     if (pendingEnhancement) {
@@ -3793,7 +3953,7 @@ const selectThreadFromRoute = async (threadId) => {
   return true
 }
 
-const handleSendMessage = async ({ image } = {}) => {
+const handleSendMessage = async ({ image, browserEnabled } = {}) => {
   const text = userInput.value.trim()
   const imageContent = image?.imageContent || null
   if (
@@ -3871,7 +4031,8 @@ const handleSendMessage = async ({ image } = {}) => {
       image_content: imageContent,
       model_spec: modelSpec,
       mention_protocol: structuredMentions ? 'mention.v2' : null,
-      mentions: structuredMentions
+      mentions: structuredMentions,
+      browser_enabled: browserEnabled === true
     })
     const runId = runResp?.run_id
     if (!runId) {
@@ -4746,6 +4907,116 @@ watch(currentChatId, (threadId, oldThreadId) => {
     justify-content: center;
     min-width: 0;
     max-width: min(168px, calc(100vw - 160px));
+  }
+
+  .browser-live-bar {
+    width: 100%;
+    max-width: 800px;
+    margin: 0 auto 8px;
+    border: 1px solid var(--gray-150);
+    border-radius: 12px;
+    background: var(--gray-0);
+    box-shadow: 0 1px 4px var(--shadow-0);
+    overflow: hidden;
+
+    .browser-live-bar__head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--gray-150);
+    }
+
+    .browser-live-bar__title {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--gray-700);
+    }
+
+    .browser-live-bar__icon {
+      color: var(--color-success-500);
+    }
+
+    .browser-live-bar__run {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: 'Monaco', 'Consolas', monospace;
+      font-size: 12px;
+      color: var(--gray-400);
+    }
+
+    .browser-live-bar__close {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--gray-400);
+      cursor: pointer;
+
+      &:hover {
+        background: var(--gray-100);
+        color: var(--gray-700);
+      }
+    }
+
+    .browser-live-bar__body {
+      display: flex;
+      align-items: stretch;
+      gap: 10px;
+      padding: 10px 12px;
+    }
+
+    .browser-live-bar__frame {
+      flex: 1;
+      min-width: 0;
+      max-height: 200px;
+      border-radius: 8px;
+      background: var(--gray-900);
+      object-fit: contain;
+    }
+
+    .browser-live-bar__placeholder {
+      flex: 1;
+      min-width: 0;
+      min-height: 120px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      background: var(--gray-10);
+      color: var(--gray-400);
+      font-size: 12px;
+      text-align: center;
+      line-height: 1.6;
+      padding: 12px;
+    }
+
+    .browser-live-bar__controls {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .browser-live-bar__foot {
+      padding: 6px 12px 8px;
+      border-top: 1px solid var(--gray-150);
+      background: var(--gray-50);
+      color: var(--gray-500);
+      font-size: 12px;
+    }
   }
 
   &.start-screen {

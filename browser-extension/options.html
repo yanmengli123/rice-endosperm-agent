@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>语析本机浏览器连接 - 设置</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="head">
+      <img src="icons/icon128.png" class="logo" alt="语析" />
+      <div>
+        <h1>语析本机浏览器连接</h1>
+        <p id="version" class="muted"></p>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>配对</h2>
+      <p class="muted">
+        在语析服务端生成配对链接后,把完整链接粘贴到下面。链接形如
+        <code>http://主机:端口/api/browser/pairing?p=一次性码</code>。配对成功后会保存设备凭证并自动连接。
+      </p>
+      <label for="pairing-link">配对链接</label>
+      <textarea id="pairing-link" rows="2" placeholder="http://192.168.1.10:5050/api/browser/pairing?p=xxxxxxxx" spellcheck="false"></textarea>
+      <label for="device-name">设备名称</label>
+      <input id="device-name" type="text" maxlength="100" placeholder="Chrome on Windows" />
+      <div class="row">
+        <button id="pair-btn" class="btn primary">开始配对</button>
+        <span id="pair-msg" class="msg" role="status"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>当前状态</h2>
+      <dl class="kv">
+        <dt>服务器</dt>
+        <dd id="st-origin">-</dd>
+        <dt>设备名称</dt>
+        <dd id="st-device">-</dd>
+        <dt>连接状态</dt>
+        <dd id="st-conn">-</dd>
+        <dt>令牌有效期至</dt>
+        <dd id="st-expiry">-</dd>
+      </dl>
+    </section>
+
+    <section class="card danger">
+      <h2>断开</h2>
+      <p class="muted">断开连接、关闭任务窗口并清除本机保存的设备凭证;之后需要重新配对。</p>
+      <button id="reset-btn" class="btn danger-btn">断开并清除凭证</button>
+    </section>
+  </main>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

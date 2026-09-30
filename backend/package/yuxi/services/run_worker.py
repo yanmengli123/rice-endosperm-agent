@@ -18,6 +18,12 @@ from yuxi.agents.mcp.execution import (
 )
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.agents.skills.service import init_builtin_skills
+from yuxi.agents.toolkits.browser.gateway_client import (
+    BrowserExecutionContext,
+    end_browser_task_best_effort,
+    reset_browser_execution_context,
+    set_browser_execution_context,
+)
 from yuxi.config import config as sys_config
 from yuxi.knowledge.graphs.doclex.service import prewarm_doclex_for_kb
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
@@ -562,6 +568,35 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
             yield _STREAM_WAITING
 
 
+async def _emit_browser_guard_trace(run_id: str) -> None:
+    """浏览器诚实性门禁：browser_enabled 轮若全程零审计，发用户可见轨迹事件。
+
+    模型可能在未实际调用浏览器工具的情况下声称已完成操作（幻觉式合规）；
+    审计表是唯一权威。零审计时明示事实，把静默幻觉变成可见、可查询的信号
+    （与 answer.source_guard.completed 同一轨迹模式）。事件绝不影响发布路径。
+    """
+    try:
+        from yuxi.services.browser_gateway_service import count_run_commands
+        from yuxi.trace import emit_trace
+
+        async with pg_manager.get_async_session_context() as db:
+            audit_count = await count_run_commands(db, run_id=run_id)
+        emit_trace(
+            category="ANSWER",
+            operation="browser_guard",
+            event_type="answer.browser_guard.completed",
+            title="本机浏览器核验",
+            summary=(
+                f"本轮浏览器工具实际调用 {audit_count} 次"
+                + ("——回答中关于浏览器操作的描述未经实际执行，请谨慎采信" if audit_count == 0 else "")
+            ),
+            attributes={"browser_audit_count": audit_count, "invoked": audit_count > 0},
+            visibility="USER",
+        )
+    except Exception as error:  # noqa: BLE001 —— 门禁绝不影响 run 终态
+        logger.warning(f"browser guard trace skipped: {type(error).__name__}")
+
+
 async def process_agent_run(ctx, run_id: str):
     """执行队列中的 AgentRun，并只从 run 列和输入消息恢复运行参数。"""
     run = await _get_run(run_id)
@@ -690,6 +725,7 @@ async def process_agent_run(ctx, run_id: str):
         "mention_resolution": payload.get("mention_resolution"),
         "user_credential": payload.get("user_credential"),
         "policy_version": payload.get("policy_version"),
+        "browser_enabled": bool(payload.get("browser_enabled")),
         "run_type": run_type,
         "created_by_run_id": run.created_by_run_id,
     }
@@ -778,6 +814,21 @@ async def process_agent_run(ctx, run_id: str):
     else:
         mcp_execution_token = set_mcp_execution_context(
             McpExecutionContext(
+                tenant_id=int(run.tenant_id),
+                uid=str(user.uid),
+                thread_id=thread_id,
+                run_id=run_id,
+                agent_slug=agent_slug,
+            )
+        )
+    # 本机浏览器执行身份与 MCP 同边界设置（同一段消费语义，见上注释）：
+    # chat_service 生成器内 set 的值只活在首次激活的那个 Task，工具节点读不到；
+    # 仅 browser_enabled 轮激活；缺租户快照时跳过，工具以 BROWSER_CONTEXT_MISSING
+    # 显式失败（fail-closed），与 MCP 审计缺口的处理一致。
+    browser_execution_token = None
+    if meta.get("browser_enabled") and run.tenant_id is not None:
+        browser_execution_token = set_browser_execution_context(
+            BrowserExecutionContext(
                 tenant_id=int(run.tenant_id),
                 uid=str(user.uid),
                 thread_id=thread_id,
@@ -1040,6 +1091,12 @@ async def process_agent_run(ctx, run_id: str):
         )
         return
     finally:
+        # 浏览器任务会话回收：在 worker Task 边界执行（工具继承的同一实例）；
+        # ended 标志与 chat_service 生成器内的 best-effort 清理幂等互斥。
+        if browser_execution_token is not None:
+            await end_browser_task_best_effort()
+            await _emit_browser_guard_trace(run_id)
+            reset_browser_execution_context(browser_execution_token)
         # 与上方 set_mcp_execution_context 配对；跨 Context 时安全降级为 no-op。
         reset_mcp_execution_context(mcp_execution_token)
         end_artifact_accumulation(artifact_accumulation_token)

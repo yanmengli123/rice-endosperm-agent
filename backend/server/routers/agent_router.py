@@ -120,6 +120,13 @@ class AgentRunCreate(BaseModel):
             "由服务端统一解析、鉴权并冻结；不一致返回 422 mention_rejected。"
         ),
     )
+    browser_enabled: bool = Field(
+        False,
+        description=(
+            "可选，本机浏览器开关。True 时 run 冻结该标志并装配 browser 工具组；"
+            "配对/在线校验在工具执行期进行。"
+        ),
+    )
 
 
 def _backend_info(info: dict) -> dict:
@@ -499,6 +506,7 @@ async def create_agent_run(
         resume=payload.resume,
         created_by_run_id=payload.created_by_run_id,
         mentions=payload.mentions,
+        browser_enabled=bool(payload.browser_enabled),
     )
 
 

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>语析本机浏览器连接</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="head">
+    <img src="icons/icon48.png" class="logo" alt="语析" />
+    <div class="head-text">
+      <h1>语析本机浏览器连接</h1>
+      <p id="version" class="muted small"></p>
+    </div>
+  </header>
+
+  <section class="card">
+    <div class="status-row">
+      <span id="status-dot" class="dot off"></span>
+      <span id="status-text">读取中…</span>
+    </div>
+    <p id="server-line" class="muted small"></p>
+    <p id="task-line" class="muted small"></p>
+  </section>
+
+  <section class="card">
+    <p id="tab-title" class="tab-title">读取中…</p>
+    <button id="borrow-btn" class="btn primary" disabled></button>
+    <p id="borrow-hint" class="muted small"></p>
+  </section>
+
+  <footer class="foot">
+    <button id="open-options" class="btn">打开设置页</button>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

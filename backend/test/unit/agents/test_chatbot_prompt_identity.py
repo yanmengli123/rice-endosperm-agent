@@ -24,3 +24,12 @@ def test_identity_guard_is_appended_after_custom_prompt():
 
     assert prompt.index(custom_prompt) < prompt.index(IDENTITY_SYSTEM_PROMPT.strip())
     assert prompt.endswith(IDENTITY_SYSTEM_PROMPT.strip())
+
+
+def test_browser_prompt_is_injected_only_when_enabled():
+    disabled = build_prompt_with_context(SimpleNamespace(system_prompt="", browser_enabled=False))
+    enabled = build_prompt_with_context(SimpleNamespace(system_prompt="", browser_enabled=True))
+
+    assert "本机浏览器执行约束" not in disabled
+    assert "本机浏览器执行约束" in enabled
+    assert "browser_get_status" in enabled
