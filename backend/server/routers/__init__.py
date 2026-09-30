@@ -6,6 +6,8 @@ from server.routers.agent_invocation_router import agent_invocation_router
 from server.routers.agent_router import agent_router
 from server.routers.auth_dept_router import department
 from server.routers.auth_router import auth
+from server.routers.browser_router import router as browser_router
+from server.routers.channel_router import channel_router, webhook_router
 from server.routers.chat_router import chat
 from server.routers.dashboard_router import dashboard
 from server.routers.filesystem_router import filesystem_router
@@ -47,6 +49,9 @@ router.include_router(user_router)  # /api/user/* 用户级配置与凭据
 router.include_router(filesystem_router)  # /api/viewer/filesystem/* 工作台文件系统视图
 router.include_router(workspace)  # /api/workspace/* 用户个人工作区
 router.include_router(mention_router)  # /api/mention/* 提及文件搜索接口
+router.include_router(channel_router)  # /api/channels/* 渠道应用管理（admin）
+router.include_router(webhook_router)  # /api/channels/*/webhook/* 平台回调（匿名，验签即认证）
+router.include_router(browser_router)  # /api/browser/* 本机浏览器接入（配对/设备/扩展 WS/内部 dispatch）
 
 if not _LITE_MODE:
     from server.routers.graph_import_router import graph_import

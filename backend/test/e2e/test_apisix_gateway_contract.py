@@ -27,6 +27,8 @@ GATEWAY_URL = os.getenv("E2E_GATEWAY_URL", "http://127.0.0.1:9088").rstrip("/")
 
 # 桌面端 yuxi.rs 实际调用的、且必须经网关放行的路由（uri, methods）。
 REQUIRED_ROUTES: dict[str, set[str]] = {
+    "/api/browser/devices": {"GET"},
+    "/api/browser/devices/*": {"DELETE"},
     "/api/chat/attachments/tmp": {"POST"},
     "/api/chat/attachments/tmp/parse": {"POST"},
     "/api/chat/thread/:thread_id/attachments/confirm": {"POST"},
@@ -45,6 +47,12 @@ REQUIRED_ROUTES: dict[str, set[str]] = {
     "/api/chat/thread/:thread_id/artifacts/save": {"POST"},
     # 证据平面（citation_ready v2 图卡取图）：仅 GET，鉴权与归属由上游承担。
     "/api/knowledge/databases/:kb_id/documents/:file_id/revisions/:revision_id/assets/*": {"GET"},
+    # 渠道平台回调（匿名 + 平台验签 + 路径随机段）：GET 用于企微/公众号 URL 校验。
+    "/api/channels/feishu/webhook/*": {"GET", "POST"},
+    "/api/channels/wecom/webhook/*": {"GET", "POST"},
+    "/api/channels/wechat_oa/webhook/*": {"GET", "POST"},
+    "/api/channels/dingtalk/webhook/*": {"GET", "POST"},
+    "/api/channels/telegram/webhook/*": {"POST"},
 }
 
 
@@ -159,15 +167,12 @@ async def test_live_knowledge_asset_route_hits_upstream_auth_not_404() -> None:
     try:
         async with httpx.AsyncClient(base_url=GATEWAY_URL, timeout=10.0) as client:
             response = await client.get(
-                "/api/knowledge/databases/probe-kb/documents/probe-file"
-                "/revisions/probe-rev/assets/probe-figure.png"
+                "/api/knowledge/databases/probe-kb/documents/probe-file/revisions/probe-rev/assets/probe-figure.png"
             )
             assert response.status_code != 404, (
                 "知识库资产路由经网关 404：apisix.yaml 未放行或容器未重建（改配置必须 force-recreate）"
             )
-            assert response.status_code in (401, 403), (
-                f"未带凭证的资产请求意外状态 {response.status_code}"
-            )
+            assert response.status_code in (401, 403), f"未带凭证的资产请求意外状态 {response.status_code}"
     except httpx.ConnectError:
         pytest.skip(f"网关不可达：{GATEWAY_URL}")
 

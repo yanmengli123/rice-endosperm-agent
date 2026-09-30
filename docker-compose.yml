@@ -138,6 +138,49 @@ services:
       retries: 12
       start_period: 20s
 
+  # 渠道网关运行时：持有长连接/轮询型入站传输（当前 Telegram getUpdates；
+  # webhook 型平台不经过本进程）。与 api/worker 共镜像。
+  # 单副本运行：多副本不会出错（每 app 一把 Redis 单活锁，败者 standby），
+  # 但长轮询型传输只有持锁者工作，扩副本无收益——扩容请扩 webhook 型平台。
+  channels:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: yuxi-api:${YUXI_VERSION:-0.7.1}
+    container_name: channels-dev
+    working_dir: /app
+    volumes:
+      - ./backend/server:/app/server
+      - ./backend/package:/app/package
+      - ./docker/volumes/yuxi:/app/saves
+      - ./docker/volumes/models:/app/models
+      - ./.env:/app/.env
+      - ./backend/pyproject.toml:/app/pyproject.toml
+      - ./backend/uv.lock:/app/uv.lock
+    networks:
+      - app-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      <<: *api-worker-env
+    command: uv run --no-sync --no-dev python -m server.channels_main
+    restart: unless-stopped
+    # 健康检查锚定运行时心跳文件（每 60s 刷新，容忍 200s 缺失）：
+    # 「进程活着但监督/心跳循环卡死」也能被判出，而非只测 TCP 可达。
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,time; assert time.time()-os.path.getmtime('/tmp/channels_heartbeat')<200\""]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 45s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   worker:
     build:
       context: .

@@ -1553,3 +1553,239 @@ class RunArtifact(Base):
             "media_type": self.media_type,
             "created_at": format_utc_datetime(self.created_at),
         }
+
+
+# ---------------------------------------------------------------------------
+# 多渠道网关（migration 0057）：渠道应用、终端用户绑定、会话映射、收发流水、
+# 出站 outbox 与绑定配对。渠道层只做协议翻译，所有消息最终是标准 AgentRun。
+# ---------------------------------------------------------------------------
+
+CHANNEL_TYPES = ("feishu", "wecom", "wechat_oa", "dingtalk", "telegram")
+CHANNEL_MESSAGE_INBOUND = "in"
+CHANNEL_MESSAGE_OUTBOUND = "out"
+CHANNEL_MESSAGE_STATUSES = ("received", "ignored", "rejected", "dispatched", "replied", "failed")
+CHANNEL_OUTBOUND_STATUSES = ("PENDING", "PUSHED", "DEAD")
+CHANNEL_PAIRING_STATUSES = ("pending", "bound", "expired")
+
+
+class ChannelApp(Base):
+    """租户级渠道应用：一个飞书自建应用 / 企微自建应用 / 公众号 / Telegram Bot。
+
+    - ``credentials_ciphertext`` 打包该平台全部长期密钥（app_secret、corp_secret、
+      encrypt_key、encoding_aes_key、webhook_secret 等，JSON 后整体加密），
+      AAD 绑定 ``channel-app:{tenant_id}:{channel_type}:{platform_app_id}``；
+    - ``path_token_hash`` 是 webhook 路径随机段的哈希（防扫描），明文只在创建/
+      重置时回显一次；
+    - ``service_uid`` 是未个人绑定时承担 run 的组织级服务账号。
+    """
+
+    __tablename__ = "channel_apps"
+    __table_args__ = (
+        Index("uq_channel_apps_tenant_type_app", "tenant_id", "channel_type", "platform_app_id", unique=True),
+        Index("uq_channel_apps_path_token", "channel_type", "path_token_hash", unique=True),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    channel_type = Column(String(32), nullable=False)
+    name = Column(String(128), nullable=False)
+    platform_app_id = Column(String(128), nullable=False)
+    platform_agent_id = Column(String(128), nullable=True, comment="企微 agentid 等二级标识")
+    credentials_ciphertext = Column(Text, nullable=False, comment="AES-256-GCM 加密的平台密钥 JSON")
+    credentials_masked_hint = Column(String(255), nullable=True)
+    path_token_hash = Column(String(64), nullable=False)
+    service_uid = Column(String(64), nullable=False, index=True, comment="组织级服务账号 uid")
+    config = Column(
+        JSON,
+        nullable=False,
+        default=dict,
+        comment="{bound_agent_slug, allowed_chats, mention_only, daily_limit, push_placeholder}",
+    )
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    last_inbound_at = Column(DateTime(timezone=True), nullable=True)
+    last_push_at = Column(DateTime(timezone=True), nullable=True)
+    created_by = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "channel_type": self.channel_type,
+            "name": self.name,
+            "platform_app_id": self.platform_app_id,
+            "platform_agent_id": self.platform_agent_id,
+            "credentials_masked_hint": self.credentials_masked_hint,
+            "service_uid": self.service_uid,
+            "config": self.config or {},
+            "is_enabled": bool(self.is_enabled),
+            "last_inbound_at": format_utc_datetime(self.last_inbound_at),
+            "last_push_at": format_utc_datetime(self.last_push_at),
+            "created_by": self.created_by,
+            "created_at": format_utc_datetime(self.created_at),
+        }
+
+
+class ChannelEndUser(Base):
+    """渠道终端用户：平台身份（open_id/userid/openid）与 Yuxi 用户的可选绑定。"""
+
+    __tablename__ = "channel_end_users"
+    __table_args__ = (Index("uq_channel_end_users", "channel_app_id", "platform_user_id", unique=True),)
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    channel_app_id = Column(BigIntPk, ForeignKey("channel_apps.id", ondelete="CASCADE"), nullable=False, index=True)
+    platform_user_id = Column(String(128), nullable=False)
+    display_name = Column(String(255), nullable=True)
+    bound_uid = Column(String(64), nullable=True, index=True, comment="绑定的 Yuxi 用户 uid；空则走服务账号")
+    bound_at = Column(DateTime(timezone=True), nullable=True)
+    consent_at = Column(DateTime(timezone=True), nullable=True, comment="绑定时的知情同意时间")
+    unbound_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "channel_app_id": self.channel_app_id,
+            "platform_user_id": self.platform_user_id,
+            "display_name": self.display_name,
+            "bound_uid": self.bound_uid,
+            "bound_at": format_utc_datetime(self.bound_at),
+            "consent_at": format_utc_datetime(self.consent_at),
+            "unbound_at": format_utc_datetime(self.unbound_at),
+            "created_at": format_utc_datetime(self.created_at),
+        }
+
+
+class ChannelChat(Base):
+    """渠道会话到 Yuxi thread 的映射：私聊与群聊统一按 chat 建线程。
+
+    身份切换（终端用户绑定/解绑）导致会话所有者变化时换新线程，旧行保留审计。
+    """
+
+    __tablename__ = "channel_chats"
+    __table_args__ = (Index("uq_channel_chats", "channel_app_id", "platform_chat_id", "owner_uid", unique=True),)
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    channel_app_id = Column(BigIntPk, ForeignKey("channel_apps.id", ondelete="CASCADE"), nullable=False, index=True)
+    platform_chat_id = Column(String(255), nullable=False)
+    chat_type = Column(String(16), nullable=False, default="p2p", comment="p2p|group")
+    owner_uid = Column(String(64), nullable=False, comment="当前 thread 归属的执行账号 uid")
+    thread_id = Column(String(128), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class ChannelMessage(Base):
+    """渠道收发流水：入站行在落库瞬间获得唯一性（幂等权威），出站行关联 outbox。"""
+
+    __tablename__ = "channel_messages"
+    __table_args__ = (
+        Index(
+            "uq_channel_messages_inbound",
+            "channel_app_id",
+            "platform_message_id",
+            unique=True,
+            postgresql_where=text("direction = 'in'"),
+            sqlite_where=text("direction = 'in'"),
+        ),
+        Index("ix_channel_messages_app_created", "channel_app_id", "created_at"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    channel_app_id = Column(BigIntPk, ForeignKey("channel_apps.id", ondelete="CASCADE"), nullable=False, index=True)
+    direction = Column(String(8), nullable=False, comment="in|out")
+    platform_message_id = Column(String(128), nullable=True)
+    platform_chat_id = Column(String(255), nullable=False, index=True)
+    platform_user_id = Column(String(128), nullable=True)
+    chat_type = Column(String(16), nullable=False, default="p2p")
+    content_digest = Column(String(255), nullable=True, comment="PII 掩码后的内容摘要，原始报文不进日志")
+    payload = Column(JSON, nullable=False, default=dict, comment="归一化 ChannelEnvelope（入站）/ 回复载荷（出站）")
+    run_id = Column(String(64), nullable=True, index=True)
+    status = Column(String(16), nullable=False, default="received", index=True)
+    status_detail = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, index=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "channel_app_id": self.channel_app_id,
+            "direction": self.direction,
+            "platform_message_id": self.platform_message_id,
+            "platform_chat_id": self.platform_chat_id,
+            "platform_user_id": self.platform_user_id,
+            "chat_type": self.chat_type,
+            "content_digest": self.content_digest,
+            "run_id": self.run_id,
+            "status": self.status,
+            "status_detail": self.status_detail,
+            "created_at": format_utc_datetime(self.created_at),
+        }
+
+
+class ChannelOutboundOutbox(Base):
+    """渠道出站 outbox：可靠推送的权威，relay 以 claim/lease 消费，指数退避封顶后进 DEAD。"""
+
+    __tablename__ = "channel_outbound_outbox"
+    __table_args__ = (Index("ix_channel_outbound_status_due", "status", "next_attempt_at"),)
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    channel_app_id = Column(BigIntPk, ForeignKey("channel_apps.id", ondelete="CASCADE"), nullable=False, index=True)
+    channel_message_id = Column(
+        BigIntPk, ForeignKey("channel_messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id = Column(String(64), nullable=True)
+    payload = Column(JSON, nullable=False, default=dict, comment="{kind, chat, chunks, fallback_text}")
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+    status = Column(String(16), nullable=False, default="PENDING", index=True)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    lease_until = Column(DateTime(timezone=True), nullable=True)
+    lease_owner = Column(String(64), nullable=True)
+    last_error = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    pushed_at = Column(DateTime(timezone=True), nullable=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "channel_app_id": self.channel_app_id,
+            "channel_message_id": self.channel_message_id,
+            "run_id": self.run_id,
+            "attempts": self.attempts,
+            "max_attempts": self.max_attempts,
+            "status": self.status,
+            "last_error": self.last_error,
+            "created_at": format_utc_datetime(self.created_at),
+            "pushed_at": format_utc_datetime(self.pushed_at),
+        }
+
+
+class ChannelPairing(Base):
+    """渠道身份绑定码会话：只存哈希、10 分钟有效、一次性消费（对齐激活凭证纪律）。"""
+
+    __tablename__ = "channel_pairings"
+    __table_args__ = (Index("uq_channel_pairings_code", "code_hash", unique=True),)
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    channel_app_id = Column(BigIntPk, ForeignKey("channel_apps.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String(16), nullable=False, default="bind")
+    code_hash = Column(String(64), nullable=False)
+    created_by = Column(String(64), nullable=False, comment="发起绑定的 Yuxi 用户 uid，即绑定目标")
+    status = Column(String(16), nullable=False, default="pending")
+    bound_end_user_id = Column(BigIntPk, ForeignKey("channel_end_users.id", ondelete="SET NULL"), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+
+
+
+

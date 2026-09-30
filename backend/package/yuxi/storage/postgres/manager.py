@@ -1080,7 +1080,158 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0063_conversation_graph_snapshot", "_migration_0063_conversation_graph_snapshot"),
         ("0064_mcp_call_diagnostics", "_migration_0064_mcp_call_diagnostics"),
         ("0065_knowledge_scope_folders", "_migration_0065_knowledge_scope_folders"),
+        ("0066_channel_gateway", "_migration_0066_channel_gateway"),
     ]
+
+    async def _migration_0066_channel_gateway(self, conn) -> None:
+        """多渠道网关：渠道应用/终端用户/会话映射/收发流水/出站 outbox/绑定配对。"""
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS channel_apps (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+                    channel_type VARCHAR(32) NOT NULL,
+                    name VARCHAR(128) NOT NULL,
+                    platform_app_id VARCHAR(128) NOT NULL,
+                    platform_agent_id VARCHAR(128),
+                    credentials_ciphertext TEXT NOT NULL,
+                    credentials_masked_hint VARCHAR(255),
+                    path_token_hash VARCHAR(64) NOT NULL,
+                    service_uid VARCHAR(64) NOT NULL,
+                    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    last_inbound_at TIMESTAMPTZ,
+                    last_push_at TIMESTAMPTZ,
+                    created_by VARCHAR(64),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS channel_end_users (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+                    channel_app_id BIGINT NOT NULL REFERENCES channel_apps(id) ON DELETE CASCADE,
+                    platform_user_id VARCHAR(128) NOT NULL,
+                    display_name VARCHAR(255),
+                    bound_uid VARCHAR(64),
+                    bound_at TIMESTAMPTZ,
+                    consent_at TIMESTAMPTZ,
+                    unbound_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS channel_chats (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+                    channel_app_id BIGINT NOT NULL REFERENCES channel_apps(id) ON DELETE CASCADE,
+                    platform_chat_id VARCHAR(255) NOT NULL,
+                    chat_type VARCHAR(16) NOT NULL DEFAULT 'p2p',
+                    owner_uid VARCHAR(64) NOT NULL,
+                    thread_id VARCHAR(128) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS channel_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+                    channel_app_id BIGINT NOT NULL REFERENCES channel_apps(id) ON DELETE CASCADE,
+                    direction VARCHAR(8) NOT NULL,
+                    platform_message_id VARCHAR(128),
+                    platform_chat_id VARCHAR(255) NOT NULL,
+                    platform_user_id VARCHAR(128),
+                    chat_type VARCHAR(16) NOT NULL DEFAULT 'p2p',
+                    content_digest VARCHAR(255),
+                    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    run_id VARCHAR(64),
+                    status VARCHAR(16) NOT NULL DEFAULT 'received',
+                    status_detail VARCHAR(255),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS channel_outbound_outbox (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+                    channel_app_id BIGINT NOT NULL REFERENCES channel_apps(id) ON DELETE CASCADE,
+                    channel_message_id BIGINT NOT NULL REFERENCES channel_messages(id) ON DELETE CASCADE,
+                    run_id VARCHAR(64),
+                    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 5,
+                    status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+                    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    lease_until TIMESTAMPTZ,
+                    lease_owner VARCHAR(64),
+                    last_error VARCHAR(255),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    pushed_at TIMESTAMPTZ
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS channel_pairings (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+                    channel_app_id BIGINT NOT NULL REFERENCES channel_apps(id) ON DELETE CASCADE,
+                    kind VARCHAR(16) NOT NULL DEFAULT 'bind',
+                    code_hash VARCHAR(64) NOT NULL,
+                    created_by VARCHAR(64) NOT NULL,
+                    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                    bound_end_user_id BIGINT REFERENCES channel_end_users(id) ON DELETE SET NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    consumed_at TIMESTAMPTZ
+                )
+                """
+            )
+        )
+        statements = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_apps_tenant_type_app ON channel_apps(tenant_id, channel_type, platform_app_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_apps_path_token ON channel_apps(channel_type, path_token_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_apps_service_uid ON channel_apps(service_uid)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_end_users ON channel_end_users(channel_app_id, platform_user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_end_users_app ON channel_end_users(channel_app_id)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_end_users_bound_uid ON channel_end_users(bound_uid)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_chats ON channel_chats(channel_app_id, platform_chat_id, owner_uid)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_chats_thread ON channel_chats(thread_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_messages_inbound ON channel_messages(channel_app_id, platform_message_id) WHERE direction = 'in'",
+            "CREATE INDEX IF NOT EXISTS ix_channel_messages_app_created ON channel_messages(channel_app_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_messages_chat ON channel_messages(platform_chat_id)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_messages_run ON channel_messages(run_id)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_messages_status ON channel_messages(status)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_outbound_app ON channel_outbound_outbox(channel_app_id)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_outbound_message ON channel_outbound_outbox(channel_message_id)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_outbound_status_due ON channel_outbound_outbox(status, next_attempt_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_pairings_code ON channel_pairings(code_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_pairings_app ON channel_pairings(channel_app_id)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
 
     async def _migration_0065_knowledge_scope_folders(self, conn) -> None:
         """Allow a knowledge-scope member to freeze selected real folders."""

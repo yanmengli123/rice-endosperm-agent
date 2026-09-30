@@ -26,6 +26,12 @@ from yuxi.services.agent_run_service import (
     dispatch_pending_agent_runs,
     reconcile_stale_agent_runs,
 )
+from yuxi.services.channel_service import (
+    process_channel_message,
+    purge_channel_history,
+    relay_channel_outbox,
+    relay_channel_outbox_now,
+)
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.mcp_canary_service import run_mcp_live_canary
@@ -1099,7 +1105,14 @@ async def _worker_shutdown(ctx):
 
 
 class WorkerSettings:
-    functions = [process_agent_run, process_scientific_pdf_ingest, process_dynamic_wiki_build, prewarm_doclex_for_kb]
+    functions = [
+        process_agent_run,
+        process_scientific_pdf_ingest,
+        process_dynamic_wiki_build,
+        prewarm_doclex_for_kb,
+        process_channel_message,
+        relay_channel_outbox_now,
+    ]
     # 每 5 分钟清扫一次孤儿 run；worker 启动时也会立即执行一次。
     cron_jobs = [
         cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5))),
@@ -1108,8 +1121,12 @@ class WorkerSettings:
         cron(reconcile_dynamic_wikis, minute=set(range(0, 60))),
         # 轨迹 Outbox relay：fast-path 直发失败/worker 崩溃遗留的 PENDING 补发
         cron(relay_trace_outbox, minute=set(range(0, 60))),
+        # 渠道出站 Outbox relay：claim/lease + 指数退避，5 次后 DEAD（管理页可 requeue）
+        cron(relay_channel_outbox, minute=set(range(0, 60))),
         # 每日按有界多批追赶超过策略期限的 STANDARD 终态轨迹；数据库函数承担安全门。
         cron(purge_expired_trace_runs, hour={3}, minute={17}),
+        # 渠道历史保留期（H）：超期流水/终态 outbox/过期绑定有界清理；PENDING 绝不删
+        cron(purge_channel_history, hour={3}, minute={23}),
         # 每日 MCP live canary：离线契约证明不了远程持续可用——成功率/空结果率
         # /p95 延迟落轨迹事件（mcp.canary.*），监控侧按阈值决定升级。
         cron(run_mcp_live_canary, hour={2}, minute={30}),

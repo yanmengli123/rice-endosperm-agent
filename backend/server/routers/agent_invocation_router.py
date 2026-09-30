@@ -13,9 +13,15 @@ from yuxi.services.agent_invocation_service import (
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.auth_utils import AuthUtils
 
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.auth_middleware import get_db, get_required_user, require_scope
 
-agent_invocation_router = APIRouter(prefix="/agent-invocation", tags=["agent-invocation"])
+agent_invocation_router = APIRouter(
+    prefix="/agent-invocation",
+    tags=["agent-invocation"],
+    # agent-call/eval 均属对话调用类：空 scopes 的 external_agent Key 放行，
+    # 显式配置 scopes 的 Key 必须覆盖 agent:runs
+    dependencies=[Depends(require_scope("agent:runs"))],
+)
 
 
 class AgentCallRunCreate(BaseModel):

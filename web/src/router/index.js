@@ -98,6 +98,19 @@ const router = createRouter({
       ]
     },
     {
+      path: '/channel-manage',
+      name: 'ChannelManage',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'ChannelManageComp',
+          component: () => import('../views/ChannelManageView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+        }
+      ]
+    },
+    {
       path: '/model-manage',
       name: 'model-manage',
       component: AppLayout,

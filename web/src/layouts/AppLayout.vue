@@ -11,7 +11,8 @@ import {
   PanelLeftOpen,
   MessageCirclePlus,
   Search,
-  Users
+  Users,
+  Webhook
 } from '@lucide/vue'
 
 import { useConfigStore } from '@/stores/config'
@@ -125,6 +126,13 @@ const mainList = computed(() => {
       path: '/user-manage',
       icon: Users,
       activeIcon: Users
+    })
+
+    items.push({
+      name: '渠道接入',
+      path: '/channel-manage',
+      icon: Webhook,
+      activeIcon: Webhook
     })
   }
 

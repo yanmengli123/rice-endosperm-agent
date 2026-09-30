@@ -1,6 +1,6 @@
 import hashlib
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,8 +53,11 @@ async def _verify_api_key(key: str, db: AsyncSession) -> tuple[User | None, APIK
     return None, None
 
 
-# 获取当前用户（异步版本）
+# 获取当前用户（异步版本）。API Key 认证成功时把 purpose/scopes 写入 request.state，
+# 供 require_scope 做 Key 能力范围校验（JWT 交互登录不受 scopes 约束）。
+# request 带 None 默认值兼容既有直调测试；注解保持裸 Request 以维持 FastAPI 注入。
 async def get_current_user(
+    request: Request = None,  # type: ignore[assignment]
     authorization: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
@@ -81,6 +84,9 @@ async def get_current_user(
         if user is not None and api_key_obj is not None:
             api_key_obj.last_used_at = utc_now_naive()
             await db.commit()
+            if request is not None:
+                request.state.api_key_purpose = api_key_obj.purpose
+                request.state.api_key_scopes = api_key_obj.scopes
         return user
 
     # JWT Token 认证
@@ -193,3 +199,28 @@ async def get_superadmin_user(current_user: User = Depends(get_required_user)):
             detail="需要超级管理员权限",
         )
     return current_user
+
+
+def require_scope(scope: str):
+    """API Key 能力范围门禁。
+
+    语义（与 api_keys.scopes 列注释一致）：scopes 为空 = 仅对话调用，对话类
+    端点放行；非空列表必须包含目标 scope（或 "*"）。JWT 交互登录与
+    desktop_legacy 过渡 Key 不受约束。
+    """
+
+    async def _check_scope(request: Request) -> None:
+        purpose = getattr(request.state, "api_key_purpose", None)
+        if purpose is None or purpose == "desktop_legacy":
+            return
+        scopes = getattr(request.state, "api_key_scopes", None)
+        if not scopes:
+            return
+        if isinstance(scopes, list) and (scope in scopes or "*" in scopes):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"API Key 缺少权限范围：{scope}",
+        )
+
+    return _check_scope
