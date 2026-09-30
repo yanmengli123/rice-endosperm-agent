@@ -31,7 +31,16 @@ foreach ($path in @($bsk, $pythonw, $bridgeScript)) {
 }
 
 $user = "$env:USERDOMAIN\$env:USERNAME"
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+# Task Scheduler does not apply RestartOnFailure when a process is explicitly
+# terminated (0xC000013A), which can happen during browser/E2E cleanup.  The
+# minute trigger is a self-healing safety net: IgnoreNew makes it a no-op while
+# the long-running task is healthy and starts it again after an external kill.
+$recoveryTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date).AddSeconds(10) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1)
+$triggers = @($logonTrigger, $recoveryTrigger)
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -46,10 +55,10 @@ $daemonAction = New-ScheduledTaskAction -Execute $bsk -Argument "daemon start --
 Register-ScheduledTask `
     -TaskName $daemonTask `
     -Action $daemonAction `
-    -Trigger $trigger `
+    -Trigger $triggers `
     -Principal $principal `
     -Settings $settings `
-    -Description "Keeps the local BrowserSkill daemon available for Yuxi." `
+    -Description "Keeps the local BrowserSkill daemon available for Yuxi; recovers within one minute after an external termination." `
     -Force | Out-Null
 
 $bridgeArguments = (
@@ -60,10 +69,10 @@ $bridgeAction = New-ScheduledTaskAction -Execute $pythonw -Argument $bridgeArgum
 Register-ScheduledTask `
     -TaskName $bridgeTask `
     -Action $bridgeAction `
-    -Trigger $trigger `
+    -Trigger $triggers `
     -Principal $principal `
     -Settings $settings `
-    -Description "Authenticated host bridge from Yuxi Docker services to BrowserSkill." `
+    -Description "Authenticated host bridge from Yuxi Docker services to BrowserSkill; recovers within one minute after an external termination." `
     -Force | Out-Null
 
 if (-not (Get-NetTCPConnection -LocalPort 52800 -State Listen -ErrorAction SilentlyContinue)) {
@@ -73,4 +82,4 @@ if (-not (Get-NetTCPConnection -LocalPort $BridgePort -State Listen -ErrorAction
     Start-ScheduledTask -TaskName $bridgeTask
 }
 
-Write-Host "BrowserSkill tasks installed: $daemonTask, $bridgeTask"
+Write-Host "BrowserSkill tasks installed with one-minute self-healing: $daemonTask, $bridgeTask"

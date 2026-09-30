@@ -21,7 +21,7 @@
 ## 用户使用（BrowserSkill，本机默认）
 
 1. 安装 BrowserSkill Chrome 扩展和同版本 `bsk` CLI。扩展弹窗的地址应为 `Local · ws://127.0.0.1:52800`。
-2. 执行 `powershell -ExecutionPolicy Bypass -File scripts/start-browser-skill-bridge.ps1`。本机已注册**两个独立**登录启动任务 `Yuxi BrowserSkill Daemon`（`bsk daemon`，52800）与 `Yuxi BrowserSkill Bridge`（鉴权桥，52801），正常重启后无需手工执行。**坑**：计划任务若用 PowerShell 包一层再启动，任务结束时子进程会被一并终止——必须 daemon 与桥各建独立任务，动作直接指向可执行文件。
+2. 首次安装执行 `powershell -ExecutionPolicy Bypass -File scripts/install-browser-skill-tasks.ps1`。脚本注册**两个独立**登录启动任务 `Yuxi BrowserSkill Daemon`（`bsk daemon`，52800）与 `Yuxi BrowserSkill Bridge`（鉴权桥，52801），动作直接指向可执行文件；每分钟恢复触发器配合 `IgnoreNew`，健康时不重复启动，被外部清理终止（包括 `0xC000013A`）后最多 1 分钟自动拉起。临时前台联调才使用 `scripts/start-browser-skill-bridge.ps1`。
 3. 用 `bsk doctor --json` 验证 daemon、扩展连接和协议兼容全部通过。
 4. 启动语析。`docker-compose.override.yml` 给 api/worker 配置桥接地址并只读挂载密钥；工具箱会显示“BrowserSkill 已连接”，不再要求二次配对。
 5. 在智能推理输入框打开“本机浏览器”开关后提交任务。开关按 run 冻结；未开启时模型看不到浏览器工具。
@@ -88,7 +88,7 @@
 
 | 现象 | 排查 |
 | --- | --- |
-| BrowserSkill 显示 `Disconnected Local · ws://127.0.0.1:52800` | 执行 `bsk doctor --json`；确认 `Get-NetTCPConnection -LocalPort 52800 -State Listen` 有结果；再运行启动脚本 |
+| BrowserSkill 显示 `Disconnected Local · ws://127.0.0.1:52800` | 等待最多 1 分钟让恢复触发器拉起，再执行 `bsk doctor --json`；确认 `Get-NetTCPConnection -LocalPort 52800 -State Listen` 有结果。仍离线时重新执行 `scripts/install-browser-skill-tasks.ps1` 修复任务定义 |
 | 模型声称操作了浏览器但页面没动 | 查 `browser_command_audit`：run_id 无审计行即幻觉式合规，`answer.browser_guard.completed` 门禁轨迹会明示「未经实际执行」 |
 | 扩展已连接但语析显示离线 | 确认 52801 正在监听、api/worker 有两个 `BROWSER_SKILL_BRIDGE_*` 环境变量且密钥目录已挂载；重建 api/worker |
 | 扩展无法连接 | 配对 URL origin 是否可达；WSS 证书；APISIX 是否重建加载 `enable_websocket` 路由 |
