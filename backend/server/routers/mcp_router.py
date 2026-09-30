@@ -35,6 +35,7 @@ from yuxi.agents.mcp.service import (
     get_mcp_server,
     get_policy_disabled_tools,
     import_mcp_servers,
+    missing_env_refs,
     probe_mcp_server,
     read_mcp_resource,
     render_mcp_prompt,
@@ -182,6 +183,33 @@ async def get_server_or_404(db: AsyncSession, slug: str, *, tenant_id: int | Non
     if not server:
         raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
     return server
+
+
+def _ensure_spawnable(slug: str, server) -> None:
+    """env 声明了 ${} 引用但全部缺失 = 服务进程无法启动（如 lark-mcp 缺
+    APP_ID/APP_SECRET 时启动即退出）。spawn 前给出结构化 422，而不是让
+    管理页落到 transport/UNKNOWN 的 TaskGroup 裸 500。"""
+    missing = missing_env_refs(server.to_mcp_config())
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "mcp_credentials_missing",
+                "message": (
+                    f"MCP '{slug}' 凭据未配置：缺少环境变量 {', '.join(missing)}。"
+                    "请在部署环境 .env 设置后重启 api 与 worker 容器，或在「MCP 凭据」中提供后重试。"
+                ),
+                "missing": missing,
+            },
+        )
+
+
+def _mcp_unavailable_http_error(slug: str, e: McpHostError) -> HTTPException:
+    """host 层失败（spawn 失败/协议错误）→ 结构化 502，保留 stage/code。"""
+    return HTTPException(
+        status_code=502,
+        detail={"code": e.code or "MCP_UNAVAILABLE", "stage": e.stage, "message": f"MCP '{slug}' 连接失败：{e}"},
+    )
 
 
 def _policy_http_error(e: PolicyError) -> HTTPException:
@@ -767,6 +795,7 @@ async def get_mcp_server_tools(
     try:
         principal = await _request_principal(db, current_user)
         server = await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
+        _ensure_spawnable(slug, server)
         disabled_tools = set(server.disabled_tools or []) | set(get_policy_disabled_tools(slug))
 
         try:
@@ -813,6 +842,9 @@ async def get_mcp_server_tools(
                 "data": tool_list,
                 "total": len(tool_list),
             }
+        except McpHostError as tool_error:
+            logger.error(f"Failed to get tools from MCP server '{slug}': [{tool_error.stage}/{tool_error.code}]")
+            raise _mcp_unavailable_http_error(slug, tool_error) from tool_error
         except Exception as tool_error:
             logger.error(f"Failed to get tools from MCP server '{slug}': {tool_error}")
             raise HTTPException(status_code=500, detail=f"获取工具失败: {str(tool_error)}")
@@ -831,6 +863,9 @@ async def refresh_mcp_capabilities_route(
 ):
     principal = await _request_principal(db, current_user)
     await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
+    server = await get_mcp_server(db, slug, tenant_id=principal.tenant_id)
+    if server is not None:
+        _ensure_spawnable(slug, server)
     token = set_mcp_execution_context(McpExecutionContext(tenant_id=principal.tenant_id, uid=principal.uid))
     try:
         snapshot = await discover_mcp_capabilities(slug, db=db)
@@ -885,7 +920,8 @@ async def refresh_mcp_server_tools(
     """刷新 MCP 服务器的工具列表（清除缓存重新获取）"""
     try:
         principal = await _request_principal(db, current_user)
-        await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
+        server = await get_server_or_404(db, slug, tenant_id=principal.tenant_id)
+        _ensure_spawnable(slug, server)
 
         try:
             # 获取所有工具（不过滤 disabled_tools）
@@ -916,6 +952,9 @@ async def refresh_mcp_server_tools(
                 "enabled_count": enabled_count,
                 "disabled_count": disabled_count,
             }
+        except McpHostError as tool_error:
+            logger.error(f"Failed to refresh MCP server tools '{slug}': [{tool_error.stage}/{tool_error.code}]")
+            raise _mcp_unavailable_http_error(slug, tool_error) from tool_error
         except Exception as tool_error:
             raise HTTPException(status_code=500, detail=f"刷新失败: {str(tool_error)}")
     except HTTPException:

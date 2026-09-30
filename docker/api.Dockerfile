@@ -5,6 +5,14 @@ COPY --from=node:24-slim /usr/local/bin /usr/local/bin
 COPY --from=node:24-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=node:24-slim /usr/local/include /usr/local/include
 COPY --from=node:24-slim /usr/local/share /usr/local/share
+
+# Feishu/Lark 官方 OpenAPI MCP（内置 "feishu"）：版本钉死 + 全局安装进镜像，
+# 运行期零 npm 拉取（冷启动快、不受包镜像网络抖动影响）。--ignore-scripts
+# 跳过 keytar 的 node-gyp 原生编译（slim 镜像无编译链且无 libsecret）——应用
+# 身份（tenant_access_token）不依赖它，运行时自动降级内存 token store（已实测）。
+RUN npm i -g @larksuiteoapi/lark-mcp@0.5.1 --ignore-scripts --omit=optional --no-audit --no-fund \
+    && lark-mcp --version
+
 # 设置工作目录
 WORKDIR /app
 

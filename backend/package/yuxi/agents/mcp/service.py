@@ -190,6 +190,31 @@ _DEFAULT_MCP_SERVERS = {
         "source_type": SOURCE_TYPE_BUILTIN,
         "source_ref": "builtin:ricekb-profile@1.0.0",
     },
+    # 飞书/Lark 官方 OpenAPI MCP（@larksuiteoapi/lark-mcp）：把 IM 收发、多维表格、
+    # 文档、云盘、知识库、通讯录等飞书操作暴露给智能体。preset.default 是官方
+    # 安全收敛集（0.5.1 实测 19 个工具）。凭据走平台级环境变量（${} 引用，只存
+    # 引用名不存明文）：租户级共享配置在 .env 里设 LARK_MCP_APP_ID/SECRET，
+    # 也可由用户经 MCP 凭据管理按人提供同名条目。镜像内全局安装（api.Dockerfile
+    # 钉死 0.5.1 + --ignore-scripts），运行期零 npm 拉取。
+    "feishu": {
+        "name": "Feishu/Lark",
+        "command": "/usr/local/bin/lark-mcp",
+        "args": ["mcp", "-t", "preset.default", "-l", "zh"],
+        "transport": "stdio",
+        "description": "飞书/Lark 官方 OpenAPI MCP：preset.default 收敛工具集（IM 消息收发、"
+        "多维表格、文档创建/搜索/导入、云盘、知识库节点、通讯录 user id 解析），"
+        "应用身份 tenant_access_token。需在凭据中提供 LARK_MCP_APP_ID / LARK_MCP_APP_SECRET。"
+        "来源 @larksuiteoapi/lark-mcp 0.5.1",
+        "icon": "🕊️",
+        "tags": ["内置", "飞书", "IM", "协作"],
+        "timeout": 120,
+        "env": {
+            "APP_ID": "${LARK_MCP_APP_ID}",
+            "APP_SECRET": "${LARK_MCP_APP_SECRET}",
+        },
+        "source_type": SOURCE_TYPE_BUILTIN,
+        "source_ref": "builtin:feishu@0.5.1",
+    },
     "gene-authority": {
         "name": "Gene Authority APIs",
         "command": "/usr/local/bin/yuxi-genomics-mcp",
@@ -487,6 +512,27 @@ def _genomics_mcp_runtime_artifact(slug: str) -> dict[str, Any] | None:
 # =============================================================================
 # === 配置归一化（legacy 行 -> host 可用配置）===
 # =============================================================================
+
+
+def missing_env_refs(server_config: dict[str, Any]) -> list[str]:
+    """配置 env 段声明的 ${VAR} 引用中，当前进程环境缺失的变量名清单。
+
+    空 env 段返回空列表。全部声明引用缺失时进程通常无法启动（如 lark-mcp
+    缺 APP_ID/APP_SECRET 时启动即退出），spawn 边界可据此给出结构化错误，
+    而不是把 transport 层的 TaskGroup 异常裸露成 500。
+    """
+    env = server_config.get("env")
+    if not isinstance(env, dict) or not env:
+        return []
+    _, missing = expand_env_refs(env)
+    names: list[str] = []
+    for item in missing:
+        # expand_env_refs 的缺失条目形如 "KEY=${VAR}"，取 VAR 名
+        if "=" in item and "${" in item:
+            names.append(item.split("${", 1)[1].rstrip("}"))
+        else:
+            names.append(item)
+    return sorted(set(names))
 
 
 def build_runtime_config(slug: str, server_config: dict[str, Any]) -> dict[str, Any]:
@@ -1673,6 +1719,19 @@ async def probe_mcp_server(
             )
 
     server_config = server.to_mcp_config()
+    # 声明了 env 引用且全部缺失 = 进程无法启动（spawn 必失败）。在 config 阶段
+    # 给出结构化结论，而不是让连接测试落在 transport/UNKNOWN 的 TaskGroup 上。
+    missing_env = missing_env_refs(server_config)
+    if missing_env:
+        return await _finish(
+            error_result(
+                STAGE_CONFIG,
+                "CREDENTIALS_MISSING",
+                f"MCP '{slug}' 凭据未配置：缺少环境变量 {', '.join(missing_env)}"
+                "（在部署环境 .env 设置后需重启 api 与 worker 容器）",
+                retryable=False,
+            )
+        )
     if server.credential_id is not None:
         effective_tenant = int(tenant_id or server.tenant_id or 0)
         if not effective_tenant or not uid:
