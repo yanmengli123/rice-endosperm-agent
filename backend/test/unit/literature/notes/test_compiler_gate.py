@@ -59,7 +59,10 @@ async def test_compile_l1_l2_uses_model_chain_and_splits_output(monkeypatch):
         seen_specs.append(model_spec)
         return adapter
 
-    monkeypatch.setattr(compiler, "select_model", _fake_select_model)
+    # select_model 已延迟导入（P6b 防循环）——patch 源模块
+    import yuxi.models.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "select_model", _fake_select_model)
     result = await compiler.compile_l1_l2(_META, _PARAGRAPHS)
 
     assert seen_specs, "必须经 yuxi.models.select_model（不引 openai 直连）"

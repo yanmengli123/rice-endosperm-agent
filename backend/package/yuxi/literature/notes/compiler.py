@@ -21,9 +21,12 @@ from typing import Any
 from yuxi import config
 from yuxi.literature.boundaries import assert_not_evidence_capable
 from yuxi.literature.notes import prompts, renderers
-from yuxi.models.chat import select_model
 
 logger = logging.getLogger(__name__)
+
+# 注意：select_model 必须在调用时延迟导入——顶层导入会形成
+# yuxi.models.chat → yuxi.agents（toolkits/__init__ 拉起本包）→ 本包
+# → yuxi.models.chat 的循环（P6b 工具注册引入，test_benchmark_generation 收集期暴露）。
 
 LITERATURE_NOTES_KB_TYPE = "literature_notes"
 
@@ -54,6 +57,8 @@ def split_l1_l2(data: dict) -> tuple[dict, dict | None]:
 
 async def _complete(system: str, user: str) -> str:
     """经 Yuxi 模型链完成一次补全（system+user 两消息，前缀缓存友好）。"""
+    from yuxi.models.chat import select_model  # noqa: PLC0415 - 延迟导入防循环（见模块头）
+
     model = select_model(model_spec=config.default_model)
     messages = []
     if system:
