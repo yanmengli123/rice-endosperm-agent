@@ -2180,3 +2180,61 @@ class LiteratureCitation(Base):
     cited_doi = Column(String(255), nullable=False)
     cited_brief = Column(Text)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureVariant(Base):
+    """翻译/总结变体（P3，ADR-0010 决议 5：**lang 进身份**）。
+
+    D2 决策：中文变体不与英文 evidence 混用同一 quote 定位——quote_locator 只在
+    解析权威层（lang=en 的 parse_revision）上工作，变体仅是阅读派生物。
+    幂等：同 (tenant, paper, kind, lang, revision) 同 digest 不重译。
+    """
+
+    __tablename__ = "literature_variants"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "paper_id",
+            "variant_kind",
+            "lang",
+            "parse_revision_id",
+            name="uq_literature_variants_identity",
+        ),
+        Index("ix_literature_variants_paper", "tenant_id", "paper_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(
+        BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    parse_revision_id = Column(String(64), nullable=False)
+    variant_kind = Column(String(32), nullable=False)  # zh / en_zh / summary
+    lang = Column(String(8), nullable=False)  # ★ 进身份：zh / en
+    uri = Column(String(1024), nullable=False)  # kbasset:// MinIO
+    content_digest = Column(String(64), nullable=False)
+    model_id = Column(String(255))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureTranslationJob(Base):
+    """翻译任务投影（P3；状态机与编译任务同构，attempt 上限 DEAD）。"""
+
+    __tablename__ = "literature_translation_jobs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "paper_id", "variant_kind", name="uq_literature_translation_jobs_key"),
+        Index("ix_literature_translation_jobs_status", "status"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(
+        BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    variant_kind = Column(String(32), nullable=False, default="zh")
+    status = Column(String(32), nullable=False, default="PENDING")
+    attempt = Column(Integer, nullable=False, default=0)
+    variant_uri = Column(String(1024))
+    error = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)

@@ -1086,7 +1086,64 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0069_browser_schema_align", "_migration_0069_browser_schema_align"),
         ("0070_literature_reader_renders", "_migration_0070_literature_reader_renders"),
         ("0071_literature_domain", "_migration_0071_literature_domain"),
+        ("0072_literature_translation", "_migration_0072_literature_translation"),
     ]
+
+    async def _migration_0072_literature_translation(self, conn) -> None:
+        """文献域 P3：翻译变体（lang 进身份）与翻译任务（ADR-0010 决议 5/D2）。"""
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS literature_variants (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                paper_id BIGINT NOT NULL REFERENCES literature_papers(id) ON DELETE CASCADE,
+                parse_revision_id VARCHAR(64) NOT NULL,
+                variant_kind VARCHAR(32) NOT NULL,
+                lang VARCHAR(8) NOT NULL,
+                uri VARCHAR(1024) NOT NULL,
+                content_digest VARCHAR(64) NOT NULL,
+                model_id VARCHAR(255),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_variants_identity "
+            "ON literature_variants (tenant_id, paper_id, variant_kind, lang, parse_revision_id)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_variants_tenant_id ON literature_variants (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_variants_paper ON literature_variants (tenant_id, paper_id)",
+            """
+            CREATE TABLE IF NOT EXISTS literature_translation_jobs (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                paper_id BIGINT NOT NULL REFERENCES literature_papers(id) ON DELETE CASCADE,
+                variant_kind VARCHAR(32) NOT NULL DEFAULT 'zh',
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                attempt INTEGER NOT NULL DEFAULT 0,
+                variant_uri VARCHAR(1024),
+                error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_translation_jobs_key "
+            "ON literature_translation_jobs (tenant_id, paper_id, variant_kind)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_translation_jobs_status "
+            "ON literature_translation_jobs (status)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_translation_jobs_tenant_id "
+            "ON literature_translation_jobs (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_translation_jobs_paper_id "
+            "ON literature_translation_jobs (paper_id)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+        for table in ("literature_variants", "literature_translation_jobs"):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text(f"DROP POLICY IF EXISTS p_{table}_tenant ON {table}"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_tenant ON {table} USING "
+                    f"(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+                )
+            )
 
     async def _migration_0070_literature_reader_renders(self, conn) -> None:
         """文献域 P1：阅读视图渲染状态表（ADR-0010 决议 7/9；派生物，非证据）。
