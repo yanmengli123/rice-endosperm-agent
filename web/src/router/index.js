@@ -59,6 +59,19 @@ const router = createRouter({
       ]
     },
     {
+      path: '/literature',
+      name: 'literature',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'LiteratureComp',
+          component: () => import('../views/LiteratureView.vue'),
+          meta: { keepAlive: true, requiresAuth: true }
+        }
+      ]
+    },
+    {
       path: '/workspace',
       name: 'workspace',
       component: AppLayout,

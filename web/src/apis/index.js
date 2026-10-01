@@ -6,6 +6,7 @@
 // 导出API模块
 export * from './system_api' // 系统管理API
 export * from './knowledge_api' // 知识库管理API
+export * from './literature_api' // 文献域API（ADR-0010）
 export * from './graph_api' // 图谱API
 export * from './agent_api' // 智能体API
 export * from './tasker' // 任务管理API

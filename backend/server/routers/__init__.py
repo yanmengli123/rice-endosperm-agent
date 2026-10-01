@@ -9,6 +9,7 @@ from server.routers.auth_router import auth
 from server.routers.browser_router import router as browser_router
 from server.routers.channel_router import channel_router, webhook_router
 from server.routers.chat_router import chat
+from server.routers.literature_router import literature
 from server.routers.dashboard_router import dashboard
 from server.routers.filesystem_router import filesystem_router
 from server.routers.mcp_router import mcp
@@ -52,6 +53,7 @@ router.include_router(mention_router)  # /api/mention/* 提及文件搜索接口
 router.include_router(channel_router)  # /api/channels/* 渠道应用管理（admin）
 router.include_router(webhook_router)  # /api/channels/*/webhook/* 平台回调（匿名，验签即认证）
 router.include_router(browser_router)  # /api/browser/* 本机浏览器接入（配对/设备/扩展 WS/内部 dispatch）
+router.include_router(literature)  # /api/literature/* 文献域：库/笔记/翻译/依附资料/任务
 
 if not _LITE_MODE:
     from server.routers.graph_import_router import graph_import
