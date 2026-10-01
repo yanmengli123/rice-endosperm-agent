@@ -1083,6 +1083,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0066_channel_gateway", "_migration_0066_channel_gateway"),
         ("0067_local_browser_gateway", "_migration_0067_local_browser_gateway"),
         ("0068_browser_policy_and_leases", "_migration_0068_browser_policy_and_leases"),
+        ("0069_browser_schema_align", "_migration_0069_browser_schema_align"),
     ]
 
     async def _migration_0066_channel_gateway(self, conn) -> None:
@@ -1343,7 +1344,9 @@ class PostgresManager(metaclass=SingletonMeta):
                     "FOR EACH ROW EXECUTE FUNCTION browser_command_audit_append_only()"
                 )
             )
-        # 租户 RLS（纵深防御；主边界仍是 repository 过滤）
+        # 租户 RLS：注意——应用连接用户即表 owner，owner 默认不受 RLS 约束（未 FORCE，
+        # 也不能 FORCE：扩展配对/WS 鉴权/worker dispatch 等路径不设置 yuxi.tenant_id
+        # 会话变量，FORCE 后将一行都查不到）。权威隔离边界是 repository 层过滤。
         for table in (
             "browser_pairing_links",
             "browser_device_authorizations",
@@ -1412,7 +1415,10 @@ class PostgresManager(metaclass=SingletonMeta):
         )
         for statement in statements:
             await conn.execute(text(statement))
-        # 租户 RLS（纵深防御；主边界仍是 repository 过滤）
+        # 租户 RLS：注意——应用连接用户即表 owner，PG 中 owner 默认不受 RLS 约束
+        # （本迁移未 FORCE，FORCE 会在扩展配对/WS 鉴权/worker dispatch 等未设置
+        #  yuxi.tenant_id 会话变量的路径上直接查空）。租户隔离的权威边界始终是
+        # repository 层 tenant+uid 过滤；下列策略仅对未来非 owner 角色生效。
         for table in ("browser_domain_policies", "browser_connection_leases"):
             await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
             policy_name = f"p_{table}_tenant"
@@ -1430,6 +1436,79 @@ class PostgresManager(metaclass=SingletonMeta):
                         "WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)"
                     )
                 )
+
+    async def _migration_0069_browser_schema_align(self, conn) -> None:
+        """本机浏览器 schema 对齐（ORM ↔ 迁移收敛）+ 令牌轮换宽限列。
+
+        0067/0068 的索引名与 ORM index=True 生成名不一致，`CREATE INDEX IF NOT EXISTS`
+        只按名字判重，导致同列双索引（audit 三组、leases 两组、配对/设备表唯一索引双份）；
+        存量升级库还缺 ORM 侧索引。本迁移以 ORM 命名为唯一权威：
+        先删迁移命名的冗余索引，再幂等补齐 ORM 命名索引；同时把
+        browser_domain_policies.domains 从 json 收敛为迁移声明的 jsonb（ORM 已改
+        JSONB 兼容变体），并给设备授权表加轮换宽限双哈希列。
+
+        RLS 说明：五张 browser 表的租户策略对应用连接（表 owner）不生效（PG owner
+        绕过，且未设置会话变量的路径不能 FORCE）——隔离权威在 repository 过滤。
+        """
+        # 1) 清理冗余索引（保留 ORM 命名的等价索引；唯一性由 ORM 唯一索引承接）
+        redundant_indexes = (
+            "uq_browser_pairing_links_code",
+            "uq_browser_device_authorizations_device",
+            "uq_browser_device_authorizations_token",
+            "ix_browser_command_audit_run",
+            "ix_browser_command_audit_device",
+            "ix_browser_command_audit_created",
+            "ix_browser_connection_leases_until",
+            "ix_browser_connection_leases_device_id",
+        )
+        for index_name in redundant_indexes:
+            await conn.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
+        # 2) 幂等补齐 ORM 命名索引（升级库缺、新装库已有则跳过）
+        orm_indexes = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_browser_pairing_links_code_hash ON browser_pairing_links(code_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_pairing_links_uid ON browser_pairing_links(uid)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_pairing_links_status ON browser_pairing_links(status)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_pairing_links_tenant_id ON browser_pairing_links(tenant_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_browser_device_authorizations_device_id"
+            " ON browser_device_authorizations(device_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_browser_device_authorizations_token_hash"
+            " ON browser_device_authorizations(token_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_device_authorizations_uid ON browser_device_authorizations(uid)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_device_authorizations_status"
+            " ON browser_device_authorizations(status)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_device_authorizations_tenant_id"
+            " ON browser_device_authorizations(tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_uid ON browser_command_audit(uid)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_run_id ON browser_command_audit(run_id)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_device_id ON browser_command_audit(device_id)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_error_code ON browser_command_audit(error_code)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_created_at ON browser_command_audit(created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_command_audit_tenant_id ON browser_command_audit(tenant_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_connection_lease_device"
+            " ON browser_connection_leases(device_id)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_connection_leases_lease_until"
+            " ON browser_connection_leases(lease_until)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_connection_leases_tenant_id ON browser_connection_leases(tenant_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_domain_policy_tenant ON browser_domain_policies(tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_browser_domain_policies_tenant_id ON browser_domain_policies(tenant_id)",
+        )
+        for statement in orm_indexes:
+            await conn.execute(text(statement))
+        # 3) domains 列类型收敛：json → jsonb（新装库由 ORM 变体直接建为 jsonb，此处幂等）
+        await conn.execute(
+            text("ALTER TABLE browser_domain_policies ALTER COLUMN domains TYPE JSONB USING domains::jsonb")
+        )
+        await conn.execute(text("ALTER TABLE browser_domain_policies ALTER COLUMN domains SET DEFAULT '[]'::jsonb"))
+        # 4) 令牌轮换宽限：token_rotated 帧丢失时旧令牌在宽限窗内仍可续连
+        await conn.execute(
+            text("ALTER TABLE browser_device_authorizations ADD COLUMN IF NOT EXISTS previous_token_hash VARCHAR(64)")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE browser_device_authorizations "
+                "ADD COLUMN IF NOT EXISTS previous_token_expires_at TIMESTAMPTZ"
+            )
+        )
 
     async def _migration_0064_mcp_call_diagnostics(self, conn) -> None:
         """Persist value-free MCP failure diagnostics and argument shape."""

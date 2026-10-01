@@ -17,12 +17,16 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship, validates
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now, utc_now_naive
 
 # SQLite 测试库不支持 BIGINT 自增主键，统一用带方言变体的整型主键
 BigIntPk = BigInteger().with_variant(Integer(), "sqlite")
+
+# PG 走 JSONB（0069 起与迁移对齐），SQLite 测试方言回落通用 JSON
+JSONB_COMPAT = JSON().with_variant(JSONB(), "postgresql")
 
 Base = declarative_base()
 
@@ -1836,6 +1840,9 @@ class BrowserDeviceAuthorization(Base):
     device_name = Column(String(128), nullable=False, default="")
     extension_version = Column(String(32), nullable=True)
     token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    # 轮换宽限：新哈希生效后旧令牌仍可在宽限窗内续连（token_rotated 帧丢失时不至于锁死）
+    previous_token_hash = Column(String(64), nullable=True)
+    previous_token_expires_at = Column(DateTime(timezone=True), nullable=True)
     token_expires_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(String(32), nullable=False, default=STATUS_ACTIVE, index=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
@@ -1878,7 +1885,7 @@ class BrowserDomainPolicy(Base):
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = _tenant_column()
     mode = Column(String(16), nullable=False, default=MODE_OFF)
-    domains = Column(JSON, nullable=False, default=list)
+    domains = Column(JSONB_COMPAT, nullable=False, default=list)
     updated_by = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
@@ -1889,11 +1896,13 @@ class BrowserConnectionLease(Base):
     心跳续租（45s 过期）；dispatch 未命中本地注册表时按租约直连目标节点中继。"""
 
     __tablename__ = "browser_connection_leases"
+    # device_id 的唯一索引（uq_browser_connection_lease_device）已覆盖等值查询,
+    # 不再另建非唯一索引（0069 前的同列双索引已清理）。
     __table_args__ = (Index("uq_browser_connection_lease_device", "device_id", unique=True),)
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = _tenant_column()
-    device_id = Column(String(64), nullable=False, index=True)
+    device_id = Column(String(64), nullable=False)
     node_id = Column(String(128), nullable=False)
     node_url = Column(String(255), nullable=False)
     lease_until = Column(DateTime(timezone=True), nullable=False, index=True)
