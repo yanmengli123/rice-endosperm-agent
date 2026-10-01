@@ -79,10 +79,12 @@ async def _request(
         ) from error
     data = _safe_json(response.text)
     if response.status_code != 200 or not isinstance(data, dict) or not data.get("ok"):
-        error = data.get("error") if isinstance(data, dict) else {}
+        raw_error = data.get("error") if isinstance(data, dict) else None
+        # error 可能是字符串/None 等非对象形态（非 200 + 桥侧裸文本响应）
+        error = raw_error if isinstance(raw_error, dict) else {}
         raise BrowserGatewayError(
-            str((error or {}).get("code") or "BROWSER_SKILL_ERROR"),
-            str((error or {}).get("message") or f"BrowserSkill bridge error (HTTP {response.status_code})"),
+            str(error.get("code") or "BROWSER_SKILL_ERROR"),
+            str(error.get("message") or f"BrowserSkill bridge error (HTTP {response.status_code})"),
             http_status=response.status_code,
         )
     return data

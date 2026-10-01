@@ -208,12 +208,45 @@ async def test_token_rotation_when_near_expiry(session):
     auth, rotated = await authenticate_extension(db, device_token=authed["device_token"])
     assert rotated is not None
     assert rotated["device_token"].startswith("brt_")
-    # 旧令牌哈希已被替换
+    # 轮换后旧令牌进入宽限窗：token_rotated 帧丢失时扩展仍可续连并再次拿到轮换帧（自愈）
+    grace_auth, rotated_again = await authenticate_extension(db, device_token=authed["device_token"])
+    assert grace_auth.device_id == auth.device_id
+    assert rotated_again is not None and rotated_again["device_token"].startswith("brt_")
+    # 自愈轮换会孤儿化第一次轮换下发的令牌（其帧已丢失、无人持有），只认最新令牌
+    with pytest.raises(BrowserGatewayError):
+        await authenticate_extension(db, device_token=rotated["device_token"])
+    new_auth, rotated_none = await authenticate_extension(db, device_token=rotated_again["device_token"])
+    assert new_auth.device_id == auth.device_id
+    assert rotated_none is None
+
+
+async def test_token_rotation_grace_expiry_rejects_old_token(session):
+    db, _user = session
+    link = await create_pairing_link(db, uid="admin", tenant_id=1)
+    authed = await authorize_pairing(db, code=link["code"], device_name="A", extension_version=None)
+
+    row = (
+        await db.execute(
+            select(BrowserDeviceAuthorization).filter(BrowserDeviceAuthorization.device_id == authed["device_id"])
+        )
+    ).scalar_one()
+    row.token_expires_at = datetime.now(UTC) + timedelta(days=10)
+    await db.commit()
+
+    _auth, rotated = await authenticate_extension(db, device_token=authed["device_token"])
+    assert rotated is not None
+
+    row = (
+        await db.execute(
+            select(BrowserDeviceAuthorization).filter(BrowserDeviceAuthorization.device_id == authed["device_id"])
+        )
+    ).scalar_one()
+    assert row.previous_token_hash is not None
+    row.previous_token_expires_at = datetime.now(UTC) - timedelta(seconds=1)  # 宽限窗已过
+    await db.commit()
+
     with pytest.raises(BrowserGatewayError):
         await authenticate_extension(db, device_token=authed["device_token"])
-    new_auth, rotated_again = await authenticate_extension(db, device_token=rotated["device_token"])
-    assert new_auth.device_id == auth.device_id
-    assert rotated_again is None
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +391,7 @@ async def test_run_command_budget_enforced(session):
             op="get_status",
             ok=True,
         )
-    # 门控顺序：配对 → 在线 → 预算；预算前置于连接语义之上依然要求设备可用
+    # 门控顺序：暂停 → 预算 → 配对/在线；预算前置于连接语义之上依然要求设备可用
     link = await create_pairing_link(db, uid="admin", tenant_id=1)
     authed = await authorize_pairing(db, code=link["code"], device_name="A", extension_version=None)
     get_browser_connection_registry().replace_connection(_handle(FakeWebSocket(), device_id=authed["device_id"]))
@@ -511,6 +544,51 @@ async def test_connection_lease_lifecycle(session):
 
     await delete_connection_lease(db, device_id="dev-lease")
     assert await find_active_lease(db, device_id="dev-lease") is None
+
+
+async def test_renew_connection_lease_rebuilds_missing_row(session):
+    """租约被误删后心跳续租应重建登记（重连竞态的自愈通道），而不是静默跳过。"""
+    db, _user = session
+    from yuxi.services.browser_gateway_service import (
+        delete_connection_lease,
+        find_active_lease,
+        renew_connection_lease,
+    )
+
+    await delete_connection_lease(db, device_id="dev-rebuild")  # 确保无残留
+    await renew_connection_lease(db, tenant_id=1, device_id="dev-rebuild")
+    lease = await find_active_lease(db, device_id="dev-rebuild")
+    assert lease is not None
+    assert lease.tenant_id == 1
+    assert lease.node_id  # 重建时带本节点路由信息
+
+
+async def test_pause_gate_precedes_lease_relay(session, monkeypatch):
+    """租约中继路径必须先过暂停门禁：用户点暂停后 Agent 不得经跨节点通道继续操作。"""
+    db, _user = session
+    from yuxi.services import browser_gateway_service as service
+
+    link = await create_pairing_link(db, uid="admin", tenant_id=1)
+    authed = await authorize_pairing(db, code=link["code"], device_name="A", extension_version=None)
+    # 本节点不注册连接 → dispatch 会走租约中继分支
+    get_browser_connection_registry().unregister(authed["device_id"])
+
+    relay_calls: list[str] = []
+
+    async def _fake_relay(*args, **kwargs):
+        relay_calls.append(kwargs.get("op") or str(args))
+        return {"ok": True}
+
+    async def _paused(run_id):
+        return True
+
+    monkeypatch.setattr(service, "_dispatch_via_lease", _fake_relay)
+    monkeypatch.setattr(service, "is_run_paused", _paused)
+
+    with pytest.raises(BrowserGatewayError) as paused:
+        await dispatch_browser_command(db, tenant_id=1, uid="admin", run_id="run-relay", op="get_status", payload={})
+    assert paused.value.code == "BROWSER_PAUSED"
+    assert relay_calls == []  # 门禁未过，绝不触达中继
 
 
 async def test_request_help_tool_registered():

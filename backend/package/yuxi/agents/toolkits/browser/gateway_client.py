@@ -102,8 +102,10 @@ async def dispatch_browser_op(op: str, payload: dict[str, Any], *, timeout_s: fl
     if response.status_code != 200:
         detail = _safe_json(response.text)
         error = detail.get("detail") if isinstance(detail, dict) else None
-        code = str((error or {}).get("code") or "BROWSER_GATEWAY_ERROR")
-        message = str((error or {}).get("message") or f"浏览器网关错误（HTTP {response.status_code}）")
+        if not isinstance(error, dict):  # FastAPI 422 的 detail 是 list 等形态
+            error = {}
+        code = str(error.get("code") or "BROWSER_GATEWAY_ERROR")
+        message = str(error.get("message") or f"浏览器网关错误（HTTP {response.status_code}）")
         raise BrowserGatewayError(code, message, http_status=response.status_code)
     data = _safe_json(response.text)
     if not isinstance(data, dict):
@@ -122,11 +124,14 @@ async def end_browser_task_best_effort() -> None:
     context = get_browser_execution_context()
     if context is None or not context.used or context.ended:
         return
-    context.ended = True
     try:
         await dispatch_browser_op("end_task", {}, timeout_s=15)
     except Exception as error:  # noqa: BLE001 -- cleanup must never replace the run result
+        # ended 不在此处置位：worker 与 chat_service 两侧清理共享同一实例，
+        # 首次瞬时失败（如 api 恰好重启）后另一侧仍可重试一次；end_task 幂等，重复无害。
         logger.warning(f"browser task cleanup skipped: {type(error).__name__}")
+        return
+    context.ended = True
 
 
 def _safe_json(text: str) -> Any:

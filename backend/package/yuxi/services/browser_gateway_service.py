@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import (
@@ -48,6 +49,8 @@ BROWSER_PAIRING_TTL_SECONDS = int(os.getenv("BROWSER_PAIRING_TTL_SECONDS", "300"
 BROWSER_DEVICE_TOKEN_TTL_DAYS = int(os.getenv("BROWSER_DEVICE_TOKEN_TTL_DAYS", "90"))
 # 令牌有效期不足 2×轮换窗（即年龄超过 30 天）时在续连时轮换
 BROWSER_DEVICE_TOKEN_ROTATE_THRESHOLD_DAYS = int(os.getenv("BROWSER_DEVICE_TOKEN_ROTATE_THRESHOLD_DAYS", "30"))
+# 轮换宽限窗：旧令牌哈希在此窗内仍可续连（token_rotated 帧丢失的自愈通道）
+BROWSER_DEVICE_TOKEN_GRACE_DAYS = int(os.getenv("BROWSER_DEVICE_TOKEN_GRACE_DAYS", "7"))
 BROWSER_GATEWAY_MAX_CONNECTIONS = int(os.getenv("BROWSER_GATEWAY_MAX_CONNECTIONS", "32"))
 BROWSER_MAX_COMMANDS_PER_RUN = int(os.getenv("BROWSER_MAX_COMMANDS_PER_RUN", "40"))
 BROWSER_HEARTBEAT_INTERVAL_S = int(os.getenv("BROWSER_HEARTBEAT_INTERVAL_S", "10"))
@@ -62,9 +65,7 @@ CLUSTER_SECRET_ENV = "BROWSER_GATEWAY_CLUSTER_SECRET"
 # 桥模式用户隔离（多用户部署必配）：逗号分隔 UID 白名单；未配置 = 单工作站信任
 # 模式（任何开启开关的用户都会操作桥所在机器的浏览器，仅适合单人本机部署）。
 BROWSER_SKILL_ALLOWED_UIDS = frozenset(
-    item.strip()
-    for item in os.getenv("BROWSER_SKILL_ALLOWED_UIDS", "").split(",")
-    if item.strip()
+    item.strip() for item in os.getenv("BROWSER_SKILL_ALLOWED_UIDS", "").split(",") if item.strip()
 )
 _CLUSTER_SECRET_REDIS_KEY = "yuxi:browser:cluster_secret"
 
@@ -77,7 +78,9 @@ OP_TIMEOUTS_S = {
     "read_page": 20,
     "click": 15,
     "type": 20,
-    "screenshot": 20,
+    # 扩展侧最坏路径:等待导航提交 8s + 激活/渲染 0.25s + 截图 8s×2 次(超限降质重试)
+    # + 尺寸解码 3s ≈ 27s,再留余量——20s 会让慢页面上服务端先超时而扩展仍在执行。
+    "screenshot": 35,
     "get_status": 10,
     "end_task": 15,
 }
@@ -264,7 +267,17 @@ async def authorize_pairing(
         last_seen_at=now,
     )
     db.add(auth)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as error:
+        # 并发同码双消费:第二个事务撞 uq_browser_device_active 偏索引——
+        # 回滚后按"码已被使用"结构化返回,扩展重试即可,而不是裸 500。
+        await db.rollback()
+        raise pairing_link_consumed() from error
+    # 被替换的旧设备在线连接必须立即踢掉（关闭码 4403）：否则旧 WS 靠心跳无限存活,
+    # 占用连接容量槽位、list_devices 对已吊销 device_id 显示假在线。
+    for old in existing:
+        get_browser_connection_registry().close_connection(old.device_id)
     logger.info(f"browser device authorized uid={user.uid} device_id={device_id}")
     return {
         "device_token": device_token,
@@ -285,16 +298,30 @@ async def authenticate_extension(
 
     轮换载荷形如 {"type": "token_rotated", "device_token": ..., "token_expires_at": ...}。
     失败时抛 BrowserGatewayError（http_status 映射 WS 关闭码）。
+    宽限语义：token_rotated 帧丢失（毫秒级窗口断网/SW 被杀）时扩展仍持旧令牌，
+    旧哈希在 BROWSER_DEVICE_TOKEN_GRACE_DAYS 内仍可续连，且续连会再次下发轮换帧
+    （previous 链不变），扩展有机会拿到新令牌自愈，而不是被锁死到重新配对。
     """
     if not device_token:
         raise browser_not_paired()
+    token_hash = _sha256_hex(device_token)
     auth = (
-        await db.execute(
-            select(BrowserDeviceAuthorization).filter(
-                BrowserDeviceAuthorization.token_hash == _sha256_hex(device_token)
-            )
-        )
+        await db.execute(select(BrowserDeviceAuthorization).filter(BrowserDeviceAuthorization.token_hash == token_hash))
     ).scalar_one_or_none()
+    matched_previous = False
+    if auth is None:
+        candidate = (
+            await db.execute(
+                select(BrowserDeviceAuthorization).filter(BrowserDeviceAuthorization.previous_token_hash == token_hash)
+            )
+        ).scalar_one_or_none()
+        now = utc_now()
+        grace_expires_at = getattr(candidate, "previous_token_expires_at", None) if candidate else None
+        if grace_expires_at is not None and grace_expires_at.tzinfo is None:
+            grace_expires_at = grace_expires_at.replace(tzinfo=UTC)
+        if candidate is not None and grace_expires_at is not None and grace_expires_at > now:
+            auth = candidate
+            matched_previous = True
     if auth is None:
         raise browser_not_paired()
     if auth.status != BrowserDeviceAuthorization.STATUS_ACTIVE:
@@ -312,8 +339,13 @@ async def authenticate_extension(
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
     remaining = expires_at - now
-    if remaining < timedelta(days=2 * BROWSER_DEVICE_TOKEN_ROTATE_THRESHOLD_DAYS):
+    # 宽限续连（旧令牌）强制再轮换一次让扩展自愈；正常余量不足按阈值轮换
+    if matched_previous or remaining < timedelta(days=2 * BROWSER_DEVICE_TOKEN_ROTATE_THRESHOLD_DAYS):
         new_token = "brt_" + secrets.token_urlsafe(32)
+        if not matched_previous:
+            # 正常轮换：扩展手里是当前令牌，降级为 previous 进入宽限窗
+            auth.previous_token_hash = auth.token_hash
+            auth.previous_token_expires_at = now + timedelta(days=BROWSER_DEVICE_TOKEN_GRACE_DAYS)
         auth.token_hash = _sha256_hex(new_token)
         auth.token_expires_at = now + timedelta(days=BROWSER_DEVICE_TOKEN_TTL_DAYS)
         rotated = {
@@ -321,7 +353,7 @@ async def authenticate_extension(
             "device_token": new_token,
             "token_expires_at": auth.token_expires_at.isoformat(),
         }
-        logger.info(f"browser device token rotated device_id={auth.device_id}")
+        logger.info(f"browser device token rotated device_id={auth.device_id} from_previous={matched_previous}")
     auth.last_seen_at = now
     await db.commit()
     return auth, rotated
@@ -729,8 +761,10 @@ async def dispatch_browser_command(
     audit: bool = True,
     ignore_pause: bool = False,
 ) -> dict:
-    """门控（未配对/离线）→ 暂停 → 预算 → 服务端策略 → 中继 → 审计。失败抛 BrowserGatewayError。
+    """暂停 → 预算 → 门控（未配对/离线/租约路由）→ 服务端策略 → 中继 → 审计。失败抛 BrowserGatewayError。
 
+    暂停/预算必须先于一切中继路径（含跨节点租约路由）：用户点「暂停」后 Agent
+    不得经任何通道继续操控浏览器。
     count_budget/audit/ignore_pause 供预览等非模型通道关闭预算、审计与暂停拦截
     （暂停只挡模型命令，用户仍需预览画面确认现场）。
     """
@@ -753,6 +787,17 @@ async def dispatch_browser_command(
             "本部署的本机浏览器能力未授权给当前用户，请联系管理员调整 BROWSER_SKILL_ALLOWED_UIDS",
             http_status=403,
         )
+    if op != "end_task" and not ignore_pause:
+        if await is_run_paused(run_id):
+            raise browser_paused()
+        if count_budget and run_id and BROWSER_MAX_COMMANDS_PER_RUN > 0:
+            used = await count_run_commands(db, run_id=run_id)
+            if used >= BROWSER_MAX_COMMANDS_PER_RUN:
+                raise BrowserGatewayError(
+                    "BROWSER_BUDGET_EXCEEDED",
+                    f"本轮浏览器操作步数已达上限（{BROWSER_MAX_COMMANDS_PER_RUN}）",
+                    http_status=429,
+                )
     auth = None
     registry = None
     device_id = "bsk-local"
@@ -779,17 +824,6 @@ async def dispatch_browser_command(
                 return result
             raise browser_offline()
         device_id = auth.device_id
-    if op != "end_task" and not ignore_pause:
-        if await is_run_paused(run_id):
-            raise browser_paused()
-        if count_budget and run_id and BROWSER_MAX_COMMANDS_PER_RUN > 0:
-            used = await count_run_commands(db, run_id=run_id)
-            if used >= BROWSER_MAX_COMMANDS_PER_RUN:
-                raise BrowserGatewayError(
-                    "BROWSER_BUDGET_EXCEEDED",
-                    f"本轮浏览器操作步数已达上限（{BROWSER_MAX_COMMANDS_PER_RUN}）",
-                    http_status=429,
-                )
 
     effective_timeout = float(timeout_s or OP_TIMEOUTS_S.get(op, DEFAULT_OP_TIMEOUT_S))
     started = time.monotonic()
@@ -871,15 +905,27 @@ async def upsert_connection_lease(db: AsyncSession, *, tenant_id: int, device_id
     await db.commit()
 
 
-async def renew_connection_lease(db: AsyncSession, *, device_id: str) -> None:
+async def renew_connection_lease(db: AsyncSession, *, tenant_id: int, device_id: str) -> None:
+    """心跳续租；行缺失时重建登记——重连瞬间的租约误删在下一个心跳周期自愈。"""
+    now = utc_now()
+    lease_until = now + timedelta(seconds=BROWSER_CONNECTION_LEASE_SECONDS)
     lease = (
         await db.execute(select(BrowserConnectionLease).filter(BrowserConnectionLease.device_id == device_id))
     ).scalar_one_or_none()
     if lease is None:
-        return
-    now = utc_now()
-    lease.lease_until = now + timedelta(seconds=BROWSER_CONNECTION_LEASE_SECONDS)
-    lease.renewed_at = now
+        db.add(
+            BrowserConnectionLease(
+                tenant_id=tenant_id,
+                device_id=device_id,
+                node_id=BROWSER_GATEWAY_NODE_ID,
+                node_url=BROWSER_GATEWAY_NODE_URL,
+                lease_until=lease_until,
+                renewed_at=now,
+            )
+        )
+    else:
+        lease.lease_until = lease_until
+        lease.renewed_at = now
     await db.commit()
 
 
@@ -928,6 +974,7 @@ async def _dispatch_via_lease(
     secret = await resolve_cluster_secret()
     if not secret:
         return None
+    started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout_s + 10, trust_env=False) as client:
             response = await client.post(
@@ -950,7 +997,6 @@ async def _dispatch_via_lease(
     if response.status_code != 200 or not isinstance(data, dict):
         return None
     if audit:
-        started = time.monotonic()
         if data.get("ok"):
             result = data.get("result")
             await record_command(
@@ -1079,19 +1125,33 @@ async def is_run_paused(run_id: str | None) -> bool:
     try:
         redis = await get_async_redis_client()
         return bool(await redis.get(_run_pause_key(run_id)))
-    except Exception as error:  # noqa: BLE001 —— Redis 不可用时放行（可用性优先，预算/审计仍在）
-        logger.warning(f"browser pause check skipped: {type(error).__name__}")
-        return False
+    except Exception as error:  # noqa: BLE001 —— fail-closed：暂停是用户干预控制，
+        # Redis 故障时宁可拒绝浏览器命令也不能让"暂停"静默失效（Redis 同时是
+        # ARQ 的硬依赖，此处不可用时 worker 本就无法运行，不会误伤正常轮）。
+        logger.warning(f"browser pause check failed (denying): {type(error).__name__}")
+        raise BrowserGatewayError(
+            "BROWSER_PAUSE_UNAVAILABLE",
+            "暂停状态暂不可用（Redis 异常），已拒绝本次浏览器操作，请稍后重试",
+            http_status=503,
+        ) from error
 
 
 async def set_run_paused(run_id: str | None, paused: bool) -> None:
     if not run_id:
         return
-    redis = await get_async_redis_client()
-    if paused:
-        await redis.set(_run_pause_key(run_id), "1", ex=_RUN_PAUSE_TTL_SECONDS)
-    else:
-        await redis.delete(_run_pause_key(run_id))
+    try:
+        redis = await get_async_redis_client()
+        if paused:
+            await redis.set(_run_pause_key(run_id), "1", ex=_RUN_PAUSE_TTL_SECONDS)
+        else:
+            await redis.delete(_run_pause_key(run_id))
+    except Exception as error:  # noqa: BLE001 —— 与 is_run_paused 对称：结构化错误而非裸 500
+        logger.warning(f"browser pause set failed: {type(error).__name__}")
+        raise BrowserGatewayError(
+            "BROWSER_PAUSE_UNAVAILABLE",
+            "暂停/继续操作暂不可用（Redis 异常），请稍后重试",
+            http_status=503,
+        ) from error
 
 
 # ---------------------------------------------------------------------------
@@ -1109,7 +1169,12 @@ async def resolve_cluster_secret() -> str | None:
         if value:
             return value.decode("utf-8") if isinstance(value, bytes) else str(value)
         secret = "brsec_" + secrets.token_urlsafe(32)
-        await redis.set(_CLUSTER_SECRET_REDIS_KEY, secret)
+        # SET NX:api 与 worker 首次并发自举时各生成一个密钥互相覆盖,
+        # 窗口内持失势密钥的一方会 401;NX 保证只有第一个写入者生效。
+        if not await redis.set(_CLUSTER_SECRET_REDIS_KEY, secret, nx=True):
+            winner = await redis.get(_CLUSTER_SECRET_REDIS_KEY)
+            if winner:
+                return winner.decode("utf-8") if isinstance(winner, bytes) else str(winner)
         return secret
     except Exception as e:
         logger.warning(f"browser cluster secret unavailable: {e}")
@@ -1126,4 +1191,6 @@ def _safe_json(text: str):
 def cluster_secret_matches(provided: str | None, expected: str | None) -> bool:
     if not expected or not provided:
         return False
-    return secrets.compare_digest(provided, expected)
+    # compare_digest 的 str 参数仅支持 ASCII,HTTP 头可含非 ASCII(latin-1)——
+    # 先编码为 bytes,畸形输入得到 False 而不是 TypeError→500。
+    return secrets.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))

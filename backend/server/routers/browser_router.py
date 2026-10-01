@@ -156,15 +156,15 @@ async def extension_ws_route(
     registry = get_browser_connection_registry()
     device_token = _extract_ws_token(websocket)
     if len(registry.connection_snapshot()) >= registry.max_connections:
-        await websocket.close(code=4429)
+        await _ws_deny(websocket, 4429)
         return
     if device_token is None:
-        await websocket.close(code=4401)
+        await _ws_deny(websocket, 4401)
         return
     try:
         auth, rotated = await authenticate_extension(db, device_token=device_token)
     except BrowserGatewayError as e:
-        await websocket.close(code=_ws_close_code(e))
+        await _ws_deny(websocket, _ws_close_code(e))
         return
     try:
         await websocket.accept(subprotocol=_WS_TOKEN_PROTOCOL)
@@ -172,6 +172,7 @@ async def extension_ws_route(
         logger.warning(f"browser ws accept failed: {e}")
         return
 
+    lease_written = False
     try:
         # 握手：扩展先发 hello，服务端回 hello_ok；超时未握手按未就绪关闭
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
@@ -208,6 +209,7 @@ async def extension_ws_route(
         # Phase 3：登记连接租约（多副本时其他节点可经租约路由到本节点）
         try:
             await upsert_connection_lease(db, tenant_id=int(auth.tenant_id or 0), device_id=auth.device_id)
+            lease_written = True
         except Exception as lease_error:  # noqa: BLE001 —— 租约是增强通道，失败不阻断连接
             logger.warning(f"browser lease upsert skipped: {type(lease_error).__name__}")
         logger.info(f"browser extension connected device_id={auth.device_id} uid={auth.uid}")
@@ -234,7 +236,11 @@ async def extension_ws_route(
     finally:
         registry.unregister(auth.device_id, websocket)
         try:
-            await delete_connection_lease(db, device_id=auth.device_id)
+            # 仅当本连接登记过租约、且注册表已无同设备连接时才回收：
+            # 无条件按 device_id 删会把并发握手/重连连接刚写的租约误删
+            # （误删后跨节点路由误报离线，直到 renew 重建或下次重连才自愈）。
+            if lease_written and registry.get(auth.device_id) is None:
+                await delete_connection_lease(db, device_id=auth.device_id)
         except Exception as lease_error:  # noqa: BLE001
             logger.warning(f"browser lease delete skipped: {type(lease_error).__name__}")
         logger.info(f"browser extension disconnected device_id={auth.device_id}")
@@ -272,6 +278,20 @@ def _ws_close_code(error: BrowserGatewayError) -> int:
     return 4400
 
 
+async def _ws_deny(websocket: WebSocket, code: int) -> None:
+    """拒绝扩展连接必须先 accept 再 close：握手期的 close 关闭码到不了扩展
+    （uvicorn 对未 accept 的 close 直接回 HTTP 403，扩展侧只看到 1006），
+    吊销/过期设备会因此丢失「需重新配对」信号而无限退避重连。"""
+    try:
+        await websocket.accept()
+    except Exception:
+        return
+    try:
+        await websocket.close(code=code)
+    except Exception:
+        pass
+
+
 async def _handle_extension_frame(websocket: WebSocket, auth, frame: dict, db: AsyncSession) -> None:
     registry = get_browser_connection_registry()
     frame_type = str(frame.get("type") or "")
@@ -289,7 +309,7 @@ async def _handle_extension_frame(websocket: WebSocket, auth, frame: dict, db: A
             )
         )
         try:
-            await renew_connection_lease(db, device_id=auth.device_id)
+            await renew_connection_lease(db, tenant_id=int(auth.tenant_id or 0), device_id=auth.device_id)
         except Exception as lease_error:  # noqa: BLE001 —— 续租失败不影响命令通道
             logger.warning(f"browser lease renew skipped: {type(lease_error).__name__}")
         return
@@ -306,6 +326,43 @@ async def _handle_extension_frame(websocket: WebSocket, auth, frame: dict, db: A
 # ---------------------------------------------------------------------------
 # 内部 dispatch（worker→api，共享密钥；不经网关暴露）
 # ---------------------------------------------------------------------------
+
+
+def _internal_bad_payload(message: str) -> HTTPException:
+    return HTTPException(status_code=400, detail={"code": "BROWSER_INVALID_PAYLOAD", "message": message})
+
+
+def _internal_tenant_id(payload: dict[str, Any]) -> int:
+    try:
+        tenant_id = int(payload.get("tenant_id") or 0)
+    except (TypeError, ValueError):
+        raise _internal_bad_payload("tenant_id 必须是整数") from None
+    if tenant_id <= 0:
+        raise _internal_bad_payload("tenant_id 必须是正整数")
+    return tenant_id
+
+
+def _internal_run_id(payload: dict[str, Any]) -> str | None:
+    run_id = payload.get("run_id")
+    if run_id is None:
+        return None
+    if not isinstance(run_id, (str, int)):
+        raise _internal_bad_payload("run_id 必须是字符串")
+    return str(run_id)[:128] or None
+
+
+def _internal_timeout_s(payload: dict[str, Any]) -> float | None:
+    """timeout_s 透传给下游中继等待,必须钳制:负值立即超时、巨值长时间挂起 handler。"""
+    value = payload.get("timeout_s")
+    if value is None:
+        return None
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise _internal_bad_payload("timeout_s 必须是数字") from None
+    if timeout != timeout or timeout in (float("inf"), float("-inf")):  # NaN/inf
+        raise _internal_bad_payload("timeout_s 必须是有限数字")
+    return min(max(timeout, 1.0), 60.0)
 
 
 @router.post("/internal/dispatch")
@@ -325,12 +382,12 @@ async def internal_dispatch_route(
     try:
         result = await dispatch_browser_command(
             db,
-            tenant_id=int(payload.get("tenant_id") or 0),
+            tenant_id=_internal_tenant_id(payload),
             uid=str(payload.get("uid") or ""),
-            run_id=payload.get("run_id") or None,
+            run_id=_internal_run_id(payload),
             op=op,
             payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
-            timeout_s=payload.get("timeout_s"),
+            timeout_s=_internal_timeout_s(payload),
         )
         return {"ok": True, "result": result}
     except BrowserGatewayError as e:
@@ -362,7 +419,7 @@ async def internal_node_relay_route(
             device_id,
             op=op,
             payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
-            timeout_s=float(payload.get("timeout_s") or 20),
+            timeout_s=_internal_timeout_s(payload) or 20,
         )
         return {"ok": True, "result": result}
     except BrowserGatewayError as e:
@@ -431,24 +488,27 @@ async def control_run_route(
             status_code=400, detail={"code": "BROWSER_INVALID_ACTION", "message": "action 仅支持 pause/resume/end"}
         )
     tenant_id = await _require_tenant(db, current_user)
-    if action == "pause":
-        await set_run_paused(run_id, True)
-    elif action == "resume":
-        await set_run_paused(run_id, False)
-    else:  # end：尽力结束浏览器会话，离线/已结束不视为错误
-        await set_run_paused(run_id, False)
-        try:
-            await dispatch_browser_command(
-                db,
-                tenant_id=tenant_id,
-                uid=str(current_user.uid),
-                run_id=run_id,
-                op="end_task",
-                payload={},
-                timeout_s=15,
-            )
-        except BrowserGatewayError as e:
-            logger.info(f"browser run end_task skipped run={run_id}: {e.code}")
+    try:
+        if action == "pause":
+            await set_run_paused(run_id, True)
+        elif action == "resume":
+            await set_run_paused(run_id, False)
+        else:  # end：尽力结束浏览器会话，离线/已结束不视为错误
+            await set_run_paused(run_id, False)
+            try:
+                await dispatch_browser_command(
+                    db,
+                    tenant_id=tenant_id,
+                    uid=str(current_user.uid),
+                    run_id=run_id,
+                    op="end_task",
+                    payload={},
+                    timeout_s=15,
+                )
+            except BrowserGatewayError as e:
+                logger.info(f"browser run end_task skipped run={run_id}: {e.code}")
+    except BrowserGatewayError as e:
+        raise HTTPException(status_code=e.http_status, detail={"code": e.code, "message": e.message}) from e
     return {"ok": True, "action": action, "run_status": run.status}
 
 
@@ -490,35 +550,47 @@ async def _preview_stream(*, run_id: str, tenant_id: int, uid: str):
     async def _emit(event: dict) -> str:
         return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-    async with _preview_semaphore:
+    # 路由层 locked() 预检与这里 acquire 之间无原子性:超额观众排队而非立即
+    # 满员提示——acquire 带超时,等待即视为满员。
+    try:
+        await asyncio.wait_for(_preview_semaphore.acquire(), timeout=5)
+    except TimeoutError:
+        yield await _emit({"type": "end", "reason": "viewer_limit"})
+        return
+    try:
         deadline = asyncio.get_event_loop().time() + _PREVIEW_MAX_DURATION_S
         terminal_statuses = {"completed", "failed", "cancelled", "interrupted"}
         while asyncio.get_event_loop().time() < deadline:
             try:
+                # 状态查询与 dispatch 必须共用同一个作用域内的 session：
+                # 在已退出的上下文管理器外复用 session 会留下无 commit 的悬挂事务，
+                # 预览每 2.5s 一帧会持续占用连接池。
                 async with pg_session() as session:
                     row = (
                         await session.execute(select(AgentRun.status).filter(AgentRun.id == run_id))
                     ).scalar_one_or_none()
-                if row is None or str(row) in terminal_statuses:
-                    yield await _emit({"type": "end", "reason": "run_terminal"})
-                    return
-                result = await dispatch_browser_command(
-                    session,
-                    tenant_id=tenant_id,
-                    uid=uid,
-                    run_id=run_id,
-                    op="screenshot",
-                    payload={},
-                    timeout_s=20,
-                    count_budget=False,
-                    audit=False,
-                    ignore_pause=True,
-                )
-                data_url = str((result or {}).get("data_url") or "")
-                if data_url.startswith("data:image/"):
-                    yield await _emit({"type": "frame", "data_url": data_url})
-                else:
-                    yield await _emit({"type": "error", "code": "BROWSER_PREVIEW_NO_FRAME", "message": "暂无可用画面"})
+                    if row is None or str(row) in terminal_statuses:
+                        yield await _emit({"type": "end", "reason": "run_terminal"})
+                        return
+                    result = await dispatch_browser_command(
+                        session,
+                        tenant_id=tenant_id,
+                        uid=uid,
+                        run_id=run_id,
+                        op="screenshot",
+                        payload={},
+                        timeout_s=35,
+                        count_budget=False,
+                        audit=False,
+                        ignore_pause=True,
+                    )
+                    data_url = str((result or {}).get("data_url") or "")
+                    if data_url.startswith("data:image/"):
+                        yield await _emit({"type": "frame", "data_url": data_url})
+                    else:
+                        yield await _emit(
+                            {"type": "error", "code": "BROWSER_PREVIEW_NO_FRAME", "message": "暂无可用画面"}
+                        )
             except BrowserGatewayError as e:
                 yield await _emit({"type": "error", "code": e.code, "message": e.message})
                 # 桥/扩展离线类错误:预览流终止,避免每 2.5s 重复报错
@@ -536,7 +608,9 @@ async def _preview_stream(*, run_id: str, tenant_id: int, uid: str):
             except Exception as error:  # noqa: BLE001 —— 单帧失败不断流
                 logger.warning(f"browser preview frame skipped: {type(error).__name__}")
             await asyncio.sleep(_PREVIEW_FRAME_INTERVAL_S)
-    yield await _emit({"type": "end", "reason": "max_duration"})
+        yield await _emit({"type": "end", "reason": "max_duration"})
+    finally:
+        _preview_semaphore.release()
 
 
 def pg_session():

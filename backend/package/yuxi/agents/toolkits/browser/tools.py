@@ -7,6 +7,7 @@ resolve_configured_runtime_tools 才会把本组工具装配给模型；未配�
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -56,7 +57,8 @@ class BrowserRequestHelpInput(BaseModel):
 
 
 def _tool_ok(op: str, result: dict) -> str:
-    return json.dumps({"status": "ok", "op": op, **result}, ensure_ascii=False)
+    # 显式键放在展开之后:扩展返回的 status/op 等键不能覆盖协议语义。
+    return json.dumps({**result, "status": "ok", "op": op}, ensure_ascii=False)
 
 
 def _tool_error(error: BrowserGatewayError) -> str:
@@ -224,10 +226,11 @@ async def _save_screenshot(result: dict) -> dict | None:
         outputs_dir = sandbox_outputs_dir(str(thread_id)).resolve()
         browser_dir = outputs_dir / "browser"
         browser_dir.mkdir(parents=True, exist_ok=True)
-        extension = "png" if "png" in media_type else "jpg"
+        extension = {"image/png": "png", "image/webp": "webp"}.get(media_type, "jpg")
         filename = f"browser_screenshot_{int(time.time() * 1000)}.{extension}"
         target = browser_dir / filename
-        target.write_bytes(payload)
+        # 兆级截图不能在事件循环内同步写盘——阻塞会拖慢同进程全部并发任务。
+        await asyncio.to_thread(target.write_bytes, payload)
 
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/outputs/browser/{filename}"
         entry = MaterializedArtifact(

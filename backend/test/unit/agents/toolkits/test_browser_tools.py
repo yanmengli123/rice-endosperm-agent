@@ -174,9 +174,7 @@ async def test_screenshot_tool_callable_without_injected_runtime(monkeypatch):
         return {"data_url": "data:image/png;base64," + "A" * 32}
 
     monkeypatch.setattr("yuxi.agents.toolkits.browser.tools.dispatch_browser_op", _fake)
-    token = set_browser_execution_context(
-        BrowserExecutionContext(tenant_id=1, uid="u", thread_id="t", run_id="r")
-    )
+    token = set_browser_execution_context(BrowserExecutionContext(tenant_id=1, uid="u", thread_id="t", run_id="r"))
     try:
         tools = {tool.name: tool for tool in get_browser_runtime_tools()}
         raw = await tools["browser_screenshot"].coroutine()  # 不传任何参数
@@ -199,9 +197,7 @@ async def test_screenshot_result_strips_base64(monkeypatch):
         return {"data_url": "data:image/png;base64," + "A" * 100000, "width": 800, "height": 600}
 
     monkeypatch.setattr("yuxi.agents.toolkits.browser.tools.dispatch_browser_op", _fake)
-    token = set_browser_execution_context(
-        BrowserExecutionContext(tenant_id=1, uid="u", thread_id="t", run_id="r")
-    )
+    token = set_browser_execution_context(BrowserExecutionContext(tenant_id=1, uid="u", thread_id="t", run_id="r"))
     try:
         tools = {tool.name: tool for tool in get_browser_runtime_tools()}
         raw = await tools["browser_screenshot"].coroutine()
@@ -211,4 +207,41 @@ async def test_screenshot_result_strips_base64(monkeypatch):
     finally:
         from yuxi.agents.toolkits.browser.gateway_client import reset_browser_execution_context
 
+        reset_browser_execution_context(token)
+
+
+async def test_tool_ok_explicit_protocol_keys_survive_result_collision():
+    """扩展返回的 status/op 等键不得覆盖协议语义（页面内容是不可信外部输入）。"""
+    import json as _json
+
+    from yuxi.agents.toolkits.browser.tools import _tool_ok
+
+    payload = _json.loads(_tool_ok("click", {"status": "error", "op": "navigate", "clicked": True}))
+    assert payload["status"] == "ok"
+    assert payload["op"] == "click"
+    assert payload["clicked"] is True
+
+
+async def test_end_task_cleanup_retries_once_after_transient_failure(monkeypatch):
+    """首次清理瞬时失败后 ended 不置位：另一侧（chat_service/worker）的清理仍可重试。"""
+    attempts = {"count": 0}
+
+    async def flaky_dispatch(op, payload, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise BrowserGatewayError("BROWSER_GATEWAY_UNREACHABLE", "瞬时不可达")
+        return {"ok": True}
+
+    monkeypatch.setattr("yuxi.agents.toolkits.browser.gateway_client.dispatch_browser_op", flaky_dispatch)
+    context = BrowserExecutionContext(tenant_id=1, uid="admin", thread_id="t1", run_id="r1")
+    token = set_browser_execution_context(context)
+    try:
+        context.used = True
+        await end_browser_task_best_effort()  # 失败但不清除重试资格
+        assert attempts["count"] == 1
+        await end_browser_task_best_effort()  # 第二次成功
+        assert attempts["count"] == 2
+        await end_browser_task_best_effort()  # 已成功,幂等跳过
+        assert attempts["count"] == 2
+    finally:
         reset_browser_execution_context(token)
