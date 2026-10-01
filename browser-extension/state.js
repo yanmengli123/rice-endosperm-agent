@@ -120,6 +120,13 @@ export async function setLedger(ledger) {
   return normalized;
 }
 
+// 增量更新:基于读取时的最新台账合并补丁,避免调用方拿旧快照整表覆盖。
+// 调用方仍须保证自身处于串行队列中(background.enqueueSerial)。
+export async function updateLedger(patch) {
+  const ledger = await getLedger();
+  return setLedger({ ...ledger, ...patch });
+}
+
 export async function clearLedger() {
   memoryLedger = null;
   const area = sessionArea();

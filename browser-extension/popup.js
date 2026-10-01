@@ -92,12 +92,9 @@ els.borrow.addEventListener("click", async () => {
   if (!currentTab || borrowBusy) return;
   borrowBusy = true;
   try {
-    const ledger = await state.getLedger();
-    if (ledger.borrowed_tab_ids.includes(currentTab.id)) {
-      await state.unborrowTab(currentTab.id);
-    } else {
-      await state.borrowTab(currentTab.id);
-    }
+    // 借出/收回必须经 SW 串行队列落账:popup 直写 storage.session 会与
+    // 命令执行中的台账读改写互相覆盖(借出标记丢失)。
+    await chrome.runtime.sendMessage({ type: "ledger_borrow_toggle", tab_id: currentTab.id });
   } catch (_) {
     // 状态刷新在 finally 中统一处理
   } finally {

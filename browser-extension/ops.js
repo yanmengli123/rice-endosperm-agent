@@ -159,10 +159,17 @@ function pageInteract(mode, selector, text, opts) {
     target.dispatchEvent(new Event("input", { bubbles: true }));
     target.dispatchEvent(new Event("change", { bubbles: true }));
   };
+  // number/date/time 等类型的输入框不支持选区,setSelectionRange 会抛
+  // InvalidStateError——必须吞掉,否则数字/日期框必然报错且错误码误导。
+  const trySetSelectionRange = (start, end) => {
+    try {
+      target.setSelectionRange(start, end);
+    } catch (_) {}
+  };
 
   if (opts.clear) {
     if (isFormField) {
-      target.setSelectionRange(0, target.value.length);
+      trySetSelectionRange(0, target.value.length);
       let cleared = false;
       try {
         cleared = document.execCommand("delete");
@@ -191,7 +198,7 @@ function pageInteract(mode, selector, text, opts) {
 
   // 光标归位到末尾,保证插入位置确定(未 clear 时为追加语义)。
   if (isFormField) {
-    target.setSelectionRange(target.value.length, target.value.length);
+    trySetSelectionRange(target.value.length, target.value.length);
   } else {
     const sel = window.getSelection();
     const range = document.createRange();
@@ -219,8 +226,19 @@ function pageInteract(mode, selector, text, opts) {
 
   if (opts.submit) {
     const init = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
-    target.dispatchEvent(new KeyboardEvent("keydown", init));
+    const keydown = new KeyboardEvent("keydown", init);
+    target.dispatchEvent(keydown);
     target.dispatchEvent(new KeyboardEvent("keyup", init));
+    // 合成事件 isTrusted:false 不会触发浏览器"回车提交所在表单"的默认行为;
+    // 页面没有 preventDefault 且元素属于某个 form 时,兜底走原生提交。
+    if (!keydown.defaultPrevented) {
+      const form = target.form;
+      if (form && typeof form.requestSubmit === "function") {
+        try {
+          form.requestSubmit();
+        } catch (_) {}
+      }
+    }
   }
   return { found: true, editable: true };
 }
@@ -268,17 +286,16 @@ async function opNavigate(payload) {
 
   let tab;
   if (!windowAlive) {
-    // 无任务窗口:navigate 负责创建
+    // 无任务窗口:navigate 负责创建(增量更新,保留借出集合)
     const win = await chrome.windows.create({ url, focused: true });
     tab = win.tabs && win.tabs[0] ? win.tabs[0] : null;
     if (!tab) {
       const tabs = await chrome.tabs.query({ windowId: win.id });
       tab = tabs[0] || null;
     }
-    await state.setLedger({
+    await state.updateLedger({
       task_window_id: win.id,
       task_tab_ids: tab ? [tab.id] : [],
-      borrowed_tab_ids: ledger.borrowed_tab_ids,
     });
   } else if (newTab) {
     tab = await chrome.tabs.create({ windowId, url, active: true });
@@ -396,10 +413,15 @@ async function opScreenshot(payload) {
     tab = await chrome.tabs.update(tab.id, { active: true });
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
-  // 被遮挡/最小化的窗口在部分 Chromium 上会让 captureVisibleTab 挂起或报错:置前兜底。
+  // 最小化窗口无法渲染,须先恢复;其余情况不再置前抢焦点——
+  // 预览流每 2.5s 一次截图,无条件 focused:true 会持续打扰用户正在使用的窗口,
+  // 也会干扰依赖文档焦点的 type 命令。
   try {
-    await chrome.windows.update(tab.windowId, { focused: true });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const win = await chrome.windows.get(tab.windowId);
+    if (win && win.state === "minimized") {
+      await chrome.windows.update(tab.windowId, { state: "normal", focused: true });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
   } catch (_) {}
   let dataUrl = await captureVisible(tab.windowId, SCREENSHOT_QUALITY_FIRST);
   if (estimateDataUrlBytes(dataUrl) > MAX_FRAME_BYTES) {

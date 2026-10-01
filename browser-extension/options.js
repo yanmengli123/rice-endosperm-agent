@@ -48,7 +48,9 @@ function defaultDeviceName() {
 function clampHeartbeat(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 1) return 10;
-  return Math.min(300, Math.round(n));
+  // 与 background.normalizeHeartbeatInterval 一致:上限 25s——大于 SW 30s idle
+  // 窗口会导致 SW 被杀、连接震荡,并可能撞上 45s 死链判定。
+  return Math.min(25, Math.round(n));
 }
 
 // 消息送达后台失败(SW 暂不可用)时静默降级,由调用方自行完成本地清理。

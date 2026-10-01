@@ -24,6 +24,14 @@ const ALARM_KEEPALIVE = "yuxi-browser-keepalive";
 const RECONNECT_BASE_MS = 1000; // 退避起点 1s
 const RECONNECT_MAX_MS = 30000; // 退避上限 30s
 const CONNECTING_STALE_MS = 15000; // connecting 状态卡死兜底
+// 心跳间隔上限:必须显著小于 SW 30s idle 与 DEAD_LINK_MS(45s)——
+// 间隔过大时 SW 会被杀、连接震荡,甚至被自身死链判定强断健康连接。
+const HEARTBEAT_MAX_INTERVAL_S = 25;
+// 连续 N 次收到 4401(令牌不被服务端识别)后按吊销处理:停止重连并清除本地凭证。
+const AUTH_FAIL_REVOKE_THRESHOLD = 5;
+// 单条命令在队列中的最长等待执行时长;超时只是不再阻塞后续命令,
+// 慢命令本身仍会执行完并回发结果(服务端多半已超时丢弃,无害)。
+const COMMAND_QUEUE_WATCHDOG_MS = 60000;
 
 let ws = null;
 let wsState = "disconnected"; // disconnected | connecting | ready
@@ -35,13 +43,34 @@ let heartbeatIntervalS = DEFAULT_HEARTBEAT_INTERVAL_S;
 let lastServerFrameAt = 0;
 let lastHeartbeatSentAt = 0;
 let connectStartedAt = 0;
+let consecutiveAuthFails = 0;
 // "revoked":收到 4403(设备被吊销/替换)后停止自动重连,需重新配对
 let stopReason = null;
+
+// ---- 命令与台账串行队列 ----
+// 服务端预览流(每 2.5s 一条 screenshot)与 Agent 命令会并发到达;并行执行时
+// 双 navigate 会各自创建任务窗口(台账后写覆盖先建→孤儿窗口),借出标记也会在
+// 读改写竞争中丢失。所有命令与台账变更都经同一条 promise 链串行执行。
+let commandChain = Promise.resolve();
+
+function enqueueSerial(task) {
+  const run = () =>
+    Promise.race([
+      Promise.resolve().then(task),
+      new Promise((resolve) => setTimeout(resolve, COMMAND_QUEUE_WATCHDOG_MS)),
+    ]);
+  const next = commandChain.then(run, run);
+  commandChain = next.then(
+    () => {},
+    () => {}
+  );
+  return next;
+}
 
 function normalizeHeartbeatInterval(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 1) return DEFAULT_HEARTBEAT_INTERVAL_S;
-  return Math.min(300, Math.round(n));
+  return Math.min(HEARTBEAT_MAX_INTERVAL_S, Math.round(n));
 }
 
 function platformName() {
@@ -143,6 +172,7 @@ function handleServerFrame(socket, raw) {
       helloTimer = null;
     }
     reconnectAttempt = 0;
+    consecutiveAuthFails = 0;
     setWsState("ready");
     startHeartbeatLoop();
     console.log("[语析连接] 握手完成,连接就绪");
@@ -153,7 +183,7 @@ function handleServerFrame(socket, raw) {
     return;
   }
   if (isCmdFrame(frame)) {
-    runCommand(socket, frame);
+    enqueueSerial(() => runCommand(socket, frame));
     return;
   }
   // 其余帧(如服务端心跳回应)仅用于活性判断
@@ -256,7 +286,19 @@ async function handleClosed(socket, event) {
     await revokeLocalIdentity();
     return;
   }
-  // 4401 未认证、4408 心跳超时以及其他异常关闭均按退避重连
+  if (code === 4401) {
+    // 令牌不被服务端识别(服务端数据重置/轮换帧丢失等)。偶发可重试;
+    // 连续多次仍 4401 说明令牌已永久失效,继续退避重连只会每 30s 打一次服务器。
+    consecutiveAuthFails += 1;
+    if (consecutiveAuthFails >= AUTH_FAIL_REVOKE_THRESHOLD) {
+      console.warn(`[语析连接] 连续 ${consecutiveAuthFails} 次 4401,判定凭证失效,需重新配对`);
+      stopReason = "revoked";
+      persistRuntimeStatus();
+      await revokeLocalIdentity();
+      return;
+    }
+  }
+  // 4408 心跳超时以及其他异常关闭均按退避重连
   scheduleReconnect();
 }
 
@@ -381,10 +423,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // 新配对完成:解除吊销停机状态,弃置旧连接后立即用新凭证建连
     stopReason = null;
     reconnectAttempt = 0;
+    consecutiveAuthFails = 0;
     persistRuntimeStatus();
     forceReconnect();
     sendResponse({ ok: true });
     return undefined;
+  }
+  if (message.type === "ledger_borrow_toggle") {
+    // popup 的借出/收回必须经 SW 的串行队列落账:直写 storage.session 会与
+    // 命令执行中的台账读改写互相覆盖(借出标记丢失→标签失权)。
+    const tabId = Number(message.tab_id);
+    enqueueSerial(async () => {
+      if (!Number.isInteger(tabId)) return null;
+      const ledger = await state.getLedger();
+      if (ledger.borrowed_tab_ids.includes(tabId)) {
+        return state.unborrowTab(tabId);
+      }
+      return state.borrowTab(tabId);
+    })
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true; // 异步 sendResponse
   }
   return undefined;
 });
@@ -392,20 +451,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 // ---- 任务台账随标签/窗口生命周期同步 ----
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  state.removeTabRefs(tabId).catch(() => {});
+  enqueueSerial(() => state.removeTabRefs(tabId)).catch(() => {});
 });
 
 chrome.windows.onRemoved.addListener((windowId) => {
-  state
-    .getLedger()
-    .then((ledger) => {
-      if (ledger.task_window_id === windowId) {
-        // 用户手动关闭任务窗口视为任务结束:台账整体清空,借出标记一并归还
-        return state.clearLedger();
-      }
-      return undefined;
-    })
-    .catch(() => {});
+  enqueueSerial(async () => {
+    const ledger = await state.getLedger();
+    if (ledger.task_window_id === windowId) {
+      // 用户手动关闭任务窗口视为任务结束:台账整体清空,借出标记一并归还
+      return state.clearLedger();
+    }
+    return undefined;
+  }).catch(() => {});
 });
 
 // ---- 启动引导 ----
