@@ -1088,6 +1088,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0071_literature_domain", "_migration_0071_literature_domain"),
         ("0072_literature_translation", "_migration_0072_literature_translation"),
         ("0073_literature_metrics_attachments", "_migration_0073_literature_metrics_attachments"),
+        ("0074_literature_reader_renders_rls", "_migration_0074_literature_reader_renders_rls"),
     ]
 
     async def _migration_0072_literature_translation(self, conn) -> None:
@@ -1196,6 +1197,23 @@ class PostgresManager(metaclass=SingletonMeta):
                     f"(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
                 )
             )
+
+    async def _migration_0074_literature_reader_renders_rls(self, conn) -> None:
+        """文献域补丁：literature_reader_renders 补齐 RLS 策略（与 0071-0073 对齐）。
+
+        0070 建表时未随建策略（独立核查发现的防御纵深缺口）；表已入迁移台账，
+        按纪律以新迁移幂等补齐。覆盖守卫：test_rls_coverage.py 钉死全量一致性。
+        """
+        statements = (
+            "ALTER TABLE literature_reader_renders ENABLE ROW LEVEL SECURITY",
+            "DROP POLICY IF EXISTS p_literature_reader_renders_tenant ON literature_reader_renders",
+            (
+                "CREATE POLICY p_literature_reader_renders_tenant ON literature_reader_renders USING "
+                "(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+            ),
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
 
     async def _migration_0070_literature_reader_renders(self, conn) -> None:
         """文献域 P1：阅读视图渲染状态表（ADR-0010 决议 7/9；派生物，非证据）。
