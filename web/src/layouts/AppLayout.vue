@@ -18,7 +18,13 @@ import {
 import { useConfigStore } from '@/stores/config'
 import { useAgentStore } from '@/stores/agent'
 import { useChatThreadsStore } from '@/stores/chatThreads'
-import { useChatUIStore } from '@/stores/chatUI'
+import {
+  SIDEBAR_WIDTH_DEFAULT,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+  clampSidebarWidth,
+  useChatUIStore
+} from '@/stores/chatUI'
 import { useDatabaseStore } from '@/stores/database'
 import { useInfoStore } from '@/stores/info'
 import { useTaskerStore } from '@/stores/tasker'
@@ -30,6 +36,7 @@ import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
 import { TITLE_SOURCE_USER } from '@/utils/threadTitle'
+import { useColumnResize } from '@/composables/useColumnResize'
 import { useConversationExport } from '@/composables/useConversationExport'
 
 const configStore = useConfigStore()
@@ -49,6 +56,49 @@ const showDebugModal = ref(false)
 
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
 const conversationSearchOpen = ref(false)
+
+// 侧边栏展开态宽度：持久化值渲染前归一，防止旧版本/手工编辑的 localStorage 脏数据撑破布局
+const sidebarWidth = computed(() => clampSidebarWidth(chatUIStore.sidebarWidth))
+const sidebarStyle = computed(() => ({ '--sidebar-width': `${sidebarWidth.value}px` }))
+
+// 宽度按拖拽增量计算（起点宽度 + 位移），杂散点击不改变宽度；越界由 store 收敛
+const { isDragging: isSidebarResizing, startDrag: startSidebarDrag } = useColumnResize({
+  onResize: (clientX, startClientX) =>
+    chatUIStore.setSidebarWidth(sidebarWidth.value + (clientX - startClientX))
+})
+
+const resetSidebarWidth = () => {
+  chatUIStore.setSidebarWidth(SIDEBAR_WIDTH_DEFAULT)
+}
+
+// 键盘可达（WAI-ARIA separator 模式）：方向键微调、Shift 放大步长、Home/End 到边界、Enter 复位
+const handleSidebarResizeKeydown = (event) => {
+  const step = 8 * (event.shiftKey ? 4 : 1)
+  switch (event.key) {
+    case 'ArrowLeft':
+      event.preventDefault()
+      chatUIStore.setSidebarWidth(sidebarWidth.value - step)
+      break
+    case 'ArrowRight':
+      event.preventDefault()
+      chatUIStore.setSidebarWidth(sidebarWidth.value + step)
+      break
+    case 'Home':
+      event.preventDefault()
+      chatUIStore.setSidebarWidth(SIDEBAR_WIDTH_MIN)
+      break
+    case 'End':
+      event.preventDefault()
+      chatUIStore.setSidebarWidth(SIDEBAR_WIDTH_MAX)
+      break
+    case 'Enter':
+      event.preventDefault()
+      resetSidebarWidth()
+      break
+    default:
+      break
+  }
+}
 
 // Handle debug modal close
 const handleDebugModalClose = () => {
@@ -270,7 +320,11 @@ watch(
 </script>
 
 <template>
-  <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+  <div
+    class="app-layout"
+    :class="{ 'sidebar-collapsed': sidebarCollapsed, 'sidebar-resizing': isSidebarResizing }"
+    :style="sidebarStyle"
+  >
     <div class="header">
       <div class="sidebar-brand" @click.stop>
         <router-link v-if="!sidebarCollapsed" to="/" class="brand-link">
@@ -397,6 +451,21 @@ watch(
         </div>
       </div>
     </div>
+    <div
+      v-if="!sidebarCollapsed"
+      class="sidebar-resize-handle"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整侧边栏宽度"
+      :aria-valuemin="SIDEBAR_WIDTH_MIN"
+      :aria-valuemax="SIDEBAR_WIDTH_MAX"
+      :aria-valuenow="sidebarWidth"
+      title="拖拽调整宽度，双击恢复默认"
+      tabindex="0"
+      @pointerdown="startSidebarDrag"
+      @dblclick="resetSidebarWidth"
+      @keydown="handleSidebarResizeKeydown"
+    ></div>
     <router-view v-slot="{ Component, route }" id="app-router-view">
       <keep-alive v-if="route.meta.keepAlive !== false">
         <component :is="Component" />
@@ -455,6 +524,7 @@ watch(
 );
 
 .app-layout {
+  position: relative;
   display: flex;
   flex-direction: row;
   width: 100%;
@@ -473,16 +543,70 @@ div.header,
   overflow-y: auto;
 }
 
+// 侧边栏右缘拖拽把手：绝对定位覆盖在分界线上，不参与 flex 布局（避免折叠切换时 6px 抖动）
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-width, @sidebar-width) - 3px);
+  z-index: 30;
+  width: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  transition: left 0.18s ease;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 2px;
+    transform: translateX(-50%);
+    background: var(--main-color);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+
+  &:hover::after,
+  &:focus-visible::after {
+    opacity: 0.45;
+  }
+
+  &:focus-visible {
+    outline: none;
+  }
+}
+
+.app-layout.sidebar-resizing {
+  cursor: col-resize;
+
+  .header {
+    transition: none;
+  }
+
+  .sidebar-resize-handle {
+    transition: none;
+
+    &::after {
+      opacity: 0.9;
+    }
+  }
+}
+
 .header {
   display: flex;
   flex-direction: column;
-  flex: 0 0 @sidebar-width;
+  flex: 0 0 var(--sidebar-width, @sidebar-width);
   justify-content: flex-start;
   align-items: stretch;
   gap: 16px;
   background-color: var(--main-5);
   height: 100%;
-  width: @sidebar-width;
+  width: var(--sidebar-width, @sidebar-width);
   border-right: 1px solid var(--gray-100);
   padding: @sidebar-padding;
   overflow: hidden;
@@ -616,7 +740,9 @@ div.header,
 
     .nav-text {
       min-width: 0;
-      max-width: 140px;
+      // 随侧边栏拖宽自适应展示更长文案（24px = 图标 16px + 间距 8px）；
+      // 折叠态由 .sidebar-collapsed 覆盖为 0，保留 max-width 是为了折叠动画可插值
+      max-width: calc(100% - 24px);
       margin-left: 8px;
       overflow: hidden;
       line-height: 20px;
