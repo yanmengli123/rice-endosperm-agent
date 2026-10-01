@@ -157,6 +157,33 @@ async def regenerate_channel_path_token(
     return await channel_service.regenerate_path_token_view(db, current_user, app_id)
 
 
+@channel_router.post("/apps/{app_id}/test")
+async def test_channel_app(
+    app_id: int,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await channel_service.test_channel_app_view(db, current_user, app_id)
+
+
+@channel_router.post("/apps/{app_id}/activate")
+async def activate_channel_app(
+    app_id: int,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await channel_service.activate_channel_app_view(db, current_user, app_id)
+
+
+@channel_router.post("/apps/{app_id}/deactivate")
+async def deactivate_channel_app(
+    app_id: int,
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await channel_service.deactivate_channel_app_view(db, current_user, app_id)
+
+
 @channel_router.get("/apps/{app_id}/messages")
 async def list_channel_messages(
     app_id: int,

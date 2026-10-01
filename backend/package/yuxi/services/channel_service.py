@@ -18,6 +18,7 @@ import time
 import uuid
 from datetime import timedelta
 from typing import Any, NamedTuple
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy import delete, exists, func, select
@@ -105,6 +106,7 @@ CONFIG_DEFAULTS = {
     # 来源 IP 白名单（F2）：CIDR 列表 + log/enforce 双模式（log 先观察再拦截）
     "ip_allowlist": None,
     "ip_allowlist_mode": "log",
+    "transport_mode": None,
 }
 # API 可写的 config 闭集；transport_cursor 等内部键不在此列（运行时直写 ORM）
 CONFIG_KEYS = frozenset(CONFIG_DEFAULTS)
@@ -144,6 +146,8 @@ async def handle_channel_callback(
         )
     ).scalar_one_or_none()
     if app is None:
+        return 403, {}, "forbidden"
+    if (app.config or {}).get("deleted_at"):
         return 403, {}, "forbidden"
 
     await incr_metric(Metrics.INBOUND_RECEIVED, app_id=int(app.id))
@@ -621,6 +625,8 @@ async def list_channel_apps_view(db: AsyncSession, current_uid: str) -> list[dic
             outbox_stats.setdefault(int(app_id), {})[status] = int(count or 0)
     items = []
     for row in rows:
+        if (row.config or {}).get("deleted_at"):
+            continue
         item = _app_to_dict(row)
         stats = outbox_stats.get(int(row.id), {})
         item["outbox_pending"] = stats.get("PENDING", 0)
@@ -645,6 +651,10 @@ async def create_channel_app_view(db: AsyncSession, current_user: User, payload:
         raise HTTPException(status_code=422, detail=f"服务账号不可用：{exc}") from exc
 
     config = _normalize_config(payload.get("config"), with_defaults=True)
+    config["transport_mode"] = config.get("transport_mode") or _default_transport_mode(channel_type)
+    _validate_transport_mode(channel_type, str(config["transport_mode"]))
+    config["lifecycle_status"] = "DRAFT"
+    config["connection_test"] = None
     if not config["bound_agent_slug"]:
         raise HTTPException(status_code=422, detail="config.bound_agent_slug 不能为空")
     service_user = await UserRepository().get_by_uid_with_db(db, service_uid)
@@ -660,25 +670,62 @@ async def create_channel_app_view(db: AsyncSession, current_user: User, payload:
         raise HTTPException(status_code=422, detail="platform_app_id 不能为空")
 
     path_token = secrets.token_hex(16)
-    app = ChannelApp(
-        tenant_id=tenant_id,
-        channel_type=channel_type,
-        name=str(payload.get("name") or platform_app_id)[:128],
-        platform_app_id=platform_app_id,
-        platform_agent_id=str(payload.get("platform_agent_id") or "") or None,
-        credentials_ciphertext=encrypt_secret(
+    encrypted_credentials = (
+        encrypt_secret(
             json.dumps(credentials, ensure_ascii=False), _credentials_aad(channel_type, platform_app_id, tenant_id)
         )
-        or "",
-        credentials_masked_hint=_masked_hint(credentials),
-        path_token_hash=_hash_code(path_token),
-        service_uid=service_uid,
-        config=config,
-        is_enabled=bool(payload.get("is_enabled", True)),
-        created_by=str(current_user.uid),
+        or ""
     )
-    db.add(app)
+    existing = (
+        await db.execute(
+            select(ChannelApp).where(
+                ChannelApp.tenant_id == tenant_id,
+                ChannelApp.channel_type == channel_type,
+                ChannelApp.platform_app_id == platform_app_id,
+            )
+        )
+    ).scalar_one_or_none()
+    restored = existing is not None and bool((existing.config or {}).get("deleted_at"))
+    if existing is not None and not restored:
+        raise HTTPException(status_code=409, detail="同租户下该平台应用已存在")
+
+    if restored:
+        app = existing
+        app.name = str(payload.get("name") or platform_app_id)[:128]
+        app.platform_agent_id = str(payload.get("platform_agent_id") or "") or None
+        app.credentials_ciphertext = encrypted_credentials
+        app.credentials_masked_hint = _masked_hint(credentials)
+        app.path_token_hash = _hash_code(path_token)
+        app.service_uid = service_uid
+        app.config = config
+        app.is_enabled = False
+        app.created_by = str(current_user.uid)
+    else:
+        app = ChannelApp(
+            tenant_id=tenant_id,
+            channel_type=channel_type,
+            name=str(payload.get("name") or platform_app_id)[:128],
+            platform_app_id=platform_app_id,
+            platform_agent_id=str(payload.get("platform_agent_id") or "") or None,
+            credentials_ciphertext=encrypted_credentials,
+            credentials_masked_hint=_masked_hint(credentials),
+            path_token_hash=_hash_code(path_token),
+            service_uid=service_uid,
+            config=config,
+            # 企业控制面：保存永远先进入草稿；连接测试通过后由 activate 端点启用。
+            is_enabled=False,
+            created_by=str(current_user.uid),
+        )
+        db.add(app)
     try:
+        await db.flush()
+        _add_management_audit(
+            db,
+            current_user,
+            "渠道应用恢复" if restored else "渠道应用创建",
+            app,
+            {"status": "DRAFT"},
+        )
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
@@ -701,7 +748,10 @@ async def update_channel_app_view(
     if "name" in payload and str(payload.get("name") or "").strip():
         app.name = str(payload["name"])[:128]
     if "is_enabled" in payload:
-        app.is_enabled = bool(payload["is_enabled"])
+        if bool(payload["is_enabled"]):
+            raise HTTPException(status_code=422, detail="请先通过连接测试，再调用激活端点")
+        app.is_enabled = False
+        app.config = {**(app.config or {}), "lifecycle_status": "PAUSED"}
     if "platform_agent_id" in payload:
         app.platform_agent_id = str(payload.get("platform_agent_id") or "") or None
 
@@ -719,7 +769,13 @@ async def update_channel_app_view(
     if "config" in payload:
         merged = dict(app.config or {})
         merged.update(_normalize_config(payload.get("config")))
+        merged["lifecycle_status"] = "DRAFT"
+        merged["connection_test"] = None
         app.config = merged
+        app.is_enabled = False
+        _validate_transport_mode(
+            app.channel_type, str(merged.get("transport_mode") or _default_transport_mode(app.channel_type))
+        )
         if merged["bound_agent_slug"]:
             service_user = await UserRepository().get_by_uid_with_db(db, app.service_uid)
             if (
@@ -740,10 +796,19 @@ async def update_channel_app_view(
             or ""
         )
         app.credentials_masked_hint = _masked_hint(credentials)
+        app.config = {
+            **(app.config or {}),
+            "lifecycle_status": "DRAFT",
+            "connection_test": None,
+            "credentials_rotated_at": utc_now().isoformat(),
+        }
+        app.is_enabled = False
+        _add_management_audit(db, current_user, "渠道应用凭据轮换", app)
         await db.commit()
         await _prewarm_feishu_bot(app)  # S5：换密后刷新 @ 判定缓存
         return _app_to_dict(app)
 
+    _add_management_audit(db, current_user, "渠道应用更新", app)
     await db.commit()
     return _app_to_dict(app)
 
@@ -768,7 +833,14 @@ async def delete_channel_app_view(db: AsyncSession, current_user: User, app_id: 
     tenant_id = await resolve_tenant_id(db, str(current_user.uid))
     if app.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="渠道应用不存在")
-    await db.delete(app)
+    # 软删除：保留消息、outbox 与绑定审计；保留期任务继续按既有策略清理。
+    app.is_enabled = False
+    app.config = {
+        **(app.config or {}),
+        "lifecycle_status": "DELETED",
+        "deleted_at": utc_now().isoformat(),
+    }
+    _add_management_audit(db, current_user, "渠道应用删除", app)
     await db.commit()
 
 
@@ -780,8 +852,71 @@ async def regenerate_path_token_view(db: AsyncSession, current_user: User, app_i
         raise HTTPException(status_code=404, detail="渠道应用不存在")
     path_token = secrets.token_hex(16)
     app.path_token_hash = _hash_code(path_token)
+    _add_management_audit(db, current_user, "渠道回调令牌重置", app)
     await db.commit()
-    return {"path_token": path_token, "webhook_path": _webhook_path(app.channel_type, path_token)}
+    base = _public_channel_base_url()
+    return {
+        "path_token": path_token,
+        "webhook_path": _webhook_path(app.channel_type, path_token),
+        "webhook_url_template": (f"{base}/api/channels/{app.channel_type}/webhook/{{path_token}}" if base else None),
+        "transport_mode": (app.config or {}).get("transport_mode") or _default_transport_mode(app.channel_type),
+    }
+
+
+async def test_channel_app_view(db: AsyncSession, current_user: User, app_id: int) -> dict[str, Any]:
+    """验证凭据与传输前置条件；结果不包含密钥，并持久化为激活门依据。"""
+    app = await _require_tenant_app(db, current_user, app_id)
+    credentials = _load_credentials(app)
+    checks = _activation_checks(app, credentials, require_connection_test=False)
+    blocking = [item for item in checks if not item["ok"]]
+    # 即使公网回调尚未就绪，也验证平台凭据，避免部署公网后才发现第二个阻塞项。
+    try:
+        await _probe_platform_credentials(app, credentials)
+    except Exception as error:  # noqa: BLE001 - 管理测试把平台错误收敛为结构化结论
+        blocking.append({"code": "CREDENTIALS_INVALID", "ok": False, "message": str(error)[:300]})
+
+    tested_at = utc_now().isoformat()
+    result = {
+        "ok": not blocking,
+        "code": "READY" if not blocking else str(blocking[0]["code"]),
+        "message": "连接与安全前置条件验证通过" if not blocking else str(blocking[0]["message"]),
+        "checks": checks + [item for item in blocking if item not in checks],
+        "tested_at": tested_at,
+    }
+    app.config = {
+        **(app.config or {}),
+        "lifecycle_status": "READY" if result["ok"] else "BLOCKED",
+        "connection_test": result,
+    }
+    app.is_enabled = False
+    _add_management_audit(db, current_user, "渠道连接测试", app, {"ok": result["ok"], "code": result["code"]})
+    await db.commit()
+    return result
+
+
+async def activate_channel_app_view(db: AsyncSession, current_user: User, app_id: int) -> dict[str, Any]:
+    app = await _require_tenant_app(db, current_user, app_id)
+    blocking = [
+        item for item in _activation_checks(app, _load_credentials(app), require_connection_test=True) if not item["ok"]
+    ]
+    if blocking:
+        raise HTTPException(
+            status_code=422, detail={"code": blocking[0]["code"], "message": blocking[0]["message"], "checks": blocking}
+        )
+    app.is_enabled = True
+    app.config = {**(app.config or {}), "lifecycle_status": "ACTIVE", "activated_at": utc_now().isoformat()}
+    _add_management_audit(db, current_user, "渠道应用激活", app)
+    await db.commit()
+    return _app_to_dict(app)
+
+
+async def deactivate_channel_app_view(db: AsyncSession, current_user: User, app_id: int) -> dict[str, Any]:
+    app = await _require_tenant_app(db, current_user, app_id)
+    app.is_enabled = False
+    app.config = {**(app.config or {}), "lifecycle_status": "PAUSED"}
+    _add_management_audit(db, current_user, "渠道应用停用", app)
+    await db.commit()
+    return _app_to_dict(app)
 
 
 async def list_channel_messages_view(
@@ -847,13 +982,14 @@ async def requeue_channel_outbox_view(db: AsyncSession, current_user: User, outb
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="outbox 记录不存在")
-    await _require_tenant_app(db, current_user, row.channel_app_id)
+    app = await _require_tenant_app(db, current_user, row.channel_app_id)
     if row.status != "DEAD":
         raise HTTPException(status_code=422, detail="仅 DEAD 状态可重排队")
     row.status = "PENDING"
     row.attempts = 0
     row.next_attempt_at = utc_now()
     row.last_error = None
+    _add_management_audit(db, current_user, "渠道死信重排", app, {"outbox_id": int(row.id)})
     await db.commit()
     # S1b：死信计数键回落，保持「近似当前积压」语义（DB count 仍是权威）
     try:
@@ -1512,9 +1648,14 @@ def _normalize_config(raw: Any, *, with_defaults: bool = False) -> dict[str, Any
     config: dict[str, Any] = dict(CONFIG_DEFAULTS) if with_defaults else {}
     if "allowed_chats" in source:
         value = source["allowed_chats"]
+        if value is not None and not isinstance(value, list):
+            raise HTTPException(status_code=422, detail="allowed_chats 必须是字符串列表或 null")
         config["allowed_chats"] = [str(item) for item in value] if isinstance(value, list) else None
     if "daily_limit" in source and source["daily_limit"] is not None:
-        config["daily_limit"] = int(source["daily_limit"])
+        daily_limit = int(source["daily_limit"])
+        if daily_limit < 1:
+            raise HTTPException(status_code=422, detail="daily_limit 必须大于 0")
+        config["daily_limit"] = daily_limit
     if "bound_agent_slug" in source and source["bound_agent_slug"]:
         config["bound_agent_slug"] = str(source["bound_agent_slug"])
     for flag in ("mention_only", "push_placeholder", "store_text_preview"):
@@ -1525,7 +1666,15 @@ def _normalize_config(raw: Any, *, with_defaults: bool = False) -> dict[str, Any
         if value in (None, "", []):
             config["ip_allowlist"] = None
         elif isinstance(value, list):
-            config["ip_allowlist"] = [str(item).strip() for item in value if str(item).strip()]
+            from ipaddress import ip_network
+
+            normalized = [str(item).strip() for item in value if str(item).strip()]
+            try:
+                for cidr in normalized:
+                    ip_network(cidr, strict=False)
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail=f"非法 CIDR：{cidr}") from error
+            config["ip_allowlist"] = normalized
         else:
             raise HTTPException(status_code=422, detail="ip_allowlist 必须是 CIDR 列表或 null")
     if "ip_allowlist_mode" in source:
@@ -1533,7 +1682,144 @@ def _normalize_config(raw: Any, *, with_defaults: bool = False) -> dict[str, Any
         if mode not in ("log", "enforce"):
             raise HTTPException(status_code=422, detail="ip_allowlist_mode 仅支持 log / enforce")
         config["ip_allowlist_mode"] = mode
+    if "transport_mode" in source and source.get("transport_mode"):
+        config["transport_mode"] = str(source["transport_mode"])
     return config
+
+
+def _default_transport_mode(channel_type: str) -> str:
+    return "long_poll" if channel_type == "telegram" else "webhook"
+
+
+def _validate_transport_mode(channel_type: str, mode: str) -> None:
+    allowed = set(channel_registry.get(channel_type).inbound_modes)
+    if mode not in allowed:
+        raise HTTPException(status_code=422, detail=f"{channel_type} 不支持传输模式 {mode}")
+
+
+def _public_channel_base_url() -> str | None:
+    value = str(os.environ.get("CHANNEL_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return None
+    return value
+
+
+def _activation_checks(
+    app: ChannelApp, credentials: dict[str, Any], *, require_connection_test: bool
+) -> list[dict[str, Any]]:
+    """生成值无关的激活门结论，供 API、页面和测试共用。"""
+    config = app.config or {}
+    mode = str(config.get("transport_mode") or _default_transport_mode(app.channel_type))
+    checks: list[dict[str, Any]] = []
+
+    def add(code: str, ok: bool, message: str) -> None:
+        checks.append({"code": code, "ok": ok, "message": message})
+
+    allowed = set(channel_registry.get(app.channel_type).inbound_modes)
+    add("TRANSPORT_MODE", mode in allowed, f"传输模式：{mode}" if mode in allowed else f"不支持传输模式 {mode}")
+    if mode == "webhook":
+        add(
+            "PUBLIC_HTTPS_REQUIRED",
+            _public_channel_base_url() is not None,
+            "公网 HTTPS 回调地址已配置"
+            if _public_channel_base_url()
+            else "缺少有效的 CHANNEL_PUBLIC_BASE_URL（必须为公网 HTTPS）",
+        )
+
+    if app.channel_type == "feishu":
+        secure = bool(credentials.get("encrypt_key") and credentials.get("verification_token"))
+        add(
+            "FEISHU_SECURE_CALLBACK",
+            secure,
+            "飞书加密回调已配置" if secure else "飞书必须配置 Encrypt Key 与 Verification Token",
+        )
+    elif app.channel_type == "telegram" and mode == "webhook":
+        secure = bool(credentials.get("webhook_secret"))
+        add(
+            "TELEGRAM_WEBHOOK_SECRET",
+            secure,
+            "Telegram webhook secret 已配置" if secure else "Telegram webhook 模式必须配置 secret token",
+        )
+    elif app.channel_type == "dingtalk":
+        encrypted = all(credentials.get(key) for key in ("encoding_aes_key", "token", "corp_id"))
+        hardened_plain = bool(
+            credentials.get("app_secret")
+            and config.get("ip_allowlist")
+            and config.get("ip_allowlist_mode") == "enforce"
+        )
+        add(
+            "DINGTALK_CALLBACK_SECURITY",
+            encrypted or hardened_plain,
+            "钉钉回调安全配置有效"
+            if encrypted or hardened_plain
+            else "钉钉必须使用加密回调，或配置签名密钥并强制 IP 白名单",
+        )
+
+    identity_key = {"feishu": "app_id", "wecom": "corp_id", "wechat_oa": "app_id"}.get(app.channel_type)
+    if identity_key:
+        same = str(credentials.get(identity_key) or "") == str(app.platform_app_id)
+        add("PLATFORM_ID_MATCH", same, "平台应用标识一致" if same else f"platform_app_id 与凭据 {identity_key} 不一致")
+
+    if require_connection_test:
+        test = config.get("connection_test") if isinstance(config.get("connection_test"), dict) else {}
+        add(
+            "CONNECTION_TEST",
+            bool(test.get("ok")),
+            "最近一次连接测试通过" if test.get("ok") else "请先运行并通过连接测试",
+        )
+    return checks
+
+
+async def _probe_platform_credentials(app: ChannelApp, credentials: dict[str, Any]) -> None:
+    """走平台最小只读接口验证凭据；钉钉机器人没有稳定的独立探测 API。"""
+    if app.channel_type == "feishu":
+        from yuxi.channels.adapters.feishu import FeishuAdapter
+
+        await FeishuAdapter()._get_tenant_access_token(credentials, app.platform_app_id, force=True)  # noqa: SLF001
+    elif app.channel_type == "wecom":
+        from yuxi.channels.adapters.wecom import WeComAdapter
+
+        await WeComAdapter()._get_access_token(credentials, app.platform_app_id, force=True)  # noqa: SLF001
+    elif app.channel_type == "wechat_oa":
+        from yuxi.channels.adapters.wechat_oa import WeChatOfficialAccountAdapter
+
+        await WeChatOfficialAccountAdapter()._get_access_token(credentials, app.platform_app_id, force=True)  # noqa: SLF001
+    elif app.channel_type == "telegram":
+        from yuxi.channels.adapters.telegram import TelegramAdapter
+
+        username = await TelegramAdapter().resolve_bot_username(credentials, app.platform_app_id)
+        if not username:
+            raise RuntimeError("Telegram getMe 未返回 bot 身份，请检查 Bot Token 与外网连通性")
+        if str(app.platform_app_id).lstrip("@").casefold() != str(username).lstrip("@").casefold():
+            raise RuntimeError("Telegram bot username 与 platform_app_id 不一致")
+    elif app.channel_type == "dingtalk":
+        return
+
+
+def _add_management_audit(
+    db: AsyncSession,
+    current_user: User,
+    operation: str,
+    app: ChannelApp,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    detail = {
+        "channel_app_id": int(app.id) if app.id is not None else None,
+        "channel_type": app.channel_type,
+        "platform_app_id": app.platform_app_id,
+        **(extra or {}),
+    }
+    db.add(
+        OperationLog(
+            user_id=int(current_user.id),
+            tenant_id=int(app.tenant_id),
+            operation=operation,
+            details=json.dumps(detail, ensure_ascii=False),
+        )
+    )
 
 
 def _reply_extra(envelope: ChannelEnvelope) -> dict[str, Any]:
@@ -1868,7 +2154,7 @@ async def purge_channel_history(ctx: Any = None) -> dict[str, int]:
 
 async def _require_app(db: AsyncSession, app_id: int) -> ChannelApp:
     app = (await db.execute(select(ChannelApp).where(ChannelApp.id == app_id))).scalar_one_or_none()
-    if app is None:
+    if app is None or (app.config or {}).get("deleted_at"):
         raise HTTPException(status_code=404, detail="渠道应用不存在")
     return app
 
@@ -1884,4 +2170,21 @@ async def _require_tenant_app(db: AsyncSession, current_user: User, app_id: int)
 def _app_to_dict(app: ChannelApp) -> dict[str, Any]:
     result = app.to_dict()
     result["webhook_path_template"] = f"/api/channels/{app.channel_type}/webhook/{{path_token}}"
+    config = app.config or {}
+    result["lifecycle_status"] = config.get("lifecycle_status") or ("ACTIVE" if app.is_enabled else "DRAFT")
+    result["transport_mode"] = config.get("transport_mode") or _default_transport_mode(app.channel_type)
+    result["connection_test"] = config.get("connection_test")
+    base = _public_channel_base_url()
+    result["public_webhook_configured"] = base is not None
+    result["webhook_url_template"] = f"{base}/api/channels/{app.channel_type}/webhook/{{path_token}}" if base else None
+    try:
+        result["activation_checks"] = _activation_checks(app, _load_credentials(app), require_connection_test=True)
+    except Exception:  # noqa: BLE001 - 列表页不得因单条历史密文损坏而整体 500
+        result["activation_checks"] = [
+            {
+                "code": "CREDENTIALS_UNREADABLE",
+                "ok": False,
+                "message": "凭据无法解密，请轮换该渠道应用的全部凭据",
+            }
+        ]
     return result

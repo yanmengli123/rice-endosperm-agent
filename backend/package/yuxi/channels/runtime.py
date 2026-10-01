@@ -218,6 +218,9 @@ async def _load_long_poll_apps() -> list[dict[str, Any]]:
                 "platform_app_id": row.platform_app_id,
             }
             for row in rows
+            if str((row.config or {}).get("transport_mode") or "long_poll") == "long_poll"
+            and str((row.config or {}).get("lifecycle_status") or "ACTIVE") == "ACTIVE"
+            and not (row.config or {}).get("deleted_at")
         ]
 
 

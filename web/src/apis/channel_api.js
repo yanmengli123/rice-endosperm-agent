@@ -15,6 +15,14 @@ export const channelApi = {
 
   regeneratePathToken: (id) => apiPost(`${CHANNEL_BASE_PATH}/apps/${id}/regenerate-path-token`),
 
+  testApp: (id) => apiPost(`${CHANNEL_BASE_PATH}/apps/${id}/test`),
+
+  activateApp: (id) => apiPost(`${CHANNEL_BASE_PATH}/apps/${id}/activate`),
+
+  deactivateApp: (id) => apiPost(`${CHANNEL_BASE_PATH}/apps/${id}/deactivate`),
+
+  metrics: (days = 2) => apiGet(`${CHANNEL_BASE_PATH}/metrics`, { params: { days } }),
+
   listMessages: (id, params = {}) => apiGet(`${CHANNEL_BASE_PATH}/apps/${id}/messages`, { params }),
 
   listOutbox: (id, params = {}) => apiGet(`${CHANNEL_BASE_PATH}/apps/${id}/outbox`, { params }),
@@ -23,7 +31,8 @@ export const channelApi = {
 
   listEndUsers: (id) => apiGet(`${CHANNEL_BASE_PATH}/apps/${id}/end-users`),
 
-  unbindEndUser: (appId, endUserId) => apiDelete(`${CHANNEL_BASE_PATH}/apps/${appId}/end-users/${endUserId}`),
+  unbindEndUser: (appId, endUserId) =>
+    apiDelete(`${CHANNEL_BASE_PATH}/apps/${appId}/end-users/${endUserId}`),
 
   createPairing: (appId) => apiPost(`${CHANNEL_BASE_PATH}/apps/${appId}/pairings`)
 }

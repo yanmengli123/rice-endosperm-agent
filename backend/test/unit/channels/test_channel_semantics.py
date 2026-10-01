@@ -244,6 +244,51 @@ class TestCallbackOrchestration:
         assert status == 503
 
 
+class TestEnterpriseActivationGate:
+    """控制面必须拒绝不可达或弱鉴权配置，不以“已保存”冒充“可用”。"""
+
+    async def test_local_webhook_is_blocked(self, monkeypatch) -> None:
+        monkeypatch.delenv("CHANNEL_PUBLIC_BASE_URL", raising=False)
+        app = SimpleNamespace(
+            channel_type="feishu",
+            platform_app_id="cli_t",
+            config={"transport_mode": "webhook"},
+        )
+        checks = channel_service._activation_checks(
+            app,
+            {"app_id": "cli_t", "app_secret": "s", "encrypt_key": "e", "verification_token": "v"},
+            require_connection_test=False,
+        )
+        assert any(item["code"] == "PUBLIC_HTTPS_REQUIRED" and not item["ok"] for item in checks)
+
+    async def test_telegram_long_poll_needs_no_public_url(self, monkeypatch) -> None:
+        monkeypatch.delenv("CHANNEL_PUBLIC_BASE_URL", raising=False)
+        app = SimpleNamespace(
+            channel_type="telegram",
+            platform_app_id="my_bot",
+            config={"transport_mode": "long_poll"},
+        )
+        checks = channel_service._activation_checks(app, {"bot_token": "token"}, require_connection_test=False)
+        assert all(item["ok"] for item in checks)
+        assert not any(item["code"] == "PUBLIC_HTTPS_REQUIRED" for item in checks)
+
+    async def test_telegram_webhook_requires_secret(self, monkeypatch) -> None:
+        monkeypatch.setenv("CHANNEL_PUBLIC_BASE_URL", "https://bot.example.com")
+        app = SimpleNamespace(
+            channel_type="telegram",
+            platform_app_id="my_bot",
+            config={"transport_mode": "webhook"},
+        )
+        checks = channel_service._activation_checks(app, {"bot_token": "token"}, require_connection_test=False)
+        assert any(item["code"] == "TELEGRAM_WEBHOOK_SECRET" and not item["ok"] for item in checks)
+
+    async def test_public_base_rejects_localhost(self, monkeypatch) -> None:
+        monkeypatch.setenv("CHANNEL_PUBLIC_BASE_URL", "http://localhost:9088")
+        assert channel_service._public_channel_base_url() is None
+        monkeypatch.setenv("CHANNEL_PUBLIC_BASE_URL", "https://bot.example.com")
+        assert channel_service._public_channel_base_url() == "https://bot.example.com"
+
+
 class TestBatchCursorAdvance:
     """F3：零 hard-failure 才前进游标。"""
 

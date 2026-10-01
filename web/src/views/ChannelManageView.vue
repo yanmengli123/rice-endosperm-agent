@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { channelApi } from '@/apis/channel_api'
 
 const loading = ref(false)
@@ -19,9 +19,14 @@ const createForm = ref({
   allowed_chats: '',
   mention_only: true,
   push_placeholder: true,
-  daily_limit: null
+  daily_limit: null,
+  transport_mode: 'webhook',
+  ip_allowlist: '',
+  ip_allowlist_mode: 'log'
 })
 const createdReveal = ref(null)
+const editingApp = ref(null)
+const editForm = ref({})
 
 const detailApp = ref(null)
 const detailTab = ref('messages')
@@ -31,8 +36,6 @@ const detailEndUsers = ref([])
 const pairingResult = ref(null)
 
 const channelTypeOptions = computed(() => types.value)
-
-const pageOrigin = window.location.origin
 
 const credentialFields = {
   feishu: [
@@ -80,6 +83,23 @@ const prerequisiteHints = {
 }
 
 const activeCredentialFields = computed(() => credentialFields[createForm.value.channel_type] || [])
+const editCredentialFields = computed(() => credentialFields[editingApp.value?.channel_type] || [])
+const activeTransportModes = computed(() => {
+  const found = types.value.find((item) => item.channel_type === createForm.value.channel_type)
+  return found?.inbound_modes || ['webhook']
+})
+const createdWebhookUrl = computed(() => {
+  const value = createdReveal.value
+  if (!value?.webhook_url_template || !value?.path_token) return ''
+  return value.webhook_url_template.replace('{path_token}', value.path_token)
+})
+
+watch(
+  () => createForm.value.channel_type,
+  (channelType) => {
+    createForm.value.transport_mode = channelType === 'telegram' ? 'long_poll' : 'webhook'
+  }
+)
 
 const channelTypeLabel = (type) => {
   const found = types.value.find((t) => t.channel_type === type)
@@ -122,7 +142,12 @@ const submitCreate = async () => {
           : null,
         mention_only: createForm.value.mention_only,
         push_placeholder: createForm.value.push_placeholder,
-        daily_limit: createForm.value.daily_limit ? Number(createForm.value.daily_limit) : null
+        daily_limit: createForm.value.daily_limit ? Number(createForm.value.daily_limit) : null,
+        transport_mode: createForm.value.transport_mode,
+        ip_allowlist: createForm.value.ip_allowlist
+          ? createForm.value.ip_allowlist.split(/[,，\s]+/).filter(Boolean)
+          : null,
+        ip_allowlist_mode: createForm.value.ip_allowlist_mode
       }
     }
     const created = await channelApi.createApp(payload)
@@ -146,17 +171,87 @@ const resetCreate = () => {
     allowed_chats: '',
     mention_only: true,
     push_placeholder: true,
-    daily_limit: null
+    daily_limit: null,
+    transport_mode: createForm.value.channel_type === 'telegram' ? 'long_poll' : 'webhook',
+    ip_allowlist: '',
+    ip_allowlist_mode: 'log'
   }
 }
 
 const toggleEnabled = async (app) => {
   try {
-    await channelApi.updateApp(app.id, { is_enabled: !app.is_enabled })
+    if (app.is_enabled) await channelApi.deactivateApp(app.id)
+    else await channelApi.activateApp(app.id)
     await loadApps()
   } catch (e) {
     error.value = e.message || '更新失败'
   }
+}
+
+const testConnection = async (app) => {
+  try {
+    const result = await channelApi.testApp(app.id)
+    if (!result.ok) error.value = `${result.code}：${result.message}`
+    await loadApps()
+  } catch (e) {
+    error.value = e.message || '连接测试失败'
+  }
+}
+
+const openEdit = (app) => {
+  editingApp.value = app
+  editForm.value = {
+    name: app.name,
+    platform_agent_id: app.platform_agent_id || '',
+    service_uid: app.service_uid,
+    bound_agent_slug: app.config?.bound_agent_slug || '',
+    allowed_chats: (app.config?.allowed_chats || []).join(', '),
+    daily_limit: app.config?.daily_limit || null,
+    transport_mode: app.transport_mode,
+    ip_allowlist: (app.config?.ip_allowlist || []).join(', '),
+    ip_allowlist_mode: app.config?.ip_allowlist_mode || 'log',
+    credentials: {}
+  }
+}
+
+const submitEdit = async () => {
+  const app = editingApp.value
+  if (!app) return
+  try {
+    const credentials = Object.fromEntries(
+      Object.entries(editForm.value.credentials || {}).filter(([, value]) =>
+        String(value || '').trim()
+      )
+    )
+    const payload = {
+      name: editForm.value.name,
+      platform_agent_id: editForm.value.platform_agent_id || null,
+      service_uid: editForm.value.service_uid,
+      config: {
+        bound_agent_slug: editForm.value.bound_agent_slug,
+        allowed_chats: editForm.value.allowed_chats
+          ? editForm.value.allowed_chats.split(/[,，\s]+/).filter(Boolean)
+          : null,
+        daily_limit: editForm.value.daily_limit ? Number(editForm.value.daily_limit) : null,
+        transport_mode: editForm.value.transport_mode,
+        ip_allowlist: editForm.value.ip_allowlist
+          ? editForm.value.ip_allowlist.split(/[,，\s]+/).filter(Boolean)
+          : null,
+        ip_allowlist_mode: editForm.value.ip_allowlist_mode
+      }
+    }
+    if (Object.keys(credentials).length) payload.credentials = credentials
+    await channelApi.updateApp(app.id, payload)
+    editingApp.value = null
+    await loadApps()
+  } catch (e) {
+    error.value = e.message || '保存失败'
+  }
+}
+
+const copyWebhook = async () => {
+  if (!createdWebhookUrl.value) return
+  await navigator.clipboard.writeText(createdWebhookUrl.value)
 }
 
 const regenerate = async (app) => {
@@ -247,6 +342,11 @@ const statusText = (status) =>
     failed: '失败'
   })[status] || status
 
+const lifecycleText = (status) =>
+  ({ DRAFT: '草稿', READY: '待激活', ACTIVE: '运行中', BLOCKED: '阻塞', PAUSED: '已停用' })[
+    status
+  ] || status
+
 onMounted(loadApps)
 </script>
 
@@ -262,17 +362,18 @@ onMounted(loadApps)
     <p v-if="error" class="error">{{ error }}</p>
 
     <section v-if="createdReveal" class="reveal-card">
-      <h3>
-        「{{ createdReveal.name || createdReveal.channel_type }}」回调地址已生成（令牌仅此一次展示）
-      </h3>
-      <code
-        >{{ pageOrigin
-        }}{{
-          createdReveal.webhook_path ||
-          createdReveal.webhook_path_template?.replace('{path_token}', createdReveal.path_token)
-        }}</code
-      >
-      <p class="hint">请将该地址配置到平台后台的事件订阅/回调 URL；重置令牌后旧地址立即失效。</p>
+      <h3>「{{ createdReveal.name || createdReveal.channel_type }}」已保存为草稿</h3>
+      <template v-if="createdWebhookUrl">
+        <code>{{ createdWebhookUrl }}</code>
+        <p class="hint">令牌仅此一次展示。请配置到平台后台，完成连接测试后再激活。</p>
+        <a-button size="small" @click="copyWebhook">复制回调地址</a-button>
+      </template>
+      <p v-else-if="createdReveal.transport_mode === 'long_poll'" class="hint">
+        长轮询模式无需回调地址；系统将在连接测试通过并激活后自动接管。
+      </p>
+      <p v-else class="error">
+        尚未配置公网 HTTPS 地址，本应用会保持阻塞。请设置 CHANNEL_PUBLIC_BASE_URL 后重启 api。
+      </p>
       <a-button @click="createdReveal = null">我知道了</a-button>
     </section>
 
@@ -287,6 +388,14 @@ onMounted(loadApps)
               :value="t.channel_type"
             >
               {{ t.label }}
+            </a-select-option>
+          </a-select>
+        </label>
+        <label
+          >传输模式
+          <a-select v-model:value="createForm.transport_mode">
+            <a-select-option v-for="mode in activeTransportModes" :key="mode" :value="mode">
+              {{ mode === 'long_poll' ? '长轮询（无需公网）' : 'Webhook（需要公网 HTTPS）' }}
             </a-select-option>
           </a-select>
         </label>
@@ -322,6 +431,18 @@ onMounted(loadApps)
             :min="1"
             style="width: 100%"
         /></label>
+        <label
+          >来源 IP 白名单（CIDR，可选）<a-input
+            v-model:value="createForm.ip_allowlist"
+            placeholder="如 1.2.3.0/24，多个用逗号分隔"
+        /></label>
+        <label
+          >IP 白名单模式
+          <a-select v-model:value="createForm.ip_allowlist_mode">
+            <a-select-option value="log">仅记录（上线观察期）</a-select-option>
+            <a-select-option value="enforce">强制拦截</a-select-option>
+          </a-select>
+        </label>
       </div>
       <p v-if="prerequisiteHints[createForm.channel_type]" class="prereq-hint">
         ⚠️ {{ prerequisiteHints[createForm.channel_type] }}
@@ -329,10 +450,10 @@ onMounted(loadApps)
       <div class="grid">
         <label v-for="field in activeCredentialFields" :key="field.key">
           {{ field.label }}
-          <a-input
+          <a-input-password
             v-model:value="createForm.credentials[field.key]"
             :placeholder="field.required ? '必填' : '可选'"
-            autocomplete="off"
+            autocomplete="new-password"
           />
         </label>
       </div>
@@ -350,7 +471,63 @@ onMounted(loadApps)
       暂无渠道应用。点击「新建渠道应用」接入飞书 / 企微 / 公众号 / 钉钉 / Telegram。
     </p>
 
-    <table v-else class="app-table">
+    <section v-if="editingApp" class="create-card">
+      <header class="page-head">
+        <h3>编辑「{{ editingApp.name }}」</h3>
+        <a-button size="small" @click="editingApp = null">取消</a-button>
+      </header>
+      <div class="grid">
+        <label>应用名称<a-input v-model:value="editForm.name" /></label>
+        <label>服务账号 uid<a-input v-model:value="editForm.service_uid" /></label>
+        <label>二级标识<a-input v-model:value="editForm.platform_agent_id" /></label>
+        <label>绑定智能体 slug<a-input v-model:value="editForm.bound_agent_slug" /></label>
+        <label>会话白名单<a-input v-model:value="editForm.allowed_chats" /></label>
+        <label
+          >每日消息上限<a-input-number
+            v-model:value="editForm.daily_limit"
+            :min="1"
+            style="width: 100%"
+        /></label>
+        <label
+          >传输模式
+          <a-select v-model:value="editForm.transport_mode">
+            <a-select-option
+              v-for="mode in types.find((item) => item.channel_type === editingApp.channel_type)
+                ?.inbound_modes || ['webhook']"
+              :key="mode"
+              :value="mode"
+              >{{ mode === 'long_poll' ? '长轮询（无需公网）' : 'Webhook' }}</a-select-option
+            >
+          </a-select>
+        </label>
+        <label>IP 白名单<a-input v-model:value="editForm.ip_allowlist" /></label>
+        <label
+          >IP 白名单模式
+          <a-select v-model:value="editForm.ip_allowlist_mode">
+            <a-select-option value="log">仅记录</a-select-option>
+            <a-select-option value="enforce">强制拦截</a-select-option>
+          </a-select>
+        </label>
+      </div>
+      <p class="hint">
+        当前凭据：{{
+          editingApp.credentials_masked_hint || '未显示'
+        }}。下列字段全部留空则保持原凭据；填写时将整体轮换并要求重新测试。
+      </p>
+      <div class="grid">
+        <label v-for="field in editCredentialFields" :key="field.key">
+          {{ field.label }}
+          <a-input-password
+            v-model:value="editForm.credentials[field.key]"
+            placeholder="留空保持不变"
+            autocomplete="new-password"
+          />
+        </label>
+      </div>
+      <a-button type="primary" @click="submitEdit">保存并重新测试</a-button>
+    </section>
+
+    <table v-if="apps.length" class="app-table">
       <thead>
         <tr>
           <th>名称</th>
@@ -358,6 +535,7 @@ onMounted(loadApps)
           <th>平台 ID</th>
           <th>服务账号</th>
           <th>状态</th>
+          <th>连接测试</th>
           <th>最近入站</th>
           <th></th>
         </tr>
@@ -373,9 +551,9 @@ onMounted(loadApps)
             <code>{{ app.service_uid }}</code>
           </td>
           <td>
-            <span :class="['badge', app.is_enabled ? 'ok' : 'off']">{{
-              app.is_enabled ? '启用' : '停用'
-            }}</span>
+            <span :class="['badge', app.lifecycle_status === 'ACTIVE' ? 'ok' : 'off']">
+              {{ lifecycleText(app.lifecycle_status) }}
+            </span>
             <span v-if="app.outbox_dead > 0" class="badge off" title="出站死信，需在明细中 requeue"
               >死信 {{ app.outbox_dead }}</span
             >
@@ -383,11 +561,18 @@ onMounted(loadApps)
               '待发 ' + app.outbox_pending
             }}</span>
           </td>
+          <td>
+            <span :class="['badge', app.connection_test?.ok ? 'ok' : 'off']">
+              {{ app.connection_test?.ok ? '已通过' : app.connection_test?.code || '未测试' }}
+            </span>
+          </td>
           <td>{{ app.last_inbound_at || '—' }}</td>
           <td class="actions">
             <a-button size="small" @click="openDetail(app)">明细</a-button>
+            <a-button size="small" @click="openEdit(app)">编辑</a-button>
+            <a-button size="small" @click="testConnection(app)">连接测试</a-button>
             <a-button size="small" @click="toggleEnabled(app)">{{
-              app.is_enabled ? '停用' : '启用'
+              app.is_enabled ? '停用' : '激活'
             }}</a-button>
             <a-button size="small" @click="regenerate(app)">重置令牌</a-button>
             <a-button size="small" danger @click="removeApp(app)">删除</a-button>

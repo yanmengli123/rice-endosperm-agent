@@ -24,6 +24,10 @@ Markdown 呈现闭集在 `render.markdown_mode` 登记：`native`（企微/钉�
 ## 二、接入前置条件（逐平台 checklist）
 
 **全部平台共同**：
+- [ ] 管理页新建后先处于 `DRAFT`；运行「连接测试」并消除全部阻塞项后，才可
+      激活为 `ACTIVE`。编辑配置或轮换凭据会自动退回草稿并要求重测。
+- [ ] webhook 型部署设置 `CHANNEL_PUBLIC_BASE_URL=https://bot.example.com`；该值
+      必须是公网 HTTPS，不能使用浏览器地址、HTTP、localhost 或内网回环地址。
 - [ ] 公网 HTTPS 入口（webhook 型）：APISIX 改绑公网 + TLS 证书；当前默认绑定
       `127.0.0.1:9088` 仅供本机调试。
 - [ ] `YUXI_PUBLIC_WEB_URL` 配置为用户可访问的 Web 地址（决定回复中的
@@ -65,8 +69,8 @@ Markdown 呈现闭集在 `render.markdown_mode` 登记：`native`（企微/钉�
 **Telegram**：
 - [ ] BotFather 建 bot 取 token；webhook 模式需公网 HTTPS + 建议配
       `webhook_secret`；无公网环境用长轮询（`channels` 容器自动接管，单实例）。
-- [ ] 长轮询模式：新建应用后 ≤60s 自动开始拉取（动态 reconcile）；多副本部署
-      由单活锁保证只有一个实例拉取。
+- [ ] 长轮询模式：连接测试通过并激活后 ≤60s 自动开始拉取（动态 reconcile）；
+      多副本部署由单活锁保证只有一个实例拉取。
 
 ## 三、指令与身份绑定
 
@@ -100,3 +104,5 @@ Markdown 呈现闭集在 `render.markdown_mode` 登记：`native`（企微/钉�
 - Telegram 长轮询健康：容器 healthcheck 锚定 `/tmp/channels_heartbeat`
   （60s 刷新，缺失 >200s 判不健康）；监督循环状态变化有日志。
 - 路径令牌泄漏：管理页「重置令牌」立即作废旧地址，平台侧同步改配。
+- `.env` 修改 `CHANNEL_PUBLIC_BASE_URL` 后需重建相关容器使环境变量生效：
+  `docker compose up -d --force-recreate api worker channels`。
