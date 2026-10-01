@@ -23,6 +23,11 @@ ResourceKind = Literal["paper", "thesis", "book", "chapter", "patent", "standard
 #: **不进** parser_fingerprint——阅读视图的变更不得触碰解析权威层的缓存身份。
 READER_RENDER_VERSION = "reader_render_v1"
 
+#: 双通道渲染版本（决议 12：可选增强，PaddleOCR 辅通道 + 第三信号裁决票，
+#: 0 LLM 成本产出 review.json）。以 render_version 编码模式——与离线版共用
+#: (revision_id, render_version) 唯一键，两行可并存（离线版保审计轨迹）。
+READER_RENDER_DUAL_VERSION = "reader_render_v1-dual"
+
 #: 阅读视图派生物唯一合法的资产引用方案：kbasset:// 逻辑资产 URI。
 #: 禁止本地路径与 MinIO 物理路径出现在文献域契约里（物理布局永不泄漏进知识数据）。
 READER_RENDER_URI_SCHEME = "kbasset://"

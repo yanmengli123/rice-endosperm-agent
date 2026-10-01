@@ -21,15 +21,18 @@ vendor 范围（ADR-0010 决议 8，import 不动点闭包）：
     位于 vendor 根，即 paperparse/ 的上级目录）
   - 全部文件与上游**字节级一致**，未做任何改写（含 import 语句）。
 
-刻意排除（不在闭包内，均为网络/双通道分支的延迟 import，离线路径不可达）：
-  - dual_ai_review / consensus_scan：LLM 仲裁与 AI 共识扫描（ai_review 分支）
-  - paddleocr_client / parse_params：PaddleOCR 云客户端与选项（paddle 分支）
-  - local_text：第三信号 PDF 文本层（third_decide 分支）
+刻意排除（不在 vendor 树内）：
+  - dual_ai_review / consensus_scan：LLM 仲裁与 AI 共识扫描（ai_review 分支；
+    Yuxi 侧由模型链替代——review.ai_suggest 人机回环，ADR-0010 决议 12）
   - rule_mining：M8c 字符规则挖掘（双通道 review 分支）
-  - mineru_client：MinerU 云客户端（上游顶层模块，闭包从未引用）
-  离线渲染（paddle=False, ai_review=False, third_decide=False,
-  ai_synthesis=False）物理上无法触网；后续若开放双通道，须连同排除清单
-  重新评审 ADR-0010 决议 8。
+  - mineru_client：MinerU 云客户端（上游顶层模块，闭包从未引用；Yuxi 解析
+    走既有 ScientificPdfPipeline）
+
+双通道路径专用（P7.1 起进入 vendor，决议 12；仅 paddle=True/third_decide=True
+时可达，默认离线渲染仍不触网）：
+  - paddleocr_client / parse_params：PaddleOCR-VL 云客户端与选项
+    （凭据经环境变量 YUXI_PADDLE_TOKEN → PADDLEOCR_ACCESS_TOKEN 注入）
+  - local_text：第三信号 PDF 文本层（零成本裁决票）
 
 第三方依赖声明（相对上游 pyproject）：
   - 本闭包顶层仅用 jinja2 / python-dotenv / pydantic / pymupdf，前两者中

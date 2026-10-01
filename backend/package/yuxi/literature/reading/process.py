@@ -7,6 +7,7 @@ P14 是同步阻塞实现，禁止进入 ARQ worker 的 event loop：一律经�
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,8 @@ def render_in_subprocess(
     md_path: str,
     work_dir: str,
     timeout_s: int = DEFAULT_RENDER_TIMEOUT_S,
+    mode: str = "offline",
+    extra_env: dict[str, str] | None = None,
     _test_hook: str | None = None,
 ) -> dict[str, Any]:
     """在独立子进程执行 P14 离线渲染，返回纯数据结果 dict。
@@ -41,12 +44,14 @@ def render_in_subprocess(
         "md_path": str(md_path),
         "out_dir": str(work / "render"),
         "result_path": str(work / "result.json"),
+        "mode": mode,
         "_test_hook": _test_hook,
     }
     payload_path = work / "payload.json"
     payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     cmd = [sys.executable, "-m", "yuxi.literature.reading.child", str(payload_path)]
+    child_env = {**os.environ, **(extra_env or {})}
     try:
         proc = subprocess.run(  # noqa: S603 - 固定模块入口，无 shell
             cmd,
@@ -54,6 +59,7 @@ def render_in_subprocess(
             text=True,
             timeout=timeout_s,
             cwd=str(work),
+            env=child_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise RenderProcessError(f"渲染超时（>{timeout_s}s，子进程已 kill）: {exc}") from exc

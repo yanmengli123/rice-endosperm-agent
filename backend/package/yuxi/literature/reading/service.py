@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 from datetime import timedelta
 from pathlib import Path
@@ -21,7 +22,7 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from yuxi.literature.contracts import READER_RENDER_VERSION
+from yuxi.literature.contracts import READER_RENDER_DUAL_VERSION, READER_RENDER_VERSION
 from yuxi.literature.reading.process import (
     DEFAULT_RENDER_TIMEOUT_S,
     render_in_subprocess,
@@ -57,8 +58,18 @@ def _render_object_prefix(*, tenant_id: int, source_sha256: str, revision_id: st
     return f"tenants/{tenant_id}/documents/{source_sha256}/reader_render/{revision_id}"
 
 
-async def enqueue_reader_render(*, revision_id: str, force: bool = False) -> dict[str, Any]:
-    """为解析版本排一个阅读渲染任务（幂等：成功且同版本则跳过，RUNNING 则跳过）。"""
+def render_version_for(dual: bool) -> str:
+    """渲染模式编码进 render_version（决议 12）：离线 v1 与双通道 v1-dual 并存。"""
+    return READER_RENDER_DUAL_VERSION if dual else READER_RENDER_VERSION
+
+
+async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: bool = False) -> dict[str, Any]:
+    """为解析版本排一个阅读渲染任务（幂等：成功且同版本则跳过，RUNNING 则跳过）。
+
+    ``dual=True`` 走双通道路径（PaddleOCR 辅通道 + 第三信号，决议 12）：
+    凭据经 YUXI_PADDLE_TOKEN 环境变量，缺失时 fail-fast（由 review 层预检）。
+    """
+    render_version = render_version_for(dual)
     async with pg_manager.get_async_session_context() as session:
         revision = (
             await session.execute(
@@ -226,12 +237,21 @@ async def process_literature_reader_render(ctx: dict[str, Any], revision_id: str
             pdf_path.write_bytes(pdf_bytes)
             md_path = tmp_dir / "full.md"
             md_path.write_bytes(markdown_bytes)
+            dual_mode = row.render_version == READER_RENDER_DUAL_VERSION
+            extra_env = {}
+            if dual_mode:
+                paddle_token = os.getenv("YUXI_PADDLE_TOKEN", "").strip()
+                if not paddle_token:
+                    raise ValueError("双通道渲染缺少凭据（YUXI_PADDLE_TOKEN 未配置）")
+                extra_env["PADDLEOCR_ACCESS_TOKEN"] = paddle_token
             result = await asyncio.to_thread(
                 render_in_subprocess,
                 pdf_path=str(pdf_path),
                 md_path=str(md_path),
                 work_dir=str(tmp_dir / "run"),
                 timeout_s=DEFAULT_RENDER_TIMEOUT_S,
+                mode="dual" if dual_mode else "offline",
+                extra_env=extra_env or None,
             )
             markdown = validate_markdown_quality(result.get("markdown"))
             await minio.aupload_file(

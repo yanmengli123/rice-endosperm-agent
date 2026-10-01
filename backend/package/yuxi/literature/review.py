@@ -32,11 +32,16 @@ VALID_CHOICES = ("A", "B", "C", "D")
 
 
 async def enqueue_dual_channel_render(revision_id: str) -> dict[str, Any]:
-    """触发双通道渲染（可选增强；Paddle 凭据未配置时 fail-fast 明确报因）。"""
+    """触发双通道渲染（可选增强；Paddle 凭据未配置时 fail-fast 明确报因）。
+
+    P7.1 起为**真双通道**：gateway.run_dual_channel_render（paddle=True +
+    third_decide=True，0 LLM 成本产出 review.json），模式经 render_version
+    （reader_render_v1-dual）编码，与离线渲染行并存。
+    """
     token = os.getenv("YUXI_PADDLE_TOKEN", "")
     if not token:
         raise ValueError("未配置 PaddleOCR 凭据（YUXI_PADDLE_TOKEN），双通道复核不可用")
-    return await enqueue_reader_render(revision_id=revision_id, force=True)
+    return await enqueue_reader_render(revision_id=revision_id, force=True, dual=True)
 
 
 async def get_review_items(tenant_id: int, revision_id: str) -> dict[str, Any]:

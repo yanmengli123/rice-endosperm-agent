@@ -46,3 +46,24 @@ def run_offline_render(*, pdf_path: str, md_path: str, out_dir: str) -> Any:
     from paperparse.core.p14_pipeline import process_pdf_v2  # noqa: PLC0415 - 唯一合法 import 点
 
     return process_pdf_v2(str(pdf_path), md_path=str(md_path), out_dir=str(out_dir), **RENDER_OFFLINE_FLAGS)
+
+
+def run_dual_channel_render(*, pdf_path: str, md_path: str, out_dir: str) -> Any:
+    """双通道渲染（决议 12 可选增强）：离线链 + PaddleOCR 辅通道 + 第三信号裁决票。
+
+    与上游离线回归模式的差异仅三个开关（paddle/third_decide 开、ai_review 仍关
+    ——AI 综合由 Yuxi 模型链在人机回环中承担，review.ai_suggest）。凭据经
+    环境变量 PADDLEOCR_ACCESS_TOKEN 注入（service 层从 YUXI_PADDLE_TOKEN 映射）。
+    """
+    ensure_vendor_on_path()
+    from paperparse.core.p14_pipeline import process_pdf_v2  # noqa: PLC0415 - 唯一合法 import 点
+
+    return process_pdf_v2(
+        str(pdf_path),
+        md_path=str(md_path),
+        out_dir=str(out_dir),
+        paddle=True,
+        ai_review=False,
+        third_decide=True,
+        ai_synthesis=False,
+    )
