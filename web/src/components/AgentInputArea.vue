@@ -147,7 +147,8 @@ const currentImage = ref(null)
 const placeholder = '问点什么？使用 @ 可以提及哦~'
 
 // 本机浏览器开关：默认关闭；在线状态持续刷新，run 创建时冻结用户选择。
-const browserEnabled = ref(false)
+// 开关状态持久化到 localStorage，刷新页面后不回退（run 冻结语义以发送时快照为准）。
+const browserEnabled = ref(window.localStorage.getItem('yuxi.browserEnabled') === '1')
 const browserPaired = ref(null)
 const browserOnline = ref(null)
 let browserStatusTimer = null
@@ -214,6 +215,7 @@ const toggleBrowserChip = () => {
     return
   }
   browserEnabled.value = !browserEnabled.value
+  window.localStorage.setItem('yuxi.browserEnabled', browserEnabled.value ? '1' : '0')
 }
 
 // ---- 本机浏览器意图提示：发现用户要操作浏览器但开关没开，主动引导 ----
@@ -222,7 +224,7 @@ const toggleBrowserChip = () => {
 const browserIntentDismissed = ref(false)
 
 const FEATURE_PATTERN =
-  /(本机浏览器|本地浏览器|本机的浏览器|本机\s*chrome|local browser|my browser)/i
+  /(本机浏览器|本地浏览器|本机的浏览器|本机\s*chrome|本机谷歌|browserskill|browser_skill|local browser|my browser)/i
 const TOOL_PATTERN = /browser_(get_status|navigate|read_page|click|type|screenshot|request_help)/i
 const DOMAIN_PATTERN = /(浏览器|网页|网站|网址|首页|官网|域名|chromium|chrome|edge|登录态)/i
 const ACTION_PATTERN =

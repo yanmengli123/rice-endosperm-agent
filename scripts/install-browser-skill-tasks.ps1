@@ -1,5 +1,6 @@
 param(
     [int]$BridgePort = 52801,
+    [int]$DaemonPort = 52800,
     [switch]$Uninstall
 )
 
@@ -36,10 +37,13 @@ $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 # terminated (0xC000013A), which can happen during browser/E2E cleanup.  The
 # minute trigger is a self-healing safety net: IgnoreNew makes it a no-op while
 # the long-running task is healthy and starts it again after an external kill.
+# RepetitionDuration must be explicit: on older Windows/PowerShell the default
+# repetition window is 1 hour, after which self-healing silently stops.
 $recoveryTrigger = New-ScheduledTaskTrigger `
     -Once `
     -At (Get-Date).AddSeconds(10) `
-    -RepetitionInterval (New-TimeSpan -Minutes 1)
+    -RepetitionInterval (New-TimeSpan -Minutes 1) `
+    -RepetitionDuration ([TimeSpan]::MaxValue)
 $triggers = @($logonTrigger, $recoveryTrigger)
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
@@ -75,7 +79,7 @@ Register-ScheduledTask `
     -Description "Authenticated host bridge from Yuxi Docker services to BrowserSkill; recovers within one minute after an external termination." `
     -Force | Out-Null
 
-if (-not (Get-NetTCPConnection -LocalPort 52800 -State Listen -ErrorAction SilentlyContinue)) {
+if (-not (Get-NetTCPConnection -LocalPort $DaemonPort -State Listen -ErrorAction SilentlyContinue)) {
     Start-ScheduledTask -TaskName $daemonTask
 }
 if (-not (Get-NetTCPConnection -LocalPort $BridgePort -State Listen -ErrorAction SilentlyContinue)) {
