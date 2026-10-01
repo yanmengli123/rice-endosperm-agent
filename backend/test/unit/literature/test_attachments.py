@@ -95,8 +95,6 @@ async def test_register_attachment_uploads_original_and_text_zero_api(env, monke
     calls = {"llm": 0}
     import yuxi.models.chat as chat_mod
 
-    original = chat_mod.select_model
-
     def _no_llm(*args, **kwargs):
         calls["llm"] += 1
         raise AssertionError("依附资料抽文本必须 0 API（不经 LLM）")
