@@ -1089,6 +1089,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0072_literature_translation", "_migration_0072_literature_translation"),
         ("0073_literature_metrics_attachments", "_migration_0073_literature_metrics_attachments"),
         ("0074_literature_reader_renders_rls", "_migration_0074_literature_reader_renders_rls"),
+        ("0075_literature_workspace", "_migration_0075_literature_workspace"),
     ]
 
     async def _migration_0072_literature_translation(self, conn) -> None:
@@ -1214,6 +1215,86 @@ class PostgresManager(metaclass=SingletonMeta):
         )
         for statement in statements:
             await conn.execute(text(statement))
+
+    async def _migration_0075_literature_workspace(self, conn) -> None:
+        """文献域 P7（G5/G6/G4）：阅读日记、知识卡片、综述报告、复核裁决。"""
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS literature_diary_entries (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                uid VARCHAR(64) NOT NULL,
+                entry_date DATE NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_diary_user_date "
+            "ON literature_diary_entries (tenant_id, uid, entry_date)",
+            """
+            CREATE TABLE IF NOT EXISTS literature_cards (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                paper_id BIGINT NOT NULL REFERENCES literature_papers(id) ON DELETE CASCADE,
+                card_type VARCHAR(32) NOT NULL,
+                slug VARCHAR(64) NOT NULL,
+                title VARCHAR(512) NOT NULL DEFAULT '',
+                content TEXT NOT NULL,
+                para_ids_json JSONB,
+                tags_json JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_cards_key "
+            "ON literature_cards (tenant_id, paper_id, card_type, slug)",
+            """
+            CREATE TABLE IF NOT EXISTS literature_reports (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                paper_id BIGINT REFERENCES literature_papers(id) ON DELETE CASCADE,
+                report_kind VARCHAR(32) NOT NULL DEFAULT 'review',
+                title VARCHAR(512) NOT NULL,
+                content TEXT NOT NULL,
+                content_uri VARCHAR(1024),
+                created_by VARCHAR(64) NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS literature_review_decisions (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                revision_id VARCHAR(64) NOT NULL,
+                report_idx INTEGER NOT NULL,
+                para_id VARCHAR(32) NOT NULL DEFAULT '',
+                choice VARCHAR(2) NOT NULL,
+                resolved_text TEXT,
+                decided_by VARCHAR(64) NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_review_decisions_key "
+            "ON literature_review_decisions (tenant_id, revision_id, report_idx)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+        for table in (
+            "literature_diary_entries",
+            "literature_cards",
+            "literature_reports",
+            "literature_review_decisions",
+        ):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text(f"DROP POLICY IF EXISTS p_{table}_tenant ON {table}"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_tenant ON {table} USING "
+                    f"(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+                )
+            )
 
     async def _migration_0070_literature_reader_renders(self, conn) -> None:
         """文献域 P1：阅读视图渲染状态表（ADR-0010 决议 7/9；派生物，非证据）。

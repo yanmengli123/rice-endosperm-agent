@@ -204,3 +204,32 @@ statement 含多条命令，0066 同款约束）；闭包必须扫**函数内延
 P1 仅提供显式 `enqueue_reader_render` + 对账 cron（重入队滞留 PENDING/RUNNING）。
 "ingest 完成自动渲染"的挂接推迟到 P6 产品化阶段（是否默认开启属产品决策，
 且自动渲染对全部存量文献有一次性 CPU 开销）。
+
+---
+
+## P7 范围补全决议（2026-10-01，全功能对账后追加）
+
+独立验收审计（USER-MANUAL 逐条对账）发现 G1–G6 六项未适配。本节是范围补全
+的架构决议，目标恢复「完美兼容」承诺的完整语义。
+
+### 决议 12：G4 双通道仲裁无架构冲突（对决议 2 的澄清）
+
+PaperAgent 的识别复核修正对象是**阅读视图** `document.json`/`en.md`
+（派生物），不是证据权威层——与决议 2 完全一致：修正阅读视图不触碰
+`ScientificPdfPipeline` 的 evidence/anchor/fingerprint。落地形态：
+
+- 双通道渲染是**可选增强**（用户显式触发；PaddleOCR 凭据经 secret_crypto/
+  环境变量，绝不硬编码）；离线渲染（决议 8 默认路径）不变。
+- PaddleOCR 客户端（`paddleocr_client`/`parse_params`）从 NOTICE 排除清单
+  **移入** vendor（仅双通道路径可达，物理离线路径仍不触网）。
+- 人工仲裁四选一（A=保留 MinerU/B=采用 Paddle/C=合并/D=均不取）持久化于
+  `literature_review_decisions`；修正文本的渲染回放属后续迭代（已知限制）。
+- AI 综合仲裁（上游 dual_ai_review 的 OpenAI 直连）由 Yuxi 模型链替代后接入，
+  首版仅本地规则 + 第三信号（0 LLM 成本）。
+
+### 决议 13：范围基线对账表成为验收纪律
+
+「功能等价」支柱（决议 5b）的验收方式 = USER-MANUAL 能力表逐条对账（本节
+G1–G6 为首次执行）。后续每阶段收尾必须跑对账表，禁止用阶段完成度回答功能
+兼容度。G3 的 Three.js 3D 可视化以「数据 API 齐备 + 轻量前端」交付，3D 立体
+渲染不承诺（Yuxi 无 Three.js 依赖，引入属独立评估）。

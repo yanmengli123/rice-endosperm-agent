@@ -40,6 +40,8 @@
           :compile-jobs="paper.compile_jobs"
         />
         <AttachmentPanel v-else-if="currentTab === 'attachments'" :rid="rid" />
+        <CardsPanel v-else-if="currentTab === 'cards'" :rid="rid" />
+        <ReviewPanel v-else-if="currentTab === 'review'" :rid="rid" />
         <div v-else class="overview">
           <pre class="meta-json">{{ JSON.stringify(paper, null, 2) }}</pre>
         </div>
@@ -53,12 +55,14 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { getLiteraturePaper, triggerLiteratureRender, triggerLiteratureTranslation } from '@/apis/literature_api'
 import NotePanel from '@/components/literature/NotePanel.vue'
 import AttachmentPanel from '@/components/literature/AttachmentPanel.vue'
+import CardsPanel from '@/components/literature/CardsPanel.vue'
+import ReviewPanel from '@/components/literature/ReviewPanel.vue'
 
 const POLL_INTERVAL_MS = 3000
 
 export default {
   name: 'PaperDetail',
-  components: { NotePanel, AttachmentPanel },
+  components: { NotePanel, AttachmentPanel, CardsPanel, ReviewPanel },
   props: {
     rid: { type: String, required: true }
   },
@@ -72,6 +76,8 @@ export default {
     const tabs = [
       { key: 'notes', label: '笔记 (L1·L2·L3)' },
       { key: 'attachments', label: '依附资料' },
+      { key: 'cards', label: '卡片' },
+      { key: 'review', label: '识别复核' },
       { key: 'overview', label: '元数据' }
     ]
     let pollTimer = null

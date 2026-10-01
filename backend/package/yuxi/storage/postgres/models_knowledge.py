@@ -5,6 +5,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -2285,3 +2286,81 @@ class LiteratureAttachment(Base):
     content_digest = Column(String(64), nullable=False)
     size_bytes = Column(BigInteger, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureDiaryEntry(Base):
+    """阅读日记（G5，上游 diary.py 语义：空内容即删除该天，不留空白行）。"""
+
+    __tablename__ = "literature_diary_entries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "uid", "entry_date", name="uq_literature_diary_user_date"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    uid = Column(String(64), nullable=False, index=True)
+    entry_date = Column(Date, nullable=False)
+    content = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureCard(Base):
+    """知识卡片（G6，上游 cards.py 语义：translate/summary/qa/note 四类）。"""
+
+    __tablename__ = "literature_cards"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "paper_id", "card_type", "slug", name="uq_literature_cards_key"),
+        Index("ix_literature_cards_paper", "tenant_id", "paper_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(
+        BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    card_type = Column(String(32), nullable=False)
+    slug = Column(String(64), nullable=False)
+    title = Column(String(512), nullable=False, default="")
+    content = Column(Text, nullable=False)
+    para_ids_json = Column(JSON_VALUE)
+    tags_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureReport(Base):
+    """综述/报告落盘（G6，上游 writing agent 的 _reports/ 等价物）。"""
+
+    __tablename__ = "literature_reports"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"))
+    report_kind = Column(String(32), nullable=False, default="review")
+    title = Column(String(512), nullable=False)
+    content = Column(Text, nullable=False)
+    content_uri = Column(String(1024))
+    created_by = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureReviewDecision(Base):
+    """识别复核裁决（G4，上游 review 四选一：A/B/C/D 持久化）。"""
+
+    __tablename__ = "literature_review_decisions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "revision_id", "report_idx", name="uq_literature_review_decisions_key"),
+        Index("ix_literature_review_decisions_revision", "tenant_id", "revision_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    revision_id = Column(String(64), nullable=False)
+    report_idx = Column(Integer, nullable=False)
+    para_id = Column(String(32), nullable=False, default="")
+    choice = Column(String(2), nullable=False)  # A=MinerU / B=Paddle / C=合并 / D=均不取
+    resolved_text = Column(Text)
+    decided_by = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)

@@ -10,7 +10,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 
 from server.utils.auth_middleware import get_required_user
-from yuxi.literature import readops
+from yuxi.literature import bib_import, cards, diary, enrich as enrich_module
+from yuxi.literature import graph_service, readops, review
 from yuxi.literature.attachments import register_attachment
 from yuxi.literature.reading.service import RENDER_BUCKET, enqueue_reader_render
 from yuxi.literature.translate.service import enqueue_literature_translation
@@ -183,3 +184,234 @@ async def _paper_id_by_rid(tenant_id: int, rid: str) -> int:
     if paper is None:
         raise HTTPException(status_code=404, detail="文献不存在或无权访问")
     return paper.id
+
+
+# ---------------------------------------------------------------- P7：G2 导入
+
+
+@literature.post("/papers/import/bib", status_code=202)
+async def import_bib_endpoint(
+    file: UploadFile,
+    current_user: User = Depends(get_required_user),
+):
+    """WoS/BibTeX 导入（幂等：DOI/RID 已存在跳过）。"""
+    tenant_id = await _current_tenant(current_user)
+    text = (await file.read()).decode("utf-8", errors="replace")
+    report = await bib_import.import_bib(tenant_id, text, source_name=file.filename or "")
+    return {"status": 202, **report}
+
+
+@literature.post("/papers/import/markdown", status_code=201)
+async def import_markdown_endpoint(
+    payload: dict,
+    current_user: User = Depends(get_required_user),
+):
+    """Markdown 直导（免解析、0 API；无 DOI 时指纹身份）。"""
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await bib_import.import_markdown_document(
+            tenant_id,
+            markdown=str(payload.get("markdown") or ""),
+            title=str(payload.get("title") or ""),
+            doi=str(payload.get("doi") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 201, **result}
+
+
+# ---------------------------------------------------------------- P7：G1 富化
+
+
+@literature.post("/papers/{rid}/enrich", status_code=202)
+async def enrich_paper_endpoint(rid: str, current_user: User = Depends(get_required_user)):
+    """富化单篇（Crossref/OpenAlex/S2 免费源，只填空字段）。"""
+    tenant_id = await _current_tenant(current_user)
+    result = await enrich_module.enrich_paper(tenant_id, rid)
+    return {"status": 202, **result}
+
+
+@literature.post("/enrich/pending", status_code=202)
+async def enrich_pending_endpoint(
+    batch_size: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_required_user),
+):
+    """批量富化缺元数据文献。"""
+    tenant_id = await _current_tenant(current_user)
+    result = await enrich_module.enrich_pending(tenant_id, batch_size=batch_size)
+    return {"status": 202, **result}
+
+
+# ---------------------------------------------------------------- P7：G5 日记
+
+
+@literature.get("/diary/days")
+async def diary_days(
+    month: str = Query(default=""),
+    current_user: User = Depends(get_required_user),
+):
+    tenant_id = await _current_tenant(current_user)
+    days = await diary.list_diary_days(tenant_id, current_user.uid, month=month or None)
+    return {"days": days}
+
+
+@literature.get("/diary/{entry_date}")
+async def diary_day(entry_date: str, current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    try:
+        return await diary.get_diary(tenant_id, current_user.uid, entry_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@literature.put("/diary/{entry_date}")
+async def diary_write(
+    entry_date: str,
+    payload: dict,
+    current_user: User = Depends(get_required_user),
+):
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await diary.write_diary(tenant_id, current_user.uid, entry_date, str(payload.get("content") or ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return result
+
+
+# ---------------------------------------------------------------- P7：G6 卡片/综述
+
+
+@literature.get("/papers/{rid}/cards")
+async def list_cards_endpoint(
+    rid: str,
+    card_type: str = Query(default=""),
+    current_user: User = Depends(get_required_user),
+):
+    tenant_id = await _current_tenant(current_user)
+    return {"cards": await cards.list_cards(tenant_id, rid, card_type=card_type or None)}
+
+
+@literature.post("/papers/{rid}/cards", status_code=201)
+async def write_card_endpoint(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await cards.write_card(
+            tenant_id,
+            rid,
+            card_type=str(payload.get("card_type") or ""),
+            content=str(payload.get("content") or ""),
+            title=str(payload.get("title") or ""),
+            para_ids=payload.get("para_ids") or [],
+            tags=payload.get("tags") or [],
+            slug=payload.get("slug"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 201, **result}
+
+
+@literature.get("/reports")
+async def list_reports_endpoint(current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    return {"reports": await cards.list_reports(tenant_id)}
+
+
+@literature.post("/reports/generate", status_code=202)
+async def generate_report_endpoint(payload: dict, current_user: User = Depends(get_required_user)):
+    """综述生成（多篇 L1 聚合 → LLM；异步产物经 reports 列表查询）。"""
+    tenant_id = await _current_tenant(current_user)
+    rids = [str(r) for r in (payload.get("rids") or [])]
+    title = str(payload.get("title") or "文献综述")
+    try:
+        result = await cards.generate_review_report(
+            tenant_id, rids, title=title, created_by=getattr(current_user, "uid", "")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 202, **result}
+
+
+# ---------------------------------------------------------------- P7：G4 复核
+
+
+@literature.post("/papers/{rid}/review/dual-channel", status_code=202)
+async def enqueue_dual_channel(rid: str, current_user: User = Depends(get_required_user)):
+    """触发双通道渲染（可选增强；凭据未配置 fail-fast 422）。"""
+    tenant_id = await _current_tenant(current_user)
+    detail = await readops.get_paper_detail(tenant_id, rid)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="文献不存在或无权访问")
+    revision_id = detail.get("source_revision_id")
+    if not revision_id:
+        raise HTTPException(status_code=409, detail="文献未关联解析版本")
+    try:
+        result = await review.enqueue_dual_channel_render(revision_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 202, **result}
+
+
+@literature.get("/papers/{rid}/review")
+async def get_review_endpoint(rid: str, current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    detail = await readops.get_paper_detail(tenant_id, rid)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="文献不存在或无权访问")
+    revision_id = detail.get("source_revision_id")
+    if not revision_id:
+        raise HTTPException(status_code=409, detail="文献未关联解析版本")
+    try:
+        return await review.get_review_items(tenant_id, revision_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@literature.post("/papers/{rid}/review/decide")
+async def decide_review_endpoint(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
+    """四选一仲裁（A/B/C/D；幂等 upsert）。"""
+    tenant_id = await _current_tenant(current_user)
+    detail = await readops.get_paper_detail(tenant_id, rid)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="文献不存在或无权访问")
+    revision_id = detail.get("source_revision_id") or ""
+    try:
+        result = await review.decide(
+            tenant_id,
+            revision_id,
+            report_idx=int(payload.get("report_idx", -1)),
+            choice=str(payload.get("choice") or ""),
+            resolved_text=payload.get("resolved_text"),
+            para_id=str(payload.get("para_id") or ""),
+            decided_by=getattr(current_user, "uid", ""),
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return result
+
+
+# ---------------------------------------------------------------- P7：G3 图谱
+
+
+@literature.get("/graph/network")
+async def graph_network_endpoint(
+    min_citations: int = Query(default=0, ge=0),
+    limit: int = Query(default=300, ge=1, le=5000),
+    current_user: User = Depends(get_required_user),
+):
+    tenant_id = await _current_tenant(current_user)
+    return await graph_service.graph_network(tenant_id, min_citations=min_citations, limit=limit)
+
+
+@literature.get("/graph/neighbors/{rid}")
+async def graph_neighbors_endpoint(rid: str, current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    return await graph_service.graph_neighbors(tenant_id, rid)
+
+
+@literature.get("/graph/top")
+async def graph_top_endpoint(
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_required_user),
+):
+    tenant_id = await _current_tenant(current_user)
+    return {"top": await graph_service.graph_top(tenant_id, limit=limit)}

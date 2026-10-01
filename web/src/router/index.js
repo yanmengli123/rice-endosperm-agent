@@ -68,6 +68,12 @@ const router = createRouter({
           name: 'LiteratureComp',
           component: () => import('../views/LiteratureView.vue'),
           meta: { keepAlive: true, requiresAuth: true }
+        },
+        {
+          path: 'diary',
+          name: 'LiteratureDiary',
+          component: () => import('../views/DiaryView.vue'),
+          meta: { keepAlive: true, requiresAuth: true }
         }
       ]
     },
