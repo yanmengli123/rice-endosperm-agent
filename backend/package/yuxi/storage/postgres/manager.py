@@ -1243,9 +1243,18 @@ class PostgresManager(metaclass=SingletonMeta):
             CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_reader_render_revision
                 ON literature_reader_renders (revision_id, render_version)
             """,
-            "CREATE INDEX IF NOT EXISTS ix_literature_reader_render_status ON literature_reader_renders (status)",
-            "CREATE INDEX IF NOT EXISTS ix_literature_reader_renders_revision_id ON literature_reader_renders (revision_id)",
-            "CREATE INDEX IF NOT EXISTS ix_literature_reader_renders_tenant_id ON literature_reader_renders (tenant_id)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_literature_reader_render_status "
+                "ON literature_reader_renders (status)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_literature_reader_renders_revision_id "
+                "ON literature_reader_renders (revision_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_literature_reader_renders_tenant_id "
+                "ON literature_reader_renders (tenant_id)"
+            ),
         )
         for statement in statements:
             await conn.execute(text(statement))
