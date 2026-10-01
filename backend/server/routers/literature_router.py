@@ -415,3 +415,58 @@ async def graph_top_endpoint(
 ):
     tenant_id = await _current_tenant(current_user)
     return {"top": await graph_service.graph_top(tenant_id, limit=limit)}
+
+
+# ---------------------------------------------------------------- P7.1：修正回放 / AI 建议 / 图谱投影
+
+
+@literature.post("/papers/{rid}/review/apply")
+async def apply_review_endpoint(rid: str, current_user: User = Depends(get_required_user)):
+    """修正回放：裁决 → document_resolved + render_resolved（原始产物保留审计）。"""
+    tenant_id = await _current_tenant(current_user)
+    detail = await readops.get_paper_detail(tenant_id, rid)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="文献不存在或无权访问")
+    revision_id = detail.get("source_revision_id") or ""
+    try:
+        manifest = await review.apply_decisions(tenant_id, revision_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return manifest
+
+
+@literature.get("/papers/{rid}/review/resolved")
+async def resolved_manifest_endpoint(rid: str, current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    detail = await readops.get_paper_detail(tenant_id, rid)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="文献不存在或无权访问")
+    revision_id = detail.get("source_revision_id") or ""
+    manifest = await review.get_resolved_manifest(tenant_id, revision_id)
+    return {"resolved": manifest is not None, "manifest": manifest}
+
+
+@literature.post("/papers/{rid}/review/suggest")
+async def suggest_review_endpoint(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
+    """AI 仲裁建议（人机回环：只建议，裁决仍需人工四选一）。"""
+    tenant_id = await _current_tenant(current_user)
+    detail = await readops.get_paper_detail(tenant_id, rid)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="文献不存在或无权访问")
+    revision_id = detail.get("source_revision_id") or ""
+    try:
+        result = await review.ai_suggest(tenant_id, revision_id, int(payload.get("report_idx", -1)))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return result
+
+
+@literature.post("/graph/project", status_code=202)
+async def project_graph_endpoint(current_user: User = Depends(get_required_user)):
+    """引用图投影到 Neo4j（PG 仍为 canonical；多跳/图治理消费）。"""
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await graph_service.project_to_neo4j(tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 202, **result}

@@ -18,8 +18,19 @@ from yuxi.storage.postgres.models_knowledge import LiteraturePaper
 
 logger = logging.getLogger(__name__)
 
-_UA = "YuxiLiterature/1.0 (literature enrichment; mailto:user@example.com)"
+_UA_BASE = "YuxiLiterature/1.0 (literature enrichment)"
 _TIMEOUT = httpx.Timeout(20.0)
+
+
+def _user_agent() -> str:
+    """polite pool UA：真实联系邮箱经 YUXI_CONTACT_EMAIL 注入（OpenAlex/Crossref
+    凭 mailto 给 10 req/s，无 mailto 1 req/s）；未配置则裸 UA，不用占位邮箱
+    冒充 polite pool（诚实降级，不虚标）。"""
+    import os
+
+    email = os.getenv("YUXI_CONTACT_EMAIL", "").strip()
+    return f"{_UA_BASE}; mailto:{email}" if email else _UA_BASE
+
 
 _FILLABLE_FIELDS = ("title", "journal", "year")
 
@@ -27,7 +38,7 @@ _FILLABLE_FIELDS = ("title", "journal", "year")
 async def _get_json(url: str, *, headers: dict[str, str] | None = None) -> dict[str, Any] | None:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": _UA, **(headers or {})})
+            resp = await client.get(url, headers={"User-Agent": _user_agent(), **(headers or {})})
         if resp.status_code != 200:
             return None
         return resp.json()

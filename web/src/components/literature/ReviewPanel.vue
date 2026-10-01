@@ -5,6 +5,9 @@
       <button class="btn" :disabled="dualLoading" @click="triggerDual">
         {{ dualLoading ? '双通道渲染入队中…' : '触发双通道渲染' }}
       </button>
+      <button class="btn" :disabled="applying" @click="applyDecisions">
+        {{ applying ? '回放中…' : '应用裁决（修正回放）' }}
+      </button>
     </div>
     <div v-if="notice" class="review-notice">{{ notice }}</div>
 
@@ -39,6 +42,11 @@
           >
             {{ choice.label }}
           </button>
+          <button class="choice-btn suggest" @click="suggest(item)">✨ AI 建议</button>
+        </div>
+        <div v-if="item.suggestion" class="item-suggestion">
+          <label>AI 建议（仅预填，仍需人工确认）：</label>
+          <textarea v-model="item.suggestion" rows="2" class="suggest-input"></textarea>
         </div>
       </li>
     </ul>
@@ -58,6 +66,7 @@ export default {
     const meta = ref({ total: 0, blocking_pending: 0, items: [] })
     const notice = ref('')
     const dualLoading = ref(false)
+    const applying = ref(false)
     const choices = [
       { key: 'A', label: 'A 保留 MinerU' },
       { key: 'B', label: 'B 采用 Paddle' },
@@ -85,8 +94,31 @@ export default {
         dualLoading.value = false
       }
     }
+    const suggest = async (item) => {
+      try {
+        const data = await apiPost(`/api/literature/papers/${enc(props.rid)}/review/suggest`, {
+          report_idx: item.report_idx
+        })
+        item.suggestion = data?.suggestion || ''
+      } catch (err) {
+        notice.value = `AI 建议失败：${err?.message || err}`
+      }
+    }
+    const applyDecisions = async () => {
+      applying.value = true
+      notice.value = ''
+      try {
+        const manifest = await apiPost(`/api/literature/papers/${enc(props.rid)}/review/apply`)
+        notice.value = `修正回放完成：${manifest.applied_decisions} 条裁决（替换 ${manifest.actions.replaced} / 删除 ${manifest.actions.removed} / 保留 ${manifest.actions.kept}）`
+        await load()
+      } catch (err) {
+        notice.value = `回放失败：${err?.message || err}`
+      } finally {
+        applying.value = false
+      }
+    }
     const decide = async (item, choice) => {
-      const resolvedText = choice === 'A' ? null : item.b_text || item.suggestion || ''
+      const resolvedText = choice === 'A' ? null : item.suggestion || item.b_text || ''
       try {
         await apiPost(`/api/literature/papers/${enc(props.rid)}/review/decide`, {
           report_idx: item.report_idx,
@@ -102,7 +134,7 @@ export default {
 
     onMounted(load)
 
-    return { meta, notice, dualLoading, choices, triggerDual, decide }
+    return { meta, notice, dualLoading, applying, choices, triggerDual, decide, suggest, applyDecisions }
   }
 }
 </script>

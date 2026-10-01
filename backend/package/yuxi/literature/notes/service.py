@@ -178,9 +178,18 @@ async def _load_compile_inputs(paper: LiteraturePaper) -> tuple[dict, list[str],
             raise ValueError(f"解析版本尚无成功的阅读渲染: {paper.source_revision_id}")
     if not render.markdown_uri or not render.markdown_uri.startswith("kbasset://"):
         raise ValueError(f"渲染产物 URI 非法: {render.markdown_uri!r}")
-    # document.json 与 render.md 同前缀（reading 服务约定）
-    object_name = render.markdown_uri.removeprefix("kbasset://").removesuffix("render.md") + "document.json"
-    document_json = await get_minio_client().adownload_file(RENDER_BUCKET, object_name)
+    # 修正版优先（人工裁决回放，review.document_object_candidates）；无裁决回落 canonical
+    from yuxi.literature.review import document_object_candidates
+
+    document_json = None
+    for candidate in document_object_candidates(render.markdown_uri):
+        try:
+            document_json = await get_minio_client().adownload_file(RENDER_BUCKET, candidate)
+            break
+        except Exception:  # noqa: BLE001 - 候选缺失试下一个
+            continue
+    if document_json is None:
+        raise ValueError(f"渲染产物 document.json 不可读: {render.markdown_uri}")
     doc = json.loads(document_json.decode("utf-8"))
     paragraphs = [
         str(p.get("text") or "")
@@ -188,7 +197,7 @@ async def _load_compile_inputs(paper: LiteraturePaper) -> tuple[dict, list[str],
         if isinstance(p, dict) and (p.get("text") or "").strip()
     ]
     if not paragraphs:
-        raise ValueError(f"document.json 无可用段落: {object_name}")
+        raise ValueError(f"document.json 无可用段落: {render.markdown_uri}")
     meta = {
         "title": paper.title or doc.get("metadata", {}).get("title", ""),
         "doi": paper.doi or "",
