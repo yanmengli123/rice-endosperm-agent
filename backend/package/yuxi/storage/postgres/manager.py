@@ -1090,6 +1090,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0073_literature_metrics_attachments", "_migration_0073_literature_metrics_attachments"),
         ("0074_literature_reader_renders_rls", "_migration_0074_literature_reader_renders_rls"),
         ("0075_literature_workspace", "_migration_0075_literature_workspace"),
+        ("0076_literature_papers_source_revision", "_migration_0076_literature_papers_source_revision"),
     ]
 
     async def _migration_0072_literature_translation(self, conn) -> None:
@@ -1295,6 +1296,22 @@ class PostgresManager(metaclass=SingletonMeta):
                     f"(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
                 )
             )
+
+    async def _migration_0076_literature_papers_source_revision(self, conn) -> None:
+        """文献域补丁：literature_papers.source_revision_id 回填（e2e 实测暴露的漂移）。
+
+        根因：0071 落库先于 ORM 加列 patch——已应用迁移不会重跑（版本化迁移
+        不可变教训：改列必须走新迁移，禁止改历史迁移方法体后期望重放）。
+        """
+        await conn.execute(
+            text("ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS source_revision_id VARCHAR(64)")
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_literature_papers_source_revision_id "
+                "ON literature_papers (source_revision_id)"
+            )
+        )
 
     async def _migration_0070_literature_reader_renders(self, conn) -> None:
         """文献域 P1：阅读视图渲染状态表（ADR-0010 决议 7/9；派生物，非证据）。
