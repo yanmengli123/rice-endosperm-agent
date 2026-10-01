@@ -19,7 +19,9 @@ from yuxi.services.browser_gateway_service import BrowserGatewayError
 from yuxi.utils.logging_config import logger
 
 _BROWSER_CATEGORY = "browser"
-_READ_PAGE_PREVIEW_LIMIT = 1200
+# 门户首页类大页需要足够的可见正文;仍需有界(超限走 text_truncated 标记)。
+# 1200 实测不够(tv.cctv.com 轮被迫反复截图+点击翻找),4000 兼顾上下文预算。
+_READ_PAGE_PREVIEW_LIMIT = 4000
 
 
 class BrowserNavigateInput(BaseModel):
@@ -173,7 +175,15 @@ async def browser_screenshot(tab_id: int | None = None) -> str:
     try:
         result = await dispatch_browser_op("screenshot", {"tab_id": tab_id} if tab_id is not None else {})
         saved = await _save_screenshot(result)
-        return _tool_ok("screenshot", {**result, "file": saved} if saved else result)
+        if saved is not None:
+            # 截图产物落盘为交付物后,给模型的只有文件引用——base64 内联进工具结果
+            # 会以兆级文本轰炸上下文,实测把后续模型调用直接打成 400 invalid params
+            # (2026-10-01 tv.cctv.com 验证轮:13 步浏览器操作全部成功、终答合成失败)。
+            payload = {k: v for k, v in result.items() if k != "data_url"}
+            payload["file"] = saved
+            payload["note"] = "截图已保存为交付物;内容请以 read_page 文本为准,需要时告知用户查看文件。"
+            return _tool_ok("screenshot", payload)
+        return _tool_ok("screenshot", {k: v for k, v in result.items() if k != "data_url"})
     except BrowserGatewayError as error:
         return _tool_error(error)
 

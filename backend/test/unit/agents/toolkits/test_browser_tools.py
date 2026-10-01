@@ -186,3 +186,29 @@ async def test_screenshot_tool_callable_without_injected_runtime(monkeypatch):
         from yuxi.agents.toolkits.browser.gateway_client import reset_browser_execution_context
 
         reset_browser_execution_context(token)
+
+
+async def test_screenshot_result_strips_base64(monkeypatch):
+    """回归(tv.cctv.com 轮事故):data_url 内联进工具结果会以兆级文本轰炸上下文,
+    后续模型调用 400 invalid params——落盘成功后结果必须只含文件引用。"""
+    import json as _json
+
+    from yuxi.agents.toolkits.browser.gateway_client import BrowserExecutionContext, set_browser_execution_context
+
+    async def _fake(op, payload, **kwargs):
+        return {"data_url": "data:image/png;base64," + "A" * 100000, "width": 800, "height": 600}
+
+    monkeypatch.setattr("yuxi.agents.toolkits.browser.tools.dispatch_browser_op", _fake)
+    token = set_browser_execution_context(
+        BrowserExecutionContext(tenant_id=1, uid="u", thread_id="t", run_id="r")
+    )
+    try:
+        tools = {tool.name: tool for tool in get_browser_runtime_tools()}
+        raw = await tools["browser_screenshot"].coroutine()
+        payload = _json.loads(raw)
+        assert "data_url" not in _json.dumps(payload), "截图结果不得携带 base64"
+        assert payload.get("file", {}).get("virtual_path", "").startswith("/home/gem/user-data/outputs/browser/")
+    finally:
+        from yuxi.agents.toolkits.browser.gateway_client import reset_browser_execution_context
+
+        reset_browser_execution_context(token)
