@@ -54,6 +54,8 @@
 
 ## 部署与配置
 
+**多用户隔离（桥模式）**：`BROWSER_SKILL_ALLOWED_UIDS`（逗号分隔 UID 白名单）。未配置 = 单工作站信任模式（任何开启开关的用户都会操作桥所在机器的浏览器，仅适合单人本机部署）；配置后非白名单用户的浏览器命令以 `BROWSER_FORBIDDEN_FOR_USER`(403) fail-closed。多人共用部署必须配置。
+
 环境变量（api 与 worker 共用 `.env`，改后 `docker compose up -d api worker` 重建）：
 
 | 变量 | 默认 | 说明 |
@@ -70,6 +72,7 @@
 
 - APISIX 改路由后必须 `docker compose -f docker-compose.yml -f docker-compose.apisix.yml up -d --force-recreate apisix` 重建（restart 无效）。
 - worker 的 ARQ 进程不热重载，改工具代码后必须 `docker compose restart worker`。
+- worker 健康检查锚定 ARQ 循环心跳文件 `/tmp/yuxi_worker_heartbeat`（cron 每分钟写、启动即写、200s 容忍）：进程活着但 ARQ 循环卡死/启动失败（如 Milvus 未就绪）时容器正确转 unhealthy，而非「假健康 + 任务无限 pending」。
 - `/api/browser/internal/*` 只允许 compose 内网（worker→api），网关路由**故意不声明**该前缀；共享密钥缺失时 env 未设则经 Redis 零配置分发，Redis 不可用则内部 dispatch 返回 503。
 - 远端/公网部署要求网关到浏览器的 WSS 使用受信任证书（内网可用企业 CA）；localhost 联调可 ws://。
 - 访问日志不要记录 `Sec-WebSocket-Protocol`（承载设备令牌）与 `/authorize` 请求体。
@@ -88,6 +91,7 @@
 
 | 现象 | 排查 |
 | --- | --- |
+| 模型回答「我没有本机浏览器工具 / 我无法访问网页」 | **该轮开关未开启**（`input_payload` 无 `browser_enabled` 键）——开关按轮冻结，配对 ≠ 每轮启用。在输入框打开「本机浏览器」开关后重发即可。输入框检测到相关措辞会自动出现引导条一键开启；服务端同场景注入 `BROWSER_DISABLED_NOTICE`，会引导模型说明「开启开关后重发」而不是干瘪否认能力。 |
 | BrowserSkill 显示 `Disconnected Local · ws://127.0.0.1:52800` | 等待最多 1 分钟让恢复触发器拉起，再执行 `bsk doctor --json`；确认 `Get-NetTCPConnection -LocalPort 52800 -State Listen` 有结果。仍离线时重新执行 `scripts/install-browser-skill-tasks.ps1` 修复任务定义 |
 | 模型声称操作了浏览器但页面没动 | 查 `browser_command_audit`：run_id 无审计行即幻觉式合规，`answer.browser_guard.completed` 门禁轨迹会明示「未经实际执行」 |
 | 扩展已连接但语析显示离线 | 确认 52801 正在监听、api/worker 有两个 `BROWSER_SKILL_BRIDGE_*` 环境变量且密钥目录已挂载；重建 api/worker |

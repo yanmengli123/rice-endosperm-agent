@@ -259,6 +259,12 @@ class BaseContext:
         default=False,
         metadata={"name": "本机浏览器", "configurable": False, "hide": True},
     )
+    # 本轮用户文本被判定为「要求操作本机浏览器」但开关未开：
+    # 仅用于注入引导提示词（BROWSER_DISABLED_NOTICE），不参与工具装配，不可由配置面设置。
+    browser_intent: bool = field(
+        default=False,
+        metadata={"name": "本轮为浏览器意图", "configurable": False, "hide": True},
+    )
 
     summary_threshold: int = field(
         default=DEFAULT_SUMMARY_THRESHOLD_K,

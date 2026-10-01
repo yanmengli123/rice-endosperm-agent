@@ -231,11 +231,23 @@ OCR_PARSE_FILE_DESCRIPTION = f"""
     args_schema=OcrParseFileInput,
 )
 async def ocr_parse_file(file_path: str, runtime: ToolRuntime, ocr_engine: str | None = None) -> dict:
-    """Parse a sandbox file with OCR, persist Markdown output, and return only a short result summary."""
+    """Parse a sandbox file with OCR, persist Markdown output, and return only a short result summary.
+
+    输入校验失败返回结构化错误（status=error）而非抛异常——工具异常会经中间件/
+    重试层升级为 run 级 panic 击穿整轮对话（2026-10-01 事故：模型把截图路径误喂
+    本工具，ValueError 使浏览器链全部成功的轮次以 failed 收场且无输出）。
+    """
     from yuxi.agents.backends.sandbox.paths import virtual_path_for_thread_file
     from yuxi.knowledge.parser.unified import Parser
 
-    file_thread_id, uid, actual_path = _resolve_ocr_source_path(file_path, runtime)
+    try:
+        file_thread_id, uid, actual_path = _resolve_ocr_source_path(file_path, runtime)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "error_code": "OCR_PATH_INVALID",
+            "message": str(exc),
+        }
     engine = _resolve_ocr_engine(ocr_engine)
     markdown = await Parser.aparse(str(actual_path), params={"ocr_engine": engine})
 

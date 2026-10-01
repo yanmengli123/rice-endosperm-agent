@@ -48,6 +48,30 @@
           </div>
         </div>
       </div>
+
+      <!-- 意图提示：用户写了要操作本机浏览器但开关没开——模型这一轮不会有该工具，
+           若不提示会直接表现为「功能坏了」（真实事故，见 docs/local-browser.md 排障）。 -->
+      <div v-if="showBrowserIntentHint" class="browser-intent-hint" role="status">
+        <span class="browser-intent-hint-text">
+          检测到你要用本机浏览器操作网页，但本轮开关未开启；开启后模型才能真正驱动你的 Chrome。
+        </span>
+        <button
+          type="button"
+          class="browser-intent-hint-btn"
+          :disabled="disabled"
+          @click.stop="toggleBrowserChip"
+        >
+          开启本机浏览器
+        </button>
+        <button
+          type="button"
+          class="browser-intent-hint-dismiss"
+          aria-label="忽略本提示"
+          @click.stop="browserIntentDismissed = true"
+        >
+          <X :size="14" />
+        </button>
+      </div>
     </template>
     <template #options-left>
       <AttachmentOptionsComponent
@@ -192,6 +216,34 @@ const toggleBrowserChip = () => {
   browserEnabled.value = !browserEnabled.value
 }
 
+// ---- 本机浏览器意图提示：发现用户要操作浏览器但开关没开，主动引导 ----
+// 与后端 yuxi.agents.toolkits.browser.prompt.detect_local_browser_intent 保持同一口径
+// （提示是条件引导，误判只多一条可忽略的提示条，代价极低；漏判才是事故）。
+const browserIntentDismissed = ref(false)
+
+const FEATURE_PATTERN =
+  /(本机浏览器|本地浏览器|本机的浏览器|本机\s*chrome|local browser|my browser)/i
+const TOOL_PATTERN = /browser_(get_status|navigate|read_page|click|type|screenshot|request_help)/i
+const DOMAIN_PATTERN = /(浏览器|网页|网站|网址|首页|官网|域名|chromium|chrome|edge|登录态)/i
+const ACTION_PATTERN =
+  /(打开|访问|浏览|导航|跳转|抓取|爬取|读取|查看|截图|截屏|截个图|点击|输入|填写|提交|下载|搜索|查询|查找|查一下|搜一下|看一下|翻一下|browse|navigate|visit|screenshot)/i
+const URL_PATTERN = /(https?:\/\/|www\.)\S+/i
+
+const hasLocalBrowserIntent = (text) => {
+  if (!text) return false
+  if (FEATURE_PATTERN.test(text) || TOOL_PATTERN.test(text)) return true
+  // 域词内含动作词（「浏览」⊂「浏览器」），先剥离域词再判动作，避免自触发
+  const stripped = text.replace(new RegExp(DOMAIN_PATTERN.source, 'gi'), ' ')
+  if (!ACTION_PATTERN.test(stripped)) return false
+  if (URL_PATTERN.test(text)) return true
+  return DOMAIN_PATTERN.test(text)
+}
+
+const showBrowserIntentHint = computed(() => {
+  if (browserEnabled.value || browserIntentDismissed.value) return false
+  return hasLocalBrowserIntent(props.modelValue)
+})
+
 const previewAttachments = computed(() => normalizeAttachmentPreviews(props.attachments))
 
 const updateValue = (val) => {
@@ -242,6 +294,8 @@ const handleSend = () => {
   // 开关状态随 send 事件传出，发送后保持用户选择（不自动复位）
   emit('send', { image: currentImage.value, browserEnabled: browserEnabled.value })
   currentImage.value = null
+  // 提示条按轮复位：下一条仍带浏览器意图且开关未开时应再次引导
+  browserIntentDismissed.value = false
 }
 
 const handleKeyDown = (e) => {
@@ -277,6 +331,63 @@ defineExpose({
   align-items: center;
   margin-right: 8px;
   gap: 2px;
+}
+
+.browser-intent-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--main-700);
+  border-radius: 10px;
+  background: var(--main-30);
+}
+
+.browser-intent-hint-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--gray-700);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.browser-intent-hint-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: none;
+  border-radius: 8px;
+  background: var(--main-700);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.browser-intent-hint-btn:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.browser-intent-hint-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.browser-intent-hint-dismiss {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--gray-500);
+  cursor: pointer;
+}
+
+.browser-intent-hint-dismiss:hover {
+  color: var(--gray-900);
 }
 
 .input-top-stack {

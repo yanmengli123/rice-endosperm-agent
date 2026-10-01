@@ -3059,6 +3059,14 @@ async def stream_agent_chat(
     # 本机浏览器（P1）：run 冻结的开关绑定到 runtime，toolkits 据此装配 browser 工具组
     if meta.get("browser_enabled"):
         input_context["browser_enabled"] = True
+    else:
+        # 开关未开，但用户本轮确在要求操作本机浏览器：注入条件引导。
+        # 否则模型只能答「我没有浏览器工具」，用户会把这理解成功能损坏（真实事故），
+        # 且模型容易转而用常识冒充已访问页面——这里不自动开启开关（冻结语义与用户授权不可绕过）。
+        from yuxi.agents.toolkits.browser.prompt import detect_local_browser_intent
+
+        if detect_local_browser_intent(query):
+            input_context["browser_intent"] = True
     # mention.v2：把冻结的提及解析结论绑定到 runtime，供 MODEL_DECIDES 路径的
     # 统一检索工具同样施加文献硬约束（@doc 不再只约束定位链）。
     input_context["_mention_resolution"] = _frozen_mention_resolution(meta)
@@ -4495,6 +4503,16 @@ async def stream_agent_resume(
     # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）
     if meta.get("browser_enabled"):
         input_context["browser_enabled"] = True
+    else:
+        # 父运行未开启开关：若原问题确在要求操作本机浏览器，注入同一份条件引导，
+        # 避免 resume 后仍以「本平台没有浏览器工具」作答（与 chat 路径同口径）。
+        from yuxi.agents.toolkits.browser.prompt import detect_local_browser_intent
+
+        frozen_question = (
+            str(_frozen_mention_resolution(meta).get("clean_question") or "").strip() or str(meta.get("query") or "")
+        )
+        if detect_local_browser_intent(frozen_question):
+            input_context["browser_intent"] = True
     context = _build_agent_context(agent, input_context)
     _bind_knowledge_scope_to_context(context, knowledge_scope_snapshot)
     langfuse_run = _build_langfuse_run_context(

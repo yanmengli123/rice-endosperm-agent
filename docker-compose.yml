@@ -56,6 +56,8 @@ x-api-worker-env: &api-worker-env
   RUN_CANCEL_KEY_TTL_SECONDS: ${RUN_CANCEL_KEY_TTL_SECONDS:-1800}
   RUN_EVENTS_STREAM_TTL_SECONDS: ${RUN_EVENTS_STREAM_TTL_SECONDS:-7200}
   YUXI_CORS_ORIGINS: ${YUXI_CORS_ORIGINS:-}
+  # 渠道 webhook 的唯一权威公网基址；无公网时留空，控制面会阻止 webhook 应用激活。
+  CHANNEL_PUBLIC_BASE_URL: ${CHANNEL_PUBLIC_BASE_URL:-}
   # 其他环境变量
   NO_PROXY: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd-dev,etcd,mineru,grobid,paddlex,sandbox-provisioner,api.siliconflow.cn
   no_proxy: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd-dev,etcd,mineru,grobid,paddlex,sandbox-provisioner,api.siliconflow.cn
@@ -215,7 +217,10 @@ services:
     command: uv run --no-sync --no-dev arq server.worker_main.WorkerSettings
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('redis', 6379), 3).close()\""]
+      # 真健康检查：锚定 ARQ 循环心跳文件（cron 每分钟写一次，容忍 200s）。
+      # 进程活着但 ARQ 循环卡死/启动失败时心跳停更 → unhealthy，
+      # 修复「假健康 + 任务无限 pending」陷阱（如 Milvus 未就绪时启动失败）。
+      test: ["CMD-SHELL", "python -c \"import os,time; assert time.time()-os.path.getmtime('/tmp/yuxi_worker_heartbeat')<200\""]
       interval: 15s
       timeout: 5s
       retries: 4

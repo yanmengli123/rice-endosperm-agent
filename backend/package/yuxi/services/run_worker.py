@@ -1117,8 +1117,27 @@ async def _load_input_message(message_id: int | None) -> Message | None:
         return result.scalar_one_or_none()
 
 
+async def worker_heartbeat(ctx: Any = None) -> None:
+    """ARQ 循环心跳：每分钟在事件循环内刷新心跳文件。
+
+    Docker 健康检查锚定该文件的新鲜度（容忍 200s）：进程活着但 ARQ 循环卡死/
+    崩溃时心跳停更，容器正确转为 unhealthy——修复「假健康 + 任务无限 pending」
+    陷阱（容器启动时 Milvus 未就绪可让 api/worker 同时启动失败）。
+    """
+    del ctx
+    from pathlib import Path as _P
+
+    marker = _P("/tmp/yuxi_worker_heartbeat")
+    try:
+        marker.write_text(str(time.time()), encoding="utf-8")
+    except OSError as error:  # noqa: BLE001 —— /tmp 不可写属部署异常,交由健康检查暴露
+        logger.warning(f"worker heartbeat write failed: {type(error).__name__}")
+
+
 async def _worker_startup(ctx):
     del ctx
+    # 启动即落一次心跳：避免冷启动后首个 cron 窗口内健康检查空档
+    await worker_heartbeat()
     pg_manager.initialize()
     await pg_manager.create_business_tables()
     await pg_manager.ensure_business_schema()
@@ -1164,6 +1183,7 @@ async def _worker_shutdown(ctx):
 class WorkerSettings:
     functions = [
         process_agent_run,
+        worker_heartbeat,
         process_scientific_pdf_ingest,
         process_dynamic_wiki_build,
         prewarm_doclex_for_kb,
@@ -1172,6 +1192,8 @@ class WorkerSettings:
     ]
     # 每 5 分钟清扫一次孤儿 run；worker 启动时也会立即执行一次。
     cron_jobs = [
+        # ARQ 循环心跳（compose 健康检查锚定 /tmp/yuxi_worker_heartbeat，200s 容忍）
+        cron(worker_heartbeat, minute=set(range(0, 60))),
         cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5))),
         cron(dispatch_pending_agent_runs, minute=set(range(0, 60))),
         cron(recover_stale_scientific_pdf_ingests, minute=set(range(0, 60, 5))),

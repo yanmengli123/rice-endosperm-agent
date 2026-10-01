@@ -59,6 +59,13 @@ BROWSER_GATEWAY_NODE_URL = os.getenv("BROWSER_GATEWAY_NODE_URL", "").strip().rst
 BROWSER_CONNECTION_LEASE_SECONDS = int(os.getenv("BROWSER_CONNECTION_LEASE_SECONDS", "45"))
 
 CLUSTER_SECRET_ENV = "BROWSER_GATEWAY_CLUSTER_SECRET"
+# 桥模式用户隔离（多用户部署必配）：逗号分隔 UID 白名单；未配置 = 单工作站信任
+# 模式（任何开启开关的用户都会操作桥所在机器的浏览器，仅适合单人本机部署）。
+BROWSER_SKILL_ALLOWED_UIDS = frozenset(
+    item.strip()
+    for item in os.getenv("BROWSER_SKILL_ALLOWED_UIDS", "").split(",")
+    if item.strip()
+)
 _CLUSTER_SECRET_REDIS_KEY = "yuxi:browser:cluster_secret"
 
 # 暂停/继续控制（run 粒度，Redis 标记；1h TTL 兜底防悬挂）
@@ -740,6 +747,12 @@ async def dispatch_browser_command(
     )
 
     bridge_enabled = is_browser_skill_bridge_enabled()
+    if bridge_enabled and BROWSER_SKILL_ALLOWED_UIDS and uid not in BROWSER_SKILL_ALLOWED_UIDS:
+        raise BrowserGatewayError(
+            "BROWSER_FORBIDDEN_FOR_USER",
+            "本部署的本机浏览器能力未授权给当前用户，请联系管理员调整 BROWSER_SKILL_ALLOWED_UIDS",
+            http_status=403,
+        )
     auth = None
     registry = None
     device_id = "bsk-local"

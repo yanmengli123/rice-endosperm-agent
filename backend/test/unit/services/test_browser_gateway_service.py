@@ -38,7 +38,7 @@ from yuxi.storage.postgres.models_business import (
     User,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 
 @pytest_asyncio.fixture(autouse=True)

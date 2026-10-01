@@ -11,7 +11,6 @@ import base64
 import binascii
 import json
 import time
-from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
 from yuxi.agents.toolkits.browser.gateway_client import dispatch_browser_op
@@ -168,22 +167,26 @@ async def browser_type(
     config_guide="需要在输入框开启「本机浏览器」并完成扩展配对后可用。",
     args_schema=BrowserTargetInput,
 )
-async def browser_screenshot(
-    runtime: ToolRuntime,
-    tab_id: int | None = None,
-) -> str:
+async def browser_screenshot(tab_id: int | None = None) -> str:
     """对任务窗口当前页面截屏（可视区域）。截图保存为对话交付物并返回文件信息；
     需要了解页面布局、验证操作结果时使用。"""
     try:
         result = await dispatch_browser_op("screenshot", {"tab_id": tab_id} if tab_id is not None else {})
-        saved = await _save_screenshot(runtime, result)
+        saved = await _save_screenshot(result)
         return _tool_ok("screenshot", {**result, "file": saved} if saved else result)
     except BrowserGatewayError as error:
         return _tool_error(error)
 
 
-async def _save_screenshot(runtime: ToolRuntime, result: dict) -> dict | None:
-    """把扩展返回的 data URL 截图落盘为线程交付物；任何失败都不阻断工具主流程。"""
+async def _save_screenshot(result: dict) -> dict | None:
+    """把扩展返回的 data URL 截图落盘为线程交付物；任何失败都不阻断工具主流程。
+
+    线程归属取自浏览器执行上下文（worker 消费 Task 上设置，工具链路必经）——
+    不依赖 ToolRuntime 注入（langchain 按 args_schema 调用，注入参数会
+    missing-argument 拖死整轮 run，2026-10-01 新闻轮事故）。
+    """
+    from yuxi.agents.toolkits.browser.gateway_client import get_browser_execution_context
+
     data_url = str(result.get("data_url") or "")
     if not data_url.startswith("data:image/"):
         return None
@@ -196,9 +199,9 @@ async def _save_screenshot(runtime: ToolRuntime, result: dict) -> dict | None:
     if not payload:
         return None
 
-    runtime_context = runtime.context
-    thread_id = getattr(runtime_context, "file_thread_id", None) or getattr(runtime_context, "thread_id", None)
-    uid = getattr(runtime_context, "uid", None)
+    context = get_browser_execution_context()
+    thread_id = getattr(context, "thread_id", None) if context is not None else None
+    uid = getattr(context, "uid", None) if context is not None else None
     if not thread_id or not uid:
         return None
     try:

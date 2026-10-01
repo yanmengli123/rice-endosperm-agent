@@ -160,3 +160,29 @@ async def test_gateway_error_carries_code():
     error = BrowserGatewayError("BROWSER_TIMEOUT", "超时", http_status=504)
     assert error.code == "BROWSER_TIMEOUT"
     assert error.http_status == 504
+
+
+async def test_screenshot_tool_callable_without_injected_runtime(monkeypatch):
+    """回归(2026-10-01 新闻轮事故):langchain 按 args_schema 调用只传模型可见参数,
+    签名携带 ToolRuntime 注入参数会 missing-argument 拖死整轮 run。
+    模拟真实调用路径——无 runtime、无 tab_id 直调,必须返回结构化结果而非抛异常。"""
+    import json as _json
+
+    from yuxi.agents.toolkits.browser.gateway_client import BrowserExecutionContext, set_browser_execution_context
+
+    async def _fake(op, payload, **kwargs):
+        return {"data_url": "data:image/png;base64," + "A" * 32}
+
+    monkeypatch.setattr("yuxi.agents.toolkits.browser.tools.dispatch_browser_op", _fake)
+    token = set_browser_execution_context(
+        BrowserExecutionContext(tenant_id=1, uid="u", thread_id="t", run_id="r")
+    )
+    try:
+        tools = {tool.name: tool for tool in get_browser_runtime_tools()}
+        raw = await tools["browser_screenshot"].coroutine()  # 不传任何参数
+        payload = _json.loads(raw)
+        assert payload["status"] == "ok"
+    finally:
+        from yuxi.agents.toolkits.browser.gateway_client import reset_browser_execution_context
+
+        reset_browser_execution_context(token)
