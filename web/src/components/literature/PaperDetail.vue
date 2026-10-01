@@ -34,6 +34,7 @@
           </button>
         </div>
 
+        <ReaderTabs v-if="currentTab === 'reader'" :rid="rid" />
         <NotePanel
           v-if="currentTab === 'notes'"
           :rid="rid"
@@ -56,13 +57,14 @@ import { getLiteraturePaper, triggerLiteratureRender, triggerLiteratureTranslati
 import NotePanel from '@/components/literature/NotePanel.vue'
 import AttachmentPanel from '@/components/literature/AttachmentPanel.vue'
 import CardsPanel from '@/components/literature/CardsPanel.vue'
+import ReaderTabs from '@/components/literature/ReaderTabs.vue'
 import ReviewPanel from '@/components/literature/ReviewPanel.vue'
 
 const POLL_INTERVAL_MS = 3000
 
 export default {
   name: 'PaperDetail',
-  components: { NotePanel, AttachmentPanel, CardsPanel, ReviewPanel },
+  components: { NotePanel, AttachmentPanel, CardsPanel, ReviewPanel, ReaderTabs },
   props: {
     rid: { type: String, required: true }
   },
@@ -74,6 +76,7 @@ export default {
     const translating = ref(false)
     const currentTab = ref('notes')
     const tabs = [
+      { key: 'reader', label: '阅读' },
       { key: 'notes', label: '笔记 (L1·L2·L3)' },
       { key: 'attachments', label: '依附资料' },
       { key: 'cards', label: '卡片' },

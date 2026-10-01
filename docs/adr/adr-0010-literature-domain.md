@@ -233,3 +233,23 @@ PaperAgent 的识别复核修正对象是**阅读视图** `document.json`/`en.md
 G1–G6 为首次执行）。后续每阶段收尾必须跑对账表，禁止用阶段完成度回答功能
 兼容度。G3 的 Three.js 3D 可视化以「数据 API 齐备 + 轻量前端」交付，3D 立体
 渲染不承诺（Yuxi 无 Three.js 依赖，引入属独立评估）。
+
+---
+
+## P8 决议 14：不移植清单（正式范围声明，USER-MANUAL 对账后定稿）
+
+首轮逐章对账（决议 13 的首次完整执行）确认以下 PaperAgent 能力**不移植**，
+理由均为「Yuxi 已有企业级更优替代」，非能力缺失：
+
+| PaperAgent 能力 | 不移植理由（Yuxi 替代） |
+|---|---|
+| §12 设置中心（.env 写回/价格表/热切供应商） | `model_provider_router` + `secret_crypto` + runtime Config（多租户、密钥加密、审计） |
+| 插件系统（zip 安装/on_register） | Yuxi skills/MCP 治理体系（来源可信、门禁齐备） |
+| PyInstaller 免装包 / Windows 托盘 | Docker Compose 部署形态 |
+| SQLite×5 / 目录树数据面 | PG 版本化迁移 + MinIO（RLS、备份、多租户） |
+| answer_cache / TokenGuard 单机实现 | usage_ledger append-only + 租户配额 |
+
+**本轮补齐**（对账发现的前端断点）：§5 阅读器五视图（原文/译文/双语对照/
+图片/源 PDF——P1/P3 产物的前端消费入口，`ReaderTabs`）；§9.3 概念页聚合
+（≥2 篇成页、≥3 mature，L1_data 优先 + 笔记解析兜底）与主题 MOC。
+**仍开放**：3D 立体渲染（Three.js 依赖独立评估，决议 13）。

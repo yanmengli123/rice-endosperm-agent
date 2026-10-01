@@ -23,12 +23,31 @@
         @keyup.enter="runSearch"
       />
       <button class="btn" @click="runSearch">搜索</button>
+      <span class="toolbar-spacer"></span>
+      <button class="btn" :class="{ ghost: viewMode !== 'list' }" @click="viewMode = 'list'">文献列表</button>
+      <button class="btn" :class="{ ghost: viewMode !== 'concepts' }" @click="loadConcepts">概念页</button>
+      <input v-model="mocTopic" class="moc-input" placeholder="主题 MOC（如：淀粉合成）" @keyup.enter="generateMoc" />
+      <button class="btn" :disabled="mocLoading" @click="generateMoc">{{ mocLoading ? '生成中…' : '生成主题导读' }}</button>
     </div>
 
-    <div v-if="loading" class="lit-loading">加载中…</div>
-    <div v-else-if="!papers.length" class="lit-empty">文献库为空（可经 PaperAgent 导入器迁移数据）</div>
+    <div v-if="viewMode === 'concepts'" class="concepts-panel">
+      <div v-if="!concepts.length" class="lit-empty">暂无概念页（≥2 篇文献共享同一概念时聚合；先编译 L1）</div>
+      <ul v-else class="concept-list">
+        <li v-for="concept in concepts" :key="concept.concept" class="concept-card" :class="{ mature: concept.mature }">
+          <div class="concept-head">
+            <strong>{{ concept.concept }}</strong>
+            <span class="concept-count">{{ concept.paper_count }} 篇{{ concept.mature ? ' · 成熟' : '' }}</span>
+          </div>
+          <div class="concept-def">{{ concept.definition }}</div>
+          <div class="concept-papers">{{ concept.papers.join(' · ') }}</div>
+        </li>
+      </ul>
+    </div>
 
-    <ul v-else class="paper-list">
+    <div v-if="viewMode === 'list' && loading" class="lit-loading">加载中…</div>
+    <div v-else-if="viewMode === 'list' && !papers.length" class="lit-empty">文献库为空（可经 PaperAgent 导入器迁移数据）</div>
+
+    <ul v-else-if="viewMode === 'list'" class="paper-list">
       <li v-for="paper in papers" :key="paper.rid" class="paper-card" @click="openPaper(paper)">
         <div class="paper-title">
           <span class="kind-badge" :data-kind="paper.kind">{{ kindLabel(paper.kind) }}</span>
@@ -43,7 +62,7 @@
       </li>
     </ul>
 
-    <div class="lit-pagination" v-if="total > pageSize">
+    <div class="lit-pagination" v-if="viewMode === 'list' && total > pageSize">
       <button class="btn" :disabled="page <= 1" @click="gotoPage(page - 1)">上一页</button>
       <span>{{ page }} / {{ totalPages }}</span>
       <button class="btn" :disabled="page >= totalPages" @click="gotoPage(page + 1)">下一页</button>
@@ -55,6 +74,7 @@
 
 <script>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { apiGet, apiPost } from '@/apis/base'
 import { listLiteraturePapers } from '@/apis/literature_api'
 import PaperDetail from '@/components/literature/PaperDetail.vue'
 
@@ -82,6 +102,30 @@ export default {
     const searchQuery = ref('')
     const currentKind = ref('')
     const selectedRid = ref('')
+    const viewMode = ref('list')
+    const concepts = ref([])
+    const mocTopic = ref('')
+    const mocLoading = ref(false)
+
+    const loadConcepts = async () => {
+      viewMode.value = 'concepts'
+      const data = await apiGet('/api/literature/concepts')
+      concepts.value = data?.concepts || []
+    }
+    const generateMoc = async () => {
+      if (!mocTopic.value.trim()) return
+      mocLoading.value = true
+      try {
+        const result = await apiPost('/api/literature/reports/topic-moc', { topic: mocTopic.value.trim() })
+        selectedRid.value = ''
+        mocTopic.value = ''
+        alert(`主题导读已生成（${result.sources} 篇来源），见「综述报告」列表`)
+      } catch (err) {
+        alert(`生成失败：${err?.message || err}`)
+      } finally {
+        mocLoading.value = false
+      }
+    }
 
     const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
@@ -161,7 +205,13 @@ export default {
       selectKind,
       gotoPage,
       openPaper,
-      kindLabel
+      kindLabel,
+      viewMode,
+      concepts,
+      mocTopic,
+      mocLoading,
+      loadConcepts,
+      generateMoc
     }
   }
 }
@@ -244,6 +294,47 @@ export default {
   display: flex;
   gap: 12px;
   align-items: center;
+}
+.toolbar-spacer {
+  flex: 1;
+}
+.moc-input {
+  padding: 6px 12px;
+  width: 200px;
+}
+.concept-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.concept-card {
+  border: 1px solid var(--border-color, #eee);
+  border-radius: 8px;
+  padding: 10px 14px;
+  &.mature {
+    border-color: rgba(82, 196, 26, 0.5);
+  }
+}
+.concept-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.concept-count {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.concept-def {
+  margin: 6px 0;
+  font-size: 13px;
+}
+.concept-papers {
+  font-size: 11px;
+  font-family: monospace;
+  opacity: 0.65;
+  word-break: break-all;
 }
 .lit-empty,
 .lit-loading {

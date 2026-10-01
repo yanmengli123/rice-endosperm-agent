@@ -283,6 +283,24 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
                     data=compiler.render_l2_wiki(meta, result["l2"]).encode("utf-8"),
                     content_type="text/markdown",
                 )
+            # L1 结构化数据（concepts/scores）落盘：概念页聚合的优先数据源
+            # （concepts.py 兜底解析 L1_note.md，兼容历史产物）
+            import json as _json
+
+            await minio.aupload_file(
+                bucket_name=RENDER_BUCKET,
+                object_name=f"{prefix}/L1_data.json",
+                data=_json.dumps(
+                    {
+                        "one_liner": result["l1"].get("one_liner"),
+                        "concepts": result["l1"].get("concepts") or [],
+                        "tags": result["l1"].get("tags") or [],
+                        "ai_value": result["ai_value"],
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                content_type="application/json",
+            )
             score = value_score.compute_value_score(
                 {
                     "ai_value": result["ai_value"],

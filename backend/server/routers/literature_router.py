@@ -7,11 +7,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile
 
 from server.utils.auth_middleware import get_required_user
-from yuxi.literature import bib_import, cards, diary, enrich as enrich_module
+from yuxi.literature import bib_import, cards, concepts, diary, enrich as enrich_module
 from yuxi.literature import graph_service, readops, review
+from yuxi.literature import reader_bundle
 from yuxi.literature.attachments import register_attachment
 from yuxi.literature.reading.service import RENDER_BUCKET, enqueue_reader_render
 from yuxi.literature.translate.service import enqueue_literature_translation
@@ -161,8 +162,6 @@ async def get_asset(
     except Exception as exc:  # noqa: BLE001 - 对象不存在/存储不可用统一 404
         raise HTTPException(status_code=404, detail="资产不存在") from exc
     suffix = "." + object_name.rsplit(".", 1)[-1].lower() if "." in object_name else ""
-    from fastapi import Response
-
     return Response(
         content=data,
         media_type=_ASSET_CONTENT_TYPES.get(suffix, "application/octet-stream"),
@@ -467,6 +466,66 @@ async def project_graph_endpoint(current_user: User = Depends(get_required_user)
     tenant_id = await _current_tenant(current_user)
     try:
         result = await graph_service.project_to_neo4j(tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 202, **result}
+
+
+# ---------------------------------------------------------------- P8：阅读器 / 概念页 / 主题 MOC
+
+
+@literature.get("/papers/{rid}/reader")
+async def get_reader_bundle_endpoint(rid: str, current_user: User = Depends(get_required_user)):
+    """阅读包：原文 markdown（图片 URL 已重写为鉴权端点；修正版优先）。"""
+    tenant_id = await _current_tenant(current_user)
+    bundle = await reader_bundle.get_reader_bundle(tenant_id, rid)
+    if bundle is None:
+        raise HTTPException(status_code=404, detail="文献不存在或未关联解析版本")
+    return bundle
+
+
+@literature.get("/papers/{rid}/variants/{variant_kind}")
+async def get_variant_endpoint(rid: str, variant_kind: str, current_user: User = Depends(get_required_user)):
+    """译文内容（zh/en_zh/summary，直接文本；对照阅读由前端分段对齐）。"""
+    tenant_id = await _current_tenant(current_user)
+    if variant_kind not in ("zh", "en_zh", "summary"):
+        raise HTTPException(status_code=422, detail=f"非法变体类型: {variant_kind}")
+    result = await reader_bundle.get_variant_content(tenant_id, rid, variant_kind)
+    if result is None:
+        raise HTTPException(status_code=404, detail="文献不存在")
+    return result
+
+
+@literature.get("/papers/{rid}/source-pdf")
+async def get_source_pdf_endpoint(rid: str, current_user: User = Depends(get_required_user)):
+    """源 PDF 代理（原始上传件；inline 展示）。"""
+    tenant_id = await _current_tenant(current_user)
+    result = await reader_bundle.get_source_pdf(tenant_id, rid)
+    if result is None:
+        raise HTTPException(status_code=404, detail="源 PDF 不可用（文献未关联解析版本或对象缺失）")
+    data, _object = result
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{rid}.pdf"', "Cache-Control": "private, max-age=300"},
+    )
+
+
+@literature.get("/concepts")
+async def list_concepts_endpoint(current_user: User = Depends(get_required_user)):
+    """概念页聚合（≥2 文献成页；≥3 标 mature；L1_data.json 优先、笔记解析兜底）。"""
+    tenant_id = await _current_tenant(current_user)
+    return {"concepts": await concepts.aggregate_concepts(tenant_id)}
+
+
+@literature.post("/reports/topic-moc", status_code=202)
+async def generate_topic_moc_endpoint(payload: dict, current_user: User = Depends(get_required_user)):
+    """主题 MOC 生成（概念/标题匹配 → L1 聚合 → LLM 导读；落 reports）。"""
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await concepts.generate_topic_moc(
+            tenant_id, topic=str(payload.get("topic") or ""), created_by=getattr(current_user, "uid", "")
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 202, **result}
