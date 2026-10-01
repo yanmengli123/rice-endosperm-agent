@@ -2068,3 +2068,38 @@ class FigureAssetRecord(Base):
     group_index = Column(Integer, nullable=False, default=0)
     panel_label = Column(String(16), nullable=False, default="")
     created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class LiteratureReaderRender(Base):
+    """文献域阅读视图渲染状态（ADR-0010 决议 7：P14 离线渲染，派生物非证据）。
+
+    一个 parse_revision × render_version 一行；渲染产物（render.md / images）
+    落 MinIO ``tenants/{t}/documents/{sha}/reader_render/{rev}/``，
+    ``markdown_uri`` 为 kbasset:// 逻辑 URI。不写 evidence_span、不进 Milvus。
+    """
+
+    __tablename__ = "literature_reader_renders"
+    __table_args__ = (
+        UniqueConstraint("revision_id", "render_version", name="uq_literature_reader_render_revision"),
+        Index("ix_literature_reader_render_status", "status"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    revision_id = Column(
+        String(64),
+        ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # P1 租户归属：随解析版本继承，禁止来自请求体
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="PENDING")
+    render_version = Column(String(32), nullable=False, default="reader_render_v1")
+    attempt = Column(Integer, nullable=False, default=0)
+    markdown_uri = Column(String(1024))
+    image_count = Column(Integer, nullable=False, default=0)
+    latex_count = Column(Integer, nullable=False, default=0)
+    source_digest = Column(String(64))
+    error = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)

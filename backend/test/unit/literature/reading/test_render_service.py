@@ -1,0 +1,257 @@
+"""阅读渲染服务状态机测试（ADR-0010 决议 7 + 不变量 L0-2）。
+
+SQLite 内存库（模式对齐 test_scientific_pdf_task_projection）：钉死
+PENDING → RUNNING → SUCCEEDED/FAILED 状态机、幂等入列、attempt 退避、
+质量门禁，以及 L0-2（渲染不触碰解析权威层：parser_fingerprint 与工件行不变）。
+"""
+
+from __future__ import annotations
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from yuxi.literature.reading import service as service_module
+from yuxi.literature.reading.process import RenderProcessError
+from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeParseArtifact,
+    KnowledgeParseRevision,
+    LiteratureReaderRender,
+)
+
+pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+
+REVISION_ID = "sir_lit_test_0001"
+SOURCE_SHA = "a" * 64
+MARKDOWN_URI_PREFIX = f"kbasset://tenants/1/documents/{SOURCE_SHA}/reader_render/{REVISION_ID}"
+
+
+class _AsyncSessionContext:
+    def __init__(self, db):
+        self.db = db
+
+    async def __aenter__(self):
+        return self.db
+
+    async def __aexit__(self, exc_type, *_args):
+        if exc_type is None:
+            await self.db.commit()
+        else:
+            await self.db.rollback()
+        return False
+
+
+class _FakeQueue:
+    def __init__(self):
+        self.jobs: list[tuple[str, tuple, str | None]] = []
+
+    async def enqueue_job(self, name, *args, _job_id=None):
+        self.jobs.append((name, args, _job_id))
+
+
+class _FakeMinio:
+    def __init__(self):
+        self.uploads: list[tuple[str, int, str]] = []
+
+    async def adownload_file(self, bucket, object_name):
+        assert bucket == service_module.RENDER_BUCKET
+        if object_name.endswith("original.pdf"):
+            return b"%PDF-1.7 fake-bytes"
+        return b"# Starch synthesis\n\nOsNF-YB1 regulates starch biosynthesis.\n"
+
+    async def aupload_file(self, *, bucket_name, object_name, data, content_type):
+        assert bucket_name == service_module.RENDER_BUCKET
+        self.uploads.append((object_name, len(data), content_type))
+
+
+def _render_result(markdown: str) -> dict:
+    return {
+        "ok": True,
+        "markdown": markdown,
+        "image_count": 0,
+        "image_names": [],
+        "latex_count": 0,
+        "source_digest": "d" * 64,
+    }
+
+
+async def _get_row(session) -> LiteratureReaderRender | None:
+    return (
+        await session.execute(select(LiteratureReaderRender).where(LiteratureReaderRender.revision_id == REVISION_ID))
+    ).scalar_one_or_none()
+
+
+@pytest_asyncio.fixture
+async def service_env(monkeypatch, tmp_path):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(LiteratureReaderRender.__table__.create)
+        await conn.run_sync(KnowledgeParseRevision.__table__.create)
+        await conn.run_sync(KnowledgeParseArtifact.__table__.create)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(
+            KnowledgeParseRevision(
+                id=1,
+                revision_id=REVISION_ID,
+                tenant_id=1,
+                kb_id="kb_lit",
+                file_id="kf_lit",
+                source_sha256=SOURCE_SHA,
+                parser_fingerprint="fp_abcdef",
+                pipeline_version="scientific_pdf_v3.2",
+                status="ACTIVE",
+            )
+        )
+        for artifact_id, kind, suffix in (
+            ("spa_md_1", "mineru_markdown", f"mineru/{REVISION_ID}/full.md"),
+            ("spa_pdf_1", "original_pdf", "source/original.pdf"),
+        ):
+            session.add(
+                KnowledgeParseArtifact(
+                    # SQLite 测试方言：BIGINT 主键不自增，显式给 id（AGENTS.md 硬规范）
+                    id={"spa_md_1": 101, "spa_pdf_1": 102}[artifact_id],
+                    artifact_id=artifact_id,
+                    revision_id=REVISION_ID,
+                    kind=kind,
+                    object_uri=f"tenants/1/documents/{SOURCE_SHA}/{suffix}",
+                    sha256="b" * 64,
+                    size_bytes=1024,
+                )
+            )
+        await session.commit()
+
+        monkeypatch.setattr(
+            service_module.pg_manager,
+            "get_async_session_context",
+            lambda: _AsyncSessionContext(session),
+        )
+        queue = _FakeQueue()
+
+        async def _get_pool():
+            return queue
+
+        minio = _FakeMinio()
+        monkeypatch.setattr(service_module, "get_arq_pool", _get_pool)
+        monkeypatch.setattr(service_module, "get_minio_client", lambda: minio)
+        yield session, queue, minio
+
+    await engine.dispose()
+
+
+async def test_enqueue_creates_pending_and_enqueues(service_env):
+    session, queue, _ = service_env
+    result = await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    assert result["status"] == "PENDING"
+    assert result["reused"] is False
+    assert queue.jobs == [(service_module.RENDER_JOB_NAME, (REVISION_ID,), "lit-render:sir_lit_test_0001:0")]
+    row = await _get_row(session)
+    assert row is not None
+    assert row.status == "PENDING"
+    assert row.render_version == "reader_render_v1"
+
+
+async def test_enqueue_rejects_unknown_revision(service_env):
+    with pytest.raises(ValueError, match="不存在"):
+        await service_module.enqueue_reader_render(revision_id="sir_missing")
+
+
+async def test_enqueue_is_idempotent_while_running_or_succeeded(service_env):
+    session, _, _ = service_env
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+
+    row = await _get_row(session)
+    row.status = "RUNNING"
+    await session.commit()
+    again = await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    assert again == {"revision_id": REVISION_ID, "status": "RUNNING", "reused": True}
+
+    row.status = "SUCCEEDED"
+    await session.commit()
+    done = await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    assert done["status"] == "SUCCEEDED" and done["reused"] is True
+
+    forced = await service_module.enqueue_reader_render(revision_id=REVISION_ID, force=True)
+    assert forced["reused"] is False
+    assert (await _get_row(session)).status == "PENDING"
+
+
+async def test_render_success_uploads_and_preserves_authority_plane(service_env, monkeypatch):
+    """L0-2 钉死：渲染成功只写 MinIO 派生物 + 渲染行；解析权威层（指纹/工件）不变。"""
+    session, queue, minio = service_env
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+
+    def _fake_render(**_kwargs):
+        return _render_result("# 干净阅读视图\n\nOsNF-YB1 regulates starch biosynthesis.\n")
+
+    monkeypatch.setattr(service_module, "render_in_subprocess", _fake_render)
+    outcome = await service_module.process_literature_reader_render({}, REVISION_ID)
+
+    assert outcome["status"] == "SUCCEEDED"
+    assert outcome["markdown_uri"] == f"{MARKDOWN_URI_PREFIX}/render.md"
+
+    row = await _get_row(session)
+    assert row.status == "SUCCEEDED"
+    assert row.markdown_uri.startswith(MARKDOWN_URI_PREFIX)
+    assert row.source_digest == "d" * 64
+
+    # 上传只发生在 reader_render 命名空间（第 5 段路径）
+    assert minio.uploads
+    assert all(name.split("/")[4] == "reader_render" for name, _, _ in minio.uploads)
+    assert any(name.endswith("/render.md") and ctype == "text/markdown" for name, _, ctype in minio.uploads)
+
+    # 不变量 L0-2：解析权威层零改动（指纹不变、无新增工件行）
+    revision = (
+        await session.execute(select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == REVISION_ID))
+    ).scalar_one()
+    assert revision.parser_fingerprint == "fp_abcdef"
+    artifacts = (await session.execute(select(KnowledgeParseArtifact))).scalars().all()
+    assert len(artifacts) == 2
+
+
+async def test_render_failure_requeues_then_dead(service_env, monkeypatch):
+    session, queue, _ = service_env
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+
+    def _boom(**_kwargs):
+        raise RenderProcessError("渲染子进程失败: 模拟崩溃")
+
+    monkeypatch.setattr(service_module, "render_in_subprocess", _boom)
+    first = await service_module.process_literature_reader_render({}, REVISION_ID)
+    assert first["status"] == "REQUEUED"
+    row = await _get_row(session)
+    assert row.status == "PENDING" and row.attempt == 1
+
+    second = await service_module.process_literature_reader_render({}, REVISION_ID)
+    assert second["status"] == "REQUEUED"
+    third = await service_module.process_literature_reader_render({}, REVISION_ID)
+    assert third["status"] == "FAILED"
+
+    row = await _get_row(session)
+    assert row.status == "FAILED"
+    assert row.attempt == service_module.MAX_RENDER_ATTEMPTS
+    assert "模拟崩溃" in (row.error or "")
+    # 入列轨迹：初始 attempt=0 + 失败重排 attempt=1/2（第 3 次失败不再重排）
+    assert [job[2] for job in queue.jobs] == [
+        "lit-render:sir_lit_test_0001:0",
+        "lit-render:sir_lit_test_0001:1",
+        "lit-render:sir_lit_test_0001:2",
+    ]
+
+
+async def test_render_rejects_blank_markdown_at_quality_gate(service_env, monkeypatch):
+    """质量门禁（AGENTS.md 硬规范）：空白产物拒绝入库，走失败路径。"""
+    session, _, _ = service_env
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+
+    def _blank(**_kwargs):
+        return _render_result("   ")
+
+    monkeypatch.setattr(service_module, "render_in_subprocess", _blank)
+    outcome = await service_module.process_literature_reader_render({}, REVISION_ID)
+
+    assert outcome["status"] == "REQUEUED"
+    row = await _get_row(session)
+    assert "空白" in (row.error or "")

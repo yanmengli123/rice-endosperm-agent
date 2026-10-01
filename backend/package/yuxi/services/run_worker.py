@@ -39,6 +39,10 @@ from yuxi.services.channel_service import (
     relay_channel_outbox_now,
 )
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
+from yuxi.literature.reading.service import (
+    process_literature_reader_render,
+    reconcile_stale_literature_renders,
+)
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.mcp_canary_service import run_mcp_live_canary
 from yuxi.services.run_queue_service import (
@@ -1193,6 +1197,7 @@ class WorkerSettings:
         process_agent_run,
         worker_heartbeat,
         process_scientific_pdf_ingest,
+        process_literature_reader_render,
         process_dynamic_wiki_build,
         prewarm_doclex_for_kb,
         process_channel_message,
@@ -1205,6 +1210,8 @@ class WorkerSettings:
         cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5))),
         cron(dispatch_pending_agent_runs, minute=set(range(0, 60))),
         cron(recover_stale_scientific_pdf_ingests, minute=set(range(0, 60, 5))),
+        # 文献域阅读渲染：孤儿 RUNNING 回收 + 滞留 PENDING 补偿入列（ADR-0010 决议 7）
+        cron(reconcile_stale_literature_renders, minute=set(range(0, 60, 5))),
         cron(reconcile_dynamic_wikis, minute=set(range(0, 60))),
         # 轨迹 Outbox relay：fast-path 直发失败/worker 崩溃遗留的 PENDING 补发
         cron(relay_trace_outbox, minute=set(range(0, 60))),

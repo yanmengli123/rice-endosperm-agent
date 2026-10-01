@@ -1084,7 +1084,43 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0067_local_browser_gateway", "_migration_0067_local_browser_gateway"),
         ("0068_browser_policy_and_leases", "_migration_0068_browser_policy_and_leases"),
         ("0069_browser_schema_align", "_migration_0069_browser_schema_align"),
+        ("0070_literature_reader_renders", "_migration_0070_literature_reader_renders"),
     ]
+
+    async def _migration_0070_literature_reader_renders(self, conn) -> None:
+        """文献域 P1：阅读视图渲染状态表（ADR-0010 决议 7/9；派生物，非证据）。
+
+        asyncpg 不允许单条 prepared statement 含多条命令，逐条执行。
+        """
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS literature_reader_renders (
+                id BIGSERIAL PRIMARY KEY,
+                revision_id VARCHAR(64) NOT NULL
+                    REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                render_version VARCHAR(32) NOT NULL DEFAULT 'reader_render_v1',
+                attempt INTEGER NOT NULL DEFAULT 0,
+                markdown_uri VARCHAR(1024),
+                image_count INTEGER NOT NULL DEFAULT 0,
+                latex_count INTEGER NOT NULL DEFAULT 0,
+                source_digest VARCHAR(64),
+                error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_reader_render_revision
+                ON literature_reader_renders (revision_id, render_version)
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_literature_reader_render_status ON literature_reader_renders (status)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_reader_renders_revision_id ON literature_reader_renders (revision_id)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_reader_renders_tenant_id ON literature_reader_renders (tenant_id)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
 
     async def _migration_0066_channel_gateway(self, conn) -> None:
         """多渠道网关：渠道应用/终端用户/会话映射/收发流水/出站 outbox/绑定配对。"""

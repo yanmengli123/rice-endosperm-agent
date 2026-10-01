@@ -1,0 +1,46 @@
+ vendored from PaperAgent (MIT License, Copyright (c) 2026 hui-xu-ai)
+=====================================================================
+
+上游快照：PaperAgent-main v1.4.0（paperparse 引擎版本 2.3.0，DATA_FORMAT 4）
+上游形态：本地目录克隆，**无 git 元数据** —— 本目录的 `SHA256SUMS` 是与上游
+做 diff 的唯一基准（路径相对上游项目根 `packages/paperparse/`）。
+
+vendor 范围（ADR-0010 决议 8，import 不动点闭包）：
+  - paperparse/core/{p14_pipeline, markdown_render, md_align, repair_paragraphs,
+    skeleton_local, latex_normalize, anomaly_detect, image_extract,
+    pymupdf_fallback, consensus_fix, para_align, para_verify, block_classify,
+    calibration_md, document_builder, md_qa_check, parse_audit}.py
+    （document_builder/md_qa_check/parse_audit 经 p14 尾段**无条件或 try 内
+    延迟 import** 进入离线闭包——顶层 import 扫描会漏，真实渲染 smoke 拦截。）
+  - paperparse/middleware/{schema, errors, audit}.py
+    （audit 由 middleware/__init__.py 重导出链强制进入闭包——初版闭包脚本
+    把包目录当文件漏掉，真实渲染 smoke 测试拦截；其依赖仅 jinja2/config/schema，
+    已全部在闭包内。）
+  - paperparse/{__init__, config}.py 与 core/middleware 的 __init__.py
+  - SKILL.md 与 templates/*.j2（asset_root()/templates_dir() 的解析依赖它们
+    位于 vendor 根，即 paperparse/ 的上级目录）
+  - 全部文件与上游**字节级一致**，未做任何改写（含 import 语句）。
+
+刻意排除（不在闭包内，均为网络/双通道分支的延迟 import，离线路径不可达）：
+  - dual_ai_review / consensus_scan：LLM 仲裁与 AI 共识扫描（ai_review 分支）
+  - paddleocr_client / parse_params：PaddleOCR 云客户端与选项（paddle 分支）
+  - local_text：第三信号 PDF 文本层（third_decide 分支）
+  - rule_mining：M8c 字符规则挖掘（双通道 review 分支）
+  - mineru_client：MinerU 云客户端（上游顶层模块，闭包从未引用）
+  离线渲染（paddle=False, ai_review=False, third_decide=False,
+  ai_synthesis=False）物理上无法触网；后续若开放双通道，须连同排除清单
+  重新评审 ADR-0010 决议 8。
+
+第三方依赖声明（相对上游 pyproject）：
+  - 本闭包顶层仅用 jinja2 / python-dotenv / pydantic / pymupdf，前两者中
+    jinja2 由本仓库转正声明（vendor 前为传递依赖）。
+  - pyvalem / pylatexenc / latex2mathml 不在闭包顶层 import（pyvalem 仅在
+    consensus_fix 注释中出现——领域词典为上游 tools 预生成产物）。
+
+PyMuPDF 许可提示：上游与 Yuxi 均依赖 PyMuPDF（AGPL/商业双许可）。Yuxi 在
+vendor 之前已依赖 pymupdf>=1.25.5，本目录不新增暴露面；分发闭源衍生版前
+请自行确认 AGPL 合规或商业授权。
+
+加载方式：`yuxi/literature/reading/gateway.py` 把本目录注入 sys.path 后以顶级
+包 `paperparse` 生效；禁止以 `yuxi.literature.vendor.paperparse` 点分路径
+import（内部绝对导入 `from paperparse...` 会解析失败，内层门禁测试会拦）。

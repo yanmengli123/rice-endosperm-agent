@@ -147,8 +147,60 @@ L1/L2/L3 文本永不进入 EvidenceEnvelope；经 wiki 平面发布（复用发
 - **P1**：vendor `paperparse`（SHA256 清单 + NOTICE + make lock）；
   `en.md/document.json → KnowledgeFile + parse_revision` 映射；MinerU 前置段
   注入 P14 的阅读渲染管线。
-- **P2**：`literature_*` 表（迁移 **0070**）+ L1/L2/L3 编译（价值分策略语义移植）
+- **P2**：`literature_*` 表（迁移 **0071**）+ L1/L2/L3 编译（价值分策略语义移植）
   + WikiPage 发布。
 - **P3**：翻译变体（lang 进身份）+ PaperAgent 数据目录无损导入器。
 - **P4**：计量图谱（paperlit 语义移植，图投影 Neo4j）+ 期刊指标。
 - **P5**：依附资料（SI/审稿意见，0 API 成本轻量管线语义移植）。
+
+---
+
+## P1 落地补充决议（2026-10-01，实施时核定）
+
+### 决议 7：执行隔离——P14 渲染一律子进程
+
+`process_pdf_v2` 是**同步阻塞**实现（纯 Python、内部轮询、无 async）。直接在
+ARQ worker 的 event loop 里调用会阻塞整个 worker（单篇渲染数十秒到数分钟）。
+决议：
+
+- 渲染执行走**独立子进程**（`subprocess.run` + 超时 kill +
+  纯数据 JSON 契约回传），ARQ 侧用 `asyncio.to_thread` 等待，不阻塞 loop；
+- 超时（默认 600s）/非零退出/渲染失败/质量门禁不过 → 任务 FAILED（附原因），
+  attempt ≤ 3 内可重入队，超限 DEAD 由状态字段表达；
+- 子进程崩溃与内存峰值与 api/worker 主进程物理隔离。
+
+### 决议 8：vendor 闭包修正——"只 vendor 渲染三件套"不成立
+
+原方案拟只 vendor `markdown_render + latex_* + image_extract`。核查证伪：
+`markdown_render.render()` 的输入是 `ArticleDocument`（不是裸 md），而
+document 构建器（`to_article_document` / `build_markdown`）住在
+`p14_pipeline.py` 内。实际 vendor 闭包（import 不动点 + **全量延迟 import**
+引用扫描两层计算）为 **24 个 Python 模块 + SKILL.md + 7 个 templates/**，
+清单以 `vendor/SHA256SUMS` 为准（上游无 git，该清单是唯一 diff 基准）。执行入口
+`process_pdf_v2(paddle=False, ai_review=False, third_decide=False,
+ai_synthesis=False)`——与上游 `tools/parse_regression.py` 的 0-API 回归模式
+完全一致（M1-M6：本地骨架边界 + md 对齐 + 拼接修复 + 文本规范化 + 图抽取）。
+双通道仲裁（PaddleOCR/AI，需网络与计费）留待后续可选阶段，不在 P1。
+
+第三方硬依赖仅 `jinja2`（本 ADR 落地时由传递依赖转正声明）；
+`python-dotenv` / `pymupdf` / `pydantic` 已有；`pyvalem` / `pylatexenc` /
+`latex2mathml` **不在闭包顶层 import**（pyvalem 仅注释提及，领域词典为预生成产物）。
+
+vendor 目录**不含任何 PaperAgent 网络客户端**（mineru_client / paddleocr_client /
+dual_ai_review / consensus_scan 等仅存在于 paddle/ai_review/third_decide 分支的
+延迟 import 中，离线路径不可达），离线渲染物理上无法触网。
+
+工程教训（已钉进测试）：迁移 DDL **逐条 execute**（asyncpg 禁止单 prepared
+statement 含多条命令，0066 同款约束）；闭包必须扫**函数内延迟 import**
+（document_builder/md_qa_check/parse_audit 由顶层扫描漏掉，真实渲染 smoke 拦截）。
+
+### 决议 9：迁移编号调整
+
+`0070` = `literature_reader_renders`（P1 渲染状态表）；P2 文献域表组改用
+`0071_literature_domain`（原定 0070 被 P1 前置占用）。
+
+### 决议 10：触发时机收敛
+
+P1 仅提供显式 `enqueue_reader_render` + 对账 cron（重入队滞留 PENDING/RUNNING）。
+"ingest 完成自动渲染"的挂接推迟到 P6 产品化阶段（是否默认开启属产品决策，
+且自动渲染对全部存量文献有一次性 CPU 开销）。

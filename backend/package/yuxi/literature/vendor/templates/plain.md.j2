@@ -1,0 +1,17 @@
+{% if frontmatter %}{{ frontmatter }}
+{% endif %}# {{ doc.metadata.title }}
+{%- for item in items %}
+{% if item.type == "heading" %}
+## {{ item.text }}
+{% elif item.type == "figure" %}
+![]({{ item.file }})
+{% else %}
+{{ item.text_en }}
+{% endif %}
+{% endfor %}
+
+## References
+
+{% for r in doc.references %}
+{{ r.number }}. {{ r.raw_text | strip_ref_num }}
+{% endfor %}
