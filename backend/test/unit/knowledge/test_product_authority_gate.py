@@ -46,6 +46,12 @@ def test_registry_snapshot_exposes_both_categories():
     snapshot = {item["kb_type"]: item for item in registry_snapshot()}
     assert snapshot["llmwiki"]["category"] == "derived_product"
     assert snapshot["milvus"]["category"] == "authority_source"
+    # ADR-0010：文献域 L1/L2/L3 笔记是第二个派生产品类型，快照必须暴露其三值
+    assert snapshot["literature_notes"]["category"] == "derived_product"
+    assert snapshot["literature_notes"]["trust_class"] == "DERIVED"
+    assert snapshot["literature_notes"]["authority_class"] == "NAVIGATION_ONLY"
+    # 快照锁面：登记条目集合即产品目录，增删都必须是有意为之
+    assert set(snapshot) == {"milvus", "dify", "notion", "llmwiki", "literature_notes"}
 
 
 def test_require_capability_rejects_upload_for_llmwiki():
@@ -53,6 +59,54 @@ def test_require_capability_rejects_upload_for_llmwiki():
         require_capability("llmwiki", "supports_upload")
     # 权威源不受影响
     require_capability("milvus", "supports_upload")
+
+
+# --- 文献域产品（ADR-0010：L1/L2/L3 是导航平面派生物） --------------------------
+
+
+def test_literature_notes_is_declared_as_navigation_only_derived_product():
+    spec = get_product_spec("literature_notes")
+    assert spec.category == "derived_product"
+    assert spec.trust_class == "DERIVED"
+    assert spec.authority_class == "NAVIGATION_ONLY"
+    assert spec.capabilities.supports_upload is False
+    assert spec.capabilities.supports_raw_evidence is False
+    # 与 llmwiki 同能力面：可导航/可发布/可回滚（经 Wiki 发布面生命周期管理）
+    assert spec.capabilities.supports_navigation is True
+    assert spec.capabilities.supports_publication is True
+    assert spec.capabilities.supports_rollback is True
+
+
+def test_to_evidence_envelope_rejects_literature_notes_rows():
+    # 即使把 L1/L2/L3 笔记正文伪装成检索行，类型边界也拒绝其进入证据通道
+    with pytest.raises(AuthorityGateError, match="cannot enter the evidence channel"):
+        to_evidence_envelope(
+            {"evidence_id": "ev_note", "content": "L1 一句话贡献 + 六维笔记", "kb_type": "literature_notes"}
+        )
+
+
+def test_require_capability_rejects_upload_for_literature_notes():
+    with pytest.raises(TypeError, match="does not support capability 'supports_upload'"):
+        require_capability("literature_notes", "supports_upload")
+    with pytest.raises(TypeError, match="does not support capability 'supports_raw_evidence'"):
+        require_capability("literature_notes", "supports_raw_evidence")
+    # 权威源不受影响
+    require_capability("milvus", "supports_upload")
+
+
+def test_empty_kb_type_rows_currently_pass_as_authority_known_limitation():
+    """ADR-0010 已知限制 §4：空 kb_type 行沿用「冻结时已校验」的历史假设放行。
+
+    本测试**钉住现状**（registry.get_product_spec("") 与 answer_context_builder
+    两处成对 fail-open），不是认可该行为。收紧边界的前置条件：P1 存量审计
+    （扫描冻结 scope 快照与证据行构造点，统计真实缺 kb_type 的行数），且必须
+    走独立 PR——直接收紧会让 filter_evidence_rows 静默丢弃存量证据行，表现为
+    回答悄悄变差。yuxi/literature 自身构造的行必填 kb_type（由文献域测试保证）。
+    """
+    spec = get_product_spec("")
+    assert spec.category == "authority_source"  # 现状：fail-open（历史行兼容）
+    envelope = to_evidence_envelope({"evidence_id": "ev_legacy", "content": "row without kb_type"})
+    assert isinstance(envelope, EvidenceEnvelope)
 
 
 # --- 类型契约 -----------------------------------------------------------------
@@ -173,6 +227,27 @@ def test_scope_gateway_skips_derived_members_in_evidence_fanout():
 
 
 # --- 答案上下文门禁 ------------------------------------------------------------
+
+
+def test_scope_gateway_skips_literature_notes_members_in_evidence_fanout():
+    import asyncio
+
+    import yuxi.knowledge.scope_gateway as gateway
+
+    # ADR-0010 决议 4：登记 literature_notes 后，scope_gateway 三通道封锁自动生效
+    derived_member = {"kb_id": "kb_lit", "kb_type": "literature_notes", "document_enabled": True}
+    authority_member = {"kb_id": "kb_doc", "kb_type": "milvus", "document_enabled": True}
+
+    assert gateway._member_is_derived(derived_member) is True
+    assert gateway._member_is_derived(authority_member) is False
+
+    rows, error = asyncio.run(gateway._query_document_source(derived_member, "OsNF-YB1"))
+    assert rows == []
+    assert error == "DERIVED_PRODUCT_CHANNEL_DENIED"
+
+    rows, error = asyncio.run(gateway._query_managed_graph_source(derived_member, "OsNF-YB1", limit=8))
+    assert rows == []
+    assert error == "DERIVED_PRODUCT_CHANNEL_DENIED"
 
 
 def test_answer_context_drops_derived_rows_and_reports_gate():

@@ -13,6 +13,8 @@
     WikiNavigationHit ∉ EvidenceEnvelope
     kb_type=llmwiki  ⇒ capabilities.supports_upload = False
     kb_type=llmwiki  ⇒ 不能进入 EvidenceEnvelope 通道
+    kb_type=literature_notes ⇒ 同 llmwiki（ADR-0010：文献域 L1/L2/L3 笔记
+                               是导航平面派生物，永不进入证据通道）
 """
 
 from __future__ import annotations
@@ -92,11 +94,22 @@ LLMWIKI = KnowledgeProductSpec(
     capabilities=_LLMWIKI_CAPABILITIES,
 )
 
+# 派生知识产品：文献域 L1/L2/L3 笔记（ADR-0010）。与 llmwiki 同为导航平面，
+# 由文献域编译产出、经 Wiki 发布面发布；绝不注册为 KnowledgeBase 存储适配器。
+LITERATURE_NOTES = KnowledgeProductSpec(
+    kb_type="literature_notes",
+    category="derived_product",
+    trust_class="DERIVED",
+    authority_class="NAVIGATION_ONLY",
+    capabilities=_LLMWIKI_CAPABILITIES,
+)
+
 _REGISTRY: dict[str, KnowledgeProductSpec] = {
     _AUTHORITY_SOURCE.kb_type: _AUTHORITY_SOURCE,
     DIFY.kb_type: DIFY,
     NOTION.kb_type: NOTION,
     LLMWIKI.kb_type: LLMWIKI,
+    LITERATURE_NOTES.kb_type: LITERATURE_NOTES,
 }
 
 
