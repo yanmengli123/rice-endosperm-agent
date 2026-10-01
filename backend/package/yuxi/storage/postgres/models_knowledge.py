@@ -2238,3 +2238,50 @@ class LiteratureTranslationJob(Base):
     error = Column(Text)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureJournalMetric(Base):
+    """期刊指标（P4：JCR/中科院；幂等键 tenant+journal_key+year）。"""
+
+    __tablename__ = "literature_journal_metrics"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "journal_key", "year", name="uq_literature_journal_metrics_key"),
+        Index("ix_literature_journal_metrics_tenant", "tenant_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    journal_key = Column(String(255), nullable=False)  # 归一化期刊名（&/and 等价）
+    year = Column(Integer, nullable=False)
+    jif = Column(Float)
+    quartile = Column(String(16))
+    cas_zone = Column(String(16))
+    source = Column(String(32), nullable=False, default="jcr")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureAttachment(Base):
+    """依附资料（P5，ADR-0010 决议 5：挂父资源、不单独成文献）。
+
+    0 API 成本本地抽文本；**清理守卫 assert_safe_to_clear 保护**（用户附件不可删）。
+    D5 保守方案：抽取文本只进 text_uri（独立检索通道），不混入父文献 evidence_spans。
+    """
+
+    __tablename__ = "literature_attachments"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "paper_id", "kind", "filename", name="uq_literature_attachments_key"),
+        Index("ix_literature_attachments_paper", "tenant_id", "paper_id"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(
+        BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind = Column(String(16), nullable=False)  # ATTACHMENT_KINDS: si/review/data/note/cover/response
+    filename = Column(String(512), nullable=False)
+    uri = Column(String(1024), nullable=False)  # kbasset:// 原始文件
+    text_uri = Column(String(1024))  # kbasset:// 抽取纯文本（0 API）
+    content_digest = Column(String(64), nullable=False)
+    size_bytes = Column(BigInteger, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)

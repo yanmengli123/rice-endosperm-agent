@@ -1087,6 +1087,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0070_literature_reader_renders", "_migration_0070_literature_reader_renders"),
         ("0071_literature_domain", "_migration_0071_literature_domain"),
         ("0072_literature_translation", "_migration_0072_literature_translation"),
+        ("0073_literature_metrics_attachments", "_migration_0073_literature_metrics_attachments"),
     ]
 
     async def _migration_0072_literature_translation(self, conn) -> None:
@@ -1136,6 +1137,57 @@ class PostgresManager(metaclass=SingletonMeta):
         for statement in statements:
             await conn.execute(text(statement))
         for table in ("literature_variants", "literature_translation_jobs"):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text(f"DROP POLICY IF EXISTS p_{table}_tenant ON {table}"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_tenant ON {table} USING "
+                    f"(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+                )
+            )
+
+    async def _migration_0073_literature_metrics_attachments(self, conn) -> None:
+        """文献域 P4/P5：期刊指标 + 依附资料（0 API 抽文本；清理守卫保护）。"""
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS literature_journal_metrics (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                journal_key VARCHAR(255) NOT NULL,
+                year INTEGER NOT NULL,
+                jif DOUBLE PRECISION,
+                quartile VARCHAR(16),
+                cas_zone VARCHAR(16),
+                source VARCHAR(32) NOT NULL DEFAULT 'jcr',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_journal_metrics_key "
+            "ON literature_journal_metrics (tenant_id, journal_key, year)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_journal_metrics_tenant "
+            "ON literature_journal_metrics (tenant_id)",
+            """
+            CREATE TABLE IF NOT EXISTS literature_attachments (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                paper_id BIGINT NOT NULL REFERENCES literature_papers(id) ON DELETE CASCADE,
+                kind VARCHAR(16) NOT NULL,
+                filename VARCHAR(512) NOT NULL,
+                uri VARCHAR(1024) NOT NULL,
+                text_uri VARCHAR(1024),
+                content_digest VARCHAR(64) NOT NULL,
+                size_bytes BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_attachments_key "
+            "ON literature_attachments (tenant_id, paper_id, kind, filename)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_attachments_paper "
+            "ON literature_attachments (tenant_id, paper_id)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+        for table in ("literature_journal_metrics", "literature_attachments"):
             await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
             await conn.execute(text(f"DROP POLICY IF EXISTS p_{table}_tenant ON {table}"))
             await conn.execute(
