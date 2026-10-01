@@ -98,6 +98,28 @@ def test_filter_config_by_role_keeps_admin_context_values_for_admin():
     }
 
 
+def test_strip_non_configurable_context_removes_runtime_injected_fields():
+    """browser_enabled 等运行时注入字段不得经配置保存持久化（第二写入源封堵）。"""
+    strip = context_module.strip_non_configurable_context
+
+    filtered = strip(
+        {
+            "context": {
+                "browser_enabled": True,
+                "browser_intent": True,
+                "thread_id": "should-not-persist",
+                "system_prompt": "keep me",
+            }
+        }
+    )
+    assert filtered["context"] == {"system_prompt": "keep me"}
+
+    # 可配置字段不受影响；无 context 键 / 非 dict 入参安全返回
+    assert strip({"context": {"system_prompt": "x"}})["context"] == {"system_prompt": "x"}
+    assert strip({}) == {}
+    assert strip(None) == {}
+
+
 @pytest.mark.asyncio
 async def test_resolve_agent_resource_options_empty_fields_loads_nothing(monkeypatch):
     async def fail_if_loaded(*_args, **_kwargs):

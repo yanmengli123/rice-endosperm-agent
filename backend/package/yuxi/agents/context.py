@@ -132,6 +132,30 @@ def filter_config_by_role(
     return filtered
 
 
+def strip_non_configurable_context(
+    config_json: dict,
+    context_schema: type["BaseContext"] | None = None,
+) -> dict:
+    """从 config_json.context 剥离 metadata 标记 configurable=False 的字段。
+
+    这些字段由运行时注入（run 冻结 / 会话派生），持久化进智能体配置会形成
+    绕过 run 冻结语义的第二写入源（如 browser_enabled：配置面写入 true 后
+    每轮无视输入框开关装配浏览器工具）。
+    """
+    if not isinstance(config_json, dict):
+        return {}
+    context = config_json.get("context")
+    if not isinstance(context, dict):
+        return dict(config_json)
+    schema = context_schema or BaseContext
+    frozen_fields = {f.name for f in fields(schema) if f.metadata.get("configurable") is False}
+    if not frozen_fields:
+        return dict(config_json)
+    filtered = dict(config_json)
+    filtered["context"] = {key: value for key, value in context.items() if key not in frozen_fields}
+    return filtered
+
+
 @dataclass(kw_only=True)
 class BaseContext:
     """

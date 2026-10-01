@@ -576,10 +576,18 @@ async def _emit_browser_guard_trace(run_id: str) -> None:
     （与 answer.source_guard.completed 同一轨迹模式）。事件绝不影响发布路径。
     """
     try:
+        from sqlalchemy import select
+
         from yuxi.services.browser_gateway_service import count_run_commands
         from yuxi.trace import emit_trace
 
         async with pg_manager.get_async_session_context() as db:
+            from yuxi.storage.postgres.models_business import AgentRun
+
+            status = (await db.execute(select(AgentRun.status).where(AgentRun.id == run_id))).scalar_one_or_none()
+            if status is not None and str(status) != "completed":
+                # failed/cancelled 轮没有可核验的回答，「answer 门禁」事件不应挂上去
+                return
             audit_count = await count_run_commands(db, run_id=run_id)
         emit_trace(
             category="ANSWER",

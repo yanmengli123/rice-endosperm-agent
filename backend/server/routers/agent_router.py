@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.collaboration_templates import get_collaboration_templates
-from yuxi.agents.context import filter_config_by_role
+from yuxi.agents.context import filter_config_by_role, strip_non_configurable_context
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.agent_repository import (
     ADMIN_ROLES,
@@ -123,8 +123,7 @@ class AgentRunCreate(BaseModel):
     browser_enabled: bool = Field(
         False,
         description=(
-            "可选，本机浏览器开关。True 时 run 冻结该标志并装配 browser 工具组；"
-            "配对/在线校验在工具执行期进行。"
+            "可选，本机浏览器开关。True 时 run 冻结该标志并装配 browser 工具组；配对/在线校验在工具执行期进行。"
         ),
     )
 
@@ -139,7 +138,10 @@ def _backend_info(info: dict) -> dict:
 def _filter_agent_config_json(backend_id: str, config_json: dict | None, role: str | None) -> dict:
     backend = agent_manager.get_agent(backend_id)
     context_schema = backend.context_schema if backend else None
-    return filter_config_by_role(config_json or {}, role, context_schema=context_schema)
+    filtered = filter_config_by_role(config_json or {}, role, context_schema=context_schema)
+    # 剥离运行时注入字段（browser_enabled 等 configurable=False 的 context 键）：
+    # 防止配置保存形成绕过 run 冻结语义的第二写入源。
+    return strip_non_configurable_context(filtered, context_schema)
 
 
 async def _serialize_agent(

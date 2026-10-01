@@ -2997,14 +2997,20 @@ async def stream_agent_chat(
             agent_slug=agent_slug,
         )
     )
-    browser_context_token = set_browser_execution_context(
-        BrowserExecutionContext(
-            tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
-            uid=uid,
-            thread_id=thread_id,
-            run_id=meta.get("run_id"),
-            agent_slug=agent_slug,
+    # 仅 browser_enabled 轮建立浏览器执行上下文：若配置面走私装配了 browser 工具，
+    # 未冻结开关的 run 中工具读到空上下文 → BROWSER_CONTEXT_MISSING，fail-closed。
+    browser_context_token = (
+        set_browser_execution_context(
+            BrowserExecutionContext(
+                tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
+                uid=uid,
+                thread_id=thread_id,
+                run_id=meta.get("run_id"),
+                agent_slug=agent_slug,
+            )
         )
+        if meta.get("browser_enabled")
+        else None
     )
     artifact_accumulation_token = begin_artifact_accumulation()
 
@@ -3056,10 +3062,11 @@ async def stream_agent_chat(
     _apply_model_override(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
-    # 本机浏览器（P1）：run 冻结的开关绑定到 runtime，toolkits 据此装配 browser 工具组
-    if meta.get("browser_enabled"):
-        input_context["browser_enabled"] = True
-    else:
+    # 本机浏览器（P1）：run 冻结的开关以实际布尔写入 runtime——即使配置面持久化过
+    # browser_enabled=true，run 未冻结开关时也必须以 False 覆盖，否则该智能体会
+    # 无视输入框开关每轮装配浏览器工具。
+    input_context["browser_enabled"] = bool(meta.get("browser_enabled"))
+    if not meta.get("browser_enabled"):
         # 开关未开，但用户本轮确在要求操作本机浏览器：注入条件引导。
         # 否则模型只能答「我没有浏览器工具」，用户会把这理解成功能损坏（真实事故），
         # 且模型容易转而用常识冒充已访问页面——这里不自动开启开关（冻结语义与用户授权不可绕过）。
@@ -4451,14 +4458,19 @@ async def stream_agent_resume(
             agent_slug=meta.get("agent_slug"),
         )
     )
-    browser_context_token = set_browser_execution_context(
-        BrowserExecutionContext(
-            tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
-            uid=uid,
-            thread_id=thread_id,
-            run_id=meta.get("run_id"),
-            agent_slug=meta.get("agent_slug"),
+    # 同上：仅 browser_enabled 轮建立浏览器执行上下文（resume 路径）
+    browser_context_token = (
+        set_browser_execution_context(
+            BrowserExecutionContext(
+                tenant_id=int(meta.get("tenant_id") or await resolve_tenant_id(db, uid)),
+                uid=uid,
+                thread_id=thread_id,
+                run_id=meta.get("run_id"),
+                agent_slug=meta.get("agent_slug"),
+            )
         )
+        if meta.get("browser_enabled")
+        else None
     )
     artifact_accumulation_token = begin_artifact_accumulation()
     try:
@@ -4500,16 +4512,16 @@ async def stream_agent_resume(
     )
     _apply_model_override(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
-    # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）
-    if meta.get("browser_enabled"):
-        input_context["browser_enabled"] = True
-    else:
+    # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）；
+    # 以实际布尔写入，防止配置面持久化的 browser_enabled=true 绕过 run 冻结语义。
+    input_context["browser_enabled"] = bool(meta.get("browser_enabled"))
+    if not meta.get("browser_enabled"):
         # 父运行未开启开关：若原问题确在要求操作本机浏览器，注入同一份条件引导，
         # 避免 resume 后仍以「本平台没有浏览器工具」作答（与 chat 路径同口径）。
         from yuxi.agents.toolkits.browser.prompt import detect_local_browser_intent
 
-        frozen_question = (
-            str(_frozen_mention_resolution(meta).get("clean_question") or "").strip() or str(meta.get("query") or "")
+        frozen_question = str(_frozen_mention_resolution(meta).get("clean_question") or "").strip() or str(
+            meta.get("query") or ""
         )
         if detect_local_browser_intent(frozen_question):
             input_context["browser_intent"] = True
