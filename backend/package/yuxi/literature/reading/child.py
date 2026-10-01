@@ -39,12 +39,16 @@ def main() -> int:
         product_root = stem_dir if (stem_dir / "en.md").exists() else out_dir
         md_file = product_root / "en.md"
         markdown = md_file.read_text(encoding="utf-8") if md_file.exists() else ""
+        # document.json：段落级结构（[Pxxx] ID），P2 编译提示词的引用锚点来源
+        doc_json_file = product_root / "document.json"
+        document_json = doc_json_file.read_text(encoding="utf-8") if doc_json_file.exists() else ""
         image_dir = product_root / "images"
         image_names = sorted(p.name for p in image_dir.iterdir() if p.is_file()) if image_dir.is_dir() else []
         latex_count = markdown.count("$") // 2
         result = {
             "ok": bool(markdown.strip()),
             "markdown": markdown,
+            "document_json": document_json,
             "product_root": str(product_root),
             "image_count": len(image_names),
             "image_names": image_names,

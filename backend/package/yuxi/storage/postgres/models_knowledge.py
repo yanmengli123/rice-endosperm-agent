@@ -2103,3 +2103,80 @@ class LiteratureReaderRender(Base):
     error = Column(Text)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteraturePaper(Base):
+    """文献身份（ADR-0010 决议 5 存储；1 篇文献 : N 个文件/变体）。
+
+    rid 经 ``yuxi.literature.identity.make_rid`` 生成（字节级导入兼容）；
+    计量列（paper_rank/impact_factor 等）P4 回填。租户归属权威来源 PrincipalContext。
+    """
+
+    __tablename__ = "literature_papers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "rid", name="uq_literature_papers_tenant_rid"),
+        Index("ix_literature_papers_tenant_doi", "tenant_id", "doi"),
+        Index("ix_literature_papers_tenant_kind", "tenant_id", "kind"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    rid = Column(String(160), nullable=False, index=True)
+    kind = Column(String(32), nullable=False, default="paper")
+    doi = Column(String(255))
+    title = Column(Text)
+    # 关联的活跃解析版本（渲染/编译输入定位；kbasset 前缀由 source_sha256 推导）
+    source_revision_id = Column(String(64), index=True)
+    # 计量（P4 回填；P2 先留空）
+    paper_rank = Column(Float, nullable=False, default=0.0)
+    cocitation_cluster = Column(Integer, nullable=False, default=0)
+    impact_factor = Column(Float)
+    quartile = Column(String(16), nullable=False, default="")
+    value_score = Column(Float, nullable=False, default=0.0)
+    ai_value_score = Column(Float)
+    topic_score = Column(Float)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureCompileJob(Base):
+    """L1/L2/L3 编译任务投影（append-only 事实 + 状态机；ARQ 只是调度器）。
+
+    幂等键 (tenant_id, paper_id, level)：同文献同级只有一个活跃任务。
+    attempt 达上限置 DEAD（补 PaperAgent「无重试预算/死信」缺口）。
+    """
+
+    __tablename__ = "literature_compile_jobs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "paper_id", "level", name="uq_literature_compile_jobs_key"),
+        Index("ix_literature_compile_jobs_status", "status"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
+    level = Column(String(8), nullable=False)  # L1 / L2 / L3
+    status = Column(String(32), nullable=False, default="PENDING")
+    value_score = Column(Float)
+    attempt = Column(Integer, nullable=False, default=0)
+    note_uri = Column(String(1024))  # SUCCEEDED 后的产物 MinIO URI（kbasset://）
+    error = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureCitation(Base):
+    """引用边（WOS bib 导入/DOI 元数据补全；P4 图谱投影的 canonical 输入）。"""
+
+    __tablename__ = "literature_citations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "citing_rid", "cited_doi", name="uq_literature_citations_edge"),
+        Index("ix_literature_citations_cited", "tenant_id", "cited_doi"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    citing_rid = Column(String(160), nullable=False, index=True)
+    cited_doi = Column(String(255), nullable=False)
+    cited_brief = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)

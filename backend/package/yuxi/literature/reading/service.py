@@ -240,6 +240,15 @@ async def process_literature_reader_render(ctx: dict[str, Any], revision_id: str
                 data=markdown.encode("utf-8"),
                 content_type="text/markdown",
             )
+            # document.json（段落级 [Pxxx] 结构）：P2 编译/翻译的引用锚点来源；可选产物
+            document_json = str(result.get("document_json") or "")
+            if document_json.strip():
+                await minio.aupload_file(
+                    bucket_name=RENDER_BUCKET,
+                    object_name=f"{prefix}/document.json",
+                    data=document_json.encode("utf-8"),
+                    content_type="application/json",
+                )
             for image_name in result.get("image_names") or []:
                 # 图片在子进程产物目录（product_root/images/，同机路径）读回后上传
                 image_bytes = (Path(result["product_root"]) / "images" / image_name).read_bytes()

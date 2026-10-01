@@ -1085,6 +1085,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0068_browser_policy_and_leases", "_migration_0068_browser_policy_and_leases"),
         ("0069_browser_schema_align", "_migration_0069_browser_schema_align"),
         ("0070_literature_reader_renders", "_migration_0070_literature_reader_renders"),
+        ("0071_literature_domain", "_migration_0071_literature_domain"),
     ]
 
     async def _migration_0070_literature_reader_renders(self, conn) -> None:
@@ -1121,6 +1122,82 @@ class PostgresManager(metaclass=SingletonMeta):
         )
         for statement in statements:
             await conn.execute(text(statement))
+
+    async def _migration_0071_literature_domain(self, conn) -> None:
+        """文献域 P2：文献身份 / 编译任务 / 引用边（ADR-0010 决议 5；RLS 策略随建）。"""
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS literature_papers (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                rid VARCHAR(160) NOT NULL,
+                kind VARCHAR(32) NOT NULL DEFAULT 'paper',
+                doi VARCHAR(255),
+                title TEXT,
+                source_revision_id VARCHAR(64),
+                paper_rank DOUBLE PRECISION NOT NULL DEFAULT 0,
+                cocitation_cluster INTEGER NOT NULL DEFAULT 0,
+                impact_factor DOUBLE PRECISION,
+                quartile VARCHAR(16) NOT NULL DEFAULT '',
+                value_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                ai_value_score DOUBLE PRECISION,
+                topic_score DOUBLE PRECISION,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_papers_tenant_rid ON literature_papers (tenant_id, rid)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_papers_tenant_doi ON literature_papers (tenant_id, doi)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_papers_tenant_kind ON literature_papers (tenant_id, kind)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_papers_tenant_id ON literature_papers (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_papers_rid ON literature_papers (rid)",
+            """
+            CREATE TABLE IF NOT EXISTS literature_compile_jobs (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                paper_id BIGINT NOT NULL REFERENCES literature_papers(id) ON DELETE CASCADE,
+                level VARCHAR(8) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                value_score DOUBLE PRECISION,
+                attempt INTEGER NOT NULL DEFAULT 0,
+                note_uri VARCHAR(1024),
+                error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_compile_jobs_key "
+            "ON literature_compile_jobs (tenant_id, paper_id, level)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_compile_jobs_status ON literature_compile_jobs (status)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_compile_jobs_tenant_id ON literature_compile_jobs (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_compile_jobs_paper_id ON literature_compile_jobs (paper_id)",
+            """
+            CREATE TABLE IF NOT EXISTS literature_citations (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                citing_rid VARCHAR(160) NOT NULL,
+                cited_doi VARCHAR(255) NOT NULL,
+                cited_brief TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_citations_edge "
+            "ON literature_citations (tenant_id, citing_rid, cited_doi)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_citations_cited ON literature_citations (tenant_id, cited_doi)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_citations_tenant_id ON literature_citations (tenant_id)",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+        # RLS（对齐 ADR-0001 §4 惯例：p_*_tenant 策略；owner 连接下不生效但策略就位）
+        for table in ("literature_papers", "literature_compile_jobs", "literature_citations"):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text(f"DROP POLICY IF EXISTS p_{table}_tenant ON {table}"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_tenant ON {table} USING "
+                    f"(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+                )
+            )
 
     async def _migration_0066_channel_gateway(self, conn) -> None:
         """多渠道网关：渠道应用/终端用户/会话映射/收发流水/出站 outbox/绑定配对。"""
