@@ -50,7 +50,7 @@ def split_text(text: str) -> tuple[str, list[str]]:
         if start > pos:
             chunks.append(text[pos:start])
         math_list.append(tok)
-        chunks.append("[[MATH%d]]" % (len(math_list) - 1))
+        chunks.append("[[MATH%d]]" % (len(math_list) - 1))  # noqa: UP031 - 逐字移植，保留上游写法
         pos = end
     if pos < len(text):
         chunks.append(text[pos:])
