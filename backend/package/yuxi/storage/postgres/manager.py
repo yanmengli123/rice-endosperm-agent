@@ -1094,6 +1094,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0077_literature_source_revision_unique", "_migration_0077_literature_source_revision_unique"),
         ("0078_literature_llm_governance", "_migration_0078_literature_llm_governance"),
         ("0079_literature_source_contract_closure", "_migration_0079_literature_source_contract_closure"),
+        ("0080_literature_paper_metadata", "_migration_0080_literature_paper_metadata"),
     ]
 
     async def _migration_0072_literature_translation(self, conn) -> None:
@@ -1414,6 +1415,21 @@ class PostgresManager(metaclass=SingletonMeta):
             USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)
             WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)""")
         )
+
+    async def _migration_0080_literature_paper_metadata(self, conn) -> None:
+        """文献域 P10-A：文献元数据列（enrich 三源只填空，meta_locked 保护人工值）。"""
+        statements = (
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS authors_json JSONB",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS abstract TEXT",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS journal VARCHAR(512)",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS issn VARCHAR(32)",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS pub_year INTEGER",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS keywords_json JSONB",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS external_cited INTEGER",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS meta_locked BOOLEAN NOT NULL DEFAULT FALSE",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
 
     async def _migration_0070_literature_reader_renders(self, conn) -> None:
         """文献域 P1：阅读视图渲染状态表（ADR-0010 决议 7/9；派生物，非证据）。

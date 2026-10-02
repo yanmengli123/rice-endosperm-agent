@@ -2145,6 +2145,15 @@ class LiteraturePaper(Base):
     # 关联的活跃解析版本（渲染/编译输入定位；kbasset 前缀由 source_sha256 推导）
     source_revision_id = Column(String(64), index=True)
     reading_version = Column(Integer, nullable=False, default=1)
+    # P10-A 元数据（enrich 三源只填空；人工锁定优先，见 capability-matrix §七）
+    authors_json = Column(JSON_VALUE)
+    abstract = Column(Text)
+    journal = Column(String(512))
+    issn = Column(String(32))
+    pub_year = Column(Integer)
+    keywords_json = Column(JSON_VALUE)
+    external_cited = Column(Integer)
+    meta_locked = Column(Boolean, nullable=False, default=False)
     # 计量（P4 回填；P2 先留空）
     paper_rank = Column(Float, nullable=False, default=0.0)
     cocitation_cluster = Column(Integer, nullable=False, default=0)

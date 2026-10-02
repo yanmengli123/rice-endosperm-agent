@@ -195,20 +195,21 @@ async def test_card_write_upsert_and_type_guard(env):
 
 
 async def test_review_decide_validates_choice_and_text(env):
+    """P10-A 契约：字母/语义词皆可；B 不强制 resolved_text（默认取复核项 Paddle 文本）；
+    旧语义 C/D 携带 resolved_text 需 legacy_ack（见 test_p10a 契约套件）。"""
     session, _ = env
     ok = await review.decide(TENANT, "sir_r1", report_idx=0, choice="A", decided_by="u1")
     assert ok["choice"] == "A"
+    ok2 = await review.decide(TENANT, "sir_r1", report_idx=2, choice="paddleocr", decided_by="u1")
+    assert ok2["choice"] == "B"  # 语义词归一为字母
     with pytest.raises(ValueError, match="非法裁决"):
         await review.decide(TENANT, "sir_r1", report_idx=1, choice="E")
-    # B/C/D 需要结果文本（裁决语义）
-    with pytest.raises(ValueError, match="resolved_text"):
-        await review.decide(TENANT, "sir_r1", report_idx=1, choice="B")
+    # B 显式 resolved_text（AI 建议接受）仍允许
     await review.decide(TENANT, "sir_r1", report_idx=1, choice="B", resolved_text="Paddle 修正文本")
-    # 幂等覆盖
-    await review.decide(TENANT, "sir_r1", report_idx=0, choice="C", resolved_text="合并")
+    await review.decide(TENANT, "sir_r1", report_idx=0, choice="A", decided_by="u1")
     decisions = await review.list_decisions(TENANT, "sir_r1")
     by_idx = {d["report_idx"]: d for d in decisions}
-    assert by_idx[0]["choice"] == "C" and by_idx[1]["choice"] == "B"
+    assert by_idx[0]["choice"] == "A" and by_idx[1]["choice"] == "B"
 
 
 async def test_dual_channel_requires_paddle_credential(monkeypatch, env):

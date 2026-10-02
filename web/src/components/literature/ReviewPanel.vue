@@ -68,10 +68,10 @@ export default {
     const dualLoading = ref(false)
     const applying = ref(false)
     const choices = [
-      { key: 'A', label: 'A 保留 MinerU' },
-      { key: 'B', label: 'B 采用 Paddle' },
-      { key: 'C', label: 'C 两者合并' },
-      { key: 'D', label: 'D 均不取' }
+      { key: 'A', label: 'A 保留/还原 MinerU' },
+      { key: 'B', label: 'B 采用 PaddleOCR' },
+      { key: 'C', label: 'C 两者皆可' },
+      { key: 'D', label: 'D 都有误（存疑）' }
     ]
 
     const enc = (v) => encodeURIComponent(v)
@@ -118,7 +118,8 @@ export default {
       }
     }
     const decide = async (item, choice) => {
-      const resolvedText = choice === 'A' ? null : item.suggestion || item.b_text || ''
+      // 兼容语义（review_item_v2）：仅 B 携带替换文本（AI 建议优先，缺省 Paddle 文本）；A/C/D 不改写
+      const resolvedText = choice === 'B' ? item.suggestion || item.b_text || '' : null
       try {
         await apiPost(`/api/literature/papers/${enc(props.rid)}/review/decide`, {
           report_idx: item.report_idx,

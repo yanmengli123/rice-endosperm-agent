@@ -60,7 +60,13 @@ class _FakeMinio:
             f"{BASE}work/review.json": json.dumps(
                 {
                     "items": [
-                        {"report_idx": 0, "para_id": "P001", "a_text": "甲版本", "b_text": "乙版本", "blocking": True}
+                        {
+                            "report_idx": 0,
+                            "para_id": "P001",
+                            "mineru": {"block_id": "mb1", "text": "甲版本"},
+                            "paddleocr": {"block_id": "pb1", "text": "乙版本"},
+                            "blocking": True,
+                        }
                     ]
                 },
                 ensure_ascii=False,
@@ -129,26 +135,25 @@ async def env(monkeypatch):
 
 
 async def test_apply_decisions_replay_semantics(env):
+    """P10-A 兼容语义回放：B=替换（唯一改写）；C/D 不改写正文；A 保留。"""
     session, minio, _ = env
     await review.decide(
-        TENANT, REVISION, report_idx=0, para_id="P001", choice="C", resolved_text="人工合并后的段落一。"
+        TENANT, REVISION, report_idx=0, para_id="P001", choice="B", resolved_text="人工修正后的段落一。"
     )
-    await review.decide(TENANT, REVISION, report_idx=1, para_id="P002", choice="D", resolved_text="删除")
+    await review.decide(TENANT, REVISION, report_idx=1, para_id="P002", choice="D")
     await review.decide(TENANT, REVISION, report_idx=2, para_id="P003", choice="A", decided_by="u1")
 
     manifest = await review.apply_decisions(TENANT, REVISION)
     assert manifest["applied_decisions"] == 3
-    assert (
-        manifest["actions"]["replaced"] == 1
-        and manifest["actions"]["removed"] == 1
-        and manifest["actions"]["kept"] == 1
-    )
+    assert manifest["actions"]["replaced"] == 1
+    assert manifest["actions"]["marked"] == 1  # D = 标记存疑
+    assert manifest["actions"].get("removed", 0) == 0  # 删除语义已废弃（上游 neither 不删）
 
     resolved = json.loads(minio.files[f"{BASE}document_resolved.json"].decode("utf-8"))
     # document.json v2 的规范正文键是 text_en；text 只在导入边界兼容旧快照。
     texts = [p.get("text_en") or p.get("text") or "" for p in resolved["paragraphs"]]
-    assert "人工合并后的段落一。" in texts  # C 替换
-    assert "MinerU 识别的段落二。" not in texts  # D 删除
+    assert "人工修正后的段落一。" in texts  # B 替换
+    assert "MinerU 识别的段落二。" in texts  # D 保留（上游 neither 不删除）
     assert "MinerU 识别的段落三。" in texts  # A 保留
     # 原始 document.json 不被覆盖（审计轨迹）
     assert "MinerU 识别的段落一。" in minio.files[f"{BASE}document.json"].decode("utf-8")

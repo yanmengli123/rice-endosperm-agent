@@ -20,6 +20,12 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from yuxi.literature.reading.service import RENDER_BUCKET, enqueue_reader_render
+from yuxi.literature.review_contract import (
+    CHOICE_EFFECT,
+    ReviewItem,
+    apply_choice_to_paragraph,
+    normalize_choice,
+)
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
@@ -77,16 +83,24 @@ async def get_review_items(tenant_id: int, revision_id: str) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - 无双通道产物（纯离线渲染）→ 空清单
         items = []
     decisions = await list_decisions(tenant_id, revision_id)
-    decided = {d["report_idx"]: d for d in decisions}
-    for item in items:
-        idx = int(item.get("report_idx", -1))
-        item["decision"] = decided.get(idx)
-    blocking = sum(1 for item in items if item.get("blocking") and not item.get("decision"))
+    render_id = render.render_version  # 与 render 行绑定的稳定身份
+    normalized_items = []
+    by_item_id: dict[str, dict] = {}
+    for payload in items:
+        item = ReviewItem.from_payload(payload, render_id=render_id)
+        entry = item.to_payload()
+        decision = next((d for d in decisions if d.get("report_idx") == item.report_idx), None)
+        entry["decision"] = decision
+        entry["choice_effect"] = CHOICE_EFFECT.get(normalize_choice(decision["choice"]), "") if decision else ""
+        normalized_items.append(entry)
+        by_item_id[entry["item_id"]] = entry
+    blocking = sum(1 for e in normalized_items if e["blocking"] and not e["decision"])
     return {
         "revision_id": revision_id,
-        "total": len(items),
+        "schema_version": "review_item_v2",
+        "total": len(normalized_items),
         "blocking_pending": blocking,
-        "items": items,
+        "items": normalized_items,
         "decisions": decisions,
     }
 
@@ -100,13 +114,20 @@ async def decide(
     resolved_text: str | None = None,
     para_id: str = "",
     decided_by: str = "",
+    legacy_ack: bool = False,
 ) -> dict[str, Any]:
-    """四选一仲裁（幂等 upsert：同 (tenant, revision, report_idx) 覆盖）。"""
-    if choice not in VALID_CHOICES:
-        raise ValueError(f"非法裁决: {choice}（可选 {VALID_CHOICES}）")
-    if choice in ("B", "C", "D") and not (resolved_text or "").strip():
-        # B/C/D 需要结果文本（B=采用 Paddle、C=合并、D=均不取即删除标记文本）
-        raise ValueError(f"裁决 {choice} 需提供 resolved_text")
+    """四选一仲裁（幂等 upsert；上游兼容语义：A=mineru/B=paddleocr/C=both/D=neither）。
+
+    兼容语义（review_contract）：B 的替换文本默认取复核项的 PaddleOCR 文本，
+    resolved_text 仅作为 AI 建议/自定义修正的显式覆盖；C/D 不改写正文，
+    携带旧语义 resolved_text（历史"合并/删除"）需 legacy_ack 显式确认。
+    """
+    normalized = normalize_choice(choice)
+    if normalized in ("both", "neither") and (resolved_text or "").strip() and not legacy_ack:
+        raise ValueError(
+            "检测到旧语义裁决（C/D 携带 resolved_text：旧版 C=合并替换、D=删除）。"
+            "当前兼容语义 C=两者皆可、D=标记存疑不改写正文；确要保留该文本请传 legacy_ack=true"
+        )
     async with pg_manager.get_async_session_context() as session:
         stmt = (
             pg_insert(LiteratureReviewDecision)
@@ -115,7 +136,7 @@ async def decide(
                 revision_id=revision_id,
                 report_idx=report_idx,
                 para_id=para_id,
-                choice=choice,
+                choice=_letter_for(normalized),
                 resolved_text=resolved_text,
                 decided_by=decided_by,
             )
@@ -130,7 +151,11 @@ async def decide(
         )
         await session.execute(stmt)
         await session.commit()
-    return {"revision_id": revision_id, "report_idx": report_idx, "choice": choice}
+    return {"revision_id": revision_id, "report_idx": report_idx, "choice": _letter_for(normalized)}
+
+
+def _letter_for(normalized: str) -> str:
+    return {"mineru": "A", "paddleocr": "B", "both": "C", "neither": "D"}[normalized]
 
 
 async def list_decisions(tenant_id: int, revision_id: str) -> list[dict[str, Any]]:
@@ -182,27 +207,22 @@ def para_text(para: dict) -> str:
     return str(para.get("text_en") or para.get("text") or "")
 
 
-def _apply_decision_to_paragraphs(paragraphs: list[dict], decision: dict) -> str:
-    """把单条裁决应用到段落列表，返回动作（kept/replaced/removed/no_target）。"""
-    para_id = str(decision.get("para_id") or "")
+def _apply_decision_to_paragraphs(paragraphs: list[dict], decision: dict, item: ReviewItem | None = None) -> str:
+    """把单条裁决应用到段落列表（上游兼容语义，委托 review_contract）。
+
+    decision 为历史行（字母 A-D）；item 为对应复核项（提供文本兜底定位）。
+    旧语义 C/D 行（带 resolved_text 且未 legacy_ack）在本层不再解释为
+    替换/删除——按兼容语义执行（C 保持 / D 标记），历史文本仅留档。
+    """
     choice = str(decision.get("choice") or "")
-    for para in paragraphs:
-        if not para_id or str(para.get("para_id") or "") != para_id:
-            continue
-        if choice == "A":
-            return "kept"
-        if choice in ("B", "C"):
-            para["text_en"] = str(decision.get("resolved_text") or "")
-            return "replaced"
-        if choice == "D":
-            para["text_en"] = ""
-            # Imported legacy snapshots may still carry ``text``.  Leaving it
-            # populated would resurrect a paragraph through ``para_text``'s
-            # compatibility fallback and make a D decision ineffective.
-            para["text"] = ""
-            return "removed"
-        return "no_action"
-    return "no_target"
+    if item is None:
+        # 无复核项（裁决无对应清单，如导入迁移）：构造仅含定位信息的降级项
+        item = ReviewItem(
+            para_ids=(str(decision.get("para_id") or ""),) if decision.get("para_id") else (),
+            mineru_text=str(decision.get("resolved_text") or ""),
+            paddleocr_text="",
+        )
+    return apply_choice_to_paragraph(paragraphs, item, choice, resolved_text=str(decision.get("resolved_text") or ""))
 
 
 async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
@@ -233,10 +253,21 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
     minio = get_minio_client()
     document = json.loads((await minio.adownload_file(RENDER_BUCKET, f"{base}document.json")).decode("utf-8"))
     paragraphs = [p for p in (document.get("paragraphs") or []) if isinstance(p, dict)]
-    actions = {"kept": 0, "replaced": 0, "removed": 0, "no_target": 0}
+    # 装载复核项（文本兜底定位；渲染缺 review.json 时逐条降级）
+    review_items: dict[int, ReviewItem] = {}
+    try:
+        review_raw = json.loads((await minio.adownload_file(RENDER_BUCKET, f"{base}work/review.json")).decode("utf-8"))
+        for payload in review_raw.get("items") or []:
+            item = ReviewItem.from_payload(payload, render_id=render.render_version)
+            review_items[item.report_idx] = item
+    except Exception:  # noqa: BLE001 - 无复核清单（纯离线渲染）
+        review_items = {}
+    actions = {"kept": 0, "replaced": 0, "restored": 0, "marked": 0, "no_target": 0, "no_replacement_text": 0}
     for decision in decisions:
-        action = _apply_decision_to_paragraphs(paragraphs, decision)
+        item = review_items.get(int(decision.get("report_idx", -1)))
+        action = _apply_decision_to_paragraphs(paragraphs, decision, item)
         actions[action] = actions.get(action, 0) + 1
+    # 兼容语义下 D=标记不改写：不再按裁决删段（旧 removed 语义废弃）
     document["paragraphs"] = [p for p in paragraphs if para_text(p).strip()]
     resolved_doc = json.dumps(document, ensure_ascii=False)
     title = str((document.get("metadata") or {}).get("title") or "")
@@ -342,8 +373,9 @@ async def ai_suggest(
     item = next((it for it in items if int(it.get("report_idx", -1)) == report_idx), None)
     if item is None:
         raise ValueError(f"复核项不存在: report_idx={report_idx}")
-    a_text = str(item.get("a_text") or item.get("mineru_text") or "")
-    b_text = str(item.get("b_text") or item.get("paddle_text") or "")
+    # 归一 DTO（review_item_v2）字段：mineru_text / paddleocr_text（旧扁平键兜底）
+    a_text = str(item.get("mineru_text") or item.get("a_text") or "")
+    b_text = str(item.get("paddleocr_text") or item.get("b_text") or item.get("paddle_text") or "")
     if not a_text or not b_text:
         raise ValueError("该复核项无双通道文本，无法 AI 建议")
     prompt = (

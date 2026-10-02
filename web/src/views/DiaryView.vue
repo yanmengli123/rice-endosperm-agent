@@ -44,7 +44,10 @@ export default {
       content.value = data?.content || ''
     }
     const save = async () => {
-      if (!selectedDate.value) return
+      if (!selectedDate.value) {
+        // 空日记可直接创建：默认落到今天（上游语义：用户主动写下即建行）
+        selectedDate.value = new Date().toISOString().slice(0, 10)
+      }
       saving.value = true
       try {
         await apiPut(`/api/literature/diary/${encodeURIComponent(selectedDate.value)}`, {

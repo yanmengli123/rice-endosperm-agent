@@ -54,12 +54,14 @@ async def fetch_openalex(doi: str) -> dict[str, Any] | None:
     data = await _get_json(f"https://api.openalex.org/works/doi:{doi}")
     if not data:
         return None
+    # authorships 透传（enrich_paper 消费；fields 不限制时默认返回）
     journal = ((data.get("primary_location") or {}).get("source") or {}).get("display_name") or ""
     return {
         "title": data.get("title") or "",
         "journal": journal,
         "year": str(data.get("publication_year") or ""),
         "abstract": _openalex_abstract(data.get("abstract_inverted_index")),
+        "authorships": data.get("authorships") or [],
     }
 
 
@@ -78,6 +80,7 @@ async def fetch_crossref(doi: str) -> dict[str, Any] | None:
         "journal": journal,
         "year": str(((message.get("issued") or {}).get("date-parts") or [[None]])[0][0] or ""),
         "abstract": message.get("abstract") or "",
+        "author": message.get("author") or [],
     }
 
 
@@ -144,6 +147,13 @@ async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
         fetched.append(("semantic_scholar", s2))
     if not fetched:
         return {"rid": rid, "ok": False, "reason": "all_sources_failed"}
+    # 作者（OpenAlex authorships 优先 → Crossref author 列表）
+    authors: list[str] = []
+    if oa and oa.get("authorships"):
+        authors = [str((a.get("author") or {}).get("display_name") or "") for a in oa["authorships"]]
+    elif cr and cr.get("author"):
+        authors = [str(a.get("family") or a.get("given") or "") for a in cr["author"]]
+    authors = [a for a in authors if a.strip()][:20]
 
     filled: list[str] = []
     updates: dict[str, Any] = {}
@@ -168,17 +178,34 @@ async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
             abstract = (payload.get("abstract") or "").strip()
     if new_title:
         updates["title"] = new_title
-    if new_journal:
-        updates["journal_hint"] = new_journal
-    if new_year:
-        updates["year_hint"] = new_year
-
     if "title" in updates:
         async with pg_manager.get_async_session_context() as session:
             await session.execute(
                 LiteraturePaper.__table__.update().where(LiteraturePaper.id == paper.id).values(title=updates["title"])
             )
             await session.commit()
+
+    # P10-A：元数据持久化（authors/journal/pub_year/abstract）——只填空，
+    # meta_locked=True 时全部跳过（人工锁定优先，capability-matrix §七）
+    if not paper.meta_locked:
+        values: dict[str, Any] = {}
+        if new_journal and not paper.journal:
+            values["journal"] = new_journal[:512]
+        if new_year and paper.pub_year is None:
+            try:
+                values["pub_year"] = int(new_year)
+            except (TypeError, ValueError):
+                pass
+        if abstract and not paper.abstract:
+            values["abstract"] = abstract
+        if authors and not paper.authors_json:
+            values["authors_json"] = authors
+        if values:
+            async with pg_manager.get_async_session_context() as session:
+                await session.execute(
+                    LiteraturePaper.__table__.update().where(LiteraturePaper.id == paper.id).values(**values)
+                )
+                await session.commit()
     return {"rid": rid, "ok": True, "filled": filled, "sources": [name for name, _ in fetched]}
 
 

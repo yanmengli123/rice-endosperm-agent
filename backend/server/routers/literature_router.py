@@ -443,6 +443,7 @@ async def decide_review_endpoint(rid: str, payload: dict, current_user: User = D
             resolved_text=payload.get("resolved_text"),
             para_id=str(payload.get("para_id") or ""),
             decided_by=getattr(current_user, "uid", ""),
+            legacy_ack=bool(payload.get("legacy_ack")),
         )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -210,7 +210,12 @@ export default {
       form.append('file', file)
       try {
         const result = await apiPost('/api/literature/papers/import/bib', form)
-        alert(`Bib 导入完成：新增 ${result.inserted || 0}，跳过 ${result.skipped || 0}`)
+        // 后端幂等口径：papers_written（新插入）/ papers_skipped（已存在）；
+        // citations_written 为实插引用边（RETURNING 判真，冲突跳过不计）
+        const written = result.papers_written ?? result.inserted ?? 0
+        const skipped = result.papers_skipped ?? result.skipped ?? 0
+        const citations = result.citations_written ?? 0
+        alert(`Bib 导入完成：新增 ${written}，已存在 ${skipped}，引用边 ${citations}`)
         await load()
       } catch (error) {
         alert(error?.message || 'Bib 导入失败')

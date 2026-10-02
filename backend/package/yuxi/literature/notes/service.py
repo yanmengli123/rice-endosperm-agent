@@ -436,6 +436,75 @@ async def _finish_compile_failure(job_id: int, reason: str) -> str:
     return "PENDING" if requeued else "DEAD"
 
 
+async def _assemble_l3_candidates(tenant_id: int, paper_rid: str, self_ctx: str) -> list[dict]:
+    """L3 相关文献候选装配（P10-A：替换空骨架调用）。
+
+    上游语义：从本文 L1/L2 提取检索关键词 → 召回相关**已编译**文献（排除自身）
+    → 候选上下文（对方 L1 摘要）。检索走概念/元数据匹配（目录检索 PG 通道）；
+    零候选时返回空列表（调用方必须显式报错，不得生成空骨架标成功——裁决 R2 同源纪律）。
+    """
+    import re as _re
+
+    from sqlalchemy import select as _select
+
+    async with pg_manager.get_async_session_context() as session:
+        others = (
+            (
+                await session.execute(
+                    _select(LiteraturePaper).where(
+                        LiteraturePaper.tenant_id == tenant_id,
+                        LiteraturePaper.rid != paper_rid,
+                        LiteraturePaper.id.in_(
+                            _select(LiteratureCompileJob.paper_id).where(
+                                LiteratureCompileJob.tenant_id == tenant_id,
+                                LiteratureCompileJob.level == "L1",
+                                LiteratureCompileJob.status == "SUCCEEDED",
+                            )
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if not others:
+        return []
+    # 关键词：本文上下文的高频实词（简单口径；概念标签优先——L1_data.json 兜底由 concepts 提供）
+    words = _re.findall(r"[A-Za-z][A-Za-z-]{3,}", self_ctx)
+    freq: dict[str, int] = {}
+    for w in words:
+        freq[w.lower()] = freq.get(w.lower(), 0) + 1
+    keywords = {w for w, _ in sorted(freq.items(), key=lambda kv: -kv[1])[:25]}
+    minio = get_minio_client()
+    candidates: list[dict] = []
+    for other in others[:50]:
+        try:
+            note = (
+                await minio.adownload_file(
+                    RENDER_BUCKET, f"tenants/{tenant_id}/literature/notes/{other.rid}/L1_note.md"
+                )
+            ).decode("utf-8")
+        except Exception:  # noqa: BLE001 - 无 L1 产物跳过
+            continue
+        title_words = {w.lower() for w in _re.findall(r"[A-Za-z][A-Za-z-]{3,}", str(other.title or ""))}
+        note_words = set(_re.findall(r"[A-Za-z][A-Za-z-]{3,}", note[:4000].lower()))
+        overlap = len(keywords & (title_words | note_words))
+        if overlap < 3:
+            continue
+        candidates.append(
+            {
+                "doi": str(other.doi or other.rid),
+                "context": note[:3000],
+                "connection": f"关键词重合 {overlap}",
+                "_overlap": overlap,
+            }
+        )
+    candidates.sort(key=lambda c: -c["_overlap"])
+    for c in candidates:
+        c.pop("_overlap", None)
+    return candidates[:8]
+
+
 async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[str, Any] | None:
     """ARQ 任务：编译一个文献的一个级别（L1=合并产出 L1+L2；L3=关系层）。"""
     job = await _claim_job(job_id)
@@ -548,14 +617,20 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
         self_ctx = l1_bytes.decode("utf-8")
         if len(self_ctx.strip()) < _L3_MIN_SELF_CTX_CHARS:
             raise ValueError("L1 笔记缺失或过短，无法编译 L3（先编译 L1）")
+        related = await _assemble_l3_candidates(int(job.tenant_id), paper.rid, self_ctx)
+        if not related:
+            raise ValueError(
+                "缺少相关编译文献：L3 需要库内其他已编译 L1 的文献（先编译更多同主题文献，"
+                "或稍后重试——上游语义为跨文献关系分析，不生成单文献空骨架）"
+            )
         if job.llm_run_id:
             from yuxi.literature.llm_gateway import governed_runtime, policy_for_job_attempt
 
             policy = await policy_for_job_attempt(job, operation="compile_l3")
             async with governed_runtime(policy):
-                relations_md = await compiler.compile_l3(meta, self_ctx, related_ctxs=[])
+                relations_md = await compiler.compile_l3(meta, self_ctx, related_ctxs=related)
         else:  # pre-0078 jobs and isolated unit fixtures
-            relations_md = await compiler.compile_l3(meta, self_ctx, related_ctxs=[])
+            relations_md = await compiler.compile_l3(meta, self_ctx, related_ctxs=related)
         note_uri = f"kbasset://{prefix}/L3_relations.md"
         await minio.aupload_file(
             bucket_name=RENDER_BUCKET,
