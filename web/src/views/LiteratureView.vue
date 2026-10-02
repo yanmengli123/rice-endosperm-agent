@@ -26,8 +26,42 @@
       <span class="toolbar-spacer"></span>
       <button class="btn" :class="{ ghost: viewMode !== 'list' }" @click="viewMode = 'list'">文献列表</button>
       <button class="btn" :class="{ ghost: viewMode !== 'concepts' }" @click="loadConcepts">概念页</button>
+      <button class="btn" :class="{ ghost: viewMode !== 'reports' }" @click="loadReports">综述报告</button>
+      <button class="btn" :class="{ ghost: viewMode !== 'tasks' }" @click="loadTasks">任务</button>
+      <button class="btn" @click="$refs.bibInput.click()">导入 Bib</button>
+      <button class="btn" :disabled="importing" @click="$refs.paperAgentInput.click()">
+        {{ importing ? '导入中…' : '迁移 PaperAgent' }}
+      </button>
+      <input ref="bibInput" hidden type="file" accept=".bib,.txt" @change="importBib" />
+      <input ref="paperAgentInput" hidden type="file" accept=".zip" @change="importPaperAgent" />
       <input v-model="mocTopic" class="moc-input" placeholder="主题 MOC（如：淀粉合成）" @keyup.enter="generateMoc" />
       <button class="btn" :disabled="mocLoading" @click="generateMoc">{{ mocLoading ? '生成中…' : '生成主题导读' }}</button>
+    </div>
+
+    <div v-if="viewMode === 'reports'" class="concepts-panel">
+      <div v-if="!reports.length" class="lit-empty">暂无综述或主题导读</div>
+      <ul v-else class="concept-list">
+        <li v-for="report in reports" :key="report.id" class="concept-card">
+          <div class="concept-head">
+            <strong>{{ report.title }}</strong>
+            <span class="concept-count">{{ report.report_kind }}</span>
+          </div>
+          <div class="concept-def">{{ report.created_at || '' }}</div>
+        </li>
+      </ul>
+    </div>
+
+    <div v-if="viewMode === 'tasks'" class="concepts-panel">
+      <div v-if="!literatureTasks.length" class="lit-empty">暂无文献任务</div>
+      <ul v-else class="concept-list">
+        <li v-for="task in literatureTasks" :key="`${task.type}-${task.ref}`" class="concept-card">
+          <div class="concept-head">
+            <strong>{{ task.type }} · {{ task.ref }}</strong>
+            <span class="concept-count">{{ task.status }}</span>
+          </div>
+          <div v-if="task.error" class="task-error">{{ task.error }}</div>
+        </li>
+      </ul>
     </div>
 
     <div v-if="viewMode === 'concepts'" class="concepts-panel">
@@ -73,9 +107,9 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
-import { listLiteraturePapers } from '@/apis/literature_api'
+import { listLiteraturePapers, listLiteratureTasks } from '@/apis/literature_api'
 import PaperDetail from '@/components/literature/PaperDetail.vue'
 
 const KIND_CHIPS = [
@@ -106,6 +140,9 @@ export default {
     const concepts = ref([])
     const mocTopic = ref('')
     const mocLoading = ref(false)
+    const reports = ref([])
+    const literatureTasks = ref([])
+    const importing = ref(false)
 
     const loadConcepts = async () => {
       viewMode.value = 'concepts'
@@ -124,6 +161,51 @@ export default {
         alert(`生成失败：${err?.message || err}`)
       } finally {
         mocLoading.value = false
+      }
+    }
+    const loadReports = async () => {
+      viewMode.value = 'reports'
+      const data = await apiGet('/api/literature/reports')
+      reports.value = data?.reports || []
+    }
+    const loadTasks = async () => {
+      viewMode.value = 'tasks'
+      literatureTasks.value = await listLiteratureTasks()
+    }
+    const importBib = async (event) => {
+      const file = event.target.files?.[0]
+      event.target.value = ''
+      if (!file) return
+      const form = new FormData()
+      form.append('file', file)
+      try {
+        const result = await apiPost('/api/literature/papers/import/bib', form)
+        alert(`Bib 导入完成：新增 ${result.inserted || 0}，跳过 ${result.skipped || 0}`)
+        await load()
+      } catch (error) {
+        alert(error?.message || 'Bib 导入失败')
+      }
+    }
+    const importPaperAgent = async (event) => {
+      const file = event.target.files?.[0]
+      event.target.value = ''
+      if (!file) return
+      importing.value = true
+      try {
+        const dryForm = new FormData()
+        dryForm.append('file', file)
+        const report = await apiPost('/api/literature/papers/import/paperagent?dry_run=true', dryForm)
+        const summary = `将迁移 ${report.papers?.source || 0} 篇文献、${report.variants?.source || 0} 个变体；冲突 ${report.conflicts?.length || 0} 项。`
+        if (!window.confirm(`${summary}\n确认执行正式导入？`)) return
+        const importForm = new FormData()
+        importForm.append('file', file)
+        await apiPost('/api/literature/papers/import/paperagent?dry_run=false', importForm)
+        alert('PaperAgent 数据迁移完成')
+        await load()
+      } catch (error) {
+        alert(error?.message || 'PaperAgent 数据迁移失败')
+      } finally {
+        importing.value = false
       }
     }
 
@@ -163,7 +245,7 @@ export default {
         })
         papers.value = data.items || []
         total.value = data.total || 0
-      } catch (err) {
+      } catch {
         papers.value = []
         total.value = 0
       } finally {
@@ -210,8 +292,15 @@ export default {
       concepts,
       mocTopic,
       mocLoading,
+      reports,
+      literatureTasks,
+      importing,
       loadConcepts,
-      generateMoc
+      generateMoc,
+      loadReports,
+      loadTasks,
+      importBib,
+      importPaperAgent
     }
   }
 }
@@ -340,5 +429,10 @@ export default {
 .lit-loading {
   padding: 32px 0;
   opacity: 0.6;
+}
+.task-error {
+  margin-top: 6px;
+  color: #cf1322;
+  font-size: 12px;
 }
 </style>

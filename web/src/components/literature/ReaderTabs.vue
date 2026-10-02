@@ -15,72 +15,66 @@
     <div v-if="loading" class="reader-loading">加载中…</div>
 
     <template v-else>
-      <!-- 原文（P1 阅读视图 / 修正版优先） -->
       <div v-if="current === 'original'" class="pane">
         <div v-if="!bundle?.ready" class="pane-empty">
-          {{ bundle?.reason || '阅读视图未生成（先在详情页触发渲染）' }}
+          {{ bundle?.reason || '阅读视图尚未生成（请先触发渲染）' }}
         </div>
         <template v-else>
           <div v-if="bundle.resolved" class="resolved-badge">已应用人工裁决（修正版）</div>
-          <MarkdownPreview :content="bundle.markdown" />
+          <MarkdownPreview :content="displayMarkdown" />
         </template>
       </div>
 
-      <!-- 译文（P3 zh 变体） -->
       <div v-else-if="current === 'translation'" class="pane">
-        <div v-if="!variant?.ready" class="pane-empty">{{ variant?.reason || '译文尚未生成' }}</div>
+        <div v-if="!variant?.ready" class="pane-empty">
+          {{ variant?.reason || '译文尚未生成' }}
+        </div>
         <MarkdownPreview v-else :content="variant.content" />
       </div>
 
-      <!-- 双语对照：按空行分段对齐 -->
       <div v-else-if="current === 'parallel'" class="pane">
         <div v-if="!bundle?.ready || !variant?.ready" class="pane-empty">
-          对照阅读需原文与译文均已生成
+          对照阅读需要原文与译文均已生成
         </div>
         <div v-else class="parallel-cols">
-          <div class="parallel-col">
-            <div v-for="(para, i) in originalParas" :key="'en-' + i" class="parallel-para en">{{ para }}</div>
-          </div>
-          <div class="parallel-col">
-            <div v-for="(para, i) in translatedParas" :key="'zh-' + i" class="parallel-para zh">
-              {{ para || '（该段未译）' }}
-            </div>
-          </div>
+          <template v-for="row in parallelRows" :key="row.index">
+            <div class="parallel-para en">{{ row.original || '（该段无原文）' }}</div>
+            <div class="parallel-para zh">{{ row.translated || '（该段未译）' }}</div>
+          </template>
         </div>
       </div>
 
-      <!-- 图片 -->
       <div v-else-if="current === 'images'" class="pane">
-        <div v-if="!images.length" class="pane-empty">无图片（或渲染未完成）</div>
+        <div v-if="!images.length" class="pane-empty">无图片（或渲染尚未完成）</div>
         <div v-else class="image-grid">
           <figure v-for="src in images" :key="src" class="image-item">
-            <img :src="src" loading="lazy" @click="openImage(src)" />
+            <img :src="src" loading="lazy" alt="文献图片" @click="openImage(src)" />
           </figure>
         </div>
       </div>
 
-      <!-- 源 PDF -->
       <div v-else-if="current === 'pdf'" class="pane">
-        <iframe :src="pdfUrl" class="pdf-frame" title="源 PDF"></iframe>
+        <div v-if="!pdfUrl" class="pane-empty">源 PDF 不可用</div>
+        <iframe v-else :src="pdfUrl" class="pdf-frame" title="源 PDF"></iframe>
       </div>
     </template>
 
     <div v-if="previewSrc" class="image-lightbox" @click="previewSrc = ''">
-      <img :src="previewSrc" @click.stop />
+      <img :src="previewSrc" alt="图片预览" @click.stop />
     </div>
   </div>
 </template>
 
 <script>
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { apiGet } from '@/apis/base'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 
 const splitParas = (text) =>
   String(text || '')
     .split(/\n\s*\n/)
-    .map((p) => p.trim())
-    .filter((p) => p && !p.startsWith('#') && !p.startsWith('---'))
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph && !paragraph.startsWith('#') && !paragraph.startsWith('---'))
 
 export default {
   name: 'ReaderTabs',
@@ -93,7 +87,12 @@ export default {
     const loading = ref(true)
     const bundle = ref(null)
     const variant = ref(null)
+    const parallel = ref(null)
+    const displayMarkdown = ref('')
+    const imageSources = ref([])
+    const pdfUrl = ref('')
     const previewSrc = ref('')
+    const objectUrls = new Set()
     const subTabs = [
       { key: 'original', label: '原文' },
       { key: 'translation', label: '译文' },
@@ -102,49 +101,103 @@ export default {
       { key: 'pdf', label: 'PDF' }
     ]
 
-    const enc = (v) => encodeURIComponent(v)
-    const pdfUrl = computed(() => `/api/literature/papers/${enc(props.rid)}/source-pdf`)
-
-    const originalParas = computed(() => splitParas(bundle.value?.markdown))
-    const translatedParas = computed(() => splitParas(variant.value?.content))
-    const images = computed(() => {
-      const md = String(bundle.value?.markdown || '')
-      const out = []
-      const re = /!\[[^\]]*\]\((\/api\/literature\/assets\?uri=[^)]+)\)/g
-      let match
-      while ((match = re.exec(md)) !== null) out.push(match[1])
-      return out
+    const enc = (value) => encodeURIComponent(value)
+    const parallelRows = computed(() => {
+      if (parallel.value?.ready) {
+        return (parallel.value.paragraphs || []).map((row, index) => ({ index, ...row }))
+      }
+      const originals = splitParas(bundle.value?.markdown)
+      const translations = splitParas(variant.value?.content)
+      const total = Math.max(originals.length, translations.length)
+      return Array.from({ length: total }, (_, index) => ({
+        index,
+        original: originals[index] || '',
+        translated: translations[index] || ''
+      }))
     })
+    const images = computed(() => imageSources.value)
+
+    const authenticatedObjectUrl = async (url) => {
+      const response = await apiGet(url, {}, true, 'blob')
+      const objectUrl = URL.createObjectURL(await response.blob())
+      objectUrls.add(objectUrl)
+      return objectUrl
+    }
+
+    const releaseObjectUrls = () => {
+      objectUrls.forEach((url) => URL.revokeObjectURL(url))
+      objectUrls.clear()
+      imageSources.value = []
+      pdfUrl.value = ''
+    }
+
+    const hydrateProtectedAssets = async (markdown) => {
+      const source = String(markdown || '')
+      const assetPattern = /\/api\/literature\/assets\?uri=[^)\s]+/g
+      const protectedUrls = [...new Set(source.match(assetPattern) || [])]
+      const resolved = (
+        await Promise.all(
+          protectedUrls.map(async (url) => {
+            try {
+              return [url, await authenticatedObjectUrl(url)]
+            } catch {
+              return null
+            }
+          })
+        )
+      ).filter(Boolean)
+      const lookup = new Map(resolved)
+      imageSources.value = resolved.map(([, objectUrl]) => objectUrl)
+      return protectedUrls.reduce(
+        (content, url) => content.split(url).join(lookup.get(url)),
+        source
+      )
+    }
 
     const load = async () => {
       loading.value = true
+      releaseObjectUrls()
       try {
-        const [b, v] = await Promise.all([
+        const [readerBundle, translatedVariant, parallelVariant] = await Promise.all([
           apiGet(`/api/literature/papers/${enc(props.rid)}/reader`).catch(() => null),
-          apiGet(`/api/literature/papers/${enc(props.rid)}/variants/zh`).catch(() => null)
+          apiGet(`/api/literature/papers/${enc(props.rid)}/variants/zh`).catch(() => null),
+          apiGet(`/api/literature/papers/${enc(props.rid)}/parallel`).catch(() => null)
         ])
-        bundle.value = b
-        variant.value = v
+        bundle.value = readerBundle
+        variant.value = translatedVariant
+        parallel.value = parallelVariant
+        displayMarkdown.value = readerBundle?.ready
+          ? await hydrateProtectedAssets(readerBundle.markdown)
+          : ''
+        try {
+          pdfUrl.value = await authenticatedObjectUrl(
+            `/api/literature/papers/${enc(props.rid)}/source-pdf`
+          )
+        } catch {
+          pdfUrl.value = ''
+        }
       } finally {
         loading.value = false
       }
     }
+
     const openImage = (src) => {
       previewSrc.value = src
     }
 
     onMounted(load)
+    onUnmounted(releaseObjectUrls)
 
     return {
       current,
       loading,
       bundle,
       variant,
+      displayMarkdown,
       previewSrc,
       subTabs,
       pdfUrl,
-      originalParas,
-      translatedParas,
+      parallelRows,
       images,
       openImage
     }
@@ -189,7 +242,7 @@ export default {
 }
 .parallel-cols {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0 16px;
   font-size: 13px;
   line-height: 1.7;
@@ -197,6 +250,7 @@ export default {
 .parallel-para {
   padding: 6px 0;
   border-bottom: 1px dashed rgba(0, 0, 0, 0.06);
+  white-space: pre-wrap;
   &.zh {
     opacity: 0.95;
   }

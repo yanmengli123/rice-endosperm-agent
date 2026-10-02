@@ -55,6 +55,17 @@ export function triggerLiteratureTranslation(rid, variantKind = 'zh') {
   return apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/translation?variant_kind=${encodeURIComponent(variantKind)}`)
 }
 
+/** Start an asynchronous L1/L2/L3 note compilation. */
+export function triggerLiteratureCompile(rid, level = 'L1', force = false) {
+  const query = new URLSearchParams({ level, force: String(force) })
+  return apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/compile?${query}`)
+}
+
+/** Enrich DOI and bibliographic metadata from the configured providers. */
+export function triggerLiteratureEnrich(rid) {
+  return apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/enrich`)
+}
+
 /** 依附资料清单 */
 export function listLiteratureAttachments(rid, signal = null) {
   return apiGet(`/api/literature/papers/${encodeURIComponent(rid)}/attachments`, { signal })
@@ -77,13 +88,10 @@ export function listLiteratureTasks(limit = 100, signal = null) {
 
 /** 取资产字节（文本类返回 text，二进制由调用方处理 blob） */
 export function fetchLiteratureAssetText(uri, signal = null) {
-  return fetch(buildLiteratureAssetUrl(uri), {
-    signal,
-    headers: { Accept: 'text/plain, text/markdown, application/json' }
-  }).then(async (resp) => {
-    if (!resp.ok) {
-      throw new Error(`资产获取失败 (${resp.status})`)
-    }
-    return resp.text()
-  })
+  return apiGet(
+    buildLiteratureAssetUrl(uri),
+    { signal, headers: { Accept: 'text/plain, text/markdown, application/json' } },
+    true,
+    'text'
+  )
 }

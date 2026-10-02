@@ -3,6 +3,10 @@
     <div class="graph-head">
       <h2>文献计量图谱</h2>
       <div class="graph-actions">
+        <div class="mode-switch" role="group" aria-label="图谱显示模式">
+          <button class="btn" :class="{ active: mode === '2d' }" @click="mode = '2d'">2D</button>
+          <button class="btn" :class="{ active: mode === '3d' }" @click="mode = '3d'">3D</button>
+        </div>
         <input v-model.number="limit" class="limit-input" type="number" min="10" max="2000" />
         <button class="btn" @click="load">加载</button>
         <button class="btn" :disabled="projecting" @click="project">
@@ -15,10 +19,17 @@
       <span>节点 {{ nodes.length }}</span>
       <span>边 {{ edges.length }}</span>
       <span v-if="network.truncated">（已按被引数截断）</span>
-      <span class="hint">拖拽节点 · 点击查看邻居 · 节点大小=被引 · 颜色=分区</span>
+      <span class="hint">{{ mode === '3d' ? '左键旋转 · 右键平移 · 滚轮缩放' : '拖拽节点' }} · 点击查看邻居 · 节点大小=被引 · 颜色=分区</span>
     </div>
     <div class="canvas-wrap">
-      <canvas ref="canvas" width="900" height="560" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @mouseleave="onMouseUp"></canvas>
+      <canvas v-show="mode === '2d'" ref="canvas" width="900" height="560" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @mouseleave="onMouseUp"></canvas>
+      <LiteratureGraph3D
+        v-if="mode === '3d'"
+        :nodes="nodes"
+        :edges="edges"
+        :selected-rid="selected?.rid || ''"
+        @select="selectNode"
+      />
     </div>
     <div v-if="selected" class="neighbor-panel">
       <strong>{{ selected.title || selected.rid }}</strong>
@@ -35,11 +46,13 @@
 <script>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
+import LiteratureGraph3D from '@/components/literature/LiteratureGraph3D.vue'
 
 const QUARTILE_COLORS = { Q1: '#1677ff', Q2: '#52c41a', Q3: '#faad14', Q4: '#8c8c8c' }
 
 export default {
   name: 'LiteratureGraphView',
+  components: { LiteratureGraph3D },
   setup() {
     const canvas = ref(null)
     const nodes = ref([])
@@ -50,6 +63,7 @@ export default {
     const limit = ref(200)
     const notice = ref('')
     const projecting = ref(false)
+    const mode = ref('2d')
     let raf = null
     let dragNode = null
     let simNodes = []
@@ -201,10 +215,21 @@ export default {
         if (hit) {
           try {
             neighbors.value = await apiGet(`/api/literature/graph/neighbors/${encodeURIComponent(hit.rid)}`)
-          } catch (err) {
+          } catch {
             neighbors.value = null
           }
         }
+      }
+    }
+
+    const selectNode = async (node) => {
+      selected.value = node
+      neighbors.value = null
+      if (!node) return
+      try {
+        neighbors.value = await apiGet(`/api/literature/graph/neighbors/${encodeURIComponent(node.rid)}`)
+      } catch {
+        neighbors.value = null
       }
     }
 
@@ -226,11 +251,13 @@ export default {
       limit,
       notice,
       projecting,
+      mode,
       load,
       project,
       onMouseDown,
       onMouseMove,
-      onMouseUp
+      onMouseUp,
+      selectNode
     }
   }
 }
@@ -249,6 +276,23 @@ export default {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+.mode-switch {
+  display: inline-flex;
+  .btn {
+    border-radius: 0;
+  }
+  .btn:first-child {
+    border-radius: 6px 0 0 6px;
+  }
+  .btn:last-child {
+    border-radius: 0 6px 6px 0;
+  }
+  .btn.active {
+    color: #fff;
+    background: #1677ff;
+    border-color: #1677ff;
+  }
 }
 .limit-input {
   width: 80px;

@@ -13,6 +13,9 @@
           <span v-if="paper.quartile">JCR {{ paper.quartile }}</span>
           <span>渲染: {{ paper.render?.status || '未渲染' }}</span>
           <span v-for="job in paper.compile_jobs" :key="job.level">{{ job.level }}: {{ job.status }}</span>
+          <span v-for="job in paper.translation_jobs" :key="`translation-${job.variant_kind}`">
+            {{ job.variant_kind }}: {{ job.status }}
+          </span>
         </div>
 
         <div class="detail-actions">
@@ -20,6 +23,18 @@
             {{ rendering ? '渲染入队中…' : '生成阅读视图' }}
           </button>
           <button class="btn" :disabled="translating" @click="doTranslate">请求翻译</button>
+          <button
+            v-for="level in ['L1', 'L2', 'L3']"
+            :key="level"
+            class="btn"
+            :disabled="compiling === level"
+            @click="doCompile(level)"
+          >
+            {{ compiling === level ? `${level} 入队中…` : `编译 ${level}` }}
+          </button>
+          <button class="btn" :disabled="enriching" @click="doEnrich">
+            {{ enriching ? '补全中…' : '补全元数据' }}
+          </button>
         </div>
 
         <div class="tabs">
@@ -53,7 +68,13 @@
 
 <script>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getLiteraturePaper, triggerLiteratureRender, triggerLiteratureTranslation } from '@/apis/literature_api'
+import {
+  getLiteraturePaper,
+  triggerLiteratureCompile,
+  triggerLiteratureEnrich,
+  triggerLiteratureRender,
+  triggerLiteratureTranslation
+} from '@/apis/literature_api'
 import NotePanel from '@/components/literature/NotePanel.vue'
 import AttachmentPanel from '@/components/literature/AttachmentPanel.vue'
 import CardsPanel from '@/components/literature/CardsPanel.vue'
@@ -74,6 +95,8 @@ export default {
     const loading = ref(true)
     const rendering = ref(false)
     const translating = ref(false)
+    const compiling = ref('')
+    const enriching = ref(false)
     const currentTab = ref('notes')
     const tabs = [
       { key: 'reader', label: '阅读' },
@@ -99,7 +122,10 @@ export default {
       const busy = (paper.value?.compile_jobs || []).some((job) =>
         ['PENDING', 'RUNNING'].includes(job.status)
       )
-      if (busy || ['PENDING', 'RUNNING'].includes(paper.value?.render?.status || '')) {
+      const translationBusy = (paper.value?.translation_jobs || []).some((job) =>
+        ['PENDING', 'RUNNING'].includes(job.status)
+      )
+      if (busy || translationBusy || ['PENDING', 'RUNNING'].includes(paper.value?.render?.status || '')) {
         pollTimer = setInterval(load, POLL_INTERVAL_MS)
       }
     }
@@ -130,6 +156,29 @@ export default {
         translating.value = false
       }
     }
+    const doCompile = async (level) => {
+      compiling.value = level
+      try {
+        await triggerLiteratureCompile(props.rid, level)
+        await load()
+        startPollingIfBusy()
+      } catch (error) {
+        alert(error?.message || `${level} 编译入队失败`)
+      } finally {
+        compiling.value = ''
+      }
+    }
+    const doEnrich = async () => {
+      enriching.value = true
+      try {
+        await triggerLiteratureEnrich(props.rid)
+        await load()
+      } catch (error) {
+        alert(error?.message || '元数据补全失败')
+      } finally {
+        enriching.value = false
+      }
+    }
 
     onMounted(async () => {
       await load()
@@ -142,10 +191,14 @@ export default {
       loading,
       rendering,
       translating,
+      compiling,
+      enriching,
       currentTab,
       tabs,
       doRender,
-      doTranslate
+      doTranslate,
+      doCompile,
+      doEnrich
     }
   }
 }

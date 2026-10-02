@@ -195,6 +195,9 @@ const TASK_TYPE_LABELS = {
   knowledge_index: '文档入库',
   knowledge_graph_index: '图谱构建',
   pdf_ingest: 'PDF 解析入库',
+  literature_reader_render: '文献阅读渲染',
+  literature_compile: '文献笔记编译',
+  literature_translation: '文献翻译',
   dataset_generation: '评估集生成',
   rag_evaluation: 'RAG 评估'
 }
