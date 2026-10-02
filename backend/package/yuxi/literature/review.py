@@ -173,6 +173,12 @@ def document_object_candidates(markdown_uri: str) -> list[str]:
     return [f"{base}{RESOLVED_DOC_NAME}", f"{base}document.json"]
 
 
+def para_text(para: dict) -> str:
+    """段落文本：上游 document.json 的权威键是 ``text_en``（text_zh 为翻译回填）；
+    修正回放写入同为 ``text_en``。``text`` 仅作兼容兜底。"""
+    return str(para.get("text_en") or para.get("text") or "")
+
+
 def _apply_decision_to_paragraphs(paragraphs: list[dict], decision: dict) -> str:
     """把单条裁决应用到段落列表，返回动作（kept/replaced/removed/no_target）。"""
     para_id = str(decision.get("para_id") or "")
@@ -183,9 +189,13 @@ def _apply_decision_to_paragraphs(paragraphs: list[dict], decision: dict) -> str
         if choice == "A":
             return "kept"
         if choice in ("B", "C"):
-            para["text"] = str(decision.get("resolved_text") or "")
+            para["text_en"] = str(decision.get("resolved_text") or "")
             return "replaced"
         if choice == "D":
+            para["text_en"] = ""
+            # Imported legacy snapshots may still carry ``text``.  Leaving it
+            # populated would resurrect a paragraph through ``para_text``'s
+            # compatibility fallback and make a D decision ineffective.
             para["text"] = ""
             return "removed"
         return "no_action"
@@ -221,10 +231,10 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
     for decision in decisions:
         action = _apply_decision_to_paragraphs(paragraphs, decision)
         actions[action] = actions.get(action, 0) + 1
-    document["paragraphs"] = [p for p in paragraphs if str(p.get("text") or "").strip()]
+    document["paragraphs"] = [p for p in paragraphs if para_text(p).strip()]
     resolved_doc = json.dumps(document, ensure_ascii=False)
     title = str((document.get("metadata") or {}).get("title") or "")
-    body = "\n\n".join(str(p.get("text") or "") for p in document["paragraphs"] if str(p.get("text") or "").strip())
+    body = "\n\n".join(para_text(p) for p in document["paragraphs"] if para_text(p).strip())
     resolved_md = (f"# {title}\n\n{body}\n") if title else f"{body}\n"
     digest = hashlib.sha256(resolved_doc.encode("utf-8")).hexdigest()
     await minio.aupload_file(
@@ -285,7 +295,13 @@ async def get_resolved_manifest(tenant_id: int, revision_id: str) -> dict | None
 # ---------------------------------------------------------------- AI 仲裁建议（人机回环）
 
 
-async def ai_suggest(tenant_id: int, revision_id: str, report_idx: int) -> dict:
+async def ai_suggest(
+    tenant_id: int,
+    revision_id: str,
+    report_idx: int,
+    *,
+    requested_by: str = "",
+) -> dict:
     """AI 综合建议（上游 dual_ai_review 语义，LLM 换 Yuxi 模型链）。
 
     人机回环纪律：AI **只建议不裁决**——返回的 suggestion 供前端预填
@@ -306,12 +322,16 @@ async def ai_suggest(tenant_id: int, revision_id: str, report_idx: int) -> dict:
         "只输出修正后的文本本身，不要解释）。\n\n"
         f"【版本 A（MinerU）】\n{a_text}\n\n【版本 B（PaddleOCR）】\n{b_text}"
     )
-    from yuxi import config
-    from yuxi.models.chat import select_model  # noqa: PLC0415 - 延迟导入防循环
+    from yuxi.literature.llm_gateway import complete_once
 
-    model = select_model(model_spec=config.default_model)
-    response = await model.call([{"role": "user", "content": prompt}], stream=False)
+    response = await complete_once(
+        tenant_id=tenant_id,
+        uid=requested_by,
+        operation="review_suggest",
+        resource_ref=f"{revision_id}:{report_idx}",
+        messages=[{"role": "user", "content": prompt}],
+    )
     suggestion = str(response.content or "").strip()
     if not suggestion:
         raise ValueError("AI 建议为空")
-    return {"report_idx": report_idx, "suggestion": suggestion, "model": config.default_model}
+    return {"report_idx": report_idx, "suggestion": suggestion}

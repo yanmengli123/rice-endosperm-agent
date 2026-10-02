@@ -22,6 +22,7 @@ from typing import Any
 
 from sqlalchemy import select, update
 
+from yuxi.knowledge.utils.text_utils import validate_markdown_quality
 from yuxi.literature.contracts import READER_RENDER_DUAL_VERSION, READER_RENDER_VERSION
 from yuxi.literature.reading.process import (
     DEFAULT_RENDER_TIMEOUT_S,
@@ -36,7 +37,6 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureReaderRender,
 )
 from yuxi.utils.datetime_utils import utc_now
-from yuxi.knowledge.utils.text_utils import validate_markdown_quality
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
             )
         ).scalar_one_or_none()
         if row is not None and not force:
-            if row.status == "SUCCEEDED" and row.render_version == READER_RENDER_VERSION:
+            if row.status == "SUCCEEDED" and row.render_version == render_version:
                 return {"revision_id": revision_id, "status": "SUCCEEDED", "reused": True}
             if row.status == "RUNNING":
                 return {"revision_id": revision_id, "status": "RUNNING", "reused": True}
@@ -92,7 +92,7 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
             row = LiteratureReaderRender(
                 revision_id=revision_id,
                 tenant_id=revision.tenant_id,
-                render_version=READER_RENDER_VERSION,
+                render_version=render_version,
                 status="PENDING",
                 attempt=0,
             )
@@ -101,6 +101,7 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
         else:
             row.status = "PENDING"
             row.error = None
+            row.render_version = render_version
         revision_id_value = revision_id
         attempt = int(row.attempt or 0)
         await session.commit()
@@ -289,8 +290,9 @@ async def process_literature_reader_render(ctx: dict[str, Any], revision_id: str
         return {"revision_id": revision_id, "status": "REQUEUED" if requeued else "FAILED", "error": reason}
 
 
-async def reconcile_stale_literature_renders() -> int:
+async def reconcile_stale_literature_renders(ctx: dict | None = None) -> int:
     """对账（cron 每 5 分钟）：孤儿 RUNNING 回收重排；滞留 PENDING 补偿入列。"""
+    del ctx  # ARQ cron 注入的作业上下文（对账不使用）
     now = utc_now()
     requeued = 0
     async with pg_manager.get_async_session_context() as session:

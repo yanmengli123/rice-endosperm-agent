@@ -139,7 +139,8 @@ async def test_apply_decisions_replay_semantics(env):
     )
 
     resolved = json.loads(minio.files[f"{BASE}document_resolved.json"].decode("utf-8"))
-    texts = [p["text"] for p in resolved["paragraphs"]]
+    # document.json v2 的规范正文键是 text_en；text 只在导入边界兼容旧快照。
+    texts = [p.get("text_en") or p.get("text") or "" for p in resolved["paragraphs"]]
     assert "人工合并后的段落一。" in texts  # C 替换
     assert "MinerU 识别的段落二。" not in texts  # D 删除
     assert "MinerU 识别的段落三。" in texts  # A 保留
@@ -189,13 +190,12 @@ async def test_compile_inputs_prefer_resolved_document(env):
 async def test_ai_suggest_returns_suggestion_not_decision(env):
     session, _, monkeypatch = env
 
-    class _FakeAdapter:
-        async def call(self, messages, stream=False):
-            return type("R", (), {"content": "AI 合并建议文本"})()
+    async def _complete_once(**kwargs):
+        return type("R", (), {"content": "AI 合并建议文本"})()
 
-    import yuxi.models.chat as chat_mod
+    import yuxi.literature.llm_gateway as gateway
 
-    monkeypatch.setattr(chat_mod, "select_model", lambda model_spec, **kw: _FakeAdapter())
+    monkeypatch.setattr(gateway, "complete_once", _complete_once)
     result = await review.ai_suggest(TENANT, REVISION, report_idx=0)
     assert result["suggestion"] == "AI 合并建议文本"
     # 人机回环：建议不产生裁决行
@@ -217,12 +217,12 @@ async def test_projection_writes_nodes_and_edges(env, monkeypatch):
     session, _, _ = env
     session.add(LiteraturePaper(id=1, tenant_id=TENANT, rid="doi-a", kind="paper", title="A", doi="10.1001/a"))
     session.add(LiteraturePaper(id=2, tenant_id=TENANT, rid="doi-b", kind="paper", title="B", doi="10.1001/b"))
-    session.commit()
+    await session.commit()
 
     from yuxi.storage.postgres.models_knowledge import LiteratureCitation
 
     session.add(LiteratureCitation(id=9, tenant_id=TENANT, citing_rid="doi-a", cited_doi="10.1001/b"))
-    session.commit()
+    await session.commit()
     monkeypatch.setattr(graph_service.pg_manager, "get_async_session_context", lambda: _AsyncSessionContext(session))
 
     captured = {}
