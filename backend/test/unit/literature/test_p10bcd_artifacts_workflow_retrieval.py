@@ -258,8 +258,9 @@ async def test_search_compiled_rrf_and_boundary(env):
     from yuxi.storage.postgres.models_knowledge import LiteratureCompileJob
 
     async with _AsyncSessionContext(session):
-        session.add(LiteratureCompileJob(tenant_id=TENANT, paper_id=1, level="L1", status="SUCCEEDED", attempt=0))
-    minio.files[f"tenants/{TENANT}/literature/notes/{RID}/L1_note.md"] = (
+        NOTE_URI = f"kbasset://tenants/{TENANT}/literature/notes/{RID}/src_rev_1/r1/v1/L1_note.md"
+        session.add(LiteratureCompileJob(tenant_id=TENANT, paper_id=1, level="L1", status="SUCCEEDED", attempt=0, note_uri=NOTE_URI))
+    minio.files[NOTE_URI.removeprefix("kbasset://")] = (
         b"# Note\nstarch biosynthesis regulates grain filling"
     )
     result = await retrieval.search_compiled(TENANT, "starch")

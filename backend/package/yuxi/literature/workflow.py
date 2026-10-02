@@ -215,3 +215,150 @@ async def reconcile_stale_workflows() -> int:
             stale_ids.append(run.run_id)
         await session.commit()
     return len(stale_ids)
+
+
+# ---------------------------------------------------------------- ARQ 执行器（P10-C 修订：审计 §三.4）
+
+
+async def process_literature_workflow(ctx: dict, run_id: str) -> dict | None:
+    """ARQ 任务：执行一个处理运行——逐步推进既有任务并串联状态。
+
+    步骤执行器：``register`` 已在 start 时完成；``render`` / ``compile`` /
+    ``translate`` 经各自服务的入列函数触发（返回 job 引用）；``review_gate``
+    检查 blocking 待决项——有则暂停运行（等人工裁决后 resume），无则放行。
+    ``publish`` 标记完成。
+    """
+
+    from yuxi.literature.notes.service import enqueue_literature_compile
+    from yuxi.literature.reading.service import enqueue_reader_render
+    from yuxi.literature.translate.service import enqueue_literature_translation
+
+    async with pg_manager.get_async_session_context() as session:
+        run = (
+            await session.execute(
+                select(LiteratureWorkflowRun).where(LiteratureWorkflowRun.run_id == run_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            return None
+        if run.status not in ("PENDING", "RUNNING"):
+            return None  # 已终态（重复投递幂等）
+        run.status = "RUNNING"
+        await session.commit()
+
+        paper = (await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == run.paper_id))).scalar_one()
+        tenant_id = int(run.tenant_id)
+        rid = paper.rid
+        paper_id = int(paper.id)
+        mode = run.mode
+
+    steps = {e["step"]: e for e in (run.steps_json or [])}
+    executed: dict[str, str] = {}
+
+    # RENDER（三模式共有）
+    if WorkflowStep.RENDER in steps and steps[WorkflowStep.RENDER].get("status") == "PENDING":
+        dual = mode == WorkflowMode.FULL
+        if dual:
+            import os
+
+            if not os.getenv("YUXI_PADDLE_TOKEN", "").strip():
+                await mark_step(run_id, WorkflowStep.RENDER, "FAILED", detail="双通道需 YUXI_PADDLE_TOKEN")
+                return {"run_id": run_id, "status": "FAILED"}
+        render_result = await enqueue_reader_render(revision_id=paper.source_revision_id, force=True, dual=dual)
+        executed[WorkflowStep.RENDER] = str(render_result.get("revision_id") or "")
+        await mark_step(run_id, WorkflowStep.RENDER, "RUNNING", task_ref=executed[WorkflowStep.RENDER])
+
+    # REVIEW_GATE（仅 full 模式）
+    if WorkflowStep.REVIEW_GATE in steps and steps[WorkflowStep.REVIEW_GATE].get("status") == "PENDING":
+        if run.review_skipped_by:
+            await mark_step(run_id, WorkflowStep.REVIEW_GATE, "SKIPPED", detail="人工跳过")
+        else:
+            from yuxi.literature.review import get_review_items
+
+            try:
+                review = await get_review_items(tenant_id, paper.source_revision_id)
+                pending = int(review.get("blocking_pending") or 0)
+            except Exception:  # noqa: BLE001 - 无复核清单视为无门控项
+                pending = 0
+            if pending > 0:
+                # 有 blocking 待决：暂停运行，等人工裁决后 resume
+                await mark_step(
+                    run_id,
+                    WorkflowStep.REVIEW_GATE,
+                    "PENDING",
+                    detail=f"等待 {pending} 项人工裁决（跳过或完成后自动恢复）",
+                )
+                return {"run_id": run_id, "status": "PAUSED", "blocking_pending": pending}
+            await mark_step(run_id, WorkflowStep.REVIEW_GATE, "SUCCEEDED", detail="无阻塞项")
+
+    # REPLAY（仅 full）
+    if WorkflowStep.REPLAY in steps and steps[WorkflowStep.REPLAY].get("status") == "PENDING":
+        from yuxi.literature.review import apply_decisions
+
+        try:
+            manifest = await apply_decisions(tenant_id, paper.source_revision_id)
+            await mark_step(
+                run_id,
+                WorkflowStep.REPLAY,
+                "SUCCEEDED",
+                detail=f"回放 {manifest.get('applied_decisions', 0)} 条裁决",
+            )
+        except ValueError as exc:
+            await mark_step(run_id, WorkflowStep.REPLAY, "SKIPPED", detail=str(exc)[:200])
+
+    # COMPILE（parse_compile + full）
+    if WorkflowStep.COMPILE in steps and steps[WorkflowStep.COMPILE].get("status") == "PENDING":
+        compile_result = await enqueue_literature_compile(paper_id=paper_id, level="L1")
+        executed[WorkflowStep.COMPILE] = str(compile_result.get("job_id") or "")
+        await mark_step(run_id, WorkflowStep.COMPILE, "RUNNING", task_ref=executed[WorkflowStep.COMPILE])
+
+    # TRANSLATE（仅 full）
+    if WorkflowStep.TRANSLATE in steps and steps[WorkflowStep.TRANSLATE].get("status") == "PENDING":
+        translate_result = await enqueue_literature_translation(paper_id=paper_id, variant_kind="zh")
+        executed[WorkflowStep.TRANSLATE] = str(translate_result.get("job_id") or "")
+        await mark_step(run_id, WorkflowStep.TRANSLATE, "RUNNING", task_ref=executed[WorkflowStep.TRANSLATE])
+
+    # SUMMARIZE（仅 full——当前由编译 L1 覆盖，标记 SKIPPED 待独立实现）
+    if WorkflowStep.SUMMARIZE in steps:
+        await mark_step(run_id, WorkflowStep.SUMMARIZE, "SKIPPED", detail="由编译 L1 覆盖（六维含总结）")
+
+    # PUBLISH（标记完成——发布链由 note_wikis cron 承接）
+    if WorkflowStep.PUBLISH in steps:
+        await mark_step(run_id, WorkflowStep.PUBLISH, "SUCCEEDED", detail="发布由 reconcile_literature_note_wikis 承接")
+
+    # 终态：非 RUNNING/PENDING 步骤全部完成
+    async with pg_manager.get_async_session_context() as session:
+        run = (
+            await session.execute(select(LiteratureWorkflowRun).where(LiteratureWorkflowRun.run_id == run_id))
+        ).scalar_one()
+        steps_now = run.steps_json or []
+        pending = [e for e in steps_now if e.get("status") in ("PENDING", "RUNNING")]
+        if not pending:
+            run.status = "SUCCEEDED" if not any(e.get("status") == "FAILED" for e in steps_now) else "FAILED"
+            await session.commit()
+        else:
+            # 既有任务在途——由 reconcile 步骤状态检查（cron）推进终态
+            run.status = "RUNNING"
+            await session.commit()
+
+    return {"run_id": run_id, "status": "SUCCEEDED" if not pending else "RUNNING", "tasks": executed}
+
+
+async def resume_workflow(run_id: str) -> dict | None:
+    """恢复暂停的运行（复核裁决完成后调用：重新入队）。"""
+    from yuxi.services.run_queue_service import get_arq_pool
+
+    async with pg_manager.get_async_session_context() as session:
+        run = (
+            await session.execute(select(LiteratureWorkflowRun).where(LiteratureWorkflowRun.run_id == run_id))
+        ).scalar_one_or_none()
+        if run is None:
+            return None
+        run.status = "PENDING"
+        await session.commit()
+    try:
+        queue = await get_arq_pool()
+        await queue.enqueue_job("process_literature_workflow", run_id, _job_id=f"lit-workflow:{run_id}:resume")
+    except Exception:  # noqa: BLE001 - 入队失败由 cron 补偿
+        pass
+    return {"run_id": run_id, "resumed": True}

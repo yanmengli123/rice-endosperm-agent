@@ -24,14 +24,14 @@
       >
         <div class="item-head">
           <span class="item-idx">#{{ item.report_idx }}</span>
-          <span v-if="item.para_id" class="item-para">{{ item.para_id }}</span>
+          <span v-for="pid in item.para_ids" :key="pid" class="item-para">{{ pid }}</span>
           <span v-if="item.decision" class="item-decided">
             已裁决：{{ item.decision.choice }}
           </span>
         </div>
         <div class="item-bodies">
-          <div v-if="item.a_text" class="body-mineru"><label>MinerU (A)</label>{{ item.a_text }}</div>
-          <div v-if="item.b_text" class="body-paddle"><label>Paddle (B)</label>{{ item.b_text }}</div>
+          <div v-if="item.mineru_text" class="body-mineru"><label>MinerU (A)</label>{{ item.mineru_text }}</div>
+          <div v-if="item.paddleocr_text" class="body-paddle"><label>Paddle (B)</label>{{ item.paddleocr_text }}</div>
         </div>
         <div class="item-choices">
           <button
@@ -109,7 +109,7 @@ export default {
       notice.value = ''
       try {
         const manifest = await apiPost(`/api/literature/papers/${enc(props.rid)}/review/apply`)
-        notice.value = `修正回放完成：${manifest.applied_decisions} 条裁决（替换 ${manifest.actions.replaced} / 删除 ${manifest.actions.removed} / 保留 ${manifest.actions.kept}）`
+        notice.value = `修正回放完成：${manifest.applied_decisions} 条裁决（替换 ${manifest.actions.replaced} / 还原 ${manifest.actions.restored} / 标记 ${manifest.actions.marked} / 保留 ${manifest.actions.kept}）`
         await load()
       } catch (err) {
         notice.value = `回放失败：${err?.message || err}`
@@ -119,7 +119,7 @@ export default {
     }
     const decide = async (item, choice) => {
       // 兼容语义（review_item_v2）：仅 B 携带替换文本（AI 建议优先，缺省 Paddle 文本）；A/C/D 不改写
-      const resolvedText = choice === 'B' ? item.suggestion || item.b_text || '' : null
+      const resolvedText = choice === 'B' ? item.suggestion || item.paddleocr_text || '' : null
       try {
         await apiPost(`/api/literature/papers/${enc(props.rid)}/review/decide`, {
           report_idx: item.report_idx,

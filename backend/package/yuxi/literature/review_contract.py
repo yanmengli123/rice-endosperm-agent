@@ -153,15 +153,38 @@ def _paragraph_matches(para: dict, item: ReviewItem) -> bool:
     return False
 
 
+def _norm_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _fragment_replace(para_text: str, old: str, new: str) -> str | None:
+    """段内片段替换（上游口径）：在段落中定位 old 片段，只替换该片段，保留前后正文。
+
+    三级匹配：精确子串 → 归一化空白子串 → 归一化替换。全部失败返回 None
+    （由调用方决定是否整段替换——仅当段落文本 == 冲突片段时才允许）。
+    """
+    if not old or not new:
+        return None
+    if old in para_text:
+        return para_text.replace(old, new)
+    pn_old, pn_text = _norm_ws(old), _norm_ws(para_text)
+    if pn_old and pn_old in pn_text:
+        return pn_text.replace(pn_old, _norm_ws(new))
+    return None
+
+
 def apply_choice_to_paragraph(paragraphs: list[dict], item: ReviewItem, choice: str, resolved_text: str = "") -> str:
     """把兼容语义的裁决应用到 document.json 段落列表；返回动作名。
 
-    动作口径（对齐上游 apply_choice）：
-    - ``paddleocr``（B）：定位段落后替换为 PaddleOCR 文本（resolved_text 非空时
-      以其为准——AI 建议/自定义修正的显式接受）；
-    - ``mineru``（A）：还原——段落当前是 PaddleOCR（曾选 B/AI 误落地）时换回
-      MinerU，否则保持；
-    - ``both``（C）/``neither``（D）：**不改写正文**（D 标记存疑）。
+    动作口径（对齐上游 apply_choice:378-489 实测）：
+    - ``paddleocr``（B）：**段内片段替换**——只替换冲突片段，保留前后正文
+      （上游 ``para.text_en = t.replace(before, after)`` 同款行为）；
+      resolved_text 非空时以其为新片段（AI 建议的显式接受）；
+    - ``mineru``（A）：还原——段落当前含 PaddleOCR 片段时把该片段换回
+      MinerU（上游回滚行为同款），否则保持；
+    - ``both``（C）/``neither``（D）：上游在正文已采用 PaddleOCR 时会恢复
+      MinerU——此处对齐该行为（C/D 含 PaddleOCR 片段时回滚到 MinerU），
+      纯 MinerU 段落则保持不改写。
     """
     normalized = normalize_choice(choice)
     targets = [p for p in paragraphs if _paragraph_matches(p, item)]
@@ -169,20 +192,39 @@ def apply_choice_to_paragraph(paragraphs: list[dict], item: ReviewItem, choice: 
         return "no_target"
 
     if normalized == CHOICE_PADDLEOCR:
-        replacement = (resolved_text or "").strip() or item.paddleocr_text
-        if not replacement:
+        new_fragment = (resolved_text or "").strip() or item.paddleocr_text
+        if not new_fragment:
             return "no_replacement_text"
-        for para in targets:
-            _set_para_text(para, replacement)
-        return "replaced"
-
-    if normalized == CHOICE_MINERU:
-        rolled = False
+        applied_any = False
         for para in targets:
             current = _para_text(para)
-            if item.paddleocr_text and item.paddleocr_text in current:
-                _set_para_text(para, item.mineru_text or current)
-                rolled = True
-        return "restored" if rolled else "kept"
+            old_fragment = item.mineru_text or ""
+            replaced = _fragment_replace(current, old_fragment, new_fragment)
+            if replaced is not None:
+                _set_para_text(para, replaced)
+                applied_any = True
+                continue
+            # 段落已含新片段（AI 已落地/曾选 B）→ 无需改动
+            if _norm_ws(new_fragment) in _norm_ws(current):
+                applied_any = True
+                continue
+            # 冲突片段在段落中定位失败（如导入迁移的段落文本与复核片段不完全一致）：
+            # 目标段已确认（_paragraph_matches），回退到整段替换（保留操作语义，
+            # 上游 apply_choice 的归一化兜底失败后同样直接写 para.text_en）
+            _set_para_text(para, new_fragment)
+            applied_any = True
+        return "replaced" if applied_any else "no_replacement_text"
 
-    return "marked" if normalized == CHOICE_NEITHER else "kept"
+    # A（还原）/ C / D（上游在 PaddleOCR 已落地时恢复 MinerU）
+    rolled = False
+    for para in targets:
+        current = _para_text(para)
+        if item.paddleocr_text:
+            restored = _fragment_replace(current, item.paddleocr_text, item.mineru_text)
+            if restored is not None and restored != current:
+                _set_para_text(para, restored)
+                rolled = True
+    if normalized == CHOICE_MINERU:
+        return "restored" if rolled else "kept"
+    # C/D：有回滚发生标记 restored，否则保持
+    return "restored" if rolled else ("marked" if normalized == CHOICE_NEITHER else "kept")

@@ -78,13 +78,15 @@ async def store_revision(
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == paper_rid)
+                select(LiteraturePaper)
+                .where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == paper_rid)
+                .with_for_update()  # 行锁：并发保存串行化（审计 §三.5）
             )
         ).scalar_one_or_none()
         if paper is None:
             raise ValueError(f"文献不存在: {paper_rid}")
 
-        # 乐观并发校验
+        # 乐观并发校验（行锁下读到的 current 是权威值）
         current = _current_pointer(paper, kind)
         if expected_current_revision is not None and current != expected_current_revision:
             raise RevisionConflictError(
@@ -112,6 +114,12 @@ async def store_revision(
         should_switch = freeze or not _has_frozen(paper, kind)
         if should_switch:
             _set_current_pointer(paper, kind, revision_id)
+            # 下游失效：人工冻结推进 reading_version，标记编译/翻译需重做（审计 §三.5）
+            if freeze and kind == ArtifactKind.DOCUMENT:
+                paper.reading_version = int(paper.reading_version or 1) + 1
+                paper.ai_value_score = None
+                paper.topic_score = None
+                paper.value_score = 0.0
         await session.commit()
 
     return {

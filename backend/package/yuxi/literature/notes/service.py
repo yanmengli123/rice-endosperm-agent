@@ -437,54 +437,63 @@ async def _finish_compile_failure(job_id: int, reason: str) -> str:
 
 
 async def _assemble_l3_candidates(tenant_id: int, paper_rid: str, self_ctx: str) -> list[dict]:
-    """L3 相关文献候选装配（P10-A：替换空骨架调用）。
+    """L3 相关文献候选装配（P10-A 修订；审计 §二.1/§二.2）。
 
     上游语义：从本文 L1/L2 提取检索关键词 → 召回相关**已编译**文献（排除自身）
-    → 候选上下文（对方 L1 摘要）。检索走概念/元数据匹配（目录检索 PG 通道）；
-    零候选时返回空列表（调用方必须显式报错，不得生成空骨架标成功——裁决 R2 同源纪律）。
+    → 候选上下文（对方 L1 摘要）。
+
+    审计修复：
+    - **来源 ACL**：``paper_visibility`` 在候选查询层过滤——无权文献不进入
+      L3 输入（跨文献权限闭包基础）。
+    - **真实产物路径**：读取编译任务的 ``note_uri``（含版本路径），不拼文件名。
+    - 零候选返回空列表（调用方显式报错）。
     """
     import re as _re
 
     from sqlalchemy import select as _select
 
+    from yuxi.literature.access import paper_visibility
+
     async with pg_manager.get_async_session_context() as session:
+        # ACL 先于召回 + note_uri 真实路径（每篇取最新成功 L1）
         others = (
-            (
-                await session.execute(
-                    _select(LiteraturePaper).where(
-                        LiteraturePaper.tenant_id == tenant_id,
-                        LiteraturePaper.rid != paper_rid,
-                        LiteraturePaper.id.in_(
-                            _select(LiteratureCompileJob.paper_id).where(
-                                LiteratureCompileJob.tenant_id == tenant_id,
-                                LiteratureCompileJob.level == "L1",
-                                LiteratureCompileJob.status == "SUCCEEDED",
-                            )
-                        ),
-                    )
+            await session.execute(
+                _select(LiteraturePaper, LiteratureCompileJob.note_uri)
+                .join(
+                    LiteratureCompileJob,
+                    LiteratureCompileJob.paper_id == LiteraturePaper.id,
                 )
+                .where(
+                    paper_visibility(tenant_id),
+                    LiteraturePaper.rid != paper_rid,
+                    LiteratureCompileJob.tenant_id == tenant_id,
+                    LiteratureCompileJob.level == "L1",
+                    LiteratureCompileJob.status == "SUCCEEDED",
+                    LiteratureCompileJob.note_uri.isnot(None),
+                )
+                .order_by(LiteratureCompileJob.updated_at.desc())
             )
-            .scalars()
-            .all()
-        )
-    if not others:
+        ).all()
+    # 每篇取最新成功任务的 note_uri
+    latest_note_uri: dict[int, tuple[str, str]] = {}
+    for paper, note_uri in others:
+        latest_note_uri.setdefault(paper.id, (paper.rid, note_uri))
+    if not latest_note_uri:
         return []
-    # 关键词：本文上下文的高频实词（简单口径；概念标签优先——L1_data.json 兜底由 concepts 提供）
+    # 关键词：本文上下文的高频实词
     words = _re.findall(r"[A-Za-z][A-Za-z-]{3,}", self_ctx)
     freq: dict[str, int] = {}
     for w in words:
         freq[w.lower()] = freq.get(w.lower(), 0) + 1
     keywords = {w for w, _ in sorted(freq.items(), key=lambda kv: -kv[1])[:25]}
     minio = get_minio_client()
+    paper_by_id = {p.id: p for p, _ in others}
     candidates: list[dict] = []
-    for other in others[:50]:
+    for paper_id, (rid, note_uri) in list(latest_note_uri.items())[:50]:
+        other = paper_by_id[paper_id]
         try:
-            note = (
-                await minio.adownload_file(
-                    RENDER_BUCKET, f"tenants/{tenant_id}/literature/notes/{other.rid}/L1_note.md"
-                )
-            ).decode("utf-8")
-        except Exception:  # noqa: BLE001 - 无 L1 产物跳过
+            note = (await minio.adownload_file(RENDER_BUCKET, note_uri.removeprefix("kbasset://"))).decode("utf-8")
+        except Exception:  # noqa: BLE001 - 产物缺失跳过（不拼旧路径）
             continue
         title_words = {w.lower() for w in _re.findall(r"[A-Za-z][A-Za-z-]{3,}", str(other.title or ""))}
         note_words = set(_re.findall(r"[A-Za-z][A-Za-z-]{3,}", note[:4000].lower()))
