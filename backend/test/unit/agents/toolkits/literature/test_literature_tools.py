@@ -137,6 +137,16 @@ async def test_search_returns_navigation_metadata_not_evidence(monkeypatch):
     import yuxi.agents.toolkits.literature.tools as tools_mod
 
     monkeypatch.setattr(tools_mod.pg_manager, "get_async_session_context", _fake_session)
+
+    async def _user(_self, uid):
+        return type("U", (), {"uid": uid, "is_disabled": False})()
+
+    @asynccontextmanager
+    async def _scope(user, tenant):
+        yield None
+
+    monkeypatch.setattr(tools_mod.UserRepository, "get_by_uid", _user)
+    monkeypatch.setattr(tools_mod, "access_scope", _scope)
     payload = json.loads(await _call(search_literature_papers, "", runtime=_Runtime()))
     for item in payload["papers"]:
         for forbidden in ("content", "text", "quote", "evidence_id", "markdown"):

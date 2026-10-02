@@ -129,6 +129,7 @@ async def _import_library_renders(
     paperagent_root: Path,
     papers: dict[str, LiteraturePaper],
     report: ImportReport,
+    actor_uid: str,
 ) -> None:
     """Map PaperAgent self-contained library folders into Yuxi reader products."""
     library_root = paperagent_root / "library"
@@ -147,12 +148,15 @@ async def _import_library_renders(
                 kb_type="document",
                 governance_status="ACTIVE",
                 normalized_name=f"paperagent-import-{tenant_id}",
-                created_by="paperagent-import",
+                created_by=actor_uid,
             )
             .on_conflict_do_nothing(index_elements=("kb_id",))
         )
         for paper_dir in sorted(path for path in library_root.iterdir() if path.is_dir()):
             paper = papers.get(paper_dir.name) or papers.get(f"doi-{paper_dir.name}")
+            if paper is not None and paper.source_revision_id and not paper.source_revision_id.startswith("pair-"):
+                report.conflicts.append(f"保留已有权威解析关联: {paper.rid}")
+                continue
             document_path = paper_dir / "document.json"
             if paper is None or not document_path.is_file():
                 continue
@@ -215,7 +219,7 @@ async def _import_library_renders(
                     file_size=len(source_bytes or document_bytes),
                     active_parse_revision_id=revision_id,
                     evidence_status="DERIVED_IMPORT",
-                    created_by="paperagent-import",
+                    created_by=actor_uid,
                 )
                 .on_conflict_do_update(
                     index_elements=("file_id",),
@@ -236,7 +240,7 @@ async def _import_library_renders(
                     article_summary={"title": paper.title, "doi": paper.doi, "imported": True},
                     qa_report={"source": "paperagent", "evidence_imported": False},
                     capabilities={"reader": True, "source_pdf": bool(source_bytes)},
-                    created_by="paperagent-import",
+                    created_by=actor_uid,
                 )
                 .on_conflict_do_nothing(index_elements=("revision_id",))
             )
@@ -366,6 +370,24 @@ async def import_paperagent_data(
                 report.citations_written += 1
             await session.commit()
 
+    if not dry_run:
+        async with pg_manager.get_async_session_context() as session:
+            papers = {
+                row.rid: row
+                for row in (
+                    await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id))
+                )
+                .scalars()
+                .all()
+            }
+        await _import_library_renders(
+            tenant_id=tenant_id,
+            paperagent_root=paperagent_root,
+            papers=papers,
+            report=report,
+            actor_uid=actor_uid,
+        )
+
     # knowledge_base/<目录>/：变体与笔记（dry-run 按 biblio 预期 RID 匹配计数）
     kb_root = paperagent_root / "knowledge_base"
     minio = None if dry_run else get_minio_client()
@@ -404,7 +426,12 @@ async def import_paperagent_data(
                         continue
                     content = await asyncio.to_thread(file_path.read_bytes)
                     digest = hashlib.sha256(content).hexdigest()
-                    revision = paper_row.source_revision_id or "imported" if paper_row else "imported"
+                    revision = (
+                        paper_row.source_revision_id
+                        if paper_row and str(paper_row.source_revision_id or "").startswith("pair-")
+                        else "imported"
+                    )
+                    reading_version = paper_row.reading_version if paper_row and revision != "imported" else 0
                     uri = f"kbasset://tenants/{tenant_id}/literature/variants/{paper_dir.name}/{filename}"
                     await minio.aupload_file(
                         bucket_name=RENDER_BUCKET,
@@ -418,6 +445,8 @@ async def import_paperagent_data(
                             tenant_id=tenant_id,
                             paper_id=paper_id,
                             parse_revision_id=revision,
+                            reading_version=reading_version,
+                            generator_version="paperagent-import-v4",
                             variant_kind=variant_kind,
                             lang=lang,
                             uri=uri,
@@ -425,7 +454,15 @@ async def import_paperagent_data(
                             model_id="paperagent-import",
                         )
                         .on_conflict_do_nothing(
-                            index_elements=("tenant_id", "paper_id", "variant_kind", "lang", "parse_revision_id")
+                            index_elements=(
+                                "tenant_id",
+                                "paper_id",
+                                "variant_kind",
+                                "lang",
+                                "parse_revision_id",
+                                "reading_version",
+                                "generator_version",
+                            )
                         )
                     )
                     await session.execute(stmt)
@@ -452,11 +489,25 @@ async def import_paperagent_data(
                                 tenant_id=tenant_id,
                                 paper_id=paper_id,
                                 level=level,
+                                source_revision_id=paper_row.source_revision_id
+                                if paper_row and str(paper_row.source_revision_id or "").startswith("pair-")
+                                else "",
+                                reading_version=paper_row.reading_version
+                                if paper_row and str(paper_row.source_revision_id or "").startswith("pair-")
+                                else 0,
+                                generator_version="paperagent-import-v4",
                                 status="SUCCEEDED",
                                 note_uri=f"kbasset://{object_name}",
                             )
                             .on_conflict_do_update(
-                                index_elements=("tenant_id", "paper_id", "level"),
+                                index_elements=(
+                                    "tenant_id",
+                                    "paper_id",
+                                    "level",
+                                    "source_revision_id",
+                                    "reading_version",
+                                    "generator_version",
+                                ),
                                 set_={"status": "SUCCEEDED", "note_uri": f"kbasset://{object_name}", "error": None},
                             )
                         )
@@ -474,21 +525,6 @@ async def import_paperagent_data(
                 and (path.name in expected_rids or f"doi-{path.name}" in expected_rids)
             )
     else:
-        async with pg_manager.get_async_session_context() as session:
-            papers = {
-                row.rid: row
-                for row in (
-                    await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id))
-                )
-                .scalars()
-                .all()
-            }
-        await _import_library_renders(
-            tenant_id=tenant_id,
-            paperagent_root=paperagent_root,
-            papers=papers,
-            report=report,
-        )
         if report.notes_written:
             try:
                 from yuxi.literature.notes.wiki_publish import publish_literature_notes

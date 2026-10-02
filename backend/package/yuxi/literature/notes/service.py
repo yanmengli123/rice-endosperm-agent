@@ -13,6 +13,7 @@ document.json（段落 [Pxxx] 锚点）。编译产物落 MinIO
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from datetime import timedelta
 from typing import Any
@@ -24,6 +25,7 @@ from yuxi.literature.boundaries import assert_not_evidence_capable
 from yuxi.literature.contracts import ResourceKind
 from yuxi.literature.identity.rid import make_rid
 from yuxi.literature.notes import compiler, value_score
+from yuxi.literature.provenance import COMPILE_VERSION, StaleLiteratureInput, require_current_input
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.services.run_queue_service import get_arq_pool
 from yuxi.storage.minio import get_minio_client
@@ -32,6 +34,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureCompileJob,
     LiteraturePaper,
     LiteratureReaderRender,
+    KnowledgeParseRevision,
 )
 from yuxi.utils.datetime_utils import UTC, utc_now
 
@@ -73,12 +76,28 @@ async def register_literature_paper(
     rid = make_rid(kind, doi=doi, isbn=isbn, cnki=cnki, arxiv=arxiv, fingerprint=fingerprint)
     async with pg_manager.get_async_session_context() as session:
         row = None
+        revision = None
         if source_revision_id:
+            revision = (
+                await session.execute(
+                    select(KnowledgeParseRevision).where(
+                        KnowledgeParseRevision.revision_id == source_revision_id,
+                        KnowledgeParseRevision.tenant_id == tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if revision is None:
+                raise ValueError("解析来源不存在或跨租户")
             row = (
                 await session.execute(
-                    select(LiteraturePaper).where(
+                    select(LiteraturePaper)
+                    .join(
+                        KnowledgeParseRevision, KnowledgeParseRevision.revision_id == LiteraturePaper.source_revision_id
+                    )
+                    .where(
                         LiteraturePaper.tenant_id == tenant_id,
-                        LiteraturePaper.source_revision_id == source_revision_id,
+                        KnowledgeParseRevision.file_id == revision.file_id,
+                        KnowledgeParseRevision.kb_id == revision.kb_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -88,6 +107,22 @@ async def register_literature_paper(
                     select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
                 )
             ).scalar_one_or_none()
+        if row is not None and revision is not None and row.source_revision_id:
+            prior = (
+                await session.execute(
+                    select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == row.source_revision_id)
+                )
+            ).scalar_one_or_none()
+            if prior is None or prior.kb_id != revision.kb_id:
+                # A shared DOI must not merge documents across source ACLs.
+                rid += "__source-" + hashlib.sha256(revision.kb_id.encode()).hexdigest()[:12]
+                row = (
+                    await session.execute(
+                        select(LiteraturePaper).where(
+                            LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid
+                        )
+                    )
+                ).scalar_one_or_none()
         if row is None:
             row = LiteraturePaper(
                 tenant_id=tenant_id,
@@ -102,7 +137,15 @@ async def register_literature_paper(
             if title and not row.title:
                 row.title = title
             if source_revision_id and row.source_revision_id != source_revision_id:
+                from yuxi.literature.provenance import invalidate_note_publications
+
+                if row.source_revision_id:
+                    await invalidate_note_publications(session, row.source_revision_id)
                 row.source_revision_id = source_revision_id
+                row.reading_version = int(row.reading_version or 1) + 1
+                row.ai_value_score = None
+                row.topic_score = None
+                row.value_score = 0.0
         await session.flush()
         await session.refresh(row)
         await session.commit()
@@ -124,7 +167,7 @@ async def enqueue_literature_compile(
         raise ValueError(f"非法编译级别: {level}")
     async with pg_manager.get_async_session_context() as session:
         paper = (
-            await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == paper_id))
+            await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == paper_id).with_for_update())
         ).scalar_one_or_none()
         if paper is None:
             raise ValueError(f"文献不存在: {paper_id}")
@@ -134,6 +177,9 @@ async def enqueue_literature_compile(
                     LiteratureCompileJob.tenant_id == paper.tenant_id,
                     LiteratureCompileJob.paper_id == paper_id,
                     LiteratureCompileJob.level == level,
+                    LiteratureCompileJob.source_revision_id == (paper.source_revision_id or ""),
+                    LiteratureCompileJob.reading_version == paper.reading_version,
+                    LiteratureCompileJob.generator_version == COMPILE_VERSION,
                 )
             )
         ).scalar_one_or_none()
@@ -155,7 +201,15 @@ async def enqueue_literature_compile(
                 # one durable row. The reconciler owns stale-lease recovery.
                 return {"job_id": job.id, "status": job.status, "reused": True}
         if job is None:
-            job = LiteratureCompileJob(tenant_id=paper.tenant_id, paper_id=paper_id, level=level, status="PENDING")
+            job = LiteratureCompileJob(
+                tenant_id=paper.tenant_id,
+                paper_id=paper_id,
+                level=level,
+                status="PENDING",
+                source_revision_id=paper.source_revision_id or "",
+                reading_version=paper.reading_version,
+                generator_version=COMPILE_VERSION,
+            )
             session.add(job)
         else:
             job.status = "PENDING"
@@ -219,10 +273,13 @@ async def _load_compile_inputs(paper: LiteraturePaper) -> tuple[dict, list[str],
     async with pg_manager.get_async_session_context() as session:
         render = (
             await session.execute(
-                select(LiteratureReaderRender).where(
+                select(LiteratureReaderRender)
+                .where(
                     LiteratureReaderRender.revision_id == paper.source_revision_id,
                     LiteratureReaderRender.status == "SUCCEEDED",
                 )
+                .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
         if render is None:
@@ -258,12 +315,18 @@ async def _load_compile_inputs(paper: LiteraturePaper) -> tuple[dict, list[str],
 
 
 def _notes_object_prefix(paper: LiteraturePaper) -> str:
-    # notes 以 rid 为主键路径（与前缀缓存无关）
-    return _notes_prefix(tenant_id=paper.tenant_id, rid=paper.rid)
+    return (
+        f"{_notes_prefix(tenant_id=paper.tenant_id, rid=paper.rid)}/"
+        f"{paper.source_revision_id or 'unlinked'}/r{paper.reading_version}/{COMPILE_VERSION}"
+    )
 
 
 async def _finish_compile_success(job_id: int, *, note_uri: str, value_score: float | None) -> None:
     async with pg_manager.get_async_session_context() as session:
+        job = (
+            await session.execute(select(LiteratureCompileJob).where(LiteratureCompileJob.id == job_id))
+        ).scalar_one()
+        await require_current_input(session, job)
         await session.execute(
             update(LiteratureCompileJob)
             .where(LiteratureCompileJob.id == job_id)
@@ -292,7 +355,7 @@ async def _finish_l1_l2_bundle(
         # L1 and L2 may be submitted concurrently.  Serializing on their shared
         # paper row prevents both workers from racing to insert the counterpart
         # job under uq_literature_compile_jobs_key.
-        await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == job.paper_id).with_for_update())
+        await require_current_input(session, job)
         rows = list(
             (
                 await session.execute(
@@ -300,6 +363,9 @@ async def _finish_l1_l2_bundle(
                         LiteratureCompileJob.tenant_id == job.tenant_id,
                         LiteratureCompileJob.paper_id == job.paper_id,
                         LiteratureCompileJob.level.in_(tuple(uri_by_level)),
+                        LiteratureCompileJob.source_revision_id == job.source_revision_id,
+                        LiteratureCompileJob.reading_version == job.reading_version,
+                        LiteratureCompileJob.generator_version == job.generator_version,
                     )
                 )
             ).scalars()
@@ -312,6 +378,9 @@ async def _finish_l1_l2_bundle(
                     tenant_id=job.tenant_id,
                     paper_id=job.paper_id,
                     level=level,
+                    source_revision_id=job.source_revision_id,
+                    reading_version=job.reading_version,
+                    generator_version=job.generator_version,
                     requested_by=job.requested_by or "",
                     llm_run_id=job.llm_run_id,
                     model_spec=job.model_spec,
@@ -375,9 +444,7 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
     try:
         assert_not_evidence_capable(compiler.LITERATURE_NOTES_KB_TYPE)
         async with pg_manager.get_async_session_context() as session:
-            paper = (
-                await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == job.paper_id))
-            ).scalar_one()
+            paper = await require_current_input(session, job)
         meta, paragraphs, journal_meta = await _load_compile_inputs(paper)
         minio = get_minio_client()
         prefix = _notes_object_prefix(paper)
@@ -445,6 +512,7 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
             )
             # 回填评分 + L3 自动升级（ai_value 可用且 score ≥ 4.0）
             async with pg_manager.get_async_session_context() as session:
+                await require_current_input(session, job)
                 await session.execute(
                     update(LiteraturePaper)
                     .where(LiteraturePaper.id == paper.id)
@@ -506,6 +574,8 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
         except Exception:  # noqa: BLE001 - note remains valid; cron repairs navigation publication
             logger.exception("文献 L3 已编译，但 Wiki 发布失败，将由对账任务补偿: job=%s", job.id)
         return {"job_id": job.id, "level": job.level, "status": "SUCCEEDED", "note_uri": note_uri}
+    except StaleLiteratureInput:
+        return {"job_id": job.id, "status": "STALE"}
     except IntegrityError:
         raise
     except Exception as exc:  # noqa: BLE001

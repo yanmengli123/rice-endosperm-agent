@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from yuxi.literature.identity.rid import doi_to_dirname, is_doi, make_rid
+from yuxi.literature.access import current_access
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
@@ -152,6 +153,9 @@ async def import_bib(tenant_id: int, bib_text: str, *, source_name: str = "") ->
                 )
             ).scalar_one_or_none()
             if exists is not None:
+                scope = current_access()
+                if scope is not None and existing_rid not in scope.rids:
+                    raise ValueError("导入记录与不可访问来源冲突")
                 report["papers_skipped"] += 1
                 if is_doi(doi):
                     rid_by_doi[doi] = existing_rid
@@ -216,6 +220,9 @@ async def import_markdown_document(
                 select(LiteraturePaper.id).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
+        scope = current_access()
+        if exists is not None and scope is not None and rid not in scope.rids:
+            raise ValueError("导入记录与不可访问来源冲突")
         if exists is None:
             session.add(
                 LiteraturePaper(

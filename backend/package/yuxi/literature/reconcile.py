@@ -6,12 +6,40 @@ literature。即时挂接失败时，cron 以 PostgreSQL 活跃解析版本为�
 
 from __future__ import annotations
 
-from sqlalchemy import select
+import logging
+
+from sqlalchemy import or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from yuxi.literature.notes.service import register_literature_paper
 from yuxi.literature.reading.service import enqueue_reader_render
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_knowledge import KnowledgeFile, KnowledgeParseRevision, LiteraturePaper
+from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeFile,
+    KnowledgeParseRevision,
+    LiteraturePaper,
+    LiteratureReaderRender,
+    LiteratureSourceEvent,
+)
+from yuxi.utils.datetime_utils import utc_now
+
+logger = logging.getLogger(__name__)
+
+
+async def record_source_event(session, revision_id: str, tenant_id: int) -> None:
+    """Called inside the authority activation transaction, with no separate commit."""
+    await session.execute(
+        pg_insert(LiteratureSourceEvent)
+        .values(
+            revision_id=revision_id,
+            tenant_id=tenant_id,
+            status="PENDING",
+            attempt=0,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        .on_conflict_do_nothing(index_elements=("revision_id",))
+    )
 
 
 async def register_scientific_revision(revision_id: str, *, enqueue_render: bool = True) -> dict:
@@ -24,6 +52,7 @@ async def register_scientific_revision(revision_id: str, *, enqueue_render: bool
                 .where(
                     KnowledgeParseRevision.revision_id == revision_id,
                     KnowledgeFile.active_parse_revision_id == revision_id,
+                    KnowledgeParseRevision.pipeline_version.like("scientific_pdf_%"),
                 )
             )
         ).one_or_none()
@@ -43,7 +72,15 @@ async def register_scientific_revision(revision_id: str, *, enqueue_render: bool
     )
     render = None
     if enqueue_render:
-        render = await enqueue_reader_render(revision_id)
+        render = await enqueue_reader_render(revision_id=revision_id)
+    async with pg_manager.get_async_session_context() as session:
+        await record_source_event(session, revision_id, int(revision.tenant_id))
+        event = (
+            await session.execute(select(LiteratureSourceEvent).where(LiteratureSourceEvent.revision_id == revision_id))
+        ).scalar_one()
+        event.status = "COMPLETED" if enqueue_render else "PENDING"
+        event.error = None
+        event.updated_at = utc_now()
     return {
         "revision_id": revision_id,
         "paper_id": paper.id,
@@ -54,7 +91,7 @@ async def register_scientific_revision(revision_id: str, *, enqueue_render: bool
 
 
 async def reconcile_scientific_literature_papers(ctx: dict | None = None, *, limit: int = 100) -> int:
-    """补偿所有尚未登记的活跃科研 PDF 解析版本。"""
+    """Repair missing registration, missing render rows and pending activation events."""
     del ctx
     async with pg_manager.get_async_session_context() as session:
         revisions = list(
@@ -67,7 +104,21 @@ async def reconcile_scientific_literature_papers(ctx: dict | None = None, *, lim
                         (LiteraturePaper.tenant_id == KnowledgeParseRevision.tenant_id)
                         & (LiteraturePaper.source_revision_id == KnowledgeParseRevision.revision_id),
                     )
-                    .where(LiteraturePaper.id.is_(None))
+                    .outerjoin(
+                        LiteratureReaderRender, LiteratureReaderRender.revision_id == KnowledgeParseRevision.revision_id
+                    )
+                    .outerjoin(
+                        LiteratureSourceEvent, LiteratureSourceEvent.revision_id == KnowledgeParseRevision.revision_id
+                    )
+                    .where(
+                        KnowledgeParseRevision.pipeline_version.like("scientific_pdf_%"),
+                        or_(
+                            LiteraturePaper.id.is_(None),
+                            LiteratureReaderRender.id.is_(None),
+                            LiteratureSourceEvent.status == "PENDING",
+                        ),
+                    )
+                    .group_by(KnowledgeParseRevision.revision_id, KnowledgeParseRevision.completed_at)
                     .order_by(KnowledgeParseRevision.completed_at.asc())
                     .limit(limit)
                 )
@@ -75,7 +126,25 @@ async def reconcile_scientific_literature_papers(ctx: dict | None = None, *, lim
         )
     completed = 0
     for revision_id in revisions:
-        result = await register_scientific_revision(str(revision_id), enqueue_render=True)
-        if result["status"] == "REGISTERED":
-            completed += 1
+        try:
+            result = await register_scientific_revision(str(revision_id), enqueue_render=True)
+            if result["status"] == "REGISTERED":
+                completed += 1
+        except Exception as exc:  # one failed delivery must not starve other active sources
+            logger.exception("文献登记补偿失败: revision=%s", revision_id)
+            async with pg_manager.get_async_session_context() as session:
+                revision = (
+                    await session.execute(
+                        select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == revision_id)
+                    )
+                ).scalar_one()
+                await record_source_event(session, str(revision_id), int(revision.tenant_id))
+                event = (
+                    await session.execute(
+                        select(LiteratureSourceEvent).where(LiteratureSourceEvent.revision_id == revision_id)
+                    )
+                ).scalar_one()
+                event.attempt += 1
+                event.error = f"{type(exc).__name__}: {exc}"[:2000]
+                event.updated_at = utc_now()
     return completed

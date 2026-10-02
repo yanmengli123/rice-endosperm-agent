@@ -39,6 +39,13 @@ def client(monkeypatch):
 
     user = type("U", (), {"uid": "u1"})()
     app.dependency_overrides[router_module.get_required_user] = lambda: user
+    # These are response/parameter adapter tests; real source ACLs are exercised separately.
+    app.dependency_overrides[router_module.authorize_literature_request] = lambda: None
+
+    async def _asset_access(_object):
+        return True
+
+    monkeypatch.setattr(router_module, "authorize_asset", _asset_access)
 
     # 租户权威：固定为 7（请求参数不应影响）
     async def _tenant(_user):

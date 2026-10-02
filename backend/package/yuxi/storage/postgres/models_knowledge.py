@@ -2106,6 +2106,22 @@ class LiteratureReaderRender(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
 
+class LiteratureSourceEvent(Base):
+    """Transactional outbox from PDF activation to the derived reading workspace."""
+
+    __tablename__ = "literature_source_events"
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(16), nullable=False, default="PENDING")
+    attempt = Column(Integer, nullable=False, default=0)
+    error = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
 class LiteraturePaper(Base):
     """文献身份（ADR-0010 决议 5 存储；1 篇文献 : N 个文件/变体）。
 
@@ -2128,6 +2144,7 @@ class LiteraturePaper(Base):
     title = Column(Text)
     # 关联的活跃解析版本（渲染/编译输入定位；kbasset 前缀由 source_sha256 推导）
     source_revision_id = Column(String(64), index=True)
+    reading_version = Column(Integer, nullable=False, default=1)
     # 计量（P4 回填；P2 先留空）
     paper_rank = Column(Float, nullable=False, default=0.0)
     cocitation_cluster = Column(Integer, nullable=False, default=0)
@@ -2149,7 +2166,15 @@ class LiteratureCompileJob(Base):
 
     __tablename__ = "literature_compile_jobs"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "paper_id", "level", name="uq_literature_compile_jobs_key"),
+        UniqueConstraint(
+            "tenant_id",
+            "paper_id",
+            "level",
+            "source_revision_id",
+            "reading_version",
+            "generator_version",
+            name="uq_literature_compile_jobs_key",
+        ),
         Index("ix_literature_compile_jobs_status", "status"),
     )
 
@@ -2157,6 +2182,9 @@ class LiteratureCompileJob(Base):
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
     level = Column(String(8), nullable=False)  # L1 / L2 / L3
+    source_revision_id = Column(String(64), nullable=False, default="")
+    reading_version = Column(Integer, nullable=False, default=1)
+    generator_version = Column(String(64), nullable=False, default="literature-compile-v1")
     status = Column(String(32), nullable=False, default="PENDING")
     value_score = Column(Float)
     attempt = Column(Integer, nullable=False, default=0)
@@ -2206,6 +2234,8 @@ class LiteratureVariant(Base):
             "variant_kind",
             "lang",
             "parse_revision_id",
+            "reading_version",
+            "generator_version",
             name="uq_literature_variants_identity",
         ),
         Index("ix_literature_variants_paper", "tenant_id", "paper_id"),
@@ -2215,6 +2245,8 @@ class LiteratureVariant(Base):
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
     parse_revision_id = Column(String(64), nullable=False)
+    reading_version = Column(Integer, nullable=False, default=1)
+    generator_version = Column(String(64), nullable=False, default="literature-translate-v1")
     variant_kind = Column(String(32), nullable=False)  # zh / en_zh / summary
     lang = Column(String(8), nullable=False)  # ★ 进身份：zh / en
     uri = Column(String(1024), nullable=False)  # kbasset:// MinIO
@@ -2228,7 +2260,15 @@ class LiteratureTranslationJob(Base):
 
     __tablename__ = "literature_translation_jobs"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "paper_id", "variant_kind", name="uq_literature_translation_jobs_key"),
+        UniqueConstraint(
+            "tenant_id",
+            "paper_id",
+            "variant_kind",
+            "source_revision_id",
+            "reading_version",
+            "generator_version",
+            name="uq_literature_translation_jobs_key",
+        ),
         Index("ix_literature_translation_jobs_status", "status"),
     )
 
@@ -2236,6 +2276,9 @@ class LiteratureTranslationJob(Base):
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
     variant_kind = Column(String(32), nullable=False, default="zh")
+    source_revision_id = Column(String(64), nullable=False, default="")
+    reading_version = Column(Integer, nullable=False, default=1)
+    generator_version = Column(String(64), nullable=False, default="literature-translate-v1")
     status = Column(String(32), nullable=False, default="PENDING")
     attempt = Column(Integer, nullable=False, default=0)
     variant_uri = Column(String(1024))
@@ -2345,6 +2388,8 @@ class LiteratureReport(Base):
     title = Column(String(512), nullable=False)
     content = Column(Text, nullable=False)
     content_uri = Column(String(1024))
+    source_rids_json = Column(JSON_VALUE)
+    source_versions_json = Column(JSON_VALUE)
     created_by = Column(String(64), nullable=False, default="")
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 

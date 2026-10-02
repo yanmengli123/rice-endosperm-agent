@@ -1093,6 +1093,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0076_literature_papers_source_revision", "_migration_0076_literature_papers_source_revision"),
         ("0077_literature_source_revision_unique", "_migration_0077_literature_source_revision_unique"),
         ("0078_literature_llm_governance", "_migration_0078_literature_llm_governance"),
+        ("0079_literature_source_contract_closure", "_migration_0079_literature_source_contract_closure"),
     ]
 
     async def _migration_0072_literature_translation(self, conn) -> None:
@@ -1342,6 +1343,77 @@ class PostgresManager(metaclass=SingletonMeta):
             for declaration in columns:
                 await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {declaration}"))
             await conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_llm_run_id ON {table} (llm_run_id)"))
+
+    async def _migration_0079_literature_source_contract_closure(self, conn) -> None:
+        """Freeze input provenance; preserve prior outputs as historical rows."""
+        await conn.execute(text("ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS reading_version INTEGER"))
+        await conn.execute(text("UPDATE literature_papers SET reading_version = 1 WHERE reading_version IS NULL"))
+        await conn.execute(text("ALTER TABLE literature_papers ALTER COLUMN reading_version SET NOT NULL"))
+        for table, key, axis in (
+            ("literature_compile_jobs", "uq_literature_compile_jobs_key", "level"),
+            ("literature_translation_jobs", "uq_literature_translation_jobs_key", "variant_kind"),
+        ):
+            for name, kind, legacy in (
+                ("source_revision_id", "VARCHAR(64)", "''"),
+                ("reading_version", "INTEGER", "0"),
+                ("generator_version", "VARCHAR(64)", "'legacy'"),
+            ):
+                await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {kind}"))
+                await conn.execute(text(f"UPDATE {table} SET {name} = {legacy} WHERE {name} IS NULL"))
+                await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {name} SET NOT NULL"))
+            # Earlier migrations created indexes; handle a constraint-backed
+            # index as well when upgrading a metadata-created environment.
+            await conn.execute(text(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {key}"))
+            await conn.execute(text(f"DROP INDEX IF EXISTS {key}"))
+            await conn.execute(
+                text(
+                    f"CREATE UNIQUE INDEX {key} ON {table} "
+                    f"(tenant_id, paper_id, {axis}, source_revision_id, reading_version, generator_version)"
+                )
+            )
+        for name, kind, legacy in (
+            ("reading_version", "INTEGER", "0"),
+            ("generator_version", "VARCHAR(64)", "'legacy'"),
+        ):
+            await conn.execute(text(f"ALTER TABLE literature_variants ADD COLUMN IF NOT EXISTS {name} {kind}"))
+            await conn.execute(text(f"UPDATE literature_variants SET {name} = {legacy} WHERE {name} IS NULL"))
+            await conn.execute(text(f"ALTER TABLE literature_variants ALTER COLUMN {name} SET NOT NULL"))
+        await conn.execute(
+            text("ALTER TABLE literature_variants DROP CONSTRAINT IF EXISTS uq_literature_variants_identity")
+        )
+        await conn.execute(text("DROP INDEX IF EXISTS uq_literature_variants_identity"))
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_literature_variants_identity ON literature_variants "
+                "(tenant_id,paper_id,variant_kind,lang,parse_revision_id,reading_version,generator_version)"
+            )
+        )
+        await conn.execute(text("ALTER TABLE literature_reports ADD COLUMN IF NOT EXISTS source_rids_json JSONB"))
+        await conn.execute(text("ALTER TABLE literature_reports ADD COLUMN IF NOT EXISTS source_versions_json JSONB"))
+        await conn.execute(
+            text("""UPDATE knowledge_wikis SET current_publication_id = NULL, status = 'DRAFT'
+            WHERE wiki_id LIKE 'literature-wiki-%'""")
+        )
+        await conn.execute(
+            text("""CREATE TABLE IF NOT EXISTS literature_source_events (
+            id BIGSERIAL PRIMARY KEY, revision_id VARCHAR(64) NOT NULL UNIQUE
+                REFERENCES knowledge_parse_revisions(revision_id) ON DELETE CASCADE,
+            tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            status VARCHAR(16) NOT NULL, attempt INTEGER NOT NULL, error TEXT,
+            created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)""")
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_literature_source_events_tenant_id "
+                "ON literature_source_events(tenant_id)"
+            )
+        )
+        await conn.execute(text("ALTER TABLE literature_source_events ENABLE ROW LEVEL SECURITY"))
+        await conn.execute(
+            text("""CREATE POLICY p_literature_source_events_tenant ON literature_source_events
+            USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)
+            WITH CHECK (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)""")
+        )
 
     async def _migration_0070_literature_reader_renders(self, conn) -> None:
         """文献域 P1：阅读视图渲染状态表（ADR-0010 决议 7/9；派生物，非证据）。

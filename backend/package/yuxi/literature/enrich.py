@@ -11,6 +11,8 @@ import logging
 from typing import Any
 
 import httpx
+from yuxi.literature.access import paper_visibility
+
 from sqlalchemy import select
 
 from yuxi.storage.postgres.manager import pg_manager
@@ -122,7 +124,7 @@ async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
     if paper is None:
@@ -188,7 +190,7 @@ async def enrich_pending(tenant_id: int, *, batch_size: int = 50) -> dict[str, A
                 await session.execute(
                     select(LiteraturePaper)
                     .where(
-                        LiteraturePaper.tenant_id == tenant_id,
+                        paper_visibility(tenant_id),
                         LiteraturePaper.doi.isnot(None),
                         LiteraturePaper.title.is_(None) | (LiteraturePaper.quartile == ""),
                     )

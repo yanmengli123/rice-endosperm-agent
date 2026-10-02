@@ -24,9 +24,15 @@
       />
       <button class="btn" @click="runSearch">搜索</button>
       <span class="toolbar-spacer"></span>
-      <button class="btn" :class="{ ghost: viewMode !== 'list' }" @click="viewMode = 'list'">文献列表</button>
-      <button class="btn" :class="{ ghost: viewMode !== 'concepts' }" @click="loadConcepts">概念页</button>
-      <button class="btn" :class="{ ghost: viewMode !== 'reports' }" @click="loadReports">综述报告</button>
+      <button class="btn" :class="{ ghost: viewMode !== 'list' }" @click="viewMode = 'list'">
+        文献列表
+      </button>
+      <button class="btn" :class="{ ghost: viewMode !== 'concepts' }" @click="loadConcepts">
+        概念页
+      </button>
+      <button class="btn" :class="{ ghost: viewMode !== 'reports' }" @click="loadReports">
+        综述报告
+      </button>
       <button class="btn" :class="{ ghost: viewMode !== 'tasks' }" @click="loadTasks">任务</button>
       <button class="btn" @click="$refs.bibInput.click()">导入 Bib</button>
       <button class="btn" :disabled="importing" @click="$refs.paperAgentInput.click()">
@@ -34,8 +40,15 @@
       </button>
       <input ref="bibInput" hidden type="file" accept=".bib,.txt" @change="importBib" />
       <input ref="paperAgentInput" hidden type="file" accept=".zip" @change="importPaperAgent" />
-      <input v-model="mocTopic" class="moc-input" placeholder="主题 MOC（如：淀粉合成）" @keyup.enter="generateMoc" />
-      <button class="btn" :disabled="mocLoading" @click="generateMoc">{{ mocLoading ? '生成中…' : '生成主题导读' }}</button>
+      <input
+        v-model="mocTopic"
+        class="moc-input"
+        placeholder="主题 MOC（如：淀粉合成）"
+        @keyup.enter="generateMoc"
+      />
+      <button class="btn" :disabled="mocLoading" @click="generateMoc">
+        {{ mocLoading ? '生成中…' : '生成主题导读' }}
+      </button>
     </div>
 
     <div v-if="viewMode === 'reports'" class="concepts-panel">
@@ -65,12 +78,21 @@
     </div>
 
     <div v-if="viewMode === 'concepts'" class="concepts-panel">
-      <div v-if="!concepts.length" class="lit-empty">暂无概念页（≥2 篇文献共享同一概念时聚合；先编译 L1）</div>
+      <div v-if="!concepts.length" class="lit-empty">
+        暂无概念页（≥2 篇文献共享同一概念时聚合；先编译 L1）
+      </div>
       <ul v-else class="concept-list">
-        <li v-for="concept in concepts" :key="concept.concept" class="concept-card" :class="{ mature: concept.mature }">
+        <li
+          v-for="concept in concepts"
+          :key="concept.concept"
+          class="concept-card"
+          :class="{ mature: concept.mature }"
+        >
           <div class="concept-head">
             <strong>{{ concept.concept }}</strong>
-            <span class="concept-count">{{ concept.paper_count }} 篇{{ concept.mature ? ' · 成熟' : '' }}</span>
+            <span class="concept-count"
+              >{{ concept.paper_count }} 篇{{ concept.mature ? ' · 成熟' : '' }}</span
+            >
           </div>
           <div class="concept-def">{{ concept.definition }}</div>
           <div class="concept-papers">{{ concept.papers.join(' · ') }}</div>
@@ -79,7 +101,11 @@
     </div>
 
     <div v-if="viewMode === 'list' && loading" class="lit-loading">加载中…</div>
-    <div v-else-if="viewMode === 'list' && !papers.length" class="lit-empty">文献库为空（可经 PaperAgent 导入器迁移数据）</div>
+    <div v-else-if="viewMode === 'list' && !papers.length" class="lit-empty">
+      暂无可访问文献。可在知识库中上传 PDF，完成证据处理后自动进入文献库；也可导入 Bib 或迁移
+      PaperAgent。
+      <router-link v-if="userStore.isAdmin" to="/extensions?tab=knowledge">前往知识库</router-link>
+    </div>
 
     <ul v-else-if="viewMode === 'list'" class="paper-list">
       <li v-for="paper in papers" :key="paper.rid" class="paper-card" @click="openPaper(paper)">
@@ -111,6 +137,7 @@ import { ref, computed, onMounted } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
 import { listLiteraturePapers, listLiteratureTasks } from '@/apis/literature_api'
 import PaperDetail from '@/components/literature/PaperDetail.vue'
+import { useUserStore } from '@/stores/user'
 
 const KIND_CHIPS = [
   { value: '', label: '全部' },
@@ -128,6 +155,7 @@ export default {
   name: 'LiteratureView',
   components: { PaperDetail },
   setup() {
+    const userStore = useUserStore()
     const papers = ref([])
     const total = ref(0)
     const page = ref(1)
@@ -153,7 +181,9 @@ export default {
       if (!mocTopic.value.trim()) return
       mocLoading.value = true
       try {
-        const result = await apiPost('/api/literature/reports/topic-moc', { topic: mocTopic.value.trim() })
+        const result = await apiPost('/api/literature/reports/topic-moc', {
+          topic: mocTopic.value.trim()
+        })
         selectedRid.value = ''
         mocTopic.value = ''
         alert(`主题导读已生成（${result.sources} 篇来源），见「综述报告」列表`)
@@ -194,7 +224,10 @@ export default {
       try {
         const dryForm = new FormData()
         dryForm.append('file', file)
-        const report = await apiPost('/api/literature/papers/import/paperagent?dry_run=true', dryForm)
+        const report = await apiPost(
+          '/api/literature/papers/import/paperagent?dry_run=true',
+          dryForm
+        )
         const summary = `将迁移 ${report.papers?.source || 0} 篇文献、${report.variants?.source || 0} 个变体；冲突 ${report.conflicts?.length || 0} 项。`
         if (!window.confirm(`${summary}\n确认执行正式导入？`)) return
         const importForm = new FormData()
@@ -273,6 +306,7 @@ export default {
     onMounted(load)
 
     return {
+      userStore,
       papers,
       total,
       page,

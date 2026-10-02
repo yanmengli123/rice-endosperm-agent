@@ -149,6 +149,12 @@ async def env(monkeypatch, tmp_path):
             return dict(_COMPILE_RESULT)
 
         monkeypatch.setattr(compile_service.compiler, "compile_l1_l2", _fake_compile)
+        from yuxi.literature.notes import wiki_publish
+
+        async def _publish(*args, **kwargs):
+            return {"published": False}
+
+        monkeypatch.setattr(wiki_publish, "publish_literature_notes", _publish)
         yield session, queue, minio
 
     await engine.dispose()
@@ -186,10 +192,11 @@ async def test_compile_success_updates_paper_and_uploads_notes(env):
     assert outcome["status"] == "SUCCEEDED"
     job = await _job(session, "L1")
     assert job.status == "SUCCEEDED"
-    assert job.note_uri == f"kbasset://tenants/{TENANT}/literature/notes/{paper.rid}/L1_note.md"
+    prefix = f"tenants/{TENANT}/literature/notes/{paper.rid}/{REVISION_ID}/r1/literature-compile-v1"
+    assert job.note_uri == f"kbasset://{prefix}/L1_note.md"
     l2_job = await _job(session, "L2")
     assert l2_job.status == "SUCCEEDED"
-    assert l2_job.note_uri == f"kbasset://tenants/{TENANT}/literature/notes/{paper.rid}/L2_wiki.md"
+    assert l2_job.note_uri == f"kbasset://{prefix}/L2_wiki.md"
     # 评分回填（ai_value=5 唯一可用分量 → 归一化 5.0 ≥ L3 阈值 4.0）
     paper_row = await _paper(session)
     assert paper_row.ai_value_score == 5
@@ -199,8 +206,8 @@ async def test_compile_success_updates_paper_and_uploads_notes(env):
     assert l3_jobs, "score ≥ 4.0 必须自动排 L3"
     # 产物上传：L1 note（L2 wiki 因 fake l2 存在也应上传）
     names = [name for name, _ in minio.uploads]
-    assert f"tenants/{TENANT}/literature/notes/{paper.rid}/L1_note.md" in names
-    assert f"tenants/{TENANT}/literature/notes/{paper.rid}/L2_wiki.md" in names
+    assert f"{prefix}/L1_note.md" in names
+    assert f"{prefix}/L2_wiki.md" in names
 
 
 async def test_enqueue_is_idempotent_and_failure_goes_dead(env, monkeypatch):

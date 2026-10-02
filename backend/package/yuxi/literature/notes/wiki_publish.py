@@ -10,11 +10,13 @@ from typing import Any
 from sqlalchemy import select
 
 from yuxi.literature.reading.service import RENDER_BUCKET
+from yuxi.literature.provenance import current_job
 from yuxi.services.wiki_service import activate_derived_navigation_publication
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
+    KnowledgeFile,
     KnowledgeParseRevision,
     KnowledgeWiki,
     LiteratureCompileJob,
@@ -47,25 +49,71 @@ def _title_from_markdown(content: str, fallback: str) -> str:
     return match.group(1).strip() if match else fallback
 
 
-async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[str, Any]:
+async def publish_literature_notes(
+    tenant_id: int, *, actor_uid: str, source_kb_id: str | None = None
+) -> dict[str, Any]:
     """Rebuild and atomically activate the tenant's claim-free note wiki."""
+    if source_kb_id is None:
+        async with pg_manager.get_async_session_context() as session:
+            source_ids = list(
+                (
+                    await session.execute(
+                        select(KnowledgeParseRevision.kb_id)
+                        .join(LiteraturePaper, LiteraturePaper.source_revision_id == KnowledgeParseRevision.revision_id)
+                        .join(LiteratureCompileJob, LiteratureCompileJob.paper_id == LiteraturePaper.id)
+                        .where(
+                            LiteratureCompileJob.tenant_id == tenant_id,
+                            current_job(LiteratureCompileJob),
+                            LiteratureCompileJob.status == "SUCCEEDED",
+                        )
+                        .distinct()
+                    )
+                ).scalars()
+            )
+        results = [
+            await publish_literature_notes(tenant_id, actor_uid=actor_uid, source_kb_id=source_id)
+            for source_id in source_ids
+        ]
+        if len(results) == 1:
+            return results[0]
+        return {
+            "published": any(r.get("published") for r in results),
+            "reused": all(r.get("reused") for r in results),
+            "publications": results,
+        }
     async with pg_manager.get_async_session_context() as session:
         jobs = list(
             (
                 await session.execute(
                     select(LiteratureCompileJob, LiteraturePaper)
                     .join(LiteraturePaper, LiteraturePaper.id == LiteratureCompileJob.paper_id)
+                    .join(
+                        KnowledgeParseRevision, KnowledgeParseRevision.revision_id == LiteraturePaper.source_revision_id
+                    )
+                    .join(KnowledgeFile, KnowledgeFile.active_parse_revision_id == KnowledgeParseRevision.revision_id)
                     .where(
                         LiteratureCompileJob.tenant_id == tenant_id,
                         LiteratureCompileJob.status == "SUCCEEDED",
                         LiteratureCompileJob.note_uri.is_not(None),
+                        current_job(LiteratureCompileJob),
+                        KnowledgeParseRevision.kb_id == source_kb_id,
                     )
-                    .order_by(LiteraturePaper.rid, LiteratureCompileJob.level)
+                    .order_by(
+                        LiteraturePaper.rid,
+                        LiteratureCompileJob.level,
+                        LiteratureCompileJob.updated_at.desc(),
+                        LiteratureCompileJob.id.desc(),
+                    )
                 )
             ).all()
         )
     if not jobs:
         return {"published": False, "reason": "no_compiled_notes"}
+    # Current generated and imported notes can coexist; publish one page per level.
+    latest = {}
+    for job, paper in jobs:
+        latest.setdefault((paper.rid, job.level), (job, paper))
+    jobs = list(latest.values())
 
     minio = get_minio_client()
     pages: list[dict[str, Any]] = []
@@ -77,7 +125,7 @@ async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[st
         try:
             raw = await minio.adownload_file(
                 RENDER_BUCKET,
-                f"tenants/{tenant_id}/literature/notes/{paper.rid}/L1_data.json",
+                str(_job.note_uri).removeprefix("kbasset://").rsplit("/", 1)[0] + "/L1_data.json",
             )
             data = json.loads(raw.decode("utf-8"))
             concepts_by_rid[paper.rid] = [
@@ -107,10 +155,37 @@ async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[st
                 )[:40],
             }
         )
-    content_digest = _digest([{"page_key": page["page_key"], "sha256": page["content_sha256"]} for page in pages])
+    frozen = [
+        {"rid": p.rid, "source_revision_id": p.source_revision_id, "reading_version": p.reading_version}
+        for _, p in jobs
+    ]
 
     source_kb_ids: list[str] = []
     async with pg_manager.get_async_session_context() as session:
+        current = (
+            (
+                await session.execute(
+                    select(LiteraturePaper).where(LiteraturePaper.id.in_([p.id for _, p in jobs])).with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if {(p.rid, p.source_revision_id, p.reading_version) for p in current} != {
+            (v["rid"], v["source_revision_id"], v["reading_version"]) for v in frozen
+        }:
+            return {"published": False, "reason": "source_changed"}
+        active_files = list(
+            (
+                await session.execute(
+                    select(KnowledgeFile)
+                    .where(KnowledgeFile.active_parse_revision_id.in_(source_revision_ids))
+                    .with_for_update()
+                )
+            ).scalars()
+        )
+        if {file.active_parse_revision_id for file in active_files} != set(source_revision_ids):
+            return {"published": False, "reason": "source_changed"}
         if source_revision_ids:
             source_kb_ids = sorted(
                 set(
@@ -123,8 +198,26 @@ async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[st
                     ).scalars()
                 )
             )
-        kb_id = f"literature-notes-{tenant_id}"
-        wiki_id = f"literature-wiki-{tenant_id}"
+        source = (
+            await session.execute(
+                select(KnowledgeBase).where(KnowledgeBase.kb_id == source_kb_id, KnowledgeBase.tenant_id == tenant_id)
+            )
+        ).scalar_one()
+        if source.governance_status in {"ARCHIVED", "DELETED"}:
+            return {"published": False, "reason": "source_inactive"}
+        from yuxi.services.wiki_service import _security_domain
+
+        security_domain = _security_domain(tenant_id, source.share_config)
+        content_digest = _digest(
+            {
+                "pages": [{"page_key": p["page_key"], "sha256": p["content_sha256"]} for p in pages],
+                "inputs": frozen,
+                "security_domain": security_domain,
+            }
+        )
+        suffix = hashlib.sha256(source_kb_id.encode()).hexdigest()[:12]
+        kb_id = f"literature-notes-{tenant_id}-{suffix}"
+        wiki_id = f"literature-wiki-{tenant_id}-{suffix}"
         kb = (await session.execute(select(KnowledgeBase).where(KnowledgeBase.kb_id == kb_id))).scalar_one_or_none()
         if kb is None:
             kb = KnowledgeBase(
@@ -134,8 +227,9 @@ async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[st
                 description="L1/L2/L3 编译派生产品；仅用于导航，不进入证据通道。",
                 kb_type="literature_notes",
                 governance_status="ACTIVE",
-                normalized_name=f"literature-notes-{tenant_id}",
-                created_by=actor_uid,
+                normalized_name=f"literature-notes-{tenant_id}-{suffix}",
+                created_by=source.created_by,
+                share_config=source.share_config,
             )
             session.add(kb)
         wiki = (
@@ -146,7 +240,7 @@ async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[st
                 wiki_id=wiki_id,
                 kb_id=kb_id,
                 tenant_id=tenant_id,
-                security_domain=f"tenant:{tenant_id}",
+                security_domain=security_domain,
                 trust_class="DERIVED",
                 authority_class="NAVIGATION_ONLY",
                 status="DRAFT",
@@ -156,6 +250,10 @@ async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[st
             )
             session.add(wiki)
             await session.flush()
+        else:
+            wiki.security_domain = security_domain
+        kb.share_config = source.share_config
+        kb.created_by = source.created_by
         for source_kb_id in source_kb_ids:
             existing_binding = (
                 await session.execute(
@@ -176,6 +274,8 @@ async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[st
                         created_by=actor_uid,
                     )
                 )
+            else:
+                existing_binding.security_domain = security_domain
 
         build_id = _stable_id("wbuild", wiki_id, content_digest)
         existing_build = (
@@ -245,6 +345,7 @@ async def publish_literature_notes(tenant_id: int, *, actor_uid: str) -> dict[st
             "product_type": "literature_notes",
             "sources": source_kb_ids,
             "source_revision_ids": source_revision_ids,
+            "source_versions": frozen,
             "pages": [{"page_key": page["page_key"], "sha256": page["content_sha256"]} for page in pages],
         }
         snapshot = WikiBuildSnapshot(

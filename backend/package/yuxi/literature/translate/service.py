@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import select, update
 
 from yuxi.literature.notes.prompts import parse_compile_json
+from yuxi.literature.provenance import TRANSLATE_VERSION, StaleLiteratureInput, require_current_input
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.literature.translate import prompts
 from yuxi.literature.translate.latextap import reassemble
@@ -60,7 +61,7 @@ async def enqueue_literature_translation(
         raise ValueError(f"非法变体类型: {variant_kind}")
     async with pg_manager.get_async_session_context() as session:
         paper = (
-            await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == paper_id))
+            await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == paper_id).with_for_update())
         ).scalar_one_or_none()
         if paper is None:
             raise ValueError(f"文献不存在: {paper_id}")
@@ -70,6 +71,9 @@ async def enqueue_literature_translation(
                     LiteratureTranslationJob.tenant_id == paper.tenant_id,
                     LiteratureTranslationJob.paper_id == paper_id,
                     LiteratureTranslationJob.variant_kind == variant_kind,
+                    LiteratureTranslationJob.source_revision_id == (paper.source_revision_id or ""),
+                    LiteratureTranslationJob.reading_version == paper.reading_version,
+                    LiteratureTranslationJob.generator_version == TRANSLATE_VERSION,
                 )
             )
         ).scalar_one_or_none()
@@ -88,7 +92,13 @@ async def enqueue_literature_translation(
                 return {"job_id": job.id, "status": job.status, "reused": True}
         if job is None:
             job = LiteratureTranslationJob(
-                tenant_id=paper.tenant_id, paper_id=paper_id, variant_kind=variant_kind, status="PENDING"
+                tenant_id=paper.tenant_id,
+                paper_id=paper_id,
+                variant_kind=variant_kind,
+                status="PENDING",
+                source_revision_id=paper.source_revision_id or "",
+                reading_version=paper.reading_version,
+                generator_version=TRANSLATE_VERSION,
             )
             session.add(job)
         else:
@@ -205,15 +215,16 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
         return None
     try:
         async with pg_manager.get_async_session_context() as session:
-            paper = (
-                await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == job.paper_id))
-            ).scalar_one()
+            paper = await require_current_input(session, job)
             render = (
                 await session.execute(
-                    select(LiteratureReaderRender).where(
+                    select(LiteratureReaderRender)
+                    .where(
                         LiteratureReaderRender.revision_id == paper.source_revision_id,
                         LiteratureReaderRender.status == "SUCCEEDED",
                     )
+                    .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
+                    .limit(1)
                 )
             ).scalar_one_or_none()
         if render is None:
@@ -265,7 +276,8 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
         else:  # pre-0078 jobs and isolated unit fixtures
             variant_content = await _generate_variant()
         digest = hashlib.sha256(variant_content.encode("utf-8")).hexdigest()
-        uri = f"kbasset://{object_base}variants/{job.variant_kind}.md"
+        variant_base = f"{object_base}variants/r{job.reading_version}/{TRANSLATE_VERSION}/"
+        uri = f"kbasset://{variant_base}{job.variant_kind}.md"
         await get_minio_client().aupload_file(
             bucket_name=RENDER_BUCKET,
             object_name=uri.removeprefix("kbasset://"),
@@ -275,13 +287,14 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
         if alignment:
             await get_minio_client().aupload_file(
                 bucket_name=RENDER_BUCKET,
-                object_name=f"{object_base}variants/{job.variant_kind}.json",
+                object_name=f"{variant_base}{job.variant_kind}.json",
                 data=json.dumps(
                     {"schema_version": 1, "paragraphs": alignment}, ensure_ascii=False, separators=(",", ":")
                 ).encode("utf-8"),
                 content_type="application/json",
             )
         async with pg_manager.get_async_session_context() as session:
+            await require_current_input(session, job)
             variant = (
                 await session.execute(
                     select(LiteratureVariant).where(
@@ -290,6 +303,8 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
                         LiteratureVariant.variant_kind == job.variant_kind,
                         LiteratureVariant.lang == "zh",
                         LiteratureVariant.parse_revision_id == paper.source_revision_id,
+                        LiteratureVariant.reading_version == job.reading_version,
+                        LiteratureVariant.generator_version == job.generator_version,
                     )
                 )
             ).scalar_one_or_none()
@@ -298,6 +313,8 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
                     tenant_id=paper.tenant_id,
                     paper_id=paper.id,
                     parse_revision_id=paper.source_revision_id,
+                    reading_version=job.reading_version,
+                    generator_version=job.generator_version,
                     variant_kind=job.variant_kind,
                     lang="zh",
                     uri=uri,
@@ -316,6 +333,8 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
             )
             await session.commit()
         return {"job_id": job.id, "status": "SUCCEEDED", "variant_uri": uri}
+    except StaleLiteratureInput:
+        return {"job_id": job.id, "status": "STALE"}
     except Exception as exc:  # noqa: BLE001
         reason = f"{type(exc).__name__}: {exc}"
         logger.exception("翻译失败: job=%s", job_id)

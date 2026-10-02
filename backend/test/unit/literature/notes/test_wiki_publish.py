@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.literature.notes import wiki_publish
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
+    KnowledgeFile,
     KnowledgeParseRevision,
     KnowledgeWiki,
     LiteratureCompileJob,
@@ -78,6 +79,7 @@ async def env(monkeypatch):
         for model in (
             KnowledgeParseRevision,
             KnowledgeBase,
+            KnowledgeFile,
             KnowledgeWiki,
             LiteraturePaper,
             LiteratureCompileJob,
@@ -121,12 +123,33 @@ async def env(monkeypatch):
             )
         )
         session.add(
+            KnowledgeBase(
+                id=1,
+                kb_id="kb_src_authority",
+                tenant_id=TENANT,
+                name="Authority",
+                kb_type="milvus",
+                created_by="owner",
+                share_config={"access_level": "private"},
+            )
+        )
+        session.add(
+            KnowledgeFile(
+                id=1,
+                kb_id="kb_src_authority",
+                file_id="kf_wikipub",
+                filename="source.pdf",
+                active_parse_revision_id=REVISION_ID,
+            )
+        )
+        session.add(
             LiteratureCompileJob(
                 id=1,
                 tenant_id=TENANT,
                 paper_id=1,
                 level="L1",
                 status="SUCCEEDED",
+                source_revision_id=REVISION_ID,
                 note_uri=f"kbasset://{NOTE_OBJECT}",
             )
         )
@@ -184,3 +207,17 @@ async def test_publish_is_idempotent_on_unchanged_content(env):
         await env.execute(select(func.count(WikiPublication.id)).where(WikiPublication.status == "ACTIVE"))
     ).scalar_one()
     assert active_count == 1
+
+
+async def test_source_switch_during_artifact_read_cannot_publish_old_notes(env, monkeypatch):
+    class SourceSwitchMinio(_FakeMinio):
+        async def adownload_file(self, bucket, object_name):
+            file = (await env.execute(select(KnowledgeFile))).scalar_one()
+            file.active_parse_revision_id = "new-source-revision"
+            await env.commit()
+            return await super().adownload_file(bucket, object_name)
+
+    monkeypatch.setattr(wiki_publish, "get_minio_client", SourceSwitchMinio)
+    result = await wiki_publish.publish_literature_notes(TENANT, actor_uid="u1")
+    assert result == {"published": False, "reason": "source_changed"}
+    assert (await env.execute(select(func.count(WikiPublication.id)))).scalar_one() == 0

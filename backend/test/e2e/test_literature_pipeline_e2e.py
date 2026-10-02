@@ -123,3 +123,18 @@ async def test_render_compile_pipeline(e2e_client, lit_seed):
     resp = await e2e_client.get("/api/literature/assets", headers=headers, params={"uri": l1_jobs[0]["note_uri"]})
     assert resp.status_code == 200, resp.text
     assert len(resp.content) > 100
+
+
+async def test_automatic_reader_bridge(e2e_client, lit_seed):
+    """Real PG/MinIO/ARQ render delivery, without manually calling /render."""
+    headers = {"Authorization": f"Bearer {lit_seed['api_key']}"}
+    await _wait_task(e2e_client, headers, type_="reader_render", ref=lit_seed["revision_id"])
+    rid = lit_seed["rid"]
+    response = await e2e_client.get(f"/api/literature/papers/{rid}/reader", headers=headers)
+    assert response.status_code == 200 and response.json()["ready"]
+    assert "starch" in response.json()["markdown"].lower()
+    detail = await e2e_client.get(f"/api/literature/papers/{rid}", headers=headers)
+    assert detail.json()["source"]["kb_id"] == "kb_lite2e"
+    assert detail.json()["reading_version"] >= 2
+    pdf = await e2e_client.get(f"/api/literature/papers/{rid}/source-pdf", headers=headers)
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")

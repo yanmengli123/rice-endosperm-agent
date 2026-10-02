@@ -33,7 +33,11 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         from yuxi.literature.reading import gateway  # 子进程内 bootstrap vendor sys.path
 
-        gateway.run_offline_render(pdf_path=payload["pdf_path"], md_path=payload["md_path"], out_dir=str(out_dir))
+        mode = payload.get("mode", "offline")
+        if mode not in {"offline", "dual"}:
+            raise ValueError(f"未知阅读渲染模式: {mode}")
+        render = gateway.run_dual_channel_render if mode == "dual" else gateway.run_offline_render
+        render(pdf_path=payload["pdf_path"], md_path=payload["md_path"], out_dir=str(out_dir))
         # 上游 P14 落盘惯例：产物在 <out_dir>/<pdf stem>/ 子目录（回退直接 out_dir）
         stem_dir = out_dir / Path(payload["pdf_path"]).stem
         product_root = stem_dir if (stem_dir / "en.md").exists() else out_dir
@@ -42,6 +46,8 @@ def main() -> int:
         # document.json：段落级结构（[Pxxx] ID），P2 编译提示词的引用锚点来源
         doc_json_file = product_root / "document.json"
         document_json = doc_json_file.read_text(encoding="utf-8") if doc_json_file.exists() else ""
+        review_file = product_root / "work" / "review.json"
+        review_json = review_file.read_text(encoding="utf-8") if review_file.exists() else ""
         image_dir = product_root / "images"
         image_names = sorted(p.name for p in image_dir.iterdir() if p.is_file()) if image_dir.is_dir() else []
         latex_count = markdown.count("$") // 2
@@ -49,6 +55,7 @@ def main() -> int:
             "ok": bool(markdown.strip()),
             "markdown": markdown,
             "document_json": document_json,
+            "review_json": review_json,
             "product_root": str(product_root),
             "image_count": len(image_names),
             "image_names": image_names,

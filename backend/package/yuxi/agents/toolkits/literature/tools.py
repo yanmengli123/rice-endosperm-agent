@@ -16,6 +16,11 @@ P1–P5 能力的 Agent 暴露层，**不含业务逻辑**。三条硬边界：
 from __future__ import annotations
 
 from typing import Any
+from functools import wraps
+import inspect
+
+from yuxi.literature.access import access_scope, paper_visibility
+from yuxi.repositories.user_repository import UserRepository
 
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
@@ -25,6 +30,24 @@ from yuxi.literature.notes.service import VALID_LEVELS
 from yuxi.literature.translate.service import VALID_VARIANT_KINDS
 from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.postgres.manager import pg_manager
+
+
+def _source_authorized(func):
+    @wraps(func)
+    async def wrapped(*args, **kwargs):
+        runtime = inspect.signature(func).bind_partial(*args, **kwargs).arguments.get("runtime")
+        context = getattr(runtime, "context", None)
+        if func.__name__ == "request_paper_translation" and _plan_allows_write(context):
+            return await func(*args, **kwargs)
+        tenant_id = await _principal_tenant(runtime)
+        uid = getattr(context, "uid", None)
+        user = await UserRepository().get_by_uid(uid)
+        if user is None or getattr(user, "is_disabled", False):
+            raise PermissionError("无法验证用户身份（fail-closed）")
+        async with access_scope(user, tenant_id):
+            return await func(*args, **kwargs)
+
+    return wrapped
 
 
 class SearchLiteraturePapersInput(BaseModel):
@@ -101,6 +124,7 @@ def _nav_item(row: Any) -> dict[str, Any]:
     config_guide="导航工具：按标题/DOI 检索本租户文献库，返回元数据不含正文",
     args_schema=SearchLiteraturePapersInput,
 )
+@_source_authorized
 async def search_literature_papers(query: str, kind: str = "", top_k: int = 10, runtime: ToolRuntime = None) -> str:
     """检索当前用户的文献库（元数据导航；不含正文，不可作证据）。
 
@@ -117,7 +141,7 @@ async def search_literature_papers(query: str, kind: str = "", top_k: int = 10, 
     tenant_id = await _principal_tenant(runtime)
     like = f"%{(query or '').strip()}%"
     async with pg_manager.get_async_session_context() as session:
-        conditions = [LiteraturePaper.tenant_id == tenant_id]
+        conditions = [paper_visibility(tenant_id)]
         if like != "%%":
             conditions.append(
                 LiteraturePaper.title.ilike(like) | LiteraturePaper.doi.ilike(like)  # noqa: E501 - ilike 绑定参数，无拼接注入
@@ -143,6 +167,7 @@ async def search_literature_papers(query: str, kind: str = "", top_k: int = 10, 
     config_guide="导航工具：读取 L1/L2/L3 笔记的逻辑 URI 与状态（正文经前端资产端点获取）",
     args_schema=ReadCompiledNoteInput,
 )
+@_source_authorized
 async def read_compiled_note(rid: str, level: str = "L1", runtime: ToolRuntime = None) -> str:
     """读取文献的已编译笔记（L1/L2/L3）导航信息：状态与 kbasset URI，不含笔记正文。
 
@@ -171,6 +196,7 @@ async def read_compiled_note(rid: str, level: str = "L1", runtime: ToolRuntime =
     config_guide="Authority 工具：SI/审稿意见等用户原始资料清单（0 API 抽取文本可检索）",
     args_schema=ListPaperAttachmentsInput,
 )
+@_source_authorized
 async def list_paper_attachments(rid: str, runtime: ToolRuntime = None) -> str:
     """列出文献的依附资料（支撑信息/审稿意见/数据；用户原始资料）。
 
@@ -196,6 +222,7 @@ async def list_paper_attachments(rid: str, runtime: ToolRuntime = None) -> str:
     config_guide="写操作：触发翻译入队（202 异步），需本轮计划允许文献操作",
     args_schema=RequestPaperTranslationInput,
 )
+@_source_authorized
 async def request_paper_translation(rid: str, variant_kind: str = "zh", runtime: ToolRuntime = None) -> str:
     """为文献请求翻译（异步任务；需本轮执行计划允许，写操作 fail-closed）。
 
@@ -235,6 +262,7 @@ async def request_paper_translation(rid: str, variant_kind: str = "zh", runtime:
     config_guide="导航工具：返回文献的引用邻居与共被引分簇（分数不作证据）",
     args_schema=GetCitationNeighborsInput,
 )
+@_source_authorized
 async def get_citation_neighbors(rid: str, runtime: ToolRuntime = None) -> str:
     """返回文献在引用网络中的邻居与共被引分簇（导航元数据）。
 
@@ -242,47 +270,21 @@ async def get_citation_neighbors(rid: str, runtime: ToolRuntime = None) -> str:
         rid: 文献资源键
         runtime: 运行时注入
     """
-    from sqlalchemy import select
-
-    from yuxi.storage.postgres.models_knowledge import LiteratureCitation, LiteraturePaper
-
-    tenant_id = await _principal_tenant(runtime)
-    bare = rid.strip().removeprefix("doi-")
-    async with pg_manager.get_async_session_context() as session:
-        outgoing = (
-            await session.execute(
-                select(LiteratureCitation).where(
-                    LiteratureCitation.tenant_id == tenant_id,
-                    LiteratureCitation.citing_rid == rid.strip(),
-                )
-            )
-        ).scalars()
-        incoming = (
-            await session.execute(
-                select(LiteratureCitation).where(
-                    LiteratureCitation.tenant_id == tenant_id,
-                    LiteratureCitation.cited_doi.in_([bare, rid.strip()]),
-                )
-            )
-        ).scalars()
-        out_dois = [row.cited_doi for row in outgoing]
-        in_rids = [row.citing_rid for row in incoming]
-        paper = (
-            await session.execute(
-                select(LiteraturePaper).where(
-                    LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid.strip()
-                )
-            )
-        ).scalar_one_or_none()
+    from yuxi.literature import graph_service, readops
     import json
 
+    tenant_id = await _principal_tenant(runtime)
+    paper = await readops.get_paper_detail(tenant_id, rid.strip())
+    if paper is None:
+        return f"文献 {rid} 不存在或无权访问。"
+    neighbors = await graph_service.graph_neighbors(tenant_id, rid.strip())
     return json.dumps(
         {
             "rid": rid,
-            "cited_references": out_dois[:20],
-            "cited_by": in_rids[:20],
-            "cocitation_cluster": (paper.cocitation_cluster if paper else 0),
-            "paper_rank": (paper.paper_rank if paper else 0.0),
+            "cited_references": neighbors["references"][:20],
+            "cited_by": neighbors["cited_by"][:20],
+            "cocitation_cluster": paper.get("cocitation_cluster", 0),
+            "paper_rank": paper.get("paper_rank", 0.0),
         },
         ensure_ascii=False,
     )
@@ -296,7 +298,7 @@ async def _paper_id_by_rid(tenant_id: int, rid: str) -> int:
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
     if paper is None:

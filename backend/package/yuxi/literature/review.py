@@ -49,10 +49,13 @@ async def get_review_items(tenant_id: int, revision_id: str) -> dict[str, Any]:
     async with pg_manager.get_async_session_context() as session:
         render = (
             await session.execute(
-                select(LiteratureReaderRender).where(
+                select(LiteratureReaderRender)
+                .where(
                     LiteratureReaderRender.revision_id == revision_id,
                     LiteratureReaderRender.tenant_id == tenant_id,
                 )
+                .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
         if render is None:
@@ -215,10 +218,13 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
     async with pg_manager.get_async_session_context() as session:
         render = (
             await session.execute(
-                select(LiteratureReaderRender).where(
+                select(LiteratureReaderRender)
+                .where(
                     LiteratureReaderRender.revision_id == revision_id,
                     LiteratureReaderRender.tenant_id == tenant_id,
                 )
+                .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
     if render is None or not render.markdown_uri:
@@ -237,6 +243,9 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
     body = "\n\n".join(para_text(p) for p in document["paragraphs"] if para_text(p).strip())
     resolved_md = (f"# {title}\n\n{body}\n") if title else f"{body}\n"
     digest = hashlib.sha256(resolved_doc.encode("utf-8")).hexdigest()
+    previous = await get_resolved_manifest(tenant_id, revision_id)
+    if previous and previous.get("digest") == digest:
+        return {**previous, "reused": True}
     await minio.aupload_file(
         bucket_name=RENDER_BUCKET,
         object_name=f"{base}{RESOLVED_DOC_NAME}",
@@ -262,6 +271,24 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
         data=json.dumps(manifest, ensure_ascii=False).encode("utf-8"),
         content_type="application/json",
     )
+    from sqlalchemy import update
+    from yuxi.storage.postgres.models_knowledge import LiteraturePaper
+
+    async with pg_manager.get_async_session_context() as session:
+        from yuxi.literature.provenance import invalidate_note_publications
+
+        await invalidate_note_publications(session, revision_id)
+        await session.execute(
+            update(LiteraturePaper)
+            .where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.source_revision_id == revision_id)
+            .values(
+                reading_version=LiteraturePaper.reading_version + 1,
+                ai_value_score=None,
+                topic_score=None,
+                value_score=0.0,
+            )
+        )
+        await session.commit()
     return manifest
 
 
@@ -276,10 +303,13 @@ async def get_resolved_manifest(tenant_id: int, revision_id: str) -> dict | None
     async with pg_manager.get_async_session_context() as session:
         render = (
             await session.execute(
-                select(LiteratureReaderRender).where(
+                select(LiteratureReaderRender)
+                .where(
                     LiteratureReaderRender.revision_id == revision_id,
                     LiteratureReaderRender.tenant_id == tenant_id,
                 )
+                .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
     if render is None or not render.markdown_uri:

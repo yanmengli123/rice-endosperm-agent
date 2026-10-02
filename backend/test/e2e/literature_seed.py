@@ -48,7 +48,7 @@ _REVIEW_ITEMS = {
 
 
 async def run_seed(cleanup: bool = False) -> dict:
-    from sqlalchemy import select, update
+    from sqlalchemy import delete, select, update
 
     from yuxi.storage.postgres.manager import pg_manager
     from yuxi.storage.postgres.models_business import APIKey, User
@@ -58,6 +58,7 @@ async def run_seed(cleanup: bool = False) -> dict:
         KnowledgeParseArtifact,
         KnowledgeParseRevision,
         LiteraturePaper,
+        LiteratureReaderRender,
     )
 
     async with pg_manager.get_async_session_context() as session:
@@ -68,6 +69,7 @@ async def run_seed(cleanup: bool = False) -> dict:
             return {"ok": False, "error": "no superadmin user"}
         admin_id = admin.id
         admin_dept = admin.department_id
+        admin_uid = admin.uid
 
     # ---- API key：复用或新建（明文仅本次打印） ----
     async with pg_manager.get_async_session_context() as session:
@@ -147,12 +149,25 @@ async def run_seed(cleanup: bool = False) -> dict:
         if (
             await session.execute(select(KnowledgeBase.id).where(KnowledgeBase.kb_id == "kb_lite2e"))
         ).scalar_one_or_none() is None:
-            session.add(KnowledgeBase(kb_id="kb_lite2e", name="文献域 e2e", kb_type="milvus", tenant_id=TENANT))
+            session.add(
+                KnowledgeBase(
+                    kb_id="kb_lite2e",
+                    name="文献域 e2e",
+                    kb_type="milvus",
+                    tenant_id=TENANT,
+                    created_by=admin_uid,
+                    share_config={"access_level": "private"},
+                )
+            )
             await session.flush()
         if (
             await session.execute(select(KnowledgeFile.id).where(KnowledgeFile.file_id == "kf_lite2e"))
         ).scalar_one_or_none() is None:
-            session.add(KnowledgeFile(kb_id="kb_lite2e", file_id="kf_lite2e", filename="lit-e2e.pdf"))
+            session.add(
+                KnowledgeFile(
+                    kb_id="kb_lite2e", file_id="kf_lite2e", filename="lit-e2e.pdf", active_parse_revision_id=REVISION_ID
+                )
+            )
             await session.flush()
         revision = (
             await session.execute(
@@ -170,6 +185,7 @@ async def run_seed(cleanup: bool = False) -> dict:
                     parser_fingerprint="fp_lite2e_v1",
                     pipeline_version="scientific_pdf_v3.2",
                     status="ACTIVE",
+                    article_summary={"title": TITLE, "doi": TEST_DOI},
                 )
             )
         for artifact_id, kind, suffix in (
@@ -195,19 +211,45 @@ async def run_seed(cleanup: bool = False) -> dict:
                         size_bytes=len(FULL_MD),
                     )
                 )
+        # Only reset this disposable fixture's render, never a user source.
+        running = (
+            await session.execute(
+                select(LiteratureReaderRender).where(
+                    LiteratureReaderRender.revision_id == REVISION_ID, LiteratureReaderRender.status == "RUNNING"
+                )
+            )
+        ).scalar_one_or_none()
+        if running is not None:
+            raise RuntimeError("literature e2e fixture is already running")
+        await session.execute(delete(LiteratureReaderRender).where(LiteratureReaderRender.revision_id == REVISION_ID))
+        await session.execute(
+            update(KnowledgeFile)
+            .where(KnowledgeFile.file_id == "kf_lite2e")
+            .values(active_parse_revision_id=REVISION_ID)
+        )
+        await session.execute(
+            update(KnowledgeParseRevision)
+            .where(KnowledgeParseRevision.revision_id == REVISION_ID)
+            .values(article_summary={"title": TITLE, "doi": TEST_DOI})
+        )
+        from yuxi.literature.reconcile import record_source_event
+
+        await record_source_event(session, REVISION_ID, TENANT)
         await session.commit()
 
     # ---- 文献登记（source_revision_id 挂上） ----
-    from yuxi.literature.notes.service import register_literature_paper
+    from yuxi.literature.reconcile import register_scientific_revision
 
-    paper = await register_literature_paper(tenant_id=TENANT, doi=TEST_DOI, title=TITLE, source_revision_id=REVISION_ID)
+    registration = await register_scientific_revision(REVISION_ID)
+    if registration["status"] != "REGISTERED":
+        raise RuntimeError("literature e2e automatic registration failed")
 
     return {
         "ok": True,
         "api_key": plaintext,
-        "rid": paper.rid,
+        "rid": registration["rid"],
         "revision_id": REVISION_ID,
-        "paper_id": paper.id,
+        "paper_id": registration["paper_id"],
         "tenant": TENANT,
     }
 

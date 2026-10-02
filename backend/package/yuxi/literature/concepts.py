@@ -12,6 +12,8 @@ import json
 import re
 from typing import Any
 
+from yuxi.literature.access import paper_visibility
+
 from sqlalchemy import select
 
 from yuxi.literature.reading.service import RENDER_BUCKET
@@ -43,7 +45,13 @@ def _parse_concepts_from_note(markdown: str) -> list[dict[str, str]]:
 
 
 async def _concepts_for_paper(minio, tenant_id: int, rid: str) -> list[dict[str, str]]:
-    for object_name in (f"tenants/{tenant_id}/literature/notes/{rid}/L1_data.json",):
+    from yuxi.literature.readops import get_note_uri
+
+    note_uri = await get_note_uri(tenant_id, rid, "L1")
+    if not note_uri:
+        return []
+    note_object = note_uri.removeprefix("kbasset://")
+    for object_name in (note_object.rsplit("/", 1)[0] + "/L1_data.json",):
         try:
             data = json.loads((await minio.adownload_file(RENDER_BUCKET, object_name)).decode("utf-8"))
             concepts = data.get("concepts") or []
@@ -56,9 +64,7 @@ async def _concepts_for_paper(minio, tenant_id: int, rid: str) -> list[dict[str,
         except Exception:  # noqa: BLE001 - 缺 L1_data 走 markdown 兜底
             continue
     try:
-        note = (
-            await minio.adownload_file(RENDER_BUCKET, f"tenants/{tenant_id}/literature/notes/{rid}/L1_note.md")
-        ).decode("utf-8")
+        note = (await minio.adownload_file(RENDER_BUCKET, note_object)).decode("utf-8")
         return _parse_concepts_from_note(note)
     except Exception:  # noqa: BLE001 - 无 L1 笔记
         return []
@@ -67,11 +73,7 @@ async def _concepts_for_paper(minio, tenant_id: int, rid: str) -> list[dict[str,
 async def aggregate_concepts(tenant_id: int) -> list[dict[str, Any]]:
     """聚合租户内概念页：[{concept, definition, papers, mature}]（≥MIN_PAPERS）。"""
     async with pg_manager.get_async_session_context() as session:
-        papers = (
-            (await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id)))
-            .scalars()
-            .all()
-        )
+        papers = (await session.execute(select(LiteraturePaper).where(paper_visibility(tenant_id)))).scalars().all()
     minio = get_minio_client()
     by_concept: dict[str, dict[str, Any]] = {}
     for paper in papers:
@@ -116,11 +118,7 @@ async def generate_topic_moc(
         raise ValueError("主题不能为空")
     keyword = topic.strip().lower()
     async with pg_manager.get_async_session_context() as session:
-        papers = (
-            (await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id)))
-            .scalars()
-            .all()
-        )
+        papers = (await session.execute(select(LiteraturePaper).where(paper_visibility(tenant_id)))).scalars().all()
     minio = get_minio_client()
     matched: list[tuple[str, str]] = []  # (rid, L1 note)
     concepts = await aggregate_concepts(tenant_id)
@@ -133,17 +131,24 @@ async def generate_topic_moc(
     for paper in papers:
         title_hit = keyword in (paper.title or "").lower()
         if paper.rid in concept_hit_rids or title_hit:
+            from yuxi.literature.readops import get_note_uri
+
+            note_uri = await get_note_uri(tenant_id, paper.rid, "L1")
+            if not note_uri:
+                continue
             try:
-                note = (
-                    await minio.adownload_file(
-                        RENDER_BUCKET, f"tenants/{tenant_id}/literature/notes/{paper.rid}/L1_note.md"
-                    )
-                ).decode("utf-8")
+                note = (await minio.adownload_file(RENDER_BUCKET, note_uri.removeprefix("kbasset://"))).decode("utf-8")
                 matched.append((paper.rid, note))
             except Exception:  # noqa: BLE001 - 无笔记跳过
                 continue
     if not matched:
         raise ValueError(f"主题「{topic}」零匹配（无概念/标题命中，或相关文献未编译 L1）")
+    matched = matched[:20]
+    versions = [
+        {"rid": p.rid, "parse_revision_id": p.source_revision_id, "reading_version": p.reading_version}
+        for p in papers
+        if p.rid in {rid for rid, _ in matched}
+    ]
 
     blocks = "\n\n".join(f"## {rid}\n{note}" for rid, note in matched[:20])
     prompt = (
@@ -170,6 +175,9 @@ async def generate_topic_moc(
     from yuxi.storage.postgres.models_knowledge import LiteratureReport
 
     async with pg_manager.get_async_session_context() as session:
+        from yuxi.literature.cards import verify_report_sources
+
+        await verify_report_sources(session, tenant_id, versions)
         stmt = (
             pg_insert(LiteratureReport)
             .values(
@@ -178,6 +186,8 @@ async def generate_topic_moc(
                 title=f"主题导读：{topic}",
                 content=content,
                 created_by=created_by,
+                source_rids_json=[rid for rid, _ in matched],
+                source_versions_json=versions,
             )
             .returning(LiteratureReport.id)
         )

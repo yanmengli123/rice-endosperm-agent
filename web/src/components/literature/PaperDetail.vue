@@ -9,13 +9,36 @@
       <div v-if="loading" class="detail-loading">加载中…</div>
       <template v-else-if="paper">
         <div class="detail-meta">
+          <template v-if="paper.source">
+            <router-link
+              v-if="userStore.isAdmin"
+              :to="`/extensions/knowledgebase/${encodeURIComponent(paper.source.kb_id)}`"
+            >
+              知识源：{{ paper.source.name }}
+            </router-link>
+            <span v-else>知识源：{{ paper.source.name }}</span>
+            <span
+              >{{ paper.source.imported ? '迁移阅读产物' : 'PDF 证据能力' }}：{{
+                paper.source.evidence_status
+              }}</span
+            >
+            <span>阅读修订：{{ paper.reading_version }}</span>
+          </template>
           <span v-if="paper.doi">DOI: {{ paper.doi }}</span>
           <span v-if="paper.quartile">JCR {{ paper.quartile }}</span>
           <span>渲染: {{ paper.render?.status || '未渲染' }}</span>
-          <span v-for="job in paper.compile_jobs" :key="job.level">{{ job.level }}: {{ job.status }}</span>
+          <span v-for="job in paper.compile_jobs" :key="job.level"
+            >{{ job.level }}: {{ job.status }}</span
+          >
           <span v-for="job in paper.translation_jobs" :key="`translation-${job.variant_kind}`">
             {{ job.variant_kind }}: {{ job.status }}
           </span>
+        </div>
+        <div v-if="paper.historical_compile_jobs?.length" class="detail-meta">
+          来源已更新，{{
+            paper.historical_compile_jobs.length
+          }}
+          个历史笔记任务保留记录；当前笔记需重新编译。
         </div>
 
         <div class="detail-actions">
@@ -51,7 +74,7 @@
 
         <ReaderTabs v-if="currentTab === 'reader'" :rid="rid" />
         <NotePanel
-          v-if="currentTab === 'notes'"
+          v-else-if="currentTab === 'notes'"
           :rid="rid"
           :compile-jobs="paper.compile_jobs"
         />
@@ -80,6 +103,7 @@ import AttachmentPanel from '@/components/literature/AttachmentPanel.vue'
 import CardsPanel from '@/components/literature/CardsPanel.vue'
 import ReaderTabs from '@/components/literature/ReaderTabs.vue'
 import ReviewPanel from '@/components/literature/ReviewPanel.vue'
+import { useUserStore } from '@/stores/user'
 
 const POLL_INTERVAL_MS = 3000
 
@@ -91,13 +115,14 @@ export default {
   },
   emits: ['close'],
   setup(props) {
+    const userStore = useUserStore()
     const paper = ref(null)
     const loading = ref(true)
     const rendering = ref(false)
     const translating = ref(false)
     const compiling = ref('')
     const enriching = ref(false)
-    const currentTab = ref('notes')
+    const currentTab = ref('reader')
     const tabs = [
       { key: 'reader', label: '阅读' },
       { key: 'notes', label: '笔记 (L1·L2·L3)' },
@@ -125,7 +150,11 @@ export default {
       const translationBusy = (paper.value?.translation_jobs || []).some((job) =>
         ['PENDING', 'RUNNING'].includes(job.status)
       )
-      if (busy || translationBusy || ['PENDING', 'RUNNING'].includes(paper.value?.render?.status || '')) {
+      if (
+        busy ||
+        translationBusy ||
+        ['PENDING', 'RUNNING'].includes(paper.value?.render?.status || '')
+      ) {
         pollTimer = setInterval(load, POLL_INTERVAL_MS)
       }
     }
@@ -188,6 +217,7 @@ export default {
 
     return {
       paper,
+      userStore,
       loading,
       rendering,
       translating,

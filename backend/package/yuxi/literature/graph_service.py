@@ -7,8 +7,13 @@
 from __future__ import annotations
 
 from typing import Any
+from types import SimpleNamespace
 
-from sqlalchemy import func, select
+from yuxi.literature.access import paper_visibility
+
+from sqlalchemy import select
+from collections import Counter
+from yuxi.literature.identity.rid import doi_to_dirname, is_doi
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import LiteratureCitation, LiteraturePaper
@@ -16,135 +21,100 @@ from yuxi.storage.postgres.models_knowledge import LiteratureCitation, Literatur
 MAX_NODE_LIMIT = 5000
 
 
-async def graph_network(
-    tenant_id: int,
-    *,
-    min_citations: int = 0,
-    limit: int = 300,
-) -> dict[str, Any]:
-    """引用网络（节点 = 有边文献；按入度过滤/截断，MAX_NODE_LIMIT 封顶）。"""
-    limit = max(1, min(int(limit), MAX_NODE_LIMIT))
+async def _visible_graph(tenant_id: int):
     async with pg_manager.get_async_session_context() as session:
-        edges = (
+        papers = (await session.execute(select(LiteraturePaper).where(paper_visibility(tenant_id)))).scalars().all()
+        raw_edges = (
             await session.execute(
                 select(LiteratureCitation.citing_rid, LiteratureCitation.cited_doi).where(
                     LiteratureCitation.tenant_id == tenant_id
                 )
             )
         ).all()
-        papers = (
-            (await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id)))
-            .scalars()
-            .all()
-        )
-    paper_by_rid = {p.rid: p for p in papers}
-    # 统计入度（被引次数）——决定 top 节点
-    in_degree: dict[str, int] = {}
-    for _citing, cited in edges:
-        key = f"doi-{cited}" if "/" in cited else cited
-        in_degree[key] = in_degree.get(key, 0) + 1
-    node_rids = {
-        rid
-        for rid in ({e[0] for e in edges} | {f"doi-{c}" if "/" in c else c for _, c in edges})
-        if rid in paper_by_rid
-    }
-    selected = sorted(
-        node_rids,
-        key=lambda rid: -(in_degree.get(rid, 0)),
-    )[:limit]
-    selected_set = set(selected)
-    nodes = []
-    for rid in selected:
-        paper = paper_by_rid[rid]
-        nodes.append(
-            {
-                "rid": rid,
-                "title": paper.title,
-                "kind": paper.kind,
-                "citations": in_degree.get(rid, 0),
-                "paper_rank": paper.paper_rank,
-                "impact_factor": paper.impact_factor,
-                "quartile": paper.quartile,
-                "cocitation_cluster": paper.cocitation_cluster,
-            }
-        )
-    graph_edges = [
-        {"source": citing, "target": f"doi-{cited}" if "/" in cited else cited}
-        for citing, cited in edges
-        if citing in selected_set and (f"doi-{cited}" if "/" in cited else cited) in selected_set
+        library = (
+            await session.execute(
+                select(LiteraturePaper.rid, LiteraturePaper.doi).where(LiteraturePaper.tenant_id == tenant_id)
+            )
+        ).all()
+    by_rid = {p.rid: p for p in papers}
+    visible_dois = {p.doi: p.rid for p in papers if p.doi}
+    hidden_dois = {doi for rid, doi in library if rid not in by_rid and doi} - set(visible_dois)
+    edges = []
+    for citing, doi in raw_edges:
+        if citing not in by_rid or doi in hidden_dois:
+            continue
+        target = visible_dois.get(doi) or (f"doi-{doi_to_dirname(doi)}" if is_doi(doi) else doi)
+        if target not in by_rid:
+            # External references are metadata of the visible citing paper,
+            # not hidden library documents. Preserve upstream bibliography.
+            by_rid[target] = SimpleNamespace(
+                rid=target,
+                doi=doi,
+                title=doi,
+                kind="paper",
+                paper_rank=0,
+                impact_factor=None,
+                quartile=None,
+                cocitation_cluster=None,
+            )
+        edges.append((citing, target))
+    return by_rid, edges
+
+
+async def graph_network(tenant_id: int, *, min_citations: int = 0, limit: int = 300) -> dict[str, Any]:
+    """Count and rank only edges whose two endpoints are visible."""
+    limit = max(1, min(int(limit), MAX_NODE_LIMIT))
+    papers, edges = await _visible_graph(tenant_id)
+    counts = Counter(target for _, target in edges)
+    connected = {rid for edge in edges for rid in edge}
+    selected = sorted((rid for rid in connected if counts[rid] >= min_citations), key=lambda rid: (-counts[rid], rid))[
+        :limit
     ]
-    if min_citations:
-        nodes = [n for n in nodes if n["citations"] >= min_citations]
-        keep = {n["rid"] for n in nodes}
-        graph_edges = [e for e in graph_edges if e["source"] in keep and e["target"] in keep]
-    return {"nodes": nodes, "edges": graph_edges, "total_nodes": len(node_rids), "truncated": len(node_rids) > limit}
+    nodes = [
+        {
+            "rid": rid,
+            "title": papers[rid].title,
+            "kind": papers[rid].kind,
+            "citations": counts[rid],
+            "paper_rank": papers[rid].paper_rank,
+            "impact_factor": papers[rid].impact_factor,
+            "quartile": papers[rid].quartile,
+            "cocitation_cluster": papers[rid].cocitation_cluster,
+        }
+        for rid in selected
+    ]
+    keep = set(selected)
+    return {
+        "nodes": nodes,
+        "edges": [{"source": a, "target": b} for a, b in edges if a in keep and b in keep],
+        "total_nodes": len(connected),
+        "truncated": len(connected) > limit,
+    }
 
 
 async def graph_neighbors(tenant_id: int, rid: str) -> dict[str, Any]:
-    """单文献引用邻居（出=参考文献，入=被引）。"""
-    async with pg_manager.get_async_session_context() as session:
-        outgoing = (
-            (
-                await session.execute(
-                    select(LiteratureCitation.cited_doi).where(
-                        LiteratureCitation.tenant_id == tenant_id,
-                        LiteratureCitation.citing_rid == rid,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        incoming = (
-            (
-                await session.execute(
-                    select(LiteratureCitation.citing_rid).where(
-                        LiteratureCitation.tenant_id == tenant_id,
-                        LiteratureCitation.cited_doi == rid.removeprefix("doi-"),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        paper_count = (
-            await session.execute(
-                select(func.count()).select_from(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id)
-            )
-        ).scalar_one()
+    papers, edges = await _visible_graph(tenant_id)
+    if rid not in papers:
+        raise ValueError("文献不存在或无权访问")
+    outgoing = [papers[b].doi or b for a, b in edges if a == rid]
+    incoming = [a for a, b in edges if b == rid]
     return {
         "rid": rid,
         "references": outgoing[:50],
         "cited_by": incoming[:50],
         "reference_count": len(outgoing),
         "cited_by_count": len(incoming),
-        "library_size": int(paper_count),
+        "library_size": len(papers),
     }
 
 
 async def graph_top(tenant_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
-    """被引次数 Top 文献（计量面板）。"""
-    async with pg_manager.get_async_session_context() as session:
-        rows = (
-            await session.execute(
-                select(
-                    LiteratureCitation.cited_doi,
-                    func.count().label("cited_count"),
-                )
-                .where(LiteratureCitation.tenant_id == tenant_id)
-                .group_by(LiteratureCitation.cited_doi)
-                .order_by(func.count().desc())
-                .limit(limit)
-            )
-        ).all()
-    from yuxi.literature.identity.rid import doi_to_dirname, is_doi
-
-    result = []
-    for cited_doi, count in rows:
-        # RID 归一（与 metrics.recompute 同口径）：DOI 形态 → doi-<目录名>
-        key = f"doi-{doi_to_dirname(cited_doi)}" if is_doi(cited_doi) else cited_doi
-        result.append({"rid": key, "cited_count": int(count)})
-    return result
+    _, edges = await _visible_graph(tenant_id)
+    counts = Counter(b for _, b in edges)
+    return [
+        {"rid": rid, "cited_count": count}
+        for rid, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
 
 
 async def project_to_neo4j(tenant_id: int) -> dict[str, Any]:
@@ -161,11 +131,7 @@ async def project_to_neo4j(tenant_id: int) -> dict[str, Any]:
         raise ValueError("Neo4j 不可用（连接未建立）；投影需启用 graph 服务")
 
     async with pg_manager.get_async_session_context() as session:
-        papers = (
-            (await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id)))
-            .scalars()
-            .all()
-        )
+        papers = (await session.execute(select(LiteraturePaper).where(paper_visibility(tenant_id)))).scalars().all()
         edges = (
             await session.execute(
                 select(LiteratureCitation.citing_rid, LiteratureCitation.cited_doi).where(

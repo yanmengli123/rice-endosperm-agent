@@ -9,6 +9,10 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from yuxi.literature.access import paper_visibility
+from yuxi.literature.access import current_access
+from yuxi.literature.provenance import current_job, source_matches
+
 from sqlalchemy import func, select
 
 from yuxi.storage.postgres.manager import pg_manager
@@ -21,7 +25,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureVariant,
 )
 
-_ALLOWED_ASSET_SEGMENTS = {"reader_render", "variants", "notes", "attachments"}
+_ALLOWED_ASSET_SEGMENTS = {"reader_render", "variants", "notes", "attachments", "reports"}
 
 
 async def list_papers(
@@ -34,14 +38,14 @@ async def list_papers(
 ) -> dict[str, Any]:
     """文献列表（检索词匹配标题/DOI；类型芯片筛选；分页）。"""
     async with pg_manager.get_async_session_context() as session:
-        conditions = [LiteraturePaper.tenant_id == tenant_id]
+        conditions = [paper_visibility(tenant_id)]
         if query.strip():
-            # AGENTS.md：容器 SQLAlchemy ilike 无 autoescape，转义由 SQL 参数化承担
-            # （此处用 ilike 绑定参数，不含用户拼接的 LIKE 通配问题只影响召回宽度）
-            like = f"%{query.strip()}%"
+            from yuxi.knowledge.evidence.verbatim import escape_like
+
+            like = f"%{escape_like(query.strip())}%"
             conditions.append(
-                func.coalesce(LiteraturePaper.title, "").ilike(like)
-                | func.coalesce(LiteraturePaper.doi, "").ilike(like)
+                func.coalesce(LiteraturePaper.title, "").ilike(like, escape="/")
+                | func.coalesce(LiteraturePaper.doi, "").ilike(like, escape="/")
             )
         if kind.strip():
             conditions.append(LiteraturePaper.kind == kind.strip())
@@ -86,7 +90,7 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         if paper is None:
@@ -119,7 +123,10 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
         if paper.source_revision_id:
             render = (
                 await session.execute(
-                    select(LiteratureReaderRender).where(LiteratureReaderRender.revision_id == paper.source_revision_id)
+                    select(LiteratureReaderRender)
+                    .where(LiteratureReaderRender.revision_id == paper.source_revision_id)
+                    .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
+                    .limit(1)
                 )
             ).scalar_one_or_none()
     return {
@@ -128,6 +135,8 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
         "doi": paper.doi,
         "title": paper.title,
         "source_revision_id": paper.source_revision_id,
+        "reading_version": paper.reading_version,
+        "source": current_access().sources.get(rid) if current_access() else None,
         "value_score": paper.value_score,
         "ai_value_score": paper.ai_value_score,
         "paper_rank": paper.paper_rank,
@@ -147,6 +156,7 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
         "compile_jobs": [
             {"level": job.level, "status": job.status, "note_uri": job.note_uri, "error": job.error}
             for job in compile_jobs
+            if source_matches(job, paper) and job.generator_version in {"literature-compile-v1", "paperagent-import-v4"}
         ],
         "variants": [
             {
@@ -156,6 +166,9 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
                 "parse_revision_id": v.parse_revision_id,
             }
             for v in variants
+            if v.parse_revision_id == paper.source_revision_id
+            and v.reading_version == paper.reading_version
+            and v.generator_version in {"literature-translate-v1", "paperagent-import-v4"}
         ],
         "translation_jobs": [
             {
@@ -165,9 +178,20 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
                 "error": job.error,
             }
             for job in translation_jobs
+            if source_matches(job, paper) and job.generator_version == "literature-translate-v1"
         ],
         "attachments": [
             {"kind": a.kind, "filename": a.filename, "uri": a.uri, "text_uri": a.text_uri} for a in attachments
+        ],
+        "historical_compile_jobs": [
+            {
+                "level": j.level,
+                "status": j.status,
+                "source_revision_id": j.source_revision_id,
+                "reading_version": j.reading_version,
+            }
+            for j in compile_jobs
+            if not source_matches(j, paper)
         ],
     }
 
@@ -179,16 +203,22 @@ async def get_note_uri(tenant_id: int, rid: str, level: str) -> str | None:
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         if paper is None:
             return None
         job = (
             await session.execute(
-                select(LiteratureCompileJob).where(
-                    LiteratureCompileJob.paper_id == paper.id, LiteratureCompileJob.level == level
+                select(LiteratureCompileJob)
+                .where(
+                    LiteratureCompileJob.paper_id == paper.id,
+                    LiteratureCompileJob.level == level,
+                    current_job(LiteratureCompileJob, paper),
+                    LiteratureCompileJob.status == "SUCCEEDED",
                 )
+                .order_by(LiteratureCompileJob.updated_at.desc(), LiteratureCompileJob.id.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
     return job.note_uri if job else None
@@ -202,6 +232,11 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
                 await session.execute(
                     select(LiteratureReaderRender)
                     .where(LiteratureReaderRender.tenant_id == tenant_id)
+                    .where(
+                        LiteratureReaderRender.revision_id.in_(
+                            select(LiteraturePaper.source_revision_id).where(paper_visibility(tenant_id))
+                        )
+                    )
                     .order_by(LiteratureReaderRender.updated_at.desc())
                     .limit(limit)
                 )
@@ -214,6 +249,9 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
                 await session.execute(
                     select(LiteratureCompileJob)
                     .where(LiteratureCompileJob.tenant_id == tenant_id)
+                    .where(
+                        LiteratureCompileJob.paper_id.in_(select(LiteraturePaper.id).where(paper_visibility(tenant_id)))
+                    )
                     .order_by(LiteratureCompileJob.updated_at.desc())
                     .limit(limit)
                 )
@@ -226,6 +264,11 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
                 await session.execute(
                     select(LiteratureTranslationJob)
                     .where(LiteratureTranslationJob.tenant_id == tenant_id)
+                    .where(
+                        LiteratureTranslationJob.paper_id.in_(
+                            select(LiteraturePaper.id).where(paper_visibility(tenant_id))
+                        )
+                    )
                     .order_by(LiteratureTranslationJob.updated_at.desc())
                     .limit(limit)
                 )
@@ -277,6 +320,7 @@ _TASK_CENTER_STATUS = {
     "SUCCEEDED": "success",
     "FAILED": "failed",
     "DEAD": "failed",
+    "STALE": "failed",
 }
 
 

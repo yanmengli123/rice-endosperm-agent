@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseArtifact,
     KnowledgeParseRevision,
     LiteratureReaderRender,
+    LiteraturePaper,
 )
 from yuxi.utils.datetime_utils import utc_now
 
@@ -49,8 +51,8 @@ RUNNING_LEASE_SECONDS = 60 * 30
 PENDING_REQUEUE_SECONDS = 60 * 10
 
 
-def _render_job_id(revision_id: str, attempt: int) -> str:
-    return f"lit-render:{revision_id}:{attempt}"
+def _render_job_id(revision_id: str, attempt: int, render_version: str = READER_RENDER_VERSION) -> str:
+    return f"lit-render:{revision_id}:{render_version}:{attempt}"
 
 
 def _render_object_prefix(*, tenant_id: int, source_sha256: str, revision_id: str) -> str:
@@ -80,14 +82,18 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
             raise ValueError(f"解析版本不存在: {revision_id}")
         row = (
             await session.execute(
-                select(LiteratureReaderRender).where(LiteratureReaderRender.revision_id == revision_id)
+                select(LiteratureReaderRender)
+                .where(LiteratureReaderRender.revision_id == revision_id)
+                .where(LiteratureReaderRender.render_version == render_version)
             )
         ).scalar_one_or_none()
         if row is not None and not force:
             if row.status == "SUCCEEDED" and row.render_version == render_version:
                 return {"revision_id": revision_id, "status": "SUCCEEDED", "reused": True}
-            if row.status == "RUNNING":
-                return {"revision_id": revision_id, "status": "RUNNING", "reused": True}
+            if row.status in {"RUNNING", "PENDING"}:
+                return {"revision_id": revision_id, "status": row.status, "reused": True}
+        if row is not None and row.status == "RUNNING":
+            return {"revision_id": revision_id, "status": "RUNNING", "reused": True}
         if row is None:
             row = LiteratureReaderRender(
                 revision_id=revision_id,
@@ -109,7 +115,12 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
     enqueue_deferred = False
     try:
         queue = await get_arq_pool()
-        await queue.enqueue_job(RENDER_JOB_NAME, revision_id_value, _job_id=_render_job_id(revision_id_value, attempt))
+        await queue.enqueue_job(
+            RENDER_JOB_NAME,
+            revision_id_value,
+            render_version,
+            _job_id=_render_job_id(revision_id_value, attempt, render_version),
+        )
     except Exception:  # noqa: BLE001
         enqueue_deferred = True
         logger.exception("阅读渲染任务已持久化，但即时入队失败，将由对账任务补偿: %s", revision_id_value)
@@ -121,15 +132,16 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
     }
 
 
-async def _claim_render(revision_id: str) -> LiteratureReaderRender | None:
+async def _claim_render(revision_id: str, render_version: str | None = None) -> LiteratureReaderRender | None:
     """PENDING → RUNNING 认领（行级守卫；重复投递由 ARQ _job_id 幂等吸收）。"""
     async with pg_manager.get_async_session_context() as session:
+        query = select(LiteratureReaderRender).where(
+            LiteratureReaderRender.revision_id == revision_id, LiteratureReaderRender.status == "PENDING"
+        )
+        if render_version:
+            query = query.where(LiteratureReaderRender.render_version == render_version)
         row = (
-            await session.execute(
-                select(LiteratureReaderRender)
-                .where(LiteratureReaderRender.revision_id == revision_id)
-                .with_for_update()
-            )
+            await session.execute(query.order_by(LiteratureReaderRender.id).limit(1).with_for_update())
         ).scalar_one_or_none()
         if row is None or row.status != "PENDING":
             return None
@@ -170,6 +182,9 @@ async def _load_render_inputs(revision_id: str) -> tuple[KnowledgeParseRevision,
 
 async def _finish_success(row_id: int, *, markdown_uri: str, result: dict[str, Any]) -> None:
     async with pg_manager.get_async_session_context() as session:
+        row = (
+            await session.execute(select(LiteratureReaderRender).where(LiteratureReaderRender.id == row_id))
+        ).scalar_one()
         await session.execute(
             update(LiteratureReaderRender)
             .where(LiteratureReaderRender.id == row_id)
@@ -183,6 +198,19 @@ async def _finish_success(row_id: int, *, markdown_uri: str, result: dict[str, A
                 updated_at=utc_now(),
             )
         )
+        await session.execute(
+            update(LiteraturePaper)
+            .where(LiteraturePaper.source_revision_id == row.revision_id, LiteraturePaper.tenant_id == row.tenant_id)
+            .values(
+                reading_version=LiteraturePaper.reading_version + 1,
+                ai_value_score=None,
+                topic_score=None,
+                value_score=0.0,
+            )
+        )
+        from yuxi.literature.provenance import invalidate_note_publications
+
+        await invalidate_note_publications(session, row.revision_id)
         await session.commit()
 
 
@@ -206,19 +234,27 @@ async def _finish_failure(revision_id: str, row_id: int, reason: str) -> bool:
         else:
             row.status = "FAILED"
         attempt = row.attempt
+        render_version = row.render_version
         await session.commit()
     if requeued:
         try:
             queue = await get_arq_pool()
-            await queue.enqueue_job(RENDER_JOB_NAME, revision_id, _job_id=_render_job_id(revision_id, attempt))
+            await queue.enqueue_job(
+                RENDER_JOB_NAME,
+                revision_id,
+                render_version,
+                _job_id=_render_job_id(revision_id, attempt, render_version),
+            )
         except Exception:  # noqa: BLE001
             logger.exception("阅读渲染失败重排入队失败，将由对账任务补偿: %s", revision_id)
     return requeued
 
 
-async def process_literature_reader_render(ctx: dict[str, Any], revision_id: str) -> dict[str, Any] | None:
+async def process_literature_reader_render(
+    ctx: dict[str, Any], revision_id: str, render_version: str | None = None
+) -> dict[str, Any] | None:
     """ARQ 任务：渲染一个解析版本的阅读视图（子进程执行，见决议 7）。"""
-    row = await _claim_render(revision_id)
+    row = await _claim_render(revision_id, render_version)
     if row is None:
         return None
     try:
@@ -230,6 +266,9 @@ async def process_literature_reader_render(ctx: dict[str, Any], revision_id: str
         prefix = _render_object_prefix(
             tenant_id=revision.tenant_id, source_sha256=revision.source_sha256, revision_id=revision_id
         )
+        # Publish the DB pointer only after all artifacts are complete. A rerun
+        # must never overwrite the currently served document or prior decisions.
+        prefix += f"/{row.render_version}/{uuid.uuid4().hex}"
         markdown_uri = f"kbasset://{prefix}/render.md"
 
         with tempfile.TemporaryDirectory(prefix="lit-render-") as tmp:
@@ -268,6 +307,14 @@ async def process_literature_reader_render(ctx: dict[str, Any], revision_id: str
                     bucket_name=RENDER_BUCKET,
                     object_name=f"{prefix}/document.json",
                     data=document_json.encode("utf-8"),
+                    content_type="application/json",
+                )
+            review_json = str(result.get("review_json") or "")
+            if review_json.strip():
+                await minio.aupload_file(
+                    bucket_name=RENDER_BUCKET,
+                    object_name=f"{prefix}/work/review.json",
+                    data=review_json.encode("utf-8"),
                     content_type="application/json",
                 )
             for image_name in result.get("image_names") or []:
@@ -328,12 +375,17 @@ async def reconcile_stale_literature_renders(ctx: dict | None = None) -> int:
         for row in (*stale_running, *stale_pending):
             row.status = "PENDING"
             row.updated_at = now
-            targets.append((row.revision_id, int(row.attempt or 0)))
+            targets.append((row.revision_id, int(row.attempt or 0), row.render_version))
         await session.commit()
-    for revision_id, attempt in targets:
+    for revision_id, attempt, render_version in targets:
         try:
             queue = await get_arq_pool()
-            await queue.enqueue_job(RENDER_JOB_NAME, revision_id, _job_id=_render_job_id(revision_id, attempt))
+            await queue.enqueue_job(
+                RENDER_JOB_NAME,
+                revision_id,
+                render_version,
+                _job_id=_render_job_id(revision_id, attempt, render_version),
+            )
             requeued += 1
         except Exception:  # noqa: BLE001
             logger.exception("对账重排入队失败（下一轮重试）: %s", revision_id)

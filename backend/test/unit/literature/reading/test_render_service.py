@@ -18,6 +18,10 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseArtifact,
     KnowledgeParseRevision,
     LiteratureReaderRender,
+    LiteraturePaper,
+    KnowledgeWiki,
+    WikiSourceBinding,
+    WikiPublication,
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -89,6 +93,8 @@ async def service_env(monkeypatch, tmp_path):
         await conn.run_sync(LiteratureReaderRender.__table__.create)
         await conn.run_sync(KnowledgeParseRevision.__table__.create)
         await conn.run_sync(KnowledgeParseArtifact.__table__.create)
+        for model in (LiteraturePaper, KnowledgeWiki, WikiSourceBinding, WikiPublication):
+            await conn.run_sync(model.__table__.create)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
@@ -146,7 +152,13 @@ async def test_enqueue_creates_pending_and_enqueues(service_env):
     result = await service_module.enqueue_reader_render(revision_id=REVISION_ID)
     assert result["status"] == "PENDING"
     assert result["reused"] is False
-    assert queue.jobs == [(service_module.RENDER_JOB_NAME, (REVISION_ID,), "lit-render:sir_lit_test_0001:0")]
+    assert queue.jobs == [
+        (
+            service_module.RENDER_JOB_NAME,
+            (REVISION_ID, "reader_render_v1"),
+            "lit-render:sir_lit_test_0001:reader_render_v1:0",
+        )
+    ]
     row = await _get_row(session)
     assert row is not None
     assert row.status == "PENDING"
@@ -190,7 +202,8 @@ async def test_render_success_uploads_and_preserves_authority_plane(service_env,
     outcome = await service_module.process_literature_reader_render({}, REVISION_ID)
 
     assert outcome["status"] == "SUCCEEDED"
-    assert outcome["markdown_uri"] == f"{MARKDOWN_URI_PREFIX}/render.md"
+    assert outcome["markdown_uri"].startswith(f"{MARKDOWN_URI_PREFIX}/reader_render_v1/")
+    assert outcome["markdown_uri"].endswith("/render.md")
 
     row = await _get_row(session)
     assert row.status == "SUCCEEDED"
@@ -235,9 +248,9 @@ async def test_render_failure_requeues_then_dead(service_env, monkeypatch):
     assert "模拟崩溃" in (row.error or "")
     # 入列轨迹：初始 attempt=0 + 失败重排 attempt=1/2（第 3 次失败不再重排）
     assert [job[2] for job in queue.jobs] == [
-        "lit-render:sir_lit_test_0001:0",
-        "lit-render:sir_lit_test_0001:1",
-        "lit-render:sir_lit_test_0001:2",
+        "lit-render:sir_lit_test_0001:reader_render_v1:0",
+        "lit-render:sir_lit_test_0001:reader_render_v1:1",
+        "lit-render:sir_lit_test_0001:reader_render_v1:2",
     ]
 
 
@@ -255,3 +268,32 @@ async def test_render_rejects_blank_markdown_at_quality_gate(service_env, monkey
     assert outcome["status"] == "REQUEUED"
     row = await _get_row(session)
     assert "空白" in (row.error or "")
+
+
+async def test_modes_publish_separate_immutable_runs_and_review(service_env, monkeypatch):
+    session, _, minio = service_env
+    monkeypatch.setenv("YUXI_PADDLE_TOKEN", "test-only-token")
+    modes = []
+
+    def render(**kwargs):
+        modes.append(kwargs["mode"])
+        return {**_render_result("# Reading\n\nValid research text."), "review_json": '{"items":[]}'}
+
+    monkeypatch.setattr(service_module, "render_in_subprocess", render)
+    outcomes = []
+    for dual, force in ((False, False), (True, False), (False, True)):
+        await service_module.enqueue_reader_render(revision_id=REVISION_ID, dual=dual, force=force)
+        outcomes.append(
+            await service_module.process_literature_reader_render(
+                {}, REVISION_ID, service_module.render_version_for(dual)
+            )
+        )
+    assert modes == ["offline", "dual", "offline"]
+    assert all(outcome["status"] == "SUCCEEDED" for outcome in outcomes)
+    assert len({outcome["markdown_uri"] for outcome in outcomes}) == 3
+    rows = (await session.execute(select(LiteratureReaderRender))).scalars().all()
+    assert len(rows) == 2
+    for outcome in outcomes:
+        prefix = outcome["markdown_uri"].removeprefix("kbasset://").removesuffix("/render.md")
+        assert any(name == f"{prefix}/work/review.json" for name, _, _ in minio.uploads)
+    assert outcomes[0]["markdown_uri"] != outcomes[2]["markdown_uri"]

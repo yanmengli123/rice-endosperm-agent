@@ -7,12 +7,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
 
 from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from yuxi.literature import bib_import, cards, concepts, diary, enrich as enrich_module
 from yuxi.literature import graph_service, readops, review
 from yuxi.literature import reader_bundle
+from yuxi.literature.access import access_scope, authorize_asset, paper_visibility
 from yuxi.literature.attachments import register_attachment
 from yuxi.literature.import_archive import import_paperagent_archive
 from yuxi.literature.reading.service import RENDER_BUCKET, enqueue_reader_render
@@ -23,7 +24,17 @@ from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
 
-literature = APIRouter(prefix="/literature", tags=["literature"])
+
+async def authorize_literature_request(request: Request, current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    async with access_scope(current_user, tenant_id) as scope:
+        rid = request.path_params.get("rid")
+        if rid is not None and rid not in scope.rids:
+            raise HTTPException(status_code=404, detail="文献不存在或无权访问")
+        yield scope
+
+
+literature = APIRouter(prefix="/literature", tags=["literature"], dependencies=[Depends(authorize_literature_request)])
 
 _ASSET_CONTENT_TYPES = {
     ".md": "text/markdown",
@@ -76,7 +87,7 @@ async def get_paper_note(rid: str, level: str, current_user: User = Depends(get_
 
 @literature.post("/papers/{rid}/render", status_code=202)
 async def trigger_render(rid: str, current_user: User = Depends(get_required_user)):
-    """触发阅读渲染（入队，202；D6：用户手动触发，不自动挂接）。"""
+    """手动补偿阅读渲染（PDF 激活已自动登记并入队）。"""
     tenant_id = await _current_tenant(current_user)
     detail = await readops.get_paper_detail(tenant_id, rid)
     if detail is None:
@@ -185,6 +196,8 @@ async def get_asset(
         object_name = readops.validate_literature_asset_uri(uri, tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if not await authorize_asset(object_name):
+        raise HTTPException(status_code=404, detail="资产不存在或无权访问")
     try:
         data = await get_minio_client().adownload_file(RENDER_BUCKET, object_name)
     except Exception as exc:  # noqa: BLE001 - 对象不存在/存储不可用统一 404
@@ -205,7 +218,7 @@ async def _paper_id_by_rid(tenant_id: int, rid: str) -> int:
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
     if paper is None:

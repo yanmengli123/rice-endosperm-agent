@@ -1562,6 +1562,13 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 file_row.active_parse_revision_id = revision_id
                 file_row.active_index_revision_id = index_revision_id
                 file_row.evidence_status = pipeline_result.capability
+                from yuxi.literature.reconcile import record_source_event
+                from yuxi.literature.provenance import invalidate_note_publications
+
+                previous_parse = previous_activation.get("active_parse_revision_id")
+                if previous_parse and previous_parse != revision_id:
+                    await invalidate_note_publications(session, str(previous_parse))
+                await record_source_event(session, revision_id, int(revision.tenant_id))
         await _set_stage_status(revision_id, "ACTIVATE", "SUCCEEDED", worker_id=worker_id)
         active_index_revision_id = (
             str(previous_activation.get("active_index_revision_id")) if quality_downgrade else index_revision_id

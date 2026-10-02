@@ -16,6 +16,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureReaderRender,
     LiteratureReport,
     LiteratureVariant,
+    LiteratureCompileJob,
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -74,6 +75,7 @@ async def env(monkeypatch):
             LiteraturePaper,
             LiteratureVariant,
             LiteratureReport,
+            LiteratureCompileJob,
         ):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -110,6 +112,18 @@ async def env(monkeypatch):
                 image_count=1,
             )
         )
+        for paper_id, rid in enumerate(("doi-a", "doi-b", "doi-c"), 1):
+            session.add(
+                LiteratureCompileJob(
+                    id=paper_id,
+                    tenant_id=TENANT,
+                    paper_id=paper_id,
+                    level="L1",
+                    source_revision_id=REVISION,
+                    status="SUCCEEDED",
+                    note_uri=f"kbasset://tenants/{TENANT}/literature/notes/{rid}/L1_note.md",
+                )
+            )
         session.add(
             LiteratureVariant(
                 id=1,

@@ -11,6 +11,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from yuxi.literature.access import paper_visibility
+from yuxi.literature.access import report_visible
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -22,6 +25,31 @@ from yuxi.storage.postgres.models_knowledge import LiteratureCard, LiteraturePap
 CARD_TYPES = ("card-translate", "card-summary", "card-qa", "card-note")
 
 _SLUG_RE = re.compile(r"[^\w\-]+", re.UNICODE)
+
+
+async def verify_report_sources(session, tenant_id: int, versions: list[dict]) -> None:
+    from yuxi.literature.access import build_access, current_access
+
+    scope = current_access()
+    if scope is not None:
+        fresh = await build_access(scope.user, tenant_id)
+        if not {v["rid"] for v in versions} <= fresh.rids:
+            raise ValueError("报告来源已更新或不可访问，请重新生成")
+    rows = (
+        (
+            await session.execute(
+                select(LiteraturePaper)
+                .where(paper_visibility(tenant_id), LiteraturePaper.rid.in_([v["rid"] for v in versions]))
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    actual = {(p.rid, p.source_revision_id, p.reading_version) for p in rows}
+    expected = {(v["rid"], v["parse_revision_id"], v["reading_version"]) for v in versions}
+    if actual != expected:
+        raise ValueError("报告来源已更新或不可访问，请重新生成")
 
 
 def make_slug(text: str, max_len: int = 40) -> str:
@@ -49,7 +77,7 @@ async def write_card(
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         if paper is None:
@@ -86,7 +114,7 @@ async def list_cards(tenant_id: int, rid: str, *, card_type: str | None = None) 
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         if paper is None:
@@ -121,16 +149,39 @@ async def generate_review_report(
     """
     if not rids:
         raise ValueError("综述至少需要一篇文献")
+    rids = list(dict.fromkeys(rids))[:20]
+    async with pg_manager.get_async_session_context() as session:
+        papers = (
+            (
+                await session.execute(
+                    select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid.in_(rids))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if {p.rid for p in papers} != set(rids):
+        raise ValueError("所选文献不存在或无权访问")
     minio = get_minio_client()
     notes: list[tuple[str, str]] = []
     for rid in rids[:20]:
+        from yuxi.literature.readops import get_note_uri
+
+        note_uri = await get_note_uri(tenant_id, rid, "L1")
+        if not note_uri:
+            continue
         try:
-            data = await minio.adownload_file(RENDER_BUCKET, f"tenants/{tenant_id}/literature/notes/{rid}/L1_note.md")
+            data = await minio.adownload_file(RENDER_BUCKET, note_uri.removeprefix("kbasset://"))
             notes.append((rid, data.decode("utf-8")))
         except Exception:  # noqa: BLE001 - 缺笔记的文献跳过
             continue
     if not notes:
         raise ValueError("所选文献均无 L1 笔记（先编译）")
+    versions = [
+        {"rid": p.rid, "parse_revision_id": p.source_revision_id, "reading_version": p.reading_version}
+        for p in papers
+        if p.rid in {rid for rid, _ in notes}
+    ]
 
     blocks = "\n\n".join(f"## {rid}\n{note}" for rid, note in notes)
     prompt = (
@@ -154,12 +205,15 @@ async def generate_review_report(
 
     report_id: int
     async with pg_manager.get_async_session_context() as session:
+        await verify_report_sources(session, tenant_id, versions)
         report = LiteratureReport(
             tenant_id=tenant_id,
             report_kind="literature_review",
             title=title,
             content=content,
             created_by=created_by,
+            source_rids_json=[rid for rid, _ in notes],
+            source_versions_json=versions,
         )
         session.add(report)
         await session.flush()
@@ -187,7 +241,6 @@ async def list_reports(tenant_id: int, *, limit: int = 50) -> list[dict[str, Any
                     select(LiteratureReport)
                     .where(LiteratureReport.tenant_id == tenant_id)
                     .order_by(LiteratureReport.created_at.desc())
-                    .limit(limit)
                 )
             )
             .scalars()
@@ -201,5 +254,5 @@ async def list_reports(tenant_id: int, *, limit: int = 50) -> list[dict[str, Any
             "content_uri": row.content_uri,
             "created_at": row.created_at.isoformat() if row.created_at else None,
         }
-        for row in rows
+        for row in [r for r in rows if report_visible(r)][:limit]
     ]

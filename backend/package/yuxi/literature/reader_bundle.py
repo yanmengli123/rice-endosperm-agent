@@ -13,6 +13,8 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from yuxi.literature.access import paper_visibility
+
 from sqlalchemy import select
 
 from yuxi.literature.reading.service import RENDER_BUCKET
@@ -45,7 +47,7 @@ async def get_reader_bundle(tenant_id: int, rid: str) -> dict[str, Any] | None:
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         if paper is None or not paper.source_revision_id:
@@ -57,7 +59,8 @@ async def get_reader_bundle(tenant_id: int, rid: str) -> dict[str, Any] | None:
                     LiteratureReaderRender.revision_id == paper.source_revision_id,
                     LiteratureReaderRender.status == "SUCCEEDED",
                 )
-                .order_by(LiteratureReaderRender.render_version.desc())
+                .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
         if render is None or not render.markdown_uri:
@@ -91,7 +94,7 @@ async def get_variant_content(tenant_id: int, rid: str, variant_kind: str) -> di
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         if paper is None:
@@ -100,7 +103,13 @@ async def get_variant_content(tenant_id: int, rid: str, variant_kind: str) -> di
             (
                 await session.execute(
                     select(LiteratureVariant)
-                    .where(LiteratureVariant.paper_id == paper.id, LiteratureVariant.variant_kind == variant_kind)
+                    .where(
+                        LiteratureVariant.paper_id == paper.id,
+                        LiteratureVariant.variant_kind == variant_kind,
+                        LiteratureVariant.parse_revision_id == paper.source_revision_id,
+                        LiteratureVariant.reading_version == paper.reading_version,
+                        LiteratureVariant.generator_version.in_(("literature-translate-v1", "paperagent-import-v4")),
+                    )
                     .order_by(LiteratureVariant.created_at.desc())
                 )
             )
@@ -133,7 +142,7 @@ async def get_parallel_content(tenant_id: int, rid: str) -> dict[str, Any] | Non
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         if paper is None:
@@ -145,6 +154,9 @@ async def get_parallel_content(tenant_id: int, rid: str) -> dict[str, Any] | Non
                     .where(
                         LiteratureVariant.paper_id == paper.id,
                         LiteratureVariant.variant_kind.in_(("zh", "en_zh")),
+                        LiteratureVariant.parse_revision_id == paper.source_revision_id,
+                        LiteratureVariant.reading_version == paper.reading_version,
+                        LiteratureVariant.generator_version.in_(("literature-translate-v1", "paperagent-import-v4")),
                     )
                     .order_by(LiteratureVariant.created_at.desc())
                 )
@@ -203,7 +215,7 @@ async def get_source_pdf(tenant_id: int, rid: str) -> tuple[bytes, str] | None:
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         if paper is None or not paper.source_revision_id:
