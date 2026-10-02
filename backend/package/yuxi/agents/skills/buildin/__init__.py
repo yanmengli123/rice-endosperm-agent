@@ -69,4 +69,20 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
         version="2026.09.21.2",
         mcp_dependencies=("ricekb",),
     ),
+    BuiltinSkillSpec(
+        slug="literature",
+        source_dir=_SKILLS_ROOT / "literature",
+        description=(
+            "使用文献库（PaperAgent 能力域）检索文献、读取 L1/L2/L3 编译笔记、查看依附资料与引用邻居，"
+            "以及请求翻译。文献笔记/译文为导航派生物，不得作为回答证据。"
+        ),
+        version="2026.10.02",
+        tool_dependencies=(
+            "search_literature_papers",
+            "read_compiled_note",
+            "list_paper_attachments",
+            "get_citation_neighbors",
+            "request_paper_translation",
+        ),
+    ),
 ]
