@@ -152,11 +152,15 @@ async def generate_topic_moc(
         "引用文献用「文献N（rid）」形式）。\n\n"
         f"{blocks}\n\n直接输出 Markdown。"
     )
-    from yuxi import config
-    from yuxi.models.chat import select_model  # noqa: PLC0415 - 延迟导入防循环
+    from yuxi.literature.llm_gateway import complete_once
 
-    model = select_model(model_spec=config.default_model)
-    response = await model.call([{"role": "user", "content": prompt}], stream=False)
+    response = await complete_once(
+        tenant_id=tenant_id,
+        uid=created_by,
+        operation="topic_moc",
+        resource_ref=f"topic:{topic}",
+        messages=[{"role": "user", "content": prompt}],
+    )
     content = str(response.content or "").strip()
     if not content:
         raise ValueError("主题 MOC 生成为空")

@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from yuxi import config
 from yuxi.literature.boundaries import assert_not_evidence_capable
 from yuxi.literature.notes import prompts, renderers
 
@@ -57,14 +56,13 @@ def split_l1_l2(data: dict) -> tuple[dict, dict | None]:
 
 async def _complete(system: str, user: str) -> str:
     """经 Yuxi 模型链完成一次补全（system+user 两消息，前缀缓存友好）。"""
-    from yuxi.models.chat import select_model  # noqa: PLC0415 - 延迟导入防循环（见模块头）
+    from yuxi.literature.llm_gateway import call  # noqa: PLC0415 - 延迟导入防循环（见模块头）
 
-    model = select_model(model_spec=config.default_model)
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
-    response = await model.call(messages, stream=False)
+    response = await call(messages)
     return str(response.content or "")
 
 

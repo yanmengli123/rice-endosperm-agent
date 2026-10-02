@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from yuxi.literature.readops import list_literature_pipeline_tasks
 from yuxi.storage.postgres.models_business import User
 from yuxi.services.scientific_pdf_ingest_service import list_scientific_pdf_pipeline_tasks
 from yuxi.services.task_service import tasker
@@ -37,16 +38,21 @@ async def list_tasks(
     """
     memory_result = await tasker.list_tasks(status=status, limit=limit)
     pipeline_result = await list_scientific_pdf_pipeline_tasks(status=status, limit=limit)
+    literature_result = await list_literature_pipeline_tasks(status=status, limit=limit)
     memory_tasks = memory_result.get("tasks") or []
     pipeline_tasks = pipeline_result.get("tasks") or []
+    literature_tasks = literature_result.get("tasks") or []
     merged_tasks = sorted(
-        [*memory_tasks, *pipeline_tasks],
-        key=lambda item: str(item.get("created_at") or ""),
+        [*memory_tasks, *pipeline_tasks, *literature_tasks],
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
         reverse=True,
     )[: max(int(limit or 100), 0)]
+    durable_summary = _merge_task_summaries(
+        pipeline_result.get("summary") or {}, literature_result.get("summary") or {}
+    )
     return {
         "tasks": merged_tasks,
-        "summary": _merge_task_summaries(memory_result.get("summary") or {}, pipeline_result.get("summary") or {}),
+        "summary": _merge_task_summaries(memory_result.get("summary") or {}, durable_summary),
     }
 
 

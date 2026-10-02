@@ -16,13 +16,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from yuxi.literature.identity.rid import doi_to_dirname
@@ -30,8 +32,13 @@ from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeBase,
+    KnowledgeFile,
+    KnowledgeParseRevision,
     LiteratureCitation,
+    LiteratureCompileJob,
     LiteraturePaper,
+    LiteratureReaderRender,
     LiteratureVariant,
 )
 from yuxi.utils.datetime_utils import utc_now
@@ -55,6 +62,7 @@ class ImportReport:
     variants_source: int = 0
     variants_written: int = 0
     notes_written: int = 0
+    reader_renders_written: int = 0
     conflicts: list[str] = field(default_factory=list)
     dry_run: bool = True
 
@@ -65,6 +73,7 @@ class ImportReport:
             "citations": {"source": self.citations_source, "written": self.citations_written},
             "variants": {"source": self.variants_source, "written": self.variants_written},
             "notes_written": self.notes_written,
+            "reader_renders_written": self.reader_renders_written,
             "conflicts": self.conflicts,
         }
 
@@ -102,18 +111,177 @@ def _expected_dirname(meta_row: dict) -> str:
     return rid
 
 
+def _document_markdown(document: dict) -> str:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    title = str(metadata.get("title") or "").strip()
+    paragraphs = [
+        str(row.get("text_en") or row.get("text") or "").strip()
+        for row in (document.get("paragraphs") or [])
+        if isinstance(row, dict)
+    ]
+    body = "\n\n".join(part for part in paragraphs if part)
+    return (f"# {title}\n\n" if title else "") + body + "\n"
+
+
+async def _import_library_renders(
+    *,
+    tenant_id: int,
+    paperagent_root: Path,
+    papers: dict[str, LiteraturePaper],
+    report: ImportReport,
+) -> None:
+    """Map PaperAgent self-contained library folders into Yuxi reader products."""
+    library_root = paperagent_root / "library"
+    if not library_root.is_dir():
+        return
+    kb_id = f"paperagent-import-{tenant_id}"
+    minio = get_minio_client()
+    async with pg_manager.get_async_session_context() as session:
+        await session.execute(
+            pg_insert(KnowledgeBase)
+            .values(
+                tenant_id=tenant_id,
+                kb_id=kb_id,
+                name="PaperAgent 导入文献",
+                description="PaperAgent DATA_FORMAT 4 迁移的权威源占位；阅读产物保持派生身份。",
+                kb_type="document",
+                governance_status="ACTIVE",
+                normalized_name=f"paperagent-import-{tenant_id}",
+                created_by="paperagent-import",
+            )
+            .on_conflict_do_nothing(index_elements=("kb_id",))
+        )
+        for paper_dir in sorted(path for path in library_root.iterdir() if path.is_dir()):
+            paper = papers.get(paper_dir.name) or papers.get(f"doi-{paper_dir.name}")
+            document_path = paper_dir / "document.json"
+            if paper is None or not document_path.is_file():
+                continue
+            document_bytes = await asyncio.to_thread(document_path.read_bytes)
+            document = json.loads(document_bytes.decode("utf-8"))
+            source_pdf = paper_dir / "source.pdf"
+            source_bytes = await asyncio.to_thread(source_pdf.read_bytes) if source_pdf.is_file() else b""
+            source_sha = hashlib.sha256(source_bytes or document_bytes).hexdigest()
+            identity = hashlib.sha256(f"{tenant_id}:{paper.rid}:{source_sha}".encode()).hexdigest()
+            file_id = f"paif-{identity[:32]}"
+            revision_id = f"pair-{identity[:32]}"
+            prefix = f"tenants/{tenant_id}/documents/{source_sha}/reader_render/{revision_id}/"
+            markdown_path = paper_dir / "en.md"
+            markdown = (
+                await asyncio.to_thread(markdown_path.read_text, encoding="utf-8")
+                if markdown_path.is_file()
+                else _document_markdown(document)
+            )
+            await minio.aupload_file(
+                bucket_name=RENDER_BUCKET,
+                object_name=f"{prefix}document.json",
+                data=document_bytes,
+                content_type="application/json",
+            )
+            await minio.aupload_file(
+                bucket_name=RENDER_BUCKET,
+                object_name=f"{prefix}render.md",
+                data=markdown.encode("utf-8"),
+                content_type="text/markdown",
+            )
+            image_count = 0
+            images_dir = paper_dir / "images"
+            if images_dir.is_dir():
+                for image_path in sorted(path for path in images_dir.rglob("*") if path.is_file()):
+                    relative = image_path.relative_to(images_dir).as_posix()
+                    await minio.aupload_file(
+                        bucket_name=RENDER_BUCKET,
+                        object_name=f"{prefix}images/{relative}",
+                        data=await asyncio.to_thread(image_path.read_bytes),
+                        content_type="application/octet-stream",
+                    )
+                    image_count += 1
+            if source_bytes:
+                await minio.aupload_file(
+                    bucket_name=RENDER_BUCKET,
+                    object_name=f"tenants/{tenant_id}/documents/{source_sha}/source/original.pdf",
+                    data=source_bytes,
+                    content_type="application/pdf",
+                )
+            await session.execute(
+                pg_insert(KnowledgeFile)
+                .values(
+                    file_id=file_id,
+                    kb_id=kb_id,
+                    filename=source_pdf.name if source_pdf.is_file() else f"{paper_dir.name}.json",
+                    original_filename=source_pdf.name if source_pdf.is_file() else "document.json",
+                    file_type="pdf" if source_pdf.is_file() else "json",
+                    status="processed",
+                    content_hash=source_sha,
+                    file_size=len(source_bytes or document_bytes),
+                    active_parse_revision_id=revision_id,
+                    evidence_status="DERIVED_IMPORT",
+                    created_by="paperagent-import",
+                )
+                .on_conflict_do_update(
+                    index_elements=("file_id",),
+                    set_={"active_parse_revision_id": revision_id, "status": "processed"},
+                )
+            )
+            await session.execute(
+                pg_insert(KnowledgeParseRevision)
+                .values(
+                    revision_id=revision_id,
+                    tenant_id=tenant_id,
+                    kb_id=kb_id,
+                    file_id=file_id,
+                    source_sha256=source_sha,
+                    parser_fingerprint="paperagent-data-format-4",
+                    pipeline_version="paperagent_import_v4",
+                    status="ACTIVE",
+                    article_summary={"title": paper.title, "doi": paper.doi, "imported": True},
+                    qa_report={"source": "paperagent", "evidence_imported": False},
+                    capabilities={"reader": True, "source_pdf": bool(source_bytes)},
+                    created_by="paperagent-import",
+                )
+                .on_conflict_do_nothing(index_elements=("revision_id",))
+            )
+            await session.execute(
+                pg_insert(LiteratureReaderRender)
+                .values(
+                    revision_id=revision_id,
+                    tenant_id=tenant_id,
+                    status="SUCCEEDED",
+                    render_version="paperagent_v4",
+                    markdown_uri=f"kbasset://{prefix}render.md",
+                    image_count=image_count,
+                    source_digest=hashlib.sha256(document_bytes).hexdigest(),
+                )
+                .on_conflict_do_update(
+                    index_elements=("revision_id", "render_version"),
+                    set_={
+                        "status": "SUCCEEDED",
+                        "markdown_uri": f"kbasset://{prefix}render.md",
+                        "image_count": image_count,
+                    },
+                )
+            )
+            await session.execute(
+                update(LiteraturePaper)
+                .where(LiteraturePaper.id == paper.id)
+                .values(source_revision_id=revision_id, updated_at=utc_now())
+            )
+            report.reader_renders_written += 1
+        await session.commit()
+
+
 async def import_paperagent_data(
     *,
     tenant_id: int,
     paperagent_root: Path,
     dry_run: bool = True,
+    actor_uid: str = "paperagent-import",
 ) -> ImportReport:
     """执行导入。``dry_run=True`` 只统计与冲突检查，不写任何库/对象存储。"""
     report = ImportReport(dry_run=dry_run)
     biblio_path = paperagent_root / "data" / "biblio" / "biblio.db"
     if not biblio_path.exists():
         raise ValueError(f"biblio.db 不存在: {biblio_path}")
-    paper_rows, citation_rows = _read_biblio(biblio_path)
+    paper_rows, citation_rows = await asyncio.to_thread(_read_biblio, biblio_path)
     report.papers_source = len(paper_rows)
     report.citations_source = len(citation_rows)
 
@@ -215,7 +383,7 @@ async def import_paperagent_data(
                     .all()
                 }
             for paper_dir in sorted(p for p in kb_root.iterdir() if p.is_dir() and not p.name.startswith(("_", "."))):
-                paper_row = existing.get(paper_dir.name)
+                paper_row = existing.get(paper_dir.name) or existing.get(f"doi-{paper_dir.name}")
                 # 上游布局：knowledge_base/<DOI 目录名>（无 doi- 前缀）、papers_meta.rid
                 # 带 doi- 前缀——两种键形态都要命中（P0 三键归一语义的变现）。
                 dir_rid_candidates = (paper_dir.name, f"doi-{paper_dir.name}")
@@ -234,7 +402,7 @@ async def import_paperagent_data(
                     report.variants_source += 1
                     if dry_run:
                         continue
-                    content = file_path.read_bytes()
+                    content = await asyncio.to_thread(file_path.read_bytes)
                     digest = hashlib.sha256(content).hexdigest()
                     revision = paper_row.source_revision_id or "imported" if paper_row else "imported"
                     uri = f"kbasset://tenants/{tenant_id}/literature/variants/{paper_dir.name}/{filename}"
@@ -269,13 +437,63 @@ async def import_paperagent_data(
                     if dry_run:
                         report.notes_written += 1
                         continue
+                    object_name = f"tenants/{tenant_id}/literature/notes/{paper_dir.name}/{target_name}"
                     await minio.aupload_file(
                         bucket_name=RENDER_BUCKET,
-                        object_name=f"tenants/{tenant_id}/literature/notes/{paper_dir.name}/{target_name}",
-                        data=file_path.read_bytes(),
+                        object_name=object_name,
+                        data=await asyncio.to_thread(file_path.read_bytes),
                         content_type="text/markdown",
                     )
+                    level = target_name.split("_", 1)[0]
+                    if paper_id is not None:
+                        await session.execute(
+                            pg_insert(LiteratureCompileJob)
+                            .values(
+                                tenant_id=tenant_id,
+                                paper_id=paper_id,
+                                level=level,
+                                status="SUCCEEDED",
+                                note_uri=f"kbasset://{object_name}",
+                            )
+                            .on_conflict_do_update(
+                                index_elements=("tenant_id", "paper_id", "level"),
+                                set_={"status": "SUCCEEDED", "note_uri": f"kbasset://{object_name}", "error": None},
+                            )
+                        )
                     report.notes_written += 1
             if not dry_run:
                 await session.commit()
+    if dry_run:
+        library_root = paperagent_root / "library"
+        if library_root.is_dir():
+            report.reader_renders_written = sum(
+                1
+                for path in library_root.iterdir()
+                if path.is_dir()
+                and (path / "document.json").is_file()
+                and (path.name in expected_rids or f"doi-{path.name}" in expected_rids)
+            )
+    else:
+        async with pg_manager.get_async_session_context() as session:
+            papers = {
+                row.rid: row
+                for row in (
+                    await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id))
+                )
+                .scalars()
+                .all()
+            }
+        await _import_library_renders(
+            tenant_id=tenant_id,
+            paperagent_root=paperagent_root,
+            papers=papers,
+            report=report,
+        )
+        if report.notes_written:
+            try:
+                from yuxi.literature.notes.wiki_publish import publish_literature_notes
+
+                await publish_literature_notes(tenant_id, actor_uid=actor_uid)
+            except Exception:  # noqa: BLE001 - imported notes stay valid; cron repairs publication
+                logger.exception("PaperAgent 笔记已导入，但 Wiki 发布失败，将由对账任务补偿")
     return report

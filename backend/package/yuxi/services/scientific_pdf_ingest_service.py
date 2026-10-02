@@ -1584,6 +1584,16 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             )
         except Exception as prewarm_error:  # noqa: BLE001
             logger.warning(f"doclex prewarm enqueue deferred: revision={revision_id}: {prewarm_error}")
+        try:
+            # 应用层挂接：权威解析完成后登记派生文献工作区。失败不回滚已经
+            # 激活的证据版本，reconcile_scientific_literature_papers 会补偿。
+            from yuxi.literature.reconcile import register_scientific_revision
+
+            await register_scientific_revision(revision_id, enqueue_render=True)
+        except Exception as literature_error:  # noqa: BLE001
+            logger.exception(
+                f"Literature registration deferred to reconciler: revision={revision_id}: {literature_error}"
+            )
         return {
             "revision_id": revision_id,
             "index_revision_id": index_revision_id,

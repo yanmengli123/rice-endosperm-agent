@@ -14,7 +14,6 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from yuxi import config
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
@@ -140,10 +139,15 @@ async def generate_review_report(
         "引用文献用「文献N（rid）」形式）。\n\n"
         f"{blocks}\n\n直接输出 Markdown 综述正文。"
     )
-    from yuxi.models.chat import select_model
+    from yuxi.literature.llm_gateway import complete_once
 
-    model = select_model(model_spec=config.default_model)
-    response = await model.call([{"role": "user", "content": prompt}], stream=False)
+    response = await complete_once(
+        tenant_id=tenant_id,
+        uid=created_by,
+        operation="literature_review",
+        resource_ref="review:" + ",".join(rids[:20]),
+        messages=[{"role": "user", "content": prompt}],
+    )
     content = str(response.content or "").strip()
     if not content:
         raise ValueError("综述生成为空")

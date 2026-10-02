@@ -1686,6 +1686,116 @@ async def _publication_navigation_entries(
     return entries
 
 
+async def activate_derived_navigation_publication(
+    db: AsyncSession,
+    *,
+    wiki: KnowledgeWiki,
+    build: WikiBuildRun,
+    snapshot: WikiBuildSnapshot,
+    actor_uid: str,
+    source_ids: list[str],
+    entries: list[dict[str, Any]],
+    claim_revisions: list[WikiClaimRevision] | None = None,
+    content_snapshot_digest: str,
+) -> dict[str, Any]:
+    """Atomically activate a frozen navigation publication.
+
+    Both evidence-backed Dynamic Wiki builds and claim-free derived products
+    (such as literature notes) use this one pointer-swap implementation.  The
+    caller remains responsible for its domain-specific verification gates.
+    """
+    claim_revisions = claim_revisions or []
+    duplicate = (
+        await db.execute(
+            select(WikiPublication).where(
+                WikiPublication.wiki_id == wiki.wiki_id,
+                WikiPublication.build_id == build.build_id,
+                WikiPublication.status == "ACTIVE",
+            )
+        )
+    ).scalar_one_or_none()
+    if duplicate:
+        return {**_publication_dict(duplicate), "reused": True}
+    manifest = {
+        "schema_version": "wiki-publication/1.0",
+        "wiki_id": wiki.wiki_id,
+        "build_id": build.build_id,
+        "snapshot_id": snapshot.snapshot_id,
+        "source_kb_ids": source_ids,
+        "security_domain": wiki.security_domain,
+        "compiler_fingerprint": build.compiler_fingerprint,
+        "verification_policy_version": build.verification_policy_version,
+        "verified_claim_count": len(claim_revisions),
+        "claim_revision_ids": sorted(revision.claim_revision_id for revision in claim_revisions),
+        "content_snapshot_digest": content_snapshot_digest,
+        "navigation_entries": entries,
+    }
+    now = utc_now()
+    publication = WikiPublication(
+        publication_id=_new_id("wpub"),
+        wiki_id=wiki.wiki_id,
+        tenant_id=wiki.tenant_id,
+        snapshot_id=snapshot.snapshot_id,
+        build_id=build.build_id,
+        status="ACTIVE",
+        previous_publication_id=wiki.current_publication_id,
+        manifest_hash=_digest(manifest),
+        manifest_json=manifest,
+        published_at=now,
+    )
+    if wiki.current_publication_id:
+        current = (
+            await db.execute(
+                select(WikiPublication).where(WikiPublication.publication_id == wiki.current_publication_id)
+            )
+        ).scalar_one_or_none()
+        if current:
+            current.status = "SUPERSEDED"
+    db.add(publication)
+    await db.flush()
+    page_revision_ids = [entry["page_revision_id"] for entry in entries]
+    for page_revision_id in page_revision_ids:
+        db.add(WikiPublicationPage(publication_id=publication.publication_id, page_revision_id=page_revision_id))
+    db.add(
+        WikiPublicationIndex(
+            publication_id=publication.publication_id,
+            index_kind="LEXICAL_NAVIGATION_V1",
+            index_ref=f"postgresql://wiki_publications/{publication.publication_id}/manifest",
+            status="READY",
+            metadata_json={"entry_count": len(entries)},
+        )
+    )
+    for revision in claim_revisions:
+        revision.publication_status = "PUBLISHED"
+    if page_revision_ids:
+        page_revisions = list(
+            (
+                await db.execute(
+                    select(WikiPageRevision).where(WikiPageRevision.page_revision_id.in_(page_revision_ids))
+                )
+            ).scalars()
+        )
+        for revision in page_revisions:
+            revision.status = "PUBLISHED"
+    wiki.current_publication_id = publication.publication_id
+    wiki.status = "PUBLISHED"
+    _audit(
+        db,
+        wiki=wiki,
+        event_type="WIKI_PUBLISHED",
+        actor_uid=actor_uid,
+        payload={"publication_id": publication.publication_id, "build_id": build.build_id},
+    )
+    _outbox(
+        db,
+        wiki=wiki,
+        event_type="WIKI_PUBLISHED",
+        payload={"publication_id": publication.publication_id},
+    )
+    await db.flush()
+    return {**_publication_dict(publication), "reused": False}
+
+
 async def publish_wiki(
     db: AsyncSession,
     *,
@@ -1799,95 +1909,17 @@ async def publish_wiki(
         or not artifact.metadata_json.get("dependencies_complete")
     ):
         raise WikiServiceError("编译清单的页面或 Claim 集合不完整，必须重新构建后才能发布")
-    duplicate = (
-        await db.execute(
-            select(WikiPublication).where(
-                WikiPublication.wiki_id == wiki_id,
-                WikiPublication.build_id == build_id,
-                WikiPublication.status == "ACTIVE",
-            )
-        )
-    ).scalar_one_or_none()
-    if duplicate:
-        return {**_publication_dict(duplicate), "reused": True}
-    manifest = {
-        "schema_version": "wiki-publication/1.0",
-        "wiki_id": wiki_id,
-        "build_id": build_id,
-        "snapshot_id": build.snapshot_id,
-        "source_kb_ids": source_ids,
-        "security_domain": wiki.security_domain,
-        "compiler_fingerprint": build.compiler_fingerprint,
-        "verification_policy_version": build.verification_policy_version,
-        "verified_claim_count": len(revisions),
-        "claim_revision_ids": sorted(revision.claim_revision_id for revision in revisions),
-        "content_snapshot_digest": artifact.metadata_json.get("content_snapshot_digest"),
-        "navigation_entries": entries,
-    }
-    now = utc_now()
-    publication = WikiPublication(
-        publication_id=_new_id("wpub"),
-        wiki_id=wiki_id,
-        tenant_id=tenant_id,
-        snapshot_id=build.snapshot_id,
-        build_id=build_id,
-        status="ACTIVE",
-        previous_publication_id=wiki.current_publication_id,
-        manifest_hash=_digest(manifest),
-        manifest_json=manifest,
-        published_at=now,
-    )
-    if wiki.current_publication_id:
-        current = (
-            await db.execute(
-                select(WikiPublication).where(WikiPublication.publication_id == wiki.current_publication_id)
-            )
-        ).scalar_one_or_none()
-        if current:
-            current.status = "SUPERSEDED"
-    db.add(publication)
-    await db.flush()
-    page_revision_ids = [entry["page_revision_id"] for entry in entries]
-    for page_revision_id in page_revision_ids:
-        db.add(WikiPublicationPage(publication_id=publication.publication_id, page_revision_id=page_revision_id))
-    db.add(
-        WikiPublicationIndex(
-            publication_id=publication.publication_id,
-            index_kind="LEXICAL_NAVIGATION_V1",
-            index_ref=f"postgresql://wiki_publications/{publication.publication_id}/manifest",
-            status="READY",
-            metadata_json={"entry_count": len(entries)},
-        )
-    )
-    for revision in revisions:
-        revision.publication_status = "PUBLISHED"
-    if page_revision_ids:
-        page_revisions = list(
-            (
-                await db.execute(
-                    select(WikiPageRevision).where(WikiPageRevision.page_revision_id.in_(page_revision_ids))
-                )
-            ).scalars()
-        )
-        for revision in page_revisions:
-            revision.status = "PUBLISHED"
-    wiki.current_publication_id = publication.publication_id
-    wiki.status = "PUBLISHED"
-    _audit(
+    return await activate_derived_navigation_publication(
         db,
         wiki=wiki,
-        event_type="WIKI_PUBLISHED",
+        build=build,
+        snapshot=snapshot,
         actor_uid=actor_uid,
-        payload={"publication_id": publication.publication_id, "build_id": build_id},
+        source_ids=source_ids,
+        entries=entries,
+        claim_revisions=revisions,
+        content_snapshot_digest=str(artifact.metadata_json.get("content_snapshot_digest") or ""),
     )
-    _outbox(
-        db,
-        wiki=wiki,
-        event_type="WIKI_PUBLISHED",
-        payload={"publication_id": publication.publication_id},
-    )
-    await db.flush()
-    return {**_publication_dict(publication), "reused": False}
 
 
 async def rollback_wiki(

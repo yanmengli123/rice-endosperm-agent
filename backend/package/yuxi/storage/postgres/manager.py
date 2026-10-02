@@ -1091,6 +1091,8 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0074_literature_reader_renders_rls", "_migration_0074_literature_reader_renders_rls"),
         ("0075_literature_workspace", "_migration_0075_literature_workspace"),
         ("0076_literature_papers_source_revision", "_migration_0076_literature_papers_source_revision"),
+        ("0077_literature_source_revision_unique", "_migration_0077_literature_source_revision_unique"),
+        ("0078_literature_llm_governance", "_migration_0078_literature_llm_governance"),
     ]
 
     async def _migration_0072_literature_translation(self, conn) -> None:
@@ -1130,8 +1132,7 @@ class PostgresManager(metaclass=SingletonMeta):
             """,
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_translation_jobs_key "
             "ON literature_translation_jobs (tenant_id, paper_id, variant_kind)",
-            "CREATE INDEX IF NOT EXISTS ix_literature_translation_jobs_status "
-            "ON literature_translation_jobs (status)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_translation_jobs_status ON literature_translation_jobs (status)",
             "CREATE INDEX IF NOT EXISTS ix_literature_translation_jobs_tenant_id "
             "ON literature_translation_jobs (tenant_id)",
             "CREATE INDEX IF NOT EXISTS ix_literature_translation_jobs_paper_id "
@@ -1167,8 +1168,7 @@ class PostgresManager(metaclass=SingletonMeta):
             """,
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_journal_metrics_key "
             "ON literature_journal_metrics (tenant_id, journal_key, year)",
-            "CREATE INDEX IF NOT EXISTS ix_literature_journal_metrics_tenant "
-            "ON literature_journal_metrics (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_journal_metrics_tenant ON literature_journal_metrics (tenant_id)",
             """
             CREATE TABLE IF NOT EXISTS literature_attachments (
                 id BIGSERIAL PRIMARY KEY,
@@ -1313,6 +1313,36 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         )
 
+    async def _migration_0077_literature_source_revision_unique(self, conn) -> None:
+        """同一租户的一个权威解析版本只能映射到一篇文献。
+
+        0076 已在本地环境执行，不能回改；唯一性作为独立迁移追加。若存量
+        已经漂移出重复行，让迁移失败并人工对账，禁止静默删数据。
+        """
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_papers_tenant_source_revision "
+                "ON literature_papers (tenant_id, source_revision_id) "
+                "WHERE source_revision_id IS NOT NULL"
+            )
+        )
+
+    async def _migration_0078_literature_llm_governance(self, conn) -> None:
+        """Freeze requester/model/credential policy on durable literature jobs."""
+        columns = (
+            "requested_by VARCHAR(64) NOT NULL DEFAULT ''",
+            "llm_run_id VARCHAR(64) REFERENCES agent_runs(id)",
+            "model_spec VARCHAR(200)",
+            "credential_source VARCHAR(24)",
+            "credential_id BIGINT",
+            "provider_id VARCHAR(100)",
+            "policy_version INTEGER",
+        )
+        for table in ("literature_compile_jobs", "literature_translation_jobs"):
+            for declaration in columns:
+                await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {declaration}"))
+            await conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_llm_run_id ON {table} (llm_run_id)"))
+
     async def _migration_0070_literature_reader_renders(self, conn) -> None:
         """文献域 P1：阅读视图渲染状态表（ADR-0010 决议 7/9；派生物，非证据）。
 
@@ -1341,10 +1371,7 @@ class PostgresManager(metaclass=SingletonMeta):
             CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_reader_render_revision
                 ON literature_reader_renders (revision_id, render_version)
             """,
-            (
-                "CREATE INDEX IF NOT EXISTS ix_literature_reader_render_status "
-                "ON literature_reader_renders (status)"
-            ),
+            ("CREATE INDEX IF NOT EXISTS ix_literature_reader_render_status ON literature_reader_renders (status)"),
             (
                 "CREATE INDEX IF NOT EXISTS ix_literature_reader_renders_revision_id "
                 "ON literature_reader_renders (revision_id)"

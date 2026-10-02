@@ -186,6 +186,9 @@ async def test_compile_success_updates_paper_and_uploads_notes(env):
     job = await _job(session, "L1")
     assert job.status == "SUCCEEDED"
     assert job.note_uri == f"kbasset://tenants/{TENANT}/literature/notes/{paper.rid}/L1_note.md"
+    l2_job = await _job(session, "L2")
+    assert l2_job.status == "SUCCEEDED"
+    assert l2_job.note_uri == f"kbasset://tenants/{TENANT}/literature/notes/{paper.rid}/L2_wiki.md"
     # 评分回填（ai_value=5 唯一可用分量 → 归一化 5.0 ≥ L3 阈值 4.0）
     paper_row = await _paper(session)
     assert paper_row.ai_value_score == 5

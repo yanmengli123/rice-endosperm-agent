@@ -154,7 +154,7 @@ class KnowledgeScopeAudit(Base):
     __tablename__ = "knowledge_scope_audits"
     __table_args__ = (Index("ix_knowledge_scope_audits_scope_version", "scope_id", "new_version"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     audit_id = Column(String(64), nullable=False, unique=True, index=True)
     scope_id = Column(
         String(64), ForeignKey("knowledge_scopes.scope_id", ondelete="CASCADE"), nullable=False, index=True
@@ -254,7 +254,7 @@ class KnowledgeParseRevision(Base):
         Index("ix_knowledge_parse_revision_lease", "status", "lease_expires_at"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     revision_id = Column(String(64), nullable=False, unique=True, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
@@ -290,7 +290,7 @@ class KnowledgeParseStage(Base):
         Index("ix_knowledge_parse_stage_lease", "status", "lease_expires_at"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     stage_id = Column(String(64), nullable=False, unique=True, index=True)
     revision_id = Column(
         String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
@@ -318,7 +318,7 @@ class KnowledgeDocumentIdentityCache(Base):
         UniqueConstraint("tenant_id", "source_sha256", "parser_fingerprint", name="uq_knowledge_document_identity"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     source_sha256 = Column(String(64), nullable=False, index=True)
     parser_fingerprint = Column(String(64), nullable=False, index=True)
@@ -334,7 +334,7 @@ class KnowledgeParseArtifact(Base):
     __tablename__ = "knowledge_parse_artifacts"
     __table_args__ = (UniqueConstraint("revision_id", "kind", name="uq_knowledge_parse_artifact_role"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     artifact_id = Column(String(64), nullable=False, unique=True, index=True)
     revision_id = Column(
         String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
@@ -357,7 +357,7 @@ class KnowledgeIndexRevision(Base):
         Index("ix_knowledge_index_revision_file_status", "file_id", "status"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     revision_id = Column(String(64), nullable=False, unique=True, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
@@ -382,7 +382,7 @@ class EvidenceAnchorRecord(Base):
         Index("ix_evidence_anchor_lookup", "anchor_id"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     anchor_id = Column(String(64), nullable=False)
     parse_revision_id = Column(
         String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
@@ -426,7 +426,7 @@ class EvidenceSpanRecord(Base):
         Index("ix_evidence_spans_revision_anchor", "parse_revision_id", "anchor_id"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     parse_revision_id = Column(
         String(64),
@@ -480,7 +480,7 @@ class ScientificLexicalIndexRecord(Base):
         Index("ix_scientific_lexical_revision", "parse_revision_id"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     parse_revision_id = Column(
         String(64),
@@ -513,7 +513,7 @@ class EvidenceFeedbackRecord(Base):
         Index("ix_evidence_feedback_status", "status", "created_at"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     feedback_id = Column(String(64), nullable=False, unique=True, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     run_id = Column(String(64), nullable=False, index=True)
@@ -537,7 +537,7 @@ class EvidenceBenchmarkCandidateRecord(Base):
     __tablename__ = "evidence_benchmark_candidates"
     __table_args__ = (UniqueConstraint("candidate_id", name="uq_evidence_benchmark_candidate_id"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     candidate_id = Column(String(64), nullable=False, unique=True, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     feedback_id = Column(
@@ -557,7 +557,7 @@ class ArticleReference(Base):
     __tablename__ = "article_references"
     __table_args__ = (UniqueConstraint("parse_revision_id", "reference_id", name="uq_article_reference_revision"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     parse_revision_id = Column(
         String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -573,7 +573,7 @@ class CitationMention(Base):
     __tablename__ = "citation_mentions"
     __table_args__ = (UniqueConstraint("parse_revision_id", "mention_id", name="uq_citation_mention_revision"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     parse_revision_id = Column(
         String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -621,7 +621,7 @@ class KnowledgeGraphEntityAlias(Base):
         Index("ix_graph_entity_alias_entity_id", "entity_id"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
     entity_id = Column(String(64), ForeignKey("knowledge_graph_entities.entity_id", ondelete="CASCADE"), nullable=False)
     alias = Column(String(512), nullable=False)
@@ -1128,7 +1128,7 @@ class KnowledgeGraphOutboxEvent(Base):
         Index("ix_graph_outbox_status_created", "status", "created_at"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     event_id = Column(String(64), nullable=False)
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
     import_id = Column(String(64), ForeignKey("knowledge_graph_imports.import_id", ondelete="CASCADE"), nullable=False)
@@ -1286,7 +1286,7 @@ class KnowledgeRetrievalRun(Base):
         Index("ix_knowledge_retrieval_runs_status", "status", "started_at"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     retrieval_id = Column(String(64), nullable=False)
     run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True)
     request_id = Column(String(64))
@@ -1455,7 +1455,7 @@ class KnowledgeWiki(Base):
         Index("ix_knowledge_wikis_tenant_status", "tenant_id", "status"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     wiki_id = Column(String(64), nullable=False, index=True)
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -1484,7 +1484,7 @@ class WikiSourceBinding(Base):
         Index("ix_wiki_source_bindings_wiki_enabled", "wiki_id", "enabled"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     binding_id = Column(String(64), nullable=False, unique=True, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     source_kb_id = Column(
@@ -1504,7 +1504,7 @@ class WikiBuildSnapshot(Base):
     __tablename__ = "wiki_build_snapshots"
     __table_args__ = (UniqueConstraint("snapshot_id", name="uq_wiki_build_snapshots_snapshot_id"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     snapshot_id = Column(String(64), nullable=False, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -1521,7 +1521,7 @@ class WikiBuildSnapshotItem(Base):
         Index("ix_wiki_snapshot_items_snapshot", "snapshot_id"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     snapshot_id = Column(String(64), ForeignKey("wiki_build_snapshots.snapshot_id", ondelete="CASCADE"), nullable=False)
     source_kb_id = Column(String(80), nullable=False)
     file_id = Column(String(64))
@@ -1541,7 +1541,7 @@ class WikiBuildRun(Base):
         Index("ix_wiki_build_runs_wiki_status", "wiki_id", "status"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     build_id = Column(String(64), nullable=False, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -1563,7 +1563,7 @@ class WikiBuildArtifact(Base):
     __tablename__ = "wiki_build_artifacts"
     __table_args__ = (UniqueConstraint("artifact_id", name="uq_wiki_build_artifacts_artifact_id"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     artifact_id = Column(String(64), nullable=False, index=True)
     build_id = Column(
         String(64), ForeignKey("wiki_build_runs.build_id", ondelete="CASCADE"), nullable=False, index=True
@@ -1579,7 +1579,7 @@ class WikiPage(Base):
     __tablename__ = "wiki_pages"
     __table_args__ = (UniqueConstraint("wiki_id", "page_key", name="uq_wiki_pages_wiki_page_key"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     page_id = Column(String(64), nullable=False, unique=True, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     page_key = Column(String(256), nullable=False)
@@ -1593,7 +1593,7 @@ class WikiPageRevision(Base):
     __tablename__ = "wiki_page_revisions"
     __table_args__ = (UniqueConstraint("page_revision_id", name="uq_wiki_page_revisions_revision_id"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     page_revision_id = Column(String(64), nullable=False, index=True)
     page_id = Column(String(64), ForeignKey("wiki_pages.page_id", ondelete="CASCADE"), nullable=False, index=True)
     build_id = Column(String(64), ForeignKey("wiki_build_runs.build_id", ondelete="SET NULL"))
@@ -1607,7 +1607,7 @@ class WikiClaim(Base):
     __tablename__ = "wiki_claims"
     __table_args__ = (UniqueConstraint("wiki_id", "canonical_claim_key", name="uq_wiki_claims_canonical_key"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     claim_id = Column(String(64), nullable=False, unique=True, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     canonical_claim_key = Column(String(512), nullable=False)
@@ -1618,7 +1618,7 @@ class WikiClaimRevision(Base):
     __tablename__ = "wiki_claim_revisions"
     __table_args__ = (UniqueConstraint("claim_revision_id", name="uq_wiki_claim_revisions_revision_id"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     claim_revision_id = Column(String(64), nullable=False, index=True)
     claim_id = Column(String(64), ForeignKey("wiki_claims.claim_id", ondelete="CASCADE"), nullable=False, index=True)
     page_revision_id = Column(
@@ -1650,7 +1650,7 @@ class WikiClaimEvidence(Base):
         Index("ix_wiki_claim_evidence_claim", "claim_revision_id"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     claim_revision_id = Column(
         String(64), ForeignKey("wiki_claim_revisions.claim_revision_id", ondelete="CASCADE"), nullable=False
     )
@@ -1668,7 +1668,7 @@ class WikiVerificationRun(Base):
     __tablename__ = "wiki_verification_runs"
     __table_args__ = (UniqueConstraint("verification_id", name="uq_wiki_verification_runs_verification_id"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     verification_id = Column(String(64), nullable=False, index=True)
     claim_revision_id = Column(
         String(64), ForeignKey("wiki_claim_revisions.claim_revision_id", ondelete="CASCADE"), nullable=False, index=True
@@ -1686,7 +1686,7 @@ class WikiConflict(Base):
     __tablename__ = "wiki_conflicts"
     __table_args__ = (UniqueConstraint("conflict_id", name="uq_wiki_conflicts_conflict_id"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     conflict_id = Column(String(64), nullable=False, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     claim_revision_id = Column(String(64), ForeignKey("wiki_claim_revisions.claim_revision_id", ondelete="CASCADE"))
@@ -1707,7 +1707,7 @@ class WikiDependency(Base):
         Index("ix_wiki_dependencies_source", "source_kind", "source_id"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     source_kind = Column(String(64), nullable=False)
     source_id = Column(String(512), nullable=False)
@@ -1723,7 +1723,7 @@ class WikiPublication(Base):
         Index("ix_wiki_publications_wiki_status", "wiki_id", "status"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     publication_id = Column(String(64), nullable=False, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -1743,7 +1743,7 @@ class WikiPublicationPage(Base):
     __tablename__ = "wiki_publication_pages"
     __table_args__ = (UniqueConstraint("publication_id", "page_revision_id", name="uq_wiki_publication_pages"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     publication_id = Column(
         String(64), ForeignKey("wiki_publications.publication_id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -1756,7 +1756,7 @@ class WikiPublicationIndex(Base):
     __tablename__ = "wiki_publication_indexes"
     __table_args__ = (UniqueConstraint("publication_id", "index_kind", name="uq_wiki_publication_indexes_kind"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     publication_id = Column(
         String(64), ForeignKey("wiki_publications.publication_id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -1770,7 +1770,7 @@ class WikiAuditEvent(Base):
     __tablename__ = "wiki_audit_events"
     __table_args__ = (Index("ix_wiki_audit_events_wiki_created", "wiki_id", "created_at"),)
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     event_id = Column(String(64), nullable=False, unique=True, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -1788,7 +1788,7 @@ class WikiOutboxEvent(Base):
         Index("ix_wiki_outbox_events_status", "status", "available_at"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
     event_id = Column(String(64), nullable=False, index=True)
     wiki_id = Column(String(64), ForeignKey("knowledge_wikis.wiki_id", ondelete="CASCADE"), nullable=False, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -2162,6 +2162,13 @@ class LiteratureCompileJob(Base):
     attempt = Column(Integer, nullable=False, default=0)
     note_uri = Column(String(1024))  # SUCCEEDED 后的产物 MinIO URI（kbasset://）
     error = Column(Text)
+    requested_by = Column(String(64), nullable=False, default="")
+    llm_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True, index=True)
+    model_spec = Column(String(200))
+    credential_source = Column(String(24))
+    credential_id = Column(BigInteger)
+    provider_id = Column(String(100))
+    policy_version = Column(Integer)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
@@ -2206,9 +2213,7 @@ class LiteratureVariant(Base):
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    paper_id = Column(
-        BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
     parse_revision_id = Column(String(64), nullable=False)
     variant_kind = Column(String(32), nullable=False)  # zh / en_zh / summary
     lang = Column(String(8), nullable=False)  # ★ 进身份：zh / en
@@ -2229,14 +2234,19 @@ class LiteratureTranslationJob(Base):
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    paper_id = Column(
-        BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
     variant_kind = Column(String(32), nullable=False, default="zh")
     status = Column(String(32), nullable=False, default="PENDING")
     attempt = Column(Integer, nullable=False, default=0)
     variant_uri = Column(String(1024))
     error = Column(Text)
+    requested_by = Column(String(64), nullable=False, default="")
+    llm_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True, index=True)
+    model_spec = Column(String(200))
+    credential_source = Column(String(24))
+    credential_id = Column(BigInteger)
+    provider_id = Column(String(100))
+    policy_version = Column(Integer)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
@@ -2276,9 +2286,7 @@ class LiteratureAttachment(Base):
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    paper_id = Column(
-        BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
     kind = Column(String(16), nullable=False)  # ATTACHMENT_KINDS: si/review/data/note/cover/response
     filename = Column(String(512), nullable=False)
     uri = Column(String(1024), nullable=False)  # kbasset:// 原始文件
@@ -2292,9 +2300,7 @@ class LiteratureDiaryEntry(Base):
     """阅读日记（G5，上游 diary.py 语义：空内容即删除该天，不留空白行）。"""
 
     __tablename__ = "literature_diary_entries"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "uid", "entry_date", name="uq_literature_diary_user_date"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "uid", "entry_date", name="uq_literature_diary_user_date"),)
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -2316,9 +2322,7 @@ class LiteratureCard(Base):
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    paper_id = Column(
-        BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
     card_type = Column(String(32), nullable=False)
     slug = Column(String(64), nullable=False)
     title = Column(String(512), nullable=False, default="")

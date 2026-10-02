@@ -53,19 +53,17 @@ class _FakeAdapter:
 @pytest.mark.asyncio
 async def test_compile_l1_l2_uses_model_chain_and_splits_output(monkeypatch):
     adapter = _FakeAdapter(_L1L2_JSON)
-    seen_specs = []
 
-    def _fake_select_model(model_spec, **kwargs):
-        seen_specs.append(model_spec)
-        return adapter
+    async def _fake_governed_call(messages):
+        return await adapter.call(messages, stream=False)
 
-    # select_model 已延迟导入（P6b 防循环）——patch 源模块
-    import yuxi.models.chat as chat_mod
+    # 编译器只消费统一治理网关；模型选择/BYOK/计量由网关负责。
+    import yuxi.literature.llm_gateway as gateway
 
-    monkeypatch.setattr(chat_mod, "select_model", _fake_select_model)
+    monkeypatch.setattr(gateway, "call", _fake_governed_call)
     result = await compiler.compile_l1_l2(_META, _PARAGRAPHS)
 
-    assert seen_specs, "必须经 yuxi.models.select_model（不引 openai 直连）"
+    assert adapter.calls, "必须经文献 LLM 治理网关（不引 openai 直连）"
     # system+user 两消息（前缀缓存形状）
     messages = adapter.calls[0]
     assert messages[0]["role"] == "system"

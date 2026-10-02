@@ -19,11 +19,10 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from yuxi import config
 from yuxi.literature.notes.prompts import parse_compile_json
+from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.literature.translate import prompts
 from yuxi.literature.translate.latextap import reassemble
-from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.services.run_queue_service import get_arq_pool
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
@@ -53,7 +52,9 @@ def _job_id_key(job_id: int) -> str:
 # ---------------------------------------------------------------- 任务入列
 
 
-async def enqueue_literature_translation(*, paper_id: int, variant_kind: str = "zh", force: bool = False) -> dict:
+async def enqueue_literature_translation(
+    *, paper_id: int, variant_kind: str = "zh", force: bool = False, requested_by: str = ""
+) -> dict:
     if variant_kind not in VALID_VARIANT_KINDS:
         raise ValueError(f"非法变体类型: {variant_kind}")
     async with pg_manager.get_async_session_context() as session:
@@ -82,6 +83,23 @@ async def enqueue_literature_translation(*, paper_id: int, variant_kind: str = "
         else:
             job.status = "PENDING"
             job.error = None
+        if requested_by:
+            from yuxi.literature.llm_gateway import freeze_literature_policy
+
+            policy = await freeze_literature_policy(
+                session,
+                tenant_id=int(paper.tenant_id),
+                uid=requested_by,
+                operation=f"translate_{variant_kind}",
+                resource_ref=f"{paper.rid}:{variant_kind}",
+            )
+            job.requested_by = requested_by
+            job.llm_run_id = policy.run_id
+            job.model_spec = policy.model_spec
+            job.credential_source = policy.credential_source
+            job.credential_id = policy.credential_id
+            job.provider_id = policy.provider_id
+            job.policy_version = policy.policy_version
         await session.flush()
         job_id = job.id
         await session.commit()
@@ -107,11 +125,10 @@ async def _translate_document(paragraphs: list[str]) -> list[str]:
     prompt = prompts.with_task(prefix, prompts.translate_task(para_ids))
     system, user = prompts.split_task(prompt)
 
-    from yuxi.models.chat import select_model
+    from yuxi.literature.llm_gateway import call
 
-    model = select_model(model_spec=config.default_model)
     messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
-    response = await model.call(messages, stream=False)
+    response = await call(messages)
     data = parse_compile_json(str(response.content or ""))
     translations = data.get("translations") or []
     by_id = {str(t.get("para_id") or ""): str(t.get("zh") or "") for t in translations if isinstance(t, dict)}
@@ -123,6 +140,34 @@ async def _translate_document(paragraphs: list[str]) -> list[str]:
             raise ValueError(f"译文缺少段落 {pid}（整篇契约：必须逐段返回）")
         out.append(reassemble(labeled_zh, math_list))
     return out
+
+
+async def _summarize_document(paragraphs: list[str]) -> str:
+    """Create the summary variant instead of silently treating it as a translation."""
+    source = "\n\n".join(f"[P{i:03d}] {paragraph}" for i, paragraph in enumerate(paragraphs, 1))
+    if len(source) > MAX_INPUT_CHARS_PER_CALL:
+        raise ValueError(f"全文 {len(source)} 字符超过单次调用红线 {MAX_INPUT_CHARS_PER_CALL}")
+    from yuxi.literature.llm_gateway import call
+
+    response = await call(
+        [
+            {
+                "role": "system",
+                "content": "你是严谨的学术编辑。仅依据给定论文生成中文结构化摘要，不补造事实。",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "请用 Markdown 输出研究问题、方法、关键发现、局限和可复用价值；"
+                    "关键结论必须附对应的 [Pxxx] 段落编号。\n\n" + source
+                ),
+            },
+        ],
+    )
+    content = str(response.content or "").strip()
+    if not content:
+        raise ValueError("摘要模型返回空内容")
+    return content + "\n"
 
 
 async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> dict[str, Any] | None:
@@ -160,40 +205,97 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
             ).scalar_one_or_none()
         if render is None:
             raise ValueError(f"解析版本尚无成功的阅读渲染: {paper.source_revision_id}")
+        from yuxi.literature.review import document_object_candidates, para_text
+
         object_base = render.markdown_uri.removeprefix("kbasset://").removesuffix("render.md")
-        document_json = await get_minio_client().adownload_file(RENDER_BUCKET, object_base + "document.json")
+        document_json = None
+        for candidate in document_object_candidates(render.markdown_uri):
+            try:
+                document_json = await get_minio_client().adownload_file(RENDER_BUCKET, candidate)
+                break
+            except Exception:  # noqa: BLE001 - 候选缺失试下一个
+                continue
+        if document_json is None:
+            raise ValueError(f"渲染产物 document.json 不可读: {render.markdown_uri}")
         doc = json.loads(document_json.decode("utf-8"))
         paragraphs = [
-            str(p.get("text") or "")
-            for p in (doc.get("paragraphs") or [])
-            if isinstance(p, dict) and (p.get("text") or "").strip()
+            para_text(p) for p in (doc.get("paragraphs") or []) if isinstance(p, dict) and para_text(p).strip()
         ]
         if not paragraphs:
             raise ValueError("document.json 无可用段落")
 
-        zh_paragraphs = await _translate_document(paragraphs)
-        zh_md = f"# {paper.title or ''}\n\n" + "\n\n".join(zh_paragraphs) + "\n"
-        digest = hashlib.sha256(zh_md.encode("utf-8")).hexdigest()
-        uri = f"kbasset://{object_base}variants/zh.md"
+        alignment: list[dict[str, str]] = []
+
+        async def _generate_variant() -> str:
+            nonlocal alignment
+            if job.variant_kind == "summary":
+                return await _summarize_document(paragraphs)
+            zh_paragraphs = await _translate_document(paragraphs)
+            alignment = [
+                {"para_id": f"P{i:03d}", "original": original, "translated": translated}
+                for i, (original, translated) in enumerate(zip(paragraphs, zh_paragraphs, strict=True), 1)
+            ]
+            if job.variant_kind == "en_zh":
+                return (
+                    f"# {paper.title or ''}\n\n"
+                    + "\n\n".join(f"{item['original']}\n\n> {item['translated']}" for item in alignment)
+                    + "\n"
+                )
+            return f"# {paper.title or ''}\n\n" + "\n\n".join(zh_paragraphs) + "\n"
+
+        if job.llm_run_id:
+            from yuxi.literature.llm_gateway import governed_runtime, policy_for_job_attempt
+
+            policy = await policy_for_job_attempt(job, operation=f"translate_{job.variant_kind}")
+            async with governed_runtime(policy):
+                variant_content = await _generate_variant()
+        else:  # pre-0078 jobs and isolated unit fixtures
+            variant_content = await _generate_variant()
+        digest = hashlib.sha256(variant_content.encode("utf-8")).hexdigest()
+        uri = f"kbasset://{object_base}variants/{job.variant_kind}.md"
         await get_minio_client().aupload_file(
             bucket_name=RENDER_BUCKET,
             object_name=uri.removeprefix("kbasset://"),
-            data=zh_md.encode("utf-8"),
+            data=variant_content.encode("utf-8"),
             content_type="text/markdown",
         )
+        if alignment:
+            await get_minio_client().aupload_file(
+                bucket_name=RENDER_BUCKET,
+                object_name=f"{object_base}variants/{job.variant_kind}.json",
+                data=json.dumps(
+                    {"schema_version": 1, "paragraphs": alignment}, ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8"),
+                content_type="application/json",
+            )
         async with pg_manager.get_async_session_context() as session:
-            await session.merge(
-                LiteratureVariant(
+            variant = (
+                await session.execute(
+                    select(LiteratureVariant).where(
+                        LiteratureVariant.tenant_id == paper.tenant_id,
+                        LiteratureVariant.paper_id == paper.id,
+                        LiteratureVariant.variant_kind == job.variant_kind,
+                        LiteratureVariant.lang == "zh",
+                        LiteratureVariant.parse_revision_id == paper.source_revision_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if variant is None:
+                variant = LiteratureVariant(
                     tenant_id=paper.tenant_id,
                     paper_id=paper.id,
                     parse_revision_id=paper.source_revision_id,
-                    variant_kind="zh",
+                    variant_kind=job.variant_kind,
                     lang="zh",
                     uri=uri,
                     content_digest=digest,
-                    model_id=config.default_model,
+                    model_id=job.model_spec,
                 )
-            )
+                session.add(variant)
+            else:
+                variant.uri = uri
+                variant.content_digest = digest
+                variant.model_id = job.model_spec
             await session.execute(
                 update(LiteratureTranslationJob)
                 .where(LiteratureTranslationJob.id == job.id)
@@ -230,8 +332,9 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
         return {"job_id": job_id, "status": final, "error": reason}
 
 
-async def reconcile_stale_literature_translations() -> int:
+async def reconcile_stale_literature_translations(ctx: dict | None = None) -> int:
     """对账（cron）：孤儿 RUNNING / 滞留 PENDING 回收重排。"""
+    del ctx  # ARQ cron 注入的作业上下文（对账不使用）
     now = utc_now()
     targets: list[int] = []
     async with pg_manager.get_async_session_context() as session:

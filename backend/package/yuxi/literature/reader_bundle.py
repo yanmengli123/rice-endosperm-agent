@@ -8,14 +8,15 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 from urllib.parse import quote
 
 from sqlalchemy import select
 
-from yuxi.literature.review import RESOLVED_MD_NAME
 from yuxi.literature.reading.service import RENDER_BUCKET
+from yuxi.literature.review import RESOLVED_MD_NAME
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
@@ -96,12 +97,16 @@ async def get_variant_content(tenant_id: int, rid: str, variant_kind: str) -> di
         if paper is None:
             return None
         variant = (
-            await session.execute(
-                select(LiteratureVariant)
-                .where(LiteratureVariant.paper_id == paper.id, LiteratureVariant.variant_kind == variant_kind)
-                .order_by(LiteratureVariant.created_at.desc())
+            (
+                await session.execute(
+                    select(LiteratureVariant)
+                    .where(LiteratureVariant.paper_id == paper.id, LiteratureVariant.variant_kind == variant_kind)
+                    .order_by(LiteratureVariant.created_at.desc())
+                )
             )
-        ).scalar_one_or_none()
+            .scalars()
+            .first()
+        )
     if variant is None:
         return {"rid": rid, "variant_kind": variant_kind, "ready": False, "reason": "译文尚未生成"}
     content = (await get_minio_client().adownload_file(RENDER_BUCKET, variant.uri.removeprefix("kbasset://"))).decode(
@@ -115,6 +120,82 @@ async def get_variant_content(tenant_id: int, rid: str, variant_kind: str) -> di
         "content": content,
         "uri": variant.uri,
     }
+
+
+async def get_parallel_content(tenant_id: int, rid: str) -> dict[str, Any] | None:
+    """Return paragraph-identity aligned source/translation rows.
+
+    New translations persist a JSON sidecar with stable ``Pxxx`` identities.
+    Historical imports remain readable through a deterministic positional
+    fallback, explicitly marking missing translations instead of collapsing
+    empty paragraphs.
+    """
+    async with pg_manager.get_async_session_context() as session:
+        paper = (
+            await session.execute(
+                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+            )
+        ).scalar_one_or_none()
+        if paper is None:
+            return None
+        variants = list(
+            (
+                await session.execute(
+                    select(LiteratureVariant)
+                    .where(
+                        LiteratureVariant.paper_id == paper.id,
+                        LiteratureVariant.variant_kind.in_(("zh", "en_zh")),
+                    )
+                    .order_by(LiteratureVariant.created_at.desc())
+                )
+            ).scalars()
+        )
+        # Prefer the paragraph-preserving Chinese translation.  Historical
+        # en_zh imports are a readable fallback but are not guaranteed to have
+        # one translated paragraph per source paragraph.
+        variant = next((item for item in variants if item.variant_kind == "zh"), None)
+        variant = variant or (variants[0] if variants else None)
+    if variant is None:
+        return {"rid": rid, "ready": False, "reason": "译文尚未生成", "paragraphs": []}
+
+    minio = get_minio_client()
+    sidecar_name = re.sub(r"\.md$", ".json", variant.uri.removeprefix("kbasset://"))
+    try:
+        sidecar = json.loads((await minio.adownload_file(RENDER_BUCKET, sidecar_name)).decode("utf-8"))
+        rows = [
+            {
+                "para_id": str(row.get("para_id") or ""),
+                "original": str(row.get("original") or ""),
+                "translated": str(row.get("translated") or ""),
+            }
+            for row in (sidecar.get("paragraphs") or [])
+            if isinstance(row, dict)
+        ]
+        if rows:
+            return {"rid": rid, "ready": True, "alignment": "identity", "paragraphs": rows}
+    except Exception:  # noqa: BLE001 - pre-sidecar variants use the fallback below
+        pass
+
+    reader = await get_reader_bundle(tenant_id, rid)
+    translated = await get_variant_content(tenant_id, rid, variant.variant_kind)
+    if not reader or not reader.get("ready") or not translated or not translated.get("ready"):
+        return {"rid": rid, "ready": False, "reason": "原文或译文不可读", "paragraphs": []}
+
+    def _paragraphs(value: str) -> list[str]:
+        return [part.strip() for part in re.split(r"\n\s*\n", value or "") if part.strip()]
+
+    originals = _paragraphs(str(reader.get("markdown") or ""))
+    translations = _paragraphs(str(translated.get("content") or ""))
+    total = max(len(originals), len(translations))
+    rows = [
+        {
+            "para_id": f"legacy-{index + 1:03d}",
+            "original": originals[index] if index < len(originals) else "",
+            "translated": translations[index] if index < len(translations) else "",
+        }
+        for index in range(total)
+    ]
+    return {"rid": rid, "ready": True, "alignment": "legacy-positional", "paragraphs": rows}
 
 
 async def get_source_pdf(tenant_id: int, rid: str) -> tuple[bytes, str] | None:

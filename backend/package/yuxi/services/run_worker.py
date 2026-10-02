@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from arq import cron
 from sqlalchemy import select
@@ -26,6 +27,20 @@ from yuxi.agents.toolkits.browser.gateway_client import (
 )
 from yuxi.config import config as sys_config
 from yuxi.knowledge.graphs.doclex.service import prewarm_doclex_for_kb
+from yuxi.literature.notes.service import (
+    process_literature_compile,
+    reconcile_stale_literature_compiles,
+)
+from yuxi.literature.notes.wiki_publish import reconcile_literature_note_wikis
+from yuxi.literature.reading.service import (
+    process_literature_reader_render,
+    reconcile_stale_literature_renders,
+)
+from yuxi.literature.reconcile import reconcile_scientific_literature_papers
+from yuxi.literature.translate.service import (
+    process_literature_translation,
+    reconcile_stale_literature_translations,
+)
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.services.agent_run_service import (
     acknowledge_agent_run_dispatch,
@@ -39,18 +54,6 @@ from yuxi.services.channel_service import (
     relay_channel_outbox_now,
 )
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
-from yuxi.literature.notes.service import (
-    process_literature_compile,
-    reconcile_stale_literature_compiles,
-)
-from yuxi.literature.translate.service import (
-    process_literature_translation,
-    reconcile_stale_literature_translations,
-)
-from yuxi.literature.reading.service import (
-    process_literature_reader_render,
-    reconcile_stale_literature_renders,
-)
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.mcp_canary_service import run_mcp_live_canary
 from yuxi.services.run_queue_service import (
@@ -589,7 +592,6 @@ async def _emit_browser_guard_trace(run_id: str) -> None:
     """
     try:
         from sqlalchemy import select
-
         from yuxi.services.browser_gateway_service import count_run_commands
         from yuxi.trace import emit_trace
 
@@ -1226,6 +1228,8 @@ class WorkerSettings:
         cron(reconcile_stale_literature_compiles, minute=set(range(0, 60, 5))),
         # 文献域翻译（zh 变体，lang 进身份）：同构状态机（D2 决策）
         cron(reconcile_stale_literature_translations, minute=set(range(0, 60, 5))),
+        cron(reconcile_scientific_literature_papers, minute=set(range(2, 60, 5))),
+        cron(reconcile_literature_note_wikis, minute={4, 14, 24, 34, 44, 54}),
         cron(reconcile_dynamic_wikis, minute=set(range(0, 60))),
         # 轨迹 Outbox relay：fast-path 直发失败/worker 崩溃遗留的 PENDING 补发
         cron(relay_trace_outbox, minute=set(range(0, 60))),

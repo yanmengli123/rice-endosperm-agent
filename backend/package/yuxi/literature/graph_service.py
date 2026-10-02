@@ -1,7 +1,7 @@
-"""文献计量图谱查询（G3；PG 为 canonical，Neo4j 投影属后续接入）。
+"""文献计量图谱查询（G3；PG 为 canonical，Neo4j 是可重建投影）。
 
-数据 API（network/neighbors/top）对标 paperlit graph 端点形状；前端本轮以
-轻量邻居面板消费，3D 立体渲染不承诺（决议 13）。
+数据 API（network/neighbors/top）对标 paperlit graph 端点形状；前端提供
+共享数据集的 2D Canvas 与 Three.js WebGL 3D 视图（决议 15）。
 """
 
 from __future__ import annotations

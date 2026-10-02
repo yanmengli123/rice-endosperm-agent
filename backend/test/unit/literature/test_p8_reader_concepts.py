@@ -208,13 +208,12 @@ async def test_topic_moc_fail_closed_without_match(env):
 
 
 async def test_topic_moc_generates_report(env, monkeypatch):
-    class _FakeAdapter:
-        async def call(self, messages, stream=False):
-            return type("R", (), {"content": "# 主题导读\n\n淀粉合成综述……"})()
+    async def _complete_once(**kwargs):
+        return type("R", (), {"content": "# 主题导读\n\n淀粉合成综述……"})()
 
-    import yuxi.models.chat as chat_mod
+    import yuxi.literature.llm_gateway as gateway
 
-    monkeypatch.setattr(chat_mod, "select_model", lambda model_spec, **kw: _FakeAdapter())
+    monkeypatch.setattr(gateway, "complete_once", _complete_once)
     result = await concepts.generate_topic_moc(TENANT, topic="starch biosynthesis", created_by="u1")
     assert result["sources"] == 3
     assert result["content_uri"].startswith(f"kbasset://tenants/{TENANT}/literature/reports/")

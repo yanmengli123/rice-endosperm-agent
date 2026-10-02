@@ -23,8 +23,8 @@ from pydantic import BaseModel, Field
 from yuxi.agents.toolkits.registry import tool
 from yuxi.literature.notes.service import VALID_LEVELS
 from yuxi.literature.translate.service import VALID_VARIANT_KINDS
-from yuxi.storage.postgres.manager import pg_manager
 from yuxi.services.principal import resolve_tenant_id
+from yuxi.storage.postgres.manager import pg_manager
 
 
 class SearchLiteraturePapersInput(BaseModel):
@@ -218,7 +218,11 @@ async def request_paper_translation(rid: str, variant_kind: str = "zh", runtime:
     if detail is None:
         return f"文献 {rid} 不存在或无权访问。"
     paper_id = await _paper_id_by_rid(tenant_id, rid.strip())
-    result = await enqueue_literature_translation(paper_id=paper_id, variant_kind=variant_kind.strip())
+    result = await enqueue_literature_translation(
+        paper_id=paper_id,
+        variant_kind=variant_kind.strip(),
+        requested_by=str(getattr(context, "uid", "") or ""),
+    )
     import json
 
     return json.dumps({"rid": rid, **result}, ensure_ascii=False)

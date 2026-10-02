@@ -599,7 +599,7 @@ async def _enforce_platform_token_quota(
                 select(AgentRun.input_payload).where(
                     AgentRun.tenant_id == tenant_id,
                     AgentRun.uid == uid,
-                    AgentRun.run_type.in_(("chat", "resume")),
+                    AgentRun.run_type.in_(("chat", "resume", "literature")),
                     AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
                 )
             )
@@ -655,7 +655,7 @@ async def _enforce_user_quota(
                 select(func.count(AgentRun.id)).filter(
                     AgentRun.uid == uid,
                     AgentRun.created_at >= day_start,
-                    AgentRun.run_type == "chat",
+                    AgentRun.run_type.in_(("chat", "literature")),
                     AgentRun.status.notin_(["failed", "cancelled"]),
                 )
             )

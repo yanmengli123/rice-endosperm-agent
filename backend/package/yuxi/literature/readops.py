@@ -6,6 +6,7 @@ kbasset:// 逻辑 URI，物理布局不出本域（由 /api/literature/assets �
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from sqlalchemy import func, select
@@ -100,6 +101,15 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
             .scalars()
             .all()
         )
+        translation_jobs = (
+            (
+                await session.execute(
+                    select(LiteratureTranslationJob).where(LiteratureTranslationJob.paper_id == paper.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
         attachments = (
             (await session.execute(select(LiteratureAttachment).where(LiteratureAttachment.paper_id == paper.id)))
             .scalars()
@@ -146,6 +156,15 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
                 "parse_revision_id": v.parse_revision_id,
             }
             for v in variants
+        ],
+        "translation_jobs": [
+            {
+                "variant_kind": job.variant_kind,
+                "status": job.status,
+                "variant_uri": job.variant_uri,
+                "error": job.error,
+            }
+            for job in translation_jobs
         ],
         "attachments": [
             {"kind": a.kind, "filename": a.filename, "uri": a.uri, "text_uri": a.text_uri} for a in attachments
@@ -250,6 +269,130 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
     )
     tasks.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     return tasks[:limit]
+
+
+_TASK_CENTER_STATUS = {
+    "PENDING": "queued",
+    "RUNNING": "running",
+    "SUCCEEDED": "success",
+    "FAILED": "failed",
+    "DEAD": "failed",
+}
+
+
+async def list_literature_pipeline_tasks(*, status: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Project durable literature jobs into the administrator task center.
+
+    Literature jobs execute in ARQ and therefore cannot be represented by the
+    API process-local ``Tasker``.  This projection intentionally spans tenants;
+    its only HTTP consumer is the super-administrator task endpoint.
+    """
+    bounded_limit = max(1, min(int(limit or 100), 100))
+    async with pg_manager.get_async_session_context() as session:
+        renders = list(
+            (
+                await session.execute(
+                    select(LiteratureReaderRender)
+                    .order_by(LiteratureReaderRender.updated_at.desc())
+                    .limit(bounded_limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        compiles = list(
+            (
+                await session.execute(
+                    select(LiteratureCompileJob, LiteraturePaper.rid, LiteraturePaper.title)
+                    .join(LiteraturePaper, LiteraturePaper.id == LiteratureCompileJob.paper_id)
+                    .order_by(LiteratureCompileJob.updated_at.desc())
+                    .limit(bounded_limit)
+                )
+            ).all()
+        )
+        translations = list(
+            (
+                await session.execute(
+                    select(LiteratureTranslationJob, LiteraturePaper.rid, LiteraturePaper.title)
+                    .join(LiteraturePaper, LiteraturePaper.id == LiteratureTranslationJob.paper_id)
+                    .order_by(LiteratureTranslationJob.updated_at.desc())
+                    .limit(bounded_limit)
+                )
+            ).all()
+        )
+
+    projected: list[dict[str, Any]] = []
+
+    def append_task(
+        row: Any,
+        *,
+        task_type: str,
+        name: str,
+        ref: str,
+        payload: dict[str, Any],
+    ) -> None:
+        mapped_status = _TASK_CENTER_STATUS.get(str(row.status or "").upper(), "running")
+        if status and mapped_status != status:
+            return
+        projected.append(
+            {
+                "id": f"literature:{task_type}:{row.id}",
+                "name": name,
+                "type": f"literature_{task_type}",
+                "status": mapped_status,
+                "progress": 100.0 if mapped_status == "success" else 50.0 if mapped_status == "running" else 0.0,
+                "message": str(row.error or "") if mapped_status == "failed" else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                "started_at": None,
+                "completed_at": row.updated_at.isoformat() if mapped_status in {"success", "failed"} else None,
+                "error": row.error if mapped_status == "failed" else None,
+                "cancel_requested": False,
+                "cancelable": False,
+                "deletable": False,
+                "tenant_id": int(row.tenant_id),
+                "payload": {"ref": ref, "attempt": row.attempt, **payload},
+            }
+        )
+
+    for row in renders:
+        append_task(
+            row,
+            task_type="reader_render",
+            name=f"文献阅读包渲染：{row.revision_id}",
+            ref=row.revision_id,
+            payload={"revision_id": row.revision_id},
+        )
+    for row, rid, title in compiles:
+        append_task(
+            row,
+            task_type="compile",
+            name=f"文献笔记 {row.level}：{title or rid}",
+            ref=f"{rid}:{row.level}",
+            payload={"rid": rid, "paper_id": row.paper_id, "level": row.level},
+        )
+    for row, rid, title in translations:
+        append_task(
+            row,
+            task_type="translation",
+            name=f"文献翻译 {row.variant_kind}：{title or rid}",
+            ref=f"{rid}:{row.variant_kind}",
+            payload={"rid": rid, "paper_id": row.paper_id, "variant_kind": row.variant_kind},
+        )
+
+    projected.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    projected = projected[:bounded_limit]
+    status_counter = Counter(item["status"] for item in projected)
+    type_counter = Counter(item["type"] for item in projected)
+    return {
+        "tasks": projected,
+        "summary": {
+            "total": len(projected),
+            "filtered_total": len(projected),
+            "status_counts": dict(status_counter),
+            "type_counts": dict(type_counter),
+        },
+    }
 
 
 def validate_literature_asset_uri(uri: str, tenant_id: int) -> str:

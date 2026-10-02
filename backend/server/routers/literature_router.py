@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile
 
-from server.utils.auth_middleware import get_required_user
+from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from yuxi.literature import bib_import, cards, concepts, diary, enrich as enrich_module
 from yuxi.literature import graph_service, readops, review
 from yuxi.literature import reader_bundle
 from yuxi.literature.attachments import register_attachment
+from yuxi.literature.import_archive import import_paperagent_archive
 from yuxi.literature.reading.service import RENDER_BUCKET, enqueue_reader_render
+from yuxi.literature.notes.service import enqueue_literature_compile
 from yuxi.literature.translate.service import enqueue_literature_translation
 from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.minio import get_minio_client
@@ -86,6 +88,28 @@ async def trigger_render(rid: str, current_user: User = Depends(get_required_use
     return {"status": 202, **result}
 
 
+@literature.post("/papers/{rid}/compile", status_code=202)
+async def trigger_compile(
+    rid: str,
+    level: str = Query(default="L1"),
+    force: bool = Query(default=False),
+    current_user: User = Depends(get_required_user),
+):
+    """触发 L1/L2/L3 编译（202 入队；L1=L1+L2 合并，L3 需价值分达标或 force）。"""
+    tenant_id = await _current_tenant(current_user)
+    paper_id = await _paper_id_by_rid(tenant_id, rid)
+    try:
+        result = await enqueue_literature_compile(
+            paper_id=paper_id,
+            level=level,
+            force=force,
+            requested_by=current_user.uid,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 202, **result}
+
+
 @literature.post("/papers/{rid}/translation", status_code=202)
 async def trigger_translation(
     rid: str,
@@ -98,7 +122,11 @@ async def trigger_translation(
         raise HTTPException(status_code=404, detail="文献不存在或无权访问")
     paper_id = await _paper_id_by_rid(tenant_id, rid)
     try:
-        result = await enqueue_literature_translation(paper_id=paper_id, variant_kind=variant_kind)
+        result = await enqueue_literature_translation(
+            paper_id=paper_id,
+            variant_kind=variant_kind,
+            requested_by=current_user.uid,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 202, **result}
@@ -217,6 +245,26 @@ async def import_markdown_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 201, **result}
+
+
+@literature.post("/papers/import/paperagent", status_code=202)
+async def import_paperagent_endpoint(
+    file: UploadFile,
+    dry_run: bool = Query(default=True),
+    current_user: User = Depends(get_superadmin_user),
+):
+    """Admin-only PaperAgent DATA_FORMAT 4 ZIP import; dry-run is the default."""
+    tenant_id = await _current_tenant(current_user)
+    try:
+        report = await import_paperagent_archive(
+            tenant_id=tenant_id,
+            upload=file,
+            dry_run=dry_run,
+            actor_uid=current_user.uid,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 202, **report}
 
 
 # ---------------------------------------------------------------- P7：G1 富化
@@ -454,7 +502,12 @@ async def suggest_review_endpoint(rid: str, payload: dict, current_user: User = 
         raise HTTPException(status_code=404, detail="文献不存在或无权访问")
     revision_id = detail.get("source_revision_id") or ""
     try:
-        result = await review.ai_suggest(tenant_id, revision_id, int(payload.get("report_idx", -1)))
+        result = await review.ai_suggest(
+            tenant_id,
+            revision_id,
+            int(payload.get("report_idx", -1)),
+            requested_by=current_user.uid,
+        )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return result
@@ -491,6 +544,16 @@ async def get_variant_endpoint(rid: str, variant_kind: str, current_user: User =
     if variant_kind not in ("zh", "en_zh", "summary"):
         raise HTTPException(status_code=422, detail=f"非法变体类型: {variant_kind}")
     result = await reader_bundle.get_variant_content(tenant_id, rid, variant_kind)
+    if result is None:
+        raise HTTPException(status_code=404, detail="文献不存在")
+    return result
+
+
+@literature.get("/papers/{rid}/parallel")
+async def get_parallel_endpoint(rid: str, current_user: User = Depends(get_required_user)):
+    """Return source and translation paragraphs aligned by stable paragraph id."""
+    tenant_id = await _current_tenant(current_user)
+    result = await reader_bundle.get_parallel_content(tenant_id, rid)
     if result is None:
         raise HTTPException(status_code=404, detail="文献不存在")
     return result

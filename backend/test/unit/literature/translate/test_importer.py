@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.literature import importer
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureCitation,
+    LiteratureCompileJob,
     LiteraturePaper,
     LiteratureVariant,
 )
@@ -78,7 +79,7 @@ def _build_paperagent_fixture(root: Path) -> None:
 async def env(monkeypatch, tmp_path):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        for model in (LiteraturePaper, LiteratureCitation, LiteratureVariant):
+        for model in (LiteraturePaper, LiteratureCitation, LiteratureVariant, LiteratureCompileJob):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
