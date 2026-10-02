@@ -6,6 +6,7 @@ SQLite 内存库（BigIntPk 不自增，显式给 id——AGENTS.md 硬规范）
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import pytest
 import pytest_asyncio
@@ -210,6 +211,16 @@ async def test_enqueue_is_idempotent_and_failure_goes_dead(env, monkeypatch):
     first = await compile_service.enqueue_literature_compile(paper_id=paper.id, level="L1")
     again = await compile_service.enqueue_literature_compile(paper_id=paper.id, level="L1")
     assert again["status"] == "PENDING" and again["reused"] is True
+    forced_while_active = await compile_service.enqueue_literature_compile(paper_id=paper.id, level="L1", force=True)
+    assert forced_while_active == {"job_id": first["job_id"], "status": "PENDING", "reused": True}
+    assert len(queue.jobs) == 1
+
+    active_job = await _job(session, "L1")
+    active_job.updated_at = compile_service.utc_now() - timedelta(seconds=compile_service.PENDING_REQUEUE_SECONDS + 1)
+    await session.commit()
+    forced_after_expiry = await compile_service.enqueue_literature_compile(paper_id=paper.id, level="L1", force=True)
+    assert forced_after_expiry["status"] == "PENDING" and forced_after_expiry["reused"] is False
+    assert len(queue.jobs) == 2
 
     async def _boom(meta, paragraphs, *, journal_meta=""):
         raise RuntimeError("模拟 LLM 故障")
@@ -222,6 +233,14 @@ async def test_enqueue_is_idempotent_and_failure_goes_dead(env, monkeypatch):
     assert job.status == "DEAD"
     assert job.attempt == compile_service.MAX_COMPILE_ATTEMPTS
     assert "模拟 LLM 故障" in (job.error or "")
+
+    # A user resubmission starts a new retry budget and cannot expose the stale
+    # artifact/error state from the prior terminal execution.
+    restarted = await compile_service.enqueue_literature_compile(paper_id=paper.id, level="L1")
+    assert restarted["status"] == "PENDING" and restarted["reused"] is False
+    restarted_job = await _job(session, "L1")
+    assert restarted_job.attempt == 0
+    assert restarted_job.error is None
 
 
 async def test_compile_requires_linked_revision(env, monkeypatch):

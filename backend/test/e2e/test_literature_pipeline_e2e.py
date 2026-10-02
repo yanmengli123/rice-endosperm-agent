@@ -1,6 +1,6 @@
 """文献域管线 e2e：种子 → 阅读渲染（离线 paperparse）→ L1/L2 编译 → 任务投影与资产代理。
 
-覆盖 ADR-0010 决议 10（显式触发、无自动挂接）与编译手动端点（P1 清账提交）。
+覆盖 ADR-0010 决议 10/15（自动登记后的显式重渲染）与编译手动端点。
 种子经 ``test/e2e/literature_seed.py`` 直写 DB/MinIO，须在 api 容器内运行
 （``bash backend/test/run_tests.sh e2e``）；宿主机运行时按导入失败跳过。
 鉴权使用种子签发的一次性 API Key（yxkey_ Bearer），不依赖 .env 口令。
@@ -99,7 +99,7 @@ async def test_render_compile_pipeline(e2e_client, lit_seed):
     assert resp.status_code == 200, resp.text
     assert any(t.get("type") == "literature_reader_render" for t in resp.json().get("tasks", []))
 
-    # L1/L2 编译（手动端点；force=true 自愈历史孤儿任务行，如 worker 重启残留的 RUNNING）
+    # L1/L2 编译（手动端点；force=true 仅接管超过租约的历史孤儿，活跃任务保持幂等）
     resp = await e2e_client.post(
         f"/api/literature/papers/{rid}/compile", headers=headers, params={"level": "L1", "force": "true"}
     )

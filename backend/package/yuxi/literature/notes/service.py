@@ -33,7 +33,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteraturePaper,
     LiteratureReaderRender,
 )
-from yuxi.utils.datetime_utils import utc_now
+from yuxi.utils.datetime_utils import UTC, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,11 @@ async def register_literature_paper(
 async def enqueue_literature_compile(
     *, paper_id: int, level: str, force: bool = False, requested_by: str = ""
 ) -> dict[str, Any]:
-    """排一个编译任务（幂等：SUCCEEDED/RUNNING 跳过；FAILED 重置重跑）。"""
+    """排一个编译任务。
+
+    活跃租约保持幂等；终态任务重跑会清理旧产物指针并获得全新的重试预算。
+    ``force`` 仅能接管租约已过期的 PENDING/RUNNING 任务。
+    """
     if level not in VALID_LEVELS:
         raise ValueError(f"非法编译级别: {level}")
     async with pg_manager.get_async_session_context() as session:
@@ -136,12 +140,29 @@ async def enqueue_literature_compile(
         if job is not None and not force:
             if job.status in ("SUCCEEDED", "RUNNING", "PENDING"):
                 return {"job_id": job.id, "status": job.status, "reused": True}
+        if job is not None and force and job.status in ("RUNNING", "PENDING"):
+            lease_seconds = RUNNING_LEASE_SECONDS if job.status == "RUNNING" else PENDING_REQUEUE_SECONDS
+            # These columns are TIMESTAMPTZ in production. SQLite drops tzinfo
+            # in unit tests, so its naive round-trip must still be interpreted
+            # as UTC rather than as a legacy Asia/Shanghai timestamp.
+            updated_at = job.updated_at
+            if updated_at is not None and updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
+            lease_expired = bool(updated_at and updated_at < utc_now() - timedelta(seconds=lease_seconds))
+            if not lease_expired:
+                # A fresh in-flight task must never be force-reset underneath
+                # its worker: that would permit two billable LLM executions for
+                # one durable row. The reconciler owns stale-lease recovery.
+                return {"job_id": job.id, "status": job.status, "reused": True}
         if job is None:
             job = LiteratureCompileJob(tenant_id=paper.tenant_id, paper_id=paper_id, level=level, status="PENDING")
             session.add(job)
         else:
             job.status = "PENDING"
+            job.attempt = 0
             job.error = None
+            job.note_uri = None
+            job.value_score = None
         if requested_by:
             from yuxi.literature.llm_gateway import freeze_literature_policy
 

@@ -32,7 +32,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureTranslationJob,
     LiteratureVariant,
 )
-from yuxi.utils.datetime_utils import utc_now
+from yuxi.utils.datetime_utils import UTC, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ def _job_id_key(job_id: int) -> str:
 async def enqueue_literature_translation(
     *, paper_id: int, variant_kind: str = "zh", force: bool = False, requested_by: str = ""
 ) -> dict:
+    """排一个翻译任务，且不以 ``force`` 抢占仍持有有效租约的 worker。"""
     if variant_kind not in VALID_VARIANT_KINDS:
         raise ValueError(f"非法变体类型: {variant_kind}")
     async with pg_manager.get_async_session_context() as session:
@@ -75,6 +76,16 @@ async def enqueue_literature_translation(
         if job is not None and not force:
             if job.status in ("SUCCEEDED", "RUNNING", "PENDING"):
                 return {"job_id": job.id, "status": job.status, "reused": True}
+        if job is not None and force and job.status in ("RUNNING", "PENDING"):
+            lease_seconds = RUNNING_LEASE_SECONDS if job.status == "RUNNING" else PENDING_REQUEUE_SECONDS
+            # TIMESTAMPTZ is aware in PostgreSQL; SQLite test round-trips the
+            # same column as naive UTC.
+            updated_at = job.updated_at
+            if updated_at is not None and updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
+            lease_expired = bool(updated_at and updated_at < utc_now() - timedelta(seconds=lease_seconds))
+            if not lease_expired:
+                return {"job_id": job.id, "status": job.status, "reused": True}
         if job is None:
             job = LiteratureTranslationJob(
                 tenant_id=paper.tenant_id, paper_id=paper_id, variant_kind=variant_kind, status="PENDING"
@@ -82,7 +93,9 @@ async def enqueue_literature_translation(
             session.add(job)
         else:
             job.status = "PENDING"
+            job.attempt = 0
             job.error = None
+            job.variant_uri = None
         if requested_by:
             from yuxi.literature.llm_gateway import freeze_literature_policy
 
