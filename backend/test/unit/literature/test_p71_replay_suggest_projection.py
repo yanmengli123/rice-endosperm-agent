@@ -20,6 +20,7 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeWiki,
     WikiSourceBinding,
     WikiPublication,
+    LiteratureArtifactRevision,
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -99,6 +100,7 @@ async def env(monkeypatch):
             WikiPublication,
         ):
             await conn.run_sync(model.__table__.create)
+        await conn.run_sync(LiteratureArtifactRevision.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         session.add(

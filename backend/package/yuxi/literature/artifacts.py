@@ -132,51 +132,57 @@ async def store_revision(
     }
 
 
-async def resolve_effective_document(tenant_id: int, paper_rid: str) -> dict[str, Any] | None:
+async def resolve_effective_document(
+    tenant_id: int, paper_rid: str, *, paper: LiteraturePaper | None = None
+) -> dict[str, Any] | None:
     """解析当前有效正文（方案唯一入口）。
 
     返回 ``{content, source, revision_id, digest, frozen}``；无任何产物返回 None。
+    ``paper`` 可选：调用方已加载的 LiteraturePaper 行（跳过二次查询，编译/翻译路径用）。
     """
     from yuxi.storage.postgres.models_knowledge import LiteratureArtifactRevision
 
-    async with pg_manager.get_async_session_context() as session:
-        paper = (
-            await session.execute(
-                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == paper_rid)
-            )
-        ).scalar_one_or_none()
-        if paper is None:
-            return None
-        pointer = _current_pointer(paper, ArtifactKind.DOCUMENT)
-        if pointer:
-            revision = (
+    if paper is None:
+        async with pg_manager.get_async_session_context() as session:
+            paper = (
                 await session.execute(
-                    select(LiteratureArtifactRevision).where(LiteratureArtifactRevision.revision_id == pointer)
+                    select(LiteraturePaper).where(
+                        LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == paper_rid
+                    )
                 )
             ).scalar_one_or_none()
-            if revision:
-                content = await get_minio_client().adownload_file(
-                    RENDER_BUCKET, revision.object_uri.removeprefix("kbasset://")
-                )
-                return {
-                    "content": content,
-                    "source": revision.source,
-                    "revision_id": revision.revision_id,
-                    "digest": revision.content_digest,
-                    "frozen": revision.frozen,
-                }
+        if paper is None:
+            return None
+    pointer = _current_pointer(paper, ArtifactKind.DOCUMENT)
+    if pointer:
+        revision = (
+            await session.execute(
+                select(LiteratureArtifactRevision).where(LiteratureArtifactRevision.revision_id == pointer)
+            )
+        ).scalar_one_or_none()
+        if revision:
+            content = await get_minio_client().adownload_file(
+                RENDER_BUCKET, revision.object_uri.removeprefix("kbasset://")
+            )
+            return {
+                "content": content,
+                "source": revision.source,
+                "revision_id": revision.revision_id,
+                "digest": revision.content_digest,
+                "frozen": revision.frozen,
+            }
 
     # 无 DB 指针 → 文件探测兜底（裁决版 → 渲染版），兼容既有产物
     return await _legacy_probe(tenant_id, paper)
 
 
-def _current_pointer(paper: LiteraturePaper, kind: str) -> str | None:
-    pointers = paper.artifact_pointers or {}
+def _current_pointer(paper: Any, kind: str) -> str | None:
+    pointers = getattr(paper, "artifact_pointers", None) or {}
     return pointers.get(kind)
 
 
-def _mark_frozen(paper: LiteraturePaper, kind: str) -> None:
-    frozen = set(paper.frozen_artifacts or {})
+def _mark_frozen(paper: Any, kind: str) -> None:
+    frozen = set(getattr(paper, "frozen_artifacts", None) or {})
     frozen.add(kind)
     paper.frozen_artifacts = sorted(frozen)
 
@@ -187,8 +193,8 @@ def _set_current_pointer(paper: LiteraturePaper, kind: str, revision_id: str) ->
     paper.artifact_pointers = pointers
 
 
-def _has_frozen(paper: LiteraturePaper, kind: str) -> bool:
-    frozen = paper.frozen_artifacts or {}
+def _has_frozen(paper: Any, kind: str) -> bool:
+    frozen = getattr(paper, "frozen_artifacts", None) or {}
     return kind in frozen
 
 

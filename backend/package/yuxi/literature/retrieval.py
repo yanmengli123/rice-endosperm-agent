@@ -31,6 +31,8 @@ RRF_K = 60
 #: 上游通道权重：notes=1.0, meta=0.5
 WEIGHT_NOTE = 1.0
 WEIGHT_META = 0.5
+#: 向量通道权重（上游 vector blocks w=1.0）
+WEIGHT_VECTOR = 1.0
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z\-]{1,}|\d+")
@@ -198,7 +200,31 @@ async def search_compiled(
         if any(t in blob for t in tokens):
             meta_ranking.append(paper.rid)
 
-    fused = rrf_fuse([(note_ranking, WEIGHT_NOTE), (meta_ranking, WEIGHT_META)], k=RRF_K)[:limit]
+    # 通道 3：向量召回（embedding 模型可用时；不可用降级为纯关键词，如实报告）
+    vector_ranking: list[str] = []
+    try:
+        from yuxi.models.embed import select_embedding_model
+
+        embed_model = select_embedding_model()
+        query_vec = embed_model.embed_query(query)
+        # 简化余弦相似（对 L1 笔记文本嵌入；生产应走 Milvus 投影）
+        vec_scores: list[tuple[str, float]] = []
+        for rid_key, content in note_texts.items():
+            doc_vec = embed_model.embed_query(content[:2000])
+            dot = sum(a * b for a, b in zip(query_vec, doc_vec))
+            norm_q = sum(a * a for a in query_vec) ** 0.5
+            norm_d = sum(b * b for b in doc_vec) ** 0.5
+            if norm_q > 0 and norm_d > 0:
+                vec_scores.append((rid_key, dot / (norm_q * norm_d)))
+        vec_scores.sort(key=lambda kv: -kv[1])
+        vector_ranking = [rid for rid, score in vec_scores if score > 0.3][:limit]
+    except Exception:  # noqa: BLE001 - embedding 不可用降级
+        vector_ranking = []
+
+    rankings = [(note_ranking, WEIGHT_NOTE), (meta_ranking, WEIGHT_META)]
+    if vector_ranking:
+        rankings.append((vector_ranking, WEIGHT_VECTOR))
+    fused = rrf_fuse(rankings, k=RRF_K)[:limit]
     paper_by_rid = {p.rid: p for p in papers}
     hits = []
     for rid, score in fused:
@@ -219,6 +245,8 @@ async def search_compiled(
         channels.append("note_fulltext")
     if meta_ranking:
         channels.append("metadata")
+    if vector_ranking:
+        channels.append("vector")
     return {
         "hits": hits,
         "channels_used": channels,

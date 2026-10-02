@@ -229,18 +229,19 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
             ).scalar_one_or_none()
         if render is None:
             raise ValueError(f"解析版本尚无成功的阅读渲染: {paper.source_revision_id}")
-        from yuxi.literature.review import document_object_candidates, para_text
+        from yuxi.literature import artifacts as _artifacts_mod
+        from yuxi.literature.artifacts import resolve_effective_document
+        from yuxi.literature.review import para_text
 
+        # 统一有效版本入口（P11：人工冻结→裁决→渲染→导入）
+        _artifacts_mod.pg_manager = pg_manager
+        effective = await resolve_effective_document(int(paper.tenant_id), paper.rid, paper=paper)
+        if effective is None:
+            raise ValueError(f"文献无任何正文产物: {paper.rid}")
+        document_json = effective["content"]
+        if not document_json:
+            raise ValueError(f"有效正文内容为空（source={effective['source']}）: {paper.rid}")
         object_base = render.markdown_uri.removeprefix("kbasset://").removesuffix("render.md")
-        document_json = None
-        for candidate in document_object_candidates(render.markdown_uri):
-            try:
-                document_json = await get_minio_client().adownload_file(RENDER_BUCKET, candidate)
-                break
-            except Exception:  # noqa: BLE001 - 候选缺失试下一个
-                continue
-        if document_json is None:
-            raise ValueError(f"渲染产物 document.json 不可读: {render.markdown_uri}")
         doc = json.loads(document_json.decode("utf-8"))
         paragraphs = [
             para_text(p) for p in (doc.get("paragraphs") or []) if isinstance(p, dict) and para_text(p).strip()

@@ -40,6 +40,7 @@ from yuxi.storage.postgres.models_knowledge import (
     ArticleReference,
     CitationMention,
     KnowledgeChunk,
+    LiteratureArtifactRevision,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -93,6 +94,7 @@ async def env(monkeypatch):
     async with engine.begin() as conn:
         for model in models:
             await conn.run_sync(model.__table__.create)
+        await conn.run_sync(LiteratureArtifactRevision.__table__.create)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     @asynccontextmanager

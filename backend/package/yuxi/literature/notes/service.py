@@ -286,18 +286,19 @@ async def _load_compile_inputs(paper: LiteraturePaper) -> tuple[dict, list[str],
             raise ValueError(f"解析版本尚无成功的阅读渲染: {paper.source_revision_id}")
     if not render.markdown_uri or not render.markdown_uri.startswith("kbasset://"):
         raise ValueError(f"渲染产物 URI 非法: {render.markdown_uri!r}")
-    # 修正版优先（人工裁决回放，review.document_object_candidates）；无裁决回落 canonical
-    from yuxi.literature.review import document_object_candidates
+    # 统一有效版本入口（P11：人工冻结→裁决→渲染→导入；artifacts.resolve_effective_document）
+    from yuxi.literature import artifacts as _artifacts_mod
+    from yuxi.literature.artifacts import resolve_effective_document
 
-    document_json = None
-    for candidate in document_object_candidates(render.markdown_uri):
-        try:
-            document_json = await get_minio_client().adownload_file(RENDER_BUCKET, candidate)
-            break
-        except Exception:  # noqa: BLE001 - 候选缺失试下一个
-            continue
-    if document_json is None:
-        raise ValueError(f"渲染产物 document.json 不可读: {render.markdown_uri}")
+    # 同步 pg_manager 和 minio_client 引用（测试 monkeypatch notes service 时 artifacts 同样生效）
+    _artifacts_mod.pg_manager = pg_manager
+    _artifacts_mod.get_minio_client = get_minio_client
+    effective = await resolve_effective_document(int(paper.tenant_id), paper.rid, paper=paper)
+    if effective is None:
+        raise ValueError(f"文献无任何正文产物: {paper.rid}")
+    document_json = effective["content"]
+    if not document_json:
+        raise ValueError(f"有效正文内容为空（source={effective['source']}）: {paper.rid}")
     from yuxi.literature.review import para_text
 
     doc = json.loads(document_json.decode("utf-8"))

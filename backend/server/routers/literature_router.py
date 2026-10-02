@@ -13,6 +13,7 @@ from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from yuxi.literature import bib_import, cards, concepts, diary, enrich as enrich_module
 from yuxi.literature import graph_service, readops, review
 from yuxi.literature import artifacts, reader_bundle, retrieval, workflow
+from yuxi.literature import answer_cache, export_vault, library_pipeline, session as lit_session
 from yuxi.literature.access import access_scope, authorize_asset, paper_visibility
 from yuxi.literature.attachments import register_attachment
 from yuxi.literature.import_archive import import_paperagent_archive
@@ -708,3 +709,57 @@ async def search_compiled_endpoint(
     """编译产物检索（笔记+元数据 RRF k=60；导航命中，不进证据通道）。"""
     tenant_id = await _current_tenant(current_user)
     return await retrieval.search_compiled(tenant_id, query, limit=limit)
+
+
+# ---------------------------------------------------------------- P11：六步建库 / Obsidian 导出 / 专属会话 / 缓存
+
+@literature.post("/library/pipeline", status_code=202)
+async def run_library_pipeline(payload: dict, current_user: User = Depends(get_required_user)):
+    """六步建库一键全流程（bib→清洗→富化→期刊→计量→向量；各步幂等）。"""
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await library_pipeline.run_full_pipeline(
+            tenant_id, bib_text=str(payload.get("bib_text") or ""), source_name=str(payload.get("source_name") or "")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 202, **result}
+
+
+@literature.get("/export/obsidian")
+async def export_obsidian(current_user: User = Depends(get_required_user)):
+    """Obsidian 兼容导出（zip：笔记+译文+图片+双链+清单）。"""
+    tenant_id = await _current_tenant(current_user)
+    rids = None  # 全库导出（可选按 rid 过滤：query param）
+    data = await export_vault.export_obsidian_vault(tenant_id, rids=rids)
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="literature_vault.zip"'},
+    )
+
+
+@literature.post("/sessions/paper/{rid}")
+async def create_paper_session(rid: str, current_user: User = Depends(get_required_user)):
+    """文献专属会话：冻结该文献上下文（笔记状态+摘要+附件清单）。"""
+    tenant_id = await _current_tenant(current_user)
+    try:
+        context = await lit_session.build_paper_session_context(tenant_id, rid)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return context
+
+
+@literature.post("/sessions/library")
+async def create_library_session(current_user: User = Depends(get_required_user)):
+    """全库会话（检索/管理操作上下文）。"""
+    tenant_id = await _current_tenant(current_user)
+    return await lit_session.build_library_session_context(tenant_id)
+
+
+@literature.post("/cache/invalidate/{rid}")
+async def invalidate_paper_cache(rid: str, current_user: User = Depends(get_required_user)):
+    """文献变更后失效相关答案缓存（权限/版本安全兜底）。"""
+    await _current_tenant(current_user)  # 权限检查
+    count = await answer_cache.invalidate_for_paper(rid)
+    return {"invalidated": count}
