@@ -1095,7 +1095,67 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0078_literature_llm_governance", "_migration_0078_literature_llm_governance"),
         ("0079_literature_source_contract_closure", "_migration_0079_literature_source_contract_closure"),
         ("0080_literature_paper_metadata", "_migration_0080_literature_paper_metadata"),
+        ("0081_literature_artifacts_workflow", "_migration_0081_literature_artifacts_workflow"),
     ]
+
+    async def _migration_0081_literature_artifacts_workflow(self, conn) -> None:
+        """文献域 P10-B/C：产物修订表 + 处理运行表 + paper 指针列。"""
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS literature_artifact_revisions (
+                id BIGSERIAL PRIMARY KEY,
+                revision_id VARCHAR(64) NOT NULL UNIQUE,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                paper_id BIGINT NOT NULL REFERENCES literature_papers(id) ON DELETE CASCADE,
+                kind VARCHAR(32) NOT NULL,
+                object_uri VARCHAR(1024) NOT NULL,
+                content_digest VARCHAR(64) NOT NULL,
+                frozen BOOLEAN NOT NULL DEFAULT FALSE,
+                source VARCHAR(32) NOT NULL DEFAULT 'rendered',
+                superseded_by VARCHAR(64),
+                created_by VARCHAR(64) NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_literature_artifact_revisions_paper "
+            "ON literature_artifact_revisions (tenant_id, paper_id)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_artifact_revisions_kind "
+            "ON literature_artifact_revisions (tenant_id, paper_id, kind)",
+            """
+            CREATE TABLE IF NOT EXISTS literature_workflow_runs (
+                id BIGSERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NOT NULL UNIQUE,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                paper_id BIGINT NOT NULL REFERENCES literature_papers(id) ON DELETE CASCADE,
+                mode VARCHAR(32) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                frozen_parse_revision VARCHAR(64),
+                steps_json JSONB NOT NULL DEFAULT '[]',
+                review_skipped_by VARCHAR(64),
+                review_skip_reason TEXT,
+                requested_by VARCHAR(64) NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_lit_workflow_active "
+            "ON literature_workflow_runs (tenant_id, paper_id, mode, status) "
+            "WHERE status IN ('PENDING', 'RUNNING')",
+            "CREATE INDEX IF NOT EXISTS ix_literature_workflow_runs_status_idx ON literature_workflow_runs (status)",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS artifact_pointers JSONB NOT NULL DEFAULT '{}'",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS frozen_artifacts JSONB NOT NULL DEFAULT '{}'",
+        )
+        for statement in statements:
+            await conn.execute(text(statement))
+        for table in ("literature_artifact_revisions", "literature_workflow_runs"):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text(f"DROP POLICY IF EXISTS p_{table}_tenant ON {table}"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_tenant ON {table} USING "
+                    f"(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+                )
+            )
 
     async def _migration_0072_literature_translation(self, conn) -> None:
         """文献域 P3：翻译变体（lang 进身份）与翻译任务（ADR-0010 决议 5/D2）。"""

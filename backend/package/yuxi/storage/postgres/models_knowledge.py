@@ -2154,6 +2154,9 @@ class LiteraturePaper(Base):
     keywords_json = Column(JSON_VALUE)
     external_cited = Column(Integer)
     meta_locked = Column(Boolean, nullable=False, default=False)
+    # P10-B：产物当前指针（kind → artifact revision_id）与冻结标记
+    artifact_pointers = Column(JSON_VALUE, nullable=False, default=dict)
+    frozen_artifacts = Column(JSON_VALUE, nullable=False, default=dict)
     # 计量（P4 回填；P2 先留空）
     paper_rank = Column(Float, nullable=False, default=0.0)
     cocitation_cluster = Column(Integer, nullable=False, default=0)
@@ -2420,5 +2423,52 @@ class LiteratureReviewDecision(Base):
     choice = Column(String(2), nullable=False)  # A=MinerU / B=Paddle / C=合并 / D=均不取
     resolved_text = Column(Text)
     decided_by = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureArtifactRevision(Base):
+    """派生产物修订（P10-B：不可变修订 + 当前指针由 LiteraturePaper 持有）。
+
+    人工保存产生 frozen=True 修订；自动生成只形成候选（不切指针）。
+    """
+
+    __tablename__ = "literature_artifact_revisions"
+    __table_args__ = (
+        Index("ix_literature_artifact_revisions_paper", "tenant_id", "paper_id"),
+        Index("ix_literature_artifact_revisions_kind", "tenant_id", "paper_id", "kind"),
+    )
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    revision_id = Column(String(64), nullable=False, unique=True, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String(32), nullable=False)
+    object_uri = Column(String(1024), nullable=False)
+    content_digest = Column(String(64), nullable=False)
+    frozen = Column(Boolean, nullable=False, default=False)
+    source = Column(String(32), nullable=False, default="rendered")
+    superseded_by = Column(String(64))
+    created_by = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureWorkflowRun(Base):
+    """文献处理运行记录（P10-C：三模式编排，串联既有任务表不复制状态）。"""
+
+    __tablename__ = "literature_workflow_runs"
+    __table_args__ = (UniqueConstraint("tenant_id", "paper_id", "mode", "status", name="uq_lit_workflow_active"),)
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False, unique=True, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
+    mode = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING", index=True)
+    frozen_parse_revision = Column(String(64))
+    steps_json = Column(JSON_VALUE, nullable=False, default=list)
+    review_skipped_by = Column(String(64))
+    review_skip_reason = Column(Text)
+    requested_by = Column(String(64), nullable=False, default="")
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from yuxi.literature import bib_import, cards, concepts, diary, enrich as enrich_module
 from yuxi.literature import graph_service, readops, review
-from yuxi.literature import reader_bundle
+from yuxi.literature import artifacts, reader_bundle, retrieval, workflow
 from yuxi.literature.access import access_scope, authorize_asset, paper_visibility
 from yuxi.literature.attachments import register_attachment
 from yuxi.literature.import_archive import import_paperagent_archive
@@ -606,3 +606,105 @@ async def generate_topic_moc_endpoint(payload: dict, current_user: User = Depend
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 202, **result}
+
+
+# ---------------------------------------------------------------- P10-B/C/D：产物版本 / 处理编排 / 检索
+
+
+@literature.get("/papers/{rid}/document")
+async def get_effective_document(rid: str, current_user: User = Depends(get_required_user)):
+    """当前有效正文（人工冻结→裁决→渲染→导入，artifacts 统一入口）。"""
+    tenant_id = await _current_tenant(current_user)
+    result = await artifacts.resolve_effective_document(tenant_id, rid)
+    if result is None:
+        raise HTTPException(status_code=404, detail="文献无任何正文产物")
+    return {
+        "source": result["source"],
+        "revision_id": result["revision_id"],
+        "frozen": result["frozen"],
+        "digest": result["digest"],
+    }
+
+
+@literature.put("/papers/{rid}/document")
+async def save_document_revision(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
+    """人工保存正文修订（乐观并发：expected_revision 不匹配返回 409）。"""
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await artifacts.store_revision(
+            tenant_id,
+            rid,
+            artifacts.ArtifactKind.DOCUMENT,
+            content=str(payload.get("content") or "").encode("utf-8"),
+            content_type="application/json",
+            operator=getattr(current_user, "uid", ""),
+            freeze=bool(payload.get("freeze", True)),
+            expected_current_revision=payload.get("expected_revision"),
+        )
+    except artifacts.RevisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return result
+
+
+@literature.post("/papers/{rid}/workflow")
+async def start_paper_workflow(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
+    """启动处理运行（parse_compile / full / parse_only；幂等复用活跃运行）。"""
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await workflow.start_workflow(
+            tenant_id=tenant_id,
+            paper_rid=rid,
+            mode=str(payload.get("mode") or "parse_compile"),
+            requested_by=getattr(current_user, "uid", ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return result
+
+
+@literature.get("/workflow/{run_id}")
+async def get_paper_workflow(run_id: str, current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    result = await workflow.get_workflow(run_id, tenant_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="运行不存在")
+    return result
+
+
+@literature.post("/workflow/{run_id}/skip-review")
+async def skip_review(run_id: str, payload: dict, current_user: User = Depends(get_required_user)):
+    """显式跳过复核门控（保存操作者/原因；不改变证据资格）。"""
+    tenant_id = await _current_tenant(current_user)
+    existing = await workflow.get_workflow(run_id, tenant_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="运行不存在")
+    await workflow.skip_review_gate(
+        run_id, operator=getattr(current_user, "uid", ""), reason=str(payload.get("reason") or "")
+    )
+    return {"run_id": run_id, "review_skipped": True}
+
+
+@literature.get("/search/catalog")
+async def search_catalog_endpoint(
+    query: str = Query(default=""),
+    kind: str = Query(default=""),
+    order_by: str = Query(default="relevance"),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_required_user),
+):
+    """目录检索（元数据；相关度/被引/年份/PaperRank 排序）。"""
+    tenant_id = await _current_tenant(current_user)
+    return {"results": await retrieval.search_catalog(tenant_id, query, kind=kind, order_by=order_by, limit=limit)}
+
+
+@literature.get("/search/compiled")
+async def search_compiled_endpoint(
+    query: str = Query(...),
+    limit: int = Query(default=10, ge=1, le=50),
+    current_user: User = Depends(get_required_user),
+):
+    """编译产物检索（笔记+元数据 RRF k=60；导航命中，不进证据通道）。"""
+    tenant_id = await _current_tenant(current_user)
+    return await retrieval.search_compiled(tenant_id, query, limit=limit)
