@@ -28,6 +28,12 @@ READER_RENDER_VERSION = "reader_render_v1"
 #: (revision_id, render_version) 唯一键，两行可并存（离线版保审计轨迹）。
 READER_RENDER_DUAL_VERSION = "reader_render_v1-dual"
 
+#: 文献域 LLM 调用超时（秒）。整篇大 prompt（全文前缀 + 六维任务/翻译）在
+#: 长上下文模型上普遍超过对话轮默认的 45s（agents.models.CHAT_MODEL_REQUEST_
+#: TIMEOUT_SECONDS）——e2e 实测编译 L1 稳定 45s 整超时。显式放宽到 10 分钟，
+#: 仅影响文献域 select_model 调用点，不改对话默认。
+LITERATURE_LLM_TIMEOUT_S = 600
+
 #: 阅读视图派生物唯一合法的资产引用方案：kbasset:// 逻辑资产 URI。
 #: 禁止本地路径与 MinIO 物理路径出现在文献域契约里（物理布局永不泄漏进知识数据）。
 READER_RENDER_URI_SCHEME = "kbasset://"

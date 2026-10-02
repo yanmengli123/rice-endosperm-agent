@@ -292,9 +292,15 @@ async def call(messages: list[dict[str, Any]]) -> Any:
     usage = _usage_context.get()
     if policy is None or usage is None:
         raise RuntimeError("literature LLM call must run inside governed_runtime")
+    from yuxi.literature.contracts import LITERATURE_LLM_TIMEOUT_S
     from yuxi.models.chat import select_model
 
-    response = await select_model(model_spec=policy.model_spec).call(messages, stream=False)
+    # 整篇大 prompt（全文前缀+六维任务）首 token 延迟普遍超过对话轮默认 45s
+    # （agents.models.CHAT_MODEL_REQUEST_TIMEOUT_SECONDS）——e2e 实测编译 L1
+    # 稳定 45s 整超时；显式放宽到域级 600s。
+    response = await select_model(
+        model_spec=policy.model_spec, request_timeout=LITERATURE_LLM_TIMEOUT_S
+    ).call(messages, stream=False)
     delta = _token_usage(response, messages)
     usage.input_tokens += delta.input_tokens
     usage.output_tokens += delta.output_tokens
