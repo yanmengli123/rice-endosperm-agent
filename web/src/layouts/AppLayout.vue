@@ -3,6 +3,7 @@ import { ref, onMounted, computed, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
   BarChart3,
+  BookOpenText,
   ClipboardList,
   LibraryBig,
   Box,
@@ -168,6 +169,14 @@ const mainList = computed(() => {
     path: '/workspace',
     icon: FolderKanban,
     activeIcon: FolderKanban
+  })
+
+  items.push({
+    name: '文献库',
+    path: '/literature',
+    activePaths: ['/literature'],
+    icon: BookOpenText,
+    activeIcon: BookOpenText
   })
 
   if (userStore.isAdmin) {
