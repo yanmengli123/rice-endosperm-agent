@@ -111,6 +111,8 @@ services:
         condition: service_healthy
       sandbox-provisioner:
         condition: service_healthy
+      milvus:
+        condition: service_healthy
 
   # Desktop and external clients use the APISIX gateway on port 9088. Keep it
   # in the default stack so a normal `docker compose up -d` cannot leave the
