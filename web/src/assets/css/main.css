@@ -47,17 +47,12 @@ body {
 
 /* ==========================================================================
    .btn — 全局工具按钮（文献域等非 ant-design 按钮的统一样式）
-   主题感知：light/dark 各自用语义变量，WCAG AA+ 对比度
+   注意：不用 CSS nesting（&:）以确保最大兼容性；
+   不用 color-scheme（与 ant-design darkTheme 冲突导致文字消失）；
+   暗黑模式用显式 :root.dark 覆盖而非依赖变量链（防变量链断裂）。
    ========================================================================== */
 
-/* 声明色彩方案：让浏览器原生控件（表单/滚动条/按钮 fallback）跟随主题 */
-:root {
-  color-scheme: light;
-}
-:root.dark {
-  color-scheme: dark;
-}
-
+/* 基础态（亮色） */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -66,73 +61,253 @@ body {
   padding: 5px 14px;
   font-size: 13px;
   line-height: 1.5;
-  border: 1px solid var(--gray-300);
+  border: 1px solid #d7d9d9;
   border-radius: 6px;
-  background: var(--gray-100);
-  color: var(--color-text);
+  background: #eff2f2;
+  color: #1e1f1f;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: border-color 0.15s ease, color 0.15s ease;
   white-space: nowrap;
   user-select: none;
-
-  &:hover:not(:disabled) {
-    border-color: var(--main-color);
-    color: var(--main-color);
-  }
-
-  &:active:not(:disabled) {
-    transform: translateY(0.5px);
-  }
-
-  &:disabled {
-    cursor: not-allowed;
-    opacity: 0.45;
-  }
-
-  /* 激活态（toggle 场景）：主色填充底 + 主色上高对比文字 */
-  &.active {
-    background: var(--main-color);
-    border-color: var(--main-color);
-    color: var(--gray-0);
-    font-weight: 500;
-
-    &:hover:not(:disabled) {
-      background: var(--main-bright);
-      border-color: var(--main-bright);
-      color: var(--gray-0);
-    }
-  }
-
-  /* ghost 态（切换按钮未选中）：透明底，仅边框 */
-  &.ghost {
-    background: transparent;
-    color: var(--color-text-secondary);
-    border-color: var(--gray-300);
-
-    &:hover:not(:disabled) {
-      color: var(--main-color);
-      border-color: var(--main-color);
-    }
-  }
-
-  /* 主操作（提交/搜索） */
-  &.btn-primary {
-    background: var(--main-color);
-    border-color: var(--main-color);
-    color: var(--gray-0);
-    font-weight: 500;
-
-    &:hover:not(:disabled) {
-      background: var(--main-bright);
-      border-color: var(--main-bright);
-    }
-  }
 }
 
-/* --- 全局原生 button 兜底（无 .btn 类时的暗黑可读性）--- */
+.btn:hover:not(:disabled) {
+  border-color: #046a82;
+  color: #046a82;
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.btn:disabled:hover {
+  border-color: #d7d9d9;
+  color: #1e1f1f;
+}
+
+/* 激活态 */
+.btn.active {
+  background: #046a82;
+  border-color: #046a82;
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.btn.active:hover:not(:disabled) {
+  background: #0188a6;
+  border-color: #0188a6;
+  color: #ffffff;
+}
+
+/* ghost 态（未选中切换按钮） */
+.btn.ghost {
+  background: transparent;
+  color: #494c4c;
+  border-color: #d7d9d9;
+}
+
+.btn.ghost:hover:not(:disabled) {
+  color: #046a82;
+  border-color: #046a82;
+  background: transparent;
+}
+
+/* 主操作 */
+.btn.btn-primary {
+  background: #046a82;
+  border-color: #046a82;
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.btn.btn-primary:hover:not(:disabled) {
+  background: #0188a6;
+  border-color: #0188a6;
+  color: #ffffff;
+}
+
+/* ==========================================================================
+   暗黑模式覆盖 — 显式高对比度色值，不依赖变量链
+   ========================================================================== */
+
+:root.dark .btn {
+  background: #2a2b2b;
+  border-color: #4a4b4b;
+  color: #e8eaea;
+}
+
+:root.dark .btn:hover:not(:disabled) {
+  border-color: #4a9fb8;
+  color: #82c3d6;
+}
+
+:root.dark .btn:disabled {
+  opacity: 0.5;
+}
+
+:root.dark .btn:disabled:hover {
+  border-color: #4a4b4b;
+  color: #e8eaea;
+}
+
+:root.dark .btn.active {
+  background: #4a9fb8;
+  border-color: #4a9fb8;
+  color: #0a0a0a;
+  font-weight: 500;
+}
+
+:root.dark .btn.active:hover:not(:disabled) {
+  background: #5faec2;
+  border-color: #5faec2;
+  color: #0a0a0a;
+}
+
+:root.dark .btn.ghost {
+  background: transparent;
+  color: #b0b2b2;
+  border-color: #4a4b4b;
+}
+
+:root.dark .btn.ghost:hover:not(:disabled) {
+  color: #82c3d6;
+  border-color: #4a9fb8;
+  background: transparent;
+}
+
+:root.dark .btn.btn-primary {
+  background: #4a9fb8;
+  border-color: #4a9fb8;
+  color: #0a0a0a;
+  font-weight: 500;
+}
+
+:root.dark .btn.btn-primary:hover:not(:disabled) {
+  background: #5faec2;
+  border-color: #5faec2;
+  color: #0a0a0a;
+}
+
+/* 原生 button 兜底：确保暗黑下非 .btn 按钮也可读 */
 button {
   color: inherit;
   font-family: inherit;
+}
+
+:root.dark button {
+  color: #e8eaea;
+}
+
+/* ==========================================================================
+   文献域专用控件暗黑覆盖（chip / sub-tab / level-tab / choice-btn 等）
+   ========================================================================== */
+
+/* .chip — 类型筛选芯片 */
+:root.dark .chip {
+  border-color: #4a4b4b;
+  color: #b0b2b2;
+}
+
+:root.dark .chip.active {
+  background: #4a9fb8;
+  border-color: #4a9fb8;
+  color: #0a0a0a;
+  font-weight: 500;
+}
+
+/* .sub-tab — 阅读器子标签 */
+:root.dark .sub-tab {
+  color: #b0b2b2;
+}
+
+:root.dark .sub-tab:hover {
+  color: #82c3d6;
+}
+
+:root.dark .sub-tab.active {
+  color: #82c3d6;
+  border-bottom-color: #4a9fb8;
+}
+
+/* .level-tab — 笔记级别切换 */
+:root.dark .level-tab {
+  background: #2a2b2b;
+  color: #b0b2b2;
+  border-color: #4a4b4b;
+}
+
+:root.dark .level-tab:hover {
+  border-color: #4a9fb8;
+}
+
+:root.dark .level-tab.active {
+  background: #4a9fb8;
+  border-color: #4a9fb8;
+  color: #0a0a0a;
+  font-weight: 500;
+}
+
+/* .choice-btn — 复核四选一 */
+:root.dark .choice-btn {
+  background: #2a2b2b;
+  color: #e8eaea;
+  border-color: #4a4b4b;
+}
+
+:root.dark .choice-btn:hover {
+  border-color: #4a9fb8;
+  color: #82c3d6;
+}
+
+/* .ctrl-btn — PDF 缩放控制 */
+:root.dark .ctrl-btn {
+  background: #2a2b2b;
+  color: #e8eaea;
+  border-color: #4a4b4b;
+}
+
+:root.dark .ctrl-btn:hover {
+  border-color: #4a9fb8;
+}
+
+/* .day-chip — 日记日期 */
+:root.dark .day-chip {
+  border-color: #4a4b4b;
+  color: #b0b2b2;
+}
+
+:root.dark .day-chip.active {
+  background: #4a9fb8;
+  border-color: #4a9fb8;
+  color: #0a0a0a;
+  font-weight: 500;
+}
+
+/* 输入框暗黑覆盖 */
+:root.dark .search-input,
+:root.dark .moc-input,
+:root.dark .month-input,
+:root.dark .diary-content,
+:root.dark .suggest-input,
+:root.dark .content-input,
+:root.dark .kind-select {
+  background: #2a2b2b;
+  color: #e8eaea;
+  border: 1px solid #4a4b4b;
+  border-radius: 6px;
+}
+
+:root.dark .search-input::placeholder,
+:root.dark .moc-input::placeholder,
+:root.dark .month-input::placeholder,
+:root.dark .diary-content::placeholder,
+:root.dark .content-input::placeholder {
+  color: #8a8c8c;
 }
 
 .lucide-icon-btn {
