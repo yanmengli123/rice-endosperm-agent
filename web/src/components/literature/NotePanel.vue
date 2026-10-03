@@ -19,7 +19,7 @@
 </template>
 
 <script>
-import { ref, onUnmounted } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { getLiteratureNote, fetchLiteratureAssetText } from '@/apis/literature_api'
 
 export default {
@@ -37,6 +37,7 @@ export default {
     const currentLevel = ref('L1')
     const noteMarkdown = ref('')
     const loadingNote = ref(false)
+    let generation = 0
 
     const statusOf = (level) => {
       const job = (props.compileJobs || []).find((item) => item.level === level)
@@ -44,18 +45,23 @@ export default {
     }
 
     const loadNote = async () => {
+      const ticket = ++generation
+      const rid = props.rid
+      const level = currentLevel.value
       if (!statusOf(currentLevel.value)) {
         noteMarkdown.value = ''
+        loadingNote.value = false
         return
       }
       loadingNote.value = true
       try {
-        const meta = await getLiteratureNote(props.rid, currentLevel.value)
-        noteMarkdown.value = meta?.note_uri ? await fetchLiteratureAssetText(meta.note_uri) : ''
-      } catch (err) {
-        noteMarkdown.value = ''
+        const meta = await getLiteratureNote(rid, level)
+        const content = meta?.note_uri ? await fetchLiteratureAssetText(meta.note_uri) : ''
+        if (ticket === generation) noteMarkdown.value = content
+      } catch {
+        if (ticket === generation) noteMarkdown.value = ''
       } finally {
-        loadingNote.value = false
+        if (ticket === generation) loadingNote.value = false
       }
     }
     const selectLevel = (level) => {
@@ -63,9 +69,8 @@ export default {
       loadNote()
     }
 
-    loadNote()
-    // compileJobs 变化时由父组件重载；此处按 rid 卸载清理（无定时器泄漏面）
-    onUnmounted(() => {})
+    watch(() => [props.rid, props.compileJobs], loadNote, { immediate: true, deep: true })
+    onUnmounted(() => ++generation)
 
     return { levels, currentLevel, noteMarkdown, loadingNote, statusOf, selectLevel }
   }
@@ -79,13 +84,13 @@ export default {
   margin-bottom: 8px;
 }
 .level-tab {
-  border: 1px solid var(--border-color, #ddd);
+  border: 1px solid var(--gray-150);
   background: transparent;
   border-radius: 6px;
   padding: 4px 12px;
   cursor: pointer;
   &.active {
-    background: var(--primary-color, #1677ff);
+    background: var(--main-color);
     color: #fff;
   }
   &.disabled {
@@ -106,6 +111,6 @@ export default {
 .note-empty,
 .note-loading {
   padding: 20px 0;
-  opacity: 0.6;
+  color: var(--color-text-tertiary);
 }
 </style>

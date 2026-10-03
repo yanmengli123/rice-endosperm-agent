@@ -13,6 +13,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { useThemeStore } from '@/stores/theme'
 
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
@@ -21,7 +22,10 @@ const props = defineProps({
 })
 const emit = defineEmits(['select'])
 
-const COLORS = { Q1: 0x1677ff, Q2: 0x52c41a, Q3: 0xfaad14, Q4: 0x8c8c8c }
+const COLORS_LIGHT = { Q1: 0x1677ff, Q2: 0x52c41a, Q3: 0xfaad14, Q4: 0x8c8c8c }
+const COLORS_DARK = { Q1: 0x69b1ff, Q2: 0x95de64, Q3: 0xffd666, Q4: 0xa6a6a6 }
+const themeStore = useThemeStore()
+const COLORS = computed(() => (themeStore.isDark ? COLORS_DARK : COLORS_LIGHT))
 const host = ref(null)
 const unsupported = ref(false)
 const hovered = ref(null)
@@ -86,7 +90,7 @@ function buildGraph() {
     const scale = 2.2 + Math.min(7, Math.sqrt(Number(node.citations || 0)) * 0.8)
     matrix.compose(p, new THREE.Quaternion(), new THREE.Vector3(scale, scale, scale))
     nodeMesh.setMatrixAt(index, matrix)
-    nodeMesh.setColorAt(index, color.setHex(COLORS[node.quartile] || 0xb8c1cc))
+    nodeMesh.setColorAt(index, color.setHex(COLORS.value[node.quartile] || 0xb8c1cc))
   })
   nodeMesh.instanceMatrix.needsUpdate = true
   nodeMesh.instanceColor.needsUpdate = true
@@ -113,7 +117,7 @@ function applySelection() {
   if (!nodeMesh) return
   nodeIndex.forEach((node, index) => {
     const selected = node.rid === props.selectedRid
-    nodeMesh.setColorAt(index, color.setHex(selected ? 0xf5222d : COLORS[node.quartile] || 0xb8c1cc))
+    nodeMesh.setColorAt(index, color.setHex(selected ? 0xf5222d : COLORS.value[node.quartile] || 0xb8c1cc))
   })
   nodeMesh.instanceColor.needsUpdate = true
 }
@@ -235,7 +239,7 @@ defineExpose({ fit })
   z-index: 2;
   max-width: 320px;
   padding: 6px 9px;
-  border: 1px solid var(--border-color, #d9d9d9);
+  border: 1px solid var(--gray-150);
   border-radius: 6px;
   background: var(--component-background, rgba(255, 255, 255, 0.94));
   font-size: 12px;

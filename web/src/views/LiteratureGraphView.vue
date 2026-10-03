@@ -44,16 +44,20 @@
 </template>
 
 <script>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
+import { useThemeStore } from '@/stores/theme'
 import LiteratureGraph3D from '@/components/literature/LiteratureGraph3D.vue'
 
-const QUARTILE_COLORS = { Q1: '#1677ff', Q2: '#52c41a', Q3: '#faad14', Q4: '#8c8c8c' }
+// 分区语义色：亮色模式标准色，暗黑模式提亮（WCAG 对比度）
+const QUARTILE_COLORS_LIGHT = { Q1: '#1677ff', Q2: '#52c41a', Q3: '#faad14', Q4: '#8c8c8c' }
+const QUARTILE_COLORS_DARK = { Q1: '#69b1ff', Q2: '#95de64', Q3: '#ffd666', Q4: '#a6a6a6' }
 
 export default {
   name: 'LiteratureGraphView',
   components: { LiteratureGraph3D },
   setup() {
+    const themeStore = useThemeStore()
     const canvas = ref(null)
     const nodes = ref([])
     const edges = ref([])
@@ -158,7 +162,7 @@ export default {
       const ctx = canvas.value?.getContext('2d')
       if (!ctx) return
       ctx.clearRect(0, 0, 900, 560)
-      ctx.strokeStyle = 'rgba(22, 119, 255, 0.25)'
+      ctx.strokeStyle = themeStore.isDark ? 'rgba(105, 177, 255, 0.3)' : 'rgba(22, 119, 255, 0.25)'
       ctx.lineWidth = 1
       for (const edge of simEdges) {
         ctx.beginPath()
@@ -170,7 +174,8 @@ export default {
         const radius = 4 + Math.min(14, Math.sqrt(node.citations || 0) * 2.2)
         ctx.beginPath()
         ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI)
-        ctx.fillStyle = QUARTILE_COLORS[node.quartile] || '#d9d9d9'
+        const palette = themeStore.isDark ? QUARTILE_COLORS_DARK : QUARTILE_COLORS_LIGHT
+        ctx.fillStyle = palette[node.quartile] || (themeStore.isDark ? '#5a5a5a' : '#d9d9d9')
         ctx.fill()
         if (node === selected.value) {
           ctx.strokeStyle = '#f5222d'
@@ -290,8 +295,8 @@ export default {
   }
   .btn.active {
     color: #fff;
-    background: #1677ff;
-    border-color: #1677ff;
+    background: var(--main-color);
+    border-color: var(--main-color);
   }
 }
 .limit-input {
@@ -302,21 +307,21 @@ export default {
   margin: 10px 0;
   padding: 8px 12px;
   border-radius: 6px;
-  background: rgba(22, 119, 255, 0.08);
+  background: color-mix(in srgb, var(--main-color) 10%, transparent);
   font-size: 13px;
 }
 .graph-stats {
   display: flex;
   gap: 16px;
   font-size: 12px;
-  opacity: 0.75;
+  color: var(--color-text-secondary);
   margin: 8px 0;
   .hint {
-    opacity: 0.7;
+    color: var(--color-text-secondary);
   }
 }
 .canvas-wrap {
-  border: 1px solid var(--border-color, #eee);
+  border: 1px solid var(--gray-150);
   border-radius: 10px;
   canvas {
     display: block;
@@ -326,7 +331,7 @@ export default {
 }
 .neighbor-panel {
   margin-top: 12px;
-  border: 1px solid var(--border-color, #eee);
+  border: 1px solid var(--gray-150);
   border-radius: 8px;
   padding: 10px 14px;
   font-size: 13px;

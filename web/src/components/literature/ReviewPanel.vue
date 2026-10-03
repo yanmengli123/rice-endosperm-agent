@@ -30,8 +30,12 @@
           </span>
         </div>
         <div class="item-bodies">
-          <div v-if="item.mineru_text" class="body-mineru"><label>MinerU (A)</label>{{ item.mineru_text }}</div>
-          <div v-if="item.paddleocr_text" class="body-paddle"><label>Paddle (B)</label>{{ item.paddleocr_text }}</div>
+          <div v-if="item.mineru_text" class="body-mineru">
+            <label>MinerU (A)</label>{{ item.mineru_text }}
+          </div>
+          <div v-if="item.paddleocr_text" class="body-paddle">
+            <label>Paddle (B)</label>{{ item.paddleocr_text }}
+          </div>
         </div>
         <div class="item-choices">
           <button
@@ -80,6 +84,7 @@ export default {
         meta.value = await apiGet(`/api/literature/papers/${enc(props.rid)}/review`)
       } catch (err) {
         meta.value = { total: 0, blocking_pending: 0, items: [] }
+        notice.value = `复核结果读取失败：${err?.message || err}`
       }
     }
     const triggerDual = async () => {
@@ -118,11 +123,23 @@ export default {
       }
     }
     const decide = async (item, choice) => {
+      const legacyAck = item.stale_decision?.contract_version === 'legacy_v1'
+      if (
+        legacyAck &&
+        !window.confirm(
+          '此项有旧契约裁决。确认按当前 A/B/C/D 语义重新裁决？历史文本不会被当作删除/合并指令。'
+        )
+      )
+        return
       // 兼容语义（review_item_v2）：仅 B 携带替换文本（AI 建议优先，缺省 Paddle 文本）；A/C/D 不改写
       const resolvedText = choice === 'B' ? item.suggestion || item.paddleocr_text || '' : null
       try {
         await apiPost(`/api/literature/papers/${enc(props.rid)}/review/decide`, {
           report_idx: item.report_idx,
+          item_id: item.item_id,
+          render_id: item.render_id,
+          render_digest: item.render_digest,
+          legacy_ack: legacyAck,
           para_id: item.para_id || '',
           choice,
           resolved_text: resolvedText
@@ -135,7 +152,17 @@ export default {
 
     onMounted(load)
 
-    return { meta, notice, dualLoading, applying, choices, triggerDual, decide, suggest, applyDecisions }
+    return {
+      meta,
+      notice,
+      dualLoading,
+      applying,
+      choices,
+      triggerDual,
+      decide,
+      suggest,
+      applyDecisions
+    }
   }
 }
 </script>
@@ -150,12 +177,12 @@ export default {
 .review-notice {
   padding: 8px 12px;
   border-radius: 6px;
-  background: rgba(22, 119, 255, 0.08);
+  background: color-mix(in srgb, var(--main-color) 10%, transparent);
   margin-bottom: 10px;
   font-size: 13px;
 }
 .review-empty {
-  opacity: 0.6;
+  color: var(--color-text-tertiary);
   padding: 16px 0;
 }
 .review-list {
@@ -166,14 +193,14 @@ export default {
   gap: 12px;
 }
 .review-item {
-  border: 1px solid var(--border-color, #eee);
+  border: 1px solid var(--gray-150);
   border-radius: 8px;
   padding: 10px 12px;
   &.blocking {
     border-color: #e6a23c;
   }
   &.resolved {
-    opacity: 0.65;
+    color: var(--color-text-secondary);
   }
 }
 .item-head {
@@ -183,7 +210,7 @@ export default {
   margin-bottom: 6px;
 }
 .item-decided {
-  color: var(--primary-color, #1677ff);
+  color: var(--main-color);
 }
 .item-bodies {
   display: flex;
@@ -194,7 +221,7 @@ export default {
     display: inline-block;
     font-weight: 600;
     margin-right: 6px;
-    opacity: 0.7;
+    color: var(--color-text-secondary);
   }
 }
 .item-choices {
@@ -204,13 +231,13 @@ export default {
   flex-wrap: wrap;
 }
 .choice-btn {
-  border: 1px solid var(--border-color, #ddd);
+  border: 1px solid var(--gray-150);
   border-radius: 6px;
   background: transparent;
   padding: 3px 10px;
   cursor: pointer;
   &:hover {
-    border-color: var(--primary-color, #1677ff);
+    border-color: var(--main-color);
   }
 }
 </style>

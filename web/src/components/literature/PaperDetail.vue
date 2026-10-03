@@ -1,5 +1,5 @@
 <template>
-  <div class="paper-detail-mask" @click.self="$emit('close')">
+  <div class="paper-detail-mask" :class="{ embedded }" @click.self="!embedded && $emit('close')">
     <div class="paper-detail">
       <div class="detail-header">
         <h3>{{ paper?.title || rid }}</h3>
@@ -35,13 +35,12 @@
           </span>
         </div>
         <div v-if="paper.historical_compile_jobs?.length" class="detail-meta">
-          来源已更新，{{
-            paper.historical_compile_jobs.length
-          }}
+          来源已更新，{{ paper.historical_compile_jobs.length }}
           个历史笔记任务保留记录；当前笔记需重新编译。
         </div>
 
         <div class="detail-actions">
+          <button class="btn" :disabled="sessionLoading" @click="startSession">文献专属会话</button>
           <button class="btn" :disabled="rendering" @click="doRender">
             {{ rendering ? '渲染入队中…' : '生成阅读视图' }}
           </button>
@@ -72,7 +71,12 @@
           </button>
         </div>
 
-        <ReaderTabs v-if="currentTab === 'reader'" :rid="rid" />
+        <ReaderTabs
+          v-if="currentTab === 'reader'"
+          :rid="rid"
+          @document-saved="load"
+          @open-link="$emit('open-link', $event)"
+        />
         <NotePanel
           v-else-if="currentTab === 'notes'"
           :rid="rid"
@@ -81,16 +85,17 @@
         <AttachmentPanel v-else-if="currentTab === 'attachments'" :rid="rid" />
         <CardsPanel v-else-if="currentTab === 'cards'" :rid="rid" />
         <ReviewPanel v-else-if="currentTab === 'review'" :rid="rid" />
-        <div v-else class="overview">
-          <pre class="meta-json">{{ JSON.stringify(paper, null, 2) }}</pre>
-        </div>
+        <WorkflowPanel v-else-if="currentTab === 'workflow'" :rid="rid" />
+        <MetadataPanel v-else :rid="rid" @saved="load" />
       </template>
     </div>
   </div>
 </template>
 
 <script>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onUnmounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import { apiPost } from '@/apis/base'
 import {
   getLiteraturePaper,
   triggerLiteratureCompile,
@@ -103,18 +108,45 @@ import AttachmentPanel from '@/components/literature/AttachmentPanel.vue'
 import CardsPanel from '@/components/literature/CardsPanel.vue'
 import ReaderTabs from '@/components/literature/ReaderTabs.vue'
 import ReviewPanel from '@/components/literature/ReviewPanel.vue'
+import WorkflowPanel from '@/components/literature/WorkflowPanel.vue'
+import MetadataPanel from '@/components/literature/MetadataPanel.vue'
 import { useUserStore } from '@/stores/user'
 
 const POLL_INTERVAL_MS = 3000
 
 export default {
   name: 'PaperDetail',
-  components: { NotePanel, AttachmentPanel, CardsPanel, ReviewPanel, ReaderTabs },
-  props: {
-    rid: { type: String, required: true }
+  components: {
+    NotePanel,
+    AttachmentPanel,
+    CardsPanel,
+    ReviewPanel,
+    ReaderTabs,
+    WorkflowPanel,
+    MetadataPanel
   },
-  emits: ['close'],
-  setup(props) {
+  props: {
+    rid: { type: String, required: true },
+    embedded: { type: Boolean, default: false }
+  },
+  emits: ['close', 'session', 'open-link'],
+  setup(props, { emit }) {
+    const router = useRouter()
+    const sessionLoading = ref(false)
+    const startSession = async () => {
+      sessionLoading.value = true
+      try {
+        const result = await apiPost(
+          `/api/literature/sessions/paper/${encodeURIComponent(props.rid)}`
+        )
+        if (props.embedded) emit('session', result.thread.id)
+        else await router.push(`/agent/${encodeURIComponent(result.thread.id)}`)
+      } catch (err) {
+        alert(`会话创建失败：${err?.message || err}`)
+      } finally {
+        sessionLoading.value = false
+      }
+    }
     const userStore = useUserStore()
     const paper = ref(null)
     const loading = ref(true)
@@ -129,15 +161,24 @@ export default {
       { key: 'attachments', label: '依附资料' },
       { key: 'cards', label: '卡片' },
       { key: 'review', label: '识别复核' },
+      { key: 'workflow', label: '处理流程' },
       { key: 'overview', label: '元数据' }
     ]
     let pollTimer = null
+    let loadGeneration = 0
+    let disposed = false
 
     const load = async () => {
+      const ticket = ++loadGeneration
       try {
-        paper.value = await getLiteraturePaper(props.rid)
+        const result = await getLiteraturePaper(props.rid)
+        if (ticket !== loadGeneration || disposed) return
+        paper.value = result
+        startPollingIfBusy()
+      } catch (error) {
+        if (!disposed && ticket === loadGeneration) alert(error?.message || '文献读取失败')
       } finally {
-        loading.value = false
+        if (ticket === loadGeneration) loading.value = false
       }
     }
 
@@ -155,12 +196,12 @@ export default {
         translationBusy ||
         ['PENDING', 'RUNNING'].includes(paper.value?.render?.status || '')
       ) {
-        pollTimer = setInterval(load, POLL_INTERVAL_MS)
+        pollTimer = setTimeout(load, POLL_INTERVAL_MS)
       }
     }
     const stopPolling = () => {
       if (pollTimer) {
-        clearInterval(pollTimer)
+        clearTimeout(pollTimer)
         pollTimer = null
       }
     }
@@ -209,13 +250,27 @@ export default {
       }
     }
 
-    onMounted(async () => {
-      await load()
-      startPollingIfBusy()
+    watch(
+      () => props.rid,
+      () => {
+        stopPolling()
+        paper.value = null
+        loading.value = true
+        currentTab.value = 'reader'
+        load()
+      },
+      { immediate: true }
+    )
+    onUnmounted(() => {
+      disposed = true
+      loadGeneration++
+      stopPolling()
     })
-    onUnmounted(stopPolling)
 
     return {
+      sessionLoading,
+      startSession,
+      load,
       paper,
       userStore,
       loading,
@@ -238,14 +293,25 @@ export default {
 .paper-detail-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(0, 0, 0, 0.55);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
 }
+.paper-detail-mask.embedded {
+  position: static;
+  background: transparent;
+  display: block;
+  min-width: 0;
+  .paper-detail {
+    width: 100%;
+    box-sizing: border-box;
+    max-height: none;
+  }
+}
 .paper-detail {
-  background: #fff;
+  background: var(--color-bg-container);
   border-radius: 10px;
   width: min(920px, 92vw);
   max-height: 86vh;
@@ -262,18 +328,20 @@ export default {
   gap: 14px;
   flex-wrap: wrap;
   font-size: 12px;
-  opacity: 0.75;
+  color: var(--color-text-secondary);
   margin: 8px 0;
 }
 .detail-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
   margin: 10px 0;
 }
 .tabs {
   display: flex;
   gap: 4px;
-  border-bottom: 1px solid var(--border-color, #eee);
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--gray-150);
   margin-bottom: 10px;
 }
 .tab {
@@ -282,7 +350,7 @@ export default {
   padding: 8px 14px;
   cursor: pointer;
   &.active {
-    border-bottom: 2px solid var(--primary-color, #1677ff);
+    border-bottom: 2px solid var(--main-color);
     font-weight: 600;
   }
 }

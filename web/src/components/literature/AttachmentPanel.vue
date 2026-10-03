@@ -95,10 +95,10 @@ export default {
   font-size: 12px;
   border-radius: 4px;
   padding: 1px 6px;
-  background: rgba(22, 119, 255, 0.1);
+  background: color-mix(in srgb, var(--main-color) 12%, transparent);
 }
 .attachment-empty {
-  opacity: 0.6;
+  color: var(--color-text-tertiary);
   padding: 16px 0;
 }
 </style>

@@ -9,16 +9,24 @@
       </select>
       <input v-model="title" class="title-input" placeholder="卡片标题（可空）" />
     </div>
-    <textarea v-model="content" class="content-input" rows="3" placeholder="卡片内容（问答回写、心得…）"></textarea>
+    <textarea
+      v-model="content"
+      class="content-input"
+      rows="3"
+      placeholder="卡片内容（问答回写、心得…）"
+    ></textarea>
     <button class="btn" :disabled="!content.trim() || saving" @click="save">
-      {{ saving ? '保存中…' : '写卡片' }}
+      {{ saving ? '保存中…' : editing ? '确认覆盖卡片' : '写卡片' }}
     </button>
+    <button v-if="editing" class="btn" @click="cancelEdit">取消编辑</button>
+    <p v-if="error" role="alert">{{ error }}</p>
 
     <ul v-if="cards.length" class="card-list">
       <li v-for="card in cards" :key="card.slug" class="card-item">
         <div class="card-head">
           <span class="card-type">{{ card.card_type }}</span>
           <strong>{{ card.title }}</strong>
+          <button class="btn" @click="edit(card)">编辑</button>
         </div>
         <div class="card-content">{{ card.content }}</div>
       </li>
@@ -34,7 +42,7 @@ import { apiGet, apiPost } from '@/apis/base'
 export default {
   name: 'CardsPanel',
   props: {
-    rid: { type: String, required: true }
+    rid: { type: String, default: '' }
   },
   setup(props) {
     const cards = ref([])
@@ -42,23 +50,56 @@ export default {
     const title = ref('')
     const content = ref('')
     const saving = ref(false)
+    const editing = ref(null)
+    const error = ref('')
+    const edit = (card) => {
+      editing.value = card
+      cardType.value = card.card_type
+      title.value = card.title
+      content.value = card.content
+    }
+    const cancelEdit = () => {
+      editing.value = null
+      title.value = ''
+      content.value = ''
+    }
 
     const enc = (v) => encodeURIComponent(v)
+    const endpoint = () =>
+      props.rid ? `/api/literature/papers/${enc(props.rid)}/cards` : '/api/literature/cards'
     const load = async () => {
-      const data = await apiGet(`/api/literature/papers/${enc(props.rid)}/cards`)
+      const data = await apiGet(endpoint())
       cards.value = data?.cards || []
     }
     const save = async () => {
+      if (
+        editing.value &&
+        !window.confirm('确认覆盖这张卡片？期间若有其他修改，服务端会拒绝保存。')
+      )
+        return
       saving.value = true
+      error.value = ''
       try {
-        await apiPost(`/api/literature/papers/${enc(props.rid)}/cards`, {
+        await apiPost(endpoint(), {
           card_type: cardType.value,
           content: content.value,
-          title: title.value
+          title: title.value,
+          ...(editing.value
+            ? {
+                slug: editing.value.slug,
+                overwrite: true,
+                expected_digest: editing.value.digest,
+                para_ids: editing.value.para_ids,
+                tags: editing.value.tags
+              }
+            : {})
         })
         content.value = ''
         title.value = ''
+        editing.value = null
         await load()
+      } catch (err) {
+        error.value = err?.message || '卡片保存失败'
       } finally {
         saving.value = false
       }
@@ -66,7 +107,7 @@ export default {
 
     onMounted(load)
 
-    return { cards, cardType, title, content, saving, save }
+    return { cards, cardType, title, content, saving, save, editing, error, edit, cancelEdit }
   }
 }
 </script>
@@ -96,7 +137,7 @@ export default {
   gap: 8px;
 }
 .card-item {
-  border: 1px solid var(--border-color, #eee);
+  border: 1px solid var(--gray-150);
   border-radius: 8px;
   padding: 8px 12px;
 }
@@ -110,14 +151,14 @@ export default {
   font-size: 11px;
   border-radius: 4px;
   padding: 1px 6px;
-  background: rgba(22, 119, 255, 0.1);
+  background: color-mix(in srgb, var(--main-color) 12%, transparent);
 }
 .card-content {
   font-size: 13px;
   white-space: pre-wrap;
 }
 .cards-empty {
-  opacity: 0.6;
+  color: var(--color-text-tertiary);
   padding: 12px 0;
 }
 </style>

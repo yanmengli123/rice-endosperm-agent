@@ -2,7 +2,14 @@
   <div class="diary-view">
     <div class="diary-head">
       <h2>阅读日记</h2>
-      <input v-model="month" class="month-input" placeholder="YYYY-MM（可空）" @keyup.enter="load" />
+      <input v-model="month" type="month" class="month-input" @change="load" />
+      <input
+        :value="selectedDate"
+        type="date"
+        aria-label="日记日期"
+        @change="selectDay($event.target.value)"
+      />
+      <button class="btn" :disabled="exporting" @click="exportMonth">导出当月 Markdown</button>
     </div>
     <div class="diary-days">
       <button
@@ -15,23 +22,44 @@
         {{ day }}
       </button>
     </div>
-    <textarea v-model="content" class="diary-content" rows="10" placeholder="写下当天的阅读心得（清空并保存即删除该天日记）"></textarea>
-    <button class="btn" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存日记' }}</button>
+    <textarea
+      :disabled="loading || saving"
+      v-model="content"
+      class="diary-content"
+      rows="10"
+      placeholder="写下当天的阅读心得（清空并保存即删除该天日记）"
+    ></textarea>
+    <button class="btn" :disabled="saving || loading" @click="save">
+      {{ saving ? '保存中…' : '保存日记' }}
+    </button>
+    <p v-if="notice" role="status">{{ notice }}</p>
   </div>
 </template>
 
 <script>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { apiGet, apiPut } from '@/apis/base'
+import { literatureWorkspaceApi } from '@/apis/literature_api'
 
 export default {
   name: 'DiaryView',
   setup() {
     const days = ref([])
-    const month = ref('')
-    const selectedDate = ref('')
+    const now = new Date()
+    const today = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, '0'),
+      String(now.getDate()).padStart(2, '0')
+    ].join('-')
+    const month = ref(today.slice(0, 7))
+    const selectedDate = ref(today)
     const content = ref('')
     const saving = ref(false)
+    const loading = ref(false)
+    const exporting = ref(false)
+    const notice = ref('')
+    const savedContent = ref('')
+    let generation = 0
 
     const load = async () => {
       const qs = month.value ? `?month=${encodeURIComponent(month.value)}` : ''
@@ -39,29 +67,93 @@ export default {
       days.value = data?.days || []
     }
     const selectDay = async (day) => {
+      if (!day || saving.value) return
+      if (
+        content.value !== savedContent.value &&
+        !window.confirm('切换日期会丢弃未保存的心得，继续？')
+      )
+        return
+      const ticket = ++generation
+      const previousDate = selectedDate.value
       selectedDate.value = day
-      const data = await apiGet(`/api/literature/diary/${encodeURIComponent(day)}`)
-      content.value = data?.content || ''
+      loading.value = true
+      notice.value = ''
+      try {
+        const data = await apiGet(`/api/literature/diary/${encodeURIComponent(day)}`)
+        if (ticket !== generation) return
+        content.value = savedContent.value = data?.content || ''
+      } catch (error) {
+        if (ticket === generation) {
+          selectedDate.value = previousDate
+          notice.value = error.message || '读取日记失败'
+        }
+      } finally {
+        if (ticket === generation) loading.value = false
+      }
+    }
+    const exportMonth = async () => {
+      exporting.value = true
+      try {
+        const response = await literatureWorkspaceApi.exportDiary(month.value)
+        const url = URL.createObjectURL(await response.blob())
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `阅读日记-${month.value}.md`
+        link.click()
+        setTimeout(() => URL.revokeObjectURL(url), 1000)
+      } catch (error) {
+        notice.value = error.message || '导出失败'
+      } finally {
+        exporting.value = false
+      }
     }
     const save = async () => {
       if (!selectedDate.value) {
         // 空日记可直接创建：默认落到今天（上游语义：用户主动写下即建行）
-        selectedDate.value = new Date().toISOString().slice(0, 10)
+        const now = new Date()
+        selectedDate.value = [
+          now.getFullYear(),
+          String(now.getMonth() + 1).padStart(2, '0'),
+          String(now.getDate()).padStart(2, '0')
+        ].join('-')
       }
       saving.value = true
+      const day = selectedDate.value
+      const text = content.value
       try {
-        await apiPut(`/api/literature/diary/${encodeURIComponent(selectedDate.value)}`, {
-          content: content.value
+        await apiPut(`/api/literature/diary/${encodeURIComponent(day)}`, {
+          content: text
         })
+        savedContent.value = text
+        notice.value = '已保存 ✓'
         await load()
+      } catch (error) {
+        notice.value = error.message || '日记保存失败'
       } finally {
         saving.value = false
       }
     }
 
-    onMounted(load)
+    onMounted(async () => {
+      await load()
+      await selectDay(today)
+    })
+    onBeforeUnmount(() => generation++)
 
-    return { days, month, selectedDate, content, saving, load, selectDay, save }
+    return {
+      days,
+      month,
+      selectedDate,
+      content,
+      saving,
+      loading,
+      load,
+      selectDay,
+      save,
+      notice,
+      exporting,
+      exportMonth
+    }
   }
 }
 </script>
@@ -87,13 +179,13 @@ export default {
   margin: 12px 0;
 }
 .day-chip {
-  border: 1px solid var(--border-color, #ddd);
+  border: 1px solid var(--gray-150);
   border-radius: 10px;
   background: transparent;
   padding: 2px 10px;
   cursor: pointer;
   &.active {
-    background: var(--primary-color, #1677ff);
+    background: var(--main-color);
     color: #fff;
   }
 }
