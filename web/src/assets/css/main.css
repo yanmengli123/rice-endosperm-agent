@@ -391,3 +391,109 @@ button {
   background: var(--color-warning-50);
   color: var(--color-warning-900);
 }
+
+/* 语义状态色暗黑覆盖 — 提亮以确保可读性 */
+:root.dark .task-error {
+  color: #ff7875;
+}
+
+:root.dark .resolved-badge {
+  color: #95de64;
+}
+
+:root.dark .review-item.blocking {
+  border-color: #ffa940;
+}
+
+:root.dark .error-text {
+  color: #ff7875;
+}
+
+/* 文献卡片 hover 暗黑适配 */
+:root.dark .paper-card {
+  border-color: #3a3b3b;
+}
+
+:root.dark .paper-card:hover {
+  border-color: #4a9fb8;
+}
+
+/* 模态框暗黑适配 */
+:root.dark .paper-detail {
+  background: #1e1f1f;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+}
+
+/* 概念卡片暗黑 */
+:root.dark .concept-card {
+  border-color: #3a3b3b;
+}
+
+:root.dark .concept-card.mature {
+  border-color: rgba(149, 222, 100, 0.4);
+}
+
+/* 通知条暗黑 */
+:root.dark .bib-notice,
+:root.dark .graph-notice,
+:root.dark .review-notice {
+  background: rgba(74, 159, 184, 0.15);
+  color: #82c3d6;
+}
+
+/* 空状态提示暗黑 */
+:root.dark .lit-empty,
+:root.dark .lit-loading,
+:root.dark .pane-empty,
+:root.dark .note-empty,
+:root.dark .cards-empty,
+:root.dark .review-empty,
+:root.dark .attachment-empty,
+:root.dark .reader-loading,
+:root.dark .note-loading,
+:root-dark .pane-empty {
+  color: #8a8c8c;
+}
+
+/* 元数据 JSON 展示暗黑 */
+:root.dark .meta-json {
+  color: #b0b2b2;
+}
+
+/* 邻居面板暗黑 */
+:root.dark .neighbor-panel {
+  border-color: #3a3b3b;
+  background: #1e1f1f;
+}
+
+/* PDF iframe 暗黑边框 */
+:root.dark .pdf-frame {
+  border-color: #3a3b3b;
+}
+
+/* 概念/论文元数据行 */
+:root.dark .paper-meta {
+  color: #8a8c8c;
+}
+
+:root.dark .concept-def {
+  color: #b0b2b2;
+}
+
+:root.dark .concept-count {
+  color: #8a8c8c;
+}
+
+:root.dark .concept-papers {
+  color: #6a6c6c;
+}
+
+/* 阅读器双语对照分隔线 */
+:root.dark .parallel-para {
+  border-bottom-color: rgba(128, 128, 128, 0.2);
+}
+
+/* 日记天数芯片 */
+:root.dark .diary-days {
+  gap: 6px;
+}

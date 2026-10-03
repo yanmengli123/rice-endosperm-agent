@@ -256,6 +256,12 @@
         <option value="pdf">关联 PDF 知识源</option>
         <option value="catalog">独立目录 / Markdown</option>
       </select>
+      <select v-model="filters.quartile" aria-label="期刊分区">
+        <option value="">所有分区</option>
+        <option v-for="q in ['Q1', 'Q2', 'Q3', 'Q4']" :key="q" :value="q">{{ q }}</option>
+        <option value="none">未知分区</option>
+      </select>
+      <label>最低 IF<input v-model="filters.min_if" type="number" min="0" step="0.1" /></label>
       <select v-model="filters.sort" aria-label="目录排序">
         <option value="updated">最近更新</option>
         <option value="year">年份</option>
@@ -406,6 +412,8 @@ export default {
     const runDetail = ref(null)
     const filters = ref({
       journal: '',
+      quartile: '',
+      min_if: '',
       year_min: '',
       year_max: '',
       compiled_level: '',

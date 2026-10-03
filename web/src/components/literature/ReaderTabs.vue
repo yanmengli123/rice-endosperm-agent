@@ -485,7 +485,7 @@ export default {
 }
 .parallel-para {
   padding: 6px 0;
-  border-bottom: 1px dashed rgba(0, 0, 0, 0.06);
+  border-bottom: 1px dashed rgba(128, 128, 128, 0.25);
   white-space: pre-wrap;
   &.zh {
     opacity: 0.95;
@@ -548,7 +548,7 @@ export default {
 .image-lightbox {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.75);
+  background: rgba(0, 0, 0, 0.85);
   display: flex;
   align-items: center;
   justify-content: center;

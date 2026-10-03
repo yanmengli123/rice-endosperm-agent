@@ -107,7 +107,7 @@ export default {
 .level-status {
   margin-left: 6px;
   font-size: 11px;
-  opacity: 0.8;
+  color: var(--color-text-tertiary);
 }
 .note-markdown {
   white-space: pre-wrap;

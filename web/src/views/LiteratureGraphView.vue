@@ -294,7 +294,7 @@ export default {
     border-radius: 0 6px 6px 0;
   }
   .btn.active {
-    color: #fff;
+    color: var(--gray-0);
     background: var(--main-color);
     border-color: var(--main-color);
   }
@@ -342,7 +342,7 @@ export default {
 .rid-list {
   font-family: monospace;
   font-size: 12px;
-  opacity: 0.8;
+  color: var(--color-text-tertiary);
   margin: 2px 0 8px;
   word-break: break-all;
 }

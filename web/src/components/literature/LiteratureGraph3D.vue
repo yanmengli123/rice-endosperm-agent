@@ -244,7 +244,7 @@ defineExpose({ fit })
   background: var(--component-background, rgba(255, 255, 255, 0.94));
   font-size: 12px;
   pointer-events: none;
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
 }
 .webgl-fallback {
   display: grid;

@@ -197,7 +197,7 @@ export default {
   border-radius: 8px;
   padding: 10px 12px;
   &.blocking {
-    border-color: #e6a23c;
+    border-color: color-mix(in srgb, #e6a23c 60%, transparent);
   }
   &.resolved {
     color: var(--color-text-secondary);
