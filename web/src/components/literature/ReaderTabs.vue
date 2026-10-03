@@ -448,11 +448,17 @@ export default {
 .sub-tab {
   border: none;
   background: transparent;
+  color: var(--color-text-secondary);
   padding: 6px 12px;
   cursor: pointer;
   font-size: 13px;
+  transition: color 0.15s;
+  &:hover {
+    color: var(--main-color);
+  }
   &.active {
     border-bottom: 2px solid var(--main-color);
+    color: var(--main-color);
     font-weight: 600;
   }
 }
@@ -506,11 +512,15 @@ export default {
   margin-bottom: 8px;
 }
 .ctrl-btn {
-  border: 1px solid var(--gray-150);
+  border: 1px solid var(--gray-300);
   border-radius: 4px;
-  background: transparent;
+  background: var(--gray-100);
+  color: var(--color-text);
   padding: 2px 10px;
   cursor: pointer;
+  &:hover {
+    border-color: var(--main-color);
+  }
 }
 .ctrl-scale {
   font-size: 13px;

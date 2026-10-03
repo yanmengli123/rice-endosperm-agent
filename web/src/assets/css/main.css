@@ -45,6 +45,96 @@ body {
   }
 }
 
+/* ==========================================================================
+   .btn — 全局工具按钮（文献域等非 ant-design 按钮的统一样式）
+   主题感知：light/dark 各自用语义变量，WCAG AA+ 对比度
+   ========================================================================== */
+
+/* 声明色彩方案：让浏览器原生控件（表单/滚动条/按钮 fallback）跟随主题 */
+:root {
+  color-scheme: light;
+}
+:root.dark {
+  color-scheme: dark;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid var(--gray-300);
+  border-radius: 6px;
+  background: var(--gray-100);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  user-select: none;
+
+  &:hover:not(:disabled) {
+    border-color: var(--main-color);
+    color: var(--main-color);
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(0.5px);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  /* 激活态（toggle 场景）：主色填充底 + 主色上高对比文字 */
+  &.active {
+    background: var(--main-color);
+    border-color: var(--main-color);
+    color: var(--gray-0);
+    font-weight: 500;
+
+    &:hover:not(:disabled) {
+      background: var(--main-bright);
+      border-color: var(--main-bright);
+      color: var(--gray-0);
+    }
+  }
+
+  /* ghost 态（切换按钮未选中）：透明底，仅边框 */
+  &.ghost {
+    background: transparent;
+    color: var(--color-text-secondary);
+    border-color: var(--gray-300);
+
+    &:hover:not(:disabled) {
+      color: var(--main-color);
+      border-color: var(--main-color);
+    }
+  }
+
+  /* 主操作（提交/搜索） */
+  &.btn-primary {
+    background: var(--main-color);
+    border-color: var(--main-color);
+    color: var(--gray-0);
+    font-weight: 500;
+
+    &:hover:not(:disabled) {
+      background: var(--main-bright);
+      border-color: var(--main-bright);
+    }
+  }
+}
+
+/* --- 全局原生 button 兜底（无 .btn 类时的暗黑可读性）--- */
+button {
+  color: inherit;
+  font-family: inherit;
+}
+
 .lucide-icon-btn {
   display: inline-flex;
   align-items: center;

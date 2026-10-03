@@ -169,6 +169,10 @@ export default {
   align-items: center;
 }
 .month-input {
+  background: var(--gray-100);
+  color: var(--color-text);
+  border: 1px solid var(--gray-300);
+  border-radius: 4px;
   padding: 4px 10px;
   width: 140px;
 }
@@ -179,17 +183,27 @@ export default {
   margin: 12px 0;
 }
 .day-chip {
-  border: 1px solid var(--gray-150);
+  border: 1px solid var(--gray-300);
   border-radius: 10px;
   background: transparent;
+  color: var(--color-text-secondary);
   padding: 2px 10px;
   cursor: pointer;
+  &:hover {
+    border-color: var(--main-color);
+  }
   &.active {
     background: var(--main-color);
-    color: #fff;
+    border-color: var(--main-color);
+    color: var(--gray-0);
+    font-weight: 500;
   }
 }
 .diary-content {
+  background: var(--gray-100);
+  color: var(--color-text);
+  border: 1px solid var(--gray-300);
+  border-radius: 6px;
   width: 100%;
   box-sizing: border-box;
   margin-bottom: 10px;

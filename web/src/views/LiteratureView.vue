@@ -833,14 +833,22 @@ export default {
   flex-wrap: wrap;
 }
 .chip {
-  border: 1px solid var(--gray-150);
+  border: 1px solid var(--gray-300);
   border-radius: 12px;
   background: transparent;
+  color: var(--color-text-secondary);
   padding: 2px 12px;
+  font-size: 13px;
   cursor: pointer;
+  transition: all 0.15s ease;
+  &:hover {
+    border-color: var(--main-color);
+  }
   &.active {
     background: var(--main-color);
-    color: #fff;
+    border-color: var(--main-color);
+    color: var(--gray-0);
+    font-weight: 500;
   }
 }
 .lit-toolbar {
@@ -850,6 +858,10 @@ export default {
   margin: 12px 0;
 }
 .search-input {
+  background: var(--gray-100);
+  color: var(--color-text);
+  border: 1px solid var(--gray-300);
+  border-radius: 6px;
   flex: 1;
   max-width: 480px;
   padding: 6px 12px;
@@ -898,6 +910,10 @@ export default {
   flex: 1;
 }
 .moc-input {
+  background: var(--gray-100);
+  color: var(--color-text);
+  border: 1px solid var(--gray-300);
+  border-radius: 6px;
   padding: 6px 12px;
   width: 200px;
 }

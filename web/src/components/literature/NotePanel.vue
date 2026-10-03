@@ -84,14 +84,20 @@ export default {
   margin-bottom: 8px;
 }
 .level-tab {
-  border: 1px solid var(--gray-150);
-  background: transparent;
+  border: 1px solid var(--gray-300);
+  background: var(--gray-100);
+  color: var(--color-text-secondary);
   border-radius: 6px;
   padding: 4px 12px;
   cursor: pointer;
+  &:hover {
+    border-color: var(--main-color);
+  }
   &.active {
     background: var(--main-color);
-    color: #fff;
+    border-color: var(--main-color);
+    color: var(--gray-0);
+    font-weight: 500;
   }
   &.disabled {
     opacity: 0.4;
