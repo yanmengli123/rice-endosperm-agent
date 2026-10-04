@@ -41,6 +41,7 @@ from yuxi.storage.postgres.models_knowledge import (
     CitationMention,
     KnowledgeChunk,
     LiteratureArtifactRevision,
+    LiteratureCard,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -80,6 +81,7 @@ async def env(monkeypatch):
         LiteratureAttachment,
         LiteratureCitation,
         LiteratureReport,
+        LiteratureCard,
         KnowledgeWiki,
         WikiSourceBinding,
         WikiPublication,
@@ -227,6 +229,11 @@ async def test_source_acls_apply_before_pagination_and_assets_graph_reports(env)
         assert [r["id"] for r in await cards.list_reports(TENANT)] == [2]
         neighbors = await graph_service.graph_neighbors(TENANT, "doi-public")
         assert neighbors["references"] == []
+        network = await graph_service.graph_network(TENANT, exclude_isolated=False)
+        assert {node["rid"] for node in network["nodes"]} == scope.rids
+        assert all(node["library_citations"] == 0 for node in network["nodes"])
+        preview = await graph_service.graph_network(TENANT, exclude_isolated=False, preview=True)
+        assert preview["meta"]["matched_nodes"] == len(scope.rids)
     owner = SimpleNamespace(uid="owner", role="user", department_id=None)
     async with access.access_scope(owner, TENANT) as scope:
         assert "doi-private" in scope.rids and "other-tenant" not in scope.rids

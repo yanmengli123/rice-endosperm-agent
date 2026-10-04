@@ -28,6 +28,21 @@ def test_build_event_rejects_unknown_category():
         )
 
 
+def test_literature_cache_hit_is_registered_user_visible_trace():
+    event = build_trace_event(
+        run_id="r1",
+        thread_id="t1",
+        category="MODEL",
+        operation="cache",
+        event_type="model.cache.hit",
+        title="复用模型候选（当前门禁仍执行）",
+        attributes={"cache_hit": True},
+        visibility="USER",
+    )
+    assert event["attributes"] == {"cache_hit": True}
+    assert event["visibility"] == "USER"
+
+
 def test_build_event_rejects_malformed_event_type():
     with pytest.raises(ValueError):
         build_trace_event(

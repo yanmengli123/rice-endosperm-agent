@@ -59,7 +59,12 @@ class _FakeMinio:
         self.uploads: list[tuple[str, int, str]] = []
 
     async def adownload_file(self, bucket, object_name):
+        # 服务端必须先经 parse_minio_url 拆出对象名；若直接把完整 URL 当对象名传进来，
+        # 在这里显式失败，避免 fixture 再次掩盖该缺陷。
         assert bucket == service_module.RENDER_BUCKET
+        assert not object_name.startswith(("http://", "https://", "minio://")), (
+            f"渲染输入仍是完整 URL，未解析成对象名: {object_name}"
+        )
         if object_name.endswith("original.pdf"):
             return b"%PDF-1.7 fake-bytes"
         return b"# Starch synthesis\n\nOsNF-YB1 regulates starch biosynthesis.\n"
@@ -122,7 +127,10 @@ async def service_env(monkeypatch, tmp_path):
                     artifact_id=artifact_id,
                     revision_id=REVISION_ID,
                     kind=kind,
-                    object_uri=f"tenants/1/documents/{SOURCE_SHA}/{suffix}",
+                    # 真实生产形态是完整 MinIO URL（PG 实测），不是裸对象名：
+                    # 旧 fixture 用裸名，正好掩盖了渲染层把 URL 当对象名的缺陷。
+                    object_uri=f"http://localhost:9000/{service_module.RENDER_BUCKET}"
+                    f"/tenants/1/documents/{SOURCE_SHA}/{suffix}",
                     sha256="b" * 64,
                     size_bytes=1024,
                 )

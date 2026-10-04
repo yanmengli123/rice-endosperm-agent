@@ -195,7 +195,8 @@ async def test_compile_success_updates_paper_and_uploads_notes(env):
     job = await _job(session, "L1")
     assert job.status == "SUCCEEDED"
     prefix = f"tenants/{TENANT}/literature/notes/{paper.rid}/{REVISION_ID}/r1/literature-compile-v1"
-    assert job.note_uri == f"kbasset://{prefix}/L1_note.md"
+    assert job.note_uri.startswith(f"kbasset://{prefix}/g") and job.note_uri.endswith("/L1_note.md")
+    prefix = job.note_uri.removeprefix("kbasset://").removesuffix("/L1_note.md")
     l2_job = await _job(session, "L2")
     assert l2_job.status == "SUCCEEDED"
     assert l2_job.note_uri == f"kbasset://{prefix}/L2_wiki.md"
@@ -261,4 +262,4 @@ async def test_compile_requires_linked_revision(env, monkeypatch):
     outcome = await compile_service.process_literature_compile({}, result["job_id"])
     assert outcome["status"] == "PENDING"  # attempt 1/3，回 PENDING 待重试
     job = await _job(session, "L1")
-    assert "未关联解析版本" in (job.error or "")
+    assert "无任何正文产物" in (job.error or "")

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.literature import retrieval
 from yuxi.literature.access import LiteratureAccess, _access
 from yuxi.literature.review_contract import ReviewItem, apply_choice_to_paragraph
-from yuxi.storage.postgres.models_knowledge import LiteratureCompileJob, LiteraturePaper
+from yuxi.storage.postgres.models_knowledge import LiteratureCompileJob, LiteraturePaper, LiteratureNoteSearch
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -50,7 +50,7 @@ class _FakeMinio:
 async def env(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        for model in (LiteraturePaper, LiteratureCompileJob):
+        for model in (LiteraturePaper, LiteratureCompileJob, LiteratureNoteSearch):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
@@ -116,6 +116,12 @@ async def test_compiled_search_excludes_invisible_papers(env):
                 tenant_id=TENANT, paper_id=2, level="L1", status="SUCCEEDED", attempt=0, note_uri=note_b
             )
         )
+        await session.flush()
+        from sqlalchemy import select
+        from yuxi.literature.fulltext import project_note
+
+        for job in (await session.execute(select(LiteratureCompileJob))).scalars():
+            await project_note(session, job, "starch biosynthesis" if job.paper_id == 1 else "sucrose transport starch")
     minio = _FakeMinio()
     minio.files[note_a.removeprefix("kbasset://")] = b"starch biosynthesis"
     minio.files[note_b.removeprefix("kbasset://")] = b"sucrose transport starch"
@@ -131,7 +137,7 @@ async def test_compiled_search_excludes_invisible_papers(env):
     try:
         result = await retrieval.search_compiled(TENANT, "starch")
         rids = [h["rid"] for h in result["hits"]]
-        assert RID_A in rids or result["channels_used"] == []  # 有权文献可命中
+        assert RID_A in rids
         assert RID_B not in rids, f"无权文献的笔记出现在编译检索: {rids}"
     finally:
         _access.reset(token)
@@ -221,3 +227,22 @@ def test_ilike_escaped():
     """审计 §六：用户原词进 ILIKE 必须转义。"""
     assert retrieval.escape_like("100%_a") == "100\\%\\_a"
     assert retrieval.escape_like("back\\slash") == "back\\\\slash"
+
+
+def test_missing_conflict_fragment_never_erases_whole_paragraph():
+    item = ReviewItem(source_block_ids=("mb01",), mineru_text="missing", paddleocr_text="replacement")
+    paragraphs = [{"source_block_ids": ["mb01"], "text_en": "important unrelated paragraph"}]
+    assert apply_choice_to_paragraph(paragraphs, item, "B") == "no_target"
+    assert paragraphs[0]["text_en"] == "important unrelated paragraph"
+
+
+def test_review_nested_evidence_identity():
+    item = ReviewItem.from_payload({"evidence": {"para_id": "P009"}, "mineru": {"text": "old"}})
+    assert item.para_ids == ("P009",)
+
+
+def test_identity_match_does_not_rewrite_repeated_text_elsewhere():
+    item = ReviewItem(source_block_ids=("mb01",), mineru_text="old", paddleocr_text="new")
+    paragraphs = [{"source_block_ids": ["mb01"], "text_en": "old"}, {"source_block_ids": ["mb02"], "text_en": "old"}]
+    assert apply_choice_to_paragraph(paragraphs, item, "B") == "replaced"
+    assert [row["text_en"] for row in paragraphs] == ["new", "old"]

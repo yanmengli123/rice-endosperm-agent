@@ -37,6 +37,15 @@ TENANT = 11
 REVISION = "sir_p10a_0001"
 BASE = f"tenants/{TENANT}/documents/{'c' * 64}/reader_render/{REVISION}/"
 
+
+def test_normalized_dto_preserves_paragraph_array_and_rejects_invalid_suppliers():
+    item = ReviewItem.from_payload({"report_idx": 0, "para_ids": ["P001", "P002"], "mineru_text": "old"})
+    assert item.para_ids == ("P001", "P002") and item.item_id.endswith("para:P001")
+    for payload in ({"mineru": "wrong"}, {"source_block_ids": "B001"}, {"para_ids": [""]}):
+        with pytest.raises(ValueError):
+            ReviewItem.from_payload(payload)
+
+
 # 上游真实嵌套格式（review_service 实测：items[].mineru.block_id/.text）
 _UPSTREAM_REVIEW = {
     "count": 2,
@@ -175,6 +184,54 @@ async def test_get_review_items_serves_normalized_dto(env):
     assert first["mineru_text"].startswith("AGPase")
     assert first["source_block_ids"] == ["mb_01"]
     assert first["item_id"]
+
+
+async def test_multiple_conflicts_in_one_ocr_block_have_distinct_stable_bindings(env):
+    from copy import deepcopy
+    from yuxi.literature.review_contract import normalize_review_items
+
+    _, storage = env
+    raw = deepcopy(_UPSTREAM_REVIEW)
+    raw["items"][1]["mineru"]["block_id"] = "mb_01"
+    document = {
+        "paragraphs": [
+            {
+                "para_id": "P001",
+                "source_block_ids": ["mb_01"],
+                "text_en": "prefix AGPase activity measured at 25C and OsNF-YB1 expression suffix",
+            }
+        ]
+    }
+    storage.files[f"{BASE}document.json"] = json.dumps(document).encode()
+    storage.files[f"{BASE}work/review.json"] = json.dumps(raw).encode()
+    current = await review.get_review_items(TENANT, REVISION)
+    identities = {item["report_idx"]: item["item_id"] for item in current["items"]}
+    assert len(set(identities.values())) == 2 and all(":fragment:" in value for value in identities.values())
+    reversed_items = normalize_review_items(raw["items"][::-1], render_id=current["render_id"], render_digest="changed")
+    assert {item.report_idx: item.item_id for item in reversed_items} == identities
+    for item in current["items"]:
+        await review.decide(
+            TENANT,
+            REVISION,
+            report_idx=item["report_idx"],
+            choice="B",
+            decided_by="u1",
+            item_id=item["item_id"],
+            render_id=current["render_id"],
+            render_digest=current["render_digest"],
+            require_binding=True,
+        )
+    manifest = await review.apply_decisions(TENANT, REVISION)
+    assert manifest["actions"]["replaced"] == 2
+    applied = json.loads(storage.files[f"{BASE}{review.RESOLVED_DOC_NAME}"])
+    text = applied["paragraphs"][0]["text_en"]
+    assert text.startswith("prefix") and text.endswith("suffix") and "25°C" in text and "OsNF-YBI" in text
+    with pytest.raises(ValueError, match="身份"):
+        normalize_review_items(
+            [raw["items"][0], {**raw["items"][0], "report_idx": 2}],
+            render_id=current["render_id"],
+            render_digest=current["render_digest"],
+        )
 
 
 # --- 兼容语义（A/B/C/D）----------------------------------------------------------

@@ -773,3 +773,34 @@ async def test_mention_figure_label_is_deterministic_locator_entry(monkeypatch: 
     assert contract["retrieval_plan"]["retrieval_required"] is True
     assert contract["document_narrowing"]["source"] == "MENTION_FROZEN"
     assert contract["document_narrowing"]["file_ids"] == ["file-a"]
+
+
+@pytest.mark.asyncio
+async def test_server_ceiling_intersects_text_scope_and_frozen_mentions(monkeypatch):
+    from yuxi.knowledge.planning import document_scope
+    from types import SimpleNamespace
+
+    _patch_pipeline(monkeypatch, citations=[_citation("E1", 3, "Starch synthesis occurs in endosperm.")])
+
+    async def foreign_text_scope(*_args, **_kwargs):
+        return SimpleNamespace(
+            public_dict=lambda: {"status": "RESOLVED", "file_ids": ["other-paper"]},
+            constraint_file_ids=["other-paper"],
+            clean_question="How is starch synthesized?",
+            status=document_scope.SCOPE_NONE,
+        )
+
+    monkeypatch.setattr(document_scope, "resolve_document_scope", foreign_text_scope)
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(),
+        question="How is starch synthesized?",
+        scope_snapshot={**_SCOPE, "document_scope_ceiling": {"file_ids": ["file-a"]}},
+        run_id="paper-bound-run",
+        request_id="paper-bound-request",
+        mention_resolution={"document_ids": ["file-a"]},
+    )
+    assert contract["document_narrowing"] == {
+        "source": "SERVER_DOCUMENT_CEILING",
+        "file_ids": ["file-a"],
+        "locator_only": False,
+    }

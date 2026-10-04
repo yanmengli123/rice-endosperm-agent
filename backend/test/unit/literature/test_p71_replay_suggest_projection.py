@@ -64,7 +64,7 @@ class _FakeMinio:
                         {
                             "report_idx": 0,
                             "para_id": "P001",
-                            "mineru": {"block_id": "mb1", "text": "甲版本"},
+                            "mineru": {"block_id": "mb1", "text": "MinerU 识别的段落一。"},
                             "paddleocr": {"block_id": "pb1", "text": "乙版本"},
                             "blocking": True,
                         }
@@ -178,6 +178,11 @@ def test_document_object_candidates_order():
 async def test_compile_inputs_prefer_resolved_document(env):
     """编译链修正版优先：回放后编译输入读到的是修正文本。"""
     session, minio, monkeypatch = env
+    paper = LiteraturePaper(
+        id=1, rid="doi-x", tenant_id=TENANT, kind="paper", title="T", doi="10.1/x", source_revision_id=REVISION
+    )
+    session.add(paper)
+    await session.commit()
     await review.decide(TENANT, REVISION, report_idx=0, para_id="P001", choice="B", resolved_text="Paddle 修正段落一。")
     await review.apply_decisions(TENANT, REVISION)
 
@@ -192,7 +197,7 @@ async def test_compile_inputs_prefer_resolved_document(env):
         source_revision_id = REVISION
         paper_rank = 0.0
 
-    meta, paragraphs, journal = await notes_service._load_compile_inputs(_Paper())
+    meta, paragraphs, journal = await notes_service._load_compile_inputs(paper)
     assert "Paddle 修正段落一。" in paragraphs  # 修正版生效
     assert "MinerU 识别的段落二。" in paragraphs
 

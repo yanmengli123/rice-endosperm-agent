@@ -75,6 +75,7 @@ def test_child_executes_selected_gateway_and_returns_review(monkeypatch, tmp_pat
         (root / "en.md").write_text("# Reading\n\nBody", encoding="utf-8")
         (root / "work").mkdir()
         (root / "work" / "review.json").write_text('{"items":[{"report_idx":0}]}', encoding="utf-8")
+        return {"stats": {"verify": {"items": 0}}}
 
     monkeypatch.setattr(gateway, "run_offline_render", lambda **kw: execute("offline", **kw))
     monkeypatch.setattr(gateway, "run_dual_channel_render", lambda **kw: execute("dual", **kw))
@@ -96,3 +97,16 @@ def test_child_executes_selected_gateway_and_returns_review(monkeypatch, tmp_pat
     assert child.main() == 0
     assert invoked == [mode]
     assert json.loads(json.loads(result.read_text())["review_json"])["items"][0]["report_idx"] == 0
+
+
+@pytest.mark.parametrize(
+    "result", [None, {}, {"stats": {}}, {"stats": {"paddle_error": "private-token", "verify": {}}}]
+)
+def test_dual_channel_soft_failure_is_rejected_without_secret_details(result):
+    with pytest.raises(ValueError, match="PADDLE_CHANNEL_FAILED") as error:
+        gateway.validate_dual_result(result)
+    assert "private-token" not in str(error.value)
+
+
+def test_dual_channel_zero_conflicts_is_valid_with_verification():
+    gateway.validate_dual_result({"stats": {"verify": {"items": 0}}})

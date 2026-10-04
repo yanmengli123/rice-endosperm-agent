@@ -158,6 +158,33 @@ def _build_run() -> SimpleNamespace:
     )
 
 
+@pytest.mark.asyncio
+async def test_bound_paper_changed_after_queue_fails_before_model_execution(monkeypatch):
+    run_obj = _build_run()
+    run_obj.tenant_id = 19
+    snapshot = {"literature_binding": {"rid": "bound-paper", "parse_revision_id": "old"}}
+    run_obj.input_payload["knowledge_scope_snapshot"] = snapshot
+    _patch_common(monkeypatch, run_obj)
+    finished = []
+
+    async def changed_source(*, user, tenant_id, snapshot):
+        assert user.uid == "user-1" and tenant_id == 19
+        assert snapshot["literature_binding"]["rid"] == "bound-paper"
+        raise PermissionError("绑定文献来源或阅读版本已变更")
+
+    async def finish(run, status, **kwargs):
+        finished.append((run.id, status, kwargs["error_type"]))
+
+    def forbidden_model(**_kwargs):
+        raise AssertionError("revoked/stale paper must not reach the model")
+
+    monkeypatch.setattr("yuxi.literature.session.validate_frozen_paper_scope", changed_source)
+    monkeypatch.setattr(run_worker, "_finish_run_before_execution", finish)
+    monkeypatch.setattr(run_worker, "stream_agent_chat", forbidden_model)
+    await run_worker.process_agent_run({"job_try": 1}, "run-1")
+    assert finished == [("run-1", "failed", "literature_source_changed")]
+
+
 def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
     @asynccontextmanager
     async def fake_session_ctx():

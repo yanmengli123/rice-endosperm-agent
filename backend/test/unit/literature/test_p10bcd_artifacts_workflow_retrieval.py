@@ -14,6 +14,7 @@ from yuxi.literature import artifacts, retrieval, workflow
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureArtifactRevision,
     LiteratureCompileJob,
+    LiteratureNoteSearch,
     LiteraturePaper,
     LiteratureWorkflowRun,
 )
@@ -62,9 +63,19 @@ class _FakeMinio:
 
 @pytest_asyncio.fixture
 async def env(monkeypatch):
+    async def enqueue_tick(_run_id):
+        return True
+
+    monkeypatch.setattr(workflow, "_enqueue_tick", enqueue_tick)
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        for model in (LiteraturePaper, LiteratureArtifactRevision, LiteratureWorkflowRun, LiteratureCompileJob):
+        for model in (
+            LiteraturePaper,
+            LiteratureArtifactRevision,
+            LiteratureWorkflowRun,
+            LiteratureCompileJob,
+            LiteratureNoteSearch,
+        ):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
@@ -155,14 +166,13 @@ async def test_resolve_falls_back_to_legacy_probe(env):
     paper.source_revision_id = "sir_legacy"
     await session.commit()
 
-    engine2 = paper.metadata.create_all  # noop guard
     async with _AsyncSessionContext(session):
         pass
     minio.files[base + "document_resolved.json"] = b"resolved legacy"
     # probe 需要查 render 表——直接 mock resolve 的 DB 查询层
     import yuxi.literature.artifacts as art
 
-    async def fake_probe(t, p):
+    async def fake_probe(t, p, *, storage=None):
         return {
             "content": b"resolved legacy",
             "source": "decided",
@@ -217,7 +227,71 @@ async def test_skip_review_gate_records_operator(env):
     state = await workflow.get_workflow(run["run_id"], TENANT)
     assert state["review_skipped"] is True and "已人工核对" in state["review_skip_reason"]
     gate = next(s for s in state["steps"] if s["step"] == "review_gate")
-    assert gate["status"] == "SKIPPED"
+    assert gate["status"] == "PENDING"  # Intent is consumed only after render succeeds.
+
+
+async def test_effective_pointer_with_loaded_paper_and_digest_guard(env):
+    session, minio = env
+    stored = await artifacts.store_revision(
+        TENANT,
+        RID,
+        "document",
+        content=b'{"paragraphs": []}',
+        content_type="application/json",
+        operator="u1",
+    )
+    paper = (await session.execute(select(LiteraturePaper).where(LiteraturePaper.rid == RID))).scalar_one()
+    effective = await artifacts.resolve_effective_document(TENANT, RID, paper=paper)
+    assert effective["revision_id"] == stored["revision_id"]
+    minio.files[stored["uri"].removeprefix("kbasset://")] = b"corrupted"
+    with pytest.raises(ValueError, match="完整性"):
+        await artifacts.resolve_effective_document(TENANT, RID, paper=paper)
+
+
+async def test_document_validation_rejects_before_upload(env):
+    _, minio = env
+    for content in (b"broken JSON", b'{"paragraphs": []}', b'{"paragraphs": [{"text_en":"no identity"}]}'):
+        with pytest.raises(ValueError):
+            await artifacts.store_revision(
+                TENANT, RID, "document", content=content, content_type="application/json", operator="u1", freeze=True
+            )
+    assert minio.uploads == []
+
+
+async def test_failed_step_terminates_run_with_pending_successors(env):
+    run = await workflow.start_workflow(tenant_id=TENANT, paper_rid=RID, mode="full", requested_by="u1")
+    await workflow.mark_step(run["run_id"], "render", "FAILED", detail="provider failed")
+    state = await workflow.get_workflow(run["run_id"], TENANT)
+    assert state["status"] == "FAILED"
+    assert next(step for step in state["steps"] if step["step"] == "compile")["status"] == "PENDING"
+    assert await workflow.resume_workflow(run["run_id"]) is None
+
+
+async def test_completed_history_does_not_block_new_runs(env):
+    for _ in range(2):
+        run = await workflow.start_workflow(tenant_id=TENANT, paper_rid=RID, mode="parse_only", requested_by="u1")
+        for step in workflow.MODE_STEPS["parse_only"]:
+            await workflow.mark_step(run["run_id"], step, "SUCCEEDED")
+        assert (await workflow.get_workflow(run["run_id"], TENANT))["status"] == "SUCCEEDED"
+
+
+async def test_reconcile_requeues_pending_runs_with_arq_context(env, monkeypatch):
+    run = await workflow.start_workflow(tenant_id=TENANT, paper_rid=RID, mode="parse_only", requested_by="u1")
+    queued = []
+
+    async def enqueue(run_id):
+        queued.append(run_id)
+        return True
+
+    monkeypatch.setattr(workflow, "_enqueue_tick", enqueue)
+    assert await workflow.reconcile_stale_workflows({}) == 1
+    assert queued == [run["run_id"]]
+
+
+async def test_claim_lease_prevents_concurrent_ticks(env):
+    run = await workflow.start_workflow(tenant_id=TENANT, paper_rid=RID, mode="parse_only", requested_by="u1")
+    assert await workflow._claim(run["run_id"]) is not None
+    assert await workflow._claim(run["run_id"]) is None
 
 
 # --- 阶段D：两套检索 --------------------------------------------------------------
@@ -259,10 +333,17 @@ async def test_search_compiled_rrf_and_boundary(env):
 
     async with _AsyncSessionContext(session):
         NOTE_URI = f"kbasset://tenants/{TENANT}/literature/notes/{RID}/src_rev_1/r1/v1/L1_note.md"
-        session.add(LiteratureCompileJob(tenant_id=TENANT, paper_id=1, level="L1", status="SUCCEEDED", attempt=0, note_uri=NOTE_URI))
-    minio.files[NOTE_URI.removeprefix("kbasset://")] = (
-        b"# Note\nstarch biosynthesis regulates grain filling"
-    )
+        session.add(
+            LiteratureCompileJob(
+                tenant_id=TENANT, paper_id=1, level="L1", status="SUCCEEDED", attempt=0, note_uri=NOTE_URI
+            )
+        )
+    minio.files[NOTE_URI.removeprefix("kbasset://")] = b"# Note\nstarch biosynthesis regulates grain filling"
+    from yuxi.literature.fulltext import project_note
+
+    job = (await session.execute(select(LiteratureCompileJob))).scalar_one()
+    await project_note(session, job, minio.files[NOTE_URI.removeprefix("kbasset://")].decode())
+    await session.commit()
     result = await retrieval.search_compiled(TENANT, "starch")
     assert result["channels_used"] and "note_fulltext" in result["channels_used"]
     assert len(result["hits"]) >= 1

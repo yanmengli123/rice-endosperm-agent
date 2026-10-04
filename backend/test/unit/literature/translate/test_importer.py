@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,17 @@ from yuxi.literature import importer
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureCitation,
     LiteratureCompileJob,
+    LiteratureNoteSearch,
     LiteraturePaper,
     LiteratureVariant,
+    KnowledgeBase,
+    KnowledgeFile,
+    KnowledgeParseRevision,
+    LiteratureReaderRender,
+    LiteratureArtifactRevision,
+    KnowledgeWiki,
+    WikiPublication,
+    WikiSourceBinding,
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -41,9 +51,14 @@ class _AsyncSessionContext:
 class _FakeMinio:
     def __init__(self):
         self.uploads: list[str] = []
+        self.files = {}
 
     async def aupload_file(self, *, bucket_name, object_name, data, content_type):
         self.uploads.append(object_name)
+        self.files[object_name] = bytes(data)
+
+    async def adownload_file(self, bucket, name):
+        return self.files[name]
 
 
 def _build_paperagent_fixture(root: Path) -> None:
@@ -79,13 +94,32 @@ def _build_paperagent_fixture(root: Path) -> None:
 async def env(monkeypatch, tmp_path):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        for model in (LiteraturePaper, LiteratureCitation, LiteratureVariant, LiteratureCompileJob):
+        for model in (
+            LiteraturePaper,
+            LiteratureCitation,
+            LiteratureVariant,
+            LiteratureCompileJob,
+            LiteratureNoteSearch,
+            KnowledgeBase,
+            KnowledgeFile,
+            KnowledgeParseRevision,
+            LiteratureReaderRender,
+            LiteratureArtifactRevision,
+            KnowledgeWiki,
+            WikiPublication,
+            WikiSourceBinding,
+        ):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         monkeypatch.setattr(importer.pg_manager, "get_async_session_context", lambda: _AsyncSessionContext(session))
         minio = _FakeMinio()
         monkeypatch.setattr(importer, "get_minio_client", lambda: minio)
+
+        async def publish(*args, **kwargs):
+            return {"status": "NO_BINDING"}
+
+        monkeypatch.setattr("yuxi.literature.notes.wiki_publish.publish_literature_notes", publish)
         fixture_root = tmp_path / "paperagent"
         _build_paperagent_fixture(fixture_root)
         yield session, minio, fixture_root
@@ -122,14 +156,14 @@ async def test_import_is_idempotent_and_maps_identity(env):
     variants = (await session.execute(select(LiteratureVariant))).scalars().all()
     assert variants[0].lang == "zh" and variants[0].variant_kind == "zh"
     # MinIO：译文 + 笔记
-    assert any(name.endswith("/variants/10.1002_adma.202407106/zh.md") for name in minio.uploads) or any(
-        name.endswith("10.1002_adma.202407106/zh.md") for name in minio.uploads
-    )
+    assert any("/variants/10.1002_adma.202407106/" in name and name.endswith("/zh.md") for name in minio.uploads)
     assert any(name.endswith("/L1_note.md") for name in minio.uploads)
 
     # 重跑幂等：不新增行
+    uploaded = len(minio.uploads)
     second = await importer.import_paperagent_data(tenant_id=TENANT, paperagent_root=fixture_root, dry_run=False)
-    assert second.papers_written == 2  # upsert 覆盖，不新增
+    assert second.papers_written == 0 and second.papers_skipped == 2
+    assert second.variants_written == 0 and len(minio.uploads) == uploaded
     edges_again = (await session.execute(select(LiteratureCitation))).scalars().all()
     assert len(edges_again) == 1
     variants_again = (await session.execute(select(LiteratureVariant))).scalars().all()
@@ -139,3 +173,73 @@ async def test_import_is_idempotent_and_maps_identity(env):
 async def test_import_requires_biblio_db(tmp_path):
     with pytest.raises(ValueError, match="biblio.db"):
         await importer.import_paperagent_data(tenant_id=TENANT, paperagent_root=tmp_path, dry_run=True)
+
+
+async def test_import_prefers_final_document_and_preserves_local_freeze(env):
+    from yuxi.literature import artifacts
+
+    session, minio, root = env
+    dirname = "10.1002_adma.202407106"
+    rid = f"doi-{dirname}"
+    library = root / "library" / dirname
+    library.mkdir(parents=True)
+    kb = root / "knowledge_base" / dirname
+    original = {"paragraphs": [{"text_en": "Uncorrected library text."}]}
+    final = {"paragraphs": [{"para_id": "P009", "text_en": "Final corrected knowledge document."}]}
+    (library / "document.json").write_text(json.dumps(original), encoding="utf-8")
+    (kb / "document.json").write_text(json.dumps(final), encoding="utf-8")
+    report = await importer.import_paperagent_data(tenant_id=TENANT, paperagent_root=root, dry_run=False)
+    assert report.reader_renders_written == 1
+    document = await artifacts.resolve_effective_document(TENANT, rid, storage=minio)
+    assert json.loads(document["content"])["paragraphs"][0]["text_en"] == final["paragraphs"][0]["text_en"]
+    assert document["frozen"]
+    saved = await artifacts.store_revision(
+        TENANT,
+        rid,
+        "document",
+        content=json.dumps(
+            {"paragraphs": [{"para_id": "P009", "text_en": "Local human revision must survive migration."}]}
+        ).encode(),
+        content_type="application/json",
+        operator="u1",
+        freeze=True,
+        storage=minio,
+    )
+    paper = (await session.execute(select(LiteraturePaper).where(LiteraturePaper.rid == rid))).scalar_one()
+    before = (paper.source_revision_id, paper.reading_version)
+    (kb / "document.json").write_text(json.dumps(original), encoding="utf-8")
+    again = await importer.import_paperagent_data(tenant_id=TENANT, paperagent_root=root, dry_run=False)
+    assert any("保留已冻结" in item for item in again.conflicts)
+    assert (paper.source_revision_id, paper.reading_version) == before
+    document = await artifacts.resolve_effective_document(TENANT, rid, storage=minio)
+    assert document["revision_id"] == saved["revision_id"]
+    assert json.loads(document["content"])["paragraphs"][0]["text_en"].startswith("Local human")
+    assert again.notes_written == 0 and again.variants_written == 0
+
+
+@pytest.mark.parametrize("snapshots", [1, 2])
+async def test_registered_trash_snapshot_restores_core_without_guessing(env, snapshots):
+    session, storage, root = env
+    dirname = "10.1002_adma.202407106"
+    kb = root / "knowledge_base" / dirname
+    destination = root / "knowledge_base/.trash" / (dirname + "__20261003123000")
+    destination.parent.mkdir()
+    kb.rename(destination)
+    body = {"paragraphs": [{"para_id": "P009", "text_en": "Archived corrected knowledge document."}]}
+    (destination / "document.json").write_text(json.dumps(body), encoding="utf-8")
+    with sqlite3.connect(root / "data/biblio/biblio.db") as conn:
+        conn.execute("CREATE TABLE kb_trash (key TEXT, dirname TEXT)")
+        conn.execute("INSERT INTO kb_trash VALUES (?, ?)", (f"doi-{dirname}", dirname))
+    if snapshots == 2:
+        duplicate = destination.parent / dirname
+        duplicate.mkdir()
+        (duplicate / "document.json").write_text(json.dumps(body), encoding="utf-8")
+    preview = await importer.import_paperagent_data(tenant_id=TENANT, paperagent_root=root, dry_run=True)
+    report = await importer.import_paperagent_data(tenant_id=TENANT, paperagent_root=root, dry_run=False)
+    assert preview.reader_renders_written == report.reader_renders_written == int(snapshots == 1)
+    assert report.variants_written == int(snapshots == 1)
+    assert report.notes_written == int(snapshots == 1)
+    if snapshots == 1:
+        projection = (await session.execute(select(LiteratureNoteSearch))).scalar_one()
+        assert "笔记" in projection.body
+        assert any(name.endswith("document.json") for name in storage.uploads)

@@ -14,6 +14,9 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureDiaryEntry,
     LiteraturePaper,
     LiteratureReviewDecision,
+    LiteratureReaderRender,
+    LiteratureArtifactRevision,
+    LiteratureCompileJob,
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -67,6 +70,9 @@ async def env(monkeypatch, tmp_path):
             LiteratureDiaryEntry,
             LiteratureCard,
             LiteratureReviewDecision,
+            LiteratureReaderRender,
+            LiteratureArtifactRevision,
+            LiteratureCompileJob,
         ):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -118,10 +124,30 @@ async def test_markdown_import_creates_fingerprint_identity(env):
         (await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == TENANT))).scalars().first()
     )
     assert paper.rid.startswith("nd-")
-    assert any(name.endswith(f"/{paper.rid}/imported.md") for name, _ in minio.uploads)
+    assert any(f"/{paper.rid}/markdown-import/" in name and name.endswith("/imported.md") for name, _ in minio.uploads)
+    version = paper.reading_version
+    again = await bib_import.import_markdown_document(TENANT, markdown="# 我的笔记\n\n正文内容。", title="直导文献")
+    assert again["duplicated"] and paper.reading_version == version
     # 空 Markdown 422
     with pytest.raises(ValueError, match="为空"):
         await bib_import.import_markdown_document(TENANT, markdown="   ")
+
+
+async def test_markdown_import_resumes_after_object_upload_failure(env, monkeypatch):
+    session, minio = env
+    original = minio.aupload_file
+
+    async def unavailable(**kwargs):
+        raise ConnectionError("fixture storage unavailable")
+
+    monkeypatch.setattr(minio, "aupload_file", unavailable)
+    with pytest.raises(ConnectionError):
+        await bib_import.import_markdown_document(TENANT, markdown="Recoverable scientific reading content")
+    monkeypatch.setattr(minio, "aupload_file", original)
+    result = await bib_import.import_markdown_document(TENANT, markdown="Recoverable scientific reading content")
+    assert result["duplicated"] and result["reader_repaired"]
+    paper = (await session.execute(select(LiteraturePaper))).scalar_one()
+    assert paper.artifact_pointers["document"] and paper.source_revision_id is None
 
 
 # --- G1：富化合并语义（离线：三源全失败路径） ---------------------------------------
@@ -181,7 +207,18 @@ async def test_card_write_upsert_and_type_guard(env):
     first = await cards.write_card(
         TENANT, rid, card_type="card-qa", content="Q: 机制？A: OsNF-YB1 调控 [P003]", title="机制问答"
     )
-    again = await cards.write_card(TENANT, rid, card_type="card-qa", content="更新后的答案", title="机制问答")
+    existing = (await cards.list_cards(TENANT, rid))[0]
+    with pytest.raises(cards.CardConflictError):
+        await cards.write_card(TENANT, rid, card_type="card-qa", content="更新后的答案", title="机制问答")
+    again = await cards.write_card(
+        TENANT,
+        rid,
+        card_type="card-qa",
+        content="更新后的答案",
+        title="机制问答",
+        overwrite=True,
+        expected_digest=existing["digest"],
+    )
     assert first["slug"] == again["slug"]
     rows = (await session.execute(select(LiteratureCard))).scalars().all()
     assert len(rows) == 1 and rows[0].content == "更新后的答案"
@@ -232,3 +269,96 @@ async def test_graph_network_and_neighbors_shape(env):
     assert neighbors["reference_count"] == 1
     top = await graph_service.graph_top(TENANT)
     assert top and top[0]["rid"] == "doi-10.1016_j.snb.2022.132616"
+
+
+async def test_graph_filters_preview_sources_and_current_l1(env):
+    session, _ = env
+    for ident, rid, year, external, quartile, reference in (
+        (101, "p-a", 2022, 5, "Q1", False),
+        (102, "p-b", 2024, 12, "Q2", False),
+        (103, "p-c", 2019, 2, "Q1", True),
+        (104, "p-d", 2024, 12, "Q2", False),
+    ):
+        session.add(
+            LiteraturePaper(
+                id=ident,
+                tenant_id=TENANT,
+                rid=rid,
+                doi=f"10.1234/{rid}",
+                title=rid,
+                pub_year=year,
+                external_cited=external,
+                quartile=quartile,
+                impact_factor=4.5,
+                cocitation_cluster=2,
+                is_reference=reference,
+            )
+        )
+    session.add(LiteraturePaper(id=105, tenant_id=999, rid="foreign", title="must-not-count"))
+    session.add_all(
+        [
+            LiteratureCitation(id=1, tenant_id=TENANT, citing_rid="p-a", cited_doi="10.1234/p-b"),
+            LiteratureCitation(id=2, tenant_id=TENANT, citing_rid="p-c", cited_doi="10.1234/p-b"),
+            LiteratureCitation(id=3, tenant_id=999, citing_rid="foreign", cited_doi="10.1234/p-b"),
+            LiteratureCompileJob(
+                id=1,
+                tenant_id=TENANT,
+                paper_id=102,
+                level="L1",
+                status="SUCCEEDED",
+                note_uri="kbasset://bucket/l1.md",
+                reading_version=1,
+            ),
+            LiteratureCompileJob(
+                id=2,
+                tenant_id=TENANT,
+                paper_id=104,
+                level="L1",
+                status="SUCCEEDED",
+                note_uri="kbasset://bucket/stale.md",
+                reading_version=0,
+            ),
+        ]
+    )
+    await session.commit()
+    network = await graph_service.graph_network(TENANT, exclude_isolated=False, citation_source="library")
+    nodes = {node["rid"]: node for node in network["nodes"]}
+    assert len(nodes) == 4 and nodes["p-b"]["citations"] == 2
+    assert nodes["p-b"]["in_kb"] is True and nodes["p-d"]["in_kb"] is False
+    filtered = await graph_service.graph_network(TENANT, year_min=2022, exclude_isolated=False)
+    assert {node["rid"] for node in filtered["nodes"]} == {"p-a", "p-b", "p-d"}
+    assert next(node for node in filtered["nodes"] if node["rid"] == "p-b")["citations"] == 1
+    external = await graph_service.graph_network(
+        TENANT, citation_source="wos", exclude_isolated=False, sort_by="times_cited", limit=1
+    )
+    assert external["nodes"][0]["rid"] == "p-b" and external["nodes"][0]["citations"] == 12
+    assert external["meta"]["truncated"]
+    parameters = dict(
+        year_min=2022,
+        min_times_cited=4,
+        quartiles=["Q1", "Q2"],
+        cluster=2,
+        min_impact_factor=4,
+        exclude_references=True,
+        exclude_isolated=True,
+    )
+    result = await graph_service.graph_network(TENANT, **parameters)
+    preview = await graph_service.graph_network(TENANT, preview=True, **parameters)
+    assert {node["rid"] for node in result["nodes"]} == {"p-a", "p-b"}
+    assert preview["nodes"] == preview["edges"] == []
+    assert preview["meta"]["actual_nodes"] == len(result["nodes"]) == 2
+    assert preview["meta"]["matched_nodes"] == 3 and preview["meta"]["isolated_removed"] == 1
+    assert preview["meta"]["returned_nodes"] == 0
+    compiled = await graph_service.graph_network(TENANT, in_kb_only=True, exclude_isolated=False)
+    assert [node["rid"] for node in compiled["nodes"]] == ["p-b"]
+    cited = await graph_service.graph_network(TENANT, min_library_citations=2, exclude_isolated=False)
+    assert [node["rid"] for node in cited["nodes"]] == ["p-b"]
+
+
+@pytest.mark.parametrize(
+    "filters",
+    [{"year_min": 2025, "year_max": 2020}, {"quartiles": ["Q9"]}, {"citation_source": "other"}, {"sort_by": "content"}],
+)
+async def test_graph_rejects_invalid_filters(env, filters):
+    with pytest.raises(ValueError):
+        await graph_service.graph_network(TENANT, **filters)

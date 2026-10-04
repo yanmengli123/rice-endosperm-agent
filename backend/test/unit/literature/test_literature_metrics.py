@@ -54,9 +54,10 @@ def test_paper_rank_is_deterministic_and_cited_nodes_rank_higher():
 
 
 def test_cocitation_clusters_shared_cited_pairs():
-    # a、b 共同引用 c/d → 同簇；e 独立 → 无簇
+    # a、b 共同引用 c/d：共被引节点是 c/d，绝不是 a/b（后者是文献耦合）。
     clusters = metrics.compute_cocitation_clusters({"a": {"c", "d"}, "b": {"c", "d"}, "e": {"x"}})
-    assert clusters["a"] == clusters["b"] and clusters["a"] >= 1
+    assert clusters["c"] == clusters["d"] and clusters["c"] >= 1
+    assert clusters.get("a", 0) == clusters.get("b", 0) == 0
     assert clusters.get("e", 0) == 0
 
 
@@ -88,8 +89,8 @@ async def test_recompute_backfills_rank_and_cluster(env):
     papers = {p.rid: p for p in (await session.execute(select(LiteraturePaper))).scalars().all()}
     assert papers["doi-10.1001_c"].paper_rank > papers["doi-10.1001_a"].paper_rank > 0
     assert papers["doi-10.1001_d"].paper_rank > 0  # d 为汇聚节点（网络流语义）
-    # a 与 b 共同引用 c（10.1001/c）→ 同簇；c/d 无共同被引对象 → 无簇
-    assert papers["doi-10.1001_a"].cocitation_cluster == papers["doi-10.1001_b"].cocitation_cluster == 1
+    # Shared single reference is coupling, not co-citation.
+    assert papers["doi-10.1001_a"].cocitation_cluster == papers["doi-10.1001_b"].cocitation_cluster == 0
     assert papers["doi-10.1001_c"].cocitation_cluster == 0
     assert papers["doi-10.1001_d"].cocitation_cluster == 0
     # 幂等：重跑结果一致

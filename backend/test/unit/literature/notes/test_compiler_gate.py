@@ -120,3 +120,36 @@ def test_literature_notes_stays_derived_and_compile_chain_never_touches_evidence
 
     source = inspect.getsource(compiler_mod)
     assert find_forbidden_imports(source, ("yuxi.knowledge",)) == []
+
+
+@pytest.mark.asyncio
+async def test_complete_json_reasks_once_with_error_context(monkeypatch):
+    """解析失败→带错误上下文重问恰好一次；两次都坏才抛错（2026-10-04 真实事故）。
+
+    畸形样例刻意用"串内未转义引号"——确定性修复级联明确不覆盖的形态。
+    """
+    calls: list[str] = []
+
+    async def _flaky_complete(system: str, user: str) -> str:
+        calls.append(user)
+        if len(calls) == 1:
+            # one_liner 值内嵌裸双引号：json.loads 必坏且修复级联不救
+            return '{"one_liner": "RISBZ1 是"刹车"因子", "ai_value": 2.5}'
+        return '{"one_liner": "RISBZ1 是刹车因子", "ai_value": 2.5}'
+
+    monkeypatch.setattr(compiler, "_complete", _flaky_complete)
+    data, raw = await compiler.complete_json("sys", "原始任务")
+    assert data["one_liner"] == "RISBZ1 是刹车因子"
+    assert len(calls) == 2, "重问恰好一次"
+    assert "解析错误" in calls[1] and "原始任务" in calls[1], "重问必须携带原任务与错误上下文"
+
+    calls.clear()
+
+    async def _always_bad(system: str, user: str) -> str:
+        calls.append(user)
+        return "完全不是 JSON"
+
+    monkeypatch.setattr(compiler, "_complete", _always_bad)
+    with pytest.raises(ValueError):
+        await compiler.complete_json("sys", "task")
+    assert len(calls) == 2, "重问上限一次，不无限循环"

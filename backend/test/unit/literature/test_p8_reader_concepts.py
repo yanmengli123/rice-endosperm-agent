@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 import pytest
 import pytest_asyncio
@@ -17,6 +18,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureReport,
     LiteratureVariant,
     LiteratureCompileJob,
+    LiteratureArtifactRevision,
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -76,6 +78,7 @@ async def env(monkeypatch):
             LiteratureVariant,
             LiteratureReport,
             LiteratureCompileJob,
+            LiteratureArtifactRevision,
         ):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -193,6 +196,58 @@ async def test_variant_content_returns_text(env):
     assert result["ready"] is True and "正文段一的译文" in result["content"]
     missing = await reader_bundle.get_variant_content(TENANT, "doi-a", "en_zh")
     assert missing["ready"] is False
+
+
+async def test_parallel_identity_rewrites_images_on_both_sides(env):
+    env[1].files[f"{BASE}variants/zh.json"] = json.dumps(
+        {
+            "paragraphs": [
+                {"para_id": "P001", "original": "Figure ![](images/F001.png)", "translated": "图 ![](images/F001.png)"}
+            ]
+        }
+    ).encode()
+    result = await reader_bundle.get_parallel_content(TENANT, "doi-a")
+    assert result["alignment"] == "identity"
+    assert result["paragraphs"][0]["para_id"] == "P001"
+    for field in ("original", "translated"):
+        text = result["paragraphs"][0][field]
+        assert "/api/literature/assets?uri=" in text
+        assert "images%2FF001.png" in text
+        assert "](images/" not in text
+
+
+async def test_parallel_does_not_reuse_automatic_sidecar_over_frozen_translation(env):
+    from sqlalchemy import select
+
+    db, storage = env
+    paper = (await db.execute(select(LiteraturePaper).where(LiteraturePaper.id == 1))).scalar_one()
+    paper.artifact_pointers = {"variant_zh": "manual-zh"}
+    content = "人工修正的译文。".encode()
+    db.add(
+        LiteratureArtifactRevision(
+            id=1,
+            revision_id="manual-zh",
+            tenant_id=TENANT,
+            paper_id=paper.id,
+            source_revision_id=paper.source_revision_id,
+            input_reading_version=paper.reading_version,
+            input_card_revision=paper.card_revision,
+            kind="variant_zh",
+            source="manual_frozen",
+            frozen=True,
+            object_uri=f"kbasset://{BASE}manual-zh.md",
+            content_digest=hashlib.sha256(content).hexdigest(),
+        )
+    )
+    await db.commit()
+    storage.files[f"{BASE}manual-zh.md"] = content
+    storage.files[f"{BASE}variants/zh.json"] = json.dumps(
+        {"paragraphs": [{"para_id": "P001", "original": "Old source", "translated": "旧自动译文"}]}
+    ).encode()
+    result = await reader_bundle.get_parallel_content(TENANT, "doi-a")
+    assert result["alignment"] == "manual-positional"
+    assert result["paragraphs"][0]["translated"] == "人工修正的译文。"
+    assert all("旧自动译文" not in row["translated"] for row in result["paragraphs"])
 
 
 async def test_source_pdf_streams_original(env):

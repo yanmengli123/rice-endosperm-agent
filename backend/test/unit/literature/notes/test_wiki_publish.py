@@ -221,3 +221,23 @@ async def test_source_switch_during_artifact_read_cannot_publish_old_notes(env, 
     result = await wiki_publish.publish_literature_notes(TENANT, actor_uid="u1")
     assert result == {"published": False, "reason": "source_changed"}
     assert (await env.execute(select(func.count(WikiPublication.id)))).scalar_one() == 0
+
+
+@pytest.mark.parametrize("change,reason", [("card", "source_changed"), ("note", "note_changed")])
+async def test_annotation_or_recompile_during_read_cannot_activate_old_navigation(env, monkeypatch, change, reason):
+    class ChangedMinio(_FakeMinio):
+        async def adownload_file(self, bucket, object_name):
+            if object_name == NOTE_OBJECT:
+                if change == "card":
+                    paper = (await env.execute(select(LiteraturePaper))).scalar_one()
+                    paper.card_revision += 1
+                else:
+                    job = (await env.execute(select(LiteratureCompileJob))).scalar_one()
+                    job.note_uri = "kbasset://replacement-generation/L1_note.md"
+                await env.commit()
+            return await super().adownload_file(bucket, object_name)
+
+    monkeypatch.setattr(wiki_publish, "get_minio_client", ChangedMinio)
+    result = await wiki_publish.publish_literature_notes(TENANT, actor_uid="u1")
+    assert result == {"published": False, "reason": reason}
+    assert (await env.execute(select(func.count(WikiPublication.id)))).scalar_one() == 0
