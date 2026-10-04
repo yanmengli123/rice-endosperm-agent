@@ -2531,8 +2531,10 @@ class LiteratureWorkflowRun(Base):
             "paper_id",
             "mode",
             unique=True,
-            postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
-            sqlite_where=text("status IN ('PENDING', 'RUNNING')"),
+            # CANCEL_REQUESTED 是"已请求取消、待 worker 在步骤边界收敛"的活跃态，
+            # 必须纳入否则被取消的运行会与新运行并存。
+            postgresql_where=text("status IN ('PENDING', 'RUNNING', 'CANCEL_REQUESTED')"),
+            sqlite_where=text("status IN ('PENDING', 'RUNNING', 'CANCEL_REQUESTED')"),
         ),
     )
 
@@ -2549,6 +2551,10 @@ class LiteratureWorkflowRun(Base):
     steps_json = Column(JSON_VALUE, nullable=False, default=list)
     review_skipped_by = Column(String(64))
     review_skip_reason = Column(Text)
+    #: 取消意图审计（数据库为状态权威；worker 在步骤边界落 CANCELLED）
+    cancel_requested_by = Column(String(64))
+    cancel_requested_at = Column(DateTime(timezone=True))
+    cancel_reason = Column(Text)
     requested_by = Column(String(64), nullable=False, default="")
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)

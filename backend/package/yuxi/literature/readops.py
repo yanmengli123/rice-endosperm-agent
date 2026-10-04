@@ -421,11 +421,15 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
 
 _TASK_CENTER_STATUS = {
     "PENDING": "queued",
+    "CANCEL_REQUESTED": "running",  # 已请求取消但尚未收敛，仍是活跃态
     "RUNNING": "running",
     "SUCCEEDED": "success",
     "FAILED": "failed",
     "DEAD": "failed",
     "STALE": "failed",
+    # 必须显式映射：未命中会 fallback 到 "running"，让已取消任务在任务中心
+    # 显示为"运行中"，且与 AgentRun 的终态语义不一致。
+    "CANCELLED": "cancelled",
 }
 
 

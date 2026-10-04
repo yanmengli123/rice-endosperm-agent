@@ -1108,7 +1108,31 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0091_literature_fulltext", "_migration_0091_literature_fulltext"),
         ("0092_literature_review_artifacts", "_migration_0092_literature_review_artifacts"),
         ("0093_literature_fulltext_retry", "_migration_0093_literature_fulltext_retry"),
+    ("0094_literature_workflow_cancel", "_migration_0094_literature_workflow_cancel"),
     ]
+
+    async def _migration_0094_literature_workflow_cancel(self, conn) -> None:
+        """文献工作流显式取消：意图 + 审计字段。
+
+        取消语义（对标 AgentRun 的 cancel_requested/cancelled）：
+        - 数据库是状态权威，``cancel_requested`` 只是**意图**，由 worker 在步骤
+          边界落为 ``cancelled``；不允许删除任务伪装取消。
+        - 活跃唯一索引必须把 CANCEL_REQUESTED 纳入，否则被取消的运行会与新运行
+          并存，破坏"同一 (tenant, paper, mode) 同时只有一个活跃运行"的约束。
+        """
+        for statement in (
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS "
+            "cancel_requested_by VARCHAR(64)",
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS "
+            "cancel_requested_at TIMESTAMPTZ",
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS "
+            "cancel_reason TEXT",
+            # 取消后不得再回退到非终态；终态判定仍以状态列为准，此约束只挡手工写库。
+            "DROP INDEX IF EXISTS uq_lit_workflow_active",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_lit_workflow_active ON literature_workflow_runs "
+            "(tenant_id, paper_id, mode) WHERE status IN ('PENDING', 'RUNNING', 'CANCEL_REQUESTED')",
+        ):
+            await conn.execute(text(statement))
 
     async def _migration_0093_literature_fulltext_retry(self, conn) -> None:
         for statement in (

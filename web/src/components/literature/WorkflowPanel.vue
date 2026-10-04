@@ -21,6 +21,16 @@
         <input v-model="skipReason" placeholder="显式跳过复核的原因（必填）" />
         <button class="btn" :disabled="!skipReason.trim() || busy" @click="skipReview">记录原因并跳过</button>
       </div>
+      <div v-if="cancellable" class="cancel-block">
+        <input v-model="cancelReason" placeholder="取消原因（可选）" />
+        <button class="btn danger" :disabled="busy" @click="cancel">取消本次运行</button>
+      </div>
+      <p v-else-if="state.cancel_requested" class="cancel-pending">
+        已请求取消，等待当前步骤收尾（不回滚已生成的产物与已计费用量）。
+      </p>
+      <p v-if="state.status === 'CANCELLED'" class="cancel-pending">
+        运行已取消。已完成步骤的产物保留，可在下方继续阅读或重新启动。
+      </p>
     </template>
   </section>
 </template>
@@ -35,6 +45,11 @@ const runId = ref('')
 const state = ref(null)
 const notice = ref('')
 const skipReason = ref('')
+const cancelReason = ref('')
+// 取消是显式动作且不可回滚，用 confirm 兜住误点。
+const cancellable = computed(
+  () => Boolean(state.value?.cancellable) && !state.value?.cancel_requested
+)
 let timer = null
 let disposed = false
 const awaitingReview = computed(
@@ -54,7 +69,9 @@ const refresh = async () => {
   if (disposed || !runId.value) return
   try {
     state.value = await apiGet(`/api/literature/workflow/${encodeURIComponent(runId.value)}`)
-    if (!disposed && ['PENDING', 'RUNNING'].includes(state.value.status))
+    // 必须包含 CANCEL_REQUESTED：取消后仍需轮询到 CANCELLED，
+    // 否则用户点了取消就永远看不到收敛结果。
+    if (!disposed && ['PENDING', 'RUNNING', 'CANCEL_REQUESTED'].includes(state.value.status))
       timer = setTimeout(refresh, 3000)
   } catch (err) {
     notice.value = `状态读取失败：${err?.message || err}`
@@ -91,6 +108,24 @@ const skipReview = async () => {
     busy.value = false
   }
 }
+const cancel = async () => {
+  if (!window.confirm('取消后当前步骤会中断，且已生成的产物与已计费用量不会回滚。确认取消？'))
+    return
+  busy.value = true
+  try {
+    const result = await apiPost(`/api/literature/workflow/${encodeURIComponent(runId.value)}/cancel`, {
+      reason: cancelReason.value.trim()
+    })
+    notice.value = result.already_requested
+      ? '取消已在处理中，等待当前步骤收尾。'
+      : '已请求取消，等待当前步骤收尾。'
+    await refresh()
+  } catch (err) {
+    notice.value = `取消失败：${err?.message || err}`
+  } finally {
+    busy.value = false
+  }
+}
 onUnmounted(() => {
   disposed = true
   stop()
@@ -98,6 +133,21 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.cancel-block {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.btn.danger {
+  color: var(--el-color-danger, #f56c6c);
+  border-color: var(--el-color-danger, #f56c6c);
+  background: transparent;
+}
+.cancel-pending {
+  color: var(--el-color-warning, #e6a23c);
+}
 section {
   line-height: 1.7;
   color: var(--color-text);

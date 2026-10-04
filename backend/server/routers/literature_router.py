@@ -1070,6 +1070,27 @@ async def skip_review(run_id: str, payload: dict, current_user: User = Depends(g
     return {"run_id": run_id, "review_skipped": True}
 
 
+@literature.post("/workflow/{run_id}/cancel")
+async def cancel_workflow(run_id: str, payload: dict, current_user: User = Depends(get_required_user)):
+    """请求取消工作流（幂等；终态拒绝 409）。
+
+    取消是"停止继续推进"，不回滚已上传产物与已计费用量，也不删除任务行——
+    状态由数据库权威持有，worker 在步骤边界收敛为 CANCELLED。
+    """
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await workflow.request_cancel_workflow(
+            run_id, tenant_id, operator=getattr(current_user, "uid", ""), reason=str(payload.get("reason") or "")
+        )
+    except ValueError as exc:
+        message = str(exc)
+        # 已被取消视为幂等成功；已终结才冲突。
+        if "已终结" in message:
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise HTTPException(status_code=404 if "不存在" in message else 422, detail=message) from exc
+    return result
+
+
 @literature.get("/search/catalog")
 async def search_catalog_endpoint(
     query: str = Query(default="", max_length=500),
