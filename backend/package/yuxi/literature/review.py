@@ -5,8 +5,8 @@
   0 LLM 成本产出 review.json）；AI 综合仲裁（上游 dual_ai_review）后续以
   Yuxi 模型链替代接入。
 - PaddleOCR 凭据经环境变量读取（YUXI_PADDLE_TOKEN），不落库。
-- 四选一裁决（A=保留 MinerU / B=采用 Paddle / C=两者合并 / D=均不取）
-  持久化 `literature_review_decisions`；修正文本的渲染回放属已知限制。
+- 四选一裁决（A=保留/还原 MinerU / B=采用 Paddle / C=两者皆可 / D=标记存疑）
+  持久化版本绑定裁决；回放形成不可变正文修订，不删除 C/D 段落。
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from yuxi.literature.review_contract import (
     ReviewItem,
     apply_choice_to_paragraph,
     normalize_choice,
+    normalize_review_items,
 )
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
@@ -50,18 +51,21 @@ async def enqueue_dual_channel_render(revision_id: str) -> dict[str, Any]:
     return await enqueue_reader_render(revision_id=revision_id, force=True, dual=True)
 
 
-async def get_review_items(tenant_id: int, revision_id: str) -> dict[str, Any]:
+async def get_review_items(tenant_id: int, revision_id: str, *, require_dual: bool = False) -> dict[str, Any]:
     """读取 review.json 复核清单（MinIO work/ 前缀）+ 已裁决映射。"""
     async with pg_manager.get_async_session_context() as session:
+        from yuxi.literature.reading.service import render_version_for
+
+        query = select(LiteratureReaderRender).where(
+            LiteratureReaderRender.revision_id == revision_id,
+            LiteratureReaderRender.tenant_id == tenant_id,
+            LiteratureReaderRender.status == "SUCCEEDED",
+        )
+        if require_dual:
+            query = query.where(LiteratureReaderRender.render_version == render_version_for(True))
         render = (
             await session.execute(
-                select(LiteratureReaderRender)
-                .where(
-                    LiteratureReaderRender.revision_id == revision_id,
-                    LiteratureReaderRender.tenant_id == tenant_id,
-                )
-                .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
-                .limit(1)
+                query.order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc()).limit(1)
             )
         ).scalar_one_or_none()
         if render is None:
@@ -74,30 +78,54 @@ async def get_review_items(tenant_id: int, revision_id: str) -> dict[str, Any]:
     if revision_exists is None:
         raise ValueError(f"解析版本不存在: {revision_id}")
     base = render.markdown_uri.removeprefix("kbasset://").removesuffix("render.md")
-    review_object = f"{base}work/review.json"
+    review_object = render.review_uri.removeprefix("kbasset://") if render.review_uri else f"{base}work/review.json"
     items: list[dict[str, Any]] = []
+    render_digest = ""
     try:
         data = await get_minio_client().adownload_file(RENDER_BUCKET, review_object)
         review = json.loads(data.decode("utf-8"))
+        if not isinstance(review, dict) or not isinstance(review.get("items"), list):
+            raise ValueError("复核清单必须包含 items 数组")
+        render_digest = hashlib.sha256(data).hexdigest()
+        if render.review_digest and render_digest != render.review_digest:
+            raise ValueError("复核清单完整性校验失败")
         items = list(review.get("items") or [])
-    except Exception:  # noqa: BLE001 - 无双通道产物（纯离线渲染）→ 空清单
+    except Exception as exc:  # noqa: BLE001 - only offline has no required review artifact
+        if require_dual or render.render_version == render_version_for(True) or render.review_uri:
+            raise ValueError("双通道复核清单缺失或不可读，禁止绕过复核门控") from exc
         items = []
     decisions = await list_decisions(tenant_id, revision_id)
-    render_id = render.render_version  # 与 render 行绑定的稳定身份
+    render_id = _render_identity(render)
     normalized_items = []
     by_item_id: dict[str, dict] = {}
-    for payload in items:
-        item = ReviewItem.from_payload(payload, render_id=render_id)
+    for item in normalize_review_items(items, render_id=render_id, render_digest=render_digest):
         entry = item.to_payload()
         decision = next((d for d in decisions if d.get("report_idx") == item.report_idx), None)
+        if decision and (
+            (
+                decision.get("render_id")
+                and (
+                    decision["render_id"] != render_id
+                    or decision.get("render_digest") != render_digest
+                    or decision.get("item_id") != item.item_id
+                )
+            )
+            or (decision.get("contract_version") == "legacy_v1")
+        ):
+            entry["stale_decision"] = decision
+            decision = None
         entry["decision"] = decision
         entry["choice_effect"] = CHOICE_EFFECT.get(normalize_choice(decision["choice"]), "") if decision else ""
         normalized_items.append(entry)
+        if entry["item_id"] in by_item_id:
+            raise ValueError("复核项身份重复，禁止按序号猜测裁决")
         by_item_id[entry["item_id"]] = entry
     blocking = sum(1 for e in normalized_items if e["blocking"] and not e["decision"])
     return {
         "revision_id": revision_id,
         "schema_version": "review_item_v2",
+        "render_id": render_id,
+        "render_digest": render_digest,
         "total": len(normalized_items),
         "blocking_pending": blocking,
         "items": normalized_items,
@@ -115,6 +143,10 @@ async def decide(
     para_id: str = "",
     decided_by: str = "",
     legacy_ack: bool = False,
+    item_id: str = "",
+    render_id: str = "",
+    render_digest: str = "",
+    require_binding: bool = False,
 ) -> dict[str, Any]:
     """四选一仲裁（幂等 upsert；上游兼容语义：A=mineru/B=paddleocr/C=both/D=neither）。
 
@@ -128,7 +160,43 @@ async def decide(
             "检测到旧语义裁决（C/D 携带 resolved_text：旧版 C=合并替换、D=删除）。"
             "当前兼容语义 C=两者皆可、D=标记存疑不改写正文；确要保留该文本请传 legacy_ack=true"
         )
+    if report_idx < 0:
+        raise ValueError("report_idx 必须是非负整数")
+    # API writes carry the exact preview identity; trusted legacy import callers
+    # can retain decisions with explicit paragraph anchors.
+    binding = None
+    try:
+        review = await get_review_items(tenant_id, revision_id)
+        binding = next((item for item in review["items"] if item["report_idx"] == report_idx), None)
+    except ValueError:
+        if require_binding:
+            raise
+    if require_binding and (
+        binding is None
+        or not item_id
+        or not render_id
+        or not render_digest
+        or binding["item_id"] != item_id
+        or binding["render_id"] != render_id
+        or binding["render_digest"] != render_digest
+    ):
+        raise ValueError("复核清单或渲染版本已变更，请刷新后重新裁决")
+    if binding:
+        item_id, render_id, render_digest = binding["item_id"], binding["render_id"], binding["render_digest"]
     async with pg_manager.get_async_session_context() as session:
+        previous = (
+            await session.execute(
+                select(LiteratureReviewDecision)
+                .where(
+                    LiteratureReviewDecision.tenant_id == tenant_id,
+                    LiteratureReviewDecision.revision_id == revision_id,
+                    LiteratureReviewDecision.report_idx == report_idx,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if previous and previous.contract_version == "legacy_v1" and previous.choice in ("C", "D") and not legacy_ack:
+            raise ValueError("历史 C/D 裁决需要 legacy_ack=true 显式确认，禁止静默重解释")
         stmt = (
             pg_insert(LiteratureReviewDecision)
             .values(
@@ -139,13 +207,24 @@ async def decide(
                 choice=_letter_for(normalized),
                 resolved_text=resolved_text,
                 decided_by=decided_by,
+                render_id=render_id or None,
+                render_digest=render_digest or None,
+                item_id=item_id or None,
+                contract_version="review_choice_v2",
+                legacy_ack=legacy_ack,
             )
             .on_conflict_do_update(
                 index_elements=("tenant_id", "revision_id", "report_idx"),
                 set_={
-                    "choice": choice,
+                    "choice": _letter_for(normalized),
                     "resolved_text": resolved_text,
                     "decided_by": decided_by,
+                    "para_id": para_id,
+                    "render_id": render_id or None,
+                    "render_digest": render_digest or None,
+                    "item_id": item_id or None,
+                    "contract_version": "review_choice_v2",
+                    "legacy_ack": legacy_ack,
                 },
             )
         )
@@ -179,6 +258,11 @@ async def list_decisions(tenant_id: int, revision_id: str) -> list[dict[str, Any
             "choice": row.choice,
             "resolved_text": row.resolved_text,
             "decided_by": row.decided_by,
+            "render_id": row.render_id,
+            "render_digest": row.render_digest,
+            "item_id": row.item_id,
+            "contract_version": row.contract_version,
+            "legacy_ack": row.legacy_ack,
         }
         for row in rows
     ]
@@ -189,6 +273,10 @@ async def list_decisions(tenant_id: int, revision_id: str) -> list[dict[str, Any
 RESOLVED_DOC_NAME = "document_resolved.json"
 RESOLVED_MD_NAME = "render_resolved.md"
 RESOLVED_MANIFEST_NAME = "resolved.json"
+
+
+def _render_identity(render) -> str:
+    return f"lrr_{render.id}_{hashlib.sha256(render.markdown_uri.encode()).hexdigest()[:24]}"
 
 
 def document_object_candidates(markdown_uri: str) -> list[str]:
@@ -235,13 +323,27 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
     decisions = await list_decisions(tenant_id, revision_id)
     if not decisions:
         raise ValueError("无已持久化的裁决，无可回放")
+    from yuxi.literature.access import paper_visibility
+    from yuxi.storage.postgres.models_knowledge import LiteraturePaper
+
     async with pg_manager.get_async_session_context() as session:
+        targets = list(
+            (
+                await session.execute(
+                    select(LiteraturePaper).where(
+                        paper_visibility(tenant_id), LiteraturePaper.source_revision_id == revision_id
+                    )
+                )
+            ).scalars()
+        )
+        target_inputs = {paper.rid: paper.reading_version for paper in targets}
         render = (
             await session.execute(
                 select(LiteratureReaderRender)
                 .where(
                     LiteratureReaderRender.revision_id == revision_id,
                     LiteratureReaderRender.tenant_id == tenant_id,
+                    LiteratureReaderRender.status == "SUCCEEDED",
                 )
                 .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
                 .limit(1)
@@ -256,17 +358,36 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
     # 装载复核项（文本兜底定位；渲染缺 review.json 时逐条降级）
     review_items: dict[int, ReviewItem] = {}
     try:
-        review_raw = json.loads((await minio.adownload_file(RENDER_BUCKET, f"{base}work/review.json")).decode("utf-8"))
-        for payload in review_raw.get("items") or []:
-            item = ReviewItem.from_payload(payload, render_id=render.render_version)
+        review_object = render.review_uri.removeprefix("kbasset://") if render.review_uri else f"{base}work/review.json"
+        review_bytes = await minio.adownload_file(RENDER_BUCKET, review_object)
+        review_raw = json.loads(review_bytes.decode("utf-8"))
+        review_digest = hashlib.sha256(review_bytes).hexdigest()
+        if render.review_digest and review_digest != render.review_digest:
+            raise ValueError("复核清单完整性校验失败")
+        for item in normalize_review_items(
+            review_raw.get("items") or [], render_id=_render_identity(render), render_digest=review_digest
+        ):
             review_items[item.report_idx] = item
-    except Exception:  # noqa: BLE001 - 无复核清单（纯离线渲染）
+    except Exception as exc:  # noqa: BLE001 - 无复核清单（纯离线渲染）
+        if render.review_uri or any(d.get("render_id") for d in decisions):
+            raise ValueError("裁决绑定的复核清单缺失、变更或损坏，禁止回放") from exc
         review_items = {}
     actions = {"kept": 0, "replaced": 0, "restored": 0, "marked": 0, "no_target": 0, "no_replacement_text": 0}
     for decision in decisions:
         item = review_items.get(int(decision.get("report_idx", -1)))
+        if decision.get("contract_version") == "legacy_v1":
+            raise ValueError("历史裁决未经新契约确认，禁止回放；请刷新复核清单重新裁决")
+        if decision.get("render_id") and (
+            item is None
+            or decision["render_id"] != item.render_id
+            or decision.get("render_digest") != item.render_digest
+            or decision.get("item_id") != item.item_id
+        ):
+            raise ValueError("裁决绑定的渲染版本已过期，禁止回放到新正文")
         action = _apply_decision_to_paragraphs(paragraphs, decision, item)
         actions[action] = actions.get(action, 0) + 1
+    if any(actions.get(name, 0) for name in ("no_target", "no_replacement_text", "ambiguous_target")):
+        raise ValueError("部分裁决无法安全定位正文，未保存回放；请刷新复核清单后重新裁决")
     # 兼容语义下 D=标记不改写：不再按裁决删段（旧 removed 语义废弃）
     document["paragraphs"] = [p for p in paragraphs if para_text(p).strip()]
     resolved_doc = json.dumps(document, ensure_ascii=False)
@@ -275,7 +396,7 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
     resolved_md = (f"# {title}\n\n{body}\n") if title else f"{body}\n"
     digest = hashlib.sha256(resolved_doc.encode("utf-8")).hexdigest()
     previous = await get_resolved_manifest(tenant_id, revision_id)
-    if previous and previous.get("digest") == digest:
+    if not targets and previous and previous.get("digest") == digest:
         return {**previous, "reused": True}
     await minio.aupload_file(
         bucket_name=RENDER_BUCKET,
@@ -296,30 +417,31 @@ async def apply_decisions(tenant_id: int, revision_id: str) -> dict:
         "digest": digest,
         "resolved_at": _utc_now_iso(),
     }
+    from yuxi.literature import artifacts
+
+    activated = {}
+    for rid, version in target_inputs.items():
+        activated[rid] = await artifacts.store_revision(
+            tenant_id,
+            rid,
+            artifacts.ArtifactKind.DOCUMENT,
+            content=resolved_doc.encode("utf-8"),
+            content_type="application/json",
+            operator="review:" + str(decisions[-1].get("decided_by") or "legacy"),
+            source=artifacts.ArtifactSource.DECIDED,
+            expected_source_revision=revision_id,
+            expected_reading_version=version,
+            advance_reading_version=True,
+            storage=minio,
+        )
+    manifest["artifacts"] = activated
+    manifest["candidate_only"] = bool(activated) and not any(row["switched"] for row in activated.values())
     await minio.aupload_file(
         bucket_name=RENDER_BUCKET,
         object_name=f"{base}{RESOLVED_MANIFEST_NAME}",
         data=json.dumps(manifest, ensure_ascii=False).encode("utf-8"),
         content_type="application/json",
     )
-    from sqlalchemy import update
-    from yuxi.storage.postgres.models_knowledge import LiteraturePaper
-
-    async with pg_manager.get_async_session_context() as session:
-        from yuxi.literature.provenance import invalidate_note_publications
-
-        await invalidate_note_publications(session, revision_id)
-        await session.execute(
-            update(LiteraturePaper)
-            .where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.source_revision_id == revision_id)
-            .values(
-                reading_version=LiteraturePaper.reading_version + 1,
-                ai_value_score=None,
-                topic_score=None,
-                value_score=0.0,
-            )
-        )
-        await session.commit()
     return manifest
 
 

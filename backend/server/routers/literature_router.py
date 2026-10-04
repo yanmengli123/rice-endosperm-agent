@@ -7,12 +7,18 @@
 
 from __future__ import annotations
 
+import json
+from typing import Annotated, Literal
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
+from pydantic import BaseModel, ConfigDict, Field
 
-from server.utils.auth_middleware import get_required_user, get_superadmin_user
+from server.utils.auth_middleware import get_admin_user, get_required_user, get_superadmin_user
 from yuxi.literature import bib_import, cards, concepts, diary, enrich as enrich_module
 from yuxi.literature import graph_service, readops, review
 from yuxi.literature import artifacts, reader_bundle, retrieval, workflow
+from yuxi.literature import management
+from yuxi.literature import qna
 from yuxi.literature import answer_cache, export_vault, library_pipeline, session as lit_session
 from yuxi.literature.access import access_scope, authorize_asset, paper_visibility
 from yuxi.literature.attachments import register_attachment
@@ -30,6 +36,11 @@ async def authorize_literature_request(request: Request, current_user: User = De
     tenant_id = await _current_tenant(current_user)
     async with access_scope(current_user, tenant_id) as scope:
         rid = request.path_params.get("rid")
+        if request.scope.get("route") and request.scope["route"].name == "restore_library_paper":
+            # The normal scope intentionally excludes trash. Restoration must
+            # recheck the underlying source ACL including trash, in its service.
+            yield scope
+            return
         if rid is not None and rid not in scope.rids:
             raise HTTPException(status_code=404, detail="文献不存在或无权访问")
         yield scope
@@ -53,16 +64,178 @@ async def _current_tenant(current_user: User) -> int:
         return await resolve_tenant_id(session, getattr(current_user, "uid", None))
 
 
+async def _read_bounded_upload(file: UploadFile, *, limit: int) -> bytes:
+    """Bound allocation before parsing, including uploads without Content-Length."""
+    chunks = []
+    size = 0
+    while chunk := await file.read(min(1024 * 1024, limit - size + 1)):
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail=f"文件超过大小限制（{limit // (1024 * 1024)} MiB）")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @literature.get("/papers")
 async def list_papers(
-    query: str = Query(default=""),
+    query: str = Query(default="", max_length=500),
     kind: str = Query(default=""),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    journal: str = Query(default="", max_length=512),
+    quartile: str = Query(default="", max_length=64),
+    min_if: float | None = Query(default=None, ge=0, le=1000),
+    year_min: int | None = Query(default=None, ge=1000, le=9999),
+    year_max: int | None = Query(default=None, ge=1000, le=9999),
+    compiled_level: str = Query(default=""),
+    source: str = Query(default=""),
+    sort: str = Query(default="updated"),
     current_user: User = Depends(get_required_user),
 ):
     tenant_id = await _current_tenant(current_user)
-    return await readops.list_papers(tenant_id, query=query, kind=kind, page=page, page_size=page_size)
+    try:
+        return await readops.list_papers(
+            tenant_id,
+            query=query,
+            kind=kind,
+            page=page,
+            page_size=page_size,
+            journal=journal,
+            quartile=quartile,
+            min_if=min_if,
+            year_min=year_min,
+            year_max=year_max,
+            compiled_level=compiled_level,
+            source=source,
+            sort=sort,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@literature.get("/drafts")
+async def list_parse_only_drafts(current_user: User = Depends(get_required_user)):
+    from yuxi.literature.drafts import list_drafts
+
+    return {"items": await list_drafts(await _current_tenant(current_user))}
+
+
+@literature.get("/history/archives")
+async def list_sealed_import_archives(current_user: User = Depends(get_required_user)):
+    from yuxi.literature.history_archive import list_archives
+
+    return {"items": await list_archives(await _current_tenant(current_user), current_user.uid)}
+
+
+@literature.get("/history/archives/{archive_sha256}/download")
+async def download_sealed_import_archive(archive_sha256: str, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.history_archive import export_archive
+
+    try:
+        content = await export_archive(await _current_tenant(current_user), current_user.uid, archive_sha256)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="归档不存在或无权访问") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(
+        content,
+        media_type="application/zip",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'attachment; filename="paperagent-history-{archive_sha256[:12]}.zip"',
+        },
+    )
+
+
+@literature.get("/history")
+async def list_import_history(
+    offset: int = Query(default=0, ge=0),
+    category: str = Query(default="", max_length=64),
+    current_user: User = Depends(get_required_user),
+):
+    from yuxi.literature.history_import import list_history
+
+    return await list_history(await _current_tenant(current_user), current_user.uid, offset=offset, category=category)
+
+
+@literature.get("/resolve-link")
+async def resolve_reader_link(
+    target: str = Query(min_length=1, max_length=500),
+    source_rid: str = Query(default="", max_length=255),
+    current_user: User = Depends(get_required_user),
+):
+    from yuxi.literature.management import resolve_reader_target
+
+    try:
+        return await resolve_reader_target(await _current_tenant(current_user), target, source_rid=source_rid)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class HistoryMappingRetry(BaseModel):
+    expected_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_id: UUID
+
+
+@literature.post("/history/{item_id}/retry-mapping")
+async def retry_import_history_mapping(
+    item_id: int, body: HistoryMappingRetry, current_user: User = Depends(get_required_user)
+):
+    from yuxi.literature.history_import import retry_history_mapping
+
+    try:
+        return await retry_history_mapping(
+            await _current_tenant(current_user),
+            current_user.uid,
+            item_id,
+            expected_digest=body.expected_digest,
+            request_id=str(body.request_id),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="历史资产不存在或无权访问") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@literature.get("/history/{item_id}/download")
+async def download_import_history(item_id: int, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.history_import import read_history
+
+    try:
+        content = await read_history(await _current_tenant(current_user), current_user.uid, item_id)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail="历史资产不存在或无权访问") from exc
+    return Response(
+        content,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'attachment; filename="history-{item_id}.bin"',
+        },
+    )
+
+
+@literature.get("/drafts/{revision_id}/document")
+async def read_parse_only_draft(revision_id: str, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.drafts import read_draft
+
+    try:
+        return await read_draft(await _current_tenant(current_user), revision_id)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail="草稿不存在或无权访问") from exc
+
+
+@literature.get("/drafts/{revision_id}/source-pdf")
+async def read_parse_only_pdf(revision_id: str, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.drafts import read_draft
+
+    try:
+        data = await read_draft(await _current_tenant(current_user), revision_id, pdf=True)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail="草稿不存在或无权访问") from exc
+    return Response(data, media_type="application/pdf", headers={"Cache-Control": "private, no-store"})
 
 
 @literature.get("/papers/{rid}")
@@ -166,7 +339,7 @@ async def upload_attachment(
     if detail is None:
         raise HTTPException(status_code=404, detail="文献不存在或无权访问")
     paper_id = await _paper_id_by_rid(tenant_id, rid)
-    content = await file.read()
+    content = await _read_bounded_upload(file, limit=50 * 1024 * 1024)
     try:
         result = await register_attachment(
             tenant_id=tenant_id, paper_id=paper_id, kind=kind, filename=file.filename or "", content=content
@@ -237,7 +410,7 @@ async def import_bib_endpoint(
 ):
     """WoS/BibTeX 导入（幂等：DOI/RID 已存在跳过）。"""
     tenant_id = await _current_tenant(current_user)
-    text = (await file.read()).decode("utf-8", errors="replace")
+    text = (await _read_bounded_upload(file, limit=10 * 1024 * 1024)).decode("utf-8", errors="replace")
     report = await bib_import.import_bib(tenant_id, text, source_name=file.filename or "")
     return {"status": 202, **report}
 
@@ -249,12 +422,21 @@ async def import_markdown_endpoint(
 ):
     """Markdown 直导（免解析、0 API；无 DOI 时指纹身份）。"""
     tenant_id = await _current_tenant(current_user)
+    markdown = payload.get("markdown") or ""
+    title = payload.get("title") or ""
+    doi = payload.get("doi") or ""
+    if not all(isinstance(value, str) for value in (markdown, title, doi)):
+        raise HTTPException(status_code=422, detail="Markdown、标题与 DOI 必须是文本")
+    if len(markdown.encode("utf-8")) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Markdown 不得超过 5 MiB")
+    if len(title) > 4096 or len(doi) > 512:
+        raise HTTPException(status_code=422, detail="标题或 DOI 超过长度限制")
     try:
         result = await bib_import.import_markdown_document(
             tenant_id,
-            markdown=str(payload.get("markdown") or ""),
-            title=str(payload.get("title") or ""),
-            doi=str(payload.get("doi") or ""),
+            markdown=markdown,
+            title=title,
+            doi=doi,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -265,6 +447,7 @@ async def import_markdown_endpoint(
 async def import_paperagent_endpoint(
     file: UploadFile,
     dry_run: bool = Query(default=True),
+    archive_sha256: str = Query(default="", max_length=64),
     current_user: User = Depends(get_superadmin_user),
 ):
     """Admin-only PaperAgent DATA_FORMAT 4 ZIP import; dry-run is the default."""
@@ -275,10 +458,56 @@ async def import_paperagent_endpoint(
             upload=file,
             dry_run=dry_run,
             actor_uid=current_user.uid,
+            expected_archive_sha256=archive_sha256,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 202, **report}
+
+
+# ---------------------------------------------------------------- 期刊指标（JCR / 中科院）
+
+
+#: 期刊指标导入是租户级共享目录的写入（影响同租户所有人），因此要求管理员角色；
+#: 预览只读本人上传的文件解析结果，普通登录用户即可。
+@literature.post("/journals/preview")
+async def preview_journals_table_endpoint(
+    file: UploadFile,
+    current_user: User = Depends(get_required_user),
+):
+    """JCR/中科院指标表预览（只回摘要：sheet/年份/列/行数 + 样例 ≤2 行，不 dump 全文）。"""
+    from yuxi.literature import journals
+
+    data = await _read_bounded_upload(file, limit=journals.MAX_JOURNAL_FILE_BYTES)
+    try:
+        return journals.preview_journals_table(data, file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@literature.post("/journals/import", status_code=201)
+async def import_journals_table_endpoint(
+    file: UploadFile,
+    current_user: User = Depends(get_admin_user),
+):
+    """导入 JCR/中科院指标表（幂等 upsert；租户来自 PrincipalContext，请求体 tenant_id 忽略）。"""
+    from yuxi.literature import journals
+
+    tenant_id = await _current_tenant(current_user)
+    data = await _read_bounded_upload(file, limit=journals.MAX_JOURNAL_FILE_BYTES)
+    try:
+        report = await journals.import_journals_table(tenant_id, data, file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 201, **report}
+
+
+@literature.get("/journals/status")
+async def journals_status_endpoint(current_user: User = Depends(get_required_user)):
+    """期刊映射 / IF 覆盖快照（对齐上游 /api/lit/status 的映射数与覆盖数）。"""
+    from yuxi.literature import journals
+
+    return await journals.journal_metrics_status(await _current_tenant(current_user))
 
 
 # ---------------------------------------------------------------- P7：G1 富化
@@ -314,6 +543,19 @@ async def diary_days(
     tenant_id = await _current_tenant(current_user)
     days = await diary.list_diary_days(tenant_id, current_user.uid, month=month or None)
     return {"days": days}
+
+
+@literature.get("/diary/export")
+async def export_diary_month(month: str = Query(...), current_user: User = Depends(get_required_user)):
+    try:
+        content = await diary.export_month(await _current_tenant(current_user), current_user.uid, month)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="reading-diary-{month}.md"'},
+    )
 
 
 @literature.get("/diary/{entry_date}")
@@ -352,6 +594,16 @@ async def list_cards_endpoint(
     return {"cards": await cards.list_cards(tenant_id, rid, card_type=card_type or None)}
 
 
+@literature.get("/cards")
+async def list_global_cards(current_user: User = Depends(get_required_user)):
+    return {"cards": await cards.list_cards(await _current_tenant(current_user), "")}
+
+
+@literature.post("/cards", status_code=201)
+async def write_global_card(payload: dict, current_user: User = Depends(get_required_user)):
+    return await write_card_endpoint("", payload, current_user)
+
+
 @literature.post("/papers/{rid}/cards", status_code=201)
 async def write_card_endpoint(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
     tenant_id = await _current_tenant(current_user)
@@ -365,7 +617,11 @@ async def write_card_endpoint(rid: str, payload: dict, current_user: User = Depe
             para_ids=payload.get("para_ids") or [],
             tags=payload.get("tags") or [],
             slug=payload.get("slug"),
+            overwrite=payload.get("overwrite") is True,
+            expected_digest=str(payload.get("expected_digest") or ""),
         )
+    except cards.CardConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 201, **result}
@@ -375,6 +631,17 @@ async def write_card_endpoint(rid: str, payload: dict, current_user: User = Depe
 async def list_reports_endpoint(current_user: User = Depends(get_required_user)):
     tenant_id = await _current_tenant(current_user)
     return {"reports": await cards.list_reports(tenant_id)}
+
+
+@literature.get("/reports/{report_id}")
+async def read_report_endpoint(report_id: int, current_user: User = Depends(get_required_user)):
+    try:
+        result = await cards.get_report(await _current_tenant(current_user), report_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="报告不存在或来源不可访问")
+    return result
 
 
 @literature.post("/reports/generate", status_code=202)
@@ -445,6 +712,10 @@ async def decide_review_endpoint(rid: str, payload: dict, current_user: User = D
             para_id=str(payload.get("para_id") or ""),
             decided_by=getattr(current_user, "uid", ""),
             legacy_ack=bool(payload.get("legacy_ack")),
+            item_id=str(payload.get("item_id") or ""),
+            render_id=str(payload.get("render_id") or ""),
+            render_digest=str(payload.get("render_digest") or ""),
+            require_binding=True,
         )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -458,10 +729,43 @@ async def decide_review_endpoint(rid: str, payload: dict, current_user: User = D
 async def graph_network_endpoint(
     min_citations: int = Query(default=0, ge=0),
     limit: int = Query(default=300, ge=1, le=5000),
+    year_min: int | None = Query(default=None, ge=1000, le=9999),
+    year_max: int | None = Query(default=None, ge=1000, le=9999),
+    min_library_citations: int = Query(default=0, ge=0),
+    min_times_cited: int = Query(default=0, ge=0),
+    min_impact_factor: float = Query(default=0, ge=0, allow_inf_nan=False),
+    quartiles: str = Query(default="", max_length=64),
+    cluster: int | None = Query(default=None, ge=0),
+    in_kb_only: bool = False,
+    exclude_references: bool = False,
+    exclude_isolated: bool = True,
+    citation_source: Literal["filtered", "library", "wos"] = "filtered",
+    sort_by: Literal["library_citations", "times_cited", "impact_factor", "paper_rank", "year"] = "library_citations",
+    preview: bool = False,
     current_user: User = Depends(get_required_user),
 ):
     tenant_id = await _current_tenant(current_user)
-    return await graph_service.graph_network(tenant_id, min_citations=min_citations, limit=limit)
+    try:
+        return await graph_service.graph_network(
+            tenant_id,
+            min_citations=min_citations,
+            limit=limit,
+            year_min=year_min,
+            year_max=year_max,
+            min_library_citations=min_library_citations,
+            min_times_cited=min_times_cited,
+            min_impact_factor=min_impact_factor,
+            quartiles=[value.strip() for value in quartiles.split(",") if value.strip()],
+            cluster=cluster,
+            in_kb_only=in_kb_only,
+            exclude_references=exclude_references,
+            exclude_isolated=exclude_isolated,
+            citation_source=citation_source,
+            sort_by=sort_by,
+            preview=preview,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @literature.get("/graph/neighbors/{rid}")
@@ -624,32 +928,80 @@ async def get_effective_document(rid: str, current_user: User = Depends(get_requ
         "revision_id": result["revision_id"],
         "frozen": result["frozen"],
         "digest": result["digest"],
+        "source_revision_id": result["source_revision_id"],
+        "reading_version": result["reading_version"],
+        "document": json.loads(result["content"]),
+        "expected_revision": result["revision_id"] if result["revision_id"].startswith("lar_") else None,
     }
+
+
+class ProductEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=5_000_000)
+    expected_revision: str | None
+    expected_source_revision: str | None
+    expected_reading_version: int = Field(ge=0)
+    expected_card_revision: int = Field(ge=0)
+    expected_base_uri: str | None = Field(max_length=1024)
+
+
+@literature.get("/papers/{rid}/products/{kind}")
+async def read_editable_product(rid: str, kind: str, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.products import read_product
+
+    try:
+        return await read_product(await _current_tenant(current_user), rid, kind)
+    except artifacts.RevisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@literature.put("/papers/{rid}/products/{kind}")
+async def edit_product(rid: str, kind: str, payload: ProductEdit, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.products import save_product
+
+    try:
+        data = payload.model_dump()
+        content = data.pop("content")
+        return await save_product(
+            await _current_tenant(current_user), rid, kind, uid=current_user.uid, content=content, snapshot=data
+        )
+    except artifacts.RevisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @literature.put("/papers/{rid}/document")
 async def save_document_revision(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
     """人工保存正文修订（乐观并发：expected_revision 不匹配返回 409）。"""
     tenant_id = await _current_tenant(current_user)
+    if not {"expected_revision", "expected_source_revision", "expected_reading_version"} <= payload.keys():
+        raise HTTPException(status_code=422, detail="必须提交正文指针、来源和阅读版本的并发校验字段")
     try:
+        document = payload.get("document", payload.get("content"))
+        content = json.dumps(document, ensure_ascii=False) if isinstance(document, dict) else str(document or "")
         result = await artifacts.store_revision(
             tenant_id,
             rid,
             artifacts.ArtifactKind.DOCUMENT,
-            content=str(payload.get("content") or "").encode("utf-8"),
+            content=content.encode("utf-8"),
             content_type="application/json",
             operator=getattr(current_user, "uid", ""),
             freeze=bool(payload.get("freeze", True)),
             expected_current_revision=payload.get("expected_revision"),
+            expected_source_revision=payload.get("expected_source_revision", artifacts._UNSPECIFIED),
+            expected_reading_version=payload.get("expected_reading_version", artifacts._UNSPECIFIED),
         )
     except artifacts.RevisionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return result
 
 
-@literature.post("/papers/{rid}/workflow")
+@literature.post("/papers/{rid}/workflow", status_code=202)
 async def start_paper_workflow(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
     """启动处理运行（parse_compile / full / parse_only；幂等复用活跃运行）。"""
     tenant_id = await _current_tenant(current_user)
@@ -681,37 +1033,77 @@ async def skip_review(run_id: str, payload: dict, current_user: User = Depends(g
     existing = await workflow.get_workflow(run_id, tenant_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="运行不存在")
-    await workflow.skip_review_gate(
-        run_id, operator=getattr(current_user, "uid", ""), reason=str(payload.get("reason") or "")
-    )
+    try:
+        await workflow.skip_review_gate(
+            run_id, operator=getattr(current_user, "uid", ""), reason=str(payload.get("reason") or "")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"run_id": run_id, "review_skipped": True}
 
 
 @literature.get("/search/catalog")
 async def search_catalog_endpoint(
-    query: str = Query(default=""),
+    query: str = Query(default="", max_length=500),
     kind: str = Query(default=""),
     order_by: str = Query(default="relevance"),
     limit: int = Query(default=20, ge=1, le=100),
+    use_cache: bool = Query(default=True),
+    rerank_model: str = Query(default="", max_length=512),
     current_user: User = Depends(get_required_user),
 ):
     """目录检索（元数据；相关度/被引/年份/PaperRank 排序）。"""
     tenant_id = await _current_tenant(current_user)
-    return {"results": await retrieval.search_catalog(tenant_id, query, kind=kind, order_by=order_by, limit=limit)}
+    try:
+        return {
+            "results": await retrieval.search_catalog(
+                tenant_id,
+                query,
+                kind=kind,
+                order_by=order_by,
+                limit=limit,
+                use_cache=use_cache,
+                rerank_model=rerank_model,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @literature.get("/search/compiled")
 async def search_compiled_endpoint(
-    query: str = Query(...),
+    query: str = Query(..., min_length=1, max_length=500),
+    kind: str = Query(default=""),
     limit: int = Query(default=10, ge=1, le=50),
+    use_cache: bool = Query(default=True),
+    rerank_model: str = Query(default="", max_length=512),
     current_user: User = Depends(get_required_user),
 ):
     """编译产物检索（笔记+元数据 RRF k=60；导航命中，不进证据通道）。"""
     tenant_id = await _current_tenant(current_user)
-    return await retrieval.search_compiled(tenant_id, query, limit=limit)
+    try:
+        return await retrieval.search_compiled(
+            tenant_id, query, kind=kind, limit=limit, use_cache=use_cache, rerank_model=rerank_model
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------- P11：六步建库 / Obsidian 导出 / 专属会话 / 缓存
+
+
+@literature.post("/indexes/navigation", status_code=202)
+async def build_navigation_index(payload: dict, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.navigation_index import enqueue_navigation_index
+
+    tenant_id = await _current_tenant(current_user)
+    try:
+        return await enqueue_navigation_index(
+            tenant_id, requested_by=current_user.uid, model_spec=str(payload.get("model_spec") or "")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
 
 @literature.post("/library/pipeline", status_code=202)
 async def run_library_pipeline(payload: dict, current_user: User = Depends(get_required_user)):
@@ -719,23 +1111,146 @@ async def run_library_pipeline(payload: dict, current_user: User = Depends(get_r
     tenant_id = await _current_tenant(current_user)
     try:
         result = await library_pipeline.run_full_pipeline(
-            tenant_id, bib_text=str(payload.get("bib_text") or ""), source_name=str(payload.get("source_name") or "")
+            tenant_id,
+            bib_text=str(payload.get("bib_text") or ""),
+            source_name=str(payload.get("source_name") or ""),
+            cleaning_rules=payload.get("cleaning_rules"),
+            include_mains=payload.get("include_mains") is True,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 202, **result}
 
 
+@literature.get("/library/pipeline/{run_id}")
+async def library_pipeline_status(run_id: str, current_user: User = Depends(get_required_user)):
+    result = await library_pipeline.get_library_run(await _current_tenant(current_user), run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="建库运行不存在")
+    return result
+
+
+@literature.post("/library/journal-metrics")
+async def attach_journal_metrics_endpoint(current_user: User = Depends(get_required_user)):
+    """关联期刊指标（对齐上游「关联期刊指标（写入 IF / 分区）」按钮）。
+
+    幂等：最新年份优先、只填空、人工锁定（meta_locked）文献受保护；不产生新的解析/证据。
+    """
+    tenant_id = await _current_tenant(current_user)
+    return await library_pipeline.attach_journal_metrics(tenant_id)
+
+
+@literature.post("/library/cleaning/preview")
+async def preview_library_cleaning(payload: dict, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.cleaning import preview_cleaning
+
+    try:
+        return await preview_cleaning(
+            await _current_tenant(current_user),
+            rules=payload.get("rules") or {},
+            include_mains=payload.get("include_mains") is True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@literature.post("/library/cleaning/{plan_id}/confirm")
+async def confirm_library_cleaning(plan_id: str, payload: dict, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.cleaning import confirm_cleaning
+
+    try:
+        return await confirm_cleaning(await _current_tenant(current_user), plan_id, str(payload.get("plan_hash") or ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@literature.get("/library/trash")
+async def library_trash(current_user: User = Depends(get_required_user)):
+    from yuxi.literature.cleaning import list_trash
+
+    return {"items": await list_trash(await _current_tenant(current_user))}
+
+
+@literature.post("/library/trash/{rid}/restore")
+async def restore_library_paper(rid: str, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.cleaning import restore_paper
+
+    try:
+        return await restore_paper(await _current_tenant(current_user), rid)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@literature.get("/indexes/navigation/{index_id}")
+async def navigation_index_status(index_id: str, current_user: User = Depends(get_required_user)):
+    from sqlalchemy import select
+    from yuxi.storage.postgres.models_knowledge import LiteratureNavigationIndex
+
+    tenant_id = await _current_tenant(current_user)
+    async with pg_manager.get_async_session_context() as db:
+        row = (
+            await db.execute(
+                select(LiteratureNavigationIndex).where(
+                    LiteratureNavigationIndex.index_id == index_id,
+                    LiteratureNavigationIndex.tenant_id == tenant_id,
+                    LiteratureNavigationIndex.requested_by == current_user.uid,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="导航索引任务不存在")
+        return {
+            "index_id": row.index_id,
+            "status": row.status,
+            "attempt": row.attempt,
+            "document_count": row.document_count,
+            "error": row.error,
+        }
+
+
 @literature.get("/export/obsidian")
-async def export_obsidian(current_user: User = Depends(get_required_user)):
+async def export_obsidian(
+    rids: list[str] | None = Query(default=None), current_user: User = Depends(get_required_user)
+):
     """Obsidian 兼容导出（zip：笔记+译文+图片+双链+清单）。"""
     tenant_id = await _current_tenant(current_user)
-    rids = None  # 全库导出（可选按 rid 过滤：query param）
-    data = await export_vault.export_obsidian_vault(tenant_id, rids=rids)
+    if rids is not None and (not rids or len(rids) > 1000 or any(not rid or len(rid) > 160 for rid in rids)):
+        raise HTTPException(status_code=422, detail="导出 rids 必须为 1–1000 个有界资源键")
+    try:
+        data = await export_vault.export_obsidian_vault(tenant_id, rids=rids)
+    except export_vault.ExportLimitError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return Response(
         content=data,
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="literature_vault.zip"'},
+    )
+
+
+@literature.get("/export/business-backup")
+async def export_business_backup(current_user: User = Depends(get_required_user)):
+    """当前有权业务快照；不导出凭据、ACL、账本或活跃任务。"""
+    from yuxi.literature.backup import export_business_backup as export_backup
+
+    tenant_id = await _current_tenant(current_user)
+    try:
+        data = await export_backup(tenant_id, current_user.uid)
+    except export_vault.ExportLimitError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="literature_business_backup.zip"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -744,7 +1259,9 @@ async def create_paper_session(rid: str, current_user: User = Depends(get_requir
     """文献专属会话：冻结该文献上下文（笔记状态+摘要+附件清单）。"""
     tenant_id = await _current_tenant(current_user)
     try:
-        context = await lit_session.build_paper_session_context(tenant_id, rid)
+        context = await lit_session.create_literature_conversation(
+            tenant_id=tenant_id, user=current_user, kind="paper", rid=rid
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return context
@@ -754,7 +1271,22 @@ async def create_paper_session(rid: str, current_user: User = Depends(get_requir
 async def create_library_session(current_user: User = Depends(get_required_user)):
     """全库会话（检索/管理操作上下文）。"""
     tenant_id = await _current_tenant(current_user)
-    return await lit_session.build_library_session_context(tenant_id)
+    return await lit_session.create_literature_conversation(tenant_id=tenant_id, user=current_user, kind="lit")
+
+
+@literature.post("/sessions")
+async def create_literature_session(payload: dict, current_user: User = Depends(get_required_user)):
+    tenant_id = await _current_tenant(current_user)
+    try:
+        return await lit_session.create_literature_conversation(
+            tenant_id=tenant_id,
+            user=current_user,
+            kind=str(payload.get("kind") or "global-qa"),
+            rid=str(payload.get("rid") or ""),
+            agent_slug=str(payload.get("agent_slug") or "default-chatbot"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @literature.post("/cache/invalidate/{rid}")
@@ -763,3 +1295,144 @@ async def invalidate_paper_cache(rid: str, current_user: User = Depends(get_requ
     await _current_tenant(current_user)  # 权限检查
     count = await answer_cache.invalidate_for_paper(rid)
     return {"invalidated": count}
+
+
+class MetadataChanges(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, max_length=4096)
+    kind: Literal["paper", "thesis", "book", "chapter", "patent", "standard"] = "paper"
+    authors_json: list[Annotated[str, Field(max_length=512)]] | None = Field(default=None, max_length=200)
+    abstract: str | None = Field(default=None, max_length=50000)
+    journal: str | None = Field(default=None, max_length=512)
+    issn: str | None = Field(default=None, max_length=32)
+    pub_year: int | None = Field(default=None, ge=1000, le=9999)
+    keywords_json: list[Annotated[str, Field(max_length=512)]] | None = Field(default=None, max_length=200)
+    meta_locked: bool = True
+
+
+class MetadataUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_token: str = Field(min_length=64, max_length=64)
+    changes: MetadataChanges
+
+
+@literature.get("/papers/{rid}/metadata")
+async def paper_metadata(rid: str, current_user: User = Depends(get_required_user)):
+    try:
+        return await management.get_metadata(await _current_tenant(current_user), rid)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@literature.put("/papers/{rid}/metadata")
+async def update_paper_metadata(rid: str, payload: MetadataUpdate, current_user: User = Depends(get_required_user)):
+    try:
+        return await management.update_metadata(
+            await _current_tenant(current_user),
+            rid,
+            expected_token=payload.expected_token,
+            changes=payload.changes.model_dump(exclude_unset=True),
+        )
+    except management.MetadataConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class BatchCompileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rids: list[str] = Field(min_length=1, max_length=50)
+    level: Literal["L1", "L2", "L3"] = "L1"
+    force: bool = False
+
+
+@literature.post("/library/compile", status_code=202)
+async def batch_compile_papers(payload: BatchCompileRequest, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.access import build_access
+
+    tenant_id = await _current_tenant(current_user)
+    scope = await build_access(current_user, tenant_id)
+    rids = list(dict.fromkeys(payload.rids))
+    if any(not rid or len(rid) > 160 for rid in rids):
+        raise HTTPException(status_code=422, detail="非法文献标识")
+    if not set(rids) <= scope.rids:
+        raise HTTPException(status_code=404, detail="批量范围含不可访问文献；未入队任何任务")
+    results = []
+    for rid in rids:
+        try:
+            result = await enqueue_literature_compile(
+                paper_id=await _paper_id_by_rid(tenant_id, rid),
+                level=payload.level,
+                force=payload.force,
+                requested_by=current_user.uid,
+            )
+            results.append({"rid": rid, "accepted": True, **result})
+        except ValueError as exc:
+            results.append({"rid": rid, "accepted": False, "error": str(exc)})
+    return {"items": results, "accepted": sum(item["accepted"] for item in results)}
+
+
+@literature.get("/runs")
+async def literature_runs(
+    limit: int = Query(default=50, ge=1, le=100), current_user: User = Depends(get_required_user)
+):
+    return {"items": await management.list_runs(await _current_tenant(current_user), limit=limit)}
+
+
+@literature.get("/sessions")
+async def list_literature_sessions(archived: bool = False, current_user: User = Depends(get_required_user)):
+    return {
+        "items": await lit_session.list_literature_sessions(
+            await _current_tenant(current_user), current_user.uid, archived=archived
+        )
+    }
+
+
+class SessionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    status: Literal["active", "archived"] | None = None
+
+
+@literature.put("/sessions/{thread_id}")
+async def update_literature_session(
+    thread_id: str, payload: SessionUpdate, current_user: User = Depends(get_required_user)
+):
+    try:
+        return await lit_session.update_literature_session(
+            await _current_tenant(current_user), current_user.uid, thread_id, title=payload.title, status=payload.status
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@literature.get("/sessions/{thread_id}/qna-preview")
+async def preview_session_qna(thread_id: str, current_user: User = Depends(get_required_user)):
+    try:
+        return await qna.answer_preview(await _current_tenant(current_user), current_user.uid, thread_id)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class QnaWriteback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message_id: int = Field(gt=0)
+    expected_digest: str = Field(min_length=64, max_length=64)
+
+
+@literature.post("/sessions/{thread_id}/qna-writeback", status_code=201)
+async def writeback_session_qna(thread_id: str, payload: QnaWriteback, current_user: User = Depends(get_required_user)):
+    try:
+        return await qna.writeback(
+            await _current_tenant(current_user),
+            current_user.uid,
+            thread_id,
+            message_id=payload.message_id,
+            expected_digest=payload.expected_digest,
+        )
+    except cards.CardConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

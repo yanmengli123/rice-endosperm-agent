@@ -9,6 +9,7 @@ chat runs instead of becoming an unmetered side channel.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -22,10 +23,12 @@ from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import AgentRun, UsageLedger, UserModelPreference
-from yuxi.utils.datetime_utils import utc_now_naive
+from yuxi.utils.datetime_utils import utc_now, utc_now_naive
 
 
-async def _supersede_stale_literature_runs(session, *, thread_key: str, exclude_run_id: str | None = None) -> None:
+async def _supersede_stale_literature_runs(
+    session, *, thread_key: str, tenant_id: int, uid: str, exclude_run_id: str | None = None
+) -> None:
     """把同线程滞留非终态的 literature run 收编为 failed。
 
     worker 进程中断会留下永远 pending 的 run；不清理则下一次同资源提交
@@ -38,6 +41,8 @@ async def _supersede_stale_literature_runs(session, *, thread_key: str, exclude_
                 select(AgentRun)
                 .where(
                     AgentRun.agent_slug == "literature",
+                    AgentRun.tenant_id == tenant_id,
+                    AgentRun.uid == uid,
                     AgentRun.conversation_thread_id == thread_key,
                     AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
                 )
@@ -89,6 +94,8 @@ async def freeze_literature_policy(
     uid: str,
     operation: str,
     resource_ref: str,
+    model_spec: str | None = None,
+    model_type: str = "chat",
 ) -> LiteratureLlmPolicy:
     """Resolve and persist a fail-closed model/credential policy snapshot."""
     if not uid:
@@ -101,13 +108,18 @@ async def freeze_literature_policy(
     if int(entitlement.get("tenant_id") or 0) != int(tenant_id):
         raise ValueError("LLM 文献任务的用户与租户归属不一致")
 
+    explicit_spec = model_spec
+    if explicit_spec is not None:
+        info = model_cache.get_model_info(explicit_spec)
+        if info is None or info.model_type != model_type:
+            raise ValueError("指定模型不存在或类型不匹配")
     preference = (
         await session.execute(select(UserModelPreference).where(UserModelPreference.uid == uid))
     ).scalar_one_or_none()
     preferred_spec = str(preference.chat_model_spec or "").strip() if preference else ""
     custom_specs = await list_active_custom_model_specs(session, uid)
     known = model_cache.get_model_info(preferred_spec) if preferred_spec else None
-    model_spec = (
+    model_spec = explicit_spec or (
         preferred_spec
         if preferred_spec in custom_specs or (known and known.model_type == "chat")
         else config.default_model
@@ -130,11 +142,13 @@ async def freeze_literature_policy(
             uid=uid,
             tenant_id=tenant_id,
             monthly_platform_token_limit=entitlement.get("monthly_platform_token_limit"),
-            now=utc_now_naive(),
+            now=utc_now(),
         )
 
-    thread_key = f"literature:{resource_ref}"[:64]
-    await _supersede_stale_literature_runs(session, thread_key=thread_key)
+    thread_key = f"literature:{resource_ref}"
+    if len(thread_key) > 64:
+        thread_key = "literature:" + hashlib.sha256(resource_ref.encode()).hexdigest()[:48]
+    await _supersede_stale_literature_runs(session, thread_key=thread_key, tenant_id=tenant_id, uid=uid)
     run_id = uuid.uuid4().hex
     policy = LiteratureLlmPolicy(
         run_id=run_id,
@@ -225,7 +239,7 @@ async def policy_for_job_attempt(job: Any, *, operation: str) -> LiteratureLlmPo
                 uid=policy.uid,
                 tenant_id=policy.tenant_id,
                 monthly_platform_token_limit=payload.get("monthly_platform_token_limit"),
-                now=utc_now_naive(),
+                now=utc_now(),
             )
         if run.status == "running":
             run.status = "failed"
@@ -234,7 +248,11 @@ async def policy_for_job_attempt(job: Any, *, operation: str) -> LiteratureLlmPo
             run.finished_at = utc_now_naive()
 
         await _supersede_stale_literature_runs(
-            session, thread_key=run.conversation_thread_id, exclude_run_id=policy.run_id
+            session,
+            thread_key=run.conversation_thread_id,
+            tenant_id=policy.tenant_id,
+            uid=policy.uid,
+            exclude_run_id=policy.run_id,
         )
         new_run_id = uuid.uuid4().hex
         payload.update({"retry_of": policy.run_id, "retry_attempt": int(getattr(job, "attempt", 0) or 0)})
@@ -298,9 +316,9 @@ async def call(messages: list[dict[str, Any]]) -> Any:
     # 整篇大 prompt（全文前缀+六维任务）首 token 延迟普遍超过对话轮默认 45s
     # （agents.models.CHAT_MODEL_REQUEST_TIMEOUT_SECONDS）——e2e 实测编译 L1
     # 稳定 45s 整超时；显式放宽到域级 600s。
-    response = await select_model(
-        model_spec=policy.model_spec, request_timeout=LITERATURE_LLM_TIMEOUT_S
-    ).call(messages, stream=False)
+    response = await select_model(model_spec=policy.model_spec, request_timeout=LITERATURE_LLM_TIMEOUT_S).call(
+        messages, stream=False
+    )
     delta = _token_usage(response, messages)
     usage.input_tokens += delta.input_tokens
     usage.output_tokens += delta.output_tokens
@@ -337,6 +355,7 @@ async def _settle(policy: LiteratureLlmPolicy, usage: _Usage, error: BaseExcepti
                     credential_id=policy.credential_id,
                     provider_id=policy.provider_id,
                     policy_version=policy.policy_version,
+                    created_at=utc_now(),
                 )
             )
         await session.commit()

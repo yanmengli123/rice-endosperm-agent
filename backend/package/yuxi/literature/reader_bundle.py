@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from typing import Any
 from urllib.parse import quote
@@ -23,6 +24,7 @@ from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseRevision,
+    KnowledgeParseArtifact,
     LiteraturePaper,
     LiteratureReaderRender,
     LiteratureVariant,
@@ -50,7 +52,7 @@ async def get_reader_bundle(tenant_id: int, rid: str) -> dict[str, Any] | None:
                 select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
-        if paper is None or not paper.source_revision_id:
+        if paper is None:
             return None
         render = (
             await session.execute(
@@ -63,19 +65,53 @@ async def get_reader_bundle(tenant_id: int, rid: str) -> dict[str, Any] | None:
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if render is None or not render.markdown_uri:
-            return {"rid": rid, "ready": False, "reason": "阅读渲染未完成"}
-    base = render.markdown_uri.removeprefix("kbasset://").removesuffix("render.md")
+        missing_render = (render is None or not render.markdown_uri) and not (paper.artifact_pointers or {}).get(
+            "document"
+        )
+    if missing_render:
+        return await _scientific_reading_fallback(tenant_id, paper) or {
+            "rid": rid,
+            "ready": False,
+            "reason": "阅读渲染未完成",
+        }
+    base = (
+        render.markdown_uri.removeprefix("kbasset://").removesuffix("render.md")
+        if render and render.markdown_uri
+        else ""
+    )
     minio = get_minio_client()
     markdown = ""
     resolved = False
-    for name in (RESOLVED_MD_NAME, "render.md"):
-        try:
-            markdown = (await minio.adownload_file(RENDER_BUCKET, f"{base}{name}")).decode("utf-8")
-            resolved = name == RESOLVED_MD_NAME
-            break
-        except Exception:  # noqa: BLE001 - 候选缺失试下一个
-            continue
+    revision_id = None
+    frozen = False
+    source = "rendered"
+    if (paper.artifact_pointers or {}).get("document"):
+        from yuxi.literature.artifacts import resolve_effective_document
+        from yuxi.literature.review import para_text
+
+        effective = await resolve_effective_document(tenant_id, rid, paper=paper, storage=minio)
+        document = json.loads(effective["content"])
+        # Image references belong to the document's generation, not whichever
+        # render happens to be newest after an asynchronous re-render.
+        if document.get("_image_base"):
+            base = str(document["_image_base"])
+            allowed_prefix = f"tenants/{tenant_id}/documents/"
+            if not base.startswith(allowed_prefix) or ".." in base.split("/"):
+                raise ValueError("正文图片来源前缀无效")
+        markdown = "\n\n".join(para_text(p) for p in document.get("paragraphs", []))
+        revision_id = effective["revision_id"]
+        frozen = effective["frozen"]
+        source = effective["source"]
+        resolved = source in {"manual_frozen", "decided"}
+    else:
+        for name in (RESOLVED_MD_NAME, "render.md"):
+            try:
+                markdown = (await minio.adownload_file(RENDER_BUCKET, f"{base}{name}")).decode("utf-8")
+                resolved = name == RESOLVED_MD_NAME
+                source = "decided" if resolved else "rendered"
+                break
+            except Exception:  # noqa: BLE001 - legacy missing candidate
+                continue
     if not markdown.strip():
         return {"rid": rid, "ready": False, "reason": "渲染产物不可读"}
     return {
@@ -84,8 +120,81 @@ async def get_reader_bundle(tenant_id: int, rid: str) -> dict[str, Any] | None:
         "resolved": resolved,
         "title": paper.title or rid,
         "markdown": rewrite_image_refs(markdown, base),
-        "markdown_uri": render.markdown_uri,
-        "image_count": render.image_count,
+        "markdown_uri": render.markdown_uri if render else None,
+        "image_count": render.image_count if render else 0,
+        "image_base": base,
+        "revision_id": revision_id,
+        "frozen": frozen,
+        "source": source,
+    }
+
+
+async def _scientific_reading_fallback(tenant_id: int, paper: LiteraturePaper) -> dict | None:
+    """Read canonical parse without pretending review/render succeeded."""
+    if not paper.source_revision_id:
+        return None
+    from yuxi.knowledge.utils import parse_minio_url
+    from yuxi.literature.access import current_access, build_access
+
+    async with pg_manager.get_async_session_context() as db:
+        revision = (
+            await db.execute(
+                select(KnowledgeParseRevision).where(
+                    KnowledgeParseRevision.revision_id == paper.source_revision_id,
+                    KnowledgeParseRevision.tenant_id == tenant_id,
+                    KnowledgeParseRevision.status.in_(("INDEXED_FULL", "INDEXED_CONTENT_ONLY", "ACTIVE")),
+                )
+            )
+        ).scalar_one_or_none()
+        if revision is None:
+            return None
+        artifact = (
+            await db.execute(
+                select(KnowledgeParseArtifact).where(
+                    KnowledgeParseArtifact.revision_id == revision.revision_id,
+                    KnowledgeParseArtifact.kind == "indexed_markdown",
+                )
+            )
+        ).scalar_one_or_none()
+        if artifact is None:
+            return None
+        frozen_input = (paper.id, paper.source_revision_id, paper.reading_version)
+    bucket, name = parse_minio_url(artifact.object_uri)
+    content = await get_minio_client().adownload_file(bucket, name)
+    if hashlib.sha256(content).hexdigest() != artifact.sha256:
+        raise ValueError("科学解析正文完整性校验失败")
+    scope = current_access()
+    if scope is not None and paper.rid not in (await build_access(scope.user, tenant_id)).rids:
+        raise PermissionError("读取期间来源权限已撤销")
+    async with pg_manager.get_async_session_context() as db:
+        now = (
+            await db.execute(
+                select(LiteraturePaper)
+                .where(paper_visibility(tenant_id), LiteraturePaper.id == frozen_input[0])
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if now is None or (now.id, now.source_revision_id, now.reading_version) != frozen_input:
+            raise ValueError("读取期间来源版本已变更")
+        if (now.artifact_pointers or {}).get("document"):
+            raise ValueError("读取期间人工正文已生效，请重新加载")
+    markdown = content.decode("utf-8")
+    from yuxi.knowledge.utils.text_utils import validate_markdown_quality
+
+    validate_markdown_quality(markdown)
+    return {
+        "rid": paper.rid,
+        "ready": True,
+        "resolved": False,
+        "frozen": False,
+        "title": paper.title or paper.rid,
+        "markdown": markdown,
+        "source": "scientific_parse",
+        "revision_id": revision.revision_id,
+        "knowledge_base_id": revision.kb_id,
+        "markdown_uri": None,
+        "image_count": len(re.findall(r"!\[[^\]]*\]\(", markdown)),
+        "notice": "当前显示科学 PDF 解析正文；专用阅读渲染/人工复核尚未完成，未改变证据资格。",
     }
 
 
@@ -106,11 +215,11 @@ async def get_variant_content(tenant_id: int, rid: str, variant_kind: str) -> di
                     .where(
                         LiteratureVariant.paper_id == paper.id,
                         LiteratureVariant.variant_kind == variant_kind,
-                        LiteratureVariant.parse_revision_id == paper.source_revision_id,
+                        LiteratureVariant.parse_revision_id == (paper.source_revision_id or ""),
                         LiteratureVariant.reading_version == paper.reading_version,
                         LiteratureVariant.generator_version.in_(("literature-translate-v1", "paperagent-import-v4")),
                     )
-                    .order_by(LiteratureVariant.created_at.desc())
+                    .order_by(LiteratureVariant.created_at.desc(), LiteratureVariant.id.desc())
                 )
             )
             .scalars()
@@ -118,16 +227,19 @@ async def get_variant_content(tenant_id: int, rid: str, variant_kind: str) -> di
         )
     if variant is None:
         return {"rid": rid, "variant_kind": variant_kind, "ready": False, "reason": "译文尚未生成"}
-    content = (await get_minio_client().adownload_file(RENDER_BUCKET, variant.uri.removeprefix("kbasset://"))).decode(
-        "utf-8"
-    )
+    async with pg_manager.get_async_session_context() as session:
+        from yuxi.literature.products import frozen_uri
+
+        uri = await frozen_uri(session, paper, f"variant_{variant_kind}", fallback=variant.uri)
+    content = (await get_minio_client().adownload_file(RENDER_BUCKET, uri.removeprefix("kbasset://"))).decode("utf-8")
     return {
         "rid": rid,
         "variant_kind": variant_kind,
         "lang": variant.lang,
         "ready": True,
         "content": content,
-        "uri": variant.uri,
+        "uri": uri,
+        "frozen": bool((paper.artifact_pointers or {}).get(f"variant_{variant_kind}")),
     }
 
 
@@ -154,11 +266,11 @@ async def get_parallel_content(tenant_id: int, rid: str) -> dict[str, Any] | Non
                     .where(
                         LiteratureVariant.paper_id == paper.id,
                         LiteratureVariant.variant_kind.in_(("zh", "en_zh")),
-                        LiteratureVariant.parse_revision_id == paper.source_revision_id,
+                        LiteratureVariant.parse_revision_id == (paper.source_revision_id or ""),
                         LiteratureVariant.reading_version == paper.reading_version,
                         LiteratureVariant.generator_version.in_(("literature-translate-v1", "paperagent-import-v4")),
                     )
-                    .order_by(LiteratureVariant.created_at.desc())
+                    .order_by(LiteratureVariant.created_at.desc(), LiteratureVariant.id.desc())
                 )
             ).scalars()
         )
@@ -170,28 +282,34 @@ async def get_parallel_content(tenant_id: int, rid: str) -> dict[str, Any] | Non
     if variant is None:
         return {"rid": rid, "ready": False, "reason": "译文尚未生成", "paragraphs": []}
 
-    minio = get_minio_client()
-    sidecar_name = re.sub(r"\.md$", ".json", variant.uri.removeprefix("kbasset://"))
-    try:
-        sidecar = json.loads((await minio.adownload_file(RENDER_BUCKET, sidecar_name)).decode("utf-8"))
-        rows = [
-            {
-                "para_id": str(row.get("para_id") or ""),
-                "original": str(row.get("original") or ""),
-                "translated": str(row.get("translated") or ""),
-            }
-            for row in (sidecar.get("paragraphs") or [])
-            if isinstance(row, dict)
-        ]
-        if rows:
-            return {"rid": rid, "ready": True, "alignment": "identity", "paragraphs": rows}
-    except Exception:  # noqa: BLE001 - pre-sidecar variants use the fallback below
-        pass
-
     reader = await get_reader_bundle(tenant_id, rid)
     translated = await get_variant_content(tenant_id, rid, variant.variant_kind)
     if not reader or not reader.get("ready") or not translated or not translated.get("ready"):
         return {"rid": rid, "ready": False, "reason": "原文或译文不可读", "paragraphs": []}
+
+    minio = get_minio_client()
+    sidecar_name = re.sub(r"\.md$", ".json", variant.uri.removeprefix("kbasset://"))
+    # An automatic sidecar must never override a manually frozen translation.
+    if not translated.get("frozen"):
+        try:
+            sidecar = json.loads((await minio.adownload_file(RENDER_BUCKET, sidecar_name)).decode("utf-8"))
+            rows = [
+                {
+                    "para_id": str(row.get("para_id") or ""),
+                    "original": rewrite_image_refs(str(row.get("original") or ""), reader["image_base"])
+                    if reader.get("image_base")
+                    else str(row.get("original") or ""),
+                    "translated": rewrite_image_refs(str(row.get("translated") or ""), reader["image_base"])
+                    if reader.get("image_base")
+                    else str(row.get("translated") or ""),
+                }
+                for row in (sidecar.get("paragraphs") or [])
+                if isinstance(row, dict)
+            ]
+            if rows:
+                return {"rid": rid, "ready": True, "alignment": "identity", "paragraphs": rows}
+        except Exception:  # noqa: BLE001 - pre-sidecar variants use the fallback below
+            pass
 
     def _paragraphs(value: str) -> list[str]:
         return [part.strip() for part in re.split(r"\n\s*\n", value or "") if part.strip()]
@@ -207,7 +325,12 @@ async def get_parallel_content(tenant_id: int, rid: str) -> dict[str, Any] | Non
         }
         for index in range(total)
     ]
-    return {"rid": rid, "ready": True, "alignment": "legacy-positional", "paragraphs": rows}
+    return {
+        "rid": rid,
+        "ready": True,
+        "alignment": "manual-positional" if translated.get("frozen") else "legacy-positional",
+        "paragraphs": rows,
+    }
 
 
 async def get_source_pdf(tenant_id: int, rid: str) -> tuple[bytes, str] | None:

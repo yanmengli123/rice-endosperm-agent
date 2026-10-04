@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import uuid
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from yuxi.literature.boundaries import assert_not_evidence_capable
@@ -33,7 +34,6 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureCompileJob,
     LiteraturePaper,
-    LiteratureReaderRender,
     KnowledgeParseRevision,
 )
 from yuxi.utils.datetime_utils import UTC, utc_now
@@ -179,6 +179,7 @@ async def enqueue_literature_compile(
                     LiteratureCompileJob.level == level,
                     LiteratureCompileJob.source_revision_id == (paper.source_revision_id or ""),
                     LiteratureCompileJob.reading_version == paper.reading_version,
+                    LiteratureCompileJob.card_revision == paper.card_revision,
                     LiteratureCompileJob.generator_version == COMPILE_VERSION,
                 )
             )
@@ -208,6 +209,7 @@ async def enqueue_literature_compile(
                 status="PENDING",
                 source_revision_id=paper.source_revision_id or "",
                 reading_version=paper.reading_version,
+                card_revision=paper.card_revision,
                 generator_version=COMPILE_VERSION,
             )
             session.add(job)
@@ -225,7 +227,10 @@ async def enqueue_literature_compile(
                 tenant_id=int(paper.tenant_id),
                 uid=requested_by,
                 operation=f"compile_{level.lower()}",
-                resource_ref=f"{paper.rid}:{level}",
+                resource_ref=(
+                    f"{paper.rid}:{level}:{paper.source_revision_id or ''}"
+                    f":r{paper.reading_version}:c{paper.card_revision}"
+                ),
             )
             job.requested_by = requested_by
             job.llm_run_id = policy.run_id
@@ -268,32 +273,12 @@ async def _claim_job(job_id: int) -> LiteratureCompileJob | None:
 
 async def _load_compile_inputs(paper: LiteraturePaper) -> tuple[dict, list[str], str]:
     """编译输入：(meta, paragraphs, journal_meta)。段落来自阅读渲染的 document.json。"""
-    if not paper.source_revision_id:
-        raise ValueError(f"文献未关联解析版本: {paper.rid}")
-    async with pg_manager.get_async_session_context() as session:
-        render = (
-            await session.execute(
-                select(LiteratureReaderRender)
-                .where(
-                    LiteratureReaderRender.revision_id == paper.source_revision_id,
-                    LiteratureReaderRender.status == "SUCCEEDED",
-                )
-                .order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if render is None:
-            raise ValueError(f"解析版本尚无成功的阅读渲染: {paper.source_revision_id}")
-    if not render.markdown_uri or not render.markdown_uri.startswith("kbasset://"):
-        raise ValueError(f"渲染产物 URI 非法: {render.markdown_uri!r}")
     # 统一有效版本入口（P11：人工冻结→裁决→渲染→导入；artifacts.resolve_effective_document）
-    from yuxi.literature import artifacts as _artifacts_mod
     from yuxi.literature.artifacts import resolve_effective_document
 
-    # 同步 pg_manager 和 minio_client 引用（测试 monkeypatch notes service 时 artifacts 同样生效）
-    _artifacts_mod.pg_manager = pg_manager
-    _artifacts_mod.get_minio_client = get_minio_client
-    effective = await resolve_effective_document(int(paper.tenant_id), paper.rid, paper=paper)
+    effective = await resolve_effective_document(
+        int(paper.tenant_id), paper.rid, paper=paper, storage=get_minio_client()
+    )
     if effective is None:
         raise ValueError(f"文献无任何正文产物: {paper.rid}")
     document_json = effective["content"]
@@ -304,13 +289,18 @@ async def _load_compile_inputs(paper: LiteraturePaper) -> tuple[dict, list[str],
     doc = json.loads(document_json.decode("utf-8"))
     paragraphs = [para_text(p) for p in (doc.get("paragraphs") or []) if isinstance(p, dict) and para_text(p).strip()]
     if not paragraphs:
-        raise ValueError(f"document.json 无可用段落: {render.markdown_uri}")
+        raise ValueError(f"document.json 无可用段落: {paper.rid}")
     meta = {
         "title": paper.title or doc.get("metadata", {}).get("title", ""),
         "doi": paper.doi or "",
-        "journal": doc.get("metadata", {}).get("journal", ""),
-        "year": doc.get("metadata", {}).get("year", ""),
-        "authors": doc.get("metadata", {}).get("authors", []),
+        "journal": paper.journal or doc.get("metadata", {}).get("journal", ""),
+        "year": paper.pub_year or doc.get("metadata", {}).get("year", ""),
+        "authors": paper.authors_json or doc.get("metadata", {}).get("authors", []),
+        "_paragraph_ids": [
+            str(p.get("para_id") or f"legacy-{i:03d}")
+            for i, p in enumerate(doc.get("paragraphs") or [], 1)
+            if isinstance(p, dict) and para_text(p).strip()
+        ],
     }
     return meta, paragraphs, meta.get("journal", "")
 
@@ -322,18 +312,22 @@ def _notes_object_prefix(paper: LiteraturePaper) -> str:
     )
 
 
-async def _finish_compile_success(job_id: int, *, note_uri: str, value_score: float | None) -> None:
+async def _finish_compile_success(job_id: int, *, note_uri: str, value_score: float | None) -> str:
     async with pg_manager.get_async_session_context() as session:
         job = (
             await session.execute(select(LiteratureCompileJob).where(LiteratureCompileJob.id == job_id))
         ).scalar_one()
-        await require_current_input(session, job)
+        paper = await require_current_input(session, job)
+        from yuxi.literature.products import frozen_uri
+
+        note_uri = await frozen_uri(session, paper, f"note_{job.level}", fallback=note_uri)
         await session.execute(
             update(LiteratureCompileJob)
             .where(LiteratureCompileJob.id == job_id)
             .values(status="SUCCEEDED", note_uri=note_uri, value_score=value_score, error=None, updated_at=utc_now())
         )
         await session.commit()
+        return note_uri
 
 
 async def _finish_l1_l2_bundle(
@@ -356,16 +350,23 @@ async def _finish_l1_l2_bundle(
         # L1 and L2 may be submitted concurrently.  Serializing on their shared
         # paper row prevents both workers from racing to insert the counterpart
         # job under uq_literature_compile_jobs_key.
-        await require_current_input(session, job)
+        paper = await require_current_input(session, job)
+        from yuxi.literature.products import frozen_uri
+
+        uri_by_level = {
+            level: await frozen_uri(session, paper, f"note_{level}", fallback=uri)
+            for level, uri in uri_by_level.items()
+        }
         rows = list(
             (
                 await session.execute(
                     select(LiteratureCompileJob).where(
                         LiteratureCompileJob.tenant_id == job.tenant_id,
                         LiteratureCompileJob.paper_id == job.paper_id,
-                        LiteratureCompileJob.level.in_(tuple(uri_by_level)),
+                        LiteratureCompileJob.level.in_(tuple(set(uri_by_level) | {job.level})),
                         LiteratureCompileJob.source_revision_id == job.source_revision_id,
                         LiteratureCompileJob.reading_version == job.reading_version,
+                        LiteratureCompileJob.card_revision == job.card_revision,
                         LiteratureCompileJob.generator_version == job.generator_version,
                     )
                 )
@@ -381,6 +382,7 @@ async def _finish_l1_l2_bundle(
                     level=level,
                     source_revision_id=job.source_revision_id,
                     reading_version=job.reading_version,
+                    card_revision=job.card_revision,
                     generator_version=job.generator_version,
                     requested_by=job.requested_by or "",
                     llm_run_id=job.llm_run_id,
@@ -393,7 +395,7 @@ async def _finish_l1_l2_bundle(
                 session.add(row)
             row.status = "SUCCEEDED"
             row.note_uri = uri
-            row.value_score = value_score
+            row.value_score = None if (paper.artifact_pointers or {}).get(f"note_{level}") else value_score
             row.error = None
             row.updated_at = utc_now()
         # A requested L2 whose compiler legitimately produced no L2 remains a
@@ -402,8 +404,9 @@ async def _finish_l1_l2_bundle(
             current = by_level.get("L2")
             if current is not None:
                 current.status = "SUCCEEDED"
-                current.note_uri = l1_uri
-                current.value_score = value_score
+                current.note_uri = await frozen_uri(session, paper, "note_L2", fallback=uri_by_level["L1"])
+                uri_by_level["L2"] = current.note_uri
+                current.value_score = None if (paper.artifact_pointers or {}).get("note_L2") else value_score
                 current.error = None
         await session.commit()
     return uri_by_level.get(job.level, l1_uri)
@@ -454,8 +457,28 @@ async def _assemble_l3_candidates(tenant_id: int, paper_rid: str, self_ctx: str)
     from sqlalchemy import select as _select
 
     from yuxi.literature.access import paper_visibility
+    from yuxi.literature.provenance import current_job
 
     async with pg_manager.get_async_session_context() as session:
+        parent = (
+            await session.execute(
+                select(LiteraturePaper).where(LiteraturePaper.rid == paper_rid, paper_visibility(tenant_id))
+            )
+        ).scalar_one_or_none()
+        if parent is None:
+            return []
+        parent_source = (
+            select(KnowledgeParseRevision.kb_id)
+            .join(LiteraturePaper, LiteraturePaper.source_revision_id == KnowledgeParseRevision.revision_id)
+            .where(LiteraturePaper.rid == paper_rid, paper_visibility(tenant_id))
+        )
+        # L3 notes publish with their parent's source ACL. Until cross-source
+        # dependency manifests exist, never embed another source's private text
+        # into that publication, even when a background worker can see it.
+        same_source_revisions = select(KnowledgeParseRevision.revision_id).where(
+            KnowledgeParseRevision.tenant_id == tenant_id,
+            KnowledgeParseRevision.kb_id.in_(parent_source),
+        )
         # ACL 先于召回 + note_uri 真实路径（每篇取最新成功 L1）
         others = (
             await session.execute(
@@ -467,10 +490,15 @@ async def _assemble_l3_candidates(tenant_id: int, paper_rid: str, self_ctx: str)
                 .where(
                     paper_visibility(tenant_id),
                     LiteraturePaper.rid != paper_rid,
+                    or_(
+                        LiteraturePaper.source_revision_id.in_(same_source_revisions),
+                        LiteraturePaper.source_revision_id.is_(None) if parent.source_revision_id is None else False,
+                    ),
                     LiteratureCompileJob.tenant_id == tenant_id,
                     LiteratureCompileJob.level == "L1",
                     LiteratureCompileJob.status == "SUCCEEDED",
                     LiteratureCompileJob.note_uri.isnot(None),
+                    current_job(LiteratureCompileJob),
                 )
                 .order_by(LiteratureCompileJob.updated_at.desc())
             )
@@ -525,8 +553,23 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
         async with pg_manager.get_async_session_context() as session:
             paper = await require_current_input(session, job)
         meta, paragraphs, journal_meta = await _load_compile_inputs(paper)
+        if job.requested_by:
+            from yuxi.literature.cards import list_cards
+
+            cards = await list_cards(int(paper.tenant_id), paper.rid)
+            meta["_manual_cards"] = [
+                {
+                    "type": card["card_type"],
+                    "title": card["title"],
+                    "annotation": card["content"][:4000],
+                    "para_ids": card["para_ids"],
+                }
+                for card in cards[:20]
+            ]
         minio = get_minio_client()
-        prefix = _notes_object_prefix(paper)
+        # Each execution writes a new generation. Force-compiling identical
+        # parse/read versions must not overwrite readers' current note bytes.
+        prefix = f"{_notes_object_prefix(paper)}/g{uuid.uuid4().hex}"
 
         if job.level in ("L1", "L2"):
             if job.llm_run_id:
@@ -577,8 +620,9 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
                     "ai_value": result["ai_value"],
                     "topic_score": result["topic_score"],
                     "year": meta.get("year"),
-                    "journal_info": None,
-                    "has_bib": False,
+                    "journal_info": {"jcr": {"jif": paper.impact_factor, "quartile": paper.quartile}},
+                    "has_bib": paper.external_cited is not None,
+                    "times_cited": paper.external_cited,
                     "paper_rank": paper.paper_rank or None,
                     "library_citations": None,
                 }
@@ -589,12 +633,32 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
                 l2_uri=l2_uri,
                 value_score=score,
             )
+            try:
+                from yuxi.literature.fulltext import sync_note
+
+                async with pg_manager.get_async_session_context() as session:
+                    l1_job_id = (
+                        await session.execute(
+                            select(LiteratureCompileJob.id).where(
+                                LiteratureCompileJob.paper_id == job.paper_id,
+                                LiteratureCompileJob.tenant_id == job.tenant_id,
+                                LiteratureCompileJob.level == "L1",
+                                LiteratureCompileJob.source_revision_id == job.source_revision_id,
+                                LiteratureCompileJob.reading_version == job.reading_version,
+                                LiteratureCompileJob.card_revision == job.card_revision,
+                                LiteratureCompileJob.generator_version == job.generator_version,
+                            )
+                        )
+                    ).scalar_one()
+                await sync_note(l1_job_id)
+            except Exception:  # noqa: BLE001 - committed note remains valid; bounded cron repairs its projection
+                logger.exception("笔记已编译，全文导航投影等待补偿: job=%s", job.id)
             # 回填评分 + L3 自动升级（ai_value 可用且 score ≥ 4.0）
             async with pg_manager.get_async_session_context() as session:
-                await require_current_input(session, job)
+                current_paper = await require_current_input(session, job)
                 await session.execute(
                     update(LiteraturePaper)
-                    .where(LiteraturePaper.id == paper.id)
+                    .where(LiteraturePaper.id == paper.id, not (current_paper.artifact_pointers or {}).get("note_L1"))
                     .values(
                         ai_value_score=result["ai_value"],
                         topic_score=result["topic_score"],
@@ -604,7 +668,7 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
                 )
                 await session.commit()
             want_l3 = value_score.auto_upgrade_levels(score, ai_value_available=result["ai_value"] is not None)[1]
-            if want_l3:
+            if want_l3 and not (current_paper.artifact_pointers or {}).get("note_L1"):
                 await enqueue_literature_compile(
                     paper_id=paper.id,
                     level="L3",
@@ -622,8 +686,12 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
             return {"job_id": job.id, "level": job.level, "status": "SUCCEEDED", "note_uri": note_uri}
 
         # L3：本文编译上下文 = L1 笔记（kbasset 同前缀）；相关文献检索随 P4 计量接入
-        l1_object = f"{prefix}/L1_note.md"
-        l1_bytes = await minio.adownload_file(RENDER_BUCKET, l1_object)
+        from yuxi.literature.readops import get_note_uri
+
+        l1_uri = await get_note_uri(int(paper.tenant_id), paper.rid, "L1")
+        if not l1_uri:
+            raise ValueError("当前版本 L1 笔记缺失，无法编译 L3（先编译 L1）")
+        l1_bytes = await minio.adownload_file(RENDER_BUCKET, l1_uri.removeprefix("kbasset://"))
         self_ctx = l1_bytes.decode("utf-8")
         if len(self_ctx.strip()) < _L3_MIN_SELF_CTX_CHARS:
             raise ValueError("L1 笔记缺失或过短，无法编译 L3（先编译 L1）")
@@ -648,7 +716,7 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
             data=relations_md.encode("utf-8"),
             content_type="text/markdown",
         )
-        await _finish_compile_success(job.id, note_uri=note_uri, value_score=None)
+        note_uri = await _finish_compile_success(job.id, note_uri=note_uri, value_score=None)
         try:
             from yuxi.literature.notes.wiki_publish import publish_literature_notes
 

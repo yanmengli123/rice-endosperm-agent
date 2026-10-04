@@ -58,7 +58,7 @@ def run_dual_channel_render(*, pdf_path: str, md_path: str, out_dir: str) -> Any
     ensure_vendor_on_path()
     from paperparse.core.p14_pipeline import process_pdf_v2  # noqa: PLC0415 - 唯一合法 import 点
 
-    return process_pdf_v2(
+    result = process_pdf_v2(
         str(pdf_path),
         md_path=str(md_path),
         out_dir=str(out_dir),
@@ -67,3 +67,16 @@ def run_dual_channel_render(*, pdf_path: str, md_path: str, out_dir: str) -> Any
         third_decide=True,
         ai_synthesis=False,
     )
+    validate_dual_result(result)
+    return result
+
+
+def validate_dual_result(result: Any) -> None:
+    """Do not label upstream's soft Paddle failure as successful dual OCR.
+
+    No raw vendor error is reflected to API clients (it can contain endpoints
+    and access tokens). The task's normal bounded retry/dead-letter applies.
+    """
+    stats = result.get("stats", {}) if isinstance(result, dict) else {}
+    if not isinstance(stats, dict) or stats.get("paddle_error") or not isinstance(stats.get("verify"), dict):
+        raise ValueError("PADDLE_CHANNEL_FAILED: 辅通道无有效验证结果；未降级为双通道成功")

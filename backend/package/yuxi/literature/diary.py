@@ -91,3 +91,25 @@ async def list_diary_days(tenant_id: int, uid: str, *, month: str | None = None)
     if month:
         days = [d for d in days if d.startswith(month)]
     return days
+
+
+async def export_month(tenant_id: int, uid: str, month: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}", month or ""):
+        raise ValueError("月份需为 YYYY-MM")
+    start = _parse_date(month + "-01")
+    end = date_type(start.year + (start.month == 12), start.month % 12 + 1, 1)
+    async with pg_manager.get_async_session_context() as session:
+        rows = (
+            await session.execute(
+                select(LiteratureDiaryEntry)
+                .where(
+                    LiteratureDiaryEntry.tenant_id == tenant_id,
+                    LiteratureDiaryEntry.uid == uid,
+                    LiteratureDiaryEntry.entry_date >= start,
+                    LiteratureDiaryEntry.entry_date < end,
+                )
+                .order_by(LiteratureDiaryEntry.entry_date)
+            )
+        ).scalars()
+        sections = [f"# 阅读日记 {month}", *[f"## {row.entry_date.isoformat()}\n\n{row.content}" for row in rows]]
+    return "\n\n".join(sections) + "\n"

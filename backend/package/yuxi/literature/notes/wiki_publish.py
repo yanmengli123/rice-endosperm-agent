@@ -114,6 +114,16 @@ async def publish_literature_notes(
     for job, paper in jobs:
         latest.setdefault((paper.rid, job.level), (job, paper))
     jobs = list(latest.values())
+    frozen = [
+        {
+            "rid": p.rid,
+            "source_revision_id": p.source_revision_id,
+            "reading_version": p.reading_version,
+            "card_revision": p.card_revision,
+        }
+        for _, p in jobs
+    ]
+    frozen_notes = {job.id: job.note_uri for job, _ in jobs}
 
     minio = get_minio_client()
     pages: list[dict[str, Any]] = []
@@ -155,11 +165,6 @@ async def publish_literature_notes(
                 )[:40],
             }
         )
-    frozen = [
-        {"rid": p.rid, "source_revision_id": p.source_revision_id, "reading_version": p.reading_version}
-        for _, p in jobs
-    ]
-
     source_kb_ids: list[str] = []
     async with pg_manager.get_async_session_context() as session:
         current = (
@@ -171,10 +176,19 @@ async def publish_literature_notes(
             .scalars()
             .all()
         )
-        if {(p.rid, p.source_revision_id, p.reading_version) for p in current} != {
-            (v["rid"], v["source_revision_id"], v["reading_version"]) for v in frozen
+        if {(p.rid, p.source_revision_id, p.reading_version, p.card_revision) for p in current} != {
+            (v["rid"], v["source_revision_id"], v["reading_version"], v["card_revision"]) for v in frozen
         }:
             return {"published": False, "reason": "source_changed"}
+        current_notes = list(
+            (
+                await session.execute(
+                    select(LiteratureCompileJob).where(LiteratureCompileJob.id.in_(frozen_notes)).with_for_update()
+                )
+            ).scalars()
+        )
+        if {job.id: job.note_uri for job in current_notes if job.status == "SUCCEEDED"} != frozen_notes:
+            return {"published": False, "reason": "note_changed"}
         active_files = list(
             (
                 await session.execute(
@@ -370,7 +384,12 @@ async def publish_literature_notes(
             started_at=utc_now(),
             completed_at=utc_now(),
         )
-        session.add_all([snapshot, build])
+        # 分阶段 flush：先落快照再挂构建。同一 flush 内曾出现单元工作直接跳过
+        # 快照 INSERT、先发 wiki_build_runs 的真实事故（FK wiki_build_runs_snapshot_id_fkey
+        # 违例，publish/对账 cron 连锁失败）；快照先于构建落库让 FK 目标按构造存在。
+        session.add(snapshot)
+        await session.flush()
+        session.add(build)
         await session.flush()
 
         entries: list[dict[str, Any]] = []

@@ -37,7 +37,9 @@ def main() -> int:
         if mode not in {"offline", "dual"}:
             raise ValueError(f"未知阅读渲染模式: {mode}")
         render = gateway.run_dual_channel_render if mode == "dual" else gateway.run_offline_render
-        render(pdf_path=payload["pdf_path"], md_path=payload["md_path"], out_dir=str(out_dir))
+        vendor_result = render(pdf_path=payload["pdf_path"], md_path=payload["md_path"], out_dir=str(out_dir))
+        if mode == "dual":
+            gateway.validate_dual_result(vendor_result)
         # 上游 P14 落盘惯例：产物在 <out_dir>/<pdf stem>/ 子目录（回退直接 out_dir）
         stem_dir = out_dir / Path(payload["pdf_path"]).stem
         product_root = stem_dir if (stem_dir / "en.md").exists() else out_dir
@@ -48,6 +50,10 @@ def main() -> int:
         document_json = doc_json_file.read_text(encoding="utf-8") if doc_json_file.exists() else ""
         review_file = product_root / "work" / "review.json"
         review_json = review_file.read_text(encoding="utf-8") if review_file.exists() else ""
+        if mode == "dual":
+            review = json.loads(review_json) if review_json else None
+            if not isinstance(review, dict) or not isinstance(review.get("items"), list):
+                raise ValueError("DUAL_REVIEW_MISSING: 双通道缺少完整复核清单，未发布")
         image_dir = product_root / "images"
         image_names = sorted(p.name for p in image_dir.iterdir() if p.is_file()) if image_dir.is_dir() else []
         latex_count = markdown.count("$") // 2

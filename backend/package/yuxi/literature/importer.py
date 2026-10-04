@@ -1,4 +1,4 @@
-"""PaperAgent 数据目录无损导入器（P3，ADR-0010 决议 5 /「完美兼容」支柱②）。
+"""PaperAgent 核心数据兼容导入器（不等同于整机无损备份）（P3，ADR-0010 决议 5 /「完美兼容」支柱②）。
 
 把 PaperAgent（v1.4.0，DATA_FORMAT 4）的数据目录映射进 Yuxi：
 
@@ -40,6 +40,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteraturePaper,
     LiteratureReaderRender,
     LiteratureVariant,
+    LiteratureArtifactRevision,
 )
 from yuxi.utils.datetime_utils import utc_now
 
@@ -123,6 +124,35 @@ def _document_markdown(document: dict) -> str:
     return (f"# {title}\n\n" if title else "") + body + "\n"
 
 
+def knowledge_directories(root: Path) -> dict[str, Path]:
+    """Registered trash only; ambiguous snapshots stay immutable history.
+
+    Match upstream's timestamp suffix exactly, never follow archive DB paths.
+    Active directories take priority. A duplicate is not silently selected.
+    """
+    from yuxi.literature.history_import import read_tables
+    import re
+
+    kb = root / "knowledge_base"
+    directories = {}
+    trash = kb / ".trash"
+    rows = read_tables(root / "data/biblio/biblio.db", ("kb_trash",)).get("kb_trash", [])
+    if trash.is_dir():
+        for row in rows:
+            name = str(row.get("dirname") or "")
+            if not name or name.startswith(("_", ".")) or any(c in name for c in "/\\:"):
+                continue
+            pattern = re.compile(re.escape(name) + r"(?:__\d{14})?\Z")
+            candidates = [path for path in trash.iterdir() if path.is_dir() and pattern.fullmatch(path.name)]
+            if len(candidates) == 1:
+                directories[name] = candidates[0]
+    if kb.is_dir():
+        directories.update(
+            {path.name: path for path in kb.iterdir() if path.is_dir() and not path.name.startswith(("_", "."))}
+        )
+    return directories
+
+
 async def _import_library_renders(
     *,
     tenant_id: int,
@@ -132,9 +162,28 @@ async def _import_library_renders(
     actor_uid: str,
 ) -> None:
     """Map PaperAgent self-contained library folders into Yuxi reader products."""
-    library_root = paperagent_root / "library"
-    if not library_root.is_dir():
+    # DATA-LAYOUT: knowledge_base/document.json is the finalized document;
+    # library/document.json is only a fallback. Never reverse that priority.
+    directories = {}
+    library = paperagent_root / "library"
+    if library.is_dir():
+        directories.update(
+            {
+                path.name: path
+                for path in library.iterdir()
+                if path.is_dir() and not path.name.startswith(("_", ".")) and (path / "document.json").is_file()
+            }
+        )
+    directories.update(
+        {
+            name: path
+            for name, path in knowledge_directories(paperagent_root).items()
+            if (path / "document.json").is_file()
+        }
+    )
+    if not directories:
         return
+    pending_documents = []
     kb_id = f"paperagent-import-{tenant_id}"
     minio = get_minio_client()
     async with pg_manager.get_async_session_context() as session:
@@ -152,8 +201,8 @@ async def _import_library_renders(
             )
             .on_conflict_do_nothing(index_elements=("kb_id",))
         )
-        for paper_dir in sorted(path for path in library_root.iterdir() if path.is_dir()):
-            paper = papers.get(paper_dir.name) or papers.get(f"doi-{paper_dir.name}")
+        for dirname, paper_dir in sorted(directories.items()):
+            paper = papers.get(dirname) or papers.get(f"doi-{dirname}")
             if paper is not None and paper.source_revision_id and not paper.source_revision_id.startswith("pair-"):
                 report.conflicts.append(f"保留已有权威解析关联: {paper.rid}")
                 continue
@@ -162,13 +211,29 @@ async def _import_library_renders(
                 continue
             document_bytes = await asyncio.to_thread(document_path.read_bytes)
             document = json.loads(document_bytes.decode("utf-8"))
+            if not isinstance(document, dict) or not isinstance(document.get("paragraphs"), list):
+                raise ValueError(f"非法 document.json: {paper.rid}")
+            for index, paragraph in enumerate(document["paragraphs"]):
+                if not isinstance(paragraph, dict):
+                    raise ValueError(f"非法段落: {paper.rid}")
+                paragraph["para_id"] = str(paragraph.get("para_id") or f"P{index + 1:03d}")
             source_pdf = paper_dir / "source.pdf"
             source_bytes = await asyncio.to_thread(source_pdf.read_bytes) if source_pdf.is_file() else b""
             source_sha = hashlib.sha256(source_bytes or document_bytes).hexdigest()
-            identity = hashlib.sha256(f"{tenant_id}:{paper.rid}:{source_sha}".encode()).hexdigest()
+            document_digest = hashlib.sha256(document_bytes).hexdigest()
+            identity = hashlib.sha256(f"{tenant_id}:{paper.rid}:{source_sha}:{document_digest}".encode()).hexdigest()
             file_id = f"paif-{identity[:32]}"
             revision_id = f"pair-{identity[:32]}"
+            if (
+                paper.source_revision_id
+                and paper.source_revision_id != revision_id
+                and "document" in (paper.frozen_artifacts or [])
+            ):
+                report.conflicts.append(f"保留已冻结正文及来源: {paper.rid}")
+                continue
             prefix = f"tenants/{tenant_id}/documents/{source_sha}/reader_render/{revision_id}/"
+            document["_image_base"] = prefix
+            normalized_bytes = json.dumps(document, ensure_ascii=False, sort_keys=True).encode("utf-8")
             markdown_path = paper_dir / "en.md"
             markdown = (
                 await asyncio.to_thread(markdown_path.read_text, encoding="utf-8")
@@ -178,7 +243,7 @@ async def _import_library_renders(
             await minio.aupload_file(
                 bucket_name=RENDER_BUCKET,
                 object_name=f"{prefix}document.json",
-                data=document_bytes,
+                data=normalized_bytes,
                 content_type="application/json",
             )
             await minio.aupload_file(
@@ -269,8 +334,39 @@ async def _import_library_renders(
                 .where(LiteraturePaper.id == paper.id)
                 .values(source_revision_id=revision_id, updated_at=utc_now())
             )
+            pending_documents.append(
+                (paper.rid, normalized_bytes, not bool((paper.artifact_pointers or {}).get("document")))
+            )
             report.reader_renders_written += 1
         await session.commit()
+    # Refresh the request's visibility after creating a source-linked record.
+    from contextlib import asynccontextmanager
+    from yuxi.literature.access import access_scope, current_access
+    from yuxi.literature.artifacts import ArtifactKind, ArtifactSource, store_revision
+
+    @asynccontextmanager
+    async def refreshed_scope():
+        scope = current_access()
+        if scope is None:
+            yield
+        else:
+            async with access_scope(scope.user, tenant_id):
+                yield
+
+    async with refreshed_scope():
+        for rid, content, first in pending_documents:
+            await store_revision(
+                tenant_id,
+                rid,
+                ArtifactKind.DOCUMENT,
+                content=content,
+                content_type="application/json",
+                operator=actor_uid,
+                freeze=first,
+                advance_reading_version=True,
+                source=ArtifactSource.IMPORTED,
+                storage=minio,
+            )
 
 
 async def import_paperagent_data(
@@ -297,43 +393,80 @@ async def import_paperagent_data(
                 if not rid:
                     report.papers_skipped += 1
                     continue
-                doi = str(row.get("doi") or "") or None
-                kind = _upstream_kind(row)
-                stmt = (
-                    pg_insert(LiteraturePaper)
-                    .values(
-                        tenant_id=tenant_id,
-                        rid=rid,
-                        kind=kind,
-                        doi=doi,
-                        title=str(row.get("title") or "") or None,
-                        paper_rank=float(row.get("paper_rank") or 0),
-                        cocitation_cluster=int(row.get("cocitation_cluster") or 0),
-                        impact_factor=row.get("impact_factor"),
-                        quartile=str(row.get("quartile") or ""),
-                        value_score=float(row.get("ai_value_score") or 0)
-                        if row.get("ai_value_score") is not None
-                        else 0.0,
-                        ai_value_score=row.get("ai_value_score"),
-                        topic_score=row.get("topic_score"),
+
+                def json_list(value):
+                    if isinstance(value, list):
+                        return value
+                    if isinstance(value, str):
+                        try:
+                            parsed = json.loads(value)
+                            return parsed if isinstance(parsed, list) else []
+                        except ValueError:
+                            return [part.strip() for part in value.split(";") if part.strip()]
+                    return []
+
+                values = {
+                    "doi": str(row.get("doi") or "") or None,
+                    "kind": _upstream_kind(row),
+                    "title": str(row.get("title") or "") or None,
+                    "paper_rank": float(row.get("paper_rank") or 0),
+                    "cocitation_cluster": int(row.get("cocitation_cluster") or 0),
+                    "impact_factor": row.get("impact_factor"),
+                    "quartile": str(row.get("quartile") or ""),
+                    "value_score": float(row.get("ai_value_score") or 0),
+                    "ai_value_score": row.get("ai_value_score"),
+                    "topic_score": row.get("topic_score"),
+                    "authors_json": json_list(row.get("authors_json") or row.get("authors")),
+                    "abstract": str(row.get("abstract") or ""),
+                    "journal": str(row.get("journal") or ""),
+                    "issn": str(row.get("issn") or ""),
+                    "pub_year": row.get("pub_year") or row.get("year"),
+                    "keywords_json": json_list(row.get("keywords_json") or row.get("keywords")),
+                    "source_main": str(row.get("source_main") or "paperagent-import"),
+                    "is_reference": bool(row.get("is_reference", False)),
+                    "external_cited": row.get("external_cited")
+                    if row.get("external_cited") is not None
+                    else row.get("times_cited"),
+                    "meta_locked": bool(row.get("meta_locked", False)),
+                }
+                # Insert first; a repeat must not overwrite local annotations,
+                # metrics, locked metadata, or a native PDF association.
+                inserted = (
+                    await session.execute(
+                        pg_insert(LiteraturePaper)
+                        .values(tenant_id=tenant_id, rid=rid, **values)
+                        .on_conflict_do_nothing(index_elements=("tenant_id", "rid"))
+                        .returning(LiteraturePaper.id)
                     )
-                    .on_conflict_do_update(
-                        index_elements=("tenant_id", "rid"),
-                        set_={
-                            "title": str(row.get("title") or "") or None,
-                            "paper_rank": float(row.get("paper_rank") or 0),
-                            "impact_factor": row.get("impact_factor"),
-                            "quartile": str(row.get("quartile") or ""),
-                            "ai_value_score": row.get("ai_value_score"),
-                            "topic_score": row.get("topic_score"),
-                            "updated_at": utc_now(),
-                        },
+                ).scalar_one_or_none()
+                paper = (
+                    await session.execute(
+                        select(LiteraturePaper)
+                        .where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                        .with_for_update()
                     )
-                    .returning(LiteraturePaper.id)
-                )
-                paper_id = (await session.execute(stmt)).scalar_one()
-                rid_to_paper_id[rid] = paper_id
-                report.papers_written += 1
+                ).scalar_one()
+                rid_to_paper_id[rid] = paper.id
+                if inserted is not None:
+                    report.papers_written += 1
+                else:
+                    report.papers_skipped += 1
+                    if not paper.meta_locked:
+                        for key in (
+                            "doi",
+                            "title",
+                            "authors_json",
+                            "abstract",
+                            "journal",
+                            "issn",
+                            "pub_year",
+                            "keywords_json",
+                            "impact_factor",
+                            "quartile",
+                            "external_cited",
+                        ):
+                            if getattr(paper, key) in (None, "", []) and values[key] not in (None, "", []):
+                                setattr(paper, key, values[key])
             await session.commit()
 
     # 目录名 ↔ RID 兼容性断言（P0 身份契约的变现）：doi 行的目录名必须可由
@@ -366,8 +499,8 @@ async def import_paperagent_data(
                     )
                     .on_conflict_do_nothing(index_elements=("tenant_id", "citing_rid", "cited_doi"))
                 )
-                await session.execute(stmt)
-                report.citations_written += 1
+                inserted = (await session.execute(stmt.returning(LiteratureCitation.id))).scalar_one_or_none()
+                report.citations_written += int(inserted is not None)
             await session.commit()
 
     if not dry_run:
@@ -375,7 +508,11 @@ async def import_paperagent_data(
             papers = {
                 row.rid: row
                 for row in (
-                    await session.execute(select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id))
+                    await session.execute(
+                        select(LiteraturePaper).where(
+                            LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid.in_(rid_to_paper_id)
+                        )
+                    )
                 )
                 .scalars()
                 .all()
@@ -404,11 +541,11 @@ async def import_paperagent_data(
                     .scalars()
                     .all()
                 }
-            for paper_dir in sorted(p for p in kb_root.iterdir() if p.is_dir() and not p.name.startswith(("_", "."))):
-                paper_row = existing.get(paper_dir.name) or existing.get(f"doi-{paper_dir.name}")
+            for dirname, paper_dir in sorted(knowledge_directories(paperagent_root).items()):
+                paper_row = existing.get(dirname) or existing.get(f"doi-{dirname}")
                 # 上游布局：knowledge_base/<DOI 目录名>（无 doi- 前缀）、papers_meta.rid
                 # 带 doi- 前缀——两种键形态都要命中（P0 三键归一语义的变现）。
-                dir_rid_candidates = (paper_dir.name, f"doi-{paper_dir.name}")
+                dir_rid_candidates = (dirname, f"doi-{dirname}")
                 matched = (
                     any(c in rid_to_paper_id for c in dir_rid_candidates)
                     or paper_row is not None
@@ -417,6 +554,21 @@ async def import_paperagent_data(
                 paper_id = next((rid_to_paper_id[c] for c in dir_rid_candidates if c in rid_to_paper_id), None) or (
                     paper_row.id if paper_row else None
                 )
+                if not dry_run and paper_row:
+                    pointer = (paper_row.artifact_pointers or {}).get("document")
+                    if pointer:
+                        source = (
+                            await session.execute(
+                                select(LiteratureArtifactRevision.source).where(
+                                    LiteratureArtifactRevision.revision_id == pointer,
+                                    LiteratureArtifactRevision.tenant_id == tenant_id,
+                                    LiteratureArtifactRevision.paper_id == paper_row.id,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if source != "imported":
+                            report.conflicts.append(f"不把历史笔记/译文挂到人工修改的当前正文: {paper_row.rid}")
+                            continue
                 for filename, (variant_kind, lang) in _VARIANT_FILES.items():
                     file_path = paper_dir / filename
                     if not file_path.exists() or not matched:
@@ -426,13 +578,28 @@ async def import_paperagent_data(
                         continue
                     content = await asyncio.to_thread(file_path.read_bytes)
                     digest = hashlib.sha256(content).hexdigest()
-                    revision = (
-                        paper_row.source_revision_id
-                        if paper_row and str(paper_row.source_revision_id or "").startswith("pair-")
-                        else "imported"
-                    )
-                    reading_version = paper_row.reading_version if paper_row and revision != "imported" else 0
-                    uri = f"kbasset://tenants/{tenant_id}/literature/variants/{paper_dir.name}/{filename}"
+                    if paper_row.source_revision_id and not paper_row.source_revision_id.startswith("pair-"):
+                        report.conflicts.append(f"不把历史译文挂到新的权威来源: {paper_row.rid}")
+                        continue
+                    revision = paper_row.source_revision_id or ""
+                    reading_version = paper_row.reading_version
+                    already = (
+                        await session.execute(
+                            select(LiteratureVariant.id)
+                            .where(
+                                LiteratureVariant.tenant_id == tenant_id,
+                                LiteratureVariant.paper_id == paper_id,
+                                LiteratureVariant.variant_kind == variant_kind,
+                                LiteratureVariant.lang == lang,
+                                LiteratureVariant.parse_revision_id == revision,
+                                LiteratureVariant.reading_version == reading_version,
+                            )
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if already is not None:
+                        continue
+                    uri = f"kbasset://tenants/{tenant_id}/literature/variants/{paper_dir.name}/{digest}/{filename}"
                     await minio.aupload_file(
                         bucket_name=RENDER_BUCKET,
                         object_name=uri.removeprefix("kbasset://"),
@@ -469,16 +636,39 @@ async def import_paperagent_data(
                     report.variants_written += 1
                 for filename, target_name in _NOTE_FILES.items():
                     file_path = paper_dir / filename
-                    if not file_path.exists():
+                    if not file_path.exists() or not matched:
                         continue
                     if dry_run:
                         report.notes_written += 1
                         continue
-                    object_name = f"tenants/{tenant_id}/literature/notes/{paper_dir.name}/{target_name}"
+                    if paper_row.source_revision_id and not paper_row.source_revision_id.startswith("pair-"):
+                        report.conflicts.append(f"不把历史笔记挂到新的权威来源: {paper_row.rid}")
+                        continue
+                    level = target_name.split("_", 1)[0]
+                    already = (
+                        await session.execute(
+                            select(LiteratureCompileJob.id)
+                            .where(
+                                LiteratureCompileJob.tenant_id == tenant_id,
+                                LiteratureCompileJob.paper_id == paper_id,
+                                LiteratureCompileJob.level == level,
+                                LiteratureCompileJob.source_revision_id == (paper_row.source_revision_id or ""),
+                                LiteratureCompileJob.reading_version == paper_row.reading_version,
+                                LiteratureCompileJob.card_revision == paper_row.card_revision,
+                                LiteratureCompileJob.status == "SUCCEEDED",
+                            )
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if already is not None:
+                        continue
+                    note_content = await asyncio.to_thread(file_path.read_bytes)
+                    note_digest = hashlib.sha256(note_content).hexdigest()
+                    object_name = f"tenants/{tenant_id}/literature/notes/{paper_dir.name}/{note_digest}/{target_name}"
                     await minio.aupload_file(
                         bucket_name=RENDER_BUCKET,
                         object_name=object_name,
-                        data=await asyncio.to_thread(file_path.read_bytes),
+                        data=note_content,
                         content_type="text/markdown",
                     )
                     level = target_name.split("_", 1)[0]
@@ -489,13 +679,10 @@ async def import_paperagent_data(
                                 tenant_id=tenant_id,
                                 paper_id=paper_id,
                                 level=level,
-                                source_revision_id=paper_row.source_revision_id
-                                if paper_row and str(paper_row.source_revision_id or "").startswith("pair-")
-                                else "",
-                                reading_version=paper_row.reading_version
-                                if paper_row and str(paper_row.source_revision_id or "").startswith("pair-")
-                                else 0,
+                                source_revision_id=paper_row.source_revision_id or "",
+                                reading_version=paper_row.reading_version,
                                 generator_version="paperagent-import-v4",
+                                card_revision=paper_row.card_revision,
                                 status="SUCCEEDED",
                                 note_uri=f"kbasset://{object_name}",
                             )
@@ -507,23 +694,49 @@ async def import_paperagent_data(
                                     "source_revision_id",
                                     "reading_version",
                                     "generator_version",
+                                    "card_revision",
                                 ),
                                 set_={"status": "SUCCEEDED", "note_uri": f"kbasset://{object_name}", "error": None},
                             )
                         )
+                        if level == "L1":
+                            from yuxi.literature.fulltext import project_note
+
+                            imported_job = (
+                                await session.execute(
+                                    select(LiteratureCompileJob).where(
+                                        LiteratureCompileJob.tenant_id == tenant_id,
+                                        LiteratureCompileJob.paper_id == paper_id,
+                                        LiteratureCompileJob.level == level,
+                                        LiteratureCompileJob.note_uri == f"kbasset://{object_name}",
+                                        LiteratureCompileJob.source_revision_id == (paper_row.source_revision_id or ""),
+                                        LiteratureCompileJob.reading_version == paper_row.reading_version,
+                                        LiteratureCompileJob.card_revision == paper_row.card_revision,
+                                        LiteratureCompileJob.generator_version == "paperagent-import-v4",
+                                    )
+                                )
+                            ).scalar_one()
+                            await project_note(session, imported_job, note_content.decode("utf-8"))
                     report.notes_written += 1
             if not dry_run:
                 await session.commit()
     if dry_run:
-        library_root = paperagent_root / "library"
-        if library_root.is_dir():
-            report.reader_renders_written = sum(
-                1
-                for path in library_root.iterdir()
-                if path.is_dir()
-                and (path / "document.json").is_file()
-                and (path.name in expected_rids or f"doi-{path.name}" in expected_rids)
-            )
+        directories = set()
+        for root in (paperagent_root / "library",):
+            if root.is_dir():
+                directories.update(
+                    path.name
+                    for path in root.iterdir()
+                    if path.is_dir()
+                    and (path / "document.json").is_file()
+                    and (path.name in expected_rids or f"doi-{path.name}" in expected_rids)
+                )
+        directories.update(
+            name
+            for name, path in knowledge_directories(paperagent_root).items()
+            if (path / "document.json").is_file() and (name in expected_rids or f"doi-{name}" in expected_rids)
+        )
+        report.reader_renders_written = len(directories)
     else:
         if report.notes_written:
             try:

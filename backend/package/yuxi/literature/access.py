@@ -38,7 +38,7 @@ _access: ContextVar[LiteratureAccess | None] = ContextVar("literature_access", d
 
 def paper_visibility(tenant_id: int):
     scope = _access.get()
-    condition = LiteraturePaper.tenant_id == tenant_id
+    condition = and_(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.trashed_at.is_(None))
     if scope is None:  # trusted background use, never an unauthenticated HTTP entry
         return condition
     return and_(condition, LiteraturePaper.rid.in_(scope.rids if scope.tenant_id == tenant_id else ()))
@@ -48,7 +48,7 @@ def current_access() -> LiteratureAccess | None:
     return _access.get()
 
 
-async def build_access(user, tenant_id: int) -> LiteratureAccess:
+async def build_access(user, tenant_id: int, *, include_trashed: bool = False) -> LiteratureAccess:
     from yuxi.knowledge.manager import KnowledgeBaseManager
 
     async with pg_manager.get_async_session_context() as session:
@@ -61,6 +61,7 @@ async def build_access(user, tenant_id: int) -> LiteratureAccess:
                 .outerjoin(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeParseRevision.kb_id)
                 .outerjoin(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
                 .where(LiteraturePaper.tenant_id == tenant_id)
+                .where(True if include_trashed else LiteraturePaper.trashed_at.is_(None))
             )
         ).all()
     principal = {
@@ -100,6 +101,7 @@ async def build_access(user, tenant_id: int) -> LiteratureAccess:
                 revisions[revision.revision_id] = revision.source_sha256
                 sources[paper.rid] = {
                     "kb_id": kb.kb_id,
+                    "file_id": source_file.file_id,
                     "name": kb.name,
                     "contract_key": kb.contract_key,
                     "parse_revision_id": revision.revision_id,
@@ -130,6 +132,8 @@ def report_visible(report: LiteratureReport) -> bool:
     if scope is None:
         return True
     sources = report.source_rids_json or []
+    if report.report_kind == "historical":
+        return report.tenant_id == scope.tenant_id and report.created_by == scope.user.uid
     # Historical reports without a source manifest cannot prove an ACL closure.
     return bool(sources) and report.tenant_id == scope.tenant_id and set(sources) <= scope.rids
 
@@ -146,7 +150,7 @@ async def authorize_asset(object_name: str) -> bool:
     if parts[2] != "literature":
         return False
     namespace, owner = parts[3:5]
-    if namespace in {"notes", "variants"}:
+    if namespace in {"notes", "variants", "artifacts"}:
         return owner in scope.rids or f"doi-{owner}" in scope.rids
     if namespace == "attachments":
         return owner.isdigit() and int(owner) in scope.paper_ids

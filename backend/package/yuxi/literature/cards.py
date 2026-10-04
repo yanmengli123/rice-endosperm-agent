@@ -1,7 +1,7 @@
 """知识卡片与综述报告（G6；语义移植自 paperkb/cards.py + writing_tools 落盘语义）。
 
 - 卡片四类（上游 CARD_TYPES）：card-translate / card-summary / card-qa / card-note；
-  同 (paper, type, slug) 幂等覆盖（上游「同 slug 覆盖需显式」→ Yuxi upsert）。
+  同 (paper, type, slug) 覆盖必须显式确认并校验摘要；全局卡片按用户隔离。
 - 综述报告：多文献 L1 笔记聚合生成（LLM 走 Yuxi 模型链）+ 手写落盘；
   产物为 literature_notes 派生产品（导航平面，永不进证据通道）。
 """
@@ -9,13 +9,14 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from typing import Any
 
 from yuxi.literature.access import paper_visibility
 from yuxi.literature.access import report_visible
+from yuxi.literature.access import current_access
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
@@ -25,6 +26,22 @@ from yuxi.storage.postgres.models_knowledge import LiteratureCard, LiteraturePap
 CARD_TYPES = ("card-translate", "card-summary", "card-qa", "card-note")
 
 _SLUG_RE = re.compile(r"[^\w\-]+", re.UNICODE)
+
+
+class CardConflictError(ValueError):
+    """Explicit overwrite approval and compare-and-swap are required."""
+
+
+def _card_digest(card) -> str:
+    import json
+
+    return hashlib.sha256(
+        json.dumps(
+            [card.title, card.content, card.para_ids_json or [], card.tags_json or []],
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
 
 
 async def verify_report_sources(session, tenant_id: int, versions: list[dict]) -> None:
@@ -58,6 +75,28 @@ def make_slug(text: str, max_len: int = 40) -> str:
     return slug or "card"
 
 
+async def _owner(session, tenant_id, rid, *, lock=False):
+    scope = current_access()
+    uid = scope.user.uid if scope is not None and scope.tenant_id == tenant_id else ""
+    if rid:
+        query = select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
+        paper = (await session.execute(query.with_for_update() if lock else query)).scalar_one_or_none()
+        if paper is None:
+            raise ValueError(f"文献不存在: {rid}")
+        return paper, uid, [LiteratureCard.tenant_id == tenant_id, LiteratureCard.paper_id == paper.id]
+    if not uid:
+        raise ValueError("全局卡片必须绑定请求用户")
+    if lock:
+        from yuxi.storage.postgres.models_business import User
+
+        await session.execute(select(User.uid).where(User.uid == uid).with_for_update())
+    return (
+        None,
+        uid,
+        [LiteratureCard.tenant_id == tenant_id, LiteratureCard.paper_id.is_(None), LiteratureCard.created_by == uid],
+    )
+
+
 async def write_card(
     tenant_id: int,
     rid: str,
@@ -68,58 +107,67 @@ async def write_card(
     para_ids: list[str] | None = None,
     tags: list[str] | None = None,
     slug: str | None = None,
+    overwrite: bool = False,
+    expected_digest: str = "",
 ) -> dict[str, Any]:
-    """写一张卡片（upsert）。"""
+    """创建卡片，或经显式确认和乐观并发校验覆盖。"""
     if card_type not in CARD_TYPES:
         raise ValueError(f"未知卡片类型: {card_type}（可选 {CARD_TYPES}）")
     if not (content or "").strip():
         raise ValueError("卡片内容不能为空")
+    if len(content) > 200_000 or len(title) > 512:
+        raise ValueError("卡片内容或标题超过长度上限")
+    if any(
+        not isinstance(value, list) or len(value) > 100 or any(not isinstance(x, str) or len(x) > 256 for x in value)
+        for value in (para_ids or [], tags or [])
+    ):
+        raise ValueError("段落编号和标签必须为有界字符串列表")
     async with pg_manager.get_async_session_context() as session:
-        paper = (
+        paper, uid, conditions = await _owner(session, tenant_id, rid, lock=True)
+        final_slug = make_slug(slug or title or content[:40])
+        card = (
             await session.execute(
-                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
+                select(LiteratureCard)
+                .where(
+                    *conditions,
+                    LiteratureCard.card_type == card_type,
+                    LiteratureCard.slug == final_slug,
+                )
+                .with_for_update()
             )
         ).scalar_one_or_none()
-        if paper is None:
-            raise ValueError(f"文献不存在: {rid}")
-        final_slug = make_slug(slug or title or content[:40])
-        stmt = (
-            pg_insert(LiteratureCard)
-            .values(
+        if card is not None and (not overwrite or _card_digest(card) != expected_digest):
+            raise CardConflictError("同名卡片已存在；请加载最新卡片并显式确认覆盖")
+        if card is None:
+            card = LiteratureCard(
                 tenant_id=tenant_id,
-                paper_id=paper.id,
+                paper_id=paper.id if paper else None,
+                created_by=uid,
                 card_type=card_type,
                 slug=final_slug,
-                title=title or content[:80],
-                content=content.strip(),
-                para_ids_json=list(para_ids or []),
-                tags_json=list(tags or []),
             )
-            .on_conflict_do_update(
-                index_elements=("tenant_id", "paper_id", "card_type", "slug"),
-                set_={
-                    "title": title or content[:80],
-                    "content": content.strip(),
-                    "para_ids_json": list(para_ids or []),
-                    "tags_json": list(tags or []),
-                },
-            )
-        )
-        await session.execute(stmt)
+            session.add(card)
+        card.title, card.content = title or content[:80], content.strip()
+        card.para_ids_json, card.tags_json = list(para_ids or []), list(tags or [])
+        if paper:
+            paper.card_revision = int(paper.card_revision or 0) + 1
+            paper.ai_value_score = None
+            paper.topic_score = None
+            paper.value_score = 0.0
+            if paper.source_revision_id:
+                from yuxi.literature.provenance import invalidate_note_publications
+
+                await invalidate_note_publications(session, paper.source_revision_id)
         await session.commit()
     return {"rid": rid, "card_type": card_type, "slug": final_slug}
 
 
 async def list_cards(tenant_id: int, rid: str, *, card_type: str | None = None) -> list[dict[str, Any]]:
     async with pg_manager.get_async_session_context() as session:
-        paper = (
-            await session.execute(
-                select(LiteraturePaper).where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
-            )
-        ).scalar_one_or_none()
-        if paper is None:
+        try:
+            _, _, conditions = await _owner(session, tenant_id, rid)
+        except ValueError:
             return []
-        conditions = [LiteratureCard.tenant_id == tenant_id, LiteratureCard.paper_id == paper.id]
         if card_type:
             conditions.append(LiteratureCard.card_type == card_type)
         rows = (await session.execute(select(LiteratureCard).where(*conditions))).scalars().all()
@@ -131,6 +179,7 @@ async def list_cards(tenant_id: int, rid: str, *, card_type: str | None = None) 
             "content": row.content,
             "para_ids": row.para_ids_json or [],
             "tags": row.tags_json or [],
+            "digest": _card_digest(row),
         }
         for row in rows
     ]
@@ -256,3 +305,38 @@ async def list_reports(tenant_id: int, *, limit: int = 50) -> list[dict[str, Any
         }
         for row in [r for r in rows if report_visible(r)][:limit]
     ]
+
+
+async def get_report(tenant_id: int, report_id: int) -> dict | None:
+    """Read a derived report only while all its original sources remain valid."""
+    async with pg_manager.get_async_session_context() as session:
+        report = (
+            await session.execute(
+                select(LiteratureReport).where(
+                    LiteratureReport.tenant_id == tenant_id,
+                    LiteratureReport.id == report_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if report is None or not report_visible(report):
+            return None
+        if report.report_kind == "historical":
+            return {
+                "id": report.id,
+                "title": report.title,
+                "report_kind": report.report_kind,
+                "navigation_markdown": report.content,
+                "source_versions": [],
+                "notice": "个人历史报告；来源未经当前版本验证，不作为知识源证据。",
+            }
+        if not report.source_versions_json:
+            raise ValueError("历史报告缺少来源版本，不能确认其时效")
+        await verify_report_sources(session, tenant_id, report.source_versions_json)
+        return {
+            "id": report.id,
+            "title": report.title,
+            "report_kind": report.report_kind,
+            "navigation_markdown": report.content,
+            "source_versions": report.source_versions_json,
+            "notice": "派生导读；不作为知识源证据。",
+        }

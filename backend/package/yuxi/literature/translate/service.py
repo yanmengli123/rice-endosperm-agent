@@ -19,7 +19,6 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from yuxi.literature.notes.prompts import parse_compile_json
 from yuxi.literature.provenance import TRANSLATE_VERSION, StaleLiteratureInput, require_current_input
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.literature.translate import prompts
@@ -148,11 +147,9 @@ async def _translate_document(paragraphs: list[str]) -> list[str]:
     prompt = prompts.with_task(prefix, prompts.translate_task(para_ids))
     system, user = prompts.split_task(prompt)
 
-    from yuxi.literature.llm_gateway import call
+    from yuxi.literature.notes.compiler import complete_json
 
-    messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
-    response = await call(messages)
-    data = parse_compile_json(str(response.content or ""))
+    data, _raw = await complete_json(system, user)
     translations = data.get("translations") or []
     by_id = {str(t.get("para_id") or ""): str(t.get("zh") or "") for t in translations if isinstance(t, dict)}
     out: list[str] = []
@@ -165,9 +162,10 @@ async def _translate_document(paragraphs: list[str]) -> list[str]:
     return out
 
 
-async def _summarize_document(paragraphs: list[str]) -> str:
+async def _summarize_document(paragraphs: list[str], para_ids: list[str] | None = None) -> str:
     """Create the summary variant instead of silently treating it as a translation."""
-    source = "\n\n".join(f"[P{i:03d}] {paragraph}" for i, paragraph in enumerate(paragraphs, 1))
+    para_ids = para_ids or [f"P{i:03d}" for i in range(1, len(paragraphs) + 1)]
+    source = "\n\n".join(f"[{pid}] {paragraph}" for pid, paragraph in zip(para_ids, paragraphs, strict=True))
     if len(source) > MAX_INPUT_CHARS_PER_CALL:
         raise ValueError(f"全文 {len(source)} 字符超过单次调用红线 {MAX_INPUT_CHARS_PER_CALL}")
     from yuxi.literature.llm_gateway import call
@@ -227,25 +225,28 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
                     .limit(1)
                 )
             ).scalar_one_or_none()
-        if render is None:
+        if render is None and not (paper.artifact_pointers or {}).get("document"):
             raise ValueError(f"解析版本尚无成功的阅读渲染: {paper.source_revision_id}")
-        from yuxi.literature import artifacts as _artifacts_mod
         from yuxi.literature.artifacts import resolve_effective_document
         from yuxi.literature.review import para_text
 
         # 统一有效版本入口（P11：人工冻结→裁决→渲染→导入）
-        _artifacts_mod.pg_manager = pg_manager
-        effective = await resolve_effective_document(int(paper.tenant_id), paper.rid, paper=paper)
+        effective = await resolve_effective_document(
+            int(paper.tenant_id), paper.rid, paper=paper, storage=get_minio_client()
+        )
         if effective is None:
             raise ValueError(f"文献无任何正文产物: {paper.rid}")
         document_json = effective["content"]
         if not document_json:
             raise ValueError(f"有效正文内容为空（source={effective['source']}）: {paper.rid}")
-        object_base = render.markdown_uri.removeprefix("kbasset://").removesuffix("render.md")
+        object_base = (
+            render.markdown_uri.removeprefix("kbasset://").removesuffix("render.md")
+            if render
+            else f"tenants/{paper.tenant_id}/literature/variants/{paper.rid}/"
+        )
         doc = json.loads(document_json.decode("utf-8"))
-        paragraphs = [
-            para_text(p) for p in (doc.get("paragraphs") or []) if isinstance(p, dict) and para_text(p).strip()
-        ]
+        paragraph_rows = [p for p in (doc.get("paragraphs") or []) if isinstance(p, dict) and para_text(p).strip()]
+        paragraphs = [para_text(p) for p in paragraph_rows]
         if not paragraphs:
             raise ValueError("document.json 无可用段落")
 
@@ -254,11 +255,20 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
         async def _generate_variant() -> str:
             nonlocal alignment
             if job.variant_kind == "summary":
-                return await _summarize_document(paragraphs)
+                return await _summarize_document(
+                    paragraphs,
+                    [str(row.get("para_id") or f"legacy-{i:03d}") for i, row in enumerate(paragraph_rows, 1)],
+                )
             zh_paragraphs = await _translate_document(paragraphs)
             alignment = [
-                {"para_id": f"P{i:03d}", "original": original, "translated": translated}
-                for i, (original, translated) in enumerate(zip(paragraphs, zh_paragraphs, strict=True), 1)
+                {
+                    "para_id": str(row.get("para_id") or f"legacy-{i:03d}"),
+                    "original": original,
+                    "translated": translated,
+                }
+                for i, (row, original, translated) in enumerate(
+                    zip(paragraph_rows, paragraphs, zh_paragraphs, strict=True), 1
+                )
             ]
             if job.variant_kind == "en_zh":
                 return (
@@ -295,7 +305,22 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
                 content_type="application/json",
             )
         async with pg_manager.get_async_session_context() as session:
-            await require_current_input(session, job)
+            paper = await require_current_input(session, job)
+            from yuxi.literature.products import frozen_uri
+
+            preserved_uri = await frozen_uri(session, paper, f"variant_{job.variant_kind}", fallback=uri)
+            if preserved_uri != uri:
+                from yuxi.storage.postgres.models_knowledge import LiteratureArtifactRevision
+
+                digest = (
+                    await session.execute(
+                        select(LiteratureArtifactRevision.content_digest).where(
+                            LiteratureArtifactRevision.revision_id
+                            == paper.artifact_pointers[f"variant_{job.variant_kind}"]
+                        )
+                    )
+                ).scalar_one()
+                uri = preserved_uri
             variant = (
                 await session.execute(
                     select(LiteratureVariant).where(
@@ -303,7 +328,7 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
                         LiteratureVariant.paper_id == paper.id,
                         LiteratureVariant.variant_kind == job.variant_kind,
                         LiteratureVariant.lang == "zh",
-                        LiteratureVariant.parse_revision_id == paper.source_revision_id,
+                        LiteratureVariant.parse_revision_id == (paper.source_revision_id or ""),
                         LiteratureVariant.reading_version == job.reading_version,
                         LiteratureVariant.generator_version == job.generator_version,
                     )

@@ -66,6 +66,27 @@ async def _complete(system: str, user: str) -> str:
     return str(response.content or "")
 
 
+async def complete_json(system: str, user: str) -> tuple[dict, str]:
+    """补全并解析 JSON；解析失败带错误上下文重问恰好一次（模型级修复）。
+
+    真实事故（2026-10-04）：多模型长中文输出畸形（含超出确定性修复级联的串内
+    未转义引号），直接烧穿编译/翻译任务的 attempt 预算。确定性修复
+    （parse_compile_json）先兜底，仍失败则把原始输出与解析错误回喂模型重问；
+    重问的调用同样经治理网关计费。两次都失败才向上抛 ValueError。
+    """
+    raw = await _complete(system, user)
+    try:
+        return prompts.parse_compile_json(raw), raw
+    except ValueError as exc:
+        corrective = (
+            f"{user}\n\n---\n你上一次的输出不是合法 JSON（解析错误：{exc}）。\n"
+            "请重新输出修正后的完整 JSON：只输出 JSON 本身，不要解释、不要代码围栏，"
+            '字符串内部的双引号必须转义（写成反斜杠加双引号），不要在字符串里保留未转义的换行。'
+        )
+        retry_raw = await _complete(system, corrective)
+        return prompts.parse_compile_json(retry_raw), retry_raw
+
+
 async def compile_l1_l2(
     meta: dict,
     paragraphs: list[str],
@@ -79,8 +100,7 @@ async def compile_l1_l2(
     assert_not_evidence_capable(LITERATURE_NOTES_KB_TYPE)  # 出口前提：派生产品身份
     prompt = prompts.prompt_l1_l2_merged(meta, paragraphs, journal_meta)
     system, user = prompts.split_task(prompt)
-    raw = await _complete(system, user)
-    data = prompts.parse_compile_json(raw)
+    data, raw = await complete_json(system, user)
     l1, l2 = split_l1_l2(data)
     if not l1.get("one_liner"):
         raise ValueError("编译输出缺少 one_liner（L1 最低契约）")
@@ -109,8 +129,7 @@ async def compile_l3(
     if related_ctxs:
         prompt = prompts.prompt_l3(meta, self_ctx, related_ctxs)
         system, user = prompts.split_task(prompt)
-        raw = await _complete(system, user)
-        data = prompts.parse_compile_json(raw)
+        data, _raw = await complete_json(system, user)
     return renderers.render_relations(meta, data, related_ctxs)
 
 

@@ -18,7 +18,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import hashlib
+import json
+from collections import Counter
+from dataclasses import dataclass, replace
 from typing import Any
 
 REVIEW_ITEM_SCHEMA_VERSION = "review_item_v2"
@@ -83,19 +86,32 @@ class ReviewItem:
     @classmethod
     def from_payload(cls, payload: dict[str, Any], *, render_id: str = "", render_digest: str = "") -> ReviewItem:
         """从供应商原始项归一（上游嵌套 + 种子/历史扁平两种形态都吃）。"""
+        if not isinstance(payload, dict):
+            raise ValueError("复核项必须为对象")
         mineru = payload.get("mineru") or {}
         paddle = payload.get("paddleocr") or {}
+        evidence = payload.get("evidence") or {}
+        if not all(isinstance(value, dict) for value in (mineru, paddle, evidence)):
+            raise ValueError("复核项 mineru/paddleocr/evidence 必须为对象")
         mineru_text = str(mineru.get("text") or payload.get("mineru_text") or payload.get("a_text") or "")
         paddle_text = str(paddle.get("text") or payload.get("paddleocr_text") or payload.get("b_text") or "")
         mineru_block = str(mineru.get("block_id") or "")
-        para_id = str(payload.get("para_id") or "")
-        source_blocks = tuple(payload.get("source_block_ids") or ([mineru_block] if mineru_block else []))
+        para_id = str(payload.get("para_id") or evidence.get("para_id") or "")
+        raw_blocks = payload.get("source_block_ids") or ([mineru_block] if mineru_block else [])
+        raw_paras = payload.get("para_ids") or ([para_id] if para_id else [])
+        if not all(isinstance(value, (list, tuple)) and len(value) <= 256 for value in (raw_blocks, raw_paras)):
+            raise ValueError("复核定位身份必须为有界数组")
+        source_blocks = tuple(str(block) for block in raw_blocks)
+        para_ids = tuple(str(value) for value in raw_paras)
+        if any(not value or len(value) > 256 for value in (*source_blocks, *para_ids)):
+            raise ValueError("复核块/段落身份为空或超长")
         explicit = str(payload.get("item_id") or "")
         if explicit:
             item_id = explicit
         elif mineru_block:
             item_id = f"{render_id}#blk:{mineru_block}" if render_id else f"blk:{mineru_block}"
-        elif para_id:
+        elif para_ids:
+            para_id = para_ids[0]
             item_id = f"{render_id}#para:{para_id}" if render_id else f"para:{para_id}"
         else:
             item_id = f"{render_id}#idx:{payload.get('report_idx', payload.get('idx', -1))}"
@@ -104,7 +120,7 @@ class ReviewItem:
             render_digest=render_digest,
             item_id=item_id,
             report_idx=int(payload.get("report_idx", payload.get("idx", -1))),
-            para_ids=(para_id,) if para_id else (),
+            para_ids=para_ids,
             source_block_ids=source_blocks,
             mineru_text=mineru_text,
             paddleocr_text=paddle_text,
@@ -118,16 +134,57 @@ class ReviewItem:
         return {
             "schema_version": self.schema_version,
             "item_id": self.item_id,
+            "render_id": self.render_id,
+            "render_digest": self.render_digest,
             "report_idx": self.report_idx,
             "para_ids": list(self.para_ids),
             "source_block_ids": list(self.source_block_ids),
-            "mineru_text": self.mineru_text[:800],
-            "paddleocr_text": self.paddleocr_text[:800],
+            "mineru_text": self.mineru_text,
+            "paddleocr_text": self.paddleocr_text,
             "blocking": self.blocking,
             "item_kind": self.item_kind,
             "page": self.page,
             "ai_verdict": self.ai_verdict,
         }
+
+
+def normalize_review_items(payloads: list, *, render_id: str, render_digest: str) -> list[ReviewItem]:
+    """Multiple independent OCR conflicts can share one source block.
+
+    Preserve single-item historical identities; disambiguate collisions by
+    actual conflict content, never positional guessing. Exact duplicates fail.
+    """
+    if not isinstance(payloads, list) or len(payloads) > 10000:
+        raise ValueError("复核清单必须是有界数组（最多 10000 项）")
+    items = []
+    for index, payload in enumerate(payloads):
+        if not isinstance(payload, dict):
+            raise ValueError("复核项必须为对象")
+        if "report_idx" not in payload and "idx" not in payload:
+            payload = {**payload, "report_idx": index}
+        items.append(ReviewItem.from_payload(payload, render_id=render_id, render_digest=render_digest))
+    counts = Counter(item.item_id for item in items)
+    normalized, identities, indices = [], set(), set()
+    for item in items:
+        if counts[item.item_id] > 1:
+            fragment = json.dumps(
+                [
+                    re.sub(r"\s+", " ", item.mineru_text).strip(),
+                    re.sub(r"\s+", " ", item.paddleocr_text).strip(),
+                    item.page,
+                    item.item_kind,
+                ],
+                ensure_ascii=False,
+            )
+            item = replace(
+                item, item_id=item.item_id + ":fragment:" + hashlib.sha256(fragment.encode()).hexdigest()[:24]
+            )
+        if item.item_id in identities or item.report_idx in indices or item.report_idx < 0:
+            raise ValueError("复核项身份或序号重复，禁止按序号猜测裁决")
+        identities.add(item.item_id)
+        indices.add(item.report_idx)
+        normalized.append(item)
+    return normalized
 
 
 def _para_text(para: dict) -> str:
@@ -187,7 +244,15 @@ def apply_choice_to_paragraph(paragraphs: list[dict], item: ReviewItem, choice: 
       纯 MinerU 段落则保持不改写。
     """
     normalized = normalize_choice(choice)
-    targets = [p for p in paragraphs if _paragraph_matches(p, item)]
+    # Stable identities take priority over the legacy substring fallback. Never
+    # rewrite a second paragraph merely because it repeats the same sentence.
+    targets = [p for p in paragraphs if set(map(str, p.get("source_block_ids") or [])) & set(item.source_block_ids)]
+    if not targets and item.para_ids:
+        targets = [p for p in paragraphs if str(p.get("para_id") or "") in item.para_ids]
+    if not targets:
+        targets = [p for p in paragraphs if _paragraph_matches(p, item)]
+        if len(targets) > 1:
+            return "ambiguous_target"
     if not targets:
         return "no_target"
 
@@ -208,12 +273,9 @@ def apply_choice_to_paragraph(paragraphs: list[dict], item: ReviewItem, choice: 
             if _norm_ws(new_fragment) in _norm_ws(current):
                 applied_any = True
                 continue
-            # 冲突片段在段落中定位失败（如导入迁移的段落文本与复核片段不完全一致）：
-            # 目标段已确认（_paragraph_matches），回退到整段替换（保留操作语义，
-            # 上游 apply_choice 的归一化兜底失败后同样直接写 para.text_en）
-            _set_para_text(para, new_fragment)
-            applied_any = True
-        return "replaced" if applied_any else "no_replacement_text"
+            # A block match does not prove that its whole paragraph is the
+            # conflict fragment. Refuse destructive whole-paragraph fallback.
+        return "replaced" if applied_any else "no_target"
 
     # A（还原）/ C / D（上游在 PaddleOCR 已落地时恢复 MinerU）
     rolled = False

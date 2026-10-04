@@ -166,6 +166,19 @@ async def import_bib(tenant_id: int, bib_text: str, *, source_name: str = "") ->
                 kind=kind,
                 doi=doi or None,
                 title=title or None,
+                source_main="wos-bib" if fields.get("cr") else "bib",
+                authors_json=[
+                    part.strip() for part in _clean_bib_value(fields.get("author", "")).split(" and ") if part.strip()
+                ],
+                abstract=_clean_bib_value(fields.get("abstract", "")) or None,
+                journal=_clean_bib_value(fields.get("journal", "")) or None,
+                issn=_clean_bib_value(fields.get("issn", "")) or None,
+                pub_year=_bib_year(fields.get("year", "")),
+                keywords_json=[
+                    part.strip()
+                    for part in re.split(r"[;,]", _clean_bib_value(fields.get("keywords", "")))
+                    if part.strip()
+                ],
             )
             session.add(paper)
             await session.flush()
@@ -201,6 +214,11 @@ def _bib_kind(fields: dict[str, str]) -> str:
     return mapping.get(entry_type, "paper")
 
 
+def _bib_year(value: str) -> int | None:
+    match = re.search(r"\b(1\d{3}|2\d{3})\b", str(value))
+    return int(match.group(1)) if match else None
+
+
 async def import_markdown_document(
     tenant_id: int,
     *,
@@ -209,15 +227,16 @@ async def import_markdown_document(
     doi: str = "",
 ) -> dict[str, Any]:
     """Markdown 直导（上游 imports.import_markdown 语义：免解析、0 API）。"""
-    if not markdown.strip():
-        raise ValueError("Markdown 内容为空")
+    from yuxi.knowledge.utils.text_utils import validate_markdown_quality
+
+    markdown = validate_markdown_quality(markdown)
     if doi and not is_doi(doi):
         raise ValueError(f"非法 DOI: {doi}")
     rid = make_rid("paper", doi=doi, fingerprint=hashlib.md5(markdown.encode("utf-8")).hexdigest())
     async with pg_manager.get_async_session_context() as session:
         exists = (
             await session.execute(
-                select(LiteraturePaper.id).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
+                select(LiteraturePaper).where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.rid == rid)
             )
         ).scalar_one_or_none()
         scope = current_access()
@@ -234,10 +253,37 @@ async def import_markdown_document(
                 )
             )
             await session.commit()
+    if exists is not None and (exists.source_revision_id or (exists.artifact_pointers or {}).get("document")):
+        return {"rid": rid, "duplicated": True}
+    digest = hashlib.sha256(markdown.encode()).hexdigest()
     await get_minio_client().aupload_file(
         bucket_name=RENDER_BUCKET,
-        object_name=f"tenants/{tenant_id}/literature/notes/{rid}/imported.md",
+        object_name=f"tenants/{tenant_id}/literature/notes/{rid}/markdown-import/{digest}/imported.md",
         data=markdown.encode("utf-8"),
         content_type="text/markdown",
     )
-    return {"rid": rid, "duplicated": exists is not None}
+    import json
+    from yuxi.literature.access import access_scope
+    from yuxi.literature.artifacts import ArtifactKind, store_revision
+
+    paragraphs = [
+        {"para_id": f"P{index:03d}", "text_en": text.strip()}
+        for index, text in enumerate(re.split(r"\n\s*\n", markdown), 1)
+        if text.strip()
+    ]
+    content = json.dumps({"metadata": {"title": title}, "paragraphs": paragraphs}, ensure_ascii=False).encode()
+    scope = current_access()
+    kwargs = dict(
+        content=content,
+        content_type="application/json",
+        operator=scope.user.uid if scope else "system:markdown-import",
+        freeze=True,
+        expected_current_revision=None,
+        storage=get_minio_client(),
+    )
+    if scope is not None:
+        async with access_scope(scope.user, tenant_id):
+            await store_revision(tenant_id, rid, ArtifactKind.DOCUMENT, **kwargs)
+    else:
+        await store_revision(tenant_id, rid, ArtifactKind.DOCUMENT, **kwargs)
+    return {"rid": rid, "duplicated": exists is not None, "reader_repaired": exists is not None}

@@ -13,6 +13,8 @@ RUNNING → SUCCEEDED/FAILED），ARQ 只是调度器；入列失败交给对账
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import tempfile
@@ -24,6 +26,7 @@ from typing import Any
 from sqlalchemy import select, update
 
 from yuxi.knowledge.utils.text_utils import validate_markdown_quality
+from yuxi.knowledge.utils import is_minio_url, parse_minio_url
 from yuxi.literature.contracts import READER_RENDER_DUAL_VERSION, READER_RENDER_VERSION
 from yuxi.literature.reading.process import (
     DEFAULT_RENDER_TIMEOUT_S,
@@ -37,6 +40,7 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseRevision,
     LiteratureReaderRender,
     LiteraturePaper,
+    LiteratureArtifactRevision,
 )
 from yuxi.utils.datetime_utils import utc_now
 
@@ -53,6 +57,22 @@ PENDING_REQUEUE_SECONDS = 60 * 10
 
 def _render_job_id(revision_id: str, attempt: int, render_version: str = READER_RENDER_VERSION) -> str:
     return f"lit-render:{revision_id}:{render_version}:{attempt}"
+
+
+def _resolve_render_input(uri: str) -> tuple[str, str]:
+    """把工件 ``object_uri`` 解析为 (bucket, object)。
+
+    工件行存的是完整 MinIO URL（如 ``http://minio:9000/knowledgebases/...``），
+    与 :mod:`scientific_pdf_ingest_service` 同一形态。直接把它当对象名传给
+    MinIO 客户端会让每一次渲染都取不到对象，进而级联拖垮编译与翻译。
+    非本系统 URL 一律拒绝，不做猜测回退。
+    """
+    if not is_minio_url(uri):
+        raise ValueError(f"渲染输入不是本系统 MinIO URL: {uri}")
+    bucket, object_name = parse_minio_url(uri)
+    if not object_name:
+        raise ValueError(f"渲染输入 URL 缺少对象名: {uri}")
+    return bucket, object_name
 
 
 def _render_object_prefix(*, tenant_id: int, source_sha256: str, revision_id: str) -> str:
@@ -180,17 +200,30 @@ async def _load_render_inputs(revision_id: str) -> tuple[KnowledgeParseRevision,
     return revision, by_kind
 
 
-async def _finish_success(row_id: int, *, markdown_uri: str, result: dict[str, Any]) -> None:
+async def _finish_success(
+    row_id: int,
+    *,
+    markdown_uri: str,
+    result: dict[str, Any],
+    document_content: bytes | None = None,
+    expected_attempt: int | None = None,
+) -> None:
     async with pg_manager.get_async_session_context() as session:
         row = (
-            await session.execute(select(LiteratureReaderRender).where(LiteratureReaderRender.id == row_id))
+            await session.execute(
+                select(LiteratureReaderRender).where(LiteratureReaderRender.id == row_id).with_for_update()
+            )
         ).scalar_one()
+        if expected_attempt is not None and (row.status != "RUNNING" or row.attempt != expected_attempt):
+            raise ValueError("阅读渲染租约已失效；未切换正文")
         await session.execute(
             update(LiteratureReaderRender)
             .where(LiteratureReaderRender.id == row_id)
             .values(
                 status="SUCCEEDED",
                 markdown_uri=markdown_uri,
+                review_uri=None,
+                review_digest=None,
                 image_count=int(result.get("image_count") or 0),
                 latex_count=int(result.get("latex_count") or 0),
                 source_digest=str(result.get("source_digest") or ""),
@@ -198,23 +231,53 @@ async def _finish_success(row_id: int, *, markdown_uri: str, result: dict[str, A
                 updated_at=utc_now(),
             )
         )
-        await session.execute(
-            update(LiteraturePaper)
-            .where(LiteraturePaper.source_revision_id == row.revision_id, LiteraturePaper.tenant_id == row.tenant_id)
-            .values(
-                reading_version=LiteraturePaper.reading_version + 1,
-                ai_value_score=None,
-                topic_score=None,
-                value_score=0.0,
-            )
+        papers = list(
+            (
+                await session.execute(
+                    select(LiteraturePaper)
+                    .where(
+                        LiteraturePaper.source_revision_id == row.revision_id,
+                        LiteraturePaper.tenant_id == row.tenant_id,
+                        LiteraturePaper.trashed_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalars()
         )
+        changed = False
+        for paper in papers:
+            frozen = "document" in (paper.frozen_artifacts or [])
+            if document_content:
+                revision_id = f"lar_{uuid.uuid4().hex[:20]}"
+                session.add(
+                    LiteratureArtifactRevision(
+                        revision_id=revision_id,
+                        tenant_id=paper.tenant_id,
+                        paper_id=paper.id,
+                        kind="document",
+                        source="rendered",
+                        frozen=False,
+                        object_uri=markdown_uri.removesuffix("render.md") + "document.json",
+                        content_digest=hashlib.sha256(document_content).hexdigest(),
+                        source_revision_id=row.revision_id,
+                        input_reading_version=paper.reading_version,
+                        created_by="system:literature-render",
+                    )
+                )
+                if not frozen:
+                    paper.artifact_pointers = {**(paper.artifact_pointers or {}), "document": revision_id}
+            if not frozen:
+                paper.reading_version += 1
+                paper.ai_value_score, paper.topic_score, paper.value_score = None, None, 0.0
+                changed = True
         from yuxi.literature.provenance import invalidate_note_publications
 
-        await invalidate_note_publications(session, row.revision_id)
+        if changed:
+            await invalidate_note_publications(session, row.revision_id)
         await session.commit()
 
 
-async def _finish_failure(revision_id: str, row_id: int, reason: str) -> bool:
+async def _finish_failure(revision_id: str, row_id: int, reason: str, *, expected_attempt: int | None = None) -> bool:
     """失败处置：attempt 内回 PENDING 并重排，超限置 FAILED。返回是否已重排。"""
     async with pg_manager.get_async_session_context() as session:
         row = (
@@ -223,6 +286,8 @@ async def _finish_failure(revision_id: str, row_id: int, reason: str) -> bool:
             )
         ).scalar_one_or_none()
         if row is None:
+            return False
+        if expected_attempt is not None and (row.status != "RUNNING" or row.attempt != expected_attempt):
             return False
         row.attempt = int(row.attempt or 0) + 1
         row.error = reason[:2000]
@@ -257,11 +322,17 @@ async def process_literature_reader_render(
     row = await _claim_render(revision_id, render_version)
     if row is None:
         return None
+    claim_attempt = int(row.attempt or 0)
     try:
         revision, inputs = await _load_render_inputs(revision_id)
         minio = get_minio_client()
-        markdown_bytes = await minio.adownload_file(RENDER_BUCKET, inputs["mineru_markdown"])
-        pdf_bytes = await minio.adownload_file(RENDER_BUCKET, inputs["original_pdf"])
+        # ParserArtifact.object_uri stores a full MinIO URL, not a bare object name
+        # (same shape scientific_pdf_ingest_service parses). Resolve it through the
+        # URL contract before touching MinIO, otherwise every render 404s.
+        markdown_bucket, markdown_object = _resolve_render_input(inputs["mineru_markdown"])
+        pdf_bucket, pdf_object = _resolve_render_input(inputs["original_pdf"])
+        markdown_bytes = await minio.adownload_file(markdown_bucket, markdown_object)
+        pdf_bytes = await minio.adownload_file(pdf_bucket, pdf_object)
 
         prefix = _render_object_prefix(
             tenant_id=revision.tenant_id, source_sha256=revision.source_sha256, revision_id=revision_id
@@ -302,11 +373,17 @@ async def process_literature_reader_render(
             )
             # document.json（段落级 [Pxxx] 结构）：P2 编译/翻译的引用锚点来源；可选产物
             document_json = str(result.get("document_json") or "")
+            document_content = None
             if document_json.strip():
+                from yuxi.literature.artifacts import validate_document
+
+                document = validate_document(document_json.encode("utf-8"))
+                document["_image_base"] = f"{prefix}/"
+                document_content = json.dumps(document, ensure_ascii=False, sort_keys=True).encode("utf-8")
                 await minio.aupload_file(
                     bucket_name=RENDER_BUCKET,
                     object_name=f"{prefix}/document.json",
-                    data=document_json.encode("utf-8"),
+                    data=document_content,
                     content_type="application/json",
                 )
             review_json = str(result.get("review_json") or "")
@@ -327,13 +404,19 @@ async def process_literature_reader_render(
                     data=image_bytes,
                     content_type=content_type,
                 )
-        await _finish_success(row.id, markdown_uri=markdown_uri, result=result)
+        await _finish_success(
+            row.id,
+            markdown_uri=markdown_uri,
+            result=result,
+            document_content=document_content,
+            expected_attempt=claim_attempt,
+        )
         logger.info("阅读渲染完成: revision=%s uri=%s", revision_id, markdown_uri)
         return {"revision_id": revision_id, "status": "SUCCEEDED", "markdown_uri": markdown_uri}
     except Exception as exc:  # noqa: BLE001
         reason = f"{type(exc).__name__}: {exc}"
         logger.exception("阅读渲染失败: revision=%s", revision_id)
-        requeued = await _finish_failure(revision_id, row.id, reason)
+        requeued = await _finish_failure(revision_id, row.id, reason, expected_attempt=claim_attempt)
         return {"revision_id": revision_id, "status": "REQUEUED" if requeued else "FAILED", "error": reason}
 
 

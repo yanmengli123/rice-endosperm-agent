@@ -8,7 +8,10 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+import json
 from typing import Any
+from urllib.parse import quote, urlparse
 
 import httpx
 from yuxi.literature.access import paper_visibility
@@ -22,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _UA_BASE = "YuxiLiterature/1.0 (literature enrichment)"
 _TIMEOUT = httpx.Timeout(20.0)
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 def _user_agent() -> str:
@@ -38,20 +42,51 @@ _FILLABLE_FIELDS = ("title", "journal", "year")
 
 
 async def _get_json(url: str, *, headers: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """Bound retries/body/deadline; don't follow API-key-bearing redirects.
+
+    Long Retry-After delays are reported as unavailable, not spent holding a
+    worker lease. The library workflow records failure and can be restarted.
+    """
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": _user_agent(), **(headers or {})})
-        if resp.status_code != 200:
-            return None
-        return resp.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("富化源请求失败: %s: %s", url, exc)
+        async with asyncio.timeout(20), httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as client:
+            for attempt in range(2):
+                try:
+                    async with client.stream(
+                        "GET", url, headers={"User-Agent": _user_agent(), **(headers or {})}
+                    ) as resp:
+                        if resp.status_code in {429, 502, 503, 504} and attempt == 0:
+                            try:
+                                delay = float(resp.headers.get("Retry-After", "0.5"))
+                            except ValueError:
+                                return None
+                            if not 0 <= delay <= 2:
+                                return None
+                        elif resp.status_code != 200:
+                            return None
+                        else:
+                            chunks, size = [], 0
+                            async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                                size += len(chunk)
+                                if size > _MAX_RESPONSE_BYTES:
+                                    return None
+                                chunks.append(chunk)
+                            payload = json.loads(b"".join(chunks))
+                            return payload if isinstance(payload, dict) else None
+                except (httpx.TimeoutException, httpx.NetworkError):
+                    if attempt:
+                        return None
+                    delay = 0.5
+                await asyncio.sleep(delay)
+    except (httpx.HTTPError, ValueError, TimeoutError) as exc:
+        # Don't persist provider response text, credentials or full request URLs.
+        logger.warning("富化源请求失败: %s (%s)", urlparse(url).hostname, type(exc).__name__)
         return None
+    return None
 
 
 async def fetch_openalex(doi: str) -> dict[str, Any] | None:
     """OpenAlex /works/doi:{doi}（polite pool：mailto 头可达 10 req/s）。"""
-    data = await _get_json(f"https://api.openalex.org/works/doi:{doi}")
+    data = await _get_json(f"https://api.openalex.org/works/doi:{quote(doi, safe='/')}")
     if not data:
         return None
     # authorships 透传（enrich_paper 消费；fields 不限制时默认返回）
@@ -67,7 +102,7 @@ async def fetch_openalex(doi: str) -> dict[str, Any] | None:
 
 async def fetch_crossref(doi: str) -> dict[str, Any] | None:
     """Crossref /works/{doi}。"""
-    data = await _get_json(f"https://api.crossref.org/works/{doi}")
+    data = await _get_json(f"https://api.crossref.org/works/{quote(doi, safe='/')}")
     message = (data or {}).get("message") or {}
     if not message:
         return None
@@ -91,7 +126,9 @@ async def fetch_semantic_scholar(doi: str) -> dict[str, Any] | None:
     api_key = os.getenv("YUXI_S2_API_KEY", "")
     headers = {"x-api-key": api_key} if api_key else {}
     fields = "title,year,abstract,venue"
-    data = await _get_json(f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields={fields}", headers=headers)
+    data = await _get_json(
+        f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote(doi, safe='/')}?fields={fields}", headers=headers
+    )
     if not data:
         return None
     return {
@@ -123,7 +160,7 @@ def _fill(current: str | None, *candidates: str) -> str | None:
 
 
 async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
-    """富化单篇：三源合并回填空字段 + 期刊指标。返回 {ok, filled, source}。"""
+    """Fetch external metadata, then revalidate ACL/lock and fill only empty fields."""
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
@@ -132,80 +169,72 @@ async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
         ).scalar_one_or_none()
     if paper is None:
         return {"rid": rid, "ok": False, "reason": "not_in_db"}
+    if paper.meta_locked:
+        return {"rid": rid, "ok": True, "filled": [], "reason": "meta_locked", "sources": []}
     if not paper.doi:
         return {"rid": rid, "ok": False, "reason": "no_doi"}
-
-    fetched: list[dict[str, Any]] = []
-    oa = await fetch_openalex(paper.doi)
-    if oa:
-        fetched.append(("openalex", oa))
-    cr = await fetch_crossref(paper.doi)
-    if cr:
-        fetched.append(("crossref", cr))
-    s2 = await fetch_semantic_scholar(paper.doi)
-    if s2:
-        fetched.append(("semantic_scholar", s2))
+    input_doi = paper.doi
+    fetched = []
+    for name, fetch in (
+        ("openalex", fetch_openalex),
+        ("crossref", fetch_crossref),
+        ("semantic_scholar", fetch_semantic_scholar),
+    ):
+        payload = await fetch(input_doi)
+        if payload:
+            fetched.append((name, payload))
     if not fetched:
         return {"rid": rid, "ok": False, "reason": "all_sources_failed"}
-    # 作者（OpenAlex authorships 优先 → Crossref author 列表）
-    authors: list[str] = []
-    if oa and oa.get("authorships"):
-        authors = [str((a.get("author") or {}).get("display_name") or "") for a in oa["authorships"]]
-    elif cr and cr.get("author"):
-        authors = [str(a.get("family") or a.get("given") or "") for a in cr["author"]]
-    authors = [a for a in authors if a.strip()][:20]
 
-    filled: list[str] = []
-    updates: dict[str, Any] = {}
-    new_title: str | None = None
-    new_journal: str | None = None
-    new_year: str | None = None
-    abstract = ""
-    for _, payload in fetched:
-        if new_title is None:
-            new_title = _fill(paper.title, payload.get("title"))
-            if new_title:
-                filled.append("title")
-        if new_journal is None:
-            new_journal = _fill("", payload.get("journal"))
-            if new_journal:
-                filled.append("journal")
-        if new_year is None:
-            new_year = _fill("", payload.get("year"))
-            if new_year:
-                filled.append("year")
-        if not abstract:
-            abstract = (payload.get("abstract") or "").strip()
-    if new_title:
-        updates["title"] = new_title
-    if "title" in updates:
-        async with pg_manager.get_async_session_context() as session:
+    # External awaits must not overwrite an intervening human edit/lock.
+    from yuxi.literature.access import build_access, current_access
+
+    scope = current_access()
+    if scope is not None and rid not in (await build_access(scope.user, tenant_id)).rids:
+        return {"rid": rid, "ok": False, "reason": "source_access_revoked"}
+    async with pg_manager.get_async_session_context() as session:
+        current = (
             await session.execute(
-                LiteraturePaper.__table__.update().where(LiteraturePaper.id == paper.id).values(title=updates["title"])
+                select(LiteraturePaper)
+                .where(paper_visibility(tenant_id), LiteraturePaper.rid == rid)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
-            await session.commit()
-
-    # P10-A：元数据持久化（authors/journal/pub_year/abstract）——只填空，
-    # meta_locked=True 时全部跳过（人工锁定优先，capability-matrix §七）
-    if not paper.meta_locked:
-        values: dict[str, Any] = {}
-        if new_journal and not paper.journal:
-            values["journal"] = new_journal[:512]
-        if new_year and paper.pub_year is None:
-            try:
-                values["pub_year"] = int(new_year)
-            except (TypeError, ValueError):
-                pass
-        if abstract and not paper.abstract:
-            values["abstract"] = abstract
-        if authors and not paper.authors_json:
-            values["authors_json"] = authors
-        if values:
-            async with pg_manager.get_async_session_context() as session:
-                await session.execute(
-                    LiteraturePaper.__table__.update().where(LiteraturePaper.id == paper.id).values(**values)
-                )
-                await session.commit()
+        ).scalar_one_or_none()
+        if current is None or current.doi != input_doi:
+            return {"rid": rid, "ok": False, "reason": "input_changed"}
+        if current.meta_locked:
+            return {"rid": rid, "ok": True, "filled": [], "reason": "meta_locked", "sources": []}
+        filled = []
+        for field in ("title", "journal", "abstract"):
+            value = _fill(getattr(current, field), *(str(p.get(field) or "") for _, p in fetched))
+            if value:
+                setattr(current, field, value[:512] if field == "journal" else value)
+                filled.append(field)
+        if current.pub_year is None:
+            for _, payload in fetched:
+                try:
+                    year = int(payload.get("year") or "")
+                except (ValueError, TypeError):
+                    continue
+                if 1000 <= year <= 9999:
+                    current.pub_year = year
+                    filled.append("pub_year")
+                    break
+        if not current.authors_json:
+            for _, payload in fetched:
+                authors = [
+                    str((a.get("author") or {}).get("display_name") or "") for a in payload.get("authorships") or []
+                ] or [
+                    " ".join(str(a.get(key) or "").strip() for key in ("given", "family")).strip()
+                    for a in payload.get("author") or []
+                ]
+                authors = [a for a in authors if a.strip()][:200]
+                if authors:
+                    current.authors_json = authors
+                    filled.append("authors_json")
+                    break
+        await session.commit()
     return {"rid": rid, "ok": True, "filled": filled, "sources": [name for name, _ in fetched]}
 
 

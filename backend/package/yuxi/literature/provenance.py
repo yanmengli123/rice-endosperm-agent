@@ -11,6 +11,7 @@ TRANSLATE_VERSION = "literature-translate-v1"
 def current_job(job_model, paper=LiteraturePaper):
     version = COMPILE_VERSION if job_model.__tablename__ == "literature_compile_jobs" else TRANSLATE_VERSION
     return and_(
+        job_model.card_revision == paper.card_revision if version == COMPILE_VERSION else True,
         job_model.source_revision_id == func.coalesce(paper.source_revision_id, ""),
         job_model.reading_version == paper.reading_version,
         job_model.generator_version.in_((version, "paperagent-import-v4")),
@@ -18,7 +19,12 @@ def current_job(job_model, paper=LiteraturePaper):
 
 
 def source_matches(job, paper) -> bool:
-    return job.source_revision_id == (paper.source_revision_id or "") and job.reading_version == paper.reading_version
+    return (
+        getattr(paper, "trashed_at", None) is None
+        and job.source_revision_id == (paper.source_revision_id or "")
+        and job.reading_version == paper.reading_version
+        and (not hasattr(job, "card_revision") or job.card_revision == paper.card_revision)
+    )
 
 
 async def require_current_input(session, job):

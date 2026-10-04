@@ -25,7 +25,47 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureVariant,
 )
 
-_ALLOWED_ASSET_SEGMENTS = {"reader_render", "variants", "notes", "attachments", "reports"}
+_ALLOWED_ASSET_SEGMENTS = {"reader_render", "variants", "notes", "attachments", "reports", "artifacts"}
+
+
+async def read_current_note(tenant_id: int, rid: str, level: str, *, max_chars: int = 12000) -> str:
+    """Bounded navigation text from the current successful job, never evidence."""
+    from yuxi.storage.minio import get_minio_client
+    from yuxi.literature.reading.service import RENDER_BUCKET
+    from yuxi.literature.access import build_access
+
+    uri = await get_note_uri(tenant_id, rid, level)
+    if not uri:
+        raise ValueError("当前版本笔记不存在")
+    data = await get_minio_client().adownload_file(RENDER_BUCKET, uri.removeprefix("kbasset://"))
+    scope = current_access()
+    if scope is not None and rid not in (await build_access(scope.user, tenant_id)).rids:
+        raise PermissionError("笔记来源权限已撤销")
+    if await get_note_uri(tenant_id, rid, level) != uri:
+        raise ValueError("笔记版本已变更，请重新读取")
+    return data.decode("utf-8")[: max(1, min(max_chars, 20000))]
+
+
+_QUARTILE_VALUES = ("Q1", "Q2", "Q3", "Q4")
+#: 「未知分区」筛选字面量（前端「未知分区」选项）；对应 quartile == ""
+_QUARTILE_UNKNOWN = ("none", "unknown", "未知")
+
+
+def _parse_quartiles(raw: str) -> list[str] | None:
+    """分区筛选解析（逗号分隔，Q1–Q4；``none`` 表示未知分区）；空串表示不筛选。"""
+    values = [item.strip() for item in (raw or "").split(",") if item.strip()]
+    if not values:
+        return None
+    parsed: list[str] = []
+    for value in values:
+        upper = value.upper()
+        if upper in _QUARTILE_VALUES:
+            parsed.append(upper)
+        elif value.lower() in _QUARTILE_UNKNOWN:
+            parsed.append("")
+        else:
+            raise ValueError("分区筛选只能是 Q1–Q4 或 none（未知分区）")
+    return sorted(set(parsed))
 
 
 async def list_papers(
@@ -35,6 +75,14 @@ async def list_papers(
     kind: str = "",
     page: int = 1,
     page_size: int = 20,
+    journal: str = "",
+    quartile: str = "",
+    min_if: float | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    compiled_level: str = "",
+    source: str = "",
+    sort: str = "updated",
 ) -> dict[str, Any]:
     """文献列表（检索词匹配标题/DOI；类型芯片筛选；分页）。"""
     async with pg_manager.get_async_session_context() as session:
@@ -49,12 +97,62 @@ async def list_papers(
             )
         if kind.strip():
             conditions.append(LiteraturePaper.kind == kind.strip())
+        if journal.strip():
+            from yuxi.knowledge.evidence.verbatim import escape_like
+
+            conditions.append(LiteraturePaper.journal.ilike(f"%{escape_like(journal.strip())}%", escape="/"))
+        quartiles = _parse_quartiles(quartile)
+        if quartiles is not None:
+            conditions.append(LiteraturePaper.quartile.in_(quartiles))
+        if min_if is not None:
+            if min_if < 0:
+                raise ValueError("最低影响因子不能为负")
+            conditions.append(LiteraturePaper.impact_factor >= min_if)
+        if year_min is not None:
+            conditions.append(LiteraturePaper.pub_year >= year_min)
+        if year_max is not None:
+            conditions.append(LiteraturePaper.pub_year <= year_max)
+        if year_min is not None and year_max is not None and year_min > year_max:
+            raise ValueError("年份起点不能晚于终点")
+        if source == "pdf":
+            conditions.append(LiteraturePaper.source_revision_id.isnot(None))
+        elif source == "catalog":
+            conditions.append(LiteraturePaper.source_revision_id.is_(None))
+        elif source:
+            raise ValueError("来源筛选必须为 pdf/catalog")
+        compiled = (
+            select(LiteratureCompileJob.id)
+            .where(
+                LiteratureCompileJob.paper_id == LiteraturePaper.id,
+                current_job(LiteratureCompileJob),
+                LiteratureCompileJob.status == "SUCCEEDED",
+            )
+            .correlate(LiteraturePaper)
+        )
+        if compiled_level == "missing":
+            conditions.append(~compiled.exists())
+        elif compiled_level:
+            if compiled_level not in {"any", "L1", "L2", "L3"}:
+                raise ValueError("非法编译级别筛选")
+            if compiled_level != "any":
+                compiled = compiled.where(LiteratureCompileJob.level == compiled_level)
+            conditions.append(compiled.exists())
+        sorting = {
+            "updated": LiteraturePaper.updated_at.desc(),
+            "year": LiteraturePaper.pub_year.desc().nulls_last(),
+            "cited": LiteraturePaper.external_cited.desc().nulls_last(),
+            "rank": LiteraturePaper.paper_rank.desc(),
+            "value": LiteraturePaper.value_score.desc(),
+            "title": LiteraturePaper.title.asc(),
+        }
+        if sort not in sorting:
+            raise ValueError("非法排序方式")
         base = select(LiteraturePaper).where(*conditions)
         total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
         rows = (
             (
                 await session.execute(
-                    base.order_by(LiteraturePaper.updated_at.desc())
+                    base.order_by(sorting[sort], LiteraturePaper.id.desc())
                     .offset(max(0, (page - 1) * page_size))
                     .limit(page_size)
                 )
@@ -77,6 +175,9 @@ async def list_papers(
                 "paper_rank": row.paper_rank,
                 "impact_factor": row.impact_factor,
                 "quartile": row.quartile,
+                "pub_year": row.pub_year,
+                "journal": row.journal,
+                "external_cited": row.external_cited,
                 "source_revision_id": row.source_revision_id,
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             }
@@ -208,6 +309,10 @@ async def get_note_uri(tenant_id: int, rid: str, level: str) -> str | None:
         ).scalar_one_or_none()
         if paper is None:
             return None
+        if (paper.artifact_pointers or {}).get(f"note_{level}"):
+            from yuxi.literature.products import frozen_uri
+
+            return await frozen_uri(session, paper, f"note_{level}", fallback=None)
         job = (
             await session.execute(
                 select(LiteratureCompileJob)

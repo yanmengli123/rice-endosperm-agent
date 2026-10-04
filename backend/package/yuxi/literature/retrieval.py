@@ -17,9 +17,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, cast, exists, func, or_, select
 
 from yuxi.literature.access import paper_visibility
+from yuxi.literature.provenance import current_job
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureCompileJob,
@@ -46,8 +47,8 @@ def escape_like(raw: str) -> str:
 def tokenize(query: str) -> list[str]:
     """查询分词：英文词 + 中文 bigram（PG 无中文 FTS 配置时的应用层分词）。"""
     tokens = _TOKEN_RE.findall(query or "")
-    cjk_runs = _CJK_RE.findall(query or "")
-    bigrams = [a + b for a, b in zip(cjk_runs, cjk_runs[1:])]
+    cjk_runs = re.findall(r"[\u4e00-\u9fff]+", query or "")
+    bigrams = [a + b for run in cjk_runs for a, b in zip(run, run[1:])]
     return [t.lower() for t in tokens + bigrams if t.strip()]
 
 
@@ -60,7 +61,7 @@ def rrf_fuse(rankings: list[tuple[list[str], float]], k: int = RRF_K) -> list[tu
     return sorted(scores.items(), key=lambda kv: -kv[1])
 
 
-async def search_catalog(
+async def _search_catalog(
     tenant_id: int,
     query: str,
     *,
@@ -68,68 +69,137 @@ async def search_catalog(
     order_by: str = "relevance",
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """目录检索：元数据关键词召回 → 排序交付（相关度/被引/年份/Pagerank）。
-
-    来源 ACL（审计修复）：``paper_visibility`` 在 WHERE 层过滤——无权文献
-    **不进入**召回集合，排序和分页在过滤后执行。
-    """
+    """ACL-first catalog keyword/semantic recall and RRF; explicit user sorting."""
+    if order_by not in {"relevance", "citations", "year", "pagerank"}:
+        raise ValueError("不支持的目录排序方式")
+    limit = max(1, min(limit, 100))
     tokens = tokenize(query)
-    like = f"%{escape_like(query.strip())}%"
-    async with pg_manager.get_async_session_context() as session:
-        conditions = [paper_visibility(tenant_id)]  # ACL 先于一切
-        if kind:
-            conditions.append(LiteraturePaper.kind == kind)
-        if query.strip():
-            conditions.append(
-                func.coalesce(LiteraturePaper.title, "").ilike(like, escape="\\")
-                | func.coalesce(LiteraturePaper.doi, "").ilike(like, escape="\\")
-                | func.coalesce(LiteraturePaper.abstract, "").ilike(like, escape="\\")
-                | func.coalesce(LiteraturePaper.journal, "").ilike(like, escape="\\")
+    terms = tokens or ([query.strip().lower()] if query.strip() else [])
+    conditions = [paper_visibility(tenant_id)]
+    if kind:
+        conditions.append(LiteraturePaper.kind == kind)
+    if terms:
+        conditions.append(
+            or_(
+                *(
+                    func.coalesce(column, "").ilike(f"%{escape_like(term)}%", escape="\\")
+                    for term in terms
+                    for column in (
+                        LiteraturePaper.title,
+                        LiteraturePaper.doi,
+                        LiteraturePaper.abstract,
+                        LiteraturePaper.journal,
+                    )
+                )
             )
-        stmt = select(LiteraturePaper).where(*conditions)
-        # 排序（方案：相关度/被引/年份/PaperRank——用户选择保留，不二次重排）
-        if order_by == "citations":
-            stmt = stmt.order_by(func.coalesce(LiteraturePaper.external_cited, 0).desc())
-        elif order_by == "year":
-            stmt = stmt.order_by(func.coalesce(LiteraturePaper.pub_year, 0).desc())
-        elif order_by == "pagerank":
-            stmt = stmt.order_by(LiteraturePaper.paper_rank.desc())
-        else:
-            title_hit = func.coalesce(LiteraturePaper.title, "").ilike(like, escape="\\")
-            stmt = stmt.order_by(title_hit.desc(), LiteraturePaper.updated_at.desc())
-        rows = (await session.execute(stmt.limit(min(limit, 100)))).scalars().all()
-
-    # 相关度评分（仅在 relevance 模式下使用；其他排序尊重用户选择）
-    results = []
-    for paper in rows:
-        score = 0.0
-        if order_by == "relevance":
-            title = str(paper.title or "").lower()
-            for token in tokens:
-                if token in title:
-                    score += 3.0
-        results.append(
-            {
-                "rid": paper.rid,
-                "title": paper.title,
-                "doi": paper.doi,
-                "kind": paper.kind,
-                "journal": paper.journal,
-                "pub_year": paper.pub_year,
-                "value_score": paper.value_score,
-                "score": score,
-            }
         )
-    if order_by == "relevance":
-        results.sort(key=lambda r: -r["score"])
-    return results[:limit]
+    async with pg_manager.get_async_session_context() as session:
+        rank = _metadata_rank(terms)
+        sort = {
+            "relevance": rank,
+            "citations": func.coalesce(LiteraturePaper.external_cited, 0),
+            "year": func.coalesce(LiteraturePaper.pub_year, 0),
+            "pagerank": func.coalesce(LiteraturePaper.paper_rank, 0),
+        }[order_by]
+        rows = list(
+            (
+                await session.execute(
+                    select(LiteraturePaper).where(*conditions).order_by(sort.desc(), LiteraturePaper.rid).limit(500)
+                )
+            ).scalars()
+        )
+        # Snapshot before an optional separately managed database channel runs.
+        results = {paper.rid: _catalog_hit(paper, terms) for paper in rows}
+    keyword_ranking = sorted(results, key=lambda rid: (-results[rid]["score"], rid))
+    vector_hits, vector_reason = [], ""
+    if query.strip():
+        from yuxi.literature.navigation_index import search_navigation_vectors
+
+        vector_hits, vector_reason = await search_navigation_vectors(
+            tenant_id, query, channel="catalog", limit=min(100, limit * 5)
+        )
+        if vector_hits:
+            async with pg_manager.get_async_session_context() as session:
+                vector_conditions = [
+                    paper_visibility(tenant_id),
+                    LiteraturePaper.rid.in_([hit["rid"] for hit in vector_hits]),
+                ]
+                if kind:
+                    vector_conditions.append(LiteraturePaper.kind == kind)
+                vector_rows = list((await session.execute(select(LiteraturePaper).where(*vector_conditions))).scalars())
+                for paper in vector_rows:
+                    results.setdefault(paper.rid, _catalog_hit(paper, terms))
+    vector_ranking = [hit["rid"] for hit in vector_hits if hit["rid"] in results]
+    fused = rrf_fuse([(keyword_ranking, WEIGHT_META), (vector_ranking, WEIGHT_VECTOR)])
+    for rid, score in fused:
+        results[rid]["rrf_score"] = round(score, 6)
+        results[rid]["channels_used"] = (["metadata"] if rid in keyword_ranking else []) + (
+            ["vector"] if rid in vector_ranking else []
+        )
+        results[rid]["navigation_note"] = vector_reason
+    ranked = [results[rid] for rid, _ in fused]
+    if order_by != "relevance":
+        field = {"citations": "external_cited", "year": "pub_year", "pagerank": "paper_rank"}[order_by]
+        ranked.sort(key=lambda row: (-(row.get(field) or 0), row["rid"]))
+    return ranked[:limit]
 
 
-async def search_compiled(
+def _catalog_hit(paper, terms: list[str]) -> dict[str, Any]:
+    title = str(paper.title or "").lower()
+    other = f"{paper.doi or ''} {paper.abstract or ''} {paper.journal or ''}".lower()
+    return {
+        "rid": paper.rid,
+        "title": paper.title,
+        "doi": paper.doi,
+        "kind": paper.kind,
+        "journal": paper.journal,
+        "pub_year": paper.pub_year,
+        "value_score": paper.value_score,
+        "paper_rank": paper.paper_rank,
+        "external_cited": paper.external_cited,
+        "quartile": paper.quartile,
+        "impact_factor": paper.impact_factor,
+        "score": sum(3.0 * (term in title) + (term in other) for term in terms),
+    }
+
+
+def _metadata_rank(terms):
+    """Rank in SQL before limiting, not after loading the newest 500 rows."""
+    return (
+        sum(
+            weight * cast(func.coalesce(column, "").ilike(f"%{escape_like(term)}%", escape="\\"), Integer)
+            for term in terms
+            for column, weight in (
+                (LiteraturePaper.title, 3),
+                (LiteraturePaper.doi, 1),
+                (LiteraturePaper.abstract, 1),
+                (LiteraturePaper.journal, 1),
+            )
+        )
+        if terms
+        else func.coalesce(LiteraturePaper.paper_rank, 0)
+    )
+
+
+def _compiled_exists(tenant_id):
+    return exists(
+        select(LiteratureCompileJob.id).where(
+            LiteratureCompileJob.paper_id == LiteraturePaper.id,
+            LiteratureCompileJob.tenant_id == tenant_id,
+            LiteratureCompileJob.level == "L1",
+            LiteratureCompileJob.status == "SUCCEEDED",
+            LiteratureCompileJob.note_uri.isnot(None),
+            current_job(LiteratureCompileJob),
+        )
+    )
+
+
+async def _search_compiled(
     tenant_id: int,
     query: str,
     *,
     compiled_only: bool = True,
+    kind: str = "",
     limit: int = 10,
 ) -> dict[str, Any]:
     """编译产物检索：笔记全文 + 元数据 → RRF(k=60) → 预算内上下文。
@@ -143,98 +213,70 @@ async def search_compiled(
     if not tokens:
         return {"hits": [], "channels_used": [], "note": "空查询"}
 
-    async with pg_manager.get_async_session_context() as session:
-        papers = (
-            (
-                await session.execute(
-                    select(LiteraturePaper).where(paper_visibility(tenant_id))  # ACL 先于召回
-                )
-            )
-            .scalars()
-            .all()
-        )
-        # 真实产物路径：编译任务的 note_uri（含 source_revision/reading_version/compile_version）
-        jobs = (
-            await session.execute(
-                select(LiteratureCompileJob, LiteraturePaper.rid)
-                .join(LiteraturePaper, LiteraturePaper.id == LiteratureCompileJob.paper_id)
-                .where(
-                    LiteratureCompileJob.tenant_id == tenant_id,
-                    LiteratureCompileJob.level == "L1",
-                    LiteratureCompileJob.status == "SUCCEEDED",
-                    LiteratureCompileJob.note_uri.isnot(None),
-                )
-            )
-        ).all()
-        # paper_id → (rid, note_uri)：仅取每篇最新成功任务
-        latest_by_paper: dict[int, tuple[str, str]] = {}
-        for job, rid in jobs:
-            latest_by_paper.setdefault(job.paper_id, (rid, job.note_uri))
+    # 通道 1：GIN 全文导航投影。查询不下载全库对象；缺失投影由后台补建。
+    from yuxi.literature.fulltext import search_notes
 
-    paper_by_id = {p.id: p for p in papers}
-    visible_ids = {p.id for p in papers}
-
-    # 通道 1：笔记全文（note_uri 真实路径，命中排序后才进 RRF）
-    note_hits: list[tuple[str, int, str]] = []  # (rid, hit_count, content)
-    minio = _get_minio()
-    for paper_id, (rid, note_uri) in latest_by_paper.items():
-        if paper_id not in visible_ids:
-            continue  # ACL：无权文献的笔记不召回
-        try:
-            content = (await minio.adownload_file(_bucket(), note_uri.removeprefix("kbasset://"))).decode("utf-8")
-        except Exception:  # noqa: BLE001 - 产物缺失跳过（不再静默拼旧路径）
-            continue
-        text_lower = content.lower()
-        hits = sum(1 for t in tokens if t in text_lower)
-        if hits:
-            note_hits.append((rid, hits, content))
-
-    note_hits.sort(key=lambda x: -x[1])  # 按命中数排序（审计修复：排序后才作 RRF 输入）
-    note_ranking = [rid for rid, _, _ in note_hits]
-    note_texts = {rid: content for rid, _, content in note_hits}
+    note_hits = await search_notes(tenant_id, tokens, kind=kind, limit=min(500, max(100, limit * 5)))
+    note_ranking = [hit["rid"] for hit in note_hits]
+    note_texts = {hit["rid"]: hit["body"] for hit in note_hits}
 
     # 通道 2：元数据（标题/摘要/期刊）
-    meta_ranking: list[str] = []
-    for paper in papers:
-        blob = f"{paper.title or ''} {paper.abstract or ''} {paper.journal or ''}".lower()
-        if any(t in blob for t in tokens):
-            meta_ranking.append(paper.rid)
+    conditions = [paper_visibility(tenant_id)]
+    if kind:
+        conditions.append(LiteraturePaper.kind == kind)
+    if compiled_only:
+        conditions.append(_compiled_exists(tenant_id))
+    async with pg_manager.get_async_session_context() as session:
+        rank = _metadata_rank(tokens)
+        meta_ranking = list(
+            (
+                await session.execute(
+                    select(LiteraturePaper.rid)
+                    .where(*conditions, rank > 0)
+                    .order_by(rank.desc(), LiteraturePaper.rid)
+                    .limit(min(500, max(100, limit * 5)))
+                )
+            ).scalars()
+        )
+    # 通道 3：持久化导航向量召回
+    # Persistent, independently namespaced navigation index. Never embed the
+    # keyword hits at query time: that cannot recall semantic-only matches.
+    from yuxi.literature.navigation_index import search_navigation_vectors
 
-    # 通道 3：向量召回（embedding 模型可用时；不可用降级为纯关键词，如实报告）
-    vector_ranking: list[str] = []
-    try:
-        from yuxi.models.embed import select_embedding_model
-
-        embed_model = select_embedding_model()
-        query_vec = embed_model.embed_query(query)
-        # 简化余弦相似（对 L1 笔记文本嵌入；生产应走 Milvus 投影）
-        vec_scores: list[tuple[str, float]] = []
-        for rid_key, content in note_texts.items():
-            doc_vec = embed_model.embed_query(content[:2000])
-            dot = sum(a * b for a, b in zip(query_vec, doc_vec))
-            norm_q = sum(a * a for a in query_vec) ** 0.5
-            norm_d = sum(b * b for b in doc_vec) ** 0.5
-            if norm_q > 0 and norm_d > 0:
-                vec_scores.append((rid_key, dot / (norm_q * norm_d)))
-        vec_scores.sort(key=lambda kv: -kv[1])
-        vector_ranking = [rid for rid, score in vec_scores if score > 0.3][:limit]
-    except Exception:  # noqa: BLE001 - embedding 不可用降级
-        vector_ranking = []
+    vector_hits, vector_reason = await search_navigation_vectors(tenant_id, query, channel="compiled", limit=limit)
+    candidate_rids = set(note_ranking + meta_ranking + [hit["rid"] for hit in vector_hits])
+    async with pg_manager.get_async_session_context() as session:
+        titles_by_rid = dict(
+            (
+                await session.execute(
+                    select(LiteraturePaper.rid, LiteraturePaper.title).where(
+                        *conditions, LiteraturePaper.rid.in_(candidate_rids)
+                    )
+                )
+            ).all()
+        )
+    note_ranking = [rid for rid in note_ranking if rid in titles_by_rid]
+    vector_ranking = [hit["rid"] for hit in vector_hits if hit["rid"] in titles_by_rid]
+    for hit in vector_hits:
+        note_texts.setdefault(hit["rid"], hit["excerpt"])
 
     rankings = [(note_ranking, WEIGHT_NOTE), (meta_ranking, WEIGHT_META)]
     if vector_ranking:
         rankings.append((vector_ranking, WEIGHT_VECTOR))
-    fused = rrf_fuse(rankings, k=RRF_K)[:limit]
-    paper_by_rid = {p.rid: p for p in papers}
+    fused = rrf_fuse(rankings, k=RRF_K)
+    if compiled_only:
+        fused = [(rid, score) for rid, score in fused if rid in titles_by_rid]
+    fused = fused[:limit]
     hits = []
     for rid, score in fused:
-        paper = paper_by_rid.get(rid)
+        if rid not in titles_by_rid:
+            continue
         note = note_texts.get(rid, "")
         excerpt = _excerpt(note, tokens, budget=400)
         hits.append(
             {
                 "rid": rid,
-                "title": paper.title if paper else rid,
+                "title": titles_by_rid[rid],
                 "note_excerpt": excerpt,
                 "rrf_score": round(score, 6),
                 # 导航命中：刻意无 evidence_id/quote/claim 字段（派生索引边界）
@@ -250,8 +292,90 @@ async def search_compiled(
     return {
         "hits": hits,
         "channels_used": channels,
-        "note": "" if channels else "纯关键词通道（向量模型未配置或无编译产物）",
+        "note": vector_reason,
     }
+
+
+async def _execute_search(tenant_id, query, *, channel, use_cache, rerank_model, options):
+    from yuxi.literature import search_runtime
+
+    request = {"channel": channel, "query": query, **options, "rerank_model": rerank_model}
+    # Cached model results cannot bypass a new quota/credential decision.
+    # Retrieval-only caching is safe; explicitly requested model reranking is
+    # always governed and executed, with failures propagated.
+    guarded = use_cache or bool(rerank_model)
+    key = await search_runtime.search_identity(tenant_id, request) if guarded else None
+    cached = await search_runtime.read_cache(key) if use_cache and not rerank_model else None
+    if cached is not None:
+        if key != await search_runtime.search_identity(tenant_id, request):
+            raise ValueError("缓存读取期间来源版本已变更")
+        if channel == "compiled":
+            return {**cached, "cache_hit": True}
+        return [{**hit, "cache_hit": True} for hit in cached]
+    recall_options = {**options, "limit": min(100, options["limit"] * 5)} if rerank_model else options
+    result = await (
+        _search_catalog(tenant_id, query, **recall_options)
+        if channel == "catalog"
+        else _search_compiled(tenant_id, query, **recall_options)
+    )
+    if rerank_model:
+        hits = result if channel == "catalog" else result["hits"]
+        hits = (await search_runtime.rerank(tenant_id, query, hits, rerank_model))[: options["limit"]]
+        if channel == "catalog":
+            result = [{**hit, "channels_used": [*hit.get("channels_used", []), "rerank"]} for hit in hits]
+        else:
+            result = {
+                **result,
+                "hits": hits,
+                "channels_used": [*result["channels_used"], "rerank"] if hits else result["channels_used"],
+            }
+    if guarded and key != await search_runtime.search_identity(tenant_id, request):
+        raise ValueError("检索期间来源或产物版本已变更，请重试")
+    if use_cache and not rerank_model:
+        await search_runtime.write_cache(key, result)
+    return result
+
+
+async def search_catalog(
+    tenant_id: int,
+    query: str,
+    *,
+    kind: str = "",
+    order_by: str = "relevance",
+    limit: int = 20,
+    use_cache: bool = False,
+    rerank_model: str = "",
+):
+    if rerank_model and order_by != "relevance":
+        raise ValueError("模型重排不能与显式年份/被引排序混用")
+    return await _execute_search(
+        tenant_id,
+        query,
+        channel="catalog",
+        use_cache=use_cache,
+        rerank_model=rerank_model,
+        options={"kind": kind, "order_by": order_by, "limit": max(1, min(limit, 100))},
+    )
+
+
+async def search_compiled(
+    tenant_id: int,
+    query: str,
+    *,
+    compiled_only: bool = True,
+    kind: str = "",
+    limit: int = 10,
+    use_cache: bool = False,
+    rerank_model: str = "",
+):
+    return await _execute_search(
+        tenant_id,
+        query,
+        channel="compiled",
+        use_cache=use_cache,
+        rerank_model=rerank_model,
+        options={"kind": kind, "compiled_only": compiled_only, "limit": max(1, min(limit, 100))},
+    )
 
 
 def _excerpt(text: str, tokens: list[str], *, budget: int) -> str:
