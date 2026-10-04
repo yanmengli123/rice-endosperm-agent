@@ -87,6 +87,13 @@ async def test_load_metadata_does_not_load_file_records(monkeypatch, tmp_path):
                     query_params=None,
                     additional_params={"chunk_preset_id": "general"},
                     created_at=None,
+                    # 列表缓存会带出契约冻结字段（见 base._load_metadata）
+                    contract_key=None,
+                    contract_version=None,
+                    contract_digest=None,
+                    content_domain=None,
+                    tool_description=None,
+                    governance_status=None,
                 )
             ]
 

@@ -1602,6 +1602,8 @@ class KnowledgeBase(ABC):
         kb_repo = KnowledgeBaseRepository()
 
         databases = [kb for kb in await kb_repo.get_all() if kb.kb_type == self.kb_type]
+        # 契约字段用 getattr 兜底：列表路径的元数据缓存允许来自精简/历史投影的
+        # 行对象（例如部分测试桩），缺失时按未冻结契约处理，不能让整个列表接口 500。
         self.databases_meta = {
             kb.kb_id: {
                 "name": kb.name,
@@ -1612,6 +1614,15 @@ class KnowledgeBase(ABC):
                 "query_params": kb.query_params or self._get_default_query_params(kb.kb_id),
                 "metadata": self.normalize_additional_params(kb.additional_params),
                 "created_at": utc_isoformat(kb.created_at) if kb.created_at else utc_isoformat(),
+                # Source Contract 冻结字段：列表端点（get_databases → 本缓存）必须与
+                # manager.get_database_info() 的字段集一致，否则前端按 contract_key
+                # 过滤（如 /literature 只列 pdf_evidence 写入目标）永远得到空列表。
+                "contract_key": getattr(kb, "contract_key", None),
+                "contract_version": getattr(kb, "contract_version", None),
+                "contract_digest": getattr(kb, "contract_digest", None),
+                "content_domain": getattr(kb, "content_domain", None),
+                "tool_description": getattr(kb, "tool_description", None),
+                "governance_status": getattr(kb, "governance_status", None) or "DRAFT",
             }
             for kb in databases
         }
