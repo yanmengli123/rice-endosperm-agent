@@ -288,7 +288,50 @@ button {
   font-weight: 500;
 }
 
-/* 输入框暗黑覆盖 */
+/* ==========================================================================
+   原生表单控件基座（input / select / textarea / option）
+   背景：此前只按类名枚举覆盖（.search-input/.moc-input/...），
+   未加类名的原生控件（工具栏 select、重排 input、workbench 的 input/textarea、
+   日记日期、图谱 limit、卡片标题）在暗色下继承浅色文字 + UA 白底 = 白底白字。
+   改为「按元素类型兜底」，新增控件无需再补暗色规则。
+   仅设置主题属性（颜色/背景/边框），不动 padding/size，避免影响既有布局。
+   ========================================================================== */
+
+input:not([type='checkbox']):not([type='radio']):not([type='file']),
+select,
+textarea {
+  background: var(--color-field-bg);
+  color: var(--color-field-text);
+  border-color: var(--color-field-border);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-field-placeholder);
+  opacity: 1;
+}
+
+/* 下拉展开时的选项列表跟随主题，否则仍是系统白底 */
+option {
+  background: var(--color-field-bg);
+  color: var(--color-field-text);
+}
+
+/* 暗色：控件底色/文字/边框；placeholder 提到 ≥4.5:1（原 #8a8c8c 仅 4.2:1） */
+:root.dark input:not([type='checkbox']):not([type='radio']):not([type='file']),
+:root.dark select,
+:root.dark textarea {
+  background: var(--color-field-bg);
+  color: var(--color-field-text);
+  border: 1px solid var(--color-field-border);
+}
+
+:root.dark option {
+  background: var(--color-field-bg);
+  color: var(--color-field-text);
+}
+
+/* 具名输入控件保留原有尺寸，仅统一主题色 */
 :root.dark .search-input,
 :root.dark .moc-input,
 :root.dark .month-input,
@@ -296,18 +339,10 @@ button {
 :root.dark .suggest-input,
 :root.dark .content-input,
 :root.dark .kind-select {
-  background: #2a2b2b;
-  color: #e8eaea;
-  border: 1px solid #4a4b4b;
+  background: var(--color-field-bg);
+  color: var(--color-field-text);
+  border: 1px solid var(--color-field-border);
   border-radius: 6px;
-}
-
-:root.dark .search-input::placeholder,
-:root.dark .moc-input::placeholder,
-:root.dark .month-input::placeholder,
-:root.dark .diary-content::placeholder,
-:root.dark .content-input::placeholder {
-  color: #8a8c8c;
 }
 
 .lucide-icon-btn {
@@ -451,7 +486,7 @@ button {
 :root.dark .attachment-empty,
 :root.dark .reader-loading,
 :root.dark .note-loading,
-:root-dark .pane-empty {
+:root.dark .pane-empty {
   color: #8a8c8c;
 }
 

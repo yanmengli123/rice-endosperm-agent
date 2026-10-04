@@ -50,6 +50,13 @@
   --rice-border: #e7e1d3;
   --rice-gold: #d6a83e;
   --rice-evidence: #3277a8;
+
+  --color-text-primary: #24312b;
+  --color-text-tertiary: #67756c;
+  --color-field-bg: #ffffff;
+  --color-field-border: #e7e1d3;
+  --color-field-text: #24312b;
+  --color-field-placeholder: #6b6f6f;
 }
 
 :root.brand-rice-endosperm.dark {
@@ -102,8 +109,14 @@
   --color-bg-container: #19251d;
   --color-bg-elevated: #202d24;
   --color-text: #edf3ee;
+  --color-text-primary: #edf3ee;
   --color-text-secondary: #a9b7ad;
   --color-text-tertiary: #7f9185;
+
+  --color-field-bg: #202d24;
+  --color-field-border: #344239;
+  --color-field-text: #edf3ee;
+  --color-field-placeholder: #9aab9f;
 }
 
 .brand-rice-endosperm .rice-gene-id {

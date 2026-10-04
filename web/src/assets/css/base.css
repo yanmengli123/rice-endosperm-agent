@@ -125,6 +125,7 @@
   --dark-80: rgba(0, 0, 0, 0.8);
   --dark-75: rgba(0, 0, 0, 0.75);
   --dark-70: rgba(0, 0, 0, 0.7);
+  --dark-55: rgba(0, 0, 0, 0.55);
   --dark-50: rgba(0, 0, 0, 0.5);
   --dark-25: rgba(0, 0, 0, 0.25);
   --dark-10: rgba(0, 0, 0, 0.1);
@@ -148,8 +149,21 @@
   --color-bg-container: var(--main-0);
   --color-bg-elevated: var(--gray-10);
   --color-text: var(--gray-1000);
+  /* --color-text-primary 此前只在多处被引用却从未定义，依赖回退继承；
+     补齐为显式令牌，避免不同父级下继承出不一致的正文色。 */
+  --color-text-primary: var(--gray-1000);
   --color-text-secondary: var(--dark-70);
-  --color-text-tertiary: var(--dark-50);
+  /* --dark-50 (alpha .5) 在白底仅 3.95:1，低于 WCAG AA 正文 4.5:1；
+     下探到 alpha .55（≈4.74:1），三级文字仍保持弱于二级但可读。 */
+  --color-text-tertiary: var(--dark-55);
+
+  /* 原生表单控件令牌（input / select / textarea / option）
+     placeholder 色值按 WCAG AA 对控件底色 ≥ 4.5:1 选取 */
+  --color-field-bg: #ffffff;
+  --color-field-border: #d7d9d9;
+  --color-field-text: var(--gray-900);
+  --color-field-placeholder: #6b6f6f;
+
   --color-trans-light: var(--light-85);
   --color-trans-dark: var(--dark-85);
 }
