@@ -45,7 +45,7 @@ from yuxi.storage.postgres.models_knowledge import (
 from yuxi.utils.datetime_utils import utc_now
 from yuxi.utils.logging_config import logger
 
-TERMINAL_PARSE_STATUSES = {"INDEXED_FULL", "INDEXED_CONTENT_ONLY", "INDEXED_TEXT_ONLY", "REJECTED"}
+TERMINAL_PARSE_STATUSES = {"INDEXED_FULL", "INDEXED_CONTENT_ONLY", "INDEXED_TEXT_ONLY", "REJECTED", "PARSED_ONLY"}
 LEASE_MINUTES = 30
 LEASE_HEARTBEAT_SECONDS = 60
 PARSE_STAGE_NAMES = ("NATIVE", "MINERU", "GROBID", "UNIFIED", "QUALITY", "INDEX", "ACTIVATE")
@@ -256,7 +256,7 @@ async def _load_source(file_record: KnowledgeFile) -> bytes:
 
 
 async def create_or_reuse_scientific_pdf_ingest(
-    *, kb_id: str, file_id: str, operator_id: str, enqueue: bool = True
+    *, kb_id: str, file_id: str, operator_id: str, enqueue: bool = True, processing_mode: str | None = None
 ) -> dict[str, Any]:
     async with pg_manager.get_async_session_context() as session:
         result = await session.execute(
@@ -274,9 +274,17 @@ async def create_or_reuse_scientific_pdf_ingest(
         source_sha256 = str(file_record.content_hash or "")
         processing_params = dict(file_record.processing_params or {})
 
+    mode = processing_mode or processing_params.get("scientific_processing_mode", "activate")
+    if mode not in {"activate", "parse_only"}:
+        raise ValueError("无效的科研 PDF 处理模式")
+
     if len(source_sha256) != 64:
         source_sha256 = _digest(await _load_source(file_record))
     fingerprint = build_parser_fingerprint(source_sha256, processing_params)
+    if mode == "parse_only":
+        # Separate immutable run identity: a parse-only retry cannot reopen or
+        # inherit the activation intent of an existing full ingestion.
+        fingerprint = _digest(f"parse_only:{fingerprint}".encode())
     revision_id = _revision_id(tenant_id, file_id, fingerprint)
 
     async with pg_manager.get_async_session_context() as session:
@@ -290,6 +298,7 @@ async def create_or_reuse_scientific_pdf_ingest(
                 source_sha256=source_sha256,
                 parser_fingerprint=fingerprint,
                 pipeline_version=PIPELINE_VERSION,
+                processing_mode=mode,
                 status="PENDING",
                 created_by=operator_id,
             )
@@ -307,7 +316,7 @@ async def create_or_reuse_scientific_pdf_ingest(
             )
         ).scalar_one()
         file_row = (await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == file_id))).scalar_one()
-        if revision.status in TERMINAL_PARSE_STATUSES - {"REJECTED"}:
+        if revision.status in TERMINAL_PARSE_STATUSES - {"REJECTED", "PARSED_ONLY"}:
             desired_fingerprint = _chunker_fingerprint(revision_id, _scientific_chunking_contract())
             active_index = None
             if file_row.active_index_revision_id:
@@ -616,8 +625,13 @@ async def _load_cached_pipeline_result(source_revision_id: str, parser_fingerpri
         # artifacts; refresh deterministic flags during a chunker-only rebuild.
         "figure_retrieval": bool(re.search(r"!\[[^\]]*\]\([^)]+\)", article.markdown)),
     }
-    capability = str((source.capabilities or {}).get("state") or (source.qa_report or {}).get("capability") or "")
-    if capability not in TERMINAL_PARSE_STATUSES - {"REJECTED"}:
+    capability = str(
+        (source.capabilities or {}).get("parse_capability")
+        or (source.capabilities or {}).get("state")
+        or (source.qa_report or {}).get("capability")
+        or ""
+    )
+    if capability not in TERMINAL_PARSE_STATUSES - {"REJECTED", "PARSED_ONLY"}:
         return None
     return PipelineResult(
         capability,
@@ -1226,6 +1240,58 @@ def _restore_active_file_state(file_row: KnowledgeFile, snapshot: dict[str, Any]
         setattr(file_row, field, snapshot.get(field))
 
 
+async def _complete_parse_only(
+    revision: KnowledgeParseRevision,
+    worker_id: str,
+    article: dict[str, Any],
+    result: PipelineResult,
+    artifact_uris: dict[str, str],
+    previous_activation: dict[str, Any],
+) -> None:
+    """Finish a read-only draft without creating evidence, index or source events."""
+    async with pg_manager.get_async_session_context() as session:
+        current = await _owned_revision(session, revision.revision_id, worker_id)
+        await session.execute(
+            update(KnowledgeParseStage)
+            .where(
+                KnowledgeParseStage.revision_id == revision.revision_id,
+                KnowledgeParseStage.stage_name.in_(("INDEX", "ACTIVATE")),
+            )
+            .values(status="SKIPPED", finished_at=_workflow_now(), lease_owner=None, lease_expires_at=None)
+        )
+        current.article_uri = artifact_uris.get("unified_article")
+        current.article_summary = {"title": article.get("title"), "counts": result.qa_report.get("counts")}
+        current.qa_report = result.qa_report
+        current.capabilities = {
+            "state": "PARSED_ONLY",
+            "parse_capability": result.capability,
+            "reading": True,
+            "fulltext_search": False,
+            "evidence": False,
+        }
+        current.status = "PARSED_ONLY"
+        current.completed_at = _workflow_now()
+        current.lease_owner = None
+        current.lease_expires_at = None
+        file_row = (
+            await session.execute(
+                select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id).with_for_update()
+            )
+        ).scalar_one()
+        # A concurrent full run may have activated while this draft parsed.
+        # Never restore a stale snapshot over a newer serving revision.
+        if file_row.active_parse_revision_id:
+            if file_row.active_parse_revision_id == previous_activation.get("active_parse_revision_id"):
+                _restore_active_file_state(file_row, previous_activation)
+        else:
+            file_row.status = "parsed"
+            file_row.evidence_status = "PARSED_ONLY"
+            file_row.evidence_capabilities = dict(current.capabilities)
+            file_row.error_message = None
+            # markdown_file is an evidence-serving pointer, not a draft pointer.
+            file_row.markdown_file = None
+
+
 async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) -> dict[str, Any] | None:
     worker_id = str(ctx.get("job_id") or ctx.get("worker_name") or os.getpid())
     revision = await _claim_revision(revision_id, worker_id)
@@ -1329,10 +1395,14 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
         article: dict[str, Any] | None = None
         if pipeline_result.capability != "REJECTED" and pipeline_result.unified_article is not None:
             article = pipeline_result.unified_article.to_dict()
-            projection_summaries = await _persist_article_records(
-                revision_id,
-                article,
-                markdown_body=pipeline_result.annotated_markdown or "",
+            projection_summaries = (
+                {}
+                if revision.processing_mode == "parse_only"
+                else await _persist_article_records(
+                    revision_id,
+                    article,
+                    markdown_body=pipeline_result.annotated_markdown or "",
+                )
             )
             pipeline_result.qa_report.update(projection_summaries)
             figure_summary = dict(projection_summaries.get("figure_index") or {})
@@ -1431,10 +1501,19 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                     "qa": pipeline_result.qa_report,
                 }
                 file_row.error_message = "; ".join(pipeline_result.qa_report.get("reasons") or ["PDF 质量门禁拒绝"])
+                if revision.processing_mode == "parse_only" and file_row.active_parse_revision_id:
+                    if file_row.active_parse_revision_id == previous_activation.get("active_parse_revision_id"):
+                        _restore_active_file_state(file_row, previous_activation)
             await _publish_identity_cache(revision)
             return {"revision_id": revision_id, "status": "REJECTED"}
 
         assert article is not None
+        if revision.processing_mode == "parse_only":
+            await _complete_parse_only(
+                revision, worker_id, article, pipeline_result, artifact_uris, previous_activation
+            )
+            await _publish_identity_cache(revision)
+            return {"revision_id": revision_id, "status": "PARSED_ONLY", "activated": False}
         markdown_uri = artifact_uris["indexed_markdown"]
         chunking = _scientific_chunking_contract()
         chunker_fingerprint = _chunker_fingerprint(revision_id, chunking)
@@ -1899,6 +1978,7 @@ async def get_scientific_pdf_status(*, kb_id: str, file_id: str) -> dict[str, An
 
 _SCI_PDF_TASK_TYPE = "pdf_ingest"
 _TASK_STATUS_BY_REVISION = {
+    "PARSED_ONLY": "success",
     "PENDING": "queued",
     "WAITING_CACHE": "queued",
     "RUNNING": "running",
@@ -1920,6 +2000,7 @@ _PIPELINE_STAGE_LABELS = {
 }
 _PIPELINE_STAGE_DONE_STATUSES = {"SUCCEEDED", "REUSED", "SKIPPED"}
 _PIPELINE_CAPABILITY_LABELS = {
+    "PARSED_ONLY": "仅解析完成（未索引、未激活）",
     "INDEXED_FULL": "全文证据索引完成",
     "INDEXED_CONTENT_ONLY": "内容证据索引完成",
     "INDEXED_TEXT_ONLY": "纯文本索引完成",

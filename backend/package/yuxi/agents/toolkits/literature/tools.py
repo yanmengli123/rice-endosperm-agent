@@ -23,7 +23,7 @@ from yuxi.literature.access import access_scope, paper_visibility
 from yuxi.repositories.user_repository import UserRepository
 
 from langgraph.prebuilt.tool_node import ToolRuntime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from yuxi.agents.toolkits.registry import tool
 from yuxi.literature.notes.service import VALID_LEVELS
@@ -44,21 +44,45 @@ def _source_authorized(func):
         user = await UserRepository().get_by_uid(uid)
         if user is None or getattr(user, "is_disabled", False):
             raise PermissionError("无法验证用户身份（fail-closed）")
-        async with access_scope(user, tenant_id):
+        async with access_scope(user, tenant_id) as scope:
+            binding = getattr(context, "_literature_session_context", None) or {}
+            if binding.get("session_kind") == "paper":
+                from dataclasses import replace
+                from yuxi.literature.access import _access
+
+                rid = str(binding.get("bound_rid") or "")
+                if rid not in scope.rids:
+                    raise PermissionError("绑定文献的来源权限已撤销")
+                token = _access.set(replace(scope, rids=frozenset({rid})))
+                try:
+                    return await func(*args, **kwargs)
+                finally:
+                    _access.reset(token)
             return await func(*args, **kwargs)
 
     return wrapped
 
 
 class SearchLiteraturePapersInput(BaseModel):
+    # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
+    model_config = ConfigDict(extra="allow")
+
     """文献库检索输入（无 kb_id/tenant_id——B1）。"""
 
     query: str = Field(default="", description="检索词（匹配标题/DOI，空=全库）")
     kind: str = Field(default="", description="类型筛选：paper/thesis/book/chapter/patent/standard（空=全部）")
     top_k: int = Field(default=10, ge=1, le=50, description="返回条数上限")
+    channel: str = Field(
+        default="catalog",
+        pattern="^(catalog|compiled)$",
+        description="catalog 元数据/语义目录；compiled 当前笔记 RRF 导航（不是证据）",
+    )
 
 
 class ReadCompiledNoteInput(BaseModel):
+    # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
+    model_config = ConfigDict(extra="allow")
+
     """读取已编译笔记的输入。"""
 
     rid: str = Field(description="文献资源键（search_literature_papers 返回的 rid）")
@@ -66,12 +90,18 @@ class ReadCompiledNoteInput(BaseModel):
 
 
 class ListPaperAttachmentsInput(BaseModel):
+    # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
+    model_config = ConfigDict(extra="allow")
+
     """依附资料清单输入。"""
 
     rid: str = Field(description="文献资源键")
 
 
 class RequestPaperTranslationInput(BaseModel):
+    # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
+    model_config = ConfigDict(extra="allow")
+
     """翻译请求输入（写操作，需计划许可）。"""
 
     rid: str = Field(description="文献资源键")
@@ -79,6 +109,9 @@ class RequestPaperTranslationInput(BaseModel):
 
 
 class GetCitationNeighborsInput(BaseModel):
+    # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
+    model_config = ConfigDict(extra="allow")
+
     """引用邻居输入。"""
 
     rid: str = Field(description="文献资源键")
@@ -96,6 +129,9 @@ async def _principal_tenant(runtime: ToolRuntime) -> int:
 
 def _plan_allows_write(context: Any) -> str | None:
     """B3：写操作的计划校验。返回 None 表示放行，否则返回拒绝原因。"""
+    binding = getattr(context, "_literature_session_context", None) or {}
+    if binding.get("session_kind") in {"global-qa", "lit"}:
+        return "当前文献会话为只读模式；请转到文献管理或文献专属会话提出写操作"
     raw_plan = getattr(context, "_turn_execution_plan", None) if context is not None else None
     if not isinstance(raw_plan, dict):
         return "本轮无已冻结的执行计划：翻译属写操作，需先制定计划（ADR-0005 计划先行）"
@@ -125,7 +161,9 @@ def _nav_item(row: Any) -> dict[str, Any]:
     args_schema=SearchLiteraturePapersInput,
 )
 @_source_authorized
-async def search_literature_papers(query: str, kind: str = "", top_k: int = 10, runtime: ToolRuntime = None) -> str:
+async def search_literature_papers(
+    query: str, kind: str = "", top_k: int = 10, runtime: ToolRuntime = None, channel: str = "catalog"
+) -> str:
     """检索当前用户的文献库（元数据导航；不含正文，不可作证据）。
 
     Args:
@@ -139,12 +177,26 @@ async def search_literature_papers(query: str, kind: str = "", top_k: int = 10, 
     from yuxi.storage.postgres.models_knowledge import LiteraturePaper
 
     tenant_id = await _principal_tenant(runtime)
-    like = f"%{(query or '').strip()}%"
+    if channel not in {"catalog", "compiled"}:
+        raise ValueError("不支持的文献检索通道")
+    if channel == "compiled" or query.strip():
+        import json
+        from yuxi.literature import retrieval
+
+        if channel == "compiled":
+            result = await retrieval.search_compiled(tenant_id, query, kind=kind, limit=min(50, top_k))
+        else:
+            hits = await retrieval.search_catalog(tenant_id, query, kind=kind, limit=min(50, top_k))
+            result = {"count": len(hits), "papers": hits}
+        return json.dumps(result, ensure_ascii=False)
+    from yuxi.literature.retrieval import escape_like
+
+    like = f"%{escape_like((query or '').strip())}%"
     async with pg_manager.get_async_session_context() as session:
         conditions = [paper_visibility(tenant_id)]
         if like != "%%":
             conditions.append(
-                LiteraturePaper.title.ilike(like) | LiteraturePaper.doi.ilike(like)  # noqa: E501 - ilike 绑定参数，无拼接注入
+                LiteraturePaper.title.ilike(like, escape="\\") | LiteraturePaper.doi.ilike(like, escape="\\")
             )
         if (kind or "").strip():
             conditions.append(LiteraturePaper.kind == kind.strip())
@@ -186,7 +238,18 @@ async def read_compiled_note(rid: str, level: str = "L1", runtime: ToolRuntime =
         return f"文献 {rid} 尚无 {level} 笔记（可能未编译或编译未完成）。"
     import json
 
-    return json.dumps({"rid": rid, "level": level.upper(), "note_uri": note_uri}, ensure_ascii=False)
+    data = await readops.read_current_note(tenant_id, rid, level.upper(), max_chars=12000)
+    return json.dumps(
+        {
+            "rid": rid,
+            "level": level.upper(),
+            "note_uri": note_uri,
+            "navigation_excerpt": data,
+            "product_kind": "literature_notes",
+            "notice": "派生笔记，仅用于导航与理解；不是 EvidenceEnvelope，事实需核验原知识源",
+        },
+        ensure_ascii=False,
+    )
 
 
 @tool(

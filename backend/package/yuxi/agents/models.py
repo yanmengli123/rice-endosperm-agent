@@ -99,10 +99,15 @@ def _custom_model_override(model_spec: str) -> ModelInfo | None:
     )
 
 
+def get_runtime_chat_model_info(model_spec: str) -> ModelInfo | None:
+    """Resolve a governed custom BYOK override before the platform registry."""
+    return _custom_model_override(model_spec) or model_cache.get_model_info(model_spec)
+
+
 def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel:
     fully_specified_name = resolve_chat_model_spec(fully_specified_name)
 
-    info = _custom_model_override(fully_specified_name) or model_cache.get_model_info(fully_specified_name)
+    info = get_runtime_chat_model_info(fully_specified_name)
     if not info:
         available_specs = model_cache.get_all_specs("chat")
         available_ids = [item.spec for item in available_specs[:10]]

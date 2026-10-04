@@ -658,6 +658,9 @@ async def query_verbatim_for_scope(
 
     供编排器低置信兜底与 ``grep_evidence`` 工具复用；租户缺失时失败关闭。
     """
+    from yuxi.knowledge.planning.document_ceiling import constrain_document_ids
+
+    file_ids = constrain_document_ids(scope_snapshot, file_ids)
     members = [
         member
         for member in scope_snapshot.get("members") or []
@@ -940,6 +943,9 @@ async def query_knowledge_scope_gateway(
     verbatim: dict[str, Any] | None = None,
     file_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    from yuxi.knowledge.planning.document_ceiling import constrain_document_ids
+
+    file_ids = constrain_document_ids(scope_snapshot, file_ids)
     members = [member for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
     top_k = min(max(int(top_k), 1), 12)
     tasks = []
@@ -958,9 +964,7 @@ async def query_knowledge_scope_gateway(
         kb_id = str(member["kb_id"])
         mentioned = files_by_kb.get(kb_id) or []
         folder_restricted = bool(member.get("folder_scope_restricted"))
-        folder_files = {
-            str(value).strip() for value in (member.get("folder_file_ids") or []) if str(value).strip()
-        }
+        folder_files = {str(value).strip() for value in (member.get("folder_file_ids") or []) if str(value).strip()}
         document_filter_active[kb_id] = bool(document_scope_files or folder_restricted)
         if document_scope_files:
             effective_document_ids[kb_id] = [
@@ -973,8 +977,7 @@ async def query_knowledge_scope_gateway(
     verbatim_members = [
         member
         for member in verbatim_members
-        if not document_filter_active[str(member["kb_id"])]
-        or effective_document_ids[str(member["kb_id"])]
+        if not document_filter_active[str(member["kb_id"])] or effective_document_ids[str(member["kb_id"])]
     ]
     verbatim_member_kb_ids = {str(member["kb_id"]) for member in verbatim_members}
     # VERBATIM 通道只在调用方携带字面信号（patterns/题型）且租户可解析时启用；
@@ -1161,9 +1164,7 @@ async def query_knowledge_scope_gateway(
         }
         if verbatim_active and member["kb_id"] in verbatim_member_kb_ids:
             # VERBATIM 状态只在通道实际运行的 Run 里出现（contract 1.1 增量字段）。
-            status_row["verbatim_status"] = (
-                "UNAVAILABLE" if str(member["kb_id"]) in verbatim_errors else "AVAILABLE"
-            )
+            status_row["verbatim_status"] = "UNAVAILABLE" if str(member["kb_id"]) in verbatim_errors else "AVAILABLE"
         member_filter_active = document_filter_active.get(str(member["kb_id"]), False)
         if member_filter_active:
             # 文献硬约束审计：图谱/结构化通道被排除；本库无指定文献时文档通道也不执行。

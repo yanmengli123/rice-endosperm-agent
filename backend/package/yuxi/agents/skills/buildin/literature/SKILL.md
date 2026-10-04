@@ -13,8 +13,8 @@ description: "使用文献库（PaperAgent 能力域）检索文献、读取 L1/
 
 ## 可用工具
 
-- `search_literature_papers`：按标题/DOI 检索本租户文献库，返回元数据（类型/期刊分区/价值分），不返回正文。
-- `read_compiled_note`：读取文献的 L1/L2/L3 编译笔记状态与逻辑 URI（kbasset），正文经资产端点获取。
+- `search_literature_papers`：channel=catalog 检索元数据与导航向量；channel=compiled 融合当前编译产物关键词和向量，返回有界导航摘录。范围由当前来源权限决定。
+- `read_compiled_note`：读取文献当前有效的 L1/L2/L3 笔记及有界 navigation_excerpt。正文不是权威证据，仍需回到原知识源核验。
 - `list_paper_attachments`：列出文献的依附资料（支撑信息/审稿意见/数据；用户原始资料）。
 - `get_citation_neighbors`：返回文献的引用邻居与共被引分簇（计量导航）。
 - `request_paper_translation`：**写操作**——为文献请求翻译（异步任务）；需本轮执行计划允许，被拒绝时向用户转述拒绝原因，不要重试。

@@ -86,7 +86,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
 
             self._initialized = True
-            logger.info(f"PostgreSQL manager initialized for knowledge base: {db_url.split('@')[0]}://***")
+            logger.info("PostgreSQL manager initialized for knowledge base (credentials redacted)")
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL manager: {e}")
             # 不抛出异常，允许应用启动，但在使用时会报错
@@ -1096,7 +1096,207 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0079_literature_source_contract_closure", "_migration_0079_literature_source_contract_closure"),
         ("0080_literature_paper_metadata", "_migration_0080_literature_paper_metadata"),
         ("0081_literature_artifacts_workflow", "_migration_0081_literature_artifacts_workflow"),
+        ("0082_literature_workflow_execution", "_migration_0082_literature_workflow_execution"),
+        ("0083_literature_navigation_index", "_migration_0083_literature_navigation_index"),
+        ("0084_literature_library_execution", "_migration_0084_literature_library_execution"),
+        ("0085_literature_revision_contracts", "_migration_0085_literature_revision_contracts"),
+        ("0086_literature_embedding_governance", "_migration_0086_literature_embedding_governance"),
+        ("0087_literature_card_context", "_migration_0087_literature_card_context"),
+        ("0088_scientific_pdf_parse_only", "_migration_0088_scientific_pdf_parse_only"),
+        ("0089_literature_history_import", "_migration_0089_literature_history_import"),
+        ("0090_literature_manual_products", "_migration_0090_literature_manual_products"),
+        ("0091_literature_fulltext", "_migration_0091_literature_fulltext"),
+        ("0092_literature_review_artifacts", "_migration_0092_literature_review_artifacts"),
+        ("0093_literature_fulltext_retry", "_migration_0093_literature_fulltext_retry"),
     ]
+
+    async def _migration_0093_literature_fulltext_retry(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_note_search ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE literature_note_search ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ",
+            "ALTER TABLE literature_note_search ADD COLUMN IF NOT EXISTS error_code VARCHAR(64)",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0092_literature_review_artifacts(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_reader_renders ADD COLUMN IF NOT EXISTS review_uri VARCHAR(1024)",
+            "ALTER TABLE literature_reader_renders ADD COLUMN IF NOT EXISTS review_digest VARCHAR(64)",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0091_literature_fulltext(self, conn) -> None:
+        for statement in (
+            """CREATE TABLE IF NOT EXISTS literature_note_search (
+                job_id BIGINT PRIMARY KEY REFERENCES literature_compile_jobs(id) ON DELETE CASCADE,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                note_uri VARCHAR(1024) NOT NULL, content_digest VARCHAR(64) NOT NULL,
+                body TEXT NOT NULL, lexical_text TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS ix_literature_note_search_fts ON literature_note_search "
+            "USING gin (to_tsvector('simple'::regconfig, lexical_text))",
+            "CREATE INDEX IF NOT EXISTS ix_literature_note_search_tenant ON literature_note_search (tenant_id)",
+            "ALTER TABLE literature_note_search ENABLE ROW LEVEL SECURITY",
+            "CREATE POLICY p_literature_note_search_tenant ON literature_note_search "
+            "USING (tenant_id = current_setting('yuxi.tenant_id', true)::bigint)",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0090_literature_manual_products(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_artifact_revisions ADD COLUMN IF NOT EXISTS input_card_revision INTEGER",
+            "UPDATE literature_artifact_revisions SET input_card_revision = 0 WHERE input_card_revision IS NULL",
+            "ALTER TABLE literature_artifact_revisions ALTER COLUMN input_card_revision SET NOT NULL",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0089_literature_history_import(self, conn) -> None:
+        for statement in (
+            """CREATE TABLE IF NOT EXISTS literature_history_items (
+                id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                uid VARCHAR(64) NOT NULL, source_key VARCHAR(1024) NOT NULL, category VARCHAR(64) NOT NULL,
+                content_digest VARCHAR(64) NOT NULL, object_uri VARCHAR(1024) NOT NULL,
+                archive_sha256 VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL,
+                target_ref VARCHAR(128), detail TEXT, created_at TIMESTAMPTZ NOT NULL,
+                CONSTRAINT uq_literature_history_identity UNIQUE (tenant_id, uid, source_key, content_digest)
+            )""",
+            "CREATE INDEX IF NOT EXISTS ix_literature_history_items_tenant_id ON literature_history_items (tenant_id)",
+            "ALTER TABLE literature_history_items ENABLE ROW LEVEL SECURITY",
+            "CREATE POLICY p_literature_history_items_tenant ON literature_history_items "
+            "USING (tenant_id = current_setting('yuxi.tenant_id', true)::bigint)",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0088_scientific_pdf_parse_only(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE knowledge_parse_revisions ADD COLUMN IF NOT EXISTS processing_mode VARCHAR(32)",
+            "UPDATE knowledge_parse_revisions SET processing_mode = 'activate' WHERE processing_mode IS NULL",
+            "ALTER TABLE knowledge_parse_revisions ALTER COLUMN processing_mode SET NOT NULL",
+            "ALTER TABLE knowledge_parse_revisions ADD CONSTRAINT ck_knowledge_parse_processing_mode "
+            "CHECK (processing_mode IN ('activate', 'parse_only'))",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0087_literature_card_context(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_cards ALTER COLUMN paper_id DROP NOT NULL",
+            "ALTER TABLE literature_cards ADD COLUMN IF NOT EXISTS created_by VARCHAR(64) NOT NULL DEFAULT ''",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_global_cards ON literature_cards "
+            "(tenant_id, created_by, card_type, slug) WHERE paper_id IS NULL",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS card_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE literature_compile_jobs ADD COLUMN IF NOT EXISTS card_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE literature_compile_jobs DROP CONSTRAINT IF EXISTS uq_literature_compile_jobs_key",
+            "DROP INDEX IF EXISTS uq_literature_compile_jobs_key",
+            "ALTER TABLE literature_compile_jobs ADD CONSTRAINT uq_literature_compile_jobs_key UNIQUE "
+            "(tenant_id, paper_id, level, source_revision_id, reading_version, generator_version, card_revision)",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0086_literature_embedding_governance(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_navigation_indexes ADD COLUMN IF NOT EXISTS llm_run_id VARCHAR(64)",
+            "ALTER TABLE literature_navigation_indexes ADD COLUMN IF NOT EXISTS credential_source VARCHAR(32)",
+            "ALTER TABLE literature_navigation_indexes ADD COLUMN IF NOT EXISTS credential_id BIGINT",
+            "ALTER TABLE literature_navigation_indexes ADD COLUMN IF NOT EXISTS provider_id VARCHAR(128)",
+            "ALTER TABLE literature_navigation_indexes ADD COLUMN IF NOT EXISTS policy_version INTEGER",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0085_literature_revision_contracts(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_review_decisions ADD COLUMN IF NOT EXISTS render_id VARCHAR(64)",
+            "ALTER TABLE literature_review_decisions ADD COLUMN IF NOT EXISTS render_digest VARCHAR(64)",
+            "ALTER TABLE literature_review_decisions ADD COLUMN IF NOT EXISTS item_id VARCHAR(512)",
+            "ALTER TABLE literature_review_decisions ADD COLUMN IF NOT EXISTS "
+            "contract_version VARCHAR(32) NOT NULL DEFAULT 'legacy_v1'",
+            "ALTER TABLE literature_review_decisions ADD COLUMN IF NOT EXISTS "
+            "legacy_ack BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE literature_artifact_revisions ADD COLUMN IF NOT EXISTS source_revision_id VARCHAR(64)",
+            "ALTER TABLE literature_artifact_revisions ADD COLUMN IF NOT EXISTS "
+            "input_reading_version INTEGER NOT NULL DEFAULT 0",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0084_literature_library_execution(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS is_reference BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS source_main VARCHAR(128) NOT NULL DEFAULT ''",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS trashed_at TIMESTAMPTZ",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS trashed_by VARCHAR(64)",
+            """CREATE TABLE IF NOT EXISTS literature_library_runs (
+                id BIGSERIAL PRIMARY KEY, run_id VARCHAR(64) NOT NULL UNIQUE,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                requested_by VARCHAR(64) NOT NULL, input_hash VARCHAR(64) NOT NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}', steps_json JSONB NOT NULL DEFAULT '{}',
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING', lease_token VARCHAR(64),
+                lease_expires_at TIMESTAMPTZ, error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_lit_library_active ON literature_library_runs "
+            "(tenant_id, requested_by, input_hash) WHERE status IN ('PENDING', 'RUNNING', 'WAITING_CONFIRM')",
+            """CREATE TABLE IF NOT EXISTS literature_cleaning_plans (
+                id BIGSERIAL PRIMARY KEY, plan_id VARCHAR(64) NOT NULL UNIQUE,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                requested_by VARCHAR(64) NOT NULL, rules_json JSONB NOT NULL,
+                targets_json JSONB NOT NULL, plan_hash VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'PREVIEW', expires_at TIMESTAMPTZ NOT NULL,
+                confirmed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""",
+        ):
+            await conn.execute(text(statement))
+        for table in ("literature_library_runs", "literature_cleaning_plans"):
+            await conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant_id ON {table} (tenant_id)"))
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text(f"DROP POLICY IF EXISTS p_{table}_tenant ON {table}"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_tenant ON {table} "
+                    "USING (tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+                )
+            )
+
+    async def _migration_0083_literature_navigation_index(self, conn) -> None:
+        """Independent, rebuildable vector navigation manifests and outbox rows."""
+        for statement in (
+            """CREATE TABLE IF NOT EXISTS literature_navigation_indexes (
+                id BIGSERIAL PRIMARY KEY, index_id VARCHAR(64) NOT NULL UNIQUE,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                requested_by VARCHAR(64) NOT NULL, model_spec VARCHAR(512) NOT NULL,
+                collection_name VARCHAR(128) NOT NULL UNIQUE, status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                attempt INTEGER NOT NULL DEFAULT 0, input_manifest JSONB NOT NULL DEFAULT '{}',
+                document_count INTEGER NOT NULL DEFAULT 0, error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""",
+            "CREATE INDEX IF NOT EXISTS ix_literature_navigation_indexes_tenant_id "
+            "ON literature_navigation_indexes (tenant_id)",
+            "ALTER TABLE literature_navigation_indexes ENABLE ROW LEVEL SECURITY",
+            "DROP POLICY IF EXISTS p_literature_navigation_indexes_tenant ON literature_navigation_indexes",
+            "CREATE POLICY p_literature_navigation_indexes_tenant ON literature_navigation_indexes "
+            "USING (tenant_id = current_setting('yuxi.tenant_id', true)::bigint)",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0082_literature_workflow_execution(self, conn) -> None:
+        """Durable workflow leases and a single active run per mode."""
+        for statement in (
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS "
+            "frozen_reading_version INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS lease_token VARCHAR(64)",
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+            # Preserve duplicate runs as historical records, rather than delete.
+            """WITH ranked AS (
+                SELECT id, row_number() OVER (PARTITION BY tenant_id, paper_id, mode ORDER BY created_at, id) AS n
+                FROM literature_workflow_runs WHERE status IN ('PENDING', 'RUNNING')
+            ) UPDATE literature_workflow_runs SET status = 'SUPERSEDED'
+              WHERE id IN (SELECT id FROM ranked WHERE n > 1)""",
+            # create_all on older checkouts created a table constraint instead
+            # of the partial index. Support both existing schema shapes.
+            "ALTER TABLE literature_workflow_runs DROP CONSTRAINT IF EXISTS uq_lit_workflow_active",
+            "DROP INDEX IF EXISTS uq_lit_workflow_active",
+            "CREATE UNIQUE INDEX uq_lit_workflow_active ON literature_workflow_runs (tenant_id, paper_id, mode) "
+            "WHERE status IN ('PENDING', 'RUNNING')",
+        ):
+            await conn.execute(text(statement))
 
     async def _migration_0081_literature_artifacts_workflow(self, conn) -> None:
         """文献域 P10-B/C：产物修订表 + 处理运行表 + paper 指针列。"""

@@ -42,6 +42,12 @@ from yuxi.literature.translate.service import (
     reconcile_stale_literature_translations,
 )
 from yuxi.literature.workflow import process_literature_workflow, reconcile_stale_workflows
+from yuxi.literature.library_pipeline import process_literature_library, reconcile_literature_libraries
+from yuxi.literature.navigation_index import (
+    process_literature_navigation_index,
+    reconcile_literature_navigation_indexes,
+)
+from yuxi.literature.fulltext import reconcile_literature_fulltext
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.services.agent_run_service import (
     acknowledge_agent_run_dispatch,
@@ -708,6 +714,18 @@ async def process_agent_run(ctx, run_id: str):
         )
         return
 
+    frozen_scope = payload.get("knowledge_scope_snapshot") or {}
+    if isinstance(frozen_scope, dict) and frozen_scope.get("literature_binding"):
+        from yuxi.literature.session import validate_frozen_paper_scope
+
+        try:
+            await validate_frozen_paper_scope(user=user, tenant_id=int(run.tenant_id), snapshot=frozen_scope)
+        except (ValueError, PermissionError) as exc:
+            await _finish_run_before_execution(
+                run, "failed", error_type="literature_source_changed", error_message=str(exc)
+            )
+            return
+
     resume_input = None
     if run_type == "resume":
         resume_input = input_metadata.get("resume")
@@ -1212,6 +1230,8 @@ class WorkerSettings:
         process_literature_compile,
         process_literature_translation,
         process_literature_workflow,
+        process_literature_navigation_index,
+        process_literature_library,
         process_dynamic_wiki_build,
         prewarm_doclex_for_kb,
         process_channel_message,
@@ -1231,7 +1251,10 @@ class WorkerSettings:
         # 文献域翻译（zh 变体，lang 进身份）：同构状态机（D2 决策）
         cron(reconcile_stale_literature_translations, minute=set(range(0, 60, 5))),
         # 文献域处理编排：滞留运行对账
-        cron(reconcile_stale_workflows, minute=set(range(0, 60, 5))),
+        cron(reconcile_stale_workflows, minute=set(range(0, 60))),
+        cron(reconcile_literature_navigation_indexes, minute=set(range(1, 60, 5))),
+        cron(reconcile_literature_fulltext, minute=set(range(60))),
+        cron(reconcile_literature_libraries, minute=set(range(60))),
         cron(reconcile_scientific_literature_papers, minute=set(range(2, 60, 5))),
         cron(reconcile_literature_note_wikis, minute={4, 14, 24, 34, 44, 54}),
         cron(reconcile_dynamic_wikis, minute=set(range(0, 60))),

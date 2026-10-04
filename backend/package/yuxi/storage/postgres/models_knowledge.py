@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from yuxi.storage.postgres.models_business import Base, BigIntPk
@@ -262,6 +263,7 @@ class KnowledgeParseRevision(Base):
     source_sha256 = Column(String(64), nullable=False, index=True)
     parser_fingerprint = Column(String(64), nullable=False, index=True)
     pipeline_version = Column(String(32), nullable=False)
+    processing_mode = Column(String(32), nullable=False, default="activate")
     status = Column(String(32), nullable=False, default="PENDING", index=True)
     attempt = Column(Integer, nullable=False, default=0)
     lease_owner = Column(String(128))
@@ -2098,6 +2100,8 @@ class LiteratureReaderRender(Base):
     render_version = Column(String(32), nullable=False, default="reader_render_v1")
     attempt = Column(Integer, nullable=False, default=0)
     markdown_uri = Column(String(1024))
+    review_uri = Column(String(1024))
+    review_digest = Column(String(64))
     image_count = Column(Integer, nullable=False, default=0)
     latex_count = Column(Integer, nullable=False, default=0)
     source_digest = Column(String(64))
@@ -2146,6 +2150,7 @@ class LiteraturePaper(Base):
     source_revision_id = Column(String(64), index=True)
     reading_version = Column(Integer, nullable=False, default=1)
     # P10-A 元数据（enrich 三源只填空；人工锁定优先，见 capability-matrix §七）
+    card_revision = Column(Integer, nullable=False, default=0)
     authors_json = Column(JSON_VALUE)
     abstract = Column(Text)
     journal = Column(String(512))
@@ -2154,6 +2159,10 @@ class LiteraturePaper(Base):
     keywords_json = Column(JSON_VALUE)
     external_cited = Column(Integer)
     meta_locked = Column(Boolean, nullable=False, default=False)
+    is_reference = Column(Boolean, nullable=False, default=False)
+    source_main = Column(String(128), nullable=False, default="")
+    trashed_at = Column(DateTime(timezone=True))
+    trashed_by = Column(String(64))
     # P10-B：产物当前指针（kind → artifact revision_id）与冻结标记
     artifact_pointers = Column(JSON_VALUE, nullable=False, default=dict)
     frozen_artifacts = Column(JSON_VALUE, nullable=False, default=dict)
@@ -2185,6 +2194,7 @@ class LiteratureCompileJob(Base):
             "source_revision_id",
             "reading_version",
             "generator_version",
+            "card_revision",
             name="uq_literature_compile_jobs_key",
         ),
         Index("ix_literature_compile_jobs_status", "status"),
@@ -2197,6 +2207,7 @@ class LiteratureCompileJob(Base):
     source_revision_id = Column(String(64), nullable=False, default="")
     reading_version = Column(Integer, nullable=False, default=1)
     generator_version = Column(String(64), nullable=False, default="literature-compile-v1")
+    card_revision = Column(Integer, nullable=False, default=0)
     status = Column(String(32), nullable=False, default="PENDING")
     value_score = Column(Float)
     attempt = Column(Integer, nullable=False, default=0)
@@ -2373,11 +2384,22 @@ class LiteratureCard(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "paper_id", "card_type", "slug", name="uq_literature_cards_key"),
         Index("ix_literature_cards_paper", "tenant_id", "paper_id"),
+        Index(
+            "uq_literature_global_cards",
+            "tenant_id",
+            "created_by",
+            "card_type",
+            "slug",
+            unique=True,
+            postgresql_where=text("paper_id IS NULL"),
+            sqlite_where=text("paper_id IS NULL"),
+        ),
     )
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
+    paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=True, index=True)
+    created_by = Column(String(64), nullable=False, default="")
     card_type = Column(String(32), nullable=False)
     slug = Column(String(64), nullable=False)
     title = Column(String(512), nullable=False, default="")
@@ -2386,6 +2408,43 @@ class LiteratureCard(Base):
     tags_json = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureNoteSearch(Base):
+    """Rebuildable navigation projection, bound to an immutable compile output."""
+
+    __tablename__ = "literature_note_search"
+    job_id = Column(BigIntPk, ForeignKey("literature_compile_jobs.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    note_uri = Column(String(1024), nullable=False)
+    content_digest = Column(String(64), nullable=False)
+    body = Column(Text, nullable=False)
+    lexical_text = Column(Text, nullable=False)
+    attempt = Column(Integer, nullable=False, default=0)
+    next_retry_at = Column(DateTime(timezone=True))
+    error_code = Column(String(64))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureHistoryItem(Base):
+    """Owner-private immutable migration receipts; never executable configuration or evidence."""
+
+    __tablename__ = "literature_history_items"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "uid", "source_key", "content_digest", name="uq_literature_history_identity"),
+    )
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    uid = Column(String(64), nullable=False)
+    source_key = Column(String(1024), nullable=False)
+    category = Column(String(64), nullable=False)
+    content_digest = Column(String(64), nullable=False)
+    object_uri = Column(String(1024), nullable=False)
+    archive_sha256 = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False)
+    target_ref = Column(String(128))
+    detail = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
 class LiteratureReport(Base):
@@ -2420,7 +2479,12 @@ class LiteratureReviewDecision(Base):
     revision_id = Column(String(64), nullable=False)
     report_idx = Column(Integer, nullable=False)
     para_id = Column(String(32), nullable=False, default="")
-    choice = Column(String(2), nullable=False)  # A=MinerU / B=Paddle / C=合并 / D=均不取
+    choice = Column(String(2), nullable=False)  # A=还原 / B=替换 / C=两者皆可 / D=存疑
+    render_id = Column(String(64))
+    render_digest = Column(String(64))
+    item_id = Column(String(512))
+    contract_version = Column(String(32), nullable=False, default="legacy_v1")
+    legacy_ack = Column(Boolean, nullable=False, default=False)
     resolved_text = Column(Text)
     decided_by = Column(String(64), nullable=False, default="")
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
@@ -2446,6 +2510,9 @@ class LiteratureArtifactRevision(Base):
     kind = Column(String(32), nullable=False)
     object_uri = Column(String(1024), nullable=False)
     content_digest = Column(String(64), nullable=False)
+    source_revision_id = Column(String(64))
+    input_reading_version = Column(Integer, nullable=False, default=0)
+    input_card_revision = Column(Integer, nullable=False, default=0)
     frozen = Column(Boolean, nullable=False, default=False)
     source = Column(String(32), nullable=False, default="rendered")
     superseded_by = Column(String(64))
@@ -2457,7 +2524,17 @@ class LiteratureWorkflowRun(Base):
     """文献处理运行记录（P10-C：三模式编排，串联既有任务表不复制状态）。"""
 
     __tablename__ = "literature_workflow_runs"
-    __table_args__ = (UniqueConstraint("tenant_id", "paper_id", "mode", "status", name="uq_lit_workflow_active"),)
+    __table_args__ = (
+        Index(
+            "uq_lit_workflow_active",
+            "tenant_id",
+            "paper_id",
+            "mode",
+            unique=True,
+            postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
+            sqlite_where=text("status IN ('PENDING', 'RUNNING')"),
+        ),
+    )
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
     run_id = Column(String(64), nullable=False, unique=True, index=True)
@@ -2466,9 +2543,84 @@ class LiteratureWorkflowRun(Base):
     mode = Column(String(32), nullable=False)
     status = Column(String(32), nullable=False, default="PENDING", index=True)
     frozen_parse_revision = Column(String(64))
+    frozen_reading_version = Column(Integer, nullable=False, default=1)
+    lease_token = Column(String(64))
+    lease_expires_at = Column(DateTime(timezone=True))
     steps_json = Column(JSON_VALUE, nullable=False, default=list)
     review_skipped_by = Column(String(64))
     review_skip_reason = Column(Text)
     requested_by = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureLibraryRun(Base):
+    """Durable six-step library jobs; Redis is dispatch only."""
+
+    __tablename__ = "literature_library_runs"
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False, unique=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    requested_by = Column(String(64), nullable=False)
+    input_hash = Column(String(64), nullable=False)
+    payload_json = Column(JSON_VALUE, nullable=False, default=dict)
+    steps_json = Column(JSON_VALUE, nullable=False, default=dict)
+    status = Column(String(32), nullable=False, default="PENDING")
+    lease_token = Column(String(64))
+    lease_expires_at = Column(DateTime(timezone=True))
+    error = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+    __table_args__ = (
+        Index(
+            "uq_lit_library_active",
+            "tenant_id",
+            "requested_by",
+            "input_hash",
+            unique=True,
+            postgresql_where=text("status IN ('PENDING', 'RUNNING', 'WAITING_CONFIRM')"),
+            sqlite_where=text("status IN ('PENDING', 'RUNNING', 'WAITING_CONFIRM')"),
+        ),
+    )
+
+
+class LiteratureCleaningPlan(Base):
+    """Expiring, actor-bound preview; exact target versions must match confirmation."""
+
+    __tablename__ = "literature_cleaning_plans"
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    plan_id = Column(String(64), nullable=False, unique=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    requested_by = Column(String(64), nullable=False)
+    rules_json = Column(JSON_VALUE, nullable=False)
+    targets_json = Column(JSON_VALUE, nullable=False)
+    plan_hash = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="PREVIEW")
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    confirmed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureNavigationIndex(Base):
+    """Disposable navigation-only vector snapshot, never an evidence collection."""
+
+    __tablename__ = "literature_navigation_indexes"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    index_id = Column(String(64), nullable=False, unique=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    requested_by = Column(String(64), nullable=False)
+    model_spec = Column(String(512), nullable=False)
+    llm_run_id = Column(String(64))
+    credential_source = Column(String(32))
+    credential_id = Column(BigInteger)
+    provider_id = Column(String(128))
+    policy_version = Column(Integer)
+    collection_name = Column(String(128), nullable=False, unique=True)
+    status = Column(String(32), nullable=False, default="PENDING")
+    attempt = Column(Integer, nullable=False, default=0)
+    input_manifest = Column(JSON_VALUE, nullable=False, default=dict)
+    document_count = Column(Integer, nullable=False, default=0)
+    error = Column(Text)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)

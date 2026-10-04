@@ -788,6 +788,11 @@ async def prepare_knowledge_context(
     if frozen_document_ids:
         scope_file_ids = list(dict.fromkeys([*frozen_document_ids, *(scope_file_ids or [])]))
         narrowing_source = "MENTION_FROZEN"
+    from yuxi.knowledge.planning.document_ceiling import constrain_document_ids
+
+    scope_file_ids = constrain_document_ids(scope_snapshot, scope_file_ids)
+    if scope_snapshot.get("document_scope_ceiling") is not None:
+        narrowing_source = "SERVER_DOCUMENT_CEILING"
     contract["document_narrowing"] = {
         "source": narrowing_source,
         "file_ids": list(scope_file_ids or []),

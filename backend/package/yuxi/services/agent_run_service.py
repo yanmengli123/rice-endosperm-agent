@@ -895,6 +895,25 @@ async def create_agent_run_view(
             session_kb_ids=mention_session_kb_ids,
         )
 
+    from yuxi.literature.session import bind_paper_evidence_scope, validate_frozen_paper_scope
+
+    try:
+        if run_type == "resume":
+            await validate_frozen_paper_scope(
+                user=scope.current_user,
+                tenant_id=int(entitlement_snapshot["tenant_id"]),
+                snapshot=knowledge_scope_snapshot,
+            )
+        knowledge_scope_snapshot, mention_resolution_audit = await bind_paper_evidence_scope(
+            user=scope.current_user,
+            tenant_id=int(entitlement_snapshot["tenant_id"]),
+            binding=(getattr(scope.conversation, "extra_metadata", None) or {}).get("literature_session"),
+            snapshot=knowledge_scope_snapshot,
+            mentions=mention_resolution_audit,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     run_input_message = _prepare_run_input_message(
         run_type=run_type,
         input_message=input_message,

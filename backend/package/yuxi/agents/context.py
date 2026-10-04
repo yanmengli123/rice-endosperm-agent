@@ -104,6 +104,14 @@ async def build_agent_input_context(
         input_context["system_prompt"] = f"{base_prompt}\n\n{agent_context}" if base_prompt else agent_context
 
     input_context.update({"uid": uid, "thread_id": thread_id, "run_id": run_id, "request_id": request_id})
+    if run_id:
+        from yuxi.literature.session import load_conversation_session
+
+        session = await load_conversation_session(thread_id, uid)
+        if session:
+            input_context["_literature_session_context"] = session
+            prompt = str(input_context.get("system_prompt") or "")
+            input_context["system_prompt"] = f"{prompt}\n\n{session['system_context']}"
     return input_context
 
 
@@ -213,6 +221,12 @@ class BaseContext:
     _run_source_manifest: dict[str, Any] | None = field(
         default=None,
         metadata={"name": "本轮来源使用清单", "configurable": False, "hide": True},
+        repr=False,
+    )
+
+    _literature_session_context: dict[str, Any] | None = field(
+        default=None,
+        metadata={"name": "文献会话运行绑定", "configurable": False, "hide": True},
         repr=False,
     )
 

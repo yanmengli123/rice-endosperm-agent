@@ -102,6 +102,9 @@ async def get_mindmap(kb_name: str, runtime: ToolRuntime) -> str:
     """
     if not kb_name:
         return "请提供知识库名称"
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    if (getattr(context, "_effective_knowledge_scope", None) or {}).get("document_scope_ceiling") is not None:
+        return "当前运行绑定单篇文档，不读取全库思维导图；请使用绑定文献的笔记导航。"
 
     # 获取所有检索器
     knowledge_base = _get_knowledge_base()
@@ -165,10 +168,11 @@ class QueryKnowledgeScopeInput(BaseModel):
 def _mention_document_file_ids(context) -> list[str] | None:
     """Run 创建时冻结的 @doc 文献硬约束（mention.v2）；对本 Run 所有检索工具一致生效。"""
     resolution = getattr(context, "_mention_resolution", None)
-    if not isinstance(resolution, dict):
-        return None
-    ids = [str(value).strip() for value in resolution.get("document_ids") or [] if str(value).strip()]
-    return ids or None
+    resolution = resolution if isinstance(resolution, dict) else {}
+    ids = [str(value).strip() for value in (resolution or {}).get("document_ids") or [] if str(value).strip()]
+    from yuxi.knowledge.planning.document_ceiling import constrain_document_ids
+
+    return constrain_document_ids(getattr(context, "_effective_knowledge_scope", None) or {}, ids or None)
 
 
 @tool(category="knowledge", tags=["知识库", "Graph-RAG"], args_schema=QueryKnowledgeScopeInput)
@@ -452,6 +456,11 @@ async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, ru
         return "请提供查询内容"
 
     context = getattr(runtime, "context", None) if runtime is not None else None
+    if (getattr(context, "_effective_knowledge_scope", None) or {}).get("document_scope_ceiling") is not None:
+        return {
+            "error": "DOCUMENT_SCOPE_BOUND",
+            "message": "当前运行绑定到指定文档，请使用 query_knowledge_scope 核验。",
+        }
     contract = getattr(context, "_knowledge_contract", None) if context is not None else None
     if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
         return {
@@ -507,6 +516,14 @@ async def open_kb_document(
         return "请提供 kb_id"
     if not normalized_file_id:
         return "请提供 file_id"
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    snapshot = getattr(context, "_effective_knowledge_scope", None) or {}
+    from yuxi.knowledge.planning.document_ceiling import constrain_document_ids
+
+    try:
+        constrain_document_ids(snapshot, [normalized_file_id])
+    except ValueError as exc:
+        return {"error": "DOCUMENT_SCOPE_BOUND", "message": str(exc)}
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
     if not visible_kbs:
@@ -565,6 +582,14 @@ async def find_kb_document(
         return "请提供 file_id"
     if not patterns:
         return "请提供 patterns"
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    snapshot = getattr(context, "_effective_knowledge_scope", None) or {}
+    from yuxi.knowledge.planning.document_ceiling import constrain_document_ids
+
+    try:
+        constrain_document_ids(snapshot, [normalized_file_id])
+    except ValueError as exc:
+        return {"error": "DOCUMENT_SCOPE_BOUND", "message": str(exc)}
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
     if not visible_kbs:

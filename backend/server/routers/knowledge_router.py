@@ -1694,6 +1694,8 @@ async def add_documents(
             or params.get("pdf_evidence_pipeline")
         )
     if scientific_pdf_pipeline:
+        if params.get("scientific_processing_mode", "activate") not in {"activate", "parse_only"}:
+            raise HTTPException(status_code=400, detail="无效的科研 PDF 处理模式")
         params = {
             **params,
             "pdf_evidence_pipeline": True,
@@ -1743,6 +1745,7 @@ async def add_documents(
                     kb_id=kb_id,
                     file_id=file_meta["file_id"],
                     operator_id=current_user.uid,
+                    processing_mode=params.get("scientific_processing_mode", "activate"),
                 )
                 queued_count += 1
                 deferred_count += int(bool(enqueue_result.get("enqueue_deferred")))
