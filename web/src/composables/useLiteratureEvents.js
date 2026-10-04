@@ -8,12 +8,14 @@ export const LITERATURE_EVENT_LIMIT = 200
 export const TASK_TYPE_LABELS = {
   reader_render: '阅读渲染',
   compile: '编译',
-  translation: '翻译'
+  translation: '翻译',
+  ingest: '入库'
 }
 
-// 与后端任务终态口径一致：失败类终态标红
-const BAD_STATUSES = new Set(['FAILED', 'DEAD'])
-const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING'])
+// 与后端任务终态口径一致：失败类终态标红（REJECTED=质量门禁拒绝，同样不可读）
+const BAD_STATUSES = new Set(['FAILED', 'DEAD', 'REJECTED'])
+// 摄入管线的活跃中间态：首次快照只静默登记，后续阶段跃迁才产生进度事件
+const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING', 'WAITING_CACHE', 'BUILDING', 'INDEXING'])
 
 export function createLiteratureEventBuffer(limit = LITERATURE_EVENT_LIMIT, storage = []) {
   const events = storage

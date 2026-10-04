@@ -17,6 +17,9 @@ from sqlalchemy import func, select
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeBase,
+    KnowledgeFile,
+    KnowledgeParseRevision,
     LiteratureAttachment,
     LiteratureCompileJob,
     LiteraturePaper,
@@ -329,8 +332,94 @@ async def get_note_uri(tenant_id: int, rid: str, level: str) -> str | None:
     return job.note_uri if job else None
 
 
+#: 摄入阶段展示映射：``KnowledgeParseRevision.status`` → 中文阶段说明。
+#: 只做展示映射，不改变知识域/文献域各自的状态机（ADR-0010 决议 5b 反对双栈回流）。
+#: 未知状态（上游升级新增）回退为原始状态字符串，绝不猜测成成功/失败。
+_INGEST_STAGE_LABELS = {
+    "PENDING": "已提交，排队中",
+    "WAITING_CACHE": "解析准备（缓存检查）",
+    "RUNNING": "解析中（云供应商）",
+    "BUILDING": "构建解析产物",
+    "INDEXING": "索引构建中",
+    "INDEXED_FULL": "已索引（完整），等待激活",
+    "INDEXED_CONTENT_ONLY": "已索引（仅内容），等待激活",
+    "ACTIVE": "激活中",
+    "READY": "解析就绪",
+    "PARSED_ONLY": "仅解析完成（草稿）",
+    "REJECTED": "质量门禁拒绝",
+    "FAILED": "处理失败",
+    "SKIPPED": "已跳过（重复/复用）",
+    "CANCELLED": "已取消",
+}
+
+
+async def _project_ingest_tasks(session, tenant_id: int, limit: int) -> list[dict[str, Any]]:
+    """租户内 PDF 契约摄入投影：从提交那一刻起可见，消灭导入后的可见性真空。
+
+    权限红线：必须以 ``KnowledgeParseRevision.tenant_id`` 过滤并限定 ``pdf_evidence``
+    契约知识源；**不得**复用跨租户的 ``list_literature_pipeline_tasks``（那是超管
+    任务中心的口径，spans tenants）。尚未登记为文献的 revision 通过
+    ``source_revision_id`` 反查 rid，登记完成即原地可点击。
+    """
+    rows = (
+        await session.execute(
+            select(KnowledgeParseRevision, KnowledgeFile.original_filename, KnowledgeFile.filename)
+            .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
+            .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeParseRevision.kb_id)
+            .where(
+                KnowledgeParseRevision.tenant_id == tenant_id,
+                KnowledgeBase.contract_key == "pdf_evidence",
+            )
+            .order_by(KnowledgeParseRevision.updated_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    if not rows:
+        return []
+    revision_ids = [row[0].revision_id for row in rows]
+    rid_by_revision = {
+        source_revision: rid
+        for source_revision, rid in (
+            await session.execute(
+                select(LiteraturePaper.source_revision_id, LiteraturePaper.rid).where(
+                    paper_visibility(tenant_id),
+                    LiteraturePaper.source_revision_id.in_(revision_ids),
+                )
+            )
+        ).all()
+    }
+    return [
+        {
+            "type": "ingest",
+            "ref": revision.revision_id,
+            "status": revision.status,
+            # 已登记为文献且非失败类终态 ⇒ 从用户视角入库已完成（可读），
+            # 覆盖 INDEXED_*/ACTIVE 等仍在等待知识域内部激活动作的中间标签
+            "stage": (
+                "入库完成（已登记文献）"
+                if rid_by_revision.get(revision.revision_id)
+                and revision.status
+                not in ("REJECTED", "FAILED", "SKIPPED", "CANCELLED", "PARSED_ONLY")
+                else _INGEST_STAGE_LABELS.get(revision.status, revision.status)
+            ),
+            "detail": original or filename or revision.revision_id,
+            "paper_rid": rid_by_revision.get(revision.revision_id),
+            "processing_mode": revision.processing_mode,
+            "attempt": revision.attempt,
+            "error": revision.error_message,
+            "created_at": revision.created_at.isoformat() if revision.created_at else None,
+            "updated_at": revision.updated_at.isoformat() if revision.updated_at else None,
+        }
+        for revision, original, filename in rows
+    ]
+
+
 async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str, Any]]:
-    """任务投影（渲染/编译/翻译三表合并，任务中心与前端轮询共用）。"""
+    """任务投影（入库/渲染/编译/翻译合并；任务中心与前端轮询共用）。
+
+    入库段来自知识域 ``KnowledgeParseRevision``（租户内 + pdf_evidence 契约），
+    让"导入 PDF 后到文献登记前"的数分钟处理过程从第一秒起用户可见。
+    """
     async with pg_manager.get_async_session_context() as session:
         renders = (
             (
@@ -381,7 +470,9 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
             .scalars()
             .all()
         )
+        ingest = await _project_ingest_tasks(session, tenant_id, limit)
     tasks: list[dict[str, Any]] = []
+    tasks.extend(ingest)
     tasks.extend(
         {
             "type": "reader_render",

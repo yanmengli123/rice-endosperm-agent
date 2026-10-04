@@ -183,17 +183,23 @@ const importPdf = (event) => {
           source_paths: { [upload.file_path]: file.name }
         })
         const failed = (result.result?.items || []).find((item) => item.status === 'failed')
+        // add_documents 响应带 parse_revision_id——把它作为"处理单号"交给用户，
+        // 进度与终态在工作台「任务与历史 → 入库中」实时可见（不再指向知识源任务页）。
+        const ticket = (result.result?.items || []).find((item) => item.parse_revision_id)
+          ?.parse_revision_id
+        const ticketText = ticket ? `（单号 ${String(ticket).slice(0, 16)}…）` : ''
         results.value.push({
           name: file.name,
           message: failed
             ? failed.error || '处理接收失败'
-            : result.message || '已提交后台 PDF 处理，请在知识源任务查看进度'
+            : `已提交处理${ticketText}，进度见工作台「任务与历史 → 入库中」`
         })
       } catch (error) {
         results.value.push({ name: file.name, message: error.message || '提交失败' })
       }
     }
-    notice.value = '提交结束；尚不表示解析成功。质量门禁拒绝或任务失败不会登记为可读文献。'
+    notice.value =
+      '提交结束；尚不表示解析成功。质量门禁拒绝或任务失败不会登记为可读文献；各文件阶段与终态见「任务与历史 → 入库中」。'
     emit('imported')
   })
 }

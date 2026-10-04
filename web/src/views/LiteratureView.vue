@@ -295,11 +295,40 @@
             </li>
           </ul>
           <pre v-if="runDetail">{{ JSON.stringify(runDetail, null, 2) }}</pre>
-          <h3>处理任务</h3>
-          <div v-if="!literatureTasks.length" class="lit-empty">暂无文献任务</div>
+          <h3>入库中（PDF 契约处理）</h3>
+          <div v-if="!ingestTasks.length" class="lit-empty">暂无入库任务</div>
           <ul v-else class="concept-list">
             <li
-              v-for="task in literatureTasks"
+              v-for="task in ingestTasks"
+              :key="`ingest-${task.ref}`"
+              class="concept-card"
+            >
+              <div class="concept-head">
+                <strong>{{ task.detail || task.ref }}</strong>
+                <span class="concept-count">{{ task.stage || task.status }}</span>
+              </div>
+              <div class="concept-meta">
+                单号 {{ task.ref }} · 提交于 {{ task.created_at || '—' }}
+                <template v-if="task.processing_mode === 'parse_only'"
+                  >· 仅解析（终点为草稿）</template
+                >
+                <template v-if="task.paper_rid">· 已登记文献</template>
+              </div>
+              <div v-if="task.error" class="task-error">{{ task.error }}</div>
+              <button
+                v-if="task.paper_rid"
+                class="btn"
+                @click="openPaper({ rid: task.paper_rid })"
+              >
+                打开文献
+              </button>
+            </li>
+          </ul>
+          <h3>处理任务</h3>
+          <div v-if="!domainTasks.length" class="lit-empty">暂无文献任务</div>
+          <ul v-else class="concept-list">
+            <li
+              v-for="task in domainTasks"
               :key="`${task.type}-${task.ref}`"
               class="concept-card"
             >
@@ -838,6 +867,9 @@ export default {
       }
     }
     const literatureTasks = ref([])
+    // 入库段（type=ingest，来自知识域摄入投影）单列一节；其余为文献域任务
+    const ingestTasks = computed(() => literatureTasks.value.filter((t) => t?.type === 'ingest'))
+    const domainTasks = computed(() => literatureTasks.value.filter((t) => t?.type !== 'ingest'))
     const importing = ref(false)
 
     const loadConcepts = async () => {
@@ -1146,6 +1178,8 @@ export default {
       selectedReport,
       openReport,
       literatureTasks,
+      ingestTasks,
+      domainTasks,
       importing,
       loadConcepts,
       generateMoc,

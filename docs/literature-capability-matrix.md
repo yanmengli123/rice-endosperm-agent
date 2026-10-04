@@ -189,3 +189,28 @@ PaperAgent 手册 §3 四区域最后两块缺口补齐，浏览器真机验收�
 - 用户告知 Chrome 已登录后再次选取该文献页：第一次工具超时，重试明确返回 saved permission blocks `127.0.0.1:5173`。按 computer-use 技能约束暂停真实页面操作，未换浏览器、端口、CDP、读取浏览器凭据或其他间接方式绕过；Chrome 已登录不等于工具获得站点权限。须解除工具站点阻止，或为独立服务验收配置正常测试凭据（不在聊天中发送密码）。
 
 Docker 分块验收：文献域 + HTTP + 原生工具 **333 passed**（包含指定真实 PDF 的离线归档测试）；相关知识定位/文档上限/仅解析/worker **47 passed**。五组前端 spec、改动代码 Ruff/ESLint、生产构建通过；业务备份最后资产路径校验另复跑通过，不累加重复计数。真实供应商脚本 **1 skipped：缺少正常测试登录凭据**，不是通过。依赖 PURE 注释/大 chunk 警告保留；未变更依赖或数据库 schema，未创建提交/推送/PR。
+
+## 入库可见性投影（2026-10-04，导入后工作流进度展示）
+
+修复「导入 PDF 后到文献登记前数分钟可见性真空」：用户提交后唯一反馈曾是指向
+知识源任务页（超管口径）的文案，租户内没有任何投影读 `KnowledgeParseRevision`。
+
+- **租户内摄入投影**：`readops.list_paper_tasks` 增加第四数据源——按
+  `KnowledgeParseRevision.tenant_id` + `pdf_evidence` 契约过滤（join 知识源契约表），
+  **不复用**跨租户的 `list_literature_pipeline_tasks`（超管任务中心专用，权限红线由
+  租户隔离用例钉住）。条目带 `stage` 中文阶段（展示映射，不动两个域的状态机，
+  决议 5b）、`detail`（原文件名）、`paper_rid`（按 `source_revision_id` 反查，登记
+  完成原地可点击）、`processing_mode`、`attempt`、`error`、`created_at/updated_at`。
+  未知状态回退原始字符串，不猜成功/失败。
+- **阶段映射**：PENDING/WAITING_CACHE/RUNNING/BUILDING/INDEXING/INDEXED_*/ACTIVE/
+  READY/PARSED_ONLY/REJECTED/FAILED/SKIPPED/CANCELLED → 提交排队 → 解析 → 索引 →
+  激活 → 终态；`parse_only` 终态显式标注"仅解析（终点为草稿）"。
+- **前端**：工作台「任务与历史」新增「入库中」一节（阶段芯片/单号/提交时间/
+  错误/登记后"打开文献"）；`useLiteratureEvents` 增 `ingest` 标签并把
+  WAITING_CACHE/BUILDING/INDEXING 纳入活跃集（首见静默、跃迁才发事件）、
+  REJECTED 纳入失败集（标红）——底部信息面板自动获得入库阶段进度事件；
+  ImportPanel 成功文案从死指针（"请在知识源任务查看进度"）改为携带
+  `parse_revision_id` 单号并指向工作台「入库中」。
+- 验证：新增 `test_ingest_projection.py` 5 用例（提交即可见/契约与租户隔离/
+  登记 rid 反查/parse_only 与失败透出/与域任务合并）；文献域回归见下。已知边界：
+  摄入侧尚无重试预算/死信/取消（AGENTS.md 既有债务），错误透出但不提供行内重试按钮。
