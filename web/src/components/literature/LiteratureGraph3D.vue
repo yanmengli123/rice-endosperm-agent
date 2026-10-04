@@ -1,5 +1,13 @@
 <template>
-  <div ref="host" class="graph-3d" @pointermove="onPointerMove" @pointerleave="clearHover" @click="onClick">
+  <div
+    ref="host"
+    class="graph-3d"
+    @pointermove="onPointerMove"
+    @pointerdown="pointerStart = { x: $event.clientX, y: $event.clientY }"
+    @pointerleave="clearHover"
+    @click="onClick"
+  >
+    <canvas ref="labelsCanvas" class="labels-layer" aria-hidden="true"></canvas>
     <div v-if="unsupported" class="webgl-fallback">
       当前浏览器未启用 WebGL，请切回 2D 视图或启用硬件加速。
     </div>
@@ -10,27 +18,50 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  onActivated,
+  onDeactivated,
+  ref,
+  watch
+} from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { useThemeStore } from '@/stores/theme'
+import {
+  graphCameraPosition,
+  graphNodeColor,
+  graphNodeRadius,
+  graphNodeLabel,
+  graphStyleDefaults
+} from '@/utils/literature_graph'
 
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
   edges: { type: Array, default: () => [] },
-  selectedRid: { type: String, default: '' }
+  selectedRid: { type: String, default: '' },
+  styleOptions: { type: Object, default: graphStyleDefaults },
+  positions: { type: Object, default: null },
+  active: { type: Boolean, default: true }
 })
 const emit = defineEmits(['select'])
 
-const COLORS_LIGHT = { Q1: 0x1677ff, Q2: 0x52c41a, Q3: 0xfaad14, Q4: 0x8c8c8c }
-const COLORS_DARK = { Q1: 0x69b1ff, Q2: 0x95de64, Q3: 0xffd666, Q4: 0xa6a6a6 }
 const themeStore = useThemeStore()
-const COLORS = computed(() => (themeStore.isDark ? COLORS_DARK : COLORS_LIGHT))
 const host = ref(null)
+const labelsCanvas = ref(null)
 const unsupported = ref(false)
 const hovered = ref(null)
 const pointer = ref({ x: 0, y: 0 })
-const tooltipStyle = computed(() => ({ left: `${pointer.value.x + 14}px`, top: `${pointer.value.y + 14}px` }))
+const tooltipStyle = computed(() => ({
+  left: `${pointer.value.x + 14}px`,
+  top: `${pointer.value.y + 14}px`
+}))
 
 let renderer
 let scene
@@ -38,24 +69,19 @@ let camera
 let controls
 let nodeMesh
 let edgeLines
+let arrowMesh
 let resizeObserver
 let animationFrame
 let nodeIndex = []
 let raycaster
+let disposed = false,
+  userMoved = false,
+  pointerStart = null
+let nodePositions = new Map(),
+  edgeIndex = []
 const mouse = new THREE.Vector2(2, 2)
 const matrix = new THREE.Matrix4()
 const color = new THREE.Color()
-
-function deterministicPosition(node, index, count) {
-  // Fibonacci sphere gives a stable, genuinely three-dimensional starting layout.
-  // Citation count pulls important papers closer to the readable foreground shell.
-  const offset = 2 / Math.max(1, count)
-  const y = index * offset - 1 + offset / 2
-  const radius = Math.sqrt(Math.max(0, 1 - y * y))
-  const phi = index * Math.PI * (3 - Math.sqrt(5))
-  const shell = 95 + Math.min(80, Math.log2(2 + Number(node.citations || 0)) * 10)
-  return new THREE.Vector3(Math.cos(phi) * radius * shell, y * shell, Math.sin(phi) * radius * shell)
-}
 
 function disposeGraph() {
   if (nodeMesh) {
@@ -70,62 +96,177 @@ function disposeGraph() {
     edgeLines.material.dispose()
     edgeLines = null
   }
+  if (arrowMesh) {
+    scene?.remove(arrowMesh)
+    arrowMesh.geometry.dispose()
+    arrowMesh.material.dispose()
+    arrowMesh = null
+  }
 }
 
 function buildGraph() {
   if (!scene) return
   disposeGraph()
+  userMoved = false
   nodeIndex = props.nodes
   if (!nodeIndex.length) return
 
-  const positions = new Map()
-  nodeIndex.forEach((node, index) => positions.set(node.rid, deterministicPosition(node, index, nodeIndex.length)))
+  nodePositions = new Map(nodeIndex.map((node) => [node.rid, new THREE.Vector3()]))
 
   const geometry = new THREE.SphereGeometry(1, 16, 12)
   const material = new THREE.MeshLambertMaterial({ vertexColors: true })
   nodeMesh = new THREE.InstancedMesh(geometry, material, nodeIndex.length)
-  nodeMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
-  nodeIndex.forEach((node, index) => {
-    const p = positions.get(node.rid)
-    const scale = 2.2 + Math.min(7, Math.sqrt(Number(node.citations || 0)) * 0.8)
-    matrix.compose(p, new THREE.Quaternion(), new THREE.Vector3(scale, scale, scale))
-    nodeMesh.setMatrixAt(index, matrix)
-    nodeMesh.setColorAt(index, color.setHex(COLORS.value[node.quartile] || 0xb8c1cc))
-  })
-  nodeMesh.instanceMatrix.needsUpdate = true
-  nodeMesh.instanceColor.needsUpdate = true
+  nodeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
   scene.add(nodeMesh)
 
-  const edgeVertices = []
-  props.edges.forEach((edge) => {
-    const source = positions.get(edge.source)
-    const target = positions.get(edge.target)
-    if (source && target) edgeVertices.push(source.x, source.y, source.z, target.x, target.y, target.z)
-  })
-  const edgeGeometry = new THREE.BufferGeometry()
-  edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(edgeVertices, 3))
-  edgeLines = new THREE.LineSegments(
-    edgeGeometry,
-    new THREE.LineBasicMaterial({ color: 0x6b8bb7, transparent: true, opacity: 0.28 })
+  edgeIndex = props.edges.filter(
+    (edge) =>
+      nodePositions.has(edge.source) &&
+      nodePositions.has(edge.target) &&
+      edge.source !== edge.target
   )
+  const edgeGeometry = new LineSegmentsGeometry()
+  edgeGeometry.setPositions(new Float32Array(edgeIndex.length * 6))
+  edgeLines = new LineSegments2(
+    edgeGeometry,
+    new LineMaterial({
+      color: props.styleOptions.edgeColor || 0x6b8bb7,
+      transparent: true,
+      opacity: 0.28
+    })
+  )
+  edgeLines.frustumCulled = false
   scene.add(edgeLines)
+  if (edgeIndex.length) {
+    arrowMesh = new THREE.InstancedMesh(
+      new THREE.ConeGeometry(1, 1, 6),
+      new THREE.MeshBasicMaterial(),
+      edgeIndex.length
+    )
+    arrowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    scene.add(arrowMesh)
+  }
+  updatePositions()
+  applyStyle()
+}
+
+function updatePositions() {
+  if (!nodeMesh || !props.positions || props.positions.length !== nodeIndex.length * 3) return
+  nodeIndex.forEach((node, index) =>
+    nodePositions.get(node.rid).set(...props.positions.subarray(index * 3, index * 3 + 3))
+  )
+  updateGeometry()
+  if (!userMoved) fit()
+}
+
+function updateGeometry() {
+  if (!nodeMesh) return
+  nodeIndex.forEach((node, index) => {
+    const radius = graphNodeRadius(node, props.styleOptions) * 0.5
+    matrix.compose(
+      nodePositions.get(node.rid),
+      new THREE.Quaternion(),
+      new THREE.Vector3(radius, radius, radius)
+    )
+    nodeMesh.setMatrixAt(index, matrix)
+  })
+  nodeMesh.instanceMatrix.needsUpdate = true
+  nodeMesh.computeBoundingSphere()
+  if (edgeIndex.length) {
+    const vertices = edgeLines.geometry.attributes.instanceStart.data.array
+    edgeIndex.forEach((edge, index) => {
+      const start = nodePositions.get(edge.source),
+        end = nodePositions.get(edge.target)
+      vertices.set([start.x, start.y, start.z, end.x, end.y, end.z], index * 6)
+      const direction = end.clone().sub(start)
+      const length = direction.length()
+      const width = Math.max(0.5, Number(props.styleOptions.edgeWidth) || 0)
+      matrix.compose(
+        start.clone().lerp(end, 0.86),
+        new THREE.Quaternion().setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0),
+          length ? direction.divideScalar(length) : new THREE.Vector3(0, 1, 0)
+        ),
+        new THREE.Vector3(width, Math.min(length * 0.12, width * 3), width)
+      )
+      arrowMesh.setMatrixAt(index, matrix)
+    })
+    edgeLines.geometry.attributes.instanceStart.data.needsUpdate = true
+    arrowMesh.instanceMatrix.needsUpdate = true
+    arrowMesh.computeBoundingSphere()
+  }
+}
+
+function applyStyle() {
+  if (!scene) return
+  const background = props.styleOptions.background
+  scene.background =
+    background === 'theme'
+      ? null
+      : new THREE.Color(
+          background === 'dark'
+            ? '#111827'
+            : background === 'light'
+              ? '#ffffff'
+              : props.styleOptions.bgColor
+        )
   applySelection()
-  fit()
+  updateGeometry()
+  if (edgeLines) {
+    const width = Math.max(0, Math.min(5, Number(props.styleOptions.edgeWidth) || 0))
+    edgeLines.visible = !!props.styleOptions.showEdges && width > 0
+    edgeLines.material.linewidth = width
+    edgeLines.material.color.set(props.styleOptions.edgeColor || '#6b8bb7')
+    edgeLines.material.resolution.set(host.value.clientWidth, host.value.clientHeight)
+    if (arrowMesh) {
+      arrowMesh.visible = edgeLines.visible && !!props.styleOptions.showEdgeDir
+      arrowMesh.material.color.copy(edgeLines.material.color)
+    }
+  }
 }
 
 function applySelection() {
   if (!nodeMesh) return
   nodeIndex.forEach((node, index) => {
     const selected = node.rid === props.selectedRid
-    nodeMesh.setColorAt(index, color.setHex(selected ? 0xf5222d : COLORS.value[node.quartile] || 0xb8c1cc))
+    nodeMesh.setColorAt(
+      index,
+      color.set(selected ? '#f5222d' : graphNodeColor(node, props.styleOptions, themeStore.isDark))
+    )
   })
   nodeMesh.instanceColor.needsUpdate = true
 }
 
-function fit() {
+function fit(direction) {
   if (!camera || !controls) return
-  camera.position.set(0, 75, 310)
-  controls.target.set(0, 0, 0)
+  const bounds = new THREE.Box3().setFromPoints([...nodePositions.values()])
+  const center = bounds.isEmpty() ? new THREE.Vector3() : bounds.getCenter(new THREE.Vector3())
+  const size = bounds.isEmpty() ? 0 : bounds.getSize(new THREE.Vector3()).length()
+  const distance = Math.max(
+    120,
+    (size * 0.65) / Math.tan((camera.fov * Math.PI) / 360) / Math.min(1, camera.aspect)
+  )
+  const offset = new THREE.Vector3(...graphCameraPosition(direction))
+    .normalize()
+    .multiplyScalar(distance)
+  camera.position.copy(center.clone().add(offset))
+  controls.target.copy(center)
+  camera.far = Math.max(3000, distance * 10)
+  controls.maxDistance = camera.far / 2
+  camera.updateProjectionMatrix()
+  controls.update()
+}
+
+function locate(rid) {
+  userMoved = true
+  const index = nodeIndex.findIndex((node) => node.rid === rid)
+  if (index < 0 || !nodeMesh || !camera || !controls) return
+  const transform = new THREE.Matrix4()
+  nodeMesh.getMatrixAt(index, transform)
+  const target = new THREE.Vector3().setFromMatrixPosition(transform)
+  const offset = camera.position.clone().sub(controls.target).normalize().multiplyScalar(120)
+  controls.target.copy(target)
+  camera.position.copy(target.clone().add(offset))
   controls.update()
 }
 
@@ -156,6 +297,12 @@ function clearHover() {
 }
 
 function onClick(event) {
+  if (unsupported.value || !raycaster || !camera) return
+  if (
+    pointerStart &&
+    Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 4
+  )
+    return
   updatePointer(event)
   const node = pick()
   if (node) emit('select', node)
@@ -169,18 +316,52 @@ function resize() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
   camera.aspect = width / height
   camera.updateProjectionMatrix()
+  if (labelsCanvas.value) {
+    labelsCanvas.value.width = width
+    labelsCanvas.value.height = height
+  }
+  edgeLines?.material.resolution.set(width, height)
 }
 
 function animate() {
+  if (disposed || !props.active || !renderer) {
+    animationFrame = null
+    return
+  }
   controls?.update()
   renderer?.render(scene, camera)
+  const ctx = labelsCanvas.value?.getContext('2d')
+  if (ctx) {
+    ctx.clearRect(0, 0, labelsCanvas.value.width, labelsCanvas.value.height)
+    ctx.font = '12px sans-serif'
+    const dark =
+      props.styleOptions.background === 'dark' ||
+      (props.styleOptions.background === 'theme' && themeStore.isDark)
+    ctx.fillStyle = dark ? '#eeeeee' : '#222222'
+    for (const node of nodeIndex) {
+      const label = graphNodeLabel(node, props.styleOptions.labelMode, props.selectedRid)
+      if (!label) continue
+      const p = nodePositions.get(node.rid).clone().project(camera)
+      if (Math.abs(p.x) <= 1 && Math.abs(p.y) <= 1 && Math.abs(p.z) <= 1)
+        ctx.fillText(
+          label,
+          ((p.x + 1) * labelsCanvas.value.width) / 2 + 8,
+          ((1 - p.y) * labelsCanvas.value.height) / 2
+        )
+    }
+  }
   animationFrame = requestAnimationFrame(animate)
 }
 
 onMounted(async () => {
   await nextTick()
+  if (disposed) return
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' })
+    renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance'
+    })
   } catch {
     unsupported.value = true
     return
@@ -199,17 +380,44 @@ onMounted(async () => {
   controls.dampingFactor = 0.08
   controls.minDistance = 45
   controls.maxDistance = 1100
+  controls.addEventListener('start', () => {
+    userMoved = true
+  })
+  controls.enabled = props.active
   resizeObserver = new ResizeObserver(resize)
   resizeObserver.observe(host.value)
   resize()
   buildGraph()
-  animate()
+  if (props.active) animate()
 })
 
 watch(() => [props.nodes, props.edges], buildGraph, { deep: true })
 watch(() => props.selectedRid, applySelection)
+watch(() => themeStore.isDark, applySelection)
+watch(() => props.styleOptions, applyStyle, { deep: true })
+watch(() => props.positions, updatePositions)
+const stopAnimation = () => {
+  cancelAnimationFrame(animationFrame)
+  animationFrame = null
+}
+watch(
+  () => props.active,
+  (active) => {
+    if (controls) controls.enabled = active
+    stopAnimation()
+    if (active && renderer) {
+      resize()
+      animate()
+    }
+  }
+)
+onDeactivated(stopAnimation)
+onActivated(() => {
+  if (props.active && renderer && !animationFrame) animate()
+})
 
 onBeforeUnmount(() => {
+  disposed = true
   cancelAnimationFrame(animationFrame)
   resizeObserver?.disconnect()
   controls?.dispose()
@@ -218,7 +426,7 @@ onBeforeUnmount(() => {
   renderer?.domElement?.remove()
 })
 
-defineExpose({ fit })
+defineExpose({ fit, locate })
 </script>
 
 <style scoped>
@@ -233,6 +441,12 @@ defineExpose({ fit })
   display: block;
   width: 100%;
   height: 100%;
+}
+.labels-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
 }
 .node-tooltip {
   position: absolute;

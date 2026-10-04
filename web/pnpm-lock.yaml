@@ -47,6 +47,9 @@ importers:
       d3:
         specifier: ^7.9.0
         version: 7.9.0
+      d3-force-3d:
+        specifier: 3.0.6
+        version: 3.0.6
       dayjs:
         specifier: ^1.11.20
         version: 1.11.21
@@ -62,6 +65,9 @@ importers:
       graphology-generators:
         specifier: ^0.11.2
         version: 0.11.2(graphology-types@0.24.8)
+      graphology-layout-forceatlas2:
+        specifier: 0.10.1
+        version: 0.10.1(graphology-types@0.24.8)
       highlight.js:
         specifier: ^11.11.1
         version: 11.11.1
@@ -1437,6 +1443,11 @@ packages:
     resolution: {integrity: sha512-A7RXuKQvdqSWOpn7ZVQo4S33O0vCfPBnUSf7FwE0zNCasqwZVUaCXePuWo5HBpWw68KJcwObZDHpFk6HKH6MYQ==}
     peerDependencies:
       graphology-types: '>=0.20.0'
+
+  graphology-layout-forceatlas2@0.10.1:
+    resolution: {integrity: sha512-ogzBeF1FvWzjkikrIFwxhlZXvD2+wlY54lqhsrWprcdPjopM2J9HoMweUmIgwaTvY4bUYVimpSsOdvDv1gPRFQ==}
+    peerDependencies:
+      graphology-types: '>=0.19.0'
 
   graphology-metrics@2.4.0:
     resolution: {integrity: sha512-7WOfOP+mFLCaTJx55Qg4eY+211vr1/b3D/R3biz3SXGhAaCVcWYkfabnmO4O4WBNWANEHtVnFrGgJ0kj6MM6xw==}
@@ -3600,6 +3611,11 @@ snapshots:
       graphology-types: 0.24.8
       graphology-utils: 2.5.2(graphology-types@0.24.8)
       mnemonist: 0.39.8
+
+  graphology-layout-forceatlas2@0.10.1(graphology-types@0.24.8):
+    dependencies:
+      graphology-types: 0.24.8
+      graphology-utils: 2.5.2(graphology-types@0.24.8)
 
   graphology-metrics@2.4.0(graphology-types@0.24.8):
     dependencies:
