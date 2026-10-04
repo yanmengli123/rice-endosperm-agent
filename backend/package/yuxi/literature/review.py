@@ -478,6 +478,72 @@ async def get_resolved_manifest(tenant_id: int, revision_id: str) -> dict | None
 # ---------------------------------------------------------------- AI 仲裁建议（人机回环）
 
 
+async def _review_render(tenant_id: int, revision_id: str, *, require_dual: bool):
+    """取最近一次成功渲染（双通道场景限定 dual 版本）。复用 get_review_items 的口径。"""
+    from yuxi.literature.reading.service import render_version_for
+
+    async with pg_manager.get_async_session_context() as session:
+        query = select(LiteratureReaderRender).where(
+            LiteratureReaderRender.revision_id == revision_id,
+            LiteratureReaderRender.tenant_id == tenant_id,
+            LiteratureReaderRender.status == "SUCCEEDED",
+        )
+        if require_dual:
+            query = query.where(LiteratureReaderRender.render_version == render_version_for(True))
+        return (
+            await session.execute(
+                query.order_by(
+                    LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc()
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+
+
+def review_page_prefix(render) -> str:
+    """渲染产物在 MinIO 中的对象前缀（去掉 kbasset:// 与末尾 render.md）。"""
+    base = (render.markdown_uri or "").removeprefix("kbasset://").removesuffix("render.md")
+    return base
+
+
+async def get_review_page_image(
+    tenant_id: int, revision_id: str, page: int, *, require_dual: bool = False
+) -> dict[str, Any]:
+    """取复核页图（第 N 页 PNG）与其差异框，供人工对照仲裁。
+
+    对标上游 PaperAgent ``review_service``：整页 PNG + 高亮矩形。
+    Yuxi 侧**不把红框烘焙进图片字节**，而是返回"页图 URI + 未烘焙的 bbox 列表"，
+    由前端在页图上叠加——好处是同一页图可服务多个差异项，避免重复渲染与存储放大，
+    且坐标系转换留在前端可随缩放调整。
+
+    安全边界：
+    - 页图与正文同属 RENDER_BUCKET，复用既有租户鉴权（调用方必须先做资产授权）；
+    - 页图与 bbox 仅供人眼对照，**不进入证据通道**（ADR-0010 决议 2/3）；
+    - page 为 1-based，越界/缺失一律 ValueError，不静默返回邻近页。
+    """
+    if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        raise ValueError("页码必须为 1 起的正整数")
+    render = await _review_render(tenant_id, revision_id, require_dual=require_dual)
+    if render is None:
+        raise ValueError(f"解析版本无渲染记录: {revision_id}")
+    prefix = review_page_prefix(render)
+
+    items = (await get_review_items(tenant_id, revision_id, require_dual=require_dual)).get("items", [])
+    boxes = [
+        {"item_id": entry["item_id"], "bbox": entry["bbox"], "item_kind": entry.get("item_kind", "")}
+        for entry in items
+        if entry.get("page") == page and entry.get("bbox")
+    ]
+    # 页图命名与渲染产物同前缀：<prefix>work/page-{page:04d}.png
+    object_name = f"{prefix}work/page-{page:04d}.png"
+    return {
+        "revision_id": revision_id,
+        "page": page,
+        "uri": f"kbasset://{object_name}",
+        "boxes": boxes,
+        "available": True,
+    }
+
+
 async def ai_suggest(
     tenant_id: int,
     revision_id: str,

@@ -50,6 +50,43 @@ CHOICE_EFFECT = {
 
 VALID_CHOICES = tuple(CHOICE_ALIASES.values())
 
+#: PaddleOCR-VL 输出的块 bbox 坐标系是 PDF 页的 2 倍画布（上游实测 9 篇语料一致）。
+#: 归一为 PDF 页坐标时统一乘该系数，前端据此在页图上叠加高亮框。
+BBOX_SCALE = 0.5
+
+#: 页图高亮框的合法范围（PDF 点坐标；越界即视为供应商数据损坏）
+BBOX_MAX_COORD = 20000.0
+BBOX_EPSILON = 1e-6
+
+
+def normalize_bbox(raw: Any) -> tuple[float, float, float, float] | None:
+    """供应商 bbox → PDF 页坐标 ``(x0, y0, x1, y1)``；缺失或非法返回 None。
+
+    上游语义（paperAgent review_service）：
+    ``bbox = paddle.bbox or mineru.bbox or [0, 0, 0, 0]``，并按 ``BBOX_SCALE``
+    从 2× 画布缩放到 PDF 页坐标。
+
+    这里采取**比上游更保守**的姿态：坐标必须有限、非负、x1>x0 且 y1>y0，
+    否则整体丢弃（返回 None）而不是退化成 [0,0,0,0]——零面积框画到页图上
+    只会误导人工裁决。丢弃后前端显示"该差异项无页图定位"，不阻断仲裁。
+    """
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    values: list[float] = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        value = float(item)
+        if value != value or value in (float("inf"), float("-inf")):  # NaN / Inf
+            return None
+        if value < 0 or value > BBOX_MAX_COORD:
+            return None
+        values.append(value)
+    x0, y0, x1, y1 = (value * BBOX_SCALE for value in values)
+    if (x1 - x0) <= BBOX_EPSILON or (y1 - y0) <= BBOX_EPSILON:
+        return None
+    return (x0, y0, x1, y1)
+
 
 def normalize_choice(raw: str) -> str:
     """字母/语义词 → 上游语义词；非法值抛 ValueError。"""
@@ -82,6 +119,9 @@ class ReviewItem:
     item_kind: str = "conflict"
     page: int = 0
     ai_verdict: str = ""
+    #: PDF 页坐标下的差异框 ``(x0, y0, x1, y1)``；无有效定位时为空元组。
+    #: 仅用于复核页的人眼对照，**不进入证据通道**（ADR-0010 决议 2/3）。
+    bbox: tuple[float, float, float, float] = ()
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any], *, render_id: str = "", render_digest: str = "") -> ReviewItem:
@@ -128,6 +168,11 @@ class ReviewItem:
             item_kind=str(payload.get("item_kind", payload.get("kind", "conflict"))),
             page=int(payload.get("page", 0) or 0),
             ai_verdict=str(payload.get("ai_verdict") or ""),
+            # 上游取值顺序：PaddleOCR 块优先，回落 MinerU 块（review_service.py:216）
+            bbox=normalize_bbox(
+                paddle.get("bbox") or mineru.get("bbox") or payload.get("bbox")
+            )
+            or (),
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -145,6 +190,7 @@ class ReviewItem:
             "item_kind": self.item_kind,
             "page": self.page,
             "ai_verdict": self.ai_verdict,
+            "bbox": list(self.bbox),
         }
 
 

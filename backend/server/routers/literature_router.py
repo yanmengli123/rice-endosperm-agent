@@ -694,6 +694,34 @@ async def get_review_endpoint(rid: str, current_user: User = Depends(get_require
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@literature.get("/papers/{rid}/review/page-image")
+async def get_review_page_image_endpoint(
+    rid: str,
+    page: int = Query(..., ge=1, description="1 起的 PDF 页码"),
+    require_dual: bool = Query(False, description="是否限定双通道渲染版本"),
+    current_user: User = Depends(get_required_user),
+):
+    """复核页图 + 该页差异框（对标上游整页 PNG + 红框高亮）。
+
+    与 ``GET /papers/{rid}/review`` 同口径做租户/来源校验；页图字节仍走
+    ``GET /api/literature/assets?uri=kbasset://...`` 鉴权代理，本端点只给
+    URI 与未烘焙的 bbox 列表——红框由前端叠加，避免同一页图重复渲染存储。
+    """
+    tenant_id = await _current_tenant(current_user)
+    detail = await readops.get_paper_detail(tenant_id, rid)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="文献不存在或无权访问")
+    revision_id = detail.get("source_revision_id")
+    if not revision_id:
+        raise HTTPException(status_code=409, detail="文献未关联解析版本")
+    try:
+        return await review.get_review_page_image(
+            tenant_id, revision_id, page, require_dual=require_dual
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @literature.post("/papers/{rid}/review/decide")
 async def decide_review_endpoint(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
     """四选一仲裁（A/B/C/D；幂等 upsert）。"""
