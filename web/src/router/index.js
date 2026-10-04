@@ -67,19 +67,20 @@ const router = createRouter({
           path: '',
           name: 'LiteratureComp',
           component: () => import('../views/LiteratureView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          // 文献工作台自带 4 抽屉左栏，需要占满桌面宽度：让外层聊天侧栏折叠。
+          meta: { keepAlive: true, requiresAuth: true, compactShell: true }
         },
         {
           path: 'diary',
           name: 'LiteratureDiary',
           component: () => import('../views/DiaryView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, compactShell: true }
         },
         {
           path: 'graph',
           name: 'LiteratureGraph',
           component: () => import('../views/LiteratureGraphView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, compactShell: true }
         }
       ]
     },

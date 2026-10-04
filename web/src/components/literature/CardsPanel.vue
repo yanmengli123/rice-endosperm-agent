@@ -1,16 +1,22 @@
 <template>
   <div class="cards-panel">
     <div class="card-form">
-      <select v-model="cardType" class="kind-select">
+      <select v-model="cardType" class="kind-select" :disabled="saving">
         <option value="card-qa">问答卡</option>
         <option value="card-summary">总结卡</option>
         <option value="card-note">笔记卡</option>
         <option value="card-translate">翻译卡</option>
       </select>
-      <input v-model="title" class="title-input" placeholder="卡片标题（可空）" />
+      <input
+        v-model="title"
+        class="title-input"
+        placeholder="卡片标题（可空）"
+        :disabled="saving"
+      />
     </div>
     <textarea
       v-model="content"
+      :disabled="saving"
       class="content-input"
       rows="3"
       placeholder="卡片内容（问答回写、心得…）"
@@ -18,7 +24,7 @@
     <button class="btn" :disabled="!content.trim() || saving" @click="save">
       {{ saving ? '保存中…' : editing ? '确认覆盖卡片' : '写卡片' }}
     </button>
-    <button v-if="editing" class="btn" @click="cancelEdit">取消编辑</button>
+    <button v-if="editing" class="btn" :disabled="saving" @click="cancelEdit">取消编辑</button>
     <p v-if="error" role="alert">{{ error }}</p>
 
     <ul v-if="cards.length" class="card-list">
@@ -26,7 +32,7 @@
         <div class="card-head">
           <span class="card-type">{{ card.card_type }}</span>
           <strong>{{ card.title }}</strong>
-          <button class="btn" @click="edit(card)">编辑</button>
+          <button class="btn" :disabled="saving" @click="edit(card)">编辑</button>
         </div>
         <div class="card-content">{{ card.content }}</div>
       </li>
@@ -36,7 +42,7 @@
 </template>
 
 <script>
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
 
 export default {
@@ -44,7 +50,8 @@ export default {
   props: {
     rid: { type: String, default: '' }
   },
-  setup(props) {
+  emits: ['saved', 'editing-change'],
+  setup(props, { emit }) {
     const cards = ref([])
     const cardType = ref('card-qa')
     const title = ref('')
@@ -52,7 +59,12 @@ export default {
     const saving = ref(false)
     const editing = ref(null)
     const error = ref('')
+    watch([title, content, editing, saving], () =>
+      emit('editing-change', saving.value || !!title.value || !!content.value || !!editing.value)
+    )
     const edit = (card) => {
+      if ((title.value || content.value) && !window.confirm('切换卡片会放弃未保存编辑，继续？'))
+        return
       editing.value = card
       cardType.value = card.card_type
       title.value = card.title
@@ -72,6 +84,7 @@ export default {
       cards.value = data?.cards || []
     }
     const save = async () => {
+      if (saving.value || !content.value.trim()) return
       if (
         editing.value &&
         !window.confirm('确认覆盖这张卡片？期间若有其他修改，服务端会拒绝保存。')
@@ -97,6 +110,7 @@ export default {
         content.value = ''
         title.value = ''
         editing.value = null
+        emit('saved')
         await load()
       } catch (err) {
         error.value = err?.message || '卡片保存失败'
@@ -106,6 +120,7 @@ export default {
     }
 
     onMounted(load)
+    onBeforeUnmount(() => emit('editing-change', false))
 
     return { cards, cardType, title, content, saving, save, editing, error, edit, cancelEdit }
   }

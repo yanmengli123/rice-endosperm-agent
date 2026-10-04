@@ -1,9 +1,9 @@
 <template>
-  <div class="paper-detail-mask" :class="{ embedded }" @click.self="!embedded && $emit('close')">
+  <div class="paper-detail-mask" :class="{ embedded }" @click.self="!embedded && close()">
     <div class="paper-detail">
       <div class="detail-header">
         <h3>{{ paper?.title || rid }}</h3>
-        <button class="btn close" @click="$emit('close')">关闭</button>
+        <button class="btn close" @click="close">关闭</button>
       </div>
 
       <div v-if="loading" class="detail-loading">加载中…</div>
@@ -44,7 +44,14 @@
           <button class="btn" :disabled="rendering" @click="doRender">
             {{ rendering ? '渲染入队中…' : '生成阅读视图' }}
           </button>
-          <button class="btn" :disabled="translating" @click="doTranslate">请求翻译</button>
+          <select v-model="translationKind" :disabled="translating" aria-label="请求译文类型">
+            <option value="zh">中文全文</option>
+            <option value="en_zh">双语全文</option>
+            <option value="summary">总结</option>
+          </select>
+          <button class="btn" :disabled="translating" @click="doTranslate">
+            生成所选译文 / 总结
+          </button>
           <button
             v-for="level in ['L1', 'L2', 'L3']"
             :key="level"
@@ -65,7 +72,7 @@
             :key="tab.key"
             class="tab"
             :class="{ active: currentTab === tab.key }"
-            @click="currentTab = tab.key"
+            @click="selectTab(tab.key)"
           >
             {{ tab.label }}
           </button>
@@ -73,7 +80,11 @@
 
         <ReaderTabs
           v-if="currentTab === 'reader'"
+          :reader-target="readerTarget"
           :rid="rid"
+          :paper="paper"
+          :version-token="readerVersion"
+          @editing-change="editingChanged"
           @document-saved="load"
           @open-link="$emit('open-link', $event)"
         />
@@ -81,19 +92,32 @@
           v-else-if="currentTab === 'notes'"
           :rid="rid"
           :compile-jobs="paper.compile_jobs"
+          @editing-change="editingChanged"
+          @saved="load"
+          @open-link="$emit('open-link', $event)"
         />
         <AttachmentPanel v-else-if="currentTab === 'attachments'" :rid="rid" />
-        <CardsPanel v-else-if="currentTab === 'cards'" :rid="rid" />
-        <ReviewPanel v-else-if="currentTab === 'review'" :rid="rid" />
+        <CardsPanel
+          v-else-if="currentTab === 'cards'"
+          :rid="rid"
+          @editing-change="editingChanged"
+          @saved="load"
+        />
+        <ReviewPanel
+          v-else-if="currentTab === 'review'"
+          :rid="rid"
+          :version-token="readerVersion"
+          @changed="load"
+        />
         <WorkflowPanel v-else-if="currentTab === 'workflow'" :rid="rid" />
-        <MetadataPanel v-else :rid="rid" @saved="load" />
+        <MetadataPanel v-else :rid="rid" @saved="load" @editing-change="editingChanged" />
       </template>
     </div>
   </div>
 </template>
 
 <script>
-import { ref, onUnmounted, watch } from 'vue'
+import { computed, ref, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiPost } from '@/apis/base'
 import {
@@ -127,9 +151,10 @@ export default {
   },
   props: {
     rid: { type: String, required: true },
-    embedded: { type: Boolean, default: false }
+    embedded: { type: Boolean, default: false },
+    readerTarget: { type: Object, default: null }
   },
-  emits: ['close', 'session', 'open-link'],
+  emits: ['close', 'session', 'open-link', 'editing-change'],
   setup(props, { emit }) {
     const router = useRouter()
     const sessionLoading = ref(false)
@@ -152,9 +177,58 @@ export default {
     const loading = ref(true)
     const rendering = ref(false)
     const translating = ref(false)
+    const translationKind = ref('zh')
     const compiling = ref('')
     const enriching = ref(false)
     const currentTab = ref('reader')
+    const editing = ref(false)
+    const editingChanged = (value) => {
+      editing.value = value
+      emit('editing-change', value)
+    }
+    const selectTab = (key) => {
+      if (key === currentTab.value) return
+      if (editing.value && !window.confirm('切换详情页会放弃未保存编辑，继续？')) return
+      editingChanged(false)
+      currentTab.value = key
+    }
+    watch(
+      () => props.readerTarget,
+      (target) => {
+        if (target?.rid === props.rid) selectTab('reader')
+      }
+    )
+    const close = () => {
+      if (editing.value && !window.confirm('关闭阅读器会放弃未保存编辑，继续？')) return
+      editingChanged(false)
+      emit('close')
+    }
+    const readerVersion = computed(() =>
+      JSON.stringify({
+        source: paper.value?.source_revision_id,
+        reading: paper.value?.reading_version,
+        cards: paper.value?.card_revision,
+        pointers: paper.value?.artifact_pointers,
+        render: [
+          paper.value?.render?.status,
+          paper.value?.render?.markdown_uri,
+          paper.value?.render?.render_version
+        ],
+        notes: paper.value?.compile_jobs?.map((job) => [
+          job.id,
+          job.level,
+          job.status,
+          job.note_uri
+        ]),
+        variants: paper.value?.variants?.map((item) => [item.variant_kind, item.uri]),
+        translations: paper.value?.translation_jobs?.map((job) => [
+          job.id,
+          job.variant_kind,
+          job.status,
+          job.variant_uri
+        ])
+      })
+    )
     const tabs = [
       { key: 'reader', label: '阅读' },
       { key: 'notes', label: '笔记 (L1·L2·L3)' },
@@ -212,6 +286,8 @@ export default {
         await triggerLiteratureRender(props.rid)
         await load()
         startPollingIfBusy()
+      } catch (error) {
+        alert(error?.message || '阅读渲染入队失败')
       } finally {
         rendering.value = false
       }
@@ -219,9 +295,11 @@ export default {
     const doTranslate = async () => {
       translating.value = true
       try {
-        await triggerLiteratureTranslation(props.rid)
+        await triggerLiteratureTranslation(props.rid, translationKind.value)
         await load()
         startPollingIfBusy()
+      } catch (error) {
+        alert(error?.message || '译文或总结入队失败')
       } finally {
         translating.value = false
       }
@@ -265,6 +343,7 @@ export default {
       disposed = true
       loadGeneration++
       stopPolling()
+      emit('editing-change', false)
     })
 
     return {
@@ -276,9 +355,14 @@ export default {
       loading,
       rendering,
       translating,
+      translationKind,
       compiling,
       enriching,
       currentTab,
+      selectTab,
+      close,
+      readerVersion,
+      editingChanged,
       tabs,
       doRender,
       doTranslate,

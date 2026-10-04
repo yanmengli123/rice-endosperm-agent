@@ -2,7 +2,21 @@
   <div class="diary-view">
     <div class="diary-head">
       <h2>阅读日记</h2>
-      <input v-model="month" type="month" class="month-input" @change="load" />
+      <button class="btn" :disabled="saving" @click="changeMonth(adjacentMonth(month, -1))">
+        上月
+      </button>
+      <input
+        :value="month"
+        type="month"
+        class="month-input"
+        aria-label="日记月份"
+        :disabled="saving"
+        @change="changeMonth($event.target.value)"
+      />
+      <button class="btn" :disabled="saving" @click="changeMonth(adjacentMonth(month, 1))">
+        下月
+      </button>
+      <button class="btn" :disabled="saving" @click="selectDay(today)">今天</button>
       <input
         :value="selectedDate"
         type="date"
@@ -11,17 +25,32 @@
       />
       <button class="btn" :disabled="exporting" @click="exportMonth">导出当月 Markdown</button>
     </div>
-    <div class="diary-days">
+    <div class="diary-days" aria-label="日记月历">
+      <span
+        v-for="weekday in ['一', '二', '三', '四', '五', '六', '日']"
+        :key="weekday"
+        class="weekday"
+        >{{ weekday }}</span
+      >
       <button
-        v-for="day in days"
-        :key="day"
+        v-for="(day, index) in calendar"
+        :key="index"
         class="day-chip"
-        :class="{ active: day === selectedDate }"
+        :disabled="!day || saving"
+        :aria-label="day ? `${day}${days.includes(day) ? ' 已有日记' : ''}` : '空白日期'"
+        :aria-pressed="!!day && day === selectedDate"
+        :class="{
+          active: day === selectedDate,
+          recorded: days.includes(day),
+          today: day === today
+        }"
         @click="selectDay(day)"
       >
-        {{ day }}
+        {{ day ? Number(day.slice(-2)) : ''
+        }}<span v-if="days.includes(day)" aria-hidden="true"> ·</span>
       </button>
     </div>
+    <p class="calendar-hint">带圆点的日期已有日记；点击任意日期可新建。</p>
     <textarea
       :disabled="loading || saving"
       v-model="content"
@@ -37,13 +66,15 @@
 </template>
 
 <script>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { apiGet, apiPut } from '@/apis/base'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
+import { monthDays, adjacentMonth } from '@/utils/literature_calendar'
 
 export default {
   name: 'DiaryView',
-  setup() {
+  emits: ['editing-change'],
+  setup(_props, { emit }) {
     const days = ref([])
     const now = new Date()
     const today = [
@@ -59,15 +90,34 @@ export default {
     const exporting = ref(false)
     const notice = ref('')
     const savedContent = ref('')
+    const calendar = computed(() => monthDays(month.value))
+    watch([content, savedContent, saving], () =>
+      emit('editing-change', saving.value || content.value !== savedContent.value)
+    )
     let generation = 0
+    let monthGeneration = 0
 
     const load = async () => {
+      const ticket = ++monthGeneration
       const qs = month.value ? `?month=${encodeURIComponent(month.value)}` : ''
-      const data = await apiGet(`/api/literature/diary/days${qs}`)
-      days.value = data?.days || []
+      try {
+        const data = await apiGet(`/api/literature/diary/days${qs}`)
+        if (ticket === monthGeneration) days.value = data?.days || []
+      } catch (error) {
+        if (ticket === monthGeneration) notice.value = error.message || '日记月历读取失败'
+      }
+    }
+    const changeMonth = async (value) => {
+      if (value === month.value || !monthDays(value).length) return
+      await selectDay(value === today.slice(0, 7) ? today : `${value}-01`)
     }
     const selectDay = async (day) => {
-      if (!day || saving.value) return
+      if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(day) ||
+        !monthDays(day.slice(0, 7)).includes(day) ||
+        saving.value
+      )
+        return
       if (
         content.value !== savedContent.value &&
         !window.confirm('切换日期会丢弃未保存的心得，继续？')
@@ -75,13 +125,18 @@ export default {
         return
       const ticket = ++generation
       const previousDate = selectedDate.value
-      selectedDate.value = day
       loading.value = true
       notice.value = ''
       try {
         const data = await apiGet(`/api/literature/diary/${encodeURIComponent(day)}`)
         if (ticket !== generation) return
+        selectedDate.value = day
         content.value = savedContent.value = data?.content || ''
+        if (month.value !== day.slice(0, 7)) {
+          month.value = day.slice(0, 7)
+          days.value = []
+          await load()
+        }
       } catch (error) {
         if (ticket === generation) {
           selectedDate.value = previousDate
@@ -138,10 +193,18 @@ export default {
       await load()
       await selectDay(today)
     })
-    onBeforeUnmount(() => generation++)
+    onBeforeUnmount(() => {
+      generation++
+      monthGeneration++
+      emit('editing-change', false)
+    })
 
     return {
       days,
+      today,
+      calendar,
+      changeMonth,
+      adjacentMonth,
       month,
       selectedDate,
       content,
@@ -165,6 +228,7 @@ export default {
 }
 .diary-head {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   align-items: center;
 }
@@ -177,10 +241,18 @@ export default {
   width: 140px;
 }
 .diary-days {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 6px;
-  flex-wrap: wrap;
   margin: 12px 0;
+}
+.weekday {
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+.calendar-hint {
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 .day-chip {
   border: 1px solid var(--gray-300);
@@ -189,6 +261,16 @@ export default {
   color: var(--color-text-secondary);
   padding: 2px 10px;
   cursor: pointer;
+  min-height: 36px;
+  &.today {
+    border-color: var(--main-color);
+  }
+  &.recorded {
+    font-weight: 600;
+  }
+  &:disabled {
+    cursor: default;
+  }
   &:hover {
     border-color: var(--main-color);
   }
