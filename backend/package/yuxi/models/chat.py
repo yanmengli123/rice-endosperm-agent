@@ -1,14 +1,20 @@
 from langchain_core.messages import convert_to_messages
 
-from yuxi.agents.models import load_chat_model
+from yuxi.agents.models import load_chat_model, get_runtime_chat_model_info
 from yuxi.models.providers.cache import model_cache
 from yuxi.utils import logger
 
 
 class GeneralResponse:
-    def __init__(self, content):
+    def __init__(self, content, *, usage_metadata=None, response_metadata=None):
         self.content = content
         self.is_full = False
+        self.usage_metadata = usage_metadata or {}
+        self.response_metadata = response_metadata or {}
+
+
+class ModelCallError(RuntimeError):
+    """Sanitized provider failure; raw SDK payloads must not enter public tasks."""
 
 
 class LangChainChatAdapter:
@@ -30,11 +36,14 @@ class LangChainChatAdapter:
             if stream:
                 return self._stream_response(messages)
             response = await self.model.ainvoke(messages)
-            return GeneralResponse(response.text)
+            return GeneralResponse(
+                response.text,
+                usage_metadata=getattr(response, "usage_metadata", None),
+                response_metadata=getattr(response, "response_metadata", None),
+            )
         except Exception as e:
-            err = f"Error calling model: {e}, URL: {self.base_url}, Model: {self.model_name}"
-            logger.error(err)
-            raise Exception(err)
+            logger.warning("模型供应商调用失败: model=%s error_type=%s", self.model_name, type(e).__name__)
+            raise ModelCallError(f"Error calling model: {type(e).__name__}；请检查模型配置或供应商状态") from None
 
     async def _stream_response(self, messages):
         async for chunk in self.model.astream(messages):
@@ -54,7 +63,7 @@ def select_model(model_spec: str, **kwargs) -> LangChainChatAdapter:
     if not model_spec:
         raise ValueError("model_spec 不能为空")
 
-    info = model_cache.get_model_info(model_spec)
+    info = get_runtime_chat_model_info(model_spec)
     if not info:
         available = model_cache.get_all_specs("chat")
         available_ids = [item.spec for item in available[:10]]

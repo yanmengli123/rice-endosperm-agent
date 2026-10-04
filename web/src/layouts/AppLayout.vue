@@ -38,6 +38,7 @@ import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
 import { TITLE_SOURCE_USER } from '@/utils/threadTitle'
 import { useColumnResize } from '@/composables/useColumnResize'
+import { isSidebarCompactRoute, resolveSidebarCollapsed } from '@/utils/literature_chrome'
 import { useConversationExport } from '@/composables/useConversationExport'
 
 const configStore = useConfigStore()
@@ -56,6 +57,12 @@ const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
 const showDebugModal = ref(false)
 
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
+const route = useRoute()
+// 有效折叠态 = 用户偏好 || 路由要求。文献工作台需要占满桌面宽度，用 compactShell
+// 表达这个要求；绝不回写持久化偏好，否则离开路由或刷新会把用户偏好改成折叠。
+const sidebarEffectivelyCollapsed = computed(() =>
+  resolveSidebarCollapsed(sidebarCollapsed.value, route.meta)
+)
 const conversationSearchOpen = ref(false)
 
 // 侧边栏展开态宽度：持久化值渲染前归一，防止旧版本/手工编辑的 localStorage 脏数据撑破布局
@@ -137,7 +144,6 @@ onMounted(async () => {
   }
 })
 
-const route = useRoute()
 const router = useRouter()
 
 const activeTaskCount = computed(() => activeCountRef.value || 0)
@@ -238,6 +244,8 @@ const setSidebarCollapsed = (collapsed) => {
 }
 
 const toggleSidebar = () => {
+  // 路由要求紧凑时不做切换：否则用户会以为自己展开了，实际被有效态立刻压回折叠。
+  if (isSidebarCompactRoute(route.meta)) return
   setSidebarCollapsed(!sidebarCollapsed.value)
 }
 
@@ -331,12 +339,12 @@ watch(
 <template>
   <div
     class="app-layout"
-    :class="{ 'sidebar-collapsed': sidebarCollapsed, 'sidebar-resizing': isSidebarResizing }"
+    :class="{ 'sidebar-collapsed': sidebarEffectivelyCollapsed, 'sidebar-resizing': isSidebarResizing }"
     :style="sidebarStyle"
   >
     <div class="header">
       <div class="sidebar-brand" @click.stop>
-        <router-link v-if="!sidebarCollapsed" to="/" class="brand-link">
+        <router-link v-if="!sidebarEffectivelyCollapsed" to="/" class="brand-link">
           <img :src="organizationAvatar" alt="" class="brand-avatar" />
           <span class="brand-name">{{ organizationName }}</span>
         </router-link>
@@ -351,7 +359,7 @@ watch(
           <PanelLeftOpen class="brand-expand-icon" size="20" />
         </button>
         <button
-          v-if="!sidebarCollapsed"
+          v-if="!sidebarEffectivelyCollapsed"
           type="button"
           class="sidebar-toggle"
           aria-label="折叠侧边栏"
@@ -369,7 +377,7 @@ watch(
           :active-class="primaryNavItem.action ? '' : 'active'"
           @click.stop
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="sidebarEffectivelyCollapsed ? undefined : false">
             <template #title>{{ primaryNavItem.name }}</template>
             <component
               class="icon"
@@ -388,7 +396,7 @@ watch(
           :class="{ active: conversationSearchOpen }"
           @click.stop="openConversationSearch"
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="sidebarEffectivelyCollapsed ? undefined : false">
             <template #title>搜索对话</template>
             <Search class="icon" size="18" />
           </a-tooltip>
@@ -405,7 +413,7 @@ watch(
           :active-class="item.action ? '' : 'active'"
           @click.stop
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="sidebarEffectivelyCollapsed ? undefined : false">
             <template #title>{{ item.name }}</template>
             <component
               class="icon"
@@ -418,7 +426,7 @@ watch(
       </div>
       <div class="fill">
         <ConversationNavSection
-          v-if="!sidebarCollapsed"
+          v-if="!sidebarEffectivelyCollapsed"
           class="sidebar-conversations"
           :current-chat-id="activeConversationThreadId"
           :chats-list="threads"
@@ -435,7 +443,7 @@ watch(
       <div class="foo">
         <!-- 用户信息组件 -->
         <div class="nav-item user-info" @click.stop>
-          <UserInfoComponent :show-role="!sidebarCollapsed">
+          <UserInfoComponent :show-role="!sidebarEffectivelyCollapsed">
             <template v-if="userStore.isAdmin" #actions>
               <a-tooltip placement="top" title="任务中心">
                 <button
@@ -461,7 +469,7 @@ watch(
       </div>
     </div>
     <div
-      v-if="!sidebarCollapsed"
+      v-if="!sidebarEffectivelyCollapsed"
       class="sidebar-resize-handle"
       role="separator"
       aria-orientation="vertical"

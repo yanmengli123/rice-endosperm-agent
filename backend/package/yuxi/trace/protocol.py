@@ -123,6 +123,7 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
         {"origin_source", "mcp_server", "mcp_tool", "size_bytes", "media_type", "name", "sha256"}
     ),
     "model.generation.started": frozenset({"model_spec", "credential_source"}),
+    "model.cache.hit": frozenset({"cache_hit"}),
     "model.generation.first_visible_token": frozenset({"model_spec"}),
     # 仅用于读取/兼容已写入的 v1 事件；新埋点使用 first_visible_token。
     "model.generation.first_token": frozenset({"model_spec"}),
@@ -278,6 +279,7 @@ EVENT_EMITTER_INDEX: dict[str, tuple[tuple[str, str], ...]] = {
     "run.mentions.finalized": (("services/chat_service.py", "run.mentions.finalized"),),
     "run.artifact.materialized": (("agents/mcp/artifact_materializer.py", "run.artifact.materialized"),),
     "model.generation.started": (("agents/middlewares/trace.py", "model.generation.started"),),
+    "model.cache.hit": (("agents/middlewares/literature_cache.py", "model.cache.hit"),),
     "model.generation.first_visible_token": (("services/run_worker.py", "model.generation.first_visible_token"),),
     "model.generation.completed": (("agents/middlewares/trace.py", "finish_span"),),
     "model.generation.failed": (("agents/middlewares/trace.py", "finish_span"),),

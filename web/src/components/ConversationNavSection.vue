@@ -344,7 +344,9 @@ const renameChat = async (chatId) => {
 
 .empty-list {
   margin-top: 16px;
-  color: var(--gray-500);
+  /* 原为 var(--gray-500)，在浅色页面底色上仅 2.8:1；
+     改用三级文字令牌（随主题翻转，暗色下自动达标）。 */
+  color: var(--color-text-tertiary);
   font-size: 12px;
   text-align: center;
 }
