@@ -1109,7 +1109,28 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0092_literature_review_artifacts", "_migration_0092_literature_review_artifacts"),
         ("0093_literature_fulltext_retry", "_migration_0093_literature_fulltext_retry"),
     ("0094_literature_workflow_cancel", "_migration_0094_literature_workflow_cancel"),
+    ("0095_literature_output_templates", "_migration_0095_literature_output_templates"),
     ]
+
+    async def _migration_0095_literature_output_templates(self, conn) -> None:
+        """输出模板进翻译任务身份。
+
+    模板必须进唯一键：否则同一 (paper, variant, revision, version) 改模板后会命中
+    既有任务的幂等键，用户选了新模板却拿到旧排版产物。
+
+    注意：``uq_literature_translation_jobs_key`` 在 PG 里表现为**索引**（UniqueConstraint
+    实现在关系上生成唯一索引），用 ``DROP CONSTRAINT IF EXISTS`` 删不掉，必须
+    ``DROP INDEX IF EXISTS``——否则第二次执行就报 DuplicateTableError。
+    """
+        for statement in (
+            "ALTER TABLE literature_translation_jobs ADD COLUMN IF NOT EXISTS "
+            "template VARCHAR(64) NOT NULL DEFAULT 'obsidian_bilingual'",
+            "DROP INDEX IF EXISTS uq_literature_translation_jobs_key",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_translation_jobs_key "
+            "ON literature_translation_jobs (tenant_id, paper_id, variant_kind, template, "
+            "source_revision_id, reading_version, generator_version)",
+        ):
+            await conn.execute(text(statement))
 
     async def _migration_0094_literature_workflow_cancel(self, conn) -> None:
         """文献工作流显式取消：意图 + 审计字段。

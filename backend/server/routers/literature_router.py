@@ -896,6 +896,34 @@ async def get_variant_endpoint(rid: str, variant_kind: str, current_user: User =
     return result
 
 
+@literature.get("/templates")
+async def list_output_templates(current_user: User = Depends(get_required_user)):
+    """输出模板清单（稳定身份；进配置契约，供选择器渲染）。"""
+    from yuxi.literature.templates import list_templates
+
+    return {"templates": list_templates()}
+
+
+@literature.get("/papers/{rid}/variants/{variant_kind}/templated")
+async def get_templated_variant_endpoint(
+    rid: str,
+    variant_kind: str,
+    template: str = Query(..., description="模板稳定身份，如 obsidian_bilingual"),
+    current_user: User = Depends(get_required_user),
+):
+    """按模板重排既有译文（en_zh；纯渲染，零 LLM 调用）。
+
+    只读已落盘的段落对齐结果重新排版——切换模板不消耗 token、不产生新副作用。
+    """
+    tenant_id = await _current_tenant(current_user)
+    result = await reader_bundle.get_templated_variant(tenant_id, rid, variant_kind, template)
+    if result is None:
+        raise HTTPException(
+            status_code=422, detail=f"变体 {variant_kind} 不支持模板重渲染（仅 en_zh 支持）"
+        )
+    return result
+
+
 @literature.get("/papers/{rid}/parallel")
 async def get_parallel_endpoint(rid: str, current_user: User = Depends(get_required_user)):
     """Return source and translation paragraphs aligned by stable paragraph id."""

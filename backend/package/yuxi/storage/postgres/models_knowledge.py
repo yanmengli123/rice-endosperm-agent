@@ -2287,6 +2287,7 @@ class LiteratureTranslationJob(Base):
             "tenant_id",
             "paper_id",
             "variant_kind",
+            "template",
             "source_revision_id",
             "reading_version",
             "generator_version",
@@ -2299,6 +2300,8 @@ class LiteratureTranslationJob(Base):
     tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     paper_id = Column(BigInteger, ForeignKey("literature_papers.id", ondelete="CASCADE"), nullable=False, index=True)
     variant_kind = Column(String(32), nullable=False, default="zh")
+    #: 输出模板稳定身份（en_zh 排版；进唯一键，改模板 = 新任务）
+    template = Column(String(64), nullable=False, default="obsidian_bilingual")
     source_revision_id = Column(String(64), nullable=False, default="")
     reading_version = Column(Integer, nullable=False, default=1)
     generator_version = Column(String(64), nullable=False, default="literature-translate-v1")

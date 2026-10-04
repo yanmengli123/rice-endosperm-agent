@@ -127,6 +127,15 @@
             <option value="summary">总结</option>
           </select></label
         >
+        <!-- 输出模板：切换只重排既有译文，不重新翻译（零 token） -->
+        <label v-if="variantKind === 'en_zh'" class="template-picker"
+          >输出模板<select v-model="templateKey" :disabled="productEditing || templateBusy">
+            <option v-for="spec in templateOptions" :key="spec.key" :value="spec.key">
+              {{ spec.label }}
+            </option>
+          </select></label
+        >
+        <p v-if="templateNotice" class="template-notice" role="status">{{ templateNotice }}</p>
         <ProductEditor
           :rid="rid"
           :kind="`variant_${variantKind}`"
@@ -260,7 +269,7 @@
 </template>
 
 <script>
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiGet, apiPut } from '@/apis/base'
 import LiteratureMarkdown from './LiteratureMarkdown.vue'
 import ProductEditor from './ProductEditor.vue'
@@ -732,6 +741,50 @@ export default {
     const reloadVariant = () => (variantKind.value === 'zh' ? load() : loadOtherVariant())
     watch(() => [props.rid, variantKind.value], loadOtherVariant)
 
+    // 输出模板（仅 en_zh 有意义）：切换走零成本重渲染，不重新翻译。
+    const templateOptions = ref([])
+    const templateKey = ref('obsidian_bilingual')
+    const templateBusy = ref(false)
+    const templateNotice = ref('')
+    const loadTemplates = async () => {
+      try {
+        const result = await apiGet('/api/literature/templates')
+        if (!disposed) templateOptions.value = result.templates || []
+      } catch {
+        // 模板清单不可用时保留默认项，不阻断阅读
+        if (!disposed) templateOptions.value = []
+      }
+    }
+    const applyTemplate = async (next) => {
+      const previous = templateKey.value
+      templateKey.value = previous
+      if (!next || next === previous || variantKind.value !== 'en_zh') return
+      templateBusy.value = true
+      templateNotice.value = ''
+      try {
+        const result = await apiGet(
+          `/api/literature/papers/${enc(props.rid)}/variants/en_zh/templated?template=${encodeURIComponent(next)}`
+        )
+        if (!result?.ready) {
+          templateNotice.value = result?.reason || '该模板暂不可用'
+          return
+        }
+        templateKey.value = next
+        otherVariant.value = result
+        templateNotice.value = '已按新模板重排（未重新翻译）'
+      } catch (error) {
+        templateNotice.value = `模板切换失败：${error?.message || error}`
+      } finally {
+        templateBusy.value = false
+      }
+    }
+    watch(templateKey, applyTemplate)
+    watch(
+      () => props.rid,
+      () => loadTemplates()
+    )
+    onMounted(loadTemplates)
+
     watch(current, (tab) => {
       ++noteGeneration
       if (tab === 'noteL1') loadNote('L1')
@@ -839,6 +892,14 @@ export default {
 </script>
 
 <style lang="less" scoped>
+.template-picker {
+  margin-left: 8px;
+}
+.template-notice {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #909399);
+}
 .reader-tabs {
   min-height: 320px;
 }

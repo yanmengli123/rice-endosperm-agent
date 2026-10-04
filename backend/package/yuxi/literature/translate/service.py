@@ -271,10 +271,18 @@ async def process_literature_translation(ctx: dict[str, Any], job_id: int) -> di
                 )
             ]
             if job.variant_kind == "en_zh":
-                return (
-                    f"# {paper.title or ''}\n\n"
-                    + "\n\n".join(f"{item['original']}\n\n> {item['translated']}" for item in alignment)
-                    + "\n"
+                # 双语排版交给模板注册表（纯函数、零 LLM）：切换模板只需重新排版，
+                # 不必重跑翻译链。alignment 已按 para_id 对齐，可反复重渲染。
+                from yuxi.literature.templates import render_markdown
+
+                return render_markdown(
+                    [
+                        {"type": "paragraph", "text_en": item["original"], "text_zh": item["translated"]}
+                        for item in alignment
+                    ],
+                    references=None,
+                    template=job.template or None,
+                    title=paper.title or "",
                 )
             return f"# {paper.title or ''}\n\n" + "\n\n".join(zh_paragraphs) + "\n"
 
