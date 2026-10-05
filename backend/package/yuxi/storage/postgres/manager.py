@@ -1109,8 +1109,22 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0092_literature_review_artifacts", "_migration_0092_literature_review_artifacts"),
         ("0093_literature_fulltext_retry", "_migration_0093_literature_fulltext_retry"),
     ("0094_literature_workflow_cancel", "_migration_0094_literature_workflow_cancel"),
-    ("0095_literature_output_templates", "_migration_0095_literature_output_templates"),
+        ("0095_literature_output_templates", "_migration_0095_literature_output_templates"),
+        ("0102_literature_reader_generation", "_migration_0102_literature_reader_generation"),
     ]
+
+    async def _migration_0102_literature_reader_generation(self, conn) -> None:
+        """渲染执行代次（可靠性收口）：每次调度递增。
+
+        ARQ 结果缓存、过期投递与被超时回收的旧执行不得复用当前租约——
+        过期代次的发布一律拒绝。列级 NOT NULL + 存量回填 0。
+        """
+        for statement in (
+            "ALTER TABLE literature_reader_renders ADD COLUMN IF NOT EXISTS generation INTEGER",
+            "UPDATE literature_reader_renders SET generation=0 WHERE generation IS NULL",
+            "ALTER TABLE literature_reader_renders ALTER COLUMN generation SET NOT NULL",
+        ):
+            await conn.execute(text(statement))
 
     async def _migration_0095_literature_output_templates(self, conn) -> None:
         """输出模板进翻译任务身份。

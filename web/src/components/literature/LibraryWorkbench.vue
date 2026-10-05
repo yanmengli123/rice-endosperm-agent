@@ -145,6 +145,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
+import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
 import CardsPanel from './CardsPanel.vue'
 
@@ -170,6 +171,10 @@ const trashLoaded = ref(false)
 const journalFile = ref(null)
 const journalPreview = ref(null)
 const journalStatus = ref(null)
+const journalStatusError = ref('')
+let pollGeneration = 0
+let pollController = new AbortController()
+let journalGeneration = 0
 let disposed = false
 let libraryTimer = null
 let indexTimer = null
@@ -236,10 +241,16 @@ const importJournals = () =>
   })
 // 只读状态刷新不走 perform 的 busy 门禁（导入/关联会 await 它，嵌套 perform 会自锁）
 const refreshJournalStatus = async () => {
+  if (disposed || !polling.value) return
+  const generation = ++journalGeneration
   try {
-    journalStatus.value = await literatureWorkspaceApi.journalsStatus()
-  } catch {
-    // 失败保持上次状态，不打断工作台的写操作
+    const result = await literatureWorkspaceApi.journalsStatus()
+    if (disposed || !polling.value || generation !== journalGeneration) return
+    journalStatus.value = result
+    journalStatusError.value = ''
+  } catch (error) {
+    if (!disposed && polling.value && generation === journalGeneration)
+      journalStatusError.value = error?.message || '读取期刊指标状态失败，请重试'
   }
 }
 const attachJournalMetrics = () =>
@@ -275,16 +286,26 @@ const downloadVault = () =>
   })
 const refreshIndex = async () => {
   clearTimeout(indexTimer)
-  if (disposed || !indexState.value?.index_id) return
+  if (disposed || !polling.value || !indexState.value?.index_id) return
   const id = indexState.value.index_id
+  const ticket = pollGeneration
   try {
-    const result = await apiGet('/api/literature/indexes/navigation/' + encodeURIComponent(id))
-    if (disposed || indexState.value?.index_id !== id) return
+    const result = await apiGet('/api/literature/indexes/navigation/' + encodeURIComponent(id), {
+      signal: pollController.signal
+    })
+    if (
+      disposed ||
+      !polling.value ||
+      ticket !== pollGeneration ||
+      indexState.value?.index_id !== id
+    )
+      return
     indexState.value = result
     if (!disposed && ['PENDING', 'RUNNING'].includes(indexState.value.status))
       indexTimer = setTimeout(refreshIndex, 5000)
   } catch (error) {
-    notice.value = error?.message || '读取索引状态失败'
+    if (!disposed && polling.value && ticket === pollGeneration)
+      notice.value = error?.message || '读取索引状态失败'
   }
 }
 const buildIndex = () =>
@@ -295,11 +316,14 @@ const buildIndex = () =>
   })
 const refreshLibrary = async () => {
   clearTimeout(libraryTimer)
-  if (disposed || !runId.value) return
+  if (disposed || !polling.value || !runId.value) return
   const id = runId.value
+  const ticket = pollGeneration
   try {
-    const result = await apiGet('/api/literature/library/pipeline/' + encodeURIComponent(id))
-    if (disposed || runId.value !== id) return
+    const result = await apiGet('/api/literature/library/pipeline/' + encodeURIComponent(id), {
+      signal: pollController.signal
+    })
+    if (disposed || !polling.value || ticket !== pollGeneration || runId.value !== id) return
     libraryState.value = result
     const clean = libraryState.value.steps?.clean_preview
     cleanPreview.value =
@@ -311,7 +335,8 @@ const refreshLibrary = async () => {
       libraryTimer = setTimeout(refreshLibrary, 5000)
     }
   } catch (error) {
-    notice.value = error?.message || '读取建库进度失败'
+    if (!disposed && polling.value && ticket === pollGeneration)
+      notice.value = error?.message || '读取建库进度失败'
   }
 }
 const startLibrary = () =>
@@ -357,6 +382,19 @@ const restore = (rid) =>
     trash.value = trash.value.filter((paper) => paper.rid !== rid)
     notice.value = '文献已恢复；被撤销的导航发布不会自动重激活'
   })
+const pausePolling = () => {
+  pollGeneration++
+  journalGeneration++
+  pollController.abort()
+  pollController = new AbortController()
+  clearTimeout(libraryTimer)
+  clearTimeout(indexTimer)
+}
+const polling = useLiteraturePollingScope(pausePolling, () => {
+  refreshIndex()
+  refreshLibrary()
+  refreshJournalStatus()
+})
 watch(
   () => props.resumeRun,
   async (run) => {

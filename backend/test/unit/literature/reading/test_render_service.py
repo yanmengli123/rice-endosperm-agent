@@ -7,6 +7,8 @@ PENDING → RUNNING → SUCCEEDED/FAILED 状态机、幂等入列、attempt 退�
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.literature.reading import service as service_module
 from yuxi.literature.reading.process import RenderProcessError
+from yuxi.utils.datetime_utils import utc_now
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseArtifact,
     KnowledgeParseRevision,
@@ -52,6 +55,7 @@ class _FakeQueue:
 
     async def enqueue_job(self, name, *args, _job_id=None):
         self.jobs.append((name, args, _job_id))
+        return object()
 
 
 class _FakeMinio:
@@ -163,8 +167,8 @@ async def test_enqueue_creates_pending_and_enqueues(service_env):
     assert queue.jobs == [
         (
             service_module.RENDER_JOB_NAME,
-            (REVISION_ID, "reader_render_v1"),
-            "lit-render:sir_lit_test_0001:reader_render_v1:0",
+            (REVISION_ID, "reader_render_v1", 0, 0),
+            "lit-render:sir_lit_test_0001:reader_render_v1:g0:a0",
         )
     ]
     row = await _get_row(session)
@@ -176,6 +180,126 @@ async def test_enqueue_creates_pending_and_enqueues(service_env):
 async def test_enqueue_rejects_unknown_revision(service_env):
     with pytest.raises(ValueError, match="不存在"):
         await service_module.enqueue_reader_render(revision_id="sir_missing")
+
+
+async def test_force_rerun_uses_fresh_dispatch_and_retry_budget(service_env):
+    session, queue, _ = service_env
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    old_job = queue.jobs[-1]
+    row = await _get_row(session)
+    row.status, row.attempt = "FAILED", service_module.MAX_RENDER_ATTEMPTS
+    await session.commit()
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID, force=True)
+    assert queue.jobs[-1][2] != old_job[2], "不能撞 ARQ 的终态结果缓存"
+    assert row.attempt == 0
+    assert await service_module._claim_render(*old_job[1]) is None, "旧投递不能认领新请求"
+
+
+async def test_expired_render_cannot_publish_or_fail_replacement(service_env):
+    session, queue, _ = service_env
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    old = await service_module._claim_render(*queue.jobs[-1][1])
+    old_id = old.id
+    old_attempt, old_generation = old.attempt, getattr(old, "generation", 0)
+    old.updated_at = utc_now() - timedelta(seconds=service_module.RUNNING_LEASE_SECONDS + 1)
+    await session.commit()
+    assert await service_module.reconcile_stale_literature_renders() == 1
+    current = await service_module._claim_render(*queue.jobs[-1][1])
+    assert current.attempt == old_attempt + 1, "超时必须消耗重试预算"
+    with pytest.raises(ValueError, match="租约已失效"):
+        await service_module._finish_success(
+            old_id,
+            markdown_uri="kbasset://old/render.md",
+            result={},
+            expected_attempt=old_attempt,
+            expected_generation=old_generation,
+        )
+    assert not await service_module._finish_failure(
+        REVISION_ID,
+        old_id,
+        "expired worker",
+        expected_attempt=old_attempt,
+        expected_generation=old_generation,
+    )
+    assert current.status == "RUNNING" and current.error != "expired worker"
+
+
+async def test_stale_running_recovery_has_finite_budget(service_env):
+    session, queue, _ = service_env
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    for attempt in range(service_module.MAX_RENDER_ATTEMPTS):
+        row = await service_module._claim_render(*queue.jobs[-1][1])
+        assert row.attempt == attempt
+        row.updated_at = utc_now() - timedelta(seconds=service_module.RUNNING_LEASE_SECONDS + 1)
+        await session.commit()
+        requeued = await service_module.reconcile_stale_literature_renders()
+        assert requeued == (1 if attempt + 1 < service_module.MAX_RENDER_ATTEMPTS else 0)
+    assert row.status == "FAILED" and row.attempt == service_module.MAX_RENDER_ATTEMPTS
+
+
+async def test_pending_recovery_rotates_cached_dispatch_without_charging_render_attempt(service_env, monkeypatch):
+    session, queue, _ = service_env
+    seen = set()
+    enqueue = queue.enqueue_job
+
+    async def cached(name, *args, _job_id=None):
+        if _job_id in seen:
+            return None
+        seen.add(_job_id)
+        return await enqueue(name, *args, _job_id=_job_id)
+
+    monkeypatch.setattr(queue, "enqueue_job", cached)
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    old_job = queue.jobs[-1]
+    row = await _get_row(session)
+    row.updated_at = utc_now() - timedelta(seconds=service_module.PENDING_REQUEUE_SECONDS + 1)
+    await session.commit()
+    assert await service_module.reconcile_stale_literature_renders() == 1
+    assert len(queue.jobs) == 2 and queue.jobs[-1][2] != old_job[2]
+    assert row.attempt == 0
+    assert await service_module._claim_render(*old_job[1]) is None
+
+
+async def test_queue_dedup_is_not_reported_as_successful_enqueue(service_env, monkeypatch):
+    session, queue, _ = service_env
+
+    async def deduplicated(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(queue, "enqueue_job", deduplicated)
+    result = await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    assert result["enqueue_deferred"] is True
+    row = await _get_row(session)
+    row.updated_at = utc_now() - timedelta(seconds=service_module.PENDING_REQUEUE_SECONDS + 1)
+    await session.commit()
+    assert await service_module.reconcile_stale_literature_renders() == 0
+
+
+async def test_text_only_ingest_renders_indexed_markdown_offline_without_mineru(service_env, monkeypatch):
+    session, queue, minio = service_env
+    revision = await session.get(KnowledgeParseRevision, 1)
+    revision.status = "INDEXED_TEXT_ONLY"
+    markdown = await session.get(KnowledgeParseArtifact, 101)
+    markdown.kind = "indexed_markdown"
+    await session.commit()
+    calls = []
+
+    def rendered(**kwargs):
+        from pathlib import Path
+
+        assert kwargs["mode"] == "offline" and not kwargs["extra_env"]
+        assert "OsNF-YB1" in Path(kwargs["md_path"]).read_text()
+        calls.append(kwargs)
+        return _render_result("# Starch synthesis\n\nReadable indexed source body.\n")
+
+    monkeypatch.setattr(service_module, "render_in_subprocess", rendered)
+    await service_module.enqueue_reader_render(revision_id=REVISION_ID)
+    result = await service_module.process_literature_reader_render({}, *queue.jobs[-1][1])
+    assert result["status"] == "SUCCEEDED" and len(calls) == 1
+    assert (await _get_row(session)).status == "SUCCEEDED" and minio.uploads
+    assert revision.status == "INDEXED_TEXT_ONLY" and markdown.kind == "indexed_markdown"
+    with pytest.raises(ValueError, match="mineru_markdown"):
+        await service_module._load_render_inputs(REVISION_ID, dual=True)
 
 
 async def test_enqueue_is_idempotent_while_running_or_succeeded(service_env):
@@ -207,7 +331,7 @@ async def test_render_success_uploads_and_preserves_authority_plane(service_env,
         return _render_result("# 干净阅读视图\n\nOsNF-YB1 regulates starch biosynthesis.\n")
 
     monkeypatch.setattr(service_module, "render_in_subprocess", _fake_render)
-    outcome = await service_module.process_literature_reader_render({}, REVISION_ID)
+    outcome = await service_module.process_literature_reader_render({}, *queue.jobs[-1][1])
 
     assert outcome["status"] == "SUCCEEDED"
     assert outcome["markdown_uri"].startswith(f"{MARKDOWN_URI_PREFIX}/reader_render_v1/")
@@ -240,14 +364,14 @@ async def test_render_failure_requeues_then_dead(service_env, monkeypatch):
         raise RenderProcessError("渲染子进程失败: 模拟崩溃")
 
     monkeypatch.setattr(service_module, "render_in_subprocess", _boom)
-    first = await service_module.process_literature_reader_render({}, REVISION_ID)
+    first = await service_module.process_literature_reader_render({}, *queue.jobs[-1][1])
     assert first["status"] == "REQUEUED"
     row = await _get_row(session)
     assert row.status == "PENDING" and row.attempt == 1
 
-    second = await service_module.process_literature_reader_render({}, REVISION_ID)
+    second = await service_module.process_literature_reader_render({}, *queue.jobs[-1][1])
     assert second["status"] == "REQUEUED"
-    third = await service_module.process_literature_reader_render({}, REVISION_ID)
+    third = await service_module.process_literature_reader_render({}, *queue.jobs[-1][1])
     assert third["status"] == "FAILED"
 
     row = await _get_row(session)
@@ -256,9 +380,9 @@ async def test_render_failure_requeues_then_dead(service_env, monkeypatch):
     assert "模拟崩溃" in (row.error or "")
     # 入列轨迹：初始 attempt=0 + 失败重排 attempt=1/2（第 3 次失败不再重排）
     assert [job[2] for job in queue.jobs] == [
-        "lit-render:sir_lit_test_0001:reader_render_v1:0",
-        "lit-render:sir_lit_test_0001:reader_render_v1:1",
-        "lit-render:sir_lit_test_0001:reader_render_v1:2",
+        "lit-render:sir_lit_test_0001:reader_render_v1:g0:a0",
+        "lit-render:sir_lit_test_0001:reader_render_v1:g1:a1",
+        "lit-render:sir_lit_test_0001:reader_render_v1:g2:a2",
     ]
 
 
@@ -279,7 +403,7 @@ async def test_render_rejects_blank_markdown_at_quality_gate(service_env, monkey
 
 
 async def test_modes_publish_separate_immutable_runs_and_review(service_env, monkeypatch):
-    session, _, minio = service_env
+    session, queue, minio = service_env
     monkeypatch.setenv("YUXI_PADDLE_TOKEN", "test-only-token")
     modes = []
 
@@ -291,11 +415,7 @@ async def test_modes_publish_separate_immutable_runs_and_review(service_env, mon
     outcomes = []
     for dual, force in ((False, False), (True, False), (False, True)):
         await service_module.enqueue_reader_render(revision_id=REVISION_ID, dual=dual, force=force)
-        outcomes.append(
-            await service_module.process_literature_reader_render(
-                {}, REVISION_ID, service_module.render_version_for(dual)
-            )
-        )
+        outcomes.append(await service_module.process_literature_reader_render({}, *queue.jobs[-1][1]))
     assert modes == ["offline", "dual", "offline"]
     assert all(outcome["status"] == "SUCCEEDED" for outcome in outcomes)
     assert len({outcome["markdown_uri"] for outcome in outcomes}) == 3

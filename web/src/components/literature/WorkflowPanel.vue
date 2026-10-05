@@ -38,6 +38,7 @@
 <script setup>
 import { computed, onUnmounted, ref } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
+import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
 const props = defineProps({ rid: { type: String, required: true } })
 const mode = ref('parse_compile')
 const busy = ref(false)
@@ -52,6 +53,9 @@ const cancellable = computed(
 )
 let timer = null
 let disposed = false
+// 迟到响应代次隔离：暂停/恢复与切换运行都会推进代次，旧响应一律丢弃
+let refreshGeneration = 0
+let controller = new AbortController()
 const awaitingReview = computed(
   () =>
     state.value?.status === 'RUNNING' &&
@@ -66,14 +70,22 @@ const stop = () => {
 }
 const refresh = async () => {
   stop()
-  if (disposed || !runId.value) return
+  // polling 由 useLiteraturePollingScope 驱动：KeepAlive 停用/页面隐藏时不再发请求
+  if (disposed || !polling.value || !runId.value) return
+  const id = runId.value
+  const generation = ++refreshGeneration
   try {
-    state.value = await apiGet(`/api/literature/workflow/${encodeURIComponent(runId.value)}`)
+    const result = await apiGet(`/api/literature/workflow/${encodeURIComponent(id)}`, {
+      signal: controller.signal
+    })
+    if (disposed || !polling.value || runId.value !== id || generation !== refreshGeneration) return
+    state.value = result
     // 必须包含 CANCEL_REQUESTED：取消后仍需轮询到 CANCELLED，
     // 否则用户点了取消就永远看不到收敛结果。
     if (!disposed && ['PENDING', 'RUNNING', 'CANCEL_REQUESTED'].includes(state.value.status))
       timer = setTimeout(refresh, 3000)
   } catch (err) {
+    if (disposed || !polling.value || runId.value !== id || generation !== refreshGeneration) return
     notice.value = `状态读取失败：${err?.message || err}`
   }
 }
@@ -126,9 +138,16 @@ const cancel = async () => {
     busy.value = false
   }
 }
+const pause = () => {
+  refreshGeneration++
+  controller.abort()
+  controller = new AbortController()
+  stop()
+}
+const polling = useLiteraturePollingScope(pause, refresh)
 onUnmounted(() => {
   disposed = true
-  stop()
+  pause()
 })
 </script>
 

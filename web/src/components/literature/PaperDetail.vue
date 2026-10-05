@@ -39,6 +39,15 @@
           个历史笔记任务保留记录；当前笔记需重新编译。
         </div>
 
+        <!-- 进行中任务进度条（任务中心同款阶段口径；数据来自本组件的 3s 轮询） -->
+        <div v-if="activeJobs.length" class="job-progress-strip" role="status">
+          <span v-for="job in activeJobs" :key="job.key" class="job-chip">
+            <span class="job-dot" aria-hidden="true"></span>
+            {{ job.label }}
+          </span>
+          <span class="job-note">进行中的任务会实时推进；完成后此处与任务中心同步消失</span>
+        </div>
+
         <div class="detail-actions">
           <button class="btn" :disabled="sessionLoading" @click="startSession">文献专属会话</button>
           <button class="btn" :disabled="rendering" @click="doRender">
@@ -135,6 +144,7 @@ import ReviewPanel from '@/components/literature/ReviewPanel.vue'
 import WorkflowPanel from '@/components/literature/WorkflowPanel.vue'
 import MetadataPanel from '@/components/literature/MetadataPanel.vue'
 import { useUserStore } from '@/stores/user'
+import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
 
 const POLL_INTERVAL_MS = 3000
 
@@ -241,24 +251,55 @@ export default {
     let pollTimer = null
     let loadGeneration = 0
     let disposed = false
+    let loadController = null
 
     const load = async () => {
+      if (disposed || !polling.value || !userStore.isLoggedIn || !userStore.uid) return
+      loadController?.abort()
+      const controller = new AbortController()
+      loadController = controller
       const ticket = ++loadGeneration
       try {
-        const result = await getLiteraturePaper(props.rid)
-        if (ticket !== loadGeneration || disposed) return
+        const result = await getLiteraturePaper(props.rid, controller.signal)
+        if (ticket !== loadGeneration || disposed || !polling.value || controller.signal.aborted)
+          return
         paper.value = result
         startPollingIfBusy()
       } catch (error) {
-        if (!disposed && ticket === loadGeneration) alert(error?.message || '文献读取失败')
+        if (!disposed && polling.value && !controller.signal.aborted && ticket === loadGeneration)
+          alert(error?.message || '文献读取失败')
       } finally {
-        if (ticket === loadGeneration) loading.value = false
+        if (loadController === controller) loadController = null
+        if (ticket === loadGeneration && polling.value) loading.value = false
       }
     }
+
+    // 进行中任务汇总（进度条口径与任务中心一致：阶段权重，PENDING=排队/RUNNING=执行中）
+    const activeJobs = computed(() => {
+      const out = []
+      const stageOf = (status) => (status === 'RUNNING' ? '执行中' : '排队中')
+      const render = paper.value?.render
+      if (render && ['PENDING', 'RUNNING'].includes(render.status || ''))
+        out.push({ key: 'render', label: `阅读渲染 · ${stageOf(render.status)}` })
+      for (const job of paper.value?.compile_jobs || [])
+        if (['PENDING', 'RUNNING'].includes(job.status))
+          out.push({
+            key: `compile-${job.id ?? job.level}`,
+            label: `编译 ${job.level} · ${stageOf(job.status)}`
+          })
+      for (const job of paper.value?.translation_jobs || [])
+        if (['PENDING', 'RUNNING'].includes(job.status))
+          out.push({
+            key: `translation-${job.id ?? job.variant_kind}`,
+            label: `翻译（${job.variant_kind}）· ${stageOf(job.status)}`
+          })
+      return out
+    })
 
     /** 渲染/编译任务进行中时轮询刷新（组件卸载必须清理） */
     const startPollingIfBusy = () => {
       stopPolling()
+      if (disposed || !polling.value) return
       const busy = (paper.value?.compile_jobs || []).some((job) =>
         ['PENDING', 'RUNNING'].includes(job.status)
       )
@@ -328,6 +369,43 @@ export default {
       }
     }
 
+    // 手动移入回收站：可恢复软删除（回收站恢复），原因必填进审计；
+    // 与清洗共用同一粘性回收语义（顺带修掉上一轮记录的 enrich 静默失败盲区）。
+    const trashing = ref(false)
+    const doTrash = async () => {
+      if (trashing.value) return
+      const reason = window.prompt('移入回收站的原因（必填，写入审计）：')
+      if (reason === null) return
+      if (!reason.trim()) {
+        alert('必须填写移入回收站的原因（审计要求）')
+        return
+      }
+      if (
+        !window.confirm(
+          '确认移入回收站？文献将从目录/检索/图谱隐藏，可在知识库工作台「回收站」恢复；进行中的编译/翻译会按过期输入终止。'
+        )
+      )
+        return
+      trashing.value = true
+      try {
+        await apiPost(`/api/literature/papers/${encodeURIComponent(props.rid)}/trash`, {
+          reason: reason.trim()
+        })
+        close()
+      } catch (error) {
+        alert(error?.message || '移入回收站失败')
+      } finally {
+        trashing.value = false
+      }
+    }
+
+    const suspend = () => {
+      loadGeneration++
+      loadController?.abort()
+      loadController = null
+      stopPolling()
+    }
+    const polling = useLiteraturePollingScope(suspend, load)
     watch(
       () => props.rid,
       () => {
@@ -339,10 +417,22 @@ export default {
       },
       { immediate: true }
     )
+    watch(
+      () =>
+        `${userStore.uid || ''}:${userStore.departmentId ?? ''}:${Boolean(userStore.isLoggedIn)}`,
+      () => {
+        loadGeneration++
+        loadController?.abort()
+        stopPolling()
+        paper.value = null
+        loading.value = true
+        if (userStore.isLoggedIn && userStore.uid) load()
+      },
+      { flush: 'sync' }
+    )
     onUnmounted(() => {
       disposed = true
-      loadGeneration++
-      stopPolling()
+      suspend()
       emit('editing-change', false)
     })
 
@@ -367,13 +457,55 @@ export default {
       doRender,
       doTranslate,
       doCompile,
-      doEnrich
+      doEnrich,
+      trashing,
+      doTrash,
+      activeJobs
     }
   }
 }
 </script>
 
 <style lang="less" scoped>
+.job-progress-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  margin: 6px 0;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  background: var(--color-field-bg, #f7f7f2);
+  font-size: 12px;
+}
+.job-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--main-color, #4a7dbe);
+  font-weight: 500;
+}
+.job-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--main-color, #4a7dbe);
+  animation: job-pulse 1.6s ease-in-out infinite;
+}
+@keyframes job-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.job-note {
+  color: var(--color-text-tertiary, #999);
+  font-size: 11px;
+}
 .paper-detail-mask {
   position: fixed;
   inset: 0;

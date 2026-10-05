@@ -83,10 +83,11 @@
 // PaperAgent §3.3 底部信息面板的平台化移植：事件由任务投影轮询派生，
 // token 读数来自 /api/user/usage 真实计量。独立自持（无 props），
 // 视图只需挂在网格下方。轮询失败记为系统 error 事件，不静默。
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { apiGet } from '@/apis/base'
 import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
+import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
 import {
   LITERATURE_EVENT_LIMIT,
   createLiteratureEventBuffer,
@@ -140,6 +141,7 @@ const resetBaseline = () => {
 
 let prevTasks = null
 let usageTimer = null
+let usageController = null
 
 // 任务数据改吃全局共享轮询源（useLiteratureTaskFeed）：状态栏 / 任务视图 /
 // 导入面板同一份数据同频刷新，不再各自 setInterval。
@@ -161,23 +163,49 @@ watch(
 )
 
 const pollUsage = async () => {
+  if (!polling.value || !taskFeed.ownerKey.value || usageController) return
+  const controller = new AbortController()
+  usageController = controller
   try {
-    const data = await apiGet('/api/user/usage?days=1')
+    const data = await apiGet('/api/user/usage?days=1', { signal: controller.signal })
+    if (!polling.value || controller.signal.aborted) return
     currentUsage.value = data || {}
     if (baseline.value === null) baseline.value = { ...currentUsage.value }
   } catch (error) {
-    buffer.record('error', '系统', `用量读取失败：${error?.message || error}`)
+    if (!controller.signal.aborted && polling.value)
+      buffer.record('error', '系统', `用量读取失败：${error?.message || error}`)
+  } finally {
+    if (usageController === controller) usageController = null
   }
 }
 
-onMounted(() => {
-  buffer.record('info', '系统', '信息面板已启动（事件来自共享任务轮询源，每 5 秒刷新）')
+const resumeUsage = () => {
+  if (!polling.value || !taskFeed.ownerKey.value || usageTimer) return
   pollUsage()
   usageTimer = window.setInterval(pollUsage, USAGE_POLL_MS)
-})
-
-onBeforeUnmount(() => {
+}
+const pauseUsage = () => {
   if (usageTimer) window.clearInterval(usageTimer)
+  usageTimer = null
+  usageController?.abort()
+  usageController = null
+}
+const polling = useLiteraturePollingScope(pauseUsage, resumeUsage)
+watch(
+  taskFeed.ownerKey,
+  () => {
+    pauseUsage()
+    prevTasks = null
+    buffer.clear()
+    baseline.value = currentUsage.value = null
+    resumeUsage()
+  },
+  { flush: 'sync' }
+)
+
+onMounted(() => {
+  buffer.record('info', '系统', '信息面板已启动（事件来自共享任务轮询源，每 5 秒刷新）')
+  resumeUsage()
 })
 </script>
 

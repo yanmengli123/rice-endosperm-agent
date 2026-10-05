@@ -5,7 +5,7 @@ RUNNING → SUCCEEDED/FAILED），ARQ 只是调度器；入列失败交给对账
 渲染执行经 :mod:`yuxi.literature.reading.process` 在子进程完成（不阻塞 loop）。
 
 不变量 L0-2（由 test_render_fingerprint_isolation 钉死）：渲染只读
-``mineru_markdown`` / ``original_pdf`` 工件，只写 MinIO 派生物与
+``mineru_markdown``（缺失时使用已入库 ``indexed_markdown``）/ ``original_pdf`` 工件，只写 MinIO 派生物与
 ``literature_reader_renders`` 行——不写 evidence_span、不进 Milvus、
 不改 ``parser_fingerprint``。
 """
@@ -55,8 +55,26 @@ RUNNING_LEASE_SECONDS = 60 * 30
 PENDING_REQUEUE_SECONDS = 60 * 10
 
 
-def _render_job_id(revision_id: str, attempt: int, render_version: str = READER_RENDER_VERSION) -> str:
-    return f"lit-render:{revision_id}:{render_version}:{attempt}"
+def _render_job_id(revision_id: str, attempt: int, render_version: str, generation: int) -> str:
+    return f"lit-render:{revision_id}:{render_version}:g{generation}:a{attempt}"
+
+
+async def _dispatch_render(revision_id: str, render_version: str, generation: int, attempt: int) -> bool:
+    """DB 是调度真相；Redis 拒绝/断连留待 cron 补偿，不冒充成功入列。"""
+    try:
+        queue = await get_arq_pool()
+        job = await queue.enqueue_job(
+            RENDER_JOB_NAME,
+            revision_id,
+            render_version,
+            generation,
+            attempt,
+            _job_id=_render_job_id(revision_id, attempt, render_version, generation),
+        )
+        return job is not None
+    except Exception:  # noqa: BLE001
+        logger.exception("阅读渲染已持久化，入队失败将由对账任务补偿: %s", revision_id)
+        return False
 
 
 def _resolve_render_input(uri: str) -> tuple[str, str]:
@@ -95,7 +113,9 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
     async with pg_manager.get_async_session_context() as session:
         revision = (
             await session.execute(
-                select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == revision_id)
+                select(KnowledgeParseRevision)
+                .where(KnowledgeParseRevision.revision_id == revision_id)
+                .with_for_update()
             )
         ).scalar_one_or_none()
         if revision is None:
@@ -105,6 +125,7 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
                 select(LiteratureReaderRender)
                 .where(LiteratureReaderRender.revision_id == revision_id)
                 .where(LiteratureReaderRender.render_version == render_version)
+                .with_for_update()
             )
         ).scalar_one_or_none()
         if row is not None and not force:
@@ -112,8 +133,8 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
                 return {"revision_id": revision_id, "status": "SUCCEEDED", "reused": True}
             if row.status in {"RUNNING", "PENDING"}:
                 return {"revision_id": revision_id, "status": row.status, "reused": True}
-        if row is not None and row.status == "RUNNING":
-            return {"revision_id": revision_id, "status": "RUNNING", "reused": True}
+        if row is not None and row.status in {"RUNNING", "PENDING"}:
+            return {"revision_id": revision_id, "status": row.status, "reused": True}
         if row is None:
             row = LiteratureReaderRender(
                 revision_id=revision_id,
@@ -121,6 +142,7 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
                 render_version=render_version,
                 status="PENDING",
                 attempt=0,
+                generation=0,
             )
             session.add(row)
             await session.flush()
@@ -128,35 +150,37 @@ async def enqueue_reader_render(*, revision_id: str, force: bool = False, dual: 
             row.status = "PENDING"
             row.error = None
             row.render_version = render_version
+            row.attempt = 0
+            row.generation += 1
+        row.updated_at = utc_now()
         revision_id_value = revision_id
         attempt = int(row.attempt or 0)
+        generation = row.generation
         await session.commit()
 
-    enqueue_deferred = False
-    try:
-        queue = await get_arq_pool()
-        await queue.enqueue_job(
-            RENDER_JOB_NAME,
-            revision_id_value,
-            render_version,
-            _job_id=_render_job_id(revision_id_value, attempt, render_version),
-        )
-    except Exception:  # noqa: BLE001
-        enqueue_deferred = True
-        logger.exception("阅读渲染任务已持久化，但即时入队失败，将由对账任务补偿: %s", revision_id_value)
+    enqueued = await _dispatch_render(revision_id_value, render_version, generation, attempt)
     return {
         "revision_id": revision_id_value,
         "status": "PENDING",
         "reused": False,
-        "enqueue_deferred": enqueue_deferred,
+        "enqueue_deferred": not enqueued,
     }
 
 
-async def _claim_render(revision_id: str, render_version: str | None = None) -> LiteratureReaderRender | None:
-    """PENDING → RUNNING 认领（行级守卫；重复投递由 ARQ _job_id 幂等吸收）。"""
+async def _claim_render(
+    revision_id: str,
+    render_version: str | None = None,
+    expected_generation: int | None = None,
+    expected_attempt: int | None = None,
+) -> LiteratureReaderRender | None:
+    """PENDING → RUNNING；旧无代际消息只能认领迁移后的初始代际/初次执行。"""
     async with pg_manager.get_async_session_context() as session:
         query = select(LiteratureReaderRender).where(
             LiteratureReaderRender.revision_id == revision_id, LiteratureReaderRender.status == "PENDING"
+        )
+        query = query.where(
+            LiteratureReaderRender.generation == (expected_generation if expected_generation is not None else 0),
+            LiteratureReaderRender.attempt == (expected_attempt if expected_attempt is not None else 0),
         )
         if render_version:
             query = query.where(LiteratureReaderRender.render_version == render_version)
@@ -171,8 +195,8 @@ async def _claim_render(revision_id: str, render_version: str | None = None) -> 
         return row
 
 
-async def _load_render_inputs(revision_id: str) -> tuple[KnowledgeParseRevision, dict[str, str]]:
-    """取渲染输入：revision 行 + {mineru_markdown, original_pdf} 的 object_uri。"""
+async def _load_render_inputs(revision_id: str, *, dual: bool = False) -> tuple[KnowledgeParseRevision, dict[str, str]]:
+    """单路排版可使用已入库正文；双 OCR 复核仍要求 MinerU 工件。"""
     async with pg_manager.get_async_session_context() as session:
         revision = (
             await session.execute(
@@ -186,7 +210,7 @@ async def _load_render_inputs(revision_id: str) -> tuple[KnowledgeParseRevision,
                 await session.execute(
                     select(KnowledgeParseArtifact).where(
                         KnowledgeParseArtifact.revision_id == revision_id,
-                        KnowledgeParseArtifact.kind.in_(("mineru_markdown", "original_pdf")),
+                        KnowledgeParseArtifact.kind.in_(("mineru_markdown", "indexed_markdown", "original_pdf")),
                     )
                 )
             )
@@ -194,9 +218,11 @@ async def _load_render_inputs(revision_id: str) -> tuple[KnowledgeParseRevision,
             .all()
         )
     by_kind = {artifact.kind: artifact.object_uri for artifact in artifacts}
-    missing = [kind for kind in ("mineru_markdown", "original_pdf") if kind not in by_kind]
+    markdown_kind = "mineru_markdown" if dual or "mineru_markdown" in by_kind else "indexed_markdown"
+    missing = [kind for kind in (markdown_kind, "original_pdf") if kind not in by_kind]
     if missing:
         raise ValueError(f"解析版本缺少渲染输入工件 {missing}: {revision_id}")
+    by_kind["reading_markdown"] = by_kind[markdown_kind]
     return revision, by_kind
 
 
@@ -207,6 +233,7 @@ async def _finish_success(
     result: dict[str, Any],
     document_content: bytes | None = None,
     expected_attempt: int | None = None,
+    expected_generation: int | None = None,
 ) -> None:
     async with pg_manager.get_async_session_context() as session:
         row = (
@@ -214,7 +241,11 @@ async def _finish_success(
                 select(LiteratureReaderRender).where(LiteratureReaderRender.id == row_id).with_for_update()
             )
         ).scalar_one()
-        if expected_attempt is not None and (row.status != "RUNNING" or row.attempt != expected_attempt):
+        if (
+            row.status != "RUNNING"
+            or row.attempt != (expected_attempt if expected_attempt is not None else 0)
+            or row.generation != (expected_generation if expected_generation is not None else 0)
+        ):
             raise ValueError("阅读渲染租约已失效；未切换正文")
         await session.execute(
             update(LiteratureReaderRender)
@@ -277,7 +308,14 @@ async def _finish_success(
         await session.commit()
 
 
-async def _finish_failure(revision_id: str, row_id: int, reason: str, *, expected_attempt: int | None = None) -> bool:
+async def _finish_failure(
+    revision_id: str,
+    row_id: int,
+    reason: str,
+    *,
+    expected_attempt: int | None = None,
+    expected_generation: int | None = None,
+) -> bool:
     """失败处置：attempt 内回 PENDING 并重排，超限置 FAILED。返回是否已重排。"""
     async with pg_manager.get_async_session_context() as session:
         row = (
@@ -287,9 +325,14 @@ async def _finish_failure(revision_id: str, row_id: int, reason: str, *, expecte
         ).scalar_one_or_none()
         if row is None:
             return False
-        if expected_attempt is not None and (row.status != "RUNNING" or row.attempt != expected_attempt):
+        if (
+            row.status != "RUNNING"
+            or row.attempt != (expected_attempt if expected_attempt is not None else 0)
+            or row.generation != (expected_generation if expected_generation is not None else 0)
+        ):
             return False
         row.attempt = int(row.attempt or 0) + 1
+        row.generation += 1
         row.error = reason[:2000]
         row.updated_at = utc_now()
         requeued = False
@@ -300,36 +343,34 @@ async def _finish_failure(revision_id: str, row_id: int, reason: str, *, expecte
             row.status = "FAILED"
         attempt = row.attempt
         render_version = row.render_version
+        generation = row.generation
         await session.commit()
     if requeued:
-        try:
-            queue = await get_arq_pool()
-            await queue.enqueue_job(
-                RENDER_JOB_NAME,
-                revision_id,
-                render_version,
-                _job_id=_render_job_id(revision_id, attempt, render_version),
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("阅读渲染失败重排入队失败，将由对账任务补偿: %s", revision_id)
+        await _dispatch_render(revision_id, render_version, generation, attempt)
     return requeued
 
 
 async def process_literature_reader_render(
-    ctx: dict[str, Any], revision_id: str, render_version: str | None = None
+    ctx: dict[str, Any],
+    revision_id: str,
+    render_version: str | None = None,
+    expected_generation: int | None = None,
+    expected_attempt: int | None = None,
 ) -> dict[str, Any] | None:
     """ARQ 任务：渲染一个解析版本的阅读视图（子进程执行，见决议 7）。"""
-    row = await _claim_render(revision_id, render_version)
+    row = await _claim_render(revision_id, render_version, expected_generation, expected_attempt)
     if row is None:
         return None
     claim_attempt = int(row.attempt or 0)
+    claim_generation = row.generation
     try:
-        revision, inputs = await _load_render_inputs(revision_id)
+        dual_mode = row.render_version == READER_RENDER_DUAL_VERSION
+        revision, inputs = await _load_render_inputs(revision_id, dual=dual_mode)
         minio = get_minio_client()
         # ParserArtifact.object_uri stores a full MinIO URL, not a bare object name
         # (same shape scientific_pdf_ingest_service parses). Resolve it through the
         # URL contract before touching MinIO, otherwise every render 404s.
-        markdown_bucket, markdown_object = _resolve_render_input(inputs["mineru_markdown"])
+        markdown_bucket, markdown_object = _resolve_render_input(inputs["reading_markdown"])
         pdf_bucket, pdf_object = _resolve_render_input(inputs["original_pdf"])
         markdown_bytes = await minio.adownload_file(markdown_bucket, markdown_object)
         pdf_bytes = await minio.adownload_file(pdf_bucket, pdf_object)
@@ -348,7 +389,6 @@ async def process_literature_reader_render(
             pdf_path.write_bytes(pdf_bytes)
             md_path = tmp_dir / "full.md"
             md_path.write_bytes(markdown_bytes)
-            dual_mode = row.render_version == READER_RENDER_DUAL_VERSION
             extra_env = {}
             if dual_mode:
                 paddle_token = os.getenv("YUXI_PADDLE_TOKEN", "").strip()
@@ -410,13 +450,20 @@ async def process_literature_reader_render(
             result=result,
             document_content=document_content,
             expected_attempt=claim_attempt,
+            expected_generation=claim_generation,
         )
         logger.info("阅读渲染完成: revision=%s uri=%s", revision_id, markdown_uri)
         return {"revision_id": revision_id, "status": "SUCCEEDED", "markdown_uri": markdown_uri}
     except Exception as exc:  # noqa: BLE001
         reason = f"{type(exc).__name__}: {exc}"
         logger.exception("阅读渲染失败: revision=%s", revision_id)
-        requeued = await _finish_failure(revision_id, row.id, reason, expected_attempt=claim_attempt)
+        requeued = await _finish_failure(
+            revision_id,
+            row.id,
+            reason,
+            expected_attempt=claim_attempt,
+            expected_generation=claim_generation,
+        )
         return {"revision_id": revision_id, "status": "REQUEUED" if requeued else "FAILED", "error": reason}
 
 
@@ -456,22 +503,20 @@ async def reconcile_stale_literature_renders(ctx: dict | None = None) -> int:
         )
         targets = []
         for row in (*stale_running, *stale_pending):
-            row.status = "PENDING"
+            if row.status == "RUNNING":
+                row.attempt += 1
+                row.error = "阅读渲染租约超时"
+            row.generation += 1
             row.updated_at = now
-            targets.append((row.revision_id, int(row.attempt or 0), row.render_version))
+            if row.attempt >= MAX_RENDER_ATTEMPTS:
+                row.status = "FAILED"
+                continue
+            row.status = "PENDING"
+            targets.append((row.revision_id, row.render_version, row.generation, row.attempt))
         await session.commit()
-    for revision_id, attempt, render_version in targets:
-        try:
-            queue = await get_arq_pool()
-            await queue.enqueue_job(
-                RENDER_JOB_NAME,
-                revision_id,
-                render_version,
-                _job_id=_render_job_id(revision_id, attempt, render_version),
-            )
+    for revision_id, render_version, generation, attempt in targets:
+        if await _dispatch_render(revision_id, render_version, generation, attempt):
             requeued += 1
-        except Exception:  # noqa: BLE001
-            logger.exception("对账重排入队失败（下一轮重试）: %s", revision_id)
     if targets:
         logger.info("阅读渲染对账：回收 %d 个滞留任务", len(targets))
     return requeued

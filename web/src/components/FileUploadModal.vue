@@ -1040,7 +1040,7 @@ const buildAutoIndexParams = () => {
 }
 
 const withEvidencePipelineParams = (params) => {
-  if (props.formatTemplate !== 'pdf_literature') return params
+  if (!isPdfEvidenceLibrary.value) return params
   return {
     ...params,
     pdf_evidence_pipeline: true,
@@ -1054,7 +1054,10 @@ const withEvidencePipelineParams = (params) => {
       overlap_token_num: 64,
       include_references: false
     },
-    auto_index: true
+    // 「取消自动入库」显式提交 parse_only：不再硬编码 auto_index=true，
+    // 与 /literature 导入面板的仅解析语义统一（同一服务端口径）。
+    scientific_processing_mode: autoIndex.value ? 'activate' : 'parse_only',
+    auto_index: autoIndex.value
   }
 }
 

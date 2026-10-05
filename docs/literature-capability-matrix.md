@@ -247,3 +247,27 @@ Docker 分块验收：文献域 + HTTP + 原生工具 **333 passed**（包含指
   attempt 渲染，API 契约实测（REJECTED→is_failure/不可重试，INDEXED_FULL+登记→
   终局入库完成）。导入面板就地芯片需真实 PDF 导入验收（不代用户消耗 MinerU
   配额）。SSE 流式按方案后置未做；ARQ 重试预算/死信仍是登记债务。
+
+## 可靠性收口一批：渲染执行代次、仅解析语义统一与轮询生命周期（2026-10-05）
+
+独立验证并落库另一工作流的三个收口（448 passed 全量回归下逐项核实）：
+
+- **渲染执行代次（0102）**：`literature_reader_renders.generation` 每次调度递增；
+  ARQ 结果缓存、过期投递与被超时回收的旧执行不得复用当前租约——过期代次
+  发布一律拒绝；强制重跑重新计算重试预算，超时恢复有次数上限；队列去重
+  返回 None 不再计入"已重排"。迁移已在真实 PG 执行（generation NOT NULL、
+  存量回填 0）。**翻译侧 generation（0101）与翻译工作区批次（0099 的
+  config_digest/options_json）数据层强耦合，不拆提交**，留整批收口。
+- **仅解析语义统一**：扩展页上传 `withEvidencePipelineParams` 原硬编码
+  `auto_index:true`（取消自动入库仍走 activate 的病灶），改为显式提交
+  `scientific_processing_mode: autoIndex?activate:parse_only`，判据以
+  pdf_evidence 契约为权威；与 /literature 导入面板同一服务端口径。
+- **轮询生命周期**：新增 `useLiteraturePollingScope`（onActivated/onDeactivated
+  + visibilitychange 双门控驱动 pause/resume）；共享任务源升级 AbortController
+  请求代次隔离与账号切换 ownerKey 栅栏；状态栏用量、PaperDetail 任务进度、
+  WorkflowPanel 运行态、LibraryWorkbench 建库/期刊指标四组独立轮询全部接入，
+  KeepAlive 停用即停、回前台即恢复，迟到响应按代次丢弃。
+- 验证：reading+ingest 44 passed、文献域+路由 448 passed；两个生命周期/导入
+  spec 裸 node 通过（含 KeepAlive/owner/迟到栅栏/双入口模式）；暂存树整体
+  生产构建通过、混合文件暂存版逐个 eslint 干净；真实 PG 列核对。OCR 引擎
+  默认、检索缓存统计、复核策略等相邻功能属其他批次，未混入本提交。
