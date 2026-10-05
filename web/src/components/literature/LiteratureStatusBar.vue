@@ -83,10 +83,10 @@
 // PaperAgent §3.3 底部信息面板的平台化移植：事件由任务投影轮询派生，
 // token 读数来自 /api/user/usage 真实计量。独立自持（无 props），
 // 视图只需挂在网格下方。轮询失败记为系统 error 事件，不静默。
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { apiGet } from '@/apis/base'
-import { listLiteratureTasks } from '@/apis/literature_api'
+import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
 import {
   LITERATURE_EVENT_LIMIT,
   createLiteratureEventBuffer,
@@ -95,7 +95,6 @@ import {
   usageStats
 } from '@/composables/useLiteratureEvents'
 
-const TASK_POLL_MS = 5000
 const USAGE_POLL_MS = 30000
 
 // 存储必须用 reactive 数组：record 直接改数组，ref(裸数组) 拿不到变更触发
@@ -140,48 +139,44 @@ const resetBaseline = () => {
 }
 
 let prevTasks = null
-let taskTimer = null
 let usageTimer = null
-let generation = 0
 
-const pollTasks = async () => {
-  const run = generation
-  try {
-    const data = await listLiteratureTasks(60)
-    if (run !== generation) return
-    const tasks = data?.tasks || []
+// 任务数据改吃全局共享轮询源（useLiteratureTaskFeed）：状态栏 / 任务视图 /
+// 导入面板同一份数据同频刷新，不再各自 setInterval。
+const taskFeed = useLiteratureTaskFeed()
+
+watch(
+  () => taskFeed.tasks.value,
+  (tasks) => {
     diffTasksToEvents(prevTasks, tasks, buffer.record.bind(buffer))
     prevTasks = tasks
-  } catch (error) {
-    if (run !== generation) return
-    buffer.record('error', '系统', `任务投影轮询失败：${error?.message || error}`)
+  },
+  { deep: false }
+)
+watch(
+  () => taskFeed.feedError.value,
+  (message) => {
+    if (message) buffer.record('error', '系统', `任务投影轮询失败：${message}`)
   }
-}
+)
 
 const pollUsage = async () => {
-  const run = generation
   try {
     const data = await apiGet('/api/user/usage?days=1')
-    if (run !== generation) return
     currentUsage.value = data || {}
     if (baseline.value === null) baseline.value = { ...currentUsage.value }
   } catch (error) {
-    if (run !== generation) return
     buffer.record('error', '系统', `用量读取失败：${error?.message || error}`)
   }
 }
 
 onMounted(() => {
-  buffer.record('info', '系统', '信息面板已启动（事件来自文献任务投影，每 5 秒刷新）')
-  pollTasks()
+  buffer.record('info', '系统', '信息面板已启动（事件来自共享任务轮询源，每 5 秒刷新）')
   pollUsage()
-  taskTimer = window.setInterval(pollTasks, TASK_POLL_MS)
   usageTimer = window.setInterval(pollUsage, USAGE_POLL_MS)
 })
 
 onBeforeUnmount(() => {
-  generation += 1
-  if (taskTimer) window.clearInterval(taskTimer)
   if (usageTimer) window.clearInterval(usageTimer)
 })
 </script>

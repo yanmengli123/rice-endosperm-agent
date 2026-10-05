@@ -12,10 +12,18 @@ export const TASK_TYPE_LABELS = {
   ingest: '入库'
 }
 
-// 与后端任务终态口径一致：失败类终态标红（REJECTED=质量门禁拒绝，同样不可读）
-const BAD_STATUSES = new Set(['FAILED', 'DEAD', 'REJECTED'])
-// 摄入管线的活跃中间态：首次快照只静默登记，后续阶段跃迁才产生进度事件
-const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING', 'WAITING_CACHE', 'BUILDING', 'INDEXING'])
+// 状态语义以后端投影下发的 is_active / is_failure 布尔位为**权威**
+// （后端新增状态时前端零改动即正确）；下列集合仅作旧载荷（无布尔位）的兼容兜底。
+const BAD_FALLBACK = new Set(['FAILED', 'DEAD', 'REJECTED'])
+const ACTIVE_FALLBACK = new Set(['PENDING', 'RUNNING', 'WAITING_CACHE', 'BUILDING', 'INDEXING'])
+
+function isActiveTask(task) {
+  return typeof task.is_active === 'boolean' ? task.is_active : ACTIVE_FALLBACK.has(task.status)
+}
+
+function isFailureTask(task) {
+  return typeof task.is_failure === 'boolean' ? task.is_failure : BAD_FALLBACK.has(task.status)
+}
 
 export function createLiteratureEventBuffer(limit = LITERATURE_EVENT_LIMIT, storage = []) {
   const events = storage
@@ -72,15 +80,23 @@ export function diffTasksToEvents(prevTasks, nextTasks, record, ts = Date.now())
     const label = `${TASK_TYPE_LABELS[task.type] || task.type} ${shortRef(task.ref)}`
     const before = prev.get(taskKey(task))
     if (!before) {
-      if (task.status && !ACTIVE_STATUSES.has(task.status)) {
-        record(BAD_STATUSES.has(task.status) ? 'error' : 'info', '任务', `${label} → ${task.status}`, ts)
+      if (task.status && !isActiveTask(task)) {
+        // 首见失败也带原因摘要（面板中途打开时同样要能回答"为什么失败"）
+        const detail =
+          task.error && isFailureTask(task) ? `：${String(task.error).slice(0, 160)}` : ''
+        record(
+          isFailureTask(task) ? 'error' : 'info',
+          '任务',
+          `${label} → ${task.status}${detail}`,
+          ts
+        )
       }
       continue
     }
     if (before.status !== task.status || before.attempt !== task.attempt) {
-      const level = BAD_STATUSES.has(task.status) ? 'error' : 'info'
+      const level = isFailureTask(task) ? 'error' : 'info'
       const detail =
-        task.error && BAD_STATUSES.has(task.status) ? `：${String(task.error).slice(0, 160)}` : ''
+        task.error && isFailureTask(task) ? `：${String(task.error).slice(0, 160)}` : ''
       record(level, '任务', `${label} ${before.status}→${task.status}${detail}`, ts)
     }
   }

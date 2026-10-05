@@ -91,6 +91,20 @@
     <ol v-if="results.length">
       <li v-for="(result, index) in results" :key="index">
         {{ result.name }}：{{ result.message }}
+        <!-- 提交即回执：带单号的文件就地显示实时阶段（数据来自共享任务轮询源，不建第二真相） -->
+        <template v-if="result.ticket">
+          <span
+            class="ticket-chip"
+            :class="{
+              'ticket-failure': ticketTask(result.ticket)?.is_failure,
+              'ticket-done':
+                ticketTask(result.ticket)?.is_terminal && !ticketTask(result.ticket)?.is_failure
+            }"
+          >
+            {{ ticketTask(result.ticket)?.stage || '已提交，等待排队快照…' }}
+          </span>
+          <button class="btn" type="button" @click="emit('track', result.ticket)">跟踪</button>
+        </template>
       </li>
     </ol>
   </section>
@@ -98,14 +112,19 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
+import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
 import { databaseApi, documentApi, fileApi } from '@/apis/knowledge_api'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
 import { apiGet, apiPost } from '@/apis/base'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import HistoryPanel from '@/components/literature/HistoryPanel.vue'
 import { useUserStore } from '@/stores/user'
-const emit = defineEmits(['imported'])
+const emit = defineEmits(['imported', 'track'])
 const userStore = useUserStore()
+// 就地进度吃全局共享轮询源（与状态栏/任务视图同源同频）
+const taskFeed = useLiteratureTaskFeed()
+const ticketTask = (ticket) =>
+  taskFeed.tasks.value.find((task) => task.type === 'ingest' && task.ref === ticket)
 const tabs = { pdf: 'PDF 契约处理', markdown: 'Markdown 直导', bib: 'BibTeX 目录' }
 const mode = ref('pdf')
 const busy = ref(false)
@@ -190,12 +209,15 @@ const importPdf = (event) => {
         const ticketText = ticket ? `（单号 ${String(ticket).slice(0, 16)}…）` : ''
         results.value.push({
           name: file.name,
+          ticket: failed ? null : ticket || null,
           message: failed
             ? failed.error || '处理接收失败'
-            : `已提交处理${ticketText}，进度见工作台「任务与历史 → 入库中」`
+            : `已提交处理${ticketText}，下方实时显示阶段；也可在工作台「任务与历史 → 入库中」查看`
         })
+        // 立即拉一次共享任务源，让就地芯片尽快从"等待快照"变为真实阶段
+        if (ticket && !failed) taskFeed.refresh()
       } catch (error) {
-        results.value.push({ name: file.name, message: error.message || '提交失败' })
+        results.value.push({ name: file.name, ticket: null, message: error.message || '提交失败' })
       }
     }
     notice.value =
@@ -247,6 +269,24 @@ onMounted(() => {
 .import-panel {
   max-width: 960px;
   line-height: 1.7;
+}
+/* 提交即回执：就地阶段芯片（失败描红、完成置绿、进行中主色） */
+.ticket-chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid var(--main-color, #2f6b4f);
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--main-color, #2f6b4f);
+}
+.ticket-chip.ticket-failure {
+  border-color: var(--color-error-700, #d03029);
+  color: var(--color-error-700, #d03029);
+}
+.ticket-chip.ticket-done {
+  border-color: #3a8f5f;
+  color: #2f7a4f;
 }
 .import-tabs {
   display: flex;

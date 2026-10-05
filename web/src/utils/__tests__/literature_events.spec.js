@@ -42,12 +42,45 @@ assert.ok(log[1].message.includes('ModelCallError'))
 
 // 首次快照：只记录非初始态
 log.length = 0
-diffTasksToEvents(null, [
-  { type: 'compile', ref: 'x', status: 'PENDING', attempt: 0 },
-  { type: 'compile', ref: 'y', status: 'SUCCEEDED', attempt: 1 }
-], record)
+diffTasksToEvents(
+  null,
+  [
+    { type: 'compile', ref: 'x', status: 'PENDING', attempt: 0 },
+    { type: 'compile', ref: 'y', status: 'SUCCEEDED', attempt: 1 }
+  ],
+  record
+)
 assert.equal(log.length, 1)
 assert.ok(log[0].message.includes('y'))
+
+// ── 权威状态位优先：后端 is_active/is_failure 布尔位定义语义（前端零状态推断） ──
+log.length = 0
+diffTasksToEvents(
+  null,
+  [
+    // 后端新增的中间态：即使不在任何前端兜底集合里，is_active=true 仍静默首见
+    { type: 'ingest', ref: 'spr_flags', status: 'SOME_NEW_STAGE', is_active: true, attempt: 0 },
+    // 布尔位判失败：状态字符串看着无害也要标红
+    { type: 'ingest', ref: 'spr_f2', status: 'WEIRD_OK_LOOKING', is_failure: true, error: 'boom' },
+    // 布尔位判终局非失败：info 事件
+    { type: 'ingest', ref: 'spr_f3', status: 'ALSO_NEW', is_terminal: true, is_active: false }
+  ],
+  record
+)
+assert.equal(log.length, 2, 'is_active 首见静默；is_failure/is_terminal 首见即记')
+assert.equal(log[0].level, 'error', 'is_failure=true 标红（不看状态字符串）')
+assert.ok(log[0].message.includes('boom'))
+assert.equal(log[1].level, 'info', '终局非失败为 info')
+
+// 无布尔位的旧载荷仍走兜底集合（兼容）
+log.length = 0
+diffTasksToEvents(
+  null,
+  [{ type: 'translation', ref: 'old', status: 'FAILED', attempt: 0 }],
+  record
+)
+assert.equal(log.length, 1)
+assert.equal(log[0].level, 'error', '旧载荷 FAILED 兜底标红')
 
 // ── 用量读数 ──
 const stats = usageStats(

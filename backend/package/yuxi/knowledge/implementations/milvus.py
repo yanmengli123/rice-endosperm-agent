@@ -322,24 +322,45 @@ class MilvusKB(KnowledgeBase):
         logger.info("MilvusKB initialized")
 
     def _init_connection(self):
-        """初始化 Milvus 连接"""
-        try:
-            # 连接到 Milvus
-            connections.connect(alias=self.connection_alias, uri=self.milvus_uri, token=self.milvus_token)
+        """初始化 Milvus 连接（启动期有界退避重试）。
 
-            # 创建数据库（如果不存在）
+        compose 已等 milvus 的 9091 healthz，但 healthz 通过 ≠ gRPC 19530
+        Proxy 就绪（Docker Desktop 重启后常见竞态）；此处硬失败会让 uvicorn
+        直接 ``Application startup failed`` 退出，只能靠 restart 策略反复拉起、
+        日志噪音大且恢复慢。改为有界退避重试（默认 12 次 × 5s ≈ 1 分钟），
+        重试耗尽仍失败才上抛——与 compose 依赖互补，双层兜底。
+        """
+        attempts = max(1, int(os.getenv("MILVUS_CONNECT_RETRIES", "12")))
+        delay = max(0.5, float(os.getenv("MILVUS_CONNECT_RETRY_DELAY", "5")))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
             try:
-                if self.milvus_db not in db.list_database(using=self.connection_alias):
-                    db.create_database(self.milvus_db, using=self.connection_alias)
-                db.using_database(self.milvus_db, using=self.connection_alias)
+                connections.connect(
+                    alias=self.connection_alias, uri=self.milvus_uri, token=self.milvus_token
+                )
+
+                # 创建数据库（如果不存在）
+                try:
+                    if self.milvus_db not in db.list_database(using=self.connection_alias):
+                        db.create_database(self.milvus_db, using=self.connection_alias)
+                    db.using_database(self.milvus_db, using=self.connection_alias)
+                except Exception as e:
+                    logger.warning(f"Database operation failed, using default: {e}")
+
+                logger.info(f"Connected to Milvus at {self.milvus_uri}")
+                return
+
             except Exception as e:
-                logger.warning(f"Database operation failed, using default: {e}")
+                last_error = e
+                if attempt < attempts:
+                    logger.warning(
+                        f"Milvus 未就绪（第 {attempt}/{attempts} 次，{delay:.0f}s 后重试）: {e}"
+                    )
+                    time.sleep(delay)
 
-            logger.info(f"Connected to Milvus at {self.milvus_uri}")
-
-        except Exception as e:
-            logger.error(f"Failed to connect to Milvus: {e}")
-            raise
+        logger.error(f"Failed to connect to Milvus after {attempts} attempts: {last_error}")
+        assert last_error is not None
+        raise last_error
 
     async def _create_kb_instance(self, kb_id: str, kb_config: dict) -> Any:
         """创建 Milvus 集合"""

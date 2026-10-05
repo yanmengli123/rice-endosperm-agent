@@ -168,7 +168,7 @@
           @session="openSession"
           @editing-change="setEditing('global-cards', $event)"
         />
-        <ImportPanel v-if="viewMode === 'import'" @imported="load" />
+        <ImportPanel v-if="viewMode === 'import'" @imported="load" @track="trackTicket" />
         <DiaryView v-if="viewMode === 'diary'" @editing-change="setEditing('diary', $event)" />
         <LiteratureGraphView v-if="viewMode === 'graph'" @open-paper="openPaper" />
         <section v-if="viewMode === 'settings'" class="workspace-settings">
@@ -276,7 +276,8 @@
         </div>
 
         <div v-if="viewMode === 'tasks'" class="concepts-panel">
-          <button class="btn" @click="loadTasks">刷新任务与运行历史</button>
+          <button class="btn" @click="onRefreshTasks">刷新任务与运行历史</button>
+          <p v-if="tasksNotice" class="task-notice" role="status">{{ tasksNotice }}</p>
           <h3>我的持久运行历史</h3>
           <ul class="concept-list">
             <li v-for="run in runs" :key="run.id" class="concept-card">
@@ -302,6 +303,10 @@
               v-for="task in ingestTasks"
               :key="`ingest-${task.ref}`"
               class="concept-card"
+              :class="{
+                'task-highlight': highlightRef && task.ref === highlightRef,
+                'task-failure': task.is_failure
+              }"
             >
               <div class="concept-head">
                 <strong>{{ task.detail || task.ref }}</strong>
@@ -309,12 +314,20 @@
               </div>
               <div class="concept-meta">
                 单号 {{ task.ref }} · 提交于 {{ task.created_at || '—' }}
+                <template v-if="task.attempt > 0">· 已尝试 {{ task.attempt + 1 }} 次</template>
                 <template v-if="task.processing_mode === 'parse_only'"
                   >· 仅解析（终点为草稿）</template
                 >
                 <template v-if="task.paper_rid">· 已登记文献</template>
               </div>
               <div v-if="task.error" class="task-error">{{ task.error }}</div>
+              <!-- 失败分类给下一步动作：REJECTED 不可重试（说明原因）；FAILED 可重导（sha 复用同一单号） -->
+              <p v-if="task.status === 'REJECTED'" class="task-hint">
+                质量门禁拒绝：不可重试，请检查文件内容（空白 / 乱码 / 非论文 PDF）。
+              </p>
+              <p v-else-if="task.status === 'FAILED'" class="task-hint">
+                供应商解析失败：可重新导入同一文件（内容指纹复用，不产生重复任务）。
+              </p>
               <button
                 v-if="task.paper_rid"
                 class="btn"
@@ -331,11 +344,13 @@
               v-for="task in domainTasks"
               :key="`${task.type}-${task.ref}`"
               class="concept-card"
+              :class="{ 'task-failure': task.is_failure }"
             >
               <div class="concept-head">
                 <strong>{{ task.type }} · {{ task.ref }}</strong>
-                <span class="concept-count">{{ task.status }}</span>
+                <span class="concept-count">{{ task.stage || task.status }}</span>
               </div>
+              <div v-if="task.attempt > 0" class="concept-meta">已尝试 {{ task.attempt + 1 }} 次</div>
               <div v-if="task.error" class="task-error">{{ task.error }}</div>
             </li>
           </ul>
@@ -506,11 +521,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { BookOpen, List, Network, FileText, Settings, Expand, PanelLeft, Eye } from '@lucide/vue'
 import { useRoute, onBeforeRouteLeave } from 'vue-router'
 import { apiGet, apiPost } from '@/apis/base'
-import {
-  listLiteraturePapers,
-  listLiteratureTasks,
-  literatureWorkspaceApi
-} from '@/apis/literature_api'
+import { listLiteraturePapers, literatureWorkspaceApi } from '@/apis/literature_api'
 import PaperDetail from '@/components/literature/PaperDetail.vue'
 import LibraryWorkbench from '@/components/literature/LibraryWorkbench.vue'
 import LiteratureStatusBar from '@/components/literature/LiteratureStatusBar.vue'
@@ -518,6 +529,7 @@ import ImportPanel from '@/components/literature/ImportPanel.vue'
 import LiteratureSessions from '@/components/literature/LiteratureSessions.vue'
 import { useColumnResize } from '@/composables/useColumnResize'
 import { useLiteratureSessions } from '@/composables/useLiteratureSessions'
+import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
 import {
   LIT_SIDEBAR_WIDTH_DEFAULT,
   LIT_SIDEBAR_WIDTH_MAX,
@@ -866,7 +878,10 @@ export default {
         alert(error?.message || '报告读取失败')
       }
     }
-    const literatureTasks = ref([])
+    // 任务数据来自共享轮询源（状态栏/导入面板同源），任务视图常驻实时
+    const taskFeed = useLiteratureTaskFeed()
+    const literatureTasks = computed(() => taskFeed.tasks.value)
+    const tasksNotice = ref('')
     // 入库段（type=ingest，来自知识域摄入投影）单列一节；其余为文献域任务
     const ingestTasks = computed(() => literatureTasks.value.filter((t) => t?.type === 'ingest'))
     const domainTasks = computed(() => literatureTasks.value.filter((t) => t?.type !== 'ingest'))
@@ -910,16 +925,29 @@ export default {
     const loadTasks = async () => {
       if (viewMode.value !== 'tasks' && !confirmLeave()) return
       viewMode.value = 'tasks'
+      // 任务列表由共享轮询源（useLiteratureTaskFeed）常驻供给；这里只补运行历史。
+      // runs 与任务进度互不相干，失败降级为行内提示，绝不连坐清空任务列表。
+      tasksNotice.value = ''
       try {
-        const [tasks, history] = await Promise.all([
-          listLiteratureTasks(),
-          literatureWorkspaceApi.runs()
-        ])
-        literatureTasks.value = tasks?.tasks || []
+        const history = await literatureWorkspaceApi.runs()
         runs.value = history?.items || []
       } catch (error) {
-        alert(error.message || '任务读取失败')
+        runs.value = []
+        tasksNotice.value = `运行历史读取失败：${error?.message || error}（任务进度不受影响）`
       }
+    }
+    const onRefreshTasks = () => {
+      taskFeed.refresh()
+      return loadTasks()
+    }
+    // 导入面板「跟踪」→ 切到任务视图并高亮该处理单号（8 秒后自动取消）
+    const highlightRef = ref('')
+    const trackTicket = (ticket) => {
+      highlightRef.value = String(ticket || '')
+      loadTasks()
+      window.setTimeout(() => {
+        if (highlightRef.value === String(ticket || '')) highlightRef.value = ''
+      }, 8000)
     }
     const importBib = async (event) => {
       const file = event.target.files?.[0]
@@ -1180,6 +1208,10 @@ export default {
       literatureTasks,
       ingestTasks,
       domainTasks,
+      tasksNotice,
+      highlightRef,
+      trackTicket,
+      onRefreshTasks,
       importing,
       loadConcepts,
       generateMoc,
@@ -1498,6 +1530,24 @@ export default {
   margin-top: 6px;
   color: var(--color-error-700);
   font-size: 12px;
+}
+.task-notice {
+  margin: 6px 0;
+  color: var(--color-text-secondary, #888);
+  font-size: 12px;
+}
+.task-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #888);
+}
+/* 失败类条目整卡描红；跟踪定位条目短暂高亮 */
+.task-failure {
+  border-color: var(--color-error-700, #d03029);
+}
+.task-highlight {
+  outline: 2px solid var(--main-color, #2f6b4f);
+  outline-offset: 2px;
 }
 .settings-links a {
   color: var(--main-color);

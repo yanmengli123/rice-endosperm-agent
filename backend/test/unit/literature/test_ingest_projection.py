@@ -53,6 +53,7 @@ async def _revision(
     tenant: int = TENANT,
     mode: str = "activate",
     error: str | None = None,
+    attempt: int = 0,
 ):
     file_id = f"file-{revision_id}"
     session.add(
@@ -74,6 +75,7 @@ async def _revision(
             pipeline_version="v1",
             processing_mode=mode,
             status=status,
+            attempt=attempt,
             error_message=error,
         )
     )
@@ -122,6 +124,11 @@ async def test_ingest_visible_from_submission(env):
     assert item["detail"] == "rev-running.pdf"
     assert item["paper_rid"] is None
     assert item["processing_mode"] == "activate"
+    # 权威状态位：活跃中、非终态、非失败
+    assert item["is_active"] is True
+    assert item["is_terminal"] is False
+    assert item["is_failure"] is False
+    assert item["retryable"] is False
 
 
 async def test_contract_and_tenant_isolation(env):
@@ -151,17 +158,29 @@ async def test_registered_paper_provides_rid(env):
     assert items[0]["paper_rid"] == "doi-ingest"
     assert items[0]["status"] == "INDEXED_FULL"
     assert items[0]["stage"] == "入库完成（已登记文献）"
+    # 已登记且非失败 ⇒ 用户视角终局（知识域内部激活动作不再关心）
+    assert items[0]["is_terminal"] is True
+    assert items[0]["is_active"] is False
+    assert items[0]["is_failure"] is False
 
 
 async def test_parse_only_terminal_and_failure_surfaced(env):
     """parse_only 终态与失败错误必须显式透出，不得静默消失。"""
     await _revision(env, "rev-draft", status="PARSED_ONLY", mode="parse_only")
     await _revision(env, "rev-bad", status="REJECTED", error="空白/乱码")
+    await _revision(env, "rev-supplier", status="FAILED", error="MinerU 超时", attempt=2)
     items = {item["ref"]: item for item in await _ingest_items()}
     assert items["rev-draft"]["stage"] == "仅解析完成（草稿）"
     assert items["rev-draft"]["processing_mode"] == "parse_only"
+    assert items["rev-draft"]["is_terminal"] is True
     assert items["rev-bad"]["stage"] == "质量门禁拒绝"
     assert items["rev-bad"]["error"] == "空白/乱码"
+    assert items["rev-bad"]["is_failure"] is True
+    # 质量门禁拒绝不可重试；供应商失败可重新导入（sha 复用同一单号）
+    assert items["rev-bad"]["retryable"] is False
+    assert items["rev-supplier"]["retryable"] is True
+    assert items["rev-supplier"]["is_failure"] is True
+    assert items["rev-supplier"]["attempt"] == 2
 
 
 async def test_merge_with_domain_tasks(env):
@@ -190,3 +209,8 @@ async def test_merge_with_domain_tasks(env):
     types = {item["type"] for item in tasks}
     assert "ingest" in types
     assert "reader_render" in types
+    # 域任务同样携带权威状态位与中文阶段（契约统一，前端零状态推断）
+    render = next(item for item in tasks if item["type"] == "reader_render")
+    assert render["stage"] == "已完成"
+    assert render["is_terminal"] is True
+    assert render["is_active"] is False

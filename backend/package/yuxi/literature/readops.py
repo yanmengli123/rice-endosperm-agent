@@ -353,6 +353,55 @@ _INGEST_STAGE_LABELS = {
 }
 
 
+#: 摄入状态语义（**权威定义**，随投影下发布尔位；前端不得自建状态集合——
+#: 后端新增状态时前端零改动即正确）。active=仍在处理（含知识域内部激活动作）；
+#: failure=失败类；terminal=用户视角已有终局；retryable=存在用户可执行的补救
+#: （FAILED 可重新导入同一文件，sha 复用会命中同一 revision 单号）。
+_INGEST_ACTIVE_STATUSES = frozenset(
+    {"PENDING", "WAITING_CACHE", "RUNNING", "BUILDING", "INDEXING", "INDEXED_FULL", "INDEXED_CONTENT_ONLY", "ACTIVE"}
+)
+_INGEST_FAILURE_STATUSES = frozenset({"REJECTED", "FAILED"})
+_INGEST_TERMINAL_STATUSES = frozenset(
+    {"READY", "PARSED_ONLY", "REJECTED", "FAILED", "SKIPPED", "CANCELLED"}
+)
+
+#: 域任务（渲染/编译/翻译）的展示阶段与同一套权威布尔位。
+_DOMAIN_STAGE_LABELS = {
+    "PENDING": "排队中",
+    "CANCEL_REQUESTED": "取消中",
+    "RUNNING": "执行中",
+    "SUCCEEDED": "已完成",
+    "FAILED": "失败",
+    "DEAD": "已死亡",
+    "STALE": "已滞留",
+    "CANCELLED": "已取消",
+}
+_DOMAIN_ACTIVE_STATUSES = frozenset({"PENDING", "RUNNING", "CANCEL_REQUESTED"})
+_DOMAIN_FAILURE_STATUSES = frozenset({"FAILED", "DEAD", "STALE"})
+_DOMAIN_TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "DEAD", "STALE", "CANCELLED"})
+
+
+def _domain_task_flags(status: str) -> dict[str, bool]:
+    return {
+        "stage": _DOMAIN_STAGE_LABELS.get(status, status),
+        "is_active": status in _DOMAIN_ACTIVE_STATUSES,
+        "is_terminal": status in _DOMAIN_TERMINAL_STATUSES,
+        "is_failure": status in _DOMAIN_FAILURE_STATUSES,
+    }
+
+
+def _ingest_task_flags(status: str, *, registered: bool) -> dict[str, Any]:
+    failure = status in _INGEST_FAILURE_STATUSES
+    # 已登记为文献且非失败 ⇒ 用户视角入库完成（知识域内部激活动作不再关心）
+    terminal = (registered and not failure) or status in _INGEST_TERMINAL_STATUSES
+    return {
+        "is_active": not terminal and not failure,
+        "is_terminal": terminal,
+        "is_failure": failure,
+        "retryable": status == "FAILED",
+    }
+
+
 async def _project_ingest_tasks(session, tenant_id: int, limit: int) -> list[dict[str, Any]]:
     """租户内 PDF 契约摄入投影：从提交那一刻起可见，消灭导入后的可见性真空。
 
@@ -401,6 +450,9 @@ async def _project_ingest_tasks(session, tenant_id: int, limit: int) -> list[dic
                 and revision.status
                 not in ("REJECTED", "FAILED", "SKIPPED", "CANCELLED", "PARSED_ONLY")
                 else _INGEST_STAGE_LABELS.get(revision.status, revision.status)
+            ),
+            **_ingest_task_flags(
+                revision.status, registered=bool(rid_by_revision.get(revision.revision_id))
             ),
             "detail": original or filename or revision.revision_id,
             "paper_rid": rid_by_revision.get(revision.revision_id),
@@ -478,6 +530,7 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
             "type": "reader_render",
             "ref": row.revision_id,
             "status": row.status,
+            **_domain_task_flags(row.status),
             "attempt": row.attempt,
             "error": row.error,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -489,6 +542,7 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
             "type": "compile",
             "ref": f"{row.paper_id}:{row.level}",
             "status": row.status,
+            **_domain_task_flags(row.status),
             "attempt": row.attempt,
             "error": row.error,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -500,6 +554,7 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
             "type": "translation",
             "ref": f"{row.paper_id}:{row.variant_kind}",
             "status": row.status,
+            **_domain_task_flags(row.status),
             "attempt": row.attempt,
             "error": row.error,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,

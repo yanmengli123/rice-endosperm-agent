@@ -214,3 +214,36 @@ Docker 分块验收：文献域 + HTTP + 原生工具 **333 passed**（包含指
 - 验证：新增 `test_ingest_projection.py` 5 用例（提交即可见/契约与租户隔离/
   登记 rid 反查/parse_only 与失败透出/与域任务合并）；文献域回归见下。已知边界：
   摄入侧尚无重试预算/死信/取消（AGENTS.md 既有债务），错误透出但不提供行内重试按钮。
+
+## 入库可见性二批：提交即回执 + 权威状态契约 + 环境兜底（2026-10-05）
+
+承接入库投影一批（上节），修掉"功能在但操作路径上不出现"的三处接线断点，
+并落地环境竞态的代码侧兜底。诊断先行核实：用户导入失败当日撞上 Docker Desktop
+重启后的 Milvus 初始化窗口（api 对 Milvus 硬失败退出），**提交从未落库**——
+环境问题与设计缺口分开处理。
+
+- **阶段 0（环境）**：compose 的 milvus `service_healthy` 依赖经查 10-02 已由
+  `7ceed700` 补齐（此前"缺依赖"结论为检查命令截断误报）。真实残余缺口是
+  9091 healthz 通过 ≠ gRPC 19530 Proxy 就绪：`MilvusKB._init_connection` 改为
+  有界退避重试（`MILVUS_CONNECT_RETRIES`×`MILVUS_CONNECT_RETRY_DELAY`，默认
+  12×5s），耗尽才上抛；与 compose 依赖双层兜底。含重试/耗尽单测。
+- **权威状态契约**：投影全部条目下发 `stage`（中文）+ `is_active`/`is_terminal`/
+  `is_failure` 布尔位 + ingest 专属 `retryable`（仅 FAILED：sha 复用同一单号）。
+  前端事件层布尔位优先、旧集合仅兜底——**后端加状态前端零改动**；域任务同样
+  带中文 stage，消除同页两套状态词汇。已登记且非失败的摄入条目判终局
+  （知识域内部激活动作不再打扰用户）。
+- **提交即回执**：ImportPanel 每文件就地阶段芯片（吃共享轮询源，不建第二真相）
+  +「跟踪」按钮带单号直达任务视图并高亮 8 秒；提交成功立即拉一次任务源。
+- **共享轮询源**：新增 `useLiteratureTaskFeed`（模块级单例 5s 轮询、订阅计数、
+  visibilitychange 暂停/回前台补拉）。状态栏 / 任务视图 / 导入面板三消费者同源
+  同频，状态栏与任务视图不再各自 setInterval。
+- **断点修复**：`loadTasks` 不再 `Promise.all` 连坐（runs 失败降级行内 notice，
+  任务进度不受影响）、阻塞 `alert` 全部移除；任务视图数据常驻实时（切视图只是
+  显示不是加载）；失败分类给下一步动作（REJECTED 不可重试说明原因 / FAILED
+  可重导且不产生重复任务）；attempt 渲染"已尝试 N 次"。
+- 验证：投影契约测试扩至权威位/attempt/retryable（5 passed）；Milvus 重试 2
+  passed；文献域+路由回归 **405 passed**；事件 spec 补权威位用例（裸 node 通过）；
+  改动文件 Ruff/ESLint/生产构建通过；真机确认任务视图失败卡描红 + 行动提示 +
+  attempt 渲染，API 契约实测（REJECTED→is_failure/不可重试，INDEXED_FULL+登记→
+  终局入库完成）。导入面板就地芯片需真实 PDF 导入验收（不代用户消耗 MinerU
+  配额）。SSE 流式按方案后置未做；ARQ 重试预算/死信仍是登记债务。
