@@ -206,7 +206,7 @@ async def model_cache_identity(request):
         if TurnExecutionPlan.model_validate(plan).requires_mcp:
             return None
     binding = getattr(context, "_literature_session_context", None) or {}
-    if binding.get("session_kind") not in {"paper", "global-qa", "lit"} or not getattr(context, "run_id", None):
+    if binding.get("session_kind") not in {"paper", "global-qa", "lit", "chat"} or not getattr(context, "run_id", None):
         return None
     async with pg_manager.get_async_session_context() as db:
         user = (await db.execute(select(User).where(User.uid == context.uid))).scalar_one_or_none()

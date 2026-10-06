@@ -16,6 +16,11 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureCompileJob,
     LiteratureNavigationIndex,
     LiteratureNoteSearch,
+    LiteratureAttachment,
+    LiteratureOriginalSearch,
+    LiteratureCard,
+    LiteratureCitation,
+    LiteratureReaderRender,
 )
 
 
@@ -71,8 +76,55 @@ async def search_identity(tenant_id: int, request: dict) -> str | None:
                 .where(LiteratureNoteSearch.tenant_id == tenant_id, LiteratureCompileJob.paper_id.in_(fresh.paper_ids))
             )
         ).all()
+        attachments = (
+            await db.execute(
+                select(
+                    LiteratureAttachment.id,
+                    LiteratureAttachment.content_digest,
+                    LiteratureAttachment.text_digest,
+                    LiteratureAttachment.text_error,
+                ).where(LiteratureAttachment.tenant_id == tenant_id, LiteratureAttachment.paper_id.in_(fresh.paper_ids))
+            )
+        ).all()
+        cards = (
+            await db.execute(
+                select(LiteratureCard.id, LiteratureCard.updated_at, LiteratureCard.content).where(
+                    LiteratureCard.tenant_id == tenant_id,
+                    (LiteratureCard.paper_id.in_(fresh.paper_ids))
+                    | (LiteratureCard.paper_id.is_(None) & (LiteratureCard.created_by == scope.user.uid)),
+                )
+            )
+        ).all()
+        citations = (
+            await db.execute(
+                select(LiteratureCitation.id, LiteratureCitation.citing_rid, LiteratureCitation.cited_doi).where(
+                    LiteratureCitation.tenant_id == tenant_id, LiteratureCitation.citing_rid.in_(fresh.rids)
+                )
+            )
+        ).all()
+        originals, renders = [], []
+        if request.get("include_original"):
+            originals = (
+                await db.execute(
+                    select(
+                        LiteratureOriginalSearch.paper_id,
+                        LiteratureOriginalSearch.content_digest,
+                        LiteratureOriginalSearch.updated_at,
+                    ).where(
+                        LiteratureOriginalSearch.tenant_id == tenant_id,
+                        LiteratureOriginalSearch.paper_id.in_(fresh.paper_ids),
+                    )
+                )
+            ).all()
+            renders = (
+                await db.execute(
+                    select(LiteratureReaderRender.id, LiteratureReaderRender.updated_at)
+                    .join(LiteraturePaper, LiteraturePaper.source_revision_id == LiteratureReaderRender.revision_id)
+                    .where(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.id.in_(fresh.paper_ids))
+                )
+            ).all()
     manifest = {
-        "version": "navigation-cache-v1",
+        "version": "navigation-cache-v2",
         "uid": scope.user.uid,
         "tenant": tenant_id,
         "sources": fresh.sources,
@@ -82,6 +134,13 @@ async def search_identity(tenant_id: int, request: dict) -> str | None:
         "notes": sorted(map(tuple, notes)),
         "indexes": sorted(map(tuple, indexes)),
         "fulltext": sorted(map(tuple, fulltext)),
+        "attachments": sorted(map(tuple, attachments)),
+        "cards": sorted(
+            (identifier, str(updated), hashlib.sha256(body.encode()).hexdigest()) for identifier, updated, body in cards
+        ),
+        "citations": sorted(map(tuple, citations)),
+        "originals": sorted(map(tuple, originals)),
+        "renders": sorted(map(tuple, renders)),
     }
     return "yuxi:lit:search:" + hashlib.sha256(json.dumps(manifest, sort_keys=True, default=str).encode()).hexdigest()
 

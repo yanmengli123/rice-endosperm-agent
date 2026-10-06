@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
+from types import SimpleNamespace
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.literature import retrieval
 from yuxi.literature.access import LiteratureAccess, _access
 from yuxi.literature.review_contract import ReviewItem, apply_choice_to_paragraph
-from yuxi.storage.postgres.models_knowledge import LiteratureCompileJob, LiteraturePaper, LiteratureNoteSearch
+from yuxi.storage.postgres.models_knowledge import (
+    LiteratureCompileJob,
+    LiteraturePaper,
+    LiteratureNoteSearch,
+    LiteratureAttachment,
+    LiteratureCard,
+    LiteratureCitation,
+    LiteratureNavigationIndex,
+)
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -50,7 +59,15 @@ class _FakeMinio:
 async def env(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        for model in (LiteraturePaper, LiteratureCompileJob, LiteratureNoteSearch):
+        for model in (
+            LiteraturePaper,
+            LiteratureCompileJob,
+            LiteratureNoteSearch,
+            LiteratureAttachment,
+            LiteratureCard,
+            LiteratureCitation,
+            LiteratureNavigationIndex,
+        ):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
@@ -88,7 +105,12 @@ async def test_catalog_excludes_invisible_papers(env):
     """审计 §二.1：目录搜索不能返回无权文献（同租户不同来源权限）。"""
     # 设定访问范围：只含 RID_A（排除 RID_B）
     scope = LiteratureAccess(
-        tenant_id=TENANT, rids=frozenset([RID_A]), paper_ids=frozenset([1]), revisions={}, sources={}, user=None
+        tenant_id=TENANT,
+        rids=frozenset([RID_A]),
+        paper_ids=frozenset([1]),
+        revisions={},
+        sources={},
+        user=SimpleNamespace(uid="u1"),
     )
     token = _access.set(scope)
     try:
@@ -131,7 +153,12 @@ async def test_compiled_search_excludes_invisible_papers(env):
     original = ret._get_minio
     ret._get_minio = lambda: minio
     scope = LiteratureAccess(
-        tenant_id=TENANT, rids=frozenset([RID_A]), paper_ids=frozenset([1]), revisions={}, sources={}, user=None
+        tenant_id=TENANT,
+        rids=frozenset([RID_A]),
+        paper_ids=frozenset([1]),
+        revisions={},
+        sources={},
+        user=SimpleNamespace(uid="u1"),
     )
     token = _access.set(scope)
     try:

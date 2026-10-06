@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
@@ -51,10 +51,46 @@ def current_access() -> LiteratureAccess | None:
 async def build_access(user, tenant_id: int, *, include_trashed: bool = False) -> LiteratureAccess:
     from yuxi.knowledge.manager import KnowledgeBaseManager
 
+    principal = {
+        "uid": user.uid,
+        "role": getattr(user, "role", "user"),
+        "department_id": getattr(user, "department_id", None),
+        "tenant_id": tenant_id,
+    }
     async with pg_manager.get_async_session_context() as session:
+        # Check each KB once, then filter sources in SQL. Never cache an ACL
+        # verdict across requests: revocation must apply to the next read.
+        databases = (
+            await session.execute(
+                select(KnowledgeBase.kb_id, KnowledgeBase.created_by, KnowledgeBase.share_config)
+                .where(KnowledgeBase.tenant_id == tenant_id)
+                .where(KnowledgeBase.governance_status.notin_(("ARCHIVED", "DELETED")))
+            )
+        ).all()
+        allowed_kbs = [
+            kb_id
+            for kb_id, created_by, share_config in databases
+            if KnowledgeBaseManager._database_info_accessible(
+                principal, {"tenant_id": tenant_id, "created_by": created_by, "share_config": share_config}
+            )
+        ]
         rows = (
             await session.execute(
-                select(LiteraturePaper, KnowledgeParseRevision, KnowledgeBase, KnowledgeFile)
+                select(
+                    LiteraturePaper.id,
+                    LiteraturePaper.rid,
+                    LiteraturePaper.reading_version,
+                    KnowledgeParseRevision.revision_id,
+                    KnowledgeParseRevision.source_sha256,
+                    KnowledgeParseRevision.kb_id,
+                    KnowledgeParseRevision.file_id,
+                    KnowledgeBase.name,
+                    KnowledgeBase.contract_key,
+                    KnowledgeParseRevision.status,
+                    KnowledgeParseRevision.capabilities,
+                    KnowledgeParseRevision.parser_fingerprint,
+                    KnowledgeParseRevision.pipeline_version,
+                )
                 .outerjoin(
                     KnowledgeParseRevision, KnowledgeParseRevision.revision_id == LiteraturePaper.source_revision_id
                 )
@@ -62,58 +98,39 @@ async def build_access(user, tenant_id: int, *, include_trashed: bool = False) -
                 .outerjoin(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
                 .where(LiteraturePaper.tenant_id == tenant_id)
                 .where(True if include_trashed else LiteraturePaper.trashed_at.is_(None))
-            )
-        ).all()
-    principal = {
-        "uid": user.uid,
-        "role": getattr(user, "role", "user"),
-        "department_id": getattr(user, "department_id", None),
-        "tenant_id": tenant_id,
-    }
-    visible = []
-    revisions = {}
-    sources = {}
-    for paper, revision, kb, source_file in rows:
-        # Independent Bib/Markdown records are shared bibliography within the
-        # tenant. A source-linked record always inherits that source's ACL.
-        allowed = paper.source_revision_id is None
-        if revision is not None and kb is not None and source_file is not None:
-            allowed = (
-                revision.tenant_id == tenant_id
-                and kb.tenant_id == tenant_id
-                and (
-                    source_file.kb_id == kb.kb_id
-                    and source_file.active_parse_revision_id == revision.revision_id
-                    and kb.governance_status not in {"ARCHIVED", "DELETED"}
-                    and KnowledgeBaseManager._database_info_accessible(
-                        principal,
-                        {
-                            "tenant_id": kb.tenant_id,
-                            "created_by": kb.created_by,
-                            "share_config": kb.share_config,
-                        },
+                .where(
+                    or_(
+                        LiteraturePaper.source_revision_id.is_(None),
+                        and_(
+                            KnowledgeParseRevision.tenant_id == tenant_id,
+                            KnowledgeBase.kb_id.in_(allowed_kbs),
+                            KnowledgeFile.kb_id == KnowledgeBase.kb_id,
+                            KnowledgeFile.active_parse_revision_id == KnowledgeParseRevision.revision_id,
+                        ),
                     )
                 )
             )
-        if allowed:
-            visible.append(paper)
-            if revision is not None:
-                revisions[revision.revision_id] = revision.source_sha256
-                sources[paper.rid] = {
-                    "kb_id": kb.kb_id,
-                    "file_id": source_file.file_id,
-                    "name": kb.name,
-                    "contract_key": kb.contract_key,
-                    "parse_revision_id": revision.revision_id,
-                    "reading_version": paper.reading_version,
-                    "evidence_status": revision.status,
-                    "capabilities": revision.capabilities or {},
-                    "parser_fingerprint": revision.parser_fingerprint,
-                    "pipeline_version": revision.pipeline_version,
-                    "imported": revision.pipeline_version == "paperagent_import_v4",
-                }
+        ).all()
+    revisions = {}
+    sources = {}
+    for row in rows:
+        if row.revision_id is not None:
+            revisions[row.revision_id] = row.source_sha256
+            sources[row.rid] = {
+                "kb_id": row.kb_id,
+                "file_id": row.file_id,
+                "name": row.name,
+                "contract_key": row.contract_key,
+                "parse_revision_id": row.revision_id,
+                "reading_version": row.reading_version,
+                "evidence_status": row.status,
+                "capabilities": row.capabilities or {},
+                "parser_fingerprint": row.parser_fingerprint,
+                "pipeline_version": row.pipeline_version,
+                "imported": row.pipeline_version == "paperagent_import_v4",
+            }
     return LiteratureAccess(
-        tenant_id, frozenset(p.rid for p in visible), frozenset(p.id for p in visible), revisions, sources, user
+        tenant_id, frozenset(row.rid for row in rows), frozenset(row.id for row in rows), revisions, sources, user
     )
 
 

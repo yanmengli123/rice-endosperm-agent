@@ -46,10 +46,8 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       let errorData = null
 
       console.log('API请求失败:', {
-        url,
-        status: response.status,
-        statusText: response.statusText,
-        headers: Object.fromEntries(response.headers.entries())
+        method: requestOptions.method || 'GET',
+        status: response.status
       })
 
       try {
@@ -62,21 +60,9 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
         } else {
           errorMessage = detail || errorData.message || errorMessage
         }
-        console.log('API错误详情:', errorData)
-
-        // 如果是422错误，打印更详细的信息
-        if (response.status === 422) {
-          console.error('422验证错误详情:', {
-            url,
-            requestMethod: requestOptions.method,
-            requestHeaders: requestOptions.headers,
-            requestBody: requestOptions.body,
-            responseData: errorData
-          })
-        }
-      } catch (e) {
+      } catch {
         // 如果无法解析JSON，使用默认错误信息
-        console.log('无法解析错误响应JSON:', e)
+        console.log('无法解析错误响应JSON:', { status: response.status })
       }
 
       // 特殊处理401和403错误
@@ -136,7 +122,11 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
     }
   } catch (error) {
     if (error.name !== 'AbortError') {
-      console.error('API请求错误:', error)
+      console.error('API请求错误:', {
+        method: options.method || 'GET',
+        status: error.response?.status || null,
+        type: error.name
+      })
     }
     throw error
   }

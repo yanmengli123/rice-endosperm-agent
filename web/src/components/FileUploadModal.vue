@@ -1046,7 +1046,10 @@ const withEvidencePipelineParams = (params) => {
     pdf_evidence_pipeline: true,
     format_template: 'pdf_literature',
     grobid_enabled: true,
-    ocr_engine: 'mineru_official',
+    // 新契约尊重用户选择；仅旧模板保持历史 MinerU 固定口径。
+    ocr_engine: String(store.database?.contract_key || '').trim()
+      ? params.ocr_engine || processingParams.value.ocr_engine
+      : 'mineru_official',
     chunk_preset_id: 'academic',
     chunk_parser_config: {
       chunk_token_num: 600,

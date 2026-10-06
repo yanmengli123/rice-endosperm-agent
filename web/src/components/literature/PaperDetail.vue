@@ -65,22 +65,37 @@
             v-for="level in ['L1', 'L2', 'L3']"
             :key="level"
             class="btn"
-            :disabled="compiling === level"
+            :disabled="Boolean(compiling)"
             @click="doCompile(level)"
           >
             {{ compiling === level ? `${level} 入队中…` : `编译 ${level}` }}
           </button>
-          <button class="btn" :disabled="enriching" @click="doEnrich">
+          <button
+            class="btn"
+            :disabled="enriching || !canEnrich"
+            :title="enrichHint"
+            @click="doEnrich"
+          >
             {{ enriching ? '补全中…' : '补全元数据' }}
+          </button>
+          <button
+            class="btn danger"
+            :disabled="trashing"
+            title="移入回收站（可恢复软删除；原因写入审计；不删除知识源证据）"
+            @click="doTrash"
+          >
+            {{ trashing ? '回收中…' : '移入回收站' }}
           </button>
         </div>
 
-        <div class="tabs">
+        <div class="tabs" role="tablist" aria-label="文献详情页签">
           <button
             v-for="tab in tabs"
             :key="tab.key"
             class="tab"
+            role="tab"
             :class="{ active: currentTab === tab.key }"
+            :aria-selected="currentTab === tab.key"
             @click="selectTab(tab.key)"
           >
             {{ tab.label }}
@@ -128,14 +143,17 @@
 <script>
 import { computed, ref, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { message } from 'ant-design-vue'
 import { apiPost } from '@/apis/base'
 import {
   getLiteraturePaper,
+  literatureWorkspaceApi,
   triggerLiteratureCompile,
   triggerLiteratureEnrich,
   triggerLiteratureRender,
   triggerLiteratureTranslation
 } from '@/apis/literature_api'
+import { litConfirm, litPrompt } from '@/utils/litDialogs'
 import NotePanel from '@/components/literature/NotePanel.vue'
 import AttachmentPanel from '@/components/literature/AttachmentPanel.vue'
 import CardsPanel from '@/components/literature/CardsPanel.vue'
@@ -147,6 +165,15 @@ import { useUserStore } from '@/stores/user'
 import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
 
 const POLL_INTERVAL_MS = 3000
+
+// 复用已有本文会话：与 LiteratureView.askPaper 同一口径。此前两个入口行为
+// 不一致（详情页每次新建、卡片入口先查后建），连点几次即产生多个同名线程。
+const reuseSession = async (targetRid) => {
+  const existing = await literatureWorkspaceApi.sessions(false)
+  return (existing.items || []).find(
+    (item) => item.session?.kind === 'paper' && item.session?.rid === targetRid
+  )
+}
 
 export default {
   name: 'PaperDetail',
@@ -168,16 +195,29 @@ export default {
   setup(props, { emit }) {
     const router = useRouter()
     const sessionLoading = ref(false)
+    // embedded 时派发给宿主切换会话区；独立页则跳转原生聊天路由。
+    const openSession = (threadId) => {
+      if (props.embedded) emit('session', threadId)
+      else router.push(`/agent/${encodeURIComponent(threadId)}`)
+    }
     const startSession = async () => {
+      if (sessionLoading.value) return
       sessionLoading.value = true
       try {
+        // 已存在本文会话时直接复用，避免连点产生多个同名线程
+        // （2026-10-05 实测：连点 3 次即生成 3 个线程）。
+        const reuse = await reuseSession(props.rid)
+        if (reuse) {
+          openSession(reuse.id)
+          return
+        }
         const result = await apiPost(
           `/api/literature/sessions/paper/${encodeURIComponent(props.rid)}`
         )
-        if (props.embedded) emit('session', result.thread.id)
-        else await router.push(`/agent/${encodeURIComponent(result.thread.id)}`)
+        if (!result?.thread?.id) throw new Error('会话建立未返回线程标识')
+        openSession(result.thread.id)
       } catch (err) {
-        alert(`会话创建失败：${err?.message || err}`)
+        message.error(`会话创建失败：${err?.message || err}`)
       } finally {
         sessionLoading.value = false
       }
@@ -190,15 +230,31 @@ export default {
     const translationKind = ref('zh')
     const compiling = ref('')
     const enriching = ref(false)
+    // Legacy PDF papers can backfill their own DOI from the authorized body.
+    const canEnrich = computed(() => Boolean(paper.value?.doi || paper.value?.source_revision_id))
+    const enrichHint = computed(() =>
+      canEnrich.value
+        ? '按 DOI 从 Crossref / OpenAlex / S2 补全空字段'
+        : '请在元数据页填写 DOI 后补全；PDF 文献可先从原文抽取'
+    )
     const currentTab = ref('reader')
     const editing = ref(false)
     const editingChanged = (value) => {
       editing.value = value
       emit('editing-change', value)
     }
-    const selectTab = (key) => {
+    const selectTab = async (key) => {
       if (key === currentTab.value) return
-      if (editing.value && !window.confirm('切换详情页会放弃未保存编辑，继续？')) return
+      if (
+        editing.value &&
+        !(await litConfirm({
+          title: '放弃未保存编辑？',
+          content: '切换详情页会放弃未保存编辑。',
+          okText: '放弃并切换',
+          danger: true
+        }))
+      )
+        return
       editingChanged(false)
       currentTab.value = key
     }
@@ -208,8 +264,21 @@ export default {
         if (target?.rid === props.rid) selectTab('reader')
       }
     )
-    const close = () => {
-      if (editing.value && !window.confirm('关闭阅读器会放弃未保存编辑，继续？')) return
+    const close = async () => {
+      if (
+        editing.value &&
+        !(await litConfirm({
+          title: '放弃未保存编辑？',
+          content: '关闭阅读器会放弃未保存编辑。',
+          okText: '放弃并关闭',
+          danger: true
+        }))
+      )
+        return
+      forceClose()
+    }
+    // 回收等终态动作后的关闭：内容已被处置，无需再确认未保存编辑
+    const forceClose = () => {
       editingChanged(false)
       emit('close')
     }
@@ -267,7 +336,7 @@ export default {
         startPollingIfBusy()
       } catch (error) {
         if (!disposed && polling.value && !controller.signal.aborted && ticket === loadGeneration)
-          alert(error?.message || '文献读取失败')
+          message.error(error?.message || '文献读取失败')
       } finally {
         if (loadController === controller) loadController = null
         if (ticket === loadGeneration && polling.value) loading.value = false
@@ -322,48 +391,72 @@ export default {
     }
 
     const doRender = async () => {
+      if (rendering.value) return
       rendering.value = true
       try {
-        await triggerLiteratureRender(props.rid)
+        const result = await triggerLiteratureRender(props.rid)
+        if (result?.reused)
+          message.info(result.status === 'SUCCEEDED' ? '已复用现有阅读产物' : '阅读渲染正在处理中，已复用现有任务')
+        else message.success(result?.enqueue_deferred ? '阅读任务已保存，等待队列恢复调度' : '阅读任务已入队')
         await load()
         startPollingIfBusy()
       } catch (error) {
-        alert(error?.message || '阅读渲染入队失败')
+        message.error(error?.message || '阅读渲染入队失败')
       } finally {
         rendering.value = false
       }
     }
     const doTranslate = async () => {
+      if (translating.value) return
       translating.value = true
       try {
-        await triggerLiteratureTranslation(props.rid, translationKind.value)
+        const result = await triggerLiteratureTranslation(props.rid, translationKind.value)
+        if (result?.reused) {
+          message.info(result.status === 'SUCCEEDED' ? '已复用现有译文/总结' : '译文/总结正在生成，已复用现有任务')
+        } else message.success(result?.enqueue_deferred ? '翻译任务已保存，等待队列恢复调度' : '翻译任务已入队')
         await load()
         startPollingIfBusy()
       } catch (error) {
-        alert(error?.message || '译文或总结入队失败')
+        message.error(error?.message || '译文或总结入队失败')
       } finally {
         translating.value = false
       }
     }
     const doCompile = async (level) => {
+      if (compiling.value) return
       compiling.value = level
       try {
-        await triggerLiteratureCompile(props.rid, level)
+        const result = await triggerLiteratureCompile(props.rid, level)
+        if (result?.reused) {
+          message.info(result.status === 'SUCCEEDED' ? `已复用 ${level} 笔记` : `${level} 正在编译，已复用现有任务`)
+        } else message.success(result?.enqueue_deferred ? `${level} 任务已保存，等待队列恢复调度` : `${level} 任务已入队`)
         await load()
         startPollingIfBusy()
       } catch (error) {
-        alert(error?.message || `${level} 编译入队失败`)
+        message.error(error?.message || `${level} 编译入队失败`)
       } finally {
         compiling.value = ''
       }
     }
     const doEnrich = async () => {
+      if (enriching.value) return
+      if (!canEnrich.value) {
+        message.warning('该文献缺少 DOI，无法从外部源补全元数据')
+        return
+      }
       enriching.value = true
       try {
-        await triggerLiteratureEnrich(props.rid)
+        const result = await triggerLiteratureEnrich(props.rid)
+        if (result && result.ok === false) {
+          message.warning(
+            `元数据补全未完成：${result.reason || '外部源未返回数据'}（不会写入空数据）`
+          )
+        } else if (result && Array.isArray(result.filled) && result.filled.length) {
+          message.success(`已从外部源补全：${result.filled.join('、')}`)
+        } else message.info(result?.reason === 'meta_locked' ? '元数据已人工锁定，未自动改写' : '未发现需要补全的空字段')
         await load()
       } catch (error) {
-        alert(error?.message || '元数据补全失败')
+        message.error(error?.message || '元数据补全失败')
       } finally {
         enriching.value = false
       }
@@ -374,26 +467,30 @@ export default {
     const trashing = ref(false)
     const doTrash = async () => {
       if (trashing.value) return
-      const reason = window.prompt('移入回收站的原因（必填，写入审计）：')
-      if (reason === null) return
-      if (!reason.trim()) {
-        alert('必须填写移入回收站的原因（审计要求）')
-        return
-      }
-      if (
-        !window.confirm(
-          '确认移入回收站？文献将从目录/检索/图谱隐藏，可在知识库工作台「回收站」恢复；进行中的编译/翻译会按过期输入终止。'
-        )
-      )
-        return
+      const reason = await litPrompt({
+        title: '移入回收站的原因（必填，写入审计）：',
+        placeholder: '例如：重复导入 / 元数据有误',
+        required: true,
+        requiredHint: '必须填写移入回收站的原因（审计要求）',
+        okText: '下一步'
+      })
+      if (!reason) return
+      const confirmed = await litConfirm({
+        title: '确认移入回收站？',
+        content:
+          '文献将从目录/检索/图谱隐藏，可在知识库工作台「回收站」恢复；进行中的编译/翻译会按过期输入终止。',
+        okText: '移入回收站',
+        danger: true
+      })
+      if (!confirmed) return
       trashing.value = true
       try {
         await apiPost(`/api/literature/papers/${encodeURIComponent(props.rid)}/trash`, {
-          reason: reason.trim()
+          reason
         })
-        close()
+        forceClose()
       } catch (error) {
-        alert(error?.message || '移入回收站失败')
+        message.error(error?.message || '移入回收站失败')
       } finally {
         trashing.value = false
       }
@@ -448,6 +545,8 @@ export default {
       translationKind,
       compiling,
       enriching,
+      canEnrich,
+      enrichHint,
       currentTab,
       selectTab,
       close,

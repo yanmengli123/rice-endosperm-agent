@@ -142,7 +142,9 @@ async def _scientific_reading_fallback(tenant_id: int, paper: LiteraturePaper) -
                 select(KnowledgeParseRevision).where(
                     KnowledgeParseRevision.revision_id == paper.source_revision_id,
                     KnowledgeParseRevision.tenant_id == tenant_id,
-                    KnowledgeParseRevision.status.in_(("INDEXED_FULL", "INDEXED_CONTENT_ONLY", "ACTIVE")),
+                    KnowledgeParseRevision.status.in_(
+                        ("INDEXED_FULL", "INDEXED_CONTENT_ONLY", "INDEXED_TEXT_ONLY", "ACTIVE")
+                    ),
                 )
             )
         ).scalar_one_or_none()
@@ -159,6 +161,7 @@ async def _scientific_reading_fallback(tenant_id: int, paper: LiteraturePaper) -
         if artifact is None:
             return None
         frozen_input = (paper.id, paper.source_revision_id, paper.reading_version)
+        revision_state = (revision.id, revision.status)
     bucket, name = parse_minio_url(artifact.object_uri)
     content = await get_minio_client().adownload_file(bucket, name)
     if hashlib.sha256(content).hexdigest() != artifact.sha256:
@@ -178,6 +181,9 @@ async def _scientific_reading_fallback(tenant_id: int, paper: LiteraturePaper) -
             raise ValueError("读取期间来源版本已变更")
         if (now.artifact_pointers or {}).get("document"):
             raise ValueError("读取期间人工正文已生效，请重新加载")
+        current_revision = await db.get(KnowledgeParseRevision, revision_state[0], populate_existing=True)
+        if current_revision is None or current_revision.status != revision_state[1]:
+            raise ValueError("读取期间解析状态已变更")
     markdown = content.decode("utf-8")
     from yuxi.knowledge.utils.text_utils import validate_markdown_quality
 
@@ -198,9 +204,7 @@ async def _scientific_reading_fallback(tenant_id: int, paper: LiteraturePaper) -
     }
 
 
-async def get_templated_variant(
-    tenant_id: int, rid: str, variant_kind: str, template: str
-) -> dict[str, Any] | None:
+async def get_templated_variant(tenant_id: int, rid: str, variant_kind: str, template: str) -> dict[str, Any] | None:
     """按模板重排既有译文——**纯渲染，零 LLM 调用**。
 
     对标上游 ``rerender_paper``：上游重渲染会重跑翻译链（再次计费），Yuxi 只读已落盘

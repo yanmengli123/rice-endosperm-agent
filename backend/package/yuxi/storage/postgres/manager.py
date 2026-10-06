@@ -1108,17 +1108,56 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0091_literature_fulltext", "_migration_0091_literature_fulltext"),
         ("0092_literature_review_artifacts", "_migration_0092_literature_review_artifacts"),
         ("0093_literature_fulltext_retry", "_migration_0093_literature_fulltext_retry"),
-    ("0094_literature_workflow_cancel", "_migration_0094_literature_workflow_cancel"),
+        ("0094_literature_workflow_cancel", "_migration_0094_literature_workflow_cancel"),
         ("0095_literature_output_templates", "_migration_0095_literature_output_templates"),
+        ("0096_literature_topics", "_migration_0096_literature_topics"),
+        ("0097_literature_original_history_search", "_migration_0097_literature_original_history_search"),
+        ("0098_literature_attachment_search", "_migration_0098_literature_attachment_search"),
+        ("0099_literature_translation_workspace", "_migration_0099_literature_translation_workspace"),
+        ("0100_literature_trash_reason", "_migration_0100_literature_trash_reason"),
+        ("0101_literature_translation_generation", "_migration_0101_literature_translation_generation"),
         ("0102_literature_reader_generation", "_migration_0102_literature_reader_generation"),
+        ("0103_literature_paper_session_unique", "_migration_0103_literature_paper_session_unique"),
     ]
 
-    async def _migration_0102_literature_reader_generation(self, conn) -> None:
-        """渲染执行代次（可靠性收口）：每次调度递增。
+    async def _migration_0103_literature_paper_session_unique(self, conn) -> None:
+        """文献专属会话一户一文一线程。
 
-        ARQ 结果缓存、过期投递与被超时回收的旧执行不得复用当前租约——
-        过期代次的发布一律拒绝。列级 NOT NULL + 存量回填 0。
+        背景（2026-10 实测）：前端"先查后建"两次请求间连点会生成同
+        (tenant, uid, rid) 的多条活跃会话。清理存量重复（保留最新一条，
+        其余软删——历史消息仍可经回收路径找回，但不再占据会话列表），
+        再上部分唯一索引兜底并发；应用层（create_literature_conversation）
+        同时做了先查复用 + IntegrityError 转复用，正常路径不会再撞索引。
         """
+        for statement in (
+            # 1) 存量清重：同键保留 id 最大（最新）一条，其余软删。
+            """
+            UPDATE conversations c SET status = 'deleted', updated_at = now()
+            WHERE c.status <> 'deleted'
+              AND (c.extra_metadata->'literature_session'->>'kind') = 'paper'
+              AND c.id < (
+                    SELECT max(c2.id) FROM conversations c2
+                    WHERE c2.status <> 'deleted'
+                      AND (c2.extra_metadata->'literature_session'->>'kind') = 'paper'
+                      AND c2.tenant_id = c.tenant_id
+                      AND c2.uid = c.uid
+                      AND (c2.extra_metadata->'literature_session'->>'rid')
+                          = (c.extra_metadata->'literature_session'->>'rid')
+                  )
+            """,
+            # 2) 部分唯一索引（幂等重建；软删/非 paper 会话不受约束）。
+            "DROP INDEX IF EXISTS uq_conversations_literature_paper_session",
+            """CREATE UNIQUE INDEX uq_conversations_literature_paper_session
+               ON conversations (
+                   tenant_id, uid,
+                   (extra_metadata->'literature_session'->>'rid')
+               )
+               WHERE status <> 'deleted'
+                 AND (extra_metadata->'literature_session'->>'kind') = 'paper'""",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0102_literature_reader_generation(self, conn) -> None:
         for statement in (
             "ALTER TABLE literature_reader_renders ADD COLUMN IF NOT EXISTS generation INTEGER",
             "UPDATE literature_reader_renders SET generation=0 WHERE generation IS NULL",
@@ -1126,16 +1165,131 @@ class PostgresManager(metaclass=SingletonMeta):
         ):
             await conn.execute(text(statement))
 
+    async def _migration_0101_literature_translation_generation(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_translation_jobs ADD COLUMN IF NOT EXISTS generation INTEGER",
+            "UPDATE literature_translation_jobs SET generation=0 WHERE generation IS NULL",
+            "ALTER TABLE literature_translation_jobs ALTER COLUMN generation SET NOT NULL",
+            "DROP INDEX IF EXISTS uq_literature_translation_jobs_key",
+            "CREATE UNIQUE INDEX uq_literature_translation_jobs_key ON literature_translation_jobs "
+            "(tenant_id, paper_id, variant_kind, template, source_revision_id, reading_version, "
+            "generator_version, config_digest, generation)",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0100_literature_trash_reason(self, conn) -> None:
+        """文献回收站审计原因列（清洗与手动移入共用同一粘性回收语义）。"""
+        await conn.execute(text("ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS trashed_reason VARCHAR(512)"))
+
+    async def _migration_0099_literature_translation_workspace(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_translation_jobs ADD COLUMN IF NOT EXISTS options_json JSONB",
+            "ALTER TABLE literature_translation_jobs ADD COLUMN IF NOT EXISTS config_digest VARCHAR(64)",
+            "UPDATE literature_translation_jobs SET config_digest='' WHERE config_digest IS NULL",
+            "ALTER TABLE literature_translation_jobs ALTER COLUMN config_digest SET NOT NULL",
+            "DROP INDEX IF EXISTS uq_literature_translation_jobs_key",
+            "CREATE UNIQUE INDEX uq_literature_translation_jobs_key ON literature_translation_jobs "
+            "(tenant_id, paper_id, variant_kind, template, source_revision_id, "
+            "reading_version, generator_version, config_digest)",
+            """CREATE TABLE literature_translation_settings (
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                uid VARCHAR(64) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                profiles_json JSONB NOT NULL, active_profile_id VARCHAR(64), updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (tenant_id, uid)
+            )""",
+            """CREATE TABLE literature_translation_tasks (
+                id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                requested_by VARCHAR(64) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                task_kind VARCHAR(16) NOT NULL, source_kind VARCHAR(16) NOT NULL,
+                source_ref VARCHAR(160) NOT NULL, source_digest VARCHAR(64) NOT NULL, options_json JSONB NOT NULL,
+                status VARCHAR(32) NOT NULL, attempt INTEGER NOT NULL, next_retry_at TIMESTAMPTZ,
+                result_json JSONB, variant_uri VARCHAR(1024), content_digest VARCHAR(64), error TEXT,
+                llm_run_id VARCHAR(64) REFERENCES agent_runs(id), model_spec VARCHAR(200),
+                credential_source VARCHAR(24), credential_id BIGINT, provider_id VARCHAR(100), policy_version INTEGER,
+                created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+            )""",
+            "CREATE INDEX ix_literature_translation_tasks_status ON literature_translation_tasks "
+            "(status, next_retry_at)",
+        ):
+            await conn.execute(text(statement))
+        for table, owner in (
+            ("literature_translation_settings", "uid"),
+            ("literature_translation_tasks", "requested_by"),
+        ):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_owner ON {table} "
+                    f"USING (tenant_id = current_setting('yuxi.tenant_id', true)::bigint "
+                    f"AND {owner} = current_setting('yuxi.uid', true))"
+                )
+            )
+
+    async def _migration_0098_literature_attachment_search(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_attachments ADD COLUMN IF NOT EXISTS text_digest VARCHAR(64)",
+            "ALTER TABLE literature_attachments ADD COLUMN IF NOT EXISTS text_body TEXT",
+            "ALTER TABLE literature_attachments ADD COLUMN IF NOT EXISTS text_lexical TEXT",
+            "ALTER TABLE literature_attachments ADD COLUMN IF NOT EXISTS text_attempt INTEGER",
+            "UPDATE literature_attachments SET text_attempt=0 WHERE text_attempt IS NULL",
+            "ALTER TABLE literature_attachments ALTER COLUMN text_attempt SET NOT NULL",
+            "ALTER TABLE literature_attachments ADD COLUMN IF NOT EXISTS text_retry_at TIMESTAMPTZ",
+            "ALTER TABLE literature_attachments ADD COLUMN IF NOT EXISTS text_error VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_attachment_text_fts ON literature_attachments "
+            "USING gin (to_tsvector('simple'::regconfig, coalesce(text_lexical, '')))",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0097_literature_original_history_search(self, conn) -> None:
+        for statement in (
+            """CREATE TABLE IF NOT EXISTS literature_original_search (
+                paper_id BIGINT PRIMARY KEY REFERENCES literature_papers(id) ON DELETE CASCADE,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                input_digest VARCHAR(64) NOT NULL, content_digest VARCHAR(64) NOT NULL,
+                body TEXT NOT NULL, lexical_text TEXT NOT NULL, attempt INTEGER NOT NULL,
+                next_retry_at TIMESTAMPTZ, error_code VARCHAR(64), updated_at TIMESTAMPTZ NOT NULL
+            )""",
+            "ALTER TABLE literature_original_search ENABLE ROW LEVEL SECURITY",
+            "CREATE POLICY p_literature_original_search_tenant ON literature_original_search "
+            "USING (tenant_id = current_setting('yuxi.tenant_id', true)::bigint)",
+            "CREATE INDEX IF NOT EXISTS ix_literature_original_search_fts ON literature_original_search "
+            "USING gin (to_tsvector('simple'::regconfig, lexical_text))",
+            "CREATE INDEX IF NOT EXISTS ix_messages_literature_history_fts ON messages "
+            "USING gin (to_tsvector('simple'::regconfig, coalesce(content, '')))",
+            "CREATE INDEX IF NOT EXISTS ix_conversations_literature_title_fts ON conversations "
+            "USING gin (to_tsvector('simple'::regconfig, coalesce(title, '')))",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0096_literature_topics(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS wos_categories_json JSONB",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS research_areas_json JSONB",
+            """CREATE TABLE IF NOT EXISTS literature_topic_sets (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                uid VARCHAR(64) NOT NULL, field VARCHAR(32) NOT NULL, min_papers INTEGER NOT NULL,
+                source_digest VARCHAR(64) NOT NULL, topics_json JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                CONSTRAINT uq_literature_topic_sets_owner UNIQUE (tenant_id, uid, field)
+            )""",
+            "ALTER TABLE literature_topic_sets ENABLE ROW LEVEL SECURITY",
+            "CREATE POLICY p_literature_topic_sets_owner ON literature_topic_sets "
+            "USING (tenant_id = current_setting('yuxi.tenant_id', true)::bigint "
+            "AND uid = current_setting('yuxi.uid', true))",
+        ):
+            await conn.execute(text(statement))
+
     async def _migration_0095_literature_output_templates(self, conn) -> None:
         """输出模板进翻译任务身份。
 
-    模板必须进唯一键：否则同一 (paper, variant, revision, version) 改模板后会命中
-    既有任务的幂等键，用户选了新模板却拿到旧排版产物。
+        模板必须进唯一键：否则同一 (paper, variant, revision, version) 改模板后会命中
+        既有任务的幂等键，用户选了新模板却拿到旧排版产物。
 
-    注意：``uq_literature_translation_jobs_key`` 在 PG 里表现为**索引**（UniqueConstraint
-    实现在关系上生成唯一索引），用 ``DROP CONSTRAINT IF EXISTS`` 删不掉，必须
-    ``DROP INDEX IF EXISTS``——否则第二次执行就报 DuplicateTableError。
-    """
+        注意：``uq_literature_translation_jobs_key`` 在 PG 里表现为**索引**（UniqueConstraint
+        实现在关系上生成唯一索引），用 ``DROP CONSTRAINT IF EXISTS`` 删不掉，必须
+        ``DROP INDEX IF EXISTS``——否则第二次执行就报 DuplicateTableError。
+        """
         for statement in (
             "ALTER TABLE literature_translation_jobs ADD COLUMN IF NOT EXISTS "
             "template VARCHAR(64) NOT NULL DEFAULT 'obsidian_bilingual'",
@@ -1156,12 +1310,9 @@ class PostgresManager(metaclass=SingletonMeta):
           并存，破坏"同一 (tenant, paper, mode) 同时只有一个活跃运行"的约束。
         """
         for statement in (
-            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS "
-            "cancel_requested_by VARCHAR(64)",
-            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS "
-            "cancel_requested_at TIMESTAMPTZ",
-            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS "
-            "cancel_reason TEXT",
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS cancel_requested_by VARCHAR(64)",
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ",
+            "ALTER TABLE literature_workflow_runs ADD COLUMN IF NOT EXISTS cancel_reason TEXT",
             # 取消后不得再回退到非终态；终态判定仍以状态列为准，此约束只挡手工写库。
             "DROP INDEX IF EXISTS uq_lit_workflow_active",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_lit_workflow_active ON literature_workflow_runs "

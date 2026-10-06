@@ -12,6 +12,17 @@ export const TASK_TYPE_LABELS = {
   ingest: '入库'
 }
 
+export function humanizeTaskError(error) {
+  const text = String(error || '')
+  if (/APIConnectionError|ConnectTimeout|供应商不可达/.test(text))
+    return '模型服务连接失败：请检查模型配置或供应商状态，稍后可重试'
+  if (/WORKER_INTERRUPTED/.test(text))
+    return '执行进程中断：任务会自动重试或可手动重新入队'
+  if (/XMinioStorageFull/.test(text))
+    return '对象存储空间不足：请联系管理员扩容后重试'
+  return text.replace(/^[A-Za-z][A-Za-z0-9_.]*(?:Error|Exception):\s*/, '')
+}
+
 // 状态语义以后端投影下发的 is_active / is_failure 布尔位为**权威**
 // （后端新增状态时前端零改动即正确）；下列集合仅作旧载荷（无布尔位）的兼容兜底。
 const BAD_FALLBACK = new Set(['FAILED', 'DEAD', 'REJECTED'])
@@ -29,13 +40,13 @@ export function createLiteratureEventBuffer(limit = LITERATURE_EVENT_LIMIT, stor
   const events = storage
   return {
     events,
-    record(level, source, message, ts = Date.now()) {
+    record(level, source, message, ts = Date.now(), detail = '') {
       const last = events[events.length - 1]
       // 连续完全相同的事件只保留一条（轮询抖动/重复错误不刷屏）
       if (last && last.level === level && last.source === source && last.message === message) {
         return last
       }
-      events.push({ ts, level, source, message })
+      events.push({ ts, level, source, message, detail })
       if (events.length > limit) events.splice(0, events.length - limit)
       return events[events.length - 1]
     },
@@ -77,27 +88,28 @@ export function diffTasksToEvents(prevTasks, nextTasks, record, ts = Date.now())
   }
   const prev = collapse(prevTasks)
   for (const task of collapse(nextTasks).values()) {
+    const updated = Date.parse(task.updated_at)
+    const eventTime = Number.isFinite(updated) ? updated : ts
+    const rawError = task.error && isFailureTask(task) ? String(task.error).slice(0, 2000) : ''
+    const errorSuffix = rawError ? `：${humanizeTaskError(rawError).slice(0, 160)}` : ''
     const label = `${TASK_TYPE_LABELS[task.type] || task.type} ${shortRef(task.ref)}`
     const before = prev.get(taskKey(task))
     if (!before) {
       if (task.status && !isActiveTask(task)) {
         // 首见失败也带原因摘要（面板中途打开时同样要能回答"为什么失败"）
-        const detail =
-          task.error && isFailureTask(task) ? `：${String(task.error).slice(0, 160)}` : ''
         record(
           isFailureTask(task) ? 'error' : 'info',
           '任务',
-          `${label} → ${task.status}${detail}`,
-          ts
+          `${label} → ${task.status}${errorSuffix}`,
+          eventTime,
+          rawError
         )
       }
       continue
     }
     if (before.status !== task.status || before.attempt !== task.attempt) {
       const level = isFailureTask(task) ? 'error' : 'info'
-      const detail =
-        task.error && isFailureTask(task) ? `：${String(task.error).slice(0, 160)}` : ''
-      record(level, '任务', `${label} ${before.status}→${task.status}${detail}`, ts)
+      record(level, '任务', `${label} ${before.status}→${task.status}${errorSuffix}`, eventTime, rawError)
     }
   }
 }

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 
 from types import SimpleNamespace
 
@@ -296,9 +295,7 @@ def test_wiki_publish_flushes_snapshot_before_build() -> None:
     from yuxi.literature.notes import wiki_publish
 
     source = Path(wiki_publish.__file__).read_text(encoding="utf-8")
-    assert "session.add_all([snapshot, build])" not in source, (
-        "快照与构建不得同一批 add+flush：FK 目标必须按构造先存在"
-    )
+    assert "session.add_all([snapshot, build])" not in source, "快照与构建不得同一批 add+flush：FK 目标必须按构造先存在"
     assert "session.add(snapshot)\n        await session.flush()\n        session.add(build)" in source
 
 
@@ -339,21 +336,16 @@ def test_tool_fingerprint_uses_model_view_schema_and_never_raises() -> None:
 
     # 直接使用真实子智能体中间件产物（含 runtime: ToolRuntime 字段的 args_schema），
     # 与线上崩溃现场同构，避免在测试里重建签名注解。
-    async def _build():
-        class _C:
-            uid = "litaccept01"
-            thread_id = "t-fix"
-            mcps: list = []
-            tools: list = []
-            skills: list = []
+    from types import SimpleNamespace
+    from yuxi.agents.middlewares.subagent_task import YuxiSubAgentMiddleware
 
-        from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
-
-        mw = await create_subagent_task_middleware(_C())
-        by_name = {t.name: t for t in (mw.tools if mw else [])}
-        return by_name["subagent_status"]
-
-    tool = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_build())
+    # Exercise the real generated tool without depending on an existing live
+    # account, its permissions, or availability of the PostgreSQL server.
+    middleware = YuxiSubAgentMiddleware(
+        parent_context=SimpleNamespace(uid="fixture-user", thread_id="fixture-thread"),
+        subagents=[SimpleNamespace(slug="fixture", name="Fixture", description="Offline schema test")],
+    )
+    tool = next(item for item in middleware.tools if item.name == "subagent_status")
     entry = _tool_fingerprint_entry(tool)
     assert entry["name"] == "subagent_status"
     # 模型视角 schema：parameters 里没有 runtime（injected 参数被剔除）

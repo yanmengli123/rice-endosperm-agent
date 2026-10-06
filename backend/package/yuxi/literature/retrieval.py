@@ -17,14 +17,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from sqlalchemy import Integer, cast, exists, func, or_, select
+from sqlalchemy import Integer, and_, cast, exists, func, or_, select
 
-from yuxi.literature.access import paper_visibility
+from yuxi.literature.access import paper_visibility, current_access
 from yuxi.literature.provenance import current_job
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureCompileJob,
     LiteraturePaper,
+    LiteratureCard,
+    LiteratureCitation,
 )
 
 #: 上游 RRF 口径（retrieve.py::rrf_fuse：k=60，Σ w/(k+rank)）
@@ -186,7 +188,7 @@ def _compiled_exists(tenant_id):
         select(LiteratureCompileJob.id).where(
             LiteratureCompileJob.paper_id == LiteraturePaper.id,
             LiteratureCompileJob.tenant_id == tenant_id,
-            LiteratureCompileJob.level == "L1",
+            LiteratureCompileJob.level.in_(("L1", "L2", "L3")),
             LiteratureCompileJob.status == "SUCCEEDED",
             LiteratureCompileJob.note_uri.isnot(None),
             current_job(LiteratureCompileJob),
@@ -201,6 +203,7 @@ async def _search_compiled(
     compiled_only: bool = True,
     kind: str = "",
     limit: int = 10,
+    include_original: bool = False,
 ) -> dict[str, Any]:
     """编译产物检索：笔记全文 + 元数据 → RRF(k=60) → 预算内上下文。
 
@@ -217,22 +220,34 @@ async def _search_compiled(
     from yuxi.literature.fulltext import search_notes
 
     note_hits = await search_notes(tenant_id, tokens, kind=kind, limit=min(500, max(100, limit * 5)))
-    note_ranking = [hit["rid"] for hit in note_hits]
-    note_texts = {hit["rid"]: hit["body"] for hit in note_hits}
+    # Multiple levels are one paper vote in this channel, not extra RRF weight.
+    # Preserve the first (highest-ranked) matching level as the excerpt source.
+    note_ranking = list(dict.fromkeys(hit["rid"] for hit in note_hits))
+    note_texts, note_levels = {}, {}
+    for hit in note_hits:
+        note_texts.setdefault(hit["rid"], hit["body"])
+        note_levels.setdefault(hit["rid"], hit["level"])
+    card_hits, global_cards = await _card_recall(tenant_id, tokens, kind=kind, limit=min(100, limit * 5))
+    from yuxi.literature.attachment_search import search_attachments
+
+    attachment_hits = await search_attachments(tenant_id, tokens, kind=kind, limit=min(100, limit * 5))
+    original_hits = []
+    if include_original:
+        from yuxi.literature.original_search import search_originals
+
+        original_hits = await search_originals(tenant_id, tokens, kind=kind, limit=min(100, limit * 5))
 
     # 通道 2：元数据（标题/摘要/期刊）
     conditions = [paper_visibility(tenant_id)]
     if kind:
         conditions.append(LiteraturePaper.kind == kind)
-    if compiled_only:
-        conditions.append(_compiled_exists(tenant_id))
     async with pg_manager.get_async_session_context() as session:
         rank = _metadata_rank(tokens)
         meta_ranking = list(
             (
                 await session.execute(
                     select(LiteraturePaper.rid)
-                    .where(*conditions, rank > 0)
+                    .where(*conditions, rank > 0, _compiled_exists(tenant_id) if compiled_only else True)
                     .order_by(rank.desc(), LiteraturePaper.rid)
                     .limit(min(500, max(100, limit * 5)))
                 )
@@ -244,7 +259,42 @@ async def _search_compiled(
     from yuxi.literature.navigation_index import search_navigation_vectors
 
     vector_hits, vector_reason = await search_navigation_vectors(tenant_id, query, channel="compiled", limit=limit)
-    candidate_rids = set(note_ranking + meta_ranking + [hit["rid"] for hit in vector_hits])
+    extra_channels = {
+        "cards": card_hits,
+        "attachment_fulltext": attachment_hits,
+        "original_fulltext": original_hits,
+    }
+    for rows in extra_channels.values():
+        for hit in rows:
+            note_texts.setdefault(hit["rid"], hit.get("excerpt", ""))
+    direct = set(note_ranking + meta_ranking + [hit["rid"] for hit in vector_hits])
+    direct.update(hit["rid"] for rows in extra_channels.values() for hit in rows)
+    async with pg_manager.get_async_session_context() as session:
+        papers = list(
+            (await session.execute(select(LiteraturePaper.rid, LiteraturePaper.doi).where(*conditions))).all()
+        )
+        doi_rids = {doi.casefold(): rid for rid, doi in papers if doi}
+        seed_dois = [doi for rid, doi in papers if rid in direct and doi]
+        edges = (
+            await session.execute(
+                select(LiteratureCitation.citing_rid, LiteratureCitation.cited_doi)
+                .where(
+                    LiteratureCitation.tenant_id == tenant_id,
+                    or_(LiteratureCitation.citing_rid.in_(direct), LiteratureCitation.cited_doi.in_(seed_dois)),
+                )
+                .order_by(LiteratureCitation.id)
+                .limit(2000)
+            )
+        ).all()
+    neighbors = set()
+    visible_rids = {rid for rid, _ in papers}
+    for citing, doi in edges:
+        cited = doi_rids.get(doi.casefold())
+        if citing in direct and cited in visible_rids and cited not in direct:
+            neighbors.add(cited)
+        if cited in direct and citing in visible_rids and citing not in direct:
+            neighbors.add(citing)
+    candidate_rids = direct | neighbors
     async with pg_manager.get_async_session_context() as session:
         titles_by_rid = dict(
             (
@@ -261,8 +311,16 @@ async def _search_compiled(
         note_texts.setdefault(hit["rid"], hit["excerpt"])
 
     rankings = [(note_ranking, WEIGHT_NOTE), (meta_ranking, WEIGHT_META)]
+    channel_ranks = {"note_fulltext": note_ranking, "metadata": meta_ranking}
+    for name, rows in extra_channels.items():
+        ranking = list(dict.fromkeys(hit["rid"] for hit in rows if hit["rid"] in titles_by_rid))
+        channel_ranks[name] = ranking
+        rankings.append((ranking, WEIGHT_NOTE))
+    channel_ranks["neighbor"] = sorted(neighbors)
+    rankings.append((sorted(neighbors), 0.25))
     if vector_ranking:
         rankings.append((vector_ranking, WEIGHT_VECTOR))
+    channel_ranks["vector"] = vector_ranking
     fused = rrf_fuse(rankings, k=RRF_K)
     if compiled_only:
         fused = [(rid, score) for rid, score in fused if rid in titles_by_rid]
@@ -279,20 +337,22 @@ async def _search_compiled(
                 "title": titles_by_rid[rid],
                 "note_excerpt": excerpt,
                 "rrf_score": round(score, 6),
+                "channels_used": [name for name, ranking in channel_ranks.items() if rid in ranking],
+                **({"note_level": note_levels[rid]} if rid in note_levels else {}),
+                **(
+                    {"attachment_id": next(hit["attachment_id"] for hit in attachment_hits if hit["rid"] == rid)}
+                    if any(hit["rid"] == rid for hit in attachment_hits)
+                    else {}
+                ),
                 # 导航命中：刻意无 evidence_id/quote/claim 字段（派生索引边界）
             }
         )
-    channels = []
-    if note_ranking:
-        channels.append("note_fulltext")
-    if meta_ranking:
-        channels.append("metadata")
-    if vector_ranking:
-        channels.append("vector")
+    channels = [name for name, ranking in channel_ranks.items() if ranking]
     return {
         "hits": hits,
         "channels_used": channels,
         "note": vector_reason,
+        "global_cards": global_cards,
     }
 
 
@@ -367,6 +427,7 @@ async def search_compiled(
     limit: int = 10,
     use_cache: bool = False,
     rerank_model: str = "",
+    include_original: bool = False,
 ):
     return await _execute_search(
         tenant_id,
@@ -374,8 +435,50 @@ async def search_compiled(
         channel="compiled",
         use_cache=use_cache,
         rerank_model=rerank_model,
-        options={"kind": kind, "compiled_only": compiled_only, "limit": max(1, min(limit, 100))},
+        options={
+            "kind": kind,
+            "compiled_only": compiled_only,
+            "limit": max(1, min(limit, 100)),
+            "include_original": include_original,
+        },
     )
+
+
+async def _card_recall(tenant_id: int, tokens: list[str], *, kind: str, limit: int):
+    scope = current_access()
+    if scope is None:
+        return [], []
+    async with pg_manager.get_async_session_context() as db:
+        rank = sum(
+            cast(func.coalesce(LiteratureCard.content, "").ilike(f"%{escape_like(term)}%", escape="\\"), Integer)
+            for term in tokens
+        )
+        rows = list(
+            (
+                await db.execute(
+                    select(LiteratureCard, LiteraturePaper.rid)
+                    .outerjoin(LiteraturePaper, LiteraturePaper.id == LiteratureCard.paper_id)
+                    .where(
+                        LiteratureCard.tenant_id == tenant_id,
+                        rank > 0,
+                        or_(
+                            and_(LiteratureCard.paper_id.is_(None), LiteratureCard.created_by == scope.user.uid),
+                            and_(paper_visibility(tenant_id), LiteraturePaper.kind == kind if kind else True),
+                        ),
+                    )
+                    .order_by(rank.desc(), LiteratureCard.id)
+                    .limit(limit)
+                )
+            ).all()
+        )
+    hits, global_cards = [], []
+    for card, rid in rows:
+        excerpt = _excerpt(card.content, tokens, budget=600)
+        if rid:
+            hits.append({"rid": rid, "excerpt": excerpt, "card_id": card.id})
+        else:
+            global_cards.append({"card_id": card.id, "title": card.title, "navigation_excerpt": excerpt})
+    return hits, global_cards
 
 
 def _excerpt(text: str, tokens: list[str], *, budget: int) -> str:

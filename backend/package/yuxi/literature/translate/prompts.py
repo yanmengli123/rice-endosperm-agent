@@ -25,19 +25,27 @@ def build_shared_prefix_with_math(paragraphs: list[str]) -> tuple[str, list[str]
     math_list 一一对应）——顺序 replace 会发生碰撞（[[MATH0]]→[[MATH1]] 后
     被下一个局部标签的替换再次命中），test_translation 钉死此契约。
     """
-    import re as _re
+    lines = [CTX_HEADER]
+    labeled, math_list = label_paragraphs(paragraphs)
+    lines.extend(f"[P{i:03d}] {para}" for i, para in enumerate(labeled, 1))
+    return "\n".join(lines), math_list
+
+
+def label_paragraphs(paragraphs: list[str]) -> tuple[list[str], list[str]]:
+    """One global formula numbering shared by context and bounded batches."""
+    import re
 
     from yuxi.literature.translate.latextap import split_text
 
-    lines = [CTX_HEADER]
+    result = []
     math_list: list[str] = []
-    for i, para in enumerate(paragraphs, 1):
+    for para in paragraphs:
         labeled, tags = split_text(para)
         offset = len(math_list)
-        labeled = _re.sub(r"\[\[MATH(\d+)\]\]", lambda m: f"[[MATH{offset + int(m.group(1))}]]", labeled)
+        labeled = re.sub(r"\[\[MATH(\d+)\]\]", lambda m: f"[[MATH{offset + int(m.group(1))}]]", labeled)
         math_list.extend(tags)
-        lines.append(f"[P{i:03d}] {labeled}")
-    return "\n".join(lines), math_list
+        result.append(labeled)
+    return result, math_list
 
 
 def translate_task(para_ids: list[str]) -> str:

@@ -7,12 +7,15 @@
 from __future__ import annotations
 
 import re
-from datetime import date as date_type
+from datetime import date as date_type, UTC
 
 from sqlalchemy import delete, select
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import LiteratureDiaryEntry
+from yuxi.literature.access import build_access, current_access, paper_visibility
+from yuxi.literature.provenance import current_job
+from yuxi.storage.postgres.models_knowledge import LiteraturePaper, LiteratureCompileJob, LiteratureVariant
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -112,4 +115,77 @@ async def export_month(tenant_id: int, uid: str, month: str) -> str:
             )
         ).scalars()
         sections = [f"# 阅读日记 {month}", *[f"## {row.entry_date.isoformat()}\n\n{row.content}" for row in rows]]
+    scope = current_access()
+    if scope is not None:
+        calendar = await activity_calendar(tenant_id, uid, month)
+        for activity in calendar["activities"]:
+            sections.append(f"## {activity['date']} 文献活动")
+            sections.extend(f"- [[{paper['rid']}]] {paper['title']}" for paper in activity["papers"])
     return "\n\n".join(sections) + "\n"
+
+
+async def activity_calendar(tenant_id: int, uid: str, month: str) -> dict:
+    """Authorized imports/knowledge products and personal notes, UTC+8 days."""
+    from datetime import timedelta, timezone
+
+    if not re.fullmatch(r"\d{4}-\d{2}", month or ""):
+        raise ValueError("月份需为 YYYY-MM")
+    _parse_date(month + "-01")
+    scope = current_access()
+    if scope is None or scope.tenant_id != tenant_id or scope.user.uid != uid:
+        raise PermissionError("日记活动仅限当前用户")
+    async with pg_manager.get_async_session_context() as db:
+        papers = list((await db.execute(select(LiteraturePaper).where(paper_visibility(tenant_id)))).scalars())
+        compiled = set(
+            (
+                await db.execute(
+                    select(LiteratureCompileJob.paper_id)
+                    .join(LiteraturePaper, LiteraturePaper.id == LiteratureCompileJob.paper_id)
+                    .where(
+                        paper_visibility(tenant_id),
+                        LiteratureCompileJob.tenant_id == tenant_id,
+                        current_job(LiteratureCompileJob),
+                        LiteratureCompileJob.status == "SUCCEEDED",
+                    )
+                )
+            ).scalars()
+        )
+        translated = set(
+            (
+                await db.execute(
+                    select(LiteratureVariant.paper_id)
+                    .join(LiteraturePaper, LiteraturePaper.id == LiteratureVariant.paper_id)
+                    .where(
+                        paper_visibility(tenant_id),
+                        LiteratureVariant.tenant_id == tenant_id,
+                        LiteratureVariant.variant_kind.in_(("zh", "en_zh")),
+                        LiteratureVariant.parse_revision_id == LiteraturePaper.source_revision_id,
+                        LiteratureVariant.reading_version == LiteraturePaper.reading_version,
+                    )
+                )
+            ).scalars()
+        )
+    activities = {}
+    for paper in papers:
+        created = paper.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)  # SQLite only; production TIMESTAMPTZ is aware.
+        day = created.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+        if not day.startswith(month):
+            continue
+        item = activities.setdefault(day, {"date": day, "imports": 0, "kb": 0, "papers": []})
+        item["imports"] += 1
+        item["kb"] += paper.id in compiled
+        item["papers"].append(
+            {
+                "rid": paper.rid,
+                "title": paper.title or paper.rid,
+                "compiled": paper.id in compiled,
+                "translated": paper.id in translated,
+            }
+        )
+    days = set(await list_diary_days(tenant_id, uid, month=month)) | set(activities)
+    fresh = await build_access(scope.user, tenant_id)
+    if scope.rids != fresh.rids or scope.sources != fresh.sources:
+        raise ValueError("日记来源权限已变更，请刷新")
+    return {"days": sorted(days), "activities": [activities[day] for day in sorted(activities)]}

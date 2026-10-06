@@ -64,6 +64,27 @@ def _workflow_now():
     return utc_now()
 
 
+def _extract_article_doi(article: dict[str, Any] | None) -> str:
+    """解析器元数据优先，其次正文首页抽取；失败返回 ""（身份回退指纹 RID）。
+
+    登记桥（reconcile.register_scientific_revision）据此把 DOI 带进
+    literature_papers；没有它，PDF 导入文献永远无法进入元数据富化链。
+    """
+    if not isinstance(article, dict):
+        return ""
+    metadata = article.get("metadata") or {}
+    if isinstance(metadata, dict):
+        candidate = str(metadata.get("doi") or "").strip()
+        if candidate:
+            from yuxi.literature.identity.rid import normalize_doi, is_doi
+
+            if is_doi(candidate):
+                return normalize_doi(candidate)
+    from yuxi.literature.identity.rid import extract_doi_from_text
+
+    return extract_doi_from_text(str(article.get("markdown") or ""))
+
+
 def _pdf_ingest_concurrency_limit() -> int:
     raw = os.getenv("SCIENTIFIC_PDF_MAX_CONCURRENCY", "2")
     try:
@@ -256,7 +277,13 @@ async def _load_source(file_record: KnowledgeFile) -> bytes:
 
 
 async def create_or_reuse_scientific_pdf_ingest(
-    *, kb_id: str, file_id: str, operator_id: str, enqueue: bool = True, processing_mode: str | None = None
+    *,
+    kb_id: str,
+    file_id: str,
+    operator_id: str,
+    enqueue: bool = True,
+    processing_mode: str | None = None,
+    defer_by_seconds: float = 0,
 ) -> dict[str, Any]:
     async with pg_manager.get_async_session_context() as session:
         result = await session.execute(
@@ -427,6 +454,8 @@ async def create_or_reuse_scientific_pdf_ingest(
                 "process_scientific_pdf_ingest",
                 revision_id,
                 _job_id=_ingest_job_id(revision_id, revision.attempt),
+                # 篇间间隔（对标 PaperAgent 批量节流）：批量导入时按序号错峰入队
+                **({"_defer_by": timedelta(seconds=defer_by_seconds)} if defer_by_seconds > 0 else {}),
             )
         except Exception:  # noqa: BLE001
             # The durable PENDING revision is the source of truth. The periodic
@@ -1260,7 +1289,11 @@ async def _complete_parse_only(
             .values(status="SKIPPED", finished_at=_workflow_now(), lease_owner=None, lease_expires_at=None)
         )
         current.article_uri = artifact_uris.get("unified_article")
-        current.article_summary = {"title": article.get("title"), "counts": result.qa_report.get("counts")}
+        current.article_summary = {
+            "title": article.get("title"),
+            "counts": result.qa_report.get("counts"),
+            "doi": _extract_article_doi(article),
+        }
         current.qa_report = result.qa_report
         current.capabilities = {
             "state": "PARSED_ONLY",
@@ -1525,6 +1558,7 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             current.article_summary = {
                 "title": article.get("title"),
                 "counts": pipeline_result.qa_report.get("counts"),
+                "doi": _extract_article_doi(article),
             }
             current.qa_report = pipeline_result.qa_report
             capability_contract = {
@@ -1641,8 +1675,8 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 file_row.active_parse_revision_id = revision_id
                 file_row.active_index_revision_id = index_revision_id
                 file_row.evidence_status = pipeline_result.capability
-                from yuxi.literature.reconcile import record_source_event
                 from yuxi.literature.provenance import invalidate_note_publications
+                from yuxi.literature.reconcile import record_source_event
 
                 previous_parse = previous_activation.get("active_parse_revision_id")
                 if previous_parse and previous_parse != revision_id:

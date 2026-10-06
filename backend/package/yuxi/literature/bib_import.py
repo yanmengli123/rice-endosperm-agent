@@ -179,6 +179,12 @@ async def import_bib(tenant_id: int, bib_text: str, *, source_name: str = "") ->
                     for part in re.split(r"[;,]", _clean_bib_value(fields.get("keywords", "")))
                     if part.strip()
                 ],
+                wos_categories_json=[
+                    part.strip() for part in _clean_bib_value(fields.get("wc", "")).split(";") if part.strip()
+                ],
+                research_areas_json=[
+                    part.strip() for part in _clean_bib_value(fields.get("sc", "")).split(";") if part.strip()
+                ],
             )
             session.add(paper)
             await session.flush()

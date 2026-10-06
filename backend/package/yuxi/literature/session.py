@@ -1,8 +1,9 @@
 """文献专属会话（P11；方案 §八：复用 Yuxi 原生聊天，冻结模式+绑定文献）。
 
-上游四种 session kind（paper / global-qa / manage / lit）在 Yuxi 的映射：
+上游会话在 Yuxi 的映射：
 - ``paper``（文献专属）：冻结本轮文献上下文（L1/L2 笔记 + 附件清单）
 - ``global-qa`` / ``manage`` / ``lit``：走通用 Agent（literature Skill 已绑）
+- ``chat``：普通原生聊天，不绑定文献或自动枚举文献库
 """
 
 from __future__ import annotations
@@ -15,19 +16,20 @@ from sqlalchemy import select
 from yuxi.literature.access import paper_visibility
 from yuxi.literature.provenance import current_job
 from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_business import Conversation
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureCompileJob,
     LiteraturePaper,
 )
 
 #: 文献会话的上下文注入前缀（供 chat 系统提示词消费）
-SESSION_KINDS = ("paper", "global-qa", "manage", "lit")
+SESSION_KINDS = ("paper", "global-qa", "manage", "lit", "chat")
 
 
 def normalize_session_kind(kind: str) -> str:
     kind = {"library": "lit", "global": "global-qa"}.get(kind, kind)
     if kind not in SESSION_KINDS:
-        raise ValueError("会话模式必须为 paper/global-qa/manage/lit")
+        raise ValueError("会话模式必须为 paper/global-qa/manage/lit/chat")
     return kind
 
 
@@ -100,6 +102,33 @@ async def build_library_session_context(tenant_id: int) -> dict[str, Any]:
     }
 
 
+async def find_active_paper_conversation(tenant_id: int, uid: str, rid: str):
+    """查同 (租户, 用户, 文献) 的活跃 paper 会话；服务端幂等复用入口。
+
+    前端"先查后建"两次请求间存在竞态（2026-10 实测连点 3 次建 3 线程），
+    这里是服务端权威判定；并发插入由 0103 部分唯一索引兜底。
+    """
+
+    async def _find() -> Conversation | None:
+        async with pg_manager.get_async_session_context() as db:
+            return (
+                await db.execute(
+                    select(Conversation)
+                    .where(
+                        Conversation.tenant_id == tenant_id,
+                        Conversation.uid == uid,
+                        Conversation.status != "deleted",
+                        Conversation.extra_metadata["literature_session"]["kind"].as_string() == "paper",
+                        Conversation.extra_metadata["literature_session"]["rid"].as_string() == rid,
+                    )
+                    .order_by(Conversation.created_at.desc(), Conversation.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
+    return await _find()
+
+
 async def create_literature_conversation(
     *, tenant_id: int, user, kind: str, rid: str = "", agent_slug: str = "default-chatbot"
 ) -> dict:
@@ -107,6 +136,28 @@ async def create_literature_conversation(
 
     kind = normalize_session_kind(kind)
     if kind == "paper":
+        # 服务端幂等：同用户同文献的活跃会话直接复用，不再新建（连点/双端
+        # 并发时唯一索引兜底，二者都收敛到"一个绑定会话"）。
+        existing = await find_active_paper_conversation(tenant_id, user.uid, rid)
+        if existing is not None:
+            from yuxi.services.conversation_service import _serialize_thread
+
+            context = await build_paper_session_context(tenant_id, rid)
+            return {
+                "thread": _serialize_thread(existing),
+                "session": (existing.extra_metadata or {}).get("literature_session")
+                or {"schema_version": 1, "kind": "paper", "rid": rid},
+                "context": context,
+                "reused": True,
+            }
+    if kind == "chat":
+        context = {
+            "session_kind": "chat",
+            "bound_rid": "",
+            "system_context": "普通聊天：未绑定文献或全库导航；遵循原生智能体的知识与工具配置。",
+        }
+        title = "普通聊天"
+    elif kind == "paper":
         context = await build_paper_session_context(tenant_id, rid)
         title = f"文献讨论 · {context['paper_title'] or rid}"
     else:
@@ -115,14 +166,32 @@ async def create_literature_conversation(
     # Persist only an immutable mode/resource binding, not untrusted prompts or
     # credentials. Per-run source versions and ACL are rebuilt by the server.
     binding = {"schema_version": 1, "kind": kind, "rid": rid if kind == "paper" else ""}
-    async with pg_manager.get_async_session_context() as db:
-        thread = await create_thread_view(
-            agent_slug=agent_slug,
-            title=title[:255],
-            metadata={"literature_session": binding},
-            db=db,
-            current_uid=user.uid,
-        )
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        async with pg_manager.get_async_session_context() as db:
+            thread = await create_thread_view(
+                agent_slug=agent_slug,
+                title=title[:255],
+                metadata={"literature_session": binding},
+                db=db,
+                current_uid=user.uid,
+            )
+    except IntegrityError:
+        # 并发双击/双端同刻插入：0103 唯一索引拒绝第二条，转成复用第一条。
+        if kind != "paper":
+            raise
+        winner = await find_active_paper_conversation(tenant_id, user.uid, rid)
+        if winner is None:
+            raise
+        from yuxi.services.conversation_service import _serialize_thread
+
+        return {
+            "thread": _serialize_thread(winner),
+            "session": (winner.extra_metadata or {}).get("literature_session") or binding,
+            "context": context,
+            "reused": True,
+        }
     return {"thread": thread, "session": binding, "context": context}
 
 
@@ -156,6 +225,15 @@ async def load_conversation_session(thread_id: str, uid: str) -> dict | None:
         if conversation.tenant_id != tenant_id:
             raise PermissionError("文献会话租户归属已变更，请新建会话")
     kind = normalize_session_kind(str(binding.get("kind") or ""))
+    if kind == "chat":
+        # No implicit library enumeration, injected note context, or read-only
+        # literature mode. The native plan/approval/source gates still apply.
+        return {
+            "session_kind": "chat",
+            "tenant_id": tenant_id,
+            "bound_rid": "",
+            "system_context": "普通聊天：没有绑定文献；不自动读取文献库。遵守原生来源核验与写操作审批。",
+        }
     async with access_scope(user, tenant_id) as scope:
         if kind == "paper":
             rid = str(binding.get("rid") or "")

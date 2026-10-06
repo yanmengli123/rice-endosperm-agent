@@ -159,6 +159,62 @@ def _fill(current: str | None, *candidates: str) -> str | None:
     return None
 
 
+async def _backfill_doi_from_document(tenant_id: int, paper: LiteraturePaper) -> str | None:
+    """存量自愈：从当前有效正文首页抽本文 DOI 并只填空回填。
+
+    PDF 导入链在抽取能力上线前登记的文献没有 DOI，元数据富化对它们
+    fail-closed。这里把「补全元数据」按钮本身变成存量修复路径。
+    """
+    if paper.doi:
+        return None
+    input_version = (paper.source_revision_id, paper.reading_version, dict(paper.artifact_pointers or {}))
+    from yuxi.literature.artifacts import resolve_effective_document
+    from yuxi.literature.identity.rid import extract_doi_from_text
+
+    try:
+        document = await resolve_effective_document(tenant_id, paper.rid, paper=paper)
+    except Exception:  # noqa: BLE001 - 自愈尽力而为：正文不可得时维持 no_doi 语义
+        logger.debug("DOI 回填未获正文: rid=%s", paper.rid)
+        return None
+    if not document:
+        return None
+    from yuxi.literature.review import para_text
+
+    parsed = json.loads(document["content"])
+    body = "\n\n".join(para_text(p) for p in parsed.get("paragraphs", []) if isinstance(p, dict))
+    doi = extract_doi_from_text(body)
+    if not doi:
+        return None
+    from yuxi.literature.access import build_access, current_access
+
+    scope = current_access()
+    if scope is not None and paper.rid not in (await build_access(scope.user, tenant_id)).rids:
+        raise PermissionError("DOI 回填期间来源访问权已撤销")
+    async with pg_manager.get_async_session_context() as session:
+        current = (
+            await session.execute(
+                select(LiteraturePaper)
+                .where(paper_visibility(tenant_id), LiteraturePaper.rid == paper.rid)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        # 重验：等待期间 DOI 可能被人工补上或文献被移出 ACL。
+        if (
+            current is None
+            or current.meta_locked
+            or (current.source_revision_id, current.reading_version, current.artifact_pointers) != input_version
+        ):
+            return None
+        if current.doi:
+            paper.doi = current.doi
+            return current.doi
+        current.doi = doi
+        await session.commit()
+    paper.doi = doi
+    return doi
+
+
 async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
     """Fetch external metadata, then revalidate ACL/lock and fill only empty fields."""
     async with pg_manager.get_async_session_context() as session:
@@ -172,7 +228,9 @@ async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
     if paper.meta_locked:
         return {"rid": rid, "ok": True, "filled": [], "reason": "meta_locked", "sources": []}
     if not paper.doi:
-        return {"rid": rid, "ok": False, "reason": "no_doi"}
+        backfilled = await _backfill_doi_from_document(tenant_id, paper)
+        if not backfilled:
+            return {"rid": rid, "ok": False, "reason": "no_doi"}
     input_doi = paper.doi
     fetched = []
     for name, fetch in (
@@ -263,4 +321,92 @@ async def enrich_pending(tenant_id: int, *, batch_size: int = 50) -> dict[str, A
         "processed": len(results),
         "ok": sum(1 for r in results if r.get("ok")),
         "results": results,
+    }
+
+
+# ---------------------------------------------------------------- 批量富化后台化
+
+
+async def enqueue_enrich_pending(tenant_id: int, *, batch_size: int = 50) -> dict[str, Any]:
+    """Reuse durable library execution for a metadata-only, actor-bound run."""
+    import hashlib
+    import uuid
+
+    from yuxi.literature.access import current_access
+    from yuxi.literature.library_pipeline import ACTIVE, STEP_NAMES, _dispatch
+    from yuxi.storage.postgres.models_business import User
+    from yuxi.storage.postgres.models_knowledge import LiteratureLibraryRun
+
+    scope = current_access()
+    if scope is None or scope.tenant_id != tenant_id:
+        raise PermissionError("批量富化必须绑定当前请求用户")
+    if type(batch_size) is not int or not 1 <= batch_size <= 200:
+        raise ValueError("batch_size 取值范围 1-200")
+    async with pg_manager.get_async_session_context() as db:
+        actor = (
+            await db.execute(
+                select(User.uid).where(User.uid == scope.user.uid, User.is_disabled.is_(False)).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if actor is None:
+            raise PermissionError("当前请求用户不可用")
+        rids = list(
+            (
+                await db.execute(
+                    select(LiteraturePaper.rid)
+                    .where(
+                        paper_visibility(tenant_id),
+                        LiteraturePaper.meta_locked.is_(False),
+                        (
+                            LiteraturePaper.doi.is_(None)
+                            | (LiteraturePaper.doi == "")
+                            | LiteraturePaper.title.is_(None)
+                            | (LiteraturePaper.title == "")
+                            | LiteraturePaper.journal.is_(None)
+                            | (LiteraturePaper.journal == "")
+                        ),
+                    )
+                    .order_by(LiteraturePaper.id)
+                    .limit(batch_size)
+                )
+            ).scalars()
+        )
+        payload = {"operation": "enrich_pending", "rids": rids}
+        identity = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        existing = (
+            await db.execute(
+                select(LiteratureLibraryRun).where(
+                    LiteratureLibraryRun.tenant_id == tenant_id,
+                    LiteratureLibraryRun.requested_by == scope.user.uid,
+                    LiteratureLibraryRun.input_hash == identity,
+                    LiteratureLibraryRun.status.in_(ACTIVE),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing:
+            return {"run_id": existing.run_id, "status": existing.status, "reused": True}
+        run_id = f"llr_{uuid.uuid4().hex}"
+        db.add(
+            LiteratureLibraryRun(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                requested_by=scope.user.uid,
+                input_hash=identity,
+                payload_json=payload,
+                steps_json={
+                    name: {
+                        "status": "PENDING" if name == "enrich_metadata" else "SUCCEEDED",
+                        "detail": {} if name == "enrich_metadata" else {"skipped": True},
+                    }
+                    for name in STEP_NAMES
+                },
+            )
+        )
+        await db.commit()
+    return {
+        "run_id": run_id,
+        "status": "PENDING",
+        "reused": False,
+        "batch_size": len(rids),
+        "enqueue_deferred": not await _dispatch(run_id),
     }

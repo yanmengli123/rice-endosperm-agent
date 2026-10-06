@@ -666,11 +666,8 @@ export const fileApi = {
 
     const url = kbId ? `/api/knowledge/files/upload?kb_id=${kbId}` : '/api/knowledge/files/upload'
 
-    return apiAdminPost(url, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    })
+    // Browser owns the multipart boundary; a manually supplied header drops it.
+    return apiAdminPost(url, formData)
   },
 
   /**

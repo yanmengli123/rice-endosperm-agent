@@ -111,7 +111,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
 import { databaseApi, documentApi, fileApi } from '@/apis/knowledge_api'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
@@ -119,6 +119,8 @@ import { apiGet, apiPost } from '@/apis/base'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import HistoryPanel from '@/components/literature/HistoryPanel.vue'
 import { useUserStore } from '@/stores/user'
+import { parseOptionsPayload } from '@/composables/useLiteratureSettings'
+import { resolveDefaultOcrEngine } from '@/utils/ocr_engine'
 const emit = defineEmits(['imported', 'track'])
 const userStore = useUserStore()
 // 就地进度吃全局共享轮询源（与状态栏/任务视图同源同频）
@@ -150,6 +152,32 @@ const doi = ref('')
 const markdown = ref('')
 const notice = ref('')
 const results = ref([])
+watch(
+  () => taskFeed.tasks.value,
+  () => {
+    let completed = false
+    for (const result of results.value) {
+      if (!result.ticket) continue
+      const task = ticketTask(result.ticket)
+      if (!task?.is_terminal) continue
+      const text = task.is_failure
+        ? `导入失败：${task.error || task.stage || '请查看任务详情'}`
+        : task.status === 'PARSED_ONLY'
+          ? '解析完成：草稿（未入库）'
+          : task.status === 'CANCELLED' || task.status === 'SKIPPED'
+            ? task.stage || '本次处理已取消或跳过'
+            : task.paper_rid
+              ? '入库成功：可打开原文、PDF 和已提取图片'
+              : task.stage || '处理结束；尚未登记为文献'
+      if (result.message !== text) {
+        result.message = text
+        completed = true
+      }
+    }
+    if (completed) emit('imported')
+  },
+  { deep: true }
+)
 const perform = async (action) => {
   if (busy.value) return
   busy.value = true
@@ -195,10 +223,15 @@ const importPdf = (event) => {
           continue
         }
         const result = await documentApi.addDocuments(target, [upload.file_path], {
+          ...parseOptionsPayload(),
           content_type: 'file',
           format_template: 'pdf_literature',
           pdf_evidence_pipeline: true,
+          ocr_engine: resolveDefaultOcrEngine({ contractKey: 'pdf_evidence' }),
           scientific_processing_mode: processingMode.value,
+          auto_index: processingMode.value === 'activate',
+          content_hashes: { [upload.file_path]: upload.content_hash },
+          file_sizes: { [upload.file_path]: upload.size ?? file.size },
           source_paths: { [upload.file_path]: file.name }
         })
         const failed = (result.result?.items || []).find((item) => item.status === 'failed')
@@ -212,7 +245,7 @@ const importPdf = (event) => {
           ticket: failed ? null : ticket || null,
           message: failed
             ? failed.error || '处理接收失败'
-            : `已提交处理${ticketText}，下方实时显示阶段；也可在工作台「任务与历史 → 入库中」查看`
+            : `上传成功，已提交处理${ticketText}，下方实时显示阶段；也可在工作台「任务与历史 → 入库中」查看`
         })
         // 立即拉一次共享任务源，让就地芯片尽快从"等待快照"变为真实阶段
         if (ticket && !failed) taskFeed.refresh()
@@ -220,9 +253,11 @@ const importPdf = (event) => {
         results.value.push({ name: file.name, ticket: null, message: error.message || '提交失败' })
       }
     }
-    notice.value =
-      '提交结束；尚不表示解析成功。质量门禁拒绝或任务失败不会登记为可读文献；各文件阶段与终态见「任务与历史 → 入库中」。'
-    emit('imported')
+    const submitted = results.value.filter((result) => result.ticket).length
+    notice.value = submitted
+      ? `${submitted} 个 PDF 已提交；尚不表示解析成功。质量门禁拒绝或任务失败不会登记为可读文献；终态见「任务与历史 → 入库中」。`
+      : '没有 PDF 成功提交解析，请查看各文件的失败或跳过原因。'
+    if (submitted) emit('imported')
   })
 }
 const readMarkdown = (event) => {

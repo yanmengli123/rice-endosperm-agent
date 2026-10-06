@@ -48,6 +48,12 @@ from yuxi.literature.navigation_index import (
     reconcile_literature_navigation_indexes,
 )
 from yuxi.literature.fulltext import reconcile_literature_fulltext
+from yuxi.literature.attachment_search import reconcile_literature_attachments
+from yuxi.literature.translation_workspace import (
+    process_literature_translation_task,
+    reconcile_literature_translation_tasks,
+)
+from yuxi.literature.original_search import reconcile_original_search
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.services.agent_run_service import (
     acknowledge_agent_run_dispatch,
@@ -1229,6 +1235,7 @@ class WorkerSettings:
         process_literature_reader_render,
         process_literature_compile,
         process_literature_translation,
+        process_literature_translation_task,
         process_literature_workflow,
         process_literature_navigation_index,
         process_literature_library,
@@ -1254,6 +1261,9 @@ class WorkerSettings:
         cron(reconcile_stale_workflows, minute=set(range(0, 60))),
         cron(reconcile_literature_navigation_indexes, minute=set(range(1, 60, 5))),
         cron(reconcile_literature_fulltext, minute=set(range(60))),
+        cron(reconcile_literature_attachments, minute=set(range(60))),
+        cron(reconcile_literature_translation_tasks, minute=set(range(60))),
+        cron(reconcile_original_search, minute=set(range(60))),
         cron(reconcile_literature_libraries, minute=set(range(60))),
         cron(reconcile_scientific_literature_papers, minute=set(range(2, 60, 5))),
         cron(reconcile_literature_note_wikis, minute={4, 14, 24, 34, 44, 54}),

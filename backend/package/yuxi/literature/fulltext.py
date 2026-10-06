@@ -35,7 +35,7 @@ def latest_current_note():
         .where(
             newer.paper_id == LiteratureCompileJob.paper_id,
             newer.tenant_id == LiteratureCompileJob.tenant_id,
-            newer.level == "L1",
+            newer.level == LiteratureCompileJob.level,
             newer.status == "SUCCEEDED",
             newer.note_uri.isnot(None),
             current_job(newer),
@@ -77,7 +77,7 @@ async def search_notes(tenant_id: int, terms: list[str], *, kind: str = "", limi
             paper_visibility(tenant_id),
             LiteratureNoteSearch.tenant_id == tenant_id,
             LiteratureCompileJob.tenant_id == tenant_id,
-            LiteratureCompileJob.level == "L1",
+            LiteratureCompileJob.level.in_(("L1", "L2", "L3")),
             LiteratureCompileJob.status == "SUCCEEDED",
             current_job(LiteratureCompileJob),
             latest_current_note(),
@@ -115,7 +115,7 @@ async def search_notes(tenant_id: int, terms: list[str], *, kind: str = "", limi
         excerpt = func.substr(LiteratureNoteSearch.body, start, 400)
         rows = (
             await db.execute(
-                select(LiteraturePaper.rid, excerpt, rank.label("rank"))
+                select(LiteraturePaper.rid, excerpt, rank.label("rank"), LiteratureCompileJob.level)
                 .select_from(LiteratureNoteSearch)
                 .join(LiteratureCompileJob, LiteratureCompileJob.id == LiteratureNoteSearch.job_id)
                 .join(LiteraturePaper, LiteraturePaper.id == LiteratureCompileJob.paper_id)
@@ -125,10 +125,10 @@ async def search_notes(tenant_id: int, terms: list[str], *, kind: str = "", limi
             )
         ).all()
     seen, hits = set(), []
-    for rid, body, score in rows:
+    for rid, body, score, level in rows:
         if rid not in seen:
             seen.add(rid)
-            hits.append({"rid": rid, "body": body, "score": float(score)})
+            hits.append({"rid": rid, "body": body, "score": float(score), "level": level})
     return hits
 
 
@@ -142,7 +142,7 @@ async def sync_note(job_id: int) -> bool:
                 .where(
                     LiteratureCompileJob.id == job_id,
                     current_job(LiteratureCompileJob),
-                    LiteratureCompileJob.level == "L1",
+                    LiteratureCompileJob.level.in_(("L1", "L2", "L3")),
                     LiteratureCompileJob.status == "SUCCEEDED",
                     LiteratureCompileJob.note_uri.isnot(None),
                     LiteraturePaper.trashed_at.is_(None),
@@ -192,7 +192,7 @@ async def reconcile_literature_fulltext(ctx=None) -> int:
                     .outerjoin(LiteratureNoteSearch, LiteratureNoteSearch.job_id == LiteratureCompileJob.id)
                     .where(
                         current_job(LiteratureCompileJob),
-                        LiteratureCompileJob.level == "L1",
+                        LiteratureCompileJob.level.in_(("L1", "L2", "L3")),
                         LiteratureCompileJob.status == "SUCCEEDED",
                         LiteratureCompileJob.note_uri.isnot(None),
                         LiteraturePaper.trashed_at.is_(None),

@@ -13,6 +13,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.literature import artifacts, retrieval, workflow
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureArtifactRevision,
+    LiteratureAttachment,
+    LiteratureCitation,
+    LiteratureNavigationIndex,
     LiteratureCompileJob,
     LiteratureNoteSearch,
     LiteraturePaper,
@@ -75,6 +78,9 @@ async def env(monkeypatch):
             LiteratureWorkflowRun,
             LiteratureCompileJob,
             LiteratureNoteSearch,
+            LiteratureAttachment,
+            LiteratureCitation,
+            LiteratureNavigationIndex,
         ):
             await conn.run_sync(model.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

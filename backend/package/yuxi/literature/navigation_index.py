@@ -20,13 +20,20 @@ from sqlalchemy import select
 from yuxi.literature.access import access_scope, current_access, paper_visibility
 from yuxi.literature.provenance import current_job
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_knowledge import LiteratureCompileJob, LiteratureNavigationIndex, LiteraturePaper
+from yuxi.storage.postgres.models_knowledge import (
+    LiteratureCompileJob,
+    LiteratureNavigationIndex,
+    LiteraturePaper,
+    LiteratureAttachment,
+)
 from yuxi.utils.datetime_utils import utc_now
 
 logger = logging.getLogger(__name__)
 BUILD_JOB = "process_literature_navigation_index"
 MAX_ATTEMPTS = 3
 MAX_CORPUS_PAPERS = 20_000
+MAX_PRODUCT_BYTES = 5 * 1024 * 1024
+MAX_NAVIGATION_CHUNKS = 20_000
 
 
 def _fingerprint(paper) -> str:
@@ -66,7 +73,7 @@ async def _visible_inputs(tenant_id: int):
                         paper_visibility(tenant_id),
                         LiteratureCompileJob.tenant_id == tenant_id,
                         current_job(LiteratureCompileJob),
-                        LiteratureCompileJob.level == "L1",
+                        LiteratureCompileJob.level.in_(("L1", "L2", "L3")),
                         LiteratureCompileJob.status == "SUCCEEDED",
                         LiteratureCompileJob.note_uri.isnot(None),
                     )
@@ -76,15 +83,36 @@ async def _visible_inputs(tenant_id: int):
             .scalars()
             .all()
         )
+        attachments = list(
+            (
+                await session.execute(
+                    select(LiteratureAttachment)
+                    .join(LiteraturePaper, LiteraturePaper.id == LiteratureAttachment.paper_id)
+                    .where(
+                        paper_visibility(tenant_id),
+                        LiteratureAttachment.tenant_id == tenant_id,
+                        LiteratureAttachment.text_uri.isnot(None),
+                        LiteratureAttachment.text_digest.isnot(None),
+                        LiteratureAttachment.text_error.is_(None),
+                    )
+                )
+            ).scalars()
+        )
     notes = {}
     for job in jobs:
-        notes.setdefault(job.paper_id, {"uri": job.note_uri, "job_id": job.id})
+        notes.setdefault(job.paper_id, {}).setdefault(job.level, {"uri": job.note_uri, "job_id": job.id})
     manifest = {
         str(p.id): {
             "rid": p.rid,
             "fingerprint": _fingerprint(p),
-            "note_uri": notes.get(p.id, {}).get("uri"),
-            "note_job_id": notes.get(p.id, {}).get("job_id"),
+            "note_uri": notes.get(p.id, {}).get("L1", {}).get("uri"),
+            "note_job_id": notes.get(p.id, {}).get("L1", {}).get("job_id"),
+            "notes": notes.get(p.id, {}),
+            "attachments": [
+                {"id": a.id, "uri": a.text_uri, "digest": a.text_digest, "source_digest": a.content_digest}
+                for a in attachments
+                if a.paper_id == p.id
+            ],
         }
         for p in papers
     }
@@ -240,13 +268,20 @@ async def process_literature_navigation_index(ctx: dict, index_id: str):
                         {"paper_id": int(paper.id), "rid": paper.rid, "channel": "catalog", "excerpt": meta[:1200]}
                     )
                     texts.append(meta[:6000])
-                uri = current[str(paper.id)]["note_uri"]
-                if uri:
-                    note = (
-                        await get_minio_client().adownload_file(RENDER_BUCKET, uri.removeprefix("kbasset://"))
-                    ).decode("utf-8")
+                products = [{"kind": level, **note} for level, note in current[str(paper.id)]["notes"].items()] + [
+                    {"kind": "attachment", **attachment} for attachment in current[str(paper.id)]["attachments"]
+                ]
+                for product in products:
+                    data = await get_minio_client().adownload_file(
+                        RENDER_BUCKET, product["uri"].removeprefix("kbasset://")
+                    )
+                    if len(data) > MAX_PRODUCT_BYTES:
+                        raise ValueError("导航产物超过 5 MiB，请拆分后重建；未截断或激活不完整索引")
+                    if product["kind"] == "attachment" and hashlib.sha256(data).hexdigest() != product["digest"]:
+                        raise ValueError("附件导航文本完整性校验失败")
+                    note = data.decode("utf-8")
                     # Bounded chunks retain semantic recall beyond the opening paragraph.
-                    for start in range(0, min(len(note), 60_000), 2000):
+                    for start in range(0, len(note), 2000):
                         text = note[start : start + 2400]
                         if text.strip():
                             documents.append(
@@ -254,10 +289,13 @@ async def process_literature_navigation_index(ctx: dict, index_id: str):
                                     "paper_id": int(paper.id),
                                     "rid": paper.rid,
                                     "channel": "compiled",
+                                    "product_kind": product["kind"],
                                     "excerpt": text[:1200],
                                 }
                             )
                             texts.append(text)
+                            if len(documents) > MAX_NAVIGATION_CHUNKS:
+                                raise ValueError("导航分块超过单批预算，请拆分后重建；未调用 Embedding")
             if not documents:
                 raise ValueError("没有可索引文本")
             policy = await policy_for_job_attempt(row, operation="navigation_build")
@@ -344,7 +382,8 @@ async def search_navigation_vectors(
             ids = [
                 int(pid)
                 for pid, item in current.items()
-                if index.input_manifest.get(pid) == item and (channel != "compiled" or item.get("note_uri"))
+                if index.input_manifest.get(pid) == item
+                and (channel != "compiled" or item.get("notes") or item.get("attachments"))
             ]
             if ids:
                 chosen, eligible = index, ids
@@ -379,7 +418,11 @@ async def search_navigation_vectors(
                 continue
             seen.add(rid)
             hits.append({"rid": rid, "excerpt": str(entity.get("excerpt") or ""), "score": float(entry["distance"])})
-        expected = {int(pid) for pid, item in current.items() if channel != "compiled" or item.get("note_uri")}
+        expected = {
+            int(pid)
+            for pid, item in current.items()
+            if channel != "compiled" or item.get("notes") or item.get("attachments")
+        }
         coverage_note = "" if set(eligible) == expected else "向量索引仅覆盖部分当前文献；请重建导航索引"
         return hits[:limit], coverage_note
     except Exception as exc:  # noqa: BLE001 - explicitly degraded, no fake vector channel

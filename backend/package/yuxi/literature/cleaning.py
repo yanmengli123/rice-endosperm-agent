@@ -244,11 +244,53 @@ async def confirm_cleaning(tenant_id: int, plan_id: str, plan_hash: str) -> dict
                 raise ValueError("引用图或可见范围已变更，请重新预览；未移除任何文献")
         for paper in papers:
             paper.trashed_at, paper.trashed_by = utc_now(), scope.user.uid
+            paper.trashed_reason = f"cleaning:{plan_id}"[:512]
             if paper.source_revision_id:
                 await invalidate_note_publications(session, paper.source_revision_id)
         plan.status, plan.confirmed_at = "CONFIRMED", utc_now()
         await session.commit()
     return {"plan_id": plan_id, "removed": len(papers), "reused": False}
+
+
+async def trash_paper(tenant_id: int, rid: str, *, reason: str) -> dict:
+    """手动把一篇文献移入回收站（与清洗同一粘性回收语义，永不物理删除）。
+
+    - 目录 / 检索 / 图谱 / 编译翻译立即隐藏（``paper_visibility`` 全线过滤
+      ``trashed_at``；进行中任务在 ``require_current_input`` 处按 STALE 诚实终止）；
+    - 不触碰知识源证据与解析版本（来源治理与审计不动）；
+    - 重复导入同一文件复用同一文献行，恢复前保持回收状态（恢复是显式动作）；
+    - 原因必填进审计（``trashed_by/trashed_reason``）。
+    """
+    scope = current_access()
+    if scope is None:
+        raise ValueError("移入回收站必须绑定请求者")
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("移入回收站必须填写原因（审计要求）")
+    fresh = await build_access(scope.user, tenant_id, include_trashed=True)
+    if rid not in fresh.rids:
+        raise ValueError("文献不存在或来源访问权已撤销")
+    async with pg_manager.get_async_session_context() as session:
+        paper = (
+            await session.execute(
+                select(LiteraturePaper)
+                .where(
+                    LiteraturePaper.tenant_id == tenant_id,
+                    LiteraturePaper.rid == rid,
+                    LiteraturePaper.trashed_at.is_(None),
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if paper is None:
+            raise ValueError("文献已在回收站；恢复请前往知识库工作台回收站")
+        now = utc_now()
+        paper.trashed_at, paper.trashed_by = now, scope.user.uid
+        paper.trashed_reason = reason[:512]
+        if paper.source_revision_id:
+            await invalidate_note_publications(session, paper.source_revision_id)
+        await session.commit()
+    return {"rid": rid, "trashed": True, "trashed_at": now.isoformat(), "trashed_by": scope.user.uid}
 
 
 async def list_trash(tenant_id: int) -> list[dict]:
@@ -271,7 +313,16 @@ async def list_trash(tenant_id: int) -> list[dict]:
                 )
             ).scalars()
         )
-    return [{"rid": paper.rid, "title": paper.title, "trashed_at": paper.trashed_at.isoformat()} for paper in papers]
+    return [
+        {
+            "rid": paper.rid,
+            "title": paper.title,
+            "trashed_at": paper.trashed_at.isoformat(),
+            "trashed_by": paper.trashed_by or "",
+            "trashed_reason": paper.trashed_reason or "",
+        }
+        for paper in papers
+    ]
 
 
 async def restore_paper(tenant_id: int, rid: str) -> dict:
@@ -289,6 +340,6 @@ async def restore_paper(tenant_id: int, rid: str) -> dict:
                 .with_for_update()
             )
         ).scalar_one()
-        paper.trashed_at, paper.trashed_by = None, None
+        paper.trashed_at, paper.trashed_by, paper.trashed_reason = None, None, None
         await session.commit()
     return {"rid": rid, "restored": True}

@@ -63,6 +63,19 @@ def extract_text_locally(file_path: Path, *, suffix: str | None = None) -> str:
     return file_path.read_text(encoding="utf-8", errors="replace")
 
 
+def extract_content(content: bytes, filename: str) -> str:
+    """Share the same local extractor with checksum-verified legacy backfill."""
+    import tempfile
+
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".pdf", ".docx", ".doc", ".txt", ".md"}:
+        return ""
+    with tempfile.TemporaryDirectory(prefix="lit-attach-") as tmp:
+        local = Path(tmp) / ("source" + suffix)
+        local.write_bytes(content)
+        return extract_text_locally(local)
+
+
 async def register_attachment(
     *,
     tenant_id: int,

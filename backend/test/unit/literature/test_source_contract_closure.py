@@ -118,6 +118,7 @@ async def env(monkeypatch):
     class Queue:
         async def enqueue_job(self, name, *args, _job_id=None):
             queued.append((name, args, _job_id))
+            return object()
 
     async def pool():
         return Queue()
@@ -284,7 +285,7 @@ async def test_activation_event_is_transactional_and_registered_missing_render_i
     # Real bridge invokes the keyword-only enqueue service, not a permissive stub.
     result = await reconcile.register_scientific_revision("rev-public")
     assert result["status"] == "REGISTERED" and result["render"]["status"] == "PENDING"
-    assert queued[0][1] == ("rev-public", "reader_render_v1")
+    assert queued[0][1] == ("rev-public", "reader_render_v1", 0, 0)
     async with sessions() as session:
         event = (await session.execute(select(LiteratureSourceEvent))).scalar_one()
         assert event.status == "COMPLETED"

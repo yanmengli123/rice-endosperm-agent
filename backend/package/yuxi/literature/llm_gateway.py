@@ -85,6 +85,40 @@ _policy_context: contextvars.ContextVar[LiteratureLlmPolicy | None] = contextvar
     "literature_llm_policy", default=None
 )
 _usage_context: contextvars.ContextVar[_Usage | None] = contextvars.ContextVar("literature_llm_usage", default=None)
+_model_options: contextvars.ContextVar[dict] = contextvars.ContextVar("literature_model_options", default={})
+
+
+async def resolve_effective_model_spec(
+    session,
+    *,
+    uid: str,
+    explicit_spec: str | None,
+    model_type: str = "chat",
+) -> str:
+    """解析将生效的 model_spec（与 freeze_literature_policy 同一判定链）。
+
+    供入队前预检等只读场景复用：不建 AgentRun、不校验配额，但模型解析
+    语义必须与冻结策略逐字一致，否则预检结果与实际执行模型漂移。
+    """
+    from yuxi.services.user_credential_service import list_active_custom_model_specs
+
+    preference = (
+        await session.execute(select(UserModelPreference).where(UserModelPreference.uid == uid))
+    ).scalar_one_or_none()
+    preferred_spec = str(preference.chat_model_spec or "").strip() if preference else ""
+    custom_specs = await list_active_custom_model_specs(session, uid)
+    if explicit_spec is not None:
+        info = model_cache.get_model_info(explicit_spec)
+        if not (model_type == "chat" and explicit_spec in custom_specs) and (
+            info is None or info.model_type != model_type
+        ):
+            raise ValueError("指定模型不存在或类型不匹配")
+    known = model_cache.get_model_info(preferred_spec) if preferred_spec else None
+    return explicit_spec or (
+        preferred_spec
+        if preferred_spec in custom_specs or (known and known.model_type == "chat")
+        else config.default_model
+    )
 
 
 async def freeze_literature_policy(
@@ -108,22 +142,8 @@ async def freeze_literature_policy(
     if int(entitlement.get("tenant_id") or 0) != int(tenant_id):
         raise ValueError("LLM 文献任务的用户与租户归属不一致")
 
-    explicit_spec = model_spec
-    if explicit_spec is not None:
-        info = model_cache.get_model_info(explicit_spec)
-        if info is None or info.model_type != model_type:
-            raise ValueError("指定模型不存在或类型不匹配")
-    preference = (
-        await session.execute(select(UserModelPreference).where(UserModelPreference.uid == uid))
-    ).scalar_one_or_none()
-    preferred_spec = str(preference.chat_model_spec or "").strip() if preference else ""
     custom_specs = await list_active_custom_model_specs(session, uid)
-    known = model_cache.get_model_info(preferred_spec) if preferred_spec else None
-    model_spec = explicit_spec or (
-        preferred_spec
-        if preferred_spec in custom_specs or (known and known.model_type == "chat")
-        else config.default_model
-    )
+    model_spec = await resolve_effective_model_spec(session, uid=uid, explicit_spec=model_spec, model_type=model_type)
     provider_id = model_spec.split(":", 1)[0] if model_spec else None
     policy_name = str(entitlement.get("credential_policy") or "platform_only")
     is_custom = model_spec in custom_specs
@@ -316,9 +336,9 @@ async def call(messages: list[dict[str, Any]]) -> Any:
     # 整篇大 prompt（全文前缀+六维任务）首 token 延迟普遍超过对话轮默认 45s
     # （agents.models.CHAT_MODEL_REQUEST_TIMEOUT_SECONDS）——e2e 实测编译 L1
     # 稳定 45s 整超时；显式放宽到域级 600s。
-    response = await select_model(model_spec=policy.model_spec, request_timeout=LITERATURE_LLM_TIMEOUT_S).call(
-        messages, stream=False
-    )
+    response = await select_model(
+        model_spec=policy.model_spec, request_timeout=LITERATURE_LLM_TIMEOUT_S, **_model_options.get()
+    ).call(messages, stream=False)
     delta = _token_usage(response, messages)
     usage.input_tokens += delta.input_tokens
     usage.output_tokens += delta.output_tokens
@@ -361,8 +381,20 @@ async def _settle(policy: LiteratureLlmPolicy, usage: _Usage, error: BaseExcepti
         await session.commit()
 
 
+async def fail_unstarted_run(run_id: str | None, *, error_type: str) -> None:
+    """Preflight/ACL failures must not strand pending quota slots; no ledger mutation."""
+    if not run_id:
+        return
+    async with pg_manager.get_async_session_context() as session:
+        run = await session.get(AgentRun, run_id, with_for_update=True)
+        if run is not None and run.status == "pending":
+            run.status, run.error_type = "failed", error_type
+            run.error_message, run.finished_at = "文献任务在模型调用前终止", utc_now_naive()
+            await session.commit()
+
+
 @asynccontextmanager
-async def governed_runtime(policy: LiteratureLlmPolicy) -> AsyncIterator[None]:
+async def governed_runtime(policy: LiteratureLlmPolicy, *, model_options: dict | None = None) -> AsyncIterator[None]:
     """Activate the frozen BYOK credential and settle one logical operation."""
     from yuxi.agents.models import reset_user_credential_override, set_user_credential_override
     from yuxi.services.user_credential_service import open_user_credential_runtime
@@ -399,6 +431,7 @@ async def governed_runtime(policy: LiteratureLlmPolicy) -> AsyncIterator[None]:
     policy_token = _policy_context.set(policy)
     usage = _Usage()
     usage_token = _usage_context.set(usage)
+    options_token = _model_options.set(dict(model_options or {}))
     error: BaseException | None = None
     try:
         yield
@@ -407,6 +440,7 @@ async def governed_runtime(policy: LiteratureLlmPolicy) -> AsyncIterator[None]:
         raise
     finally:
         _usage_context.reset(usage_token)
+        _model_options.reset(options_token)
         _policy_context.reset(policy_token)
         reset_user_credential_override(credential_token)
         await _settle(policy, usage, error)

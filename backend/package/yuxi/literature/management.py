@@ -19,6 +19,7 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 
 METADATA_FIELDS = (
+    "doi",
     "title",
     "kind",
     "authors_json",
@@ -27,6 +28,8 @@ METADATA_FIELDS = (
     "issn",
     "pub_year",
     "keywords_json",
+    "wos_categories_json",
+    "research_areas_json",
     "meta_locked",
 )
 
@@ -57,6 +60,13 @@ async def update_metadata(tenant_id: int, rid: str, *, expected_token: str, chan
         raise PermissionError("文献来源访问权已撤销")
     if not changes or set(changes) - set(METADATA_FIELDS):
         raise ValueError("仅可修改书目信息；身份、来源与计量字段由服务端维护")
+    from yuxi.literature.identity.rid import is_doi, normalize_doi
+
+    if "doi" in changes and changes["doi"]:
+        changes = dict(changes)
+        changes["doi"] = normalize_doi(str(changes["doi"]))
+        if not is_doi(changes["doi"]):
+            raise ValueError("DOI 必须形如 10.NNNN/…；RID 身份不受人工 DOI 影响")
     async with pg_manager.get_async_session_context() as db:
         paper = (
             await db.execute(

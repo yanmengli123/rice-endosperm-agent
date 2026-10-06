@@ -10,35 +10,60 @@ from __future__ import annotations
 import json
 from typing import Annotated, Literal
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
-from pydantic import BaseModel, ConfigDict, Field
 
-from server.utils.auth_middleware import get_admin_user, get_required_user, get_superadmin_user
-from yuxi.literature import bib_import, cards, concepts, diary, enrich as enrich_module
-from yuxi.literature import graph_service, readops, review
-from yuxi.literature import artifacts, reader_bundle, retrieval, workflow
-from yuxi.literature import management
-from yuxi.literature import qna
-from yuxi.literature import answer_cache, export_vault, library_pipeline, session as lit_session
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
+from yuxi.literature import (
+    answer_cache,
+    artifacts,
+    bib_import,
+    cards,
+    concepts,
+    diary,
+    export_vault,
+    graph_service,
+    library_pipeline,
+    management,
+    qna,
+    reader_bundle,
+    readops,
+    retrieval,
+    review,
+    topics,
+    workflow,
+)
+from yuxi.literature import enrich as enrich_module
+from yuxi.literature import session as lit_session
 from yuxi.literature.access import access_scope, authorize_asset, paper_visibility
 from yuxi.literature.attachments import register_attachment
 from yuxi.literature.import_archive import import_paperagent_archive
+from yuxi.literature.notes.service import (
+    CompilePreconditionFailed,
+    enqueue_literature_compile,
+    ensure_l3_preconditions,
+)
 from yuxi.literature.reading.service import RENDER_BUCKET, enqueue_reader_render
-from yuxi.literature.notes.service import enqueue_literature_compile
 from yuxi.literature.translate.service import enqueue_literature_translation
 from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
 
+from server.utils.auth_middleware import get_admin_user, get_required_user, get_superadmin_user
+
 
 async def authorize_literature_request(request: Request, current_user: User = Depends(get_required_user)):
     tenant_id = await _current_tenant(current_user)
     async with access_scope(current_user, tenant_id) as scope:
         rid = request.path_params.get("rid")
-        if request.scope.get("route") and request.scope["route"].name == "restore_library_paper":
-            # The normal scope intentionally excludes trash. Restoration must
-            # recheck the underlying source ACL including trash, in its service.
+        if request.scope.get("route") and request.scope["route"].name in {
+            "restore_library_paper",
+            "trash_library_paper",
+        }:
+            # The normal scope intentionally excludes trash. Restoration and
+            # repeat-trash must recheck the underlying source ACL including
+            # trash in their service (409 "already trashed" vs 404).
             yield scope
             return
         if rid is not None and rid not in scope.rids:
@@ -118,6 +143,116 @@ async def list_parse_only_drafts(current_user: User = Depends(get_required_user)
     from yuxi.literature.drafts import list_drafts
 
     return {"items": await list_drafts(await _current_tenant(current_user))}
+
+
+class TranslationProfileBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=64)
+    label: str = Field(default="", max_length=100)
+    model_spec: str = Field(min_length=1, max_length=200)
+    batch_chars: int = Field(default=12000, ge=1000, le=48000, strict=True)
+    reasoning_effort: Literal["default", "none", "low", "medium", "high"] = "default"
+
+
+class TranslationSettingsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profiles: list[TranslationProfileBody] = Field(max_length=20)
+    active_profile_id: str | None = Field(default=None, max_length=64)
+
+
+class TranslationProbeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile_id: str | None = Field(default=None, max_length=64)
+    source_kind: Literal["auto", "draft", "paper"] = "auto"
+    source_ref: str = Field(default="current", min_length=1, max_length=160)
+    cost_ack: bool = Field(default=False, strict=True)
+
+
+@literature.get("/translation-settings")
+async def get_translation_settings(response: Response, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.translate.settings import get_settings
+
+    response.headers["Cache-Control"] = "private, no-store"
+    return await get_settings(await _current_tenant(current_user), current_user.uid)
+
+
+@literature.put("/translation-settings")
+async def save_translation_settings(body: TranslationSettingsBody, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.translate.settings import save_settings
+
+    try:
+        return await save_settings(
+            await _current_tenant(current_user),
+            current_user.uid,
+            [profile.model_dump() for profile in body.profiles],
+            body.active_profile_id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=422 if isinstance(exc, ValueError) else 403, detail=str(exc)) from exc
+
+
+@literature.post("/translation-probe", status_code=202)
+async def start_translation_probe(body: TranslationProbeBody, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.translation_workspace import enqueue_task
+
+    try:
+        return await enqueue_task(
+            await _current_tenant(current_user),
+            current_user.uid,
+            task_kind="probe",
+            source_kind=body.source_kind,
+            source_ref=body.source_ref,
+            profile_id=body.profile_id,
+            cost_ack=body.cost_ack,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=422 if isinstance(exc, ValueError) else 404, detail=str(exc)) from exc
+
+
+@literature.get("/translation-probe/sources")
+async def translation_probe_sources(response: Response, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.translation_workspace import probe_sources
+
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"items": await probe_sources(await _current_tenant(current_user))}
+
+
+@literature.get("/translation-tasks/{task_id}")
+async def get_translation_task(task_id: int, content: bool = False, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.translation_workspace import get_task
+
+    try:
+        result = await get_task(await _current_tenant(current_user), current_user.uid, task_id, content=content)
+        return Response(
+            content=json.dumps(result, ensure_ascii=False),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@literature.post("/drafts/{revision_id}/translation", status_code=202)
+async def translate_parse_only_draft(revision_id: str, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.translation_workspace import enqueue_task
+
+    try:
+        return await enqueue_task(
+            await _current_tenant(current_user), current_user.uid, source_kind="draft", source_ref=revision_id
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=422 if isinstance(exc, ValueError) else 404, detail=str(exc)) from exc
+
+
+@literature.get("/drafts/{revision_id}/translation")
+async def get_draft_translation(revision_id: str, response: Response, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.translation_workspace import latest_draft_task
+
+    try:
+        response.headers["Cache-Control"] = "private, no-store"
+        return {"task": await latest_draft_task(await _current_tenant(current_user), current_user.uid, revision_id)}
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @literature.get("/history/archives")
@@ -280,9 +415,18 @@ async def trigger_compile(
     force: bool = Query(default=False),
     current_user: User = Depends(get_required_user),
 ):
-    """触发 L1/L2/L3 编译（202 入队；L1=L1+L2 合并，L3 需价值分达标或 force）。"""
+    """触发 L1/L2/L3 编译（202 入队；L1=L1+L2 合并，L3 需价值分达标或 force）。
+
+    L3 的前置条件（本文有 L1、库内有同来源已编译 L1）是确定性的业务规则，
+    入队前拦截并返回 409，避免占用重试预算并把"条件未满足"显示成故障。
+    """
     tenant_id = await _current_tenant(current_user)
     paper_id = await _paper_id_by_rid(tenant_id, rid)
+    if level == "L3":
+        try:
+            await ensure_l3_preconditions(tenant_id, paper_id)
+        except CompilePreconditionFailed as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         result = await enqueue_literature_compile(
             paper_id=paper_id,
@@ -344,6 +488,8 @@ async def upload_attachment(
         result = await register_attachment(
             tenant_id=tenant_id, paper_id=paper_id, kind=kind, filename=file.filename or "", content=content
         )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="文献不存在或无权访问，附件未登记") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 201, **result}
@@ -386,7 +532,6 @@ async def get_asset(
 
 async def _paper_id_by_rid(tenant_id: int, rid: str) -> int:
     from sqlalchemy import select
-
     from yuxi.storage.postgres.models_knowledge import LiteraturePaper
 
     async with pg_manager.get_async_session_context() as session:
@@ -526,9 +671,16 @@ async def enrich_pending_endpoint(
     batch_size: int = Query(default=50, ge=1, le=200),
     current_user: User = Depends(get_required_user),
 ):
-    """批量富化缺元数据文献。"""
+    """批量富化缺元数据文献（202 入队后台执行；逐篇串行外部调用不再阻塞 HTTP）。"""
     tenant_id = await _current_tenant(current_user)
-    result = await enrich_module.enrich_pending(tenant_id, batch_size=batch_size)
+    try:
+        result = await enrich_module.enqueue_enrich_pending(tenant_id, batch_size=batch_size)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - Redis 入队不可用时不假装已受理
+        raise HTTPException(status_code=503, detail=f"批量富化入队失败，请稍后重试: {type(exc).__name__}") from exc
     return {"status": 202, **result}
 
 
@@ -541,8 +693,12 @@ async def diary_days(
     current_user: User = Depends(get_required_user),
 ):
     tenant_id = await _current_tenant(current_user)
-    days = await diary.list_diary_days(tenant_id, current_user.uid, month=month or None)
-    return {"days": days}
+    if not month:
+        return {"days": await diary.list_diary_days(tenant_id, current_user.uid)}
+    try:
+        return await diary.activity_calendar(tenant_id, current_user.uid, month)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @literature.get("/diary/export")
@@ -715,9 +871,7 @@ async def get_review_page_image_endpoint(
     if not revision_id:
         raise HTTPException(status_code=409, detail="文献未关联解析版本")
     try:
-        return await review.get_review_page_image(
-            tenant_id, revision_id, page, require_dual=require_dual
-        )
+        return await review.get_review_page_image(tenant_id, revision_id, page, require_dual=require_dual)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -881,7 +1035,7 @@ async def get_reader_bundle_endpoint(rid: str, current_user: User = Depends(get_
     bundle = await reader_bundle.get_reader_bundle(tenant_id, rid)
     if bundle is None:
         raise HTTPException(status_code=404, detail="文献不存在或未关联解析版本")
-    return bundle
+    return JSONResponse(bundle, headers={"Cache-Control": "private, no-store"})
 
 
 @literature.get("/papers/{rid}/variants/{variant_kind}")
@@ -918,9 +1072,7 @@ async def get_templated_variant_endpoint(
     tenant_id = await _current_tenant(current_user)
     result = await reader_bundle.get_templated_variant(tenant_id, rid, variant_kind, template)
     if result is None:
-        raise HTTPException(
-            status_code=422, detail=f"变体 {variant_kind} 不支持模板重渲染（仅 en_zh 支持）"
-        )
+        raise HTTPException(status_code=422, detail=f"变体 {variant_kind} 不支持模板重渲染（仅 en_zh 支持）")
     return result
 
 
@@ -945,7 +1097,7 @@ async def get_source_pdf_endpoint(rid: str, current_user: User = Depends(get_req
     return Response(
         content=data,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{rid}.pdf"', "Cache-Control": "private, max-age=300"},
+        headers={"Content-Disposition": f'inline; filename="{rid}.pdf"', "Cache-Control": "private, no-store"},
     )
 
 
@@ -967,6 +1119,50 @@ async def generate_topic_moc_endpoint(payload: dict, current_user: User = Depend
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 202, **result}
+
+
+class TopicCompile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    field: Literal["wos_categories", "research_areas", "keywords"] = "wos_categories"
+    min_papers: int = Field(default=2, ge=1, le=10000)
+
+
+@literature.post("/topics/compile")
+async def compile_topic_catalog(payload: TopicCompile, current_user: User = Depends(get_required_user)):
+    try:
+        return await topics.compile_topics(await _current_tenant(current_user), **payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@literature.get("/topics")
+async def list_topic_catalog(
+    field: Literal["wos_categories", "research_areas", "keywords"] = "wos_categories",
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    current_user: User = Depends(get_required_user),
+):
+    try:
+        return await topics.list_topics(await _current_tenant(current_user), field=field, offset=offset, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@literature.get("/topics/{slug}")
+async def get_topic_catalog(
+    slug: str,
+    field: Literal["wos_categories", "research_areas", "keywords"] = "wos_categories",
+    current_user: User = Depends(get_required_user),
+):
+    try:
+        result = await topics.list_topics(await _current_tenant(current_user), field=field, slug=slug)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result.get("stale"):
+        raise HTTPException(status_code=409, detail="主题来源已变更，请重新编译")
+    if not result["topics"]:
+        raise HTTPException(status_code=404, detail="主题不存在或无权访问")
+    return result["topics"][0]
 
 
 # ---------------------------------------------------------------- P10-B/C/D：产物版本 / 处理编排 / 检索
@@ -1059,7 +1255,11 @@ async def save_document_revision(rid: str, payload: dict, current_user: User = D
 
 @literature.post("/papers/{rid}/workflow", status_code=202)
 async def start_paper_workflow(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
-    """启动处理运行（parse_compile / full / parse_only；幂等复用活跃运行）。"""
+    """启动处理运行（parse_compile / full / parse_only；幂等复用活跃运行）。
+
+    review_policy=auto（仅 full）：渲染后自动跳过复核门控直接翻译，
+    对标 PaperAgent 翻译门控的「跳过审核翻译」。
+    """
     tenant_id = await _current_tenant(current_user)
     try:
         result = await workflow.start_workflow(
@@ -1067,6 +1267,7 @@ async def start_paper_workflow(rid: str, payload: dict, current_user: User = Dep
             paper_rid=rid,
             mode=str(payload.get("mode") or "parse_compile"),
             requested_by=getattr(current_user, "uid", ""),
+            review_policy=str(payload.get("review_policy") or "wait"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1153,6 +1354,7 @@ async def search_compiled_endpoint(
     kind: str = Query(default=""),
     limit: int = Query(default=10, ge=1, le=50),
     use_cache: bool = Query(default=True),
+    include_original: bool = Query(default=False),
     rerank_model: str = Query(default="", max_length=512),
     current_user: User = Depends(get_required_user),
 ):
@@ -1160,7 +1362,13 @@ async def search_compiled_endpoint(
     tenant_id = await _current_tenant(current_user)
     try:
         return await retrieval.search_compiled(
-            tenant_id, query, kind=kind, limit=limit, use_cache=use_cache, rerank_model=rerank_model
+            tenant_id,
+            query,
+            kind=kind,
+            limit=limit,
+            use_cache=use_cache,
+            rerank_model=rerank_model,
+            include_original=include_original,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1246,6 +1454,25 @@ async def library_trash(current_user: User = Depends(get_required_user)):
     from yuxi.literature.cleaning import list_trash
 
     return {"items": await list_trash(await _current_tenant(current_user))}
+
+
+@literature.post("/papers/{rid}/trash")
+async def trash_library_paper(rid: str, payload: dict, current_user: User = Depends(get_required_user)):
+    """手动移入回收站（可恢复软删除，永不物理删除）。
+
+    - 原因必填进审计（trashed_by/trashed_reason）；
+    - 目录/检索/图谱立即隐藏；不触碰知识源证据与解析版本；
+    - 重复导入同一文件不自动恢复，恢复是回收站里的显式动作。
+    """
+    tenant_id = await _current_tenant(current_user)
+    from yuxi.literature.cleaning import trash_paper
+
+    try:
+        return await trash_paper(tenant_id, rid, reason=str(payload.get("reason") or ""))
+    except ValueError as exc:
+        message = str(exc)
+        status = 404 if ("不存在" in message or "撤销" in message) else (409 if "已在回收站" in message else 422)
+        raise HTTPException(status_code=status, detail=message) from exc
 
 
 @literature.post("/library/trash/{rid}/restore")
@@ -1374,8 +1601,63 @@ async def invalidate_paper_cache(rid: str, current_user: User = Depends(get_requ
     return {"invalidated": count}
 
 
+_SEARCH_CACHE_PATTERN = "yuxi:lit:search:*"
+
+
+async def _scan_search_cache_keys() -> list[str]:
+    from yuxi.storage.redis import get_async_redis_client
+
+    client = await get_async_redis_client()
+    if not client:
+        return []
+    return [key async for key in client.scan_iter(match=_SEARCH_CACHE_PATTERN, count=200)]
+
+
+@literature.get("/search/cache/stats")
+async def search_cache_stats(current_user: User = Depends(get_admin_user)):
+    """检索缓存统计（对标 PaperAgent 缓存统计：条目数 + TTL 概览，键级版本化自然失效）。"""
+    await _current_tenant(current_user)
+    keys = await _scan_search_cache_keys()
+    return {"entries": len(keys), "ttl_seconds": 300, "pattern": _SEARCH_CACHE_PATTERN}
+
+
+@literature.post("/search/cache/clear")
+async def clear_search_cache(current_user: User = Depends(get_admin_user)):
+    """清空检索缓存（缓存键由内容版本清单派生，清空只损失热度不损失正确性）。"""
+    await _current_tenant(current_user)
+    from yuxi.storage.redis import get_async_redis_client
+
+    keys = await _scan_search_cache_keys()
+    deleted = 0
+    if keys:
+        client = await get_async_redis_client()
+        if client:
+            for chunk_start in range(0, len(keys), 200):
+                deleted += int(await client.delete(*keys[chunk_start : chunk_start + 200]))
+    return {"cleared": deleted}
+
+
+@literature.post("/library/reconcile")
+async def reconcile_library(payload: dict, current_user: User = Depends(get_admin_user)):
+    """手动对账（对标 PaperAgent「同步磁盘」）：修复缺登记/缺渲染/滞留激活事件。
+
+    dry_run 默认开——先预览待对账数量，确认后带 dry_run=false 执行；
+    修复动作幂等（与每 5 分钟的 cron 同一入口）。
+    """
+    await _current_tenant(current_user)
+    from yuxi.literature.reconcile import reconcile_scientific_literature_papers
+
+    dry_run = bool(payload.get("dry_run", True))
+    limit = int(payload.get("limit") or 100)
+    if not 1 <= limit <= 1000:
+        raise HTTPException(status_code=422, detail="limit 取值范围 1-1000")
+    repaired = await reconcile_scientific_literature_papers(limit=limit, dry_run=dry_run)
+    return {"dry_run": dry_run, "repaired": repaired if not dry_run else None, "pending": repaired if dry_run else 0}
+
+
 class MetadataChanges(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    doi: str | None = Field(default=None, max_length=256)
     title: str | None = Field(default=None, max_length=4096)
     kind: Literal["paper", "thesis", "book", "chapter", "patent", "standard"] = "paper"
     authors_json: list[Annotated[str, Field(max_length=512)]] | None = Field(default=None, max_length=200)
@@ -1384,6 +1666,8 @@ class MetadataChanges(BaseModel):
     issn: str | None = Field(default=None, max_length=32)
     pub_year: int | None = Field(default=None, ge=1000, le=9999)
     keywords_json: list[Annotated[str, Field(max_length=512)]] | None = Field(default=None, max_length=200)
+    wos_categories_json: list[Annotated[str, Field(max_length=512)]] | None = Field(default=None, max_length=200)
+    research_areas_json: list[Annotated[str, Field(max_length=512)]] | None = Field(default=None, max_length=200)
     meta_locked: bool = True
 
 
@@ -1465,6 +1749,26 @@ async def list_literature_sessions(archived: bool = False, current_user: User = 
             await _current_tenant(current_user), current_user.uid, archived=archived
         )
     }
+
+
+@literature.get("/sessions/search")
+async def search_literature_history(
+    query: str = Query(..., min_length=1, max_length=500),
+    archived: bool = False,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_required_user),
+):
+    from yuxi.literature.session_search import search_history
+
+    try:
+        return await search_history(
+            await _current_tenant(current_user), current_user.uid, query, archived=archived, offset=offset, limit=limit
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class SessionUpdate(BaseModel):

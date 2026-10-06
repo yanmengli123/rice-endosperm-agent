@@ -85,6 +85,42 @@ def _slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._\-]+", "-", (value or "").strip()).strip("-")
 
 
+# 正文抽取形态（按可信度排序）：本文 DOI 链接 > DOI 标注行。
+# 只命中 "doi.org/10…" 与 "DOI[:：] 10…"，不做裸 10.x 全文扫描——参考文献
+# 区全是他人 DOI，全文扫描会把引用误当本文身份（身份错配比缺失更糟）。
+_DOI_IN_TEXT_PATTERNS = (
+    re.compile(r"(?:https?://)?(?:dx\.)?doi\.org/(10\.\d{4,9}/[^\s\"'<>\]\)]+)", re.IGNORECASE),
+    re.compile(r"\bDOI[:：]?\s*(10\.\d{4,9}/[^\s\"'<>\]\)]+)", re.IGNORECASE),
+)
+
+
+def extract_doi_from_text(text: str | None, *, max_scan: int = 6000) -> str:
+    """从正文首页区段抽取**本文** DOI；无命中返回 ""。
+
+    语义移植自上游 paperkb（尾部句点/标点清理、括号平衡），差异：
+    - 只扫前 ``max_scan`` 字符（首页页眉/页脚是本文 DOI 的栖息地，参考文献
+      区的他人 DOI 必须排除在窗口外）；``max_scan=0`` 表示全文扫描（测试用）。
+    - 命中后仍过 ``is_doi`` 全库唯一判据，非法形态宁可不放行。
+    """
+    if not text:
+        return ""
+    window = text if max_scan <= 0 else text[:max_scan]
+    # A short paper's references can occur inside the first-page budget.
+    window = re.split(r"(?im)^\s*(?:#{1,6}\s*)?(?:references|bibliography|参考文献)\s*:?\s*$", window)[0]
+    matches = sorted(
+        (match for pattern in _DOI_IN_TEXT_PATTERNS for match in pattern.finditer(window)),
+        key=lambda match: match.start(),
+    )
+    for match in matches:
+        value = match.group(1).rstrip(".,;")
+        while value.endswith(")") and value.count("(") < value.count(")"):
+            value = value[:-1]
+        value = normalize_doi(value)
+        if value and is_doi(value):
+            return value
+    return ""
+
+
 def make_rid(
     kind: str = "paper",
     *,

@@ -113,6 +113,11 @@ export function fetchLiteratureAssetText(uri, signal = null) {
   )
 }
 
+export async function fetchLiteratureAssetBlob(uri, signal = null) {
+  const response = await apiGet(buildLiteratureAssetUrl(uri), { signal }, true, 'blob')
+  return response.blob()
+}
+
 export const literatureWorkspaceApi = {
   exportBusinessBackup: () => apiGet('/api/literature/export/business-backup', {}, true, 'blob'),
   historyArchives: () => apiGet('/api/literature/history/archives'),

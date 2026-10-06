@@ -9,11 +9,20 @@
             <option v-for="(name, key) in kinds" :key="key" :value="key">{{ name }}</option>
           </select></label
         >
+        <label class="wide"
+          >DOI<input
+            v-model="draft.doi"
+            maxlength="256"
+            placeholder="10.NNNN/…（留空表示无；保存后可用于外部源补全）"
+            inputmode="url"
+        /></label>
         <label>作者（每行一位）<textarea v-model="authors" rows="3" /></label>
         <label>期刊<input v-model="draft.journal" maxlength="512" /></label>
         <label>ISSN<input v-model="draft.issn" maxlength="32" /></label>
         <label>年份<input v-model="draft.pub_year" type="number" min="1000" max="9999" /></label>
         <label>关键词（逗号分隔）<input v-model="keywords" /></label>
+        <label>WoS 类别（分号分隔）<input v-model="categories" /></label>
+        <label>研究领域（分号分隔）<input v-model="areas" /></label>
         <label class="wide"
           >摘要<textarea v-model="draft.abstract" rows="6" maxlength="50000" />
         </label>
@@ -46,10 +55,14 @@ const kinds = {
 const draft = ref(null)
 const authors = ref('')
 const keywords = ref('')
+const categories = ref('')
+const areas = ref('')
 const busy = ref(false)
 const notice = ref('')
 const saved = ref('')
-const snapshot = computed(() => JSON.stringify([draft.value, authors.value, keywords.value]))
+const snapshot = computed(() =>
+  JSON.stringify([draft.value, authors.value, keywords.value, categories.value, areas.value])
+)
 watch([snapshot, busy], () =>
   emit('editing-change', busy.value || (!!draft.value && snapshot.value !== saved.value))
 )
@@ -65,6 +78,8 @@ const load = async () => {
       .map((author) => (typeof author === 'string' ? author : author.name || ''))
       .join('\n')
     keywords.value = (result.keywords_json || []).join(', ')
+    categories.value = (result.wos_categories_json || []).join('; ')
+    areas.value = (result.research_areas_json || []).join('; ')
     saved.value = snapshot.value
   } catch (error) {
     if (ticket === generation) notice.value = error.message || '元数据载入失败'
@@ -84,6 +99,7 @@ const save = async () => {
     const result = await api.saveMetadata(rid, {
       expected_token: value.metadata_token,
       changes: {
+        doi: (value.doi || '').trim() || null,
         title: value.title || null,
         kind: value.kind,
         journal: value.journal || null,
@@ -98,7 +114,15 @@ const save = async () => {
           .split(/[,，]/)
           .map((x) => x.trim())
           .filter(Boolean),
-        meta_locked: value.meta_locked
+        meta_locked: value.meta_locked,
+        wos_categories_json: categories.value
+          .split(/[;；]/)
+          .map((x) => x.trim())
+          .filter(Boolean),
+        research_areas_json: areas.value
+          .split(/[;；]/)
+          .map((x) => x.trim())
+          .filter(Boolean)
       }
     })
     if (ticket !== generation) return

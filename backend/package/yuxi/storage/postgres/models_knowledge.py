@@ -2099,6 +2099,7 @@ class LiteratureReaderRender(Base):
     status = Column(String(32), nullable=False, default="PENDING")
     render_version = Column(String(32), nullable=False, default="reader_render_v1")
     attempt = Column(Integer, nullable=False, default=0)
+    generation = Column(Integer, nullable=False, default=0)
     markdown_uri = Column(String(1024))
     review_uri = Column(String(1024))
     review_digest = Column(String(64))
@@ -2157,12 +2158,15 @@ class LiteraturePaper(Base):
     issn = Column(String(32))
     pub_year = Column(Integer)
     keywords_json = Column(JSON_VALUE)
+    wos_categories_json = Column(JSON_VALUE)
+    research_areas_json = Column(JSON_VALUE)
     external_cited = Column(Integer)
     meta_locked = Column(Boolean, nullable=False, default=False)
     is_reference = Column(Boolean, nullable=False, default=False)
     source_main = Column(String(128), nullable=False, default="")
     trashed_at = Column(DateTime(timezone=True))
     trashed_by = Column(String(64))
+    trashed_reason = Column(String(512))
     # P10-B：产物当前指针（kind → artifact revision_id）与冻结标记
     artifact_pointers = Column(JSON_VALUE, nullable=False, default=dict)
     frozen_artifacts = Column(JSON_VALUE, nullable=False, default=dict)
@@ -2291,6 +2295,8 @@ class LiteratureTranslationJob(Base):
             "source_revision_id",
             "reading_version",
             "generator_version",
+            "config_digest",
+            "generation",
             name="uq_literature_translation_jobs_key",
         ),
         Index("ix_literature_translation_jobs_status", "status"),
@@ -2305,12 +2311,56 @@ class LiteratureTranslationJob(Base):
     source_revision_id = Column(String(64), nullable=False, default="")
     reading_version = Column(Integer, nullable=False, default=1)
     generator_version = Column(String(64), nullable=False, default="literature-translate-v1")
+    options_json = Column(JSON_VALUE)
+    config_digest = Column(String(64), nullable=False, default="")
+    generation = Column(Integer, nullable=False, default=0)
     status = Column(String(32), nullable=False, default="PENDING")
     attempt = Column(Integer, nullable=False, default=0)
     variant_uri = Column(String(1024))
     error = Column(Text)
     requested_by = Column(String(64), nullable=False, default="")
     llm_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True, index=True)
+    model_spec = Column(String(200))
+    credential_source = Column(String(24))
+    credential_id = Column(BigInteger)
+    provider_id = Column(String(100))
+    policy_version = Column(Integer)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureTranslationSettings(Base):
+    """Owner-private profiles referencing governed native models (migration 0099)."""
+
+    __tablename__ = "literature_translation_settings"
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
+    uid = Column(String(64), ForeignKey("users.uid", ondelete="CASCADE"), primary_key=True)
+    profiles_json = Column(JSON_VALUE, nullable=False, default=list)
+    active_profile_id = Column(String(64))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureTranslationTask(Base):
+    """Durable private draft/probe execution; never source evidence (0099)."""
+
+    __tablename__ = "literature_translation_tasks"
+    __table_args__ = (Index("ix_literature_translation_tasks_status", "status", "next_retry_at"),)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    requested_by = Column(String(64), ForeignKey("users.uid", ondelete="CASCADE"), nullable=False)
+    task_kind = Column(String(16), nullable=False)
+    source_kind = Column(String(16), nullable=False)
+    source_ref = Column(String(160), nullable=False)
+    source_digest = Column(String(64), nullable=False)
+    options_json = Column(JSON_VALUE, nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING")
+    attempt = Column(Integer, nullable=False, default=0)
+    next_retry_at = Column(DateTime(timezone=True))
+    result_json = Column(JSON_VALUE)
+    variant_uri = Column(String(1024))
+    content_digest = Column(String(64))
+    error = Column(Text)
+    llm_run_id = Column(String(64), ForeignKey("agent_runs.id"))
     model_spec = Column(String(200))
     credential_source = Column(String(24))
     credential_id = Column(BigInteger)
@@ -2360,6 +2410,12 @@ class LiteratureAttachment(Base):
     filename = Column(String(512), nullable=False)
     uri = Column(String(1024), nullable=False)  # kbasset:// 原始文件
     text_uri = Column(String(1024))  # kbasset:// 抽取纯文本（0 API）
+    text_digest = Column(String(64))
+    text_body = Column(Text)
+    text_lexical = Column(Text)
+    text_attempt = Column(Integer, nullable=False, default=0)
+    text_retry_at = Column(DateTime(timezone=True))
+    text_error = Column(String(64))
     content_digest = Column(String(64), nullable=False)
     size_bytes = Column(BigInteger, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
@@ -2426,6 +2482,37 @@ class LiteratureNoteSearch(Base):
     attempt = Column(Integer, nullable=False, default=0)
     next_retry_at = Column(DateTime(timezone=True))
     error_code = Column(String(64))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureOriginalSearch(Base):
+    """Checksum-bound original-text navigation projection (migration 0097)."""
+
+    __tablename__ = "literature_original_search"
+    paper_id = Column(BigIntPk, ForeignKey("literature_papers.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    input_digest = Column(String(64), nullable=False)
+    content_digest = Column(String(64), nullable=False)
+    body = Column(Text, nullable=False)
+    lexical_text = Column(Text, nullable=False)
+    attempt = Column(Integer, nullable=False, default=0)
+    next_retry_at = Column(DateTime(timezone=True))
+    error_code = Column(String(64))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureTopicSet(Base):
+    """Owner-scoped deterministic topic snapshot (migration 0096)."""
+
+    __tablename__ = "literature_topic_sets"
+    __table_args__ = (UniqueConstraint("tenant_id", "uid", "field", name="uq_literature_topic_sets_owner"),)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    uid = Column(String(64), nullable=False)
+    field = Column(String(32), nullable=False)
+    min_papers = Column(Integer, nullable=False)
+    source_digest = Column(String(64), nullable=False)
+    topics_json = Column(JSON_VALUE, nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
 

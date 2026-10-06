@@ -13,13 +13,14 @@ document.json（段落 [Pxxx] 锚点）。编译产物落 MinIO
 from __future__ import annotations
 
 import json
+import asyncio
 import hashlib
 import logging
 import uuid
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from yuxi.literature.boundaries import assert_not_evidence_capable
@@ -49,8 +50,11 @@ VALID_LEVELS = ("L1", "L2", "L3")
 _L3_MIN_SELF_CTX_CHARS = 80
 
 
-def _compile_job_id(job_id: int) -> str:
-    return f"lit-compile:{job_id}"
+def _compile_job_id(job_id: int, attempt: int = 0, run_id: str | None = None) -> str:
+    # A user rerun resets the retry budget but freezes a new governed run.
+    # Keep that generation distinct from ARQ's cached terminal results.
+    base = f"lit-compile:{job_id}" + (f":run:{run_id}" if run_id else "")
+    return base if attempt == 0 else f"{base}:attempt:{attempt}"
 
 
 def _notes_prefix(*, tenant_id: int, rid: str) -> str:
@@ -136,6 +140,10 @@ async def register_literature_paper(
         else:
             if title and not row.title:
                 row.title = title
+            if doi and not row.doi:
+                # 复用既有行时回填后补的 DOI（PDF 链先前未抽取）；RID 身份
+                # 已定，不因补 DOI 而改写，避免既有引用/产物悬空。
+                row.doi = doi
             if source_revision_id and row.source_revision_id != source_revision_id:
                 from yuxi.literature.provenance import invalidate_note_publications
 
@@ -160,8 +168,13 @@ async def enqueue_literature_compile(
 ) -> dict[str, Any]:
     """排一个编译任务。
 
-    活跃租约保持幂等；终态任务重跑会清理旧产物指针并获得全新的重试预算。
+    活跃租约保持幂等；终态任务重跑会获得全新的重试预算。
     ``force`` 仅能接管租约已过期的 PENDING/RUNNING 任务。
+
+    重跑**不**清空 ``note_uri``：旧产物指针必须存活到新产物成功为止
+    （``_finish_compile_success``/``_finish_l1_l2_bundle`` 才原子替换）。
+    否则一次失败的重跑会让已发布笔记永久不可读，而对象仍在 MinIO 里
+    ——2026-10-05 实测 paper20 即因此 L1 显示"未编译"而 L2 正常。
     """
     if level not in VALID_LEVELS:
         raise ValueError(f"非法编译级别: {level}")
@@ -217,7 +230,8 @@ async def enqueue_literature_compile(
             job.status = "PENDING"
             job.attempt = 0
             job.error = None
-            job.note_uri = None
+            # note_uri 刻意保留：旧产物必须存活到新产物成功为止（见函数头）。
+            # 重跑期间的可见性由 published_note_uri 负责，见下方 stale 标记。
             job.value_score = None
         if requested_by:
             from yuxi.literature.llm_gateway import freeze_literature_policy
@@ -241,12 +255,14 @@ async def enqueue_literature_compile(
             job.policy_version = policy.policy_version
         await session.flush()
         job_id = job.id
+        attempt = int(job.attempt or 0)
+        run_id = job.llm_run_id
         await session.commit()
 
     enqueue_deferred = False
     try:
         queue = await get_arq_pool()
-        await queue.enqueue_job(COMPILE_JOB_NAME, job_id, _job_id=_compile_job_id(job_id))
+        await queue.enqueue_job(COMPILE_JOB_NAME, job_id, _job_id=_compile_job_id(job_id, attempt, run_id))
     except Exception:  # noqa: BLE001
         enqueue_deferred = True
         logger.exception("编译任务已持久化，但即时入队失败，将由对账任务补偿: job=%s", job_id)
@@ -412,7 +428,7 @@ async def _finish_l1_l2_bundle(
     return uri_by_level.get(job.level, l1_uri)
 
 
-async def _finish_compile_failure(job_id: int, reason: str) -> str:
+async def _finish_compile_failure(job_id: int, reason: str, *, expected_attempt: int | None = None) -> str:
     """attempt 内回 PENDING 并重排；超限置 DEAD。返回最终状态。"""
     requeued = False
     async with pg_manager.get_async_session_context() as session:
@@ -423,7 +439,11 @@ async def _finish_compile_failure(job_id: int, reason: str) -> str:
         ).scalar_one_or_none()
         if job is None:
             return "MISSING"
+        if job.status != "RUNNING" or (expected_attempt is not None and job.attempt != expected_attempt):
+            return "STALE"
         job.attempt = int(job.attempt or 0) + 1
+        attempt = job.attempt
+        run_id = job.llm_run_id
         job.error = reason[:2000]
         if job.attempt < MAX_COMPILE_ATTEMPTS:
             job.status = "PENDING"
@@ -434,10 +454,33 @@ async def _finish_compile_failure(job_id: int, reason: str) -> str:
     if requeued:
         try:
             queue = await get_arq_pool()
-            await queue.enqueue_job(COMPILE_JOB_NAME, job_id, _job_id=_compile_job_id(job_id))
+            await queue.enqueue_job(COMPILE_JOB_NAME, job_id, _job_id=_compile_job_id(job_id, attempt, run_id))
         except Exception:  # noqa: BLE001
             logger.exception("编译失败重排入队失败，将由对账任务补偿: job=%s", job_id)
     return "PENDING" if requeued else "DEAD"
+
+
+async def _finish_compile_blocked(job_id: int, reason: str, *, expected_attempt: int | None = None) -> str:
+    """确定性前置条件未满足 → BLOCKED（不消耗 attempt、不重排）。
+
+    与 DEAD 的区别：DEAD 表示"重试预算耗尽的系统故障"（可修代码/供应商），
+    BLOCKED 表示"业务条件尚未满足"（用户补文献/先编译 L1 即可）。混用会让
+    任务中心把用户可自行补救的场景显示成红色故障。
+    """
+    async with pg_manager.get_async_session_context() as session:
+        job = (
+            await session.execute(
+                select(LiteratureCompileJob).where(LiteratureCompileJob.id == job_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if job is None:
+            return "MISSING"
+        if job.status != "RUNNING" or (expected_attempt is not None and job.attempt != expected_attempt):
+            return "STALE"
+        job.status = "BLOCKED"
+        job.error = f"前置条件未满足：{reason}"[:2000]
+        await session.commit()
+    return "BLOCKED"
 
 
 async def _assemble_l3_candidates(tenant_id: int, paper_rid: str, self_ctx: str) -> list[dict]:
@@ -496,7 +539,8 @@ async def _assemble_l3_candidates(tenant_id: int, paper_rid: str, self_ctx: str)
                     ),
                     LiteratureCompileJob.tenant_id == tenant_id,
                     LiteratureCompileJob.level == "L1",
-                    LiteratureCompileJob.status == "SUCCEEDED",
+                    # 认 note_uri 而非 status：对方笔记已发布即算候选，
+                    # 不该因对方正在重跑/重跑失败而把跨文献关系判成"缺少相关文献"。
                     LiteratureCompileJob.note_uri.isnot(None),
                     current_job(LiteratureCompileJob),
                 )
@@ -543,11 +587,61 @@ async def _assemble_l3_candidates(tenant_id: int, paper_rid: str, self_ctx: str)
     return candidates[:8]
 
 
+#: L3 的两条**确定性**前置条件（本文 L1、库内同来源 L1）不满足。
+#: 与"系统故障"严格区分：不消耗 attempt、不重排、不显示为 DEAD，
+#: 而是落到独立的 BLOCKED 终态，用户补齐前置条件后可重新触发。
+class CompilePreconditionFailed(ValueError):
+    """L3 前置条件未满足（确定性业务规则，非系统故障）。"""
+
+
+async def _resolve_l3_inputs(tenant_id: int, paper_id: int) -> tuple[str, str, list[dict]]:
+    """解析 L3 编译输入（本文 L1 笔记 + 同来源已编译 L1 候选）。
+
+    L3 是跨文献关系层：需要本文已有可读的 L1 笔记，且库内至少还有一篇
+    同来源、已编译 L1 的文献（ACL 闭包内）。这两条都是**确定性**的业务规则，
+    不随重试变化——2026-10-05 实测把它们放在 worker 里当普通异常抛，会在
+    1.1 秒内烧光 3 次 attempt 并置 DEAD，把"用户还没准备好前置条件"
+    显示成"系统故障"。因此：路由层入队前拦截（409），worker 侧兜底时
+    抛 :class:`CompilePreconditionFailed` 落 BLOCKED 终态，都不耗重试预算。
+
+    入队前只需要判定，故调用方可忽略返回值。
+    """
+    from yuxi.literature.readops import get_note_uri
+
+    async with pg_manager.get_async_session_context() as session:
+        paper = (
+            await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == paper_id).with_for_update())
+        ).scalar_one_or_none()
+        if paper is None:
+            raise CompilePreconditionFailed(f"文献不存在: {paper_id}")
+        rid = paper.rid
+    l1_uri = await get_note_uri(tenant_id, rid, "L1")
+    if not l1_uri:
+        raise CompilePreconditionFailed("当前版本尚无 L1 笔记，无法编译 L3（请先编译 L1）")
+    l1_bytes = await get_minio_client().adownload_file(RENDER_BUCKET, l1_uri.removeprefix("kbasset://"))
+    self_ctx = l1_bytes.decode("utf-8")
+    if len(self_ctx.strip()) < _L3_MIN_SELF_CTX_CHARS:
+        raise CompilePreconditionFailed("L1 笔记缺失或过短，无法编译 L3（请先重新编译 L1）")
+    related = await _assemble_l3_candidates(tenant_id, rid, self_ctx)
+    if not related:
+        raise CompilePreconditionFailed(
+            "缺少相关编译文献：L3 需要库内其他已编译 L1 的文献"
+            "（请先编译更多同主题文献后重试——L3 只做跨文献关系分析，不生成单文献空骨架）"
+        )
+    return l1_uri, self_ctx, related
+
+
+async def ensure_l3_preconditions(tenant_id: int, paper_id: int) -> None:
+    """仅判定 L3 前置条件（入队前使用）；不满足抛 CompilePreconditionFailed。"""
+    await _resolve_l3_inputs(tenant_id, paper_id)
+
+
 async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[str, Any] | None:
     """ARQ 任务：编译一个文献的一个级别（L1=合并产出 L1+L2；L3=关系层）。"""
     job = await _claim_job(job_id)
     if job is None:
         return None
+    claim_attempt = job.attempt
     try:
         assert_not_evidence_capable(compiler.LITERATURE_NOTES_KB_TYPE)
         async with pg_manager.get_async_session_context() as session:
@@ -685,22 +779,9 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
                 logger.exception("文献笔记已编译，但 Wiki 发布失败，将由对账任务补偿: job=%s", job.id)
             return {"job_id": job.id, "level": job.level, "status": "SUCCEEDED", "note_uri": note_uri}
 
-        # L3：本文编译上下文 = L1 笔记（kbasset 同前缀）；相关文献检索随 P4 计量接入
-        from yuxi.literature.readops import get_note_uri
-
-        l1_uri = await get_note_uri(int(paper.tenant_id), paper.rid, "L1")
-        if not l1_uri:
-            raise ValueError("当前版本 L1 笔记缺失，无法编译 L3（先编译 L1）")
-        l1_bytes = await minio.adownload_file(RENDER_BUCKET, l1_uri.removeprefix("kbasset://"))
-        self_ctx = l1_bytes.decode("utf-8")
-        if len(self_ctx.strip()) < _L3_MIN_SELF_CTX_CHARS:
-            raise ValueError("L1 笔记缺失或过短，无法编译 L3（先编译 L1）")
-        related = await _assemble_l3_candidates(int(job.tenant_id), paper.rid, self_ctx)
-        if not related:
-            raise ValueError(
-                "缺少相关编译文献：L3 需要库内其他已编译 L1 的文献（先编译更多同主题文献，"
-                "或稍后重试——上游语义为跨文献关系分析，不生成单文献空骨架）"
-            )
+        # L3：本文编译上下文 = L1 笔记；前置条件与入队前共用同一判定，
+        # 避免两处规则漂移（reconcile 补偿路径会绕过路由层拦截）。
+        l1_uri, self_ctx, related = await _resolve_l3_inputs(int(job.tenant_id), paper.id)
         if job.llm_run_id:
             from yuxi.literature.llm_gateway import governed_runtime, policy_for_job_attempt
 
@@ -729,12 +810,25 @@ async def process_literature_compile(ctx: dict[str, Any], job_id: int) -> dict[s
         return {"job_id": job.id, "level": job.level, "status": "SUCCEEDED", "note_uri": note_uri}
     except StaleLiteratureInput:
         return {"job_id": job.id, "status": "STALE"}
+    except CompilePreconditionFailed as exc:
+        # 确定性前置条件未满足：不消耗 attempt、不重排，直接落 BLOCKED。
+        # 与系统故障（DEAD）严格区分，用户补齐前置条件后可重新触发。
+        logger.info("L3 前置条件未满足，任务置为 BLOCKED: job=%s reason=%s", job_id, exc)
+        status = await _finish_compile_blocked(job_id, str(exc), expected_attempt=claim_attempt)
+        return {"job_id": job_id, "status": status, "error": str(exc)}
+    except asyncio.CancelledError:
+        await asyncio.shield(
+            _finish_compile_failure(
+                job_id, "WORKER_INTERRUPTED: 执行进程中断，等待重试", expected_attempt=claim_attempt
+            )
+        )
+        raise
     except IntegrityError:
         raise
     except Exception as exc:  # noqa: BLE001
         reason = f"{type(exc).__name__}: {exc}"
         logger.exception("编译失败: job=%s", job_id)
-        status = await _finish_compile_failure(job_id, reason)
+        status = await _finish_compile_failure(job_id, reason, expected_attempt=claim_attempt)
         return {"job_id": job_id, "status": status, "error": reason}
 
 
@@ -745,15 +839,23 @@ async def reconcile_stale_literature_compiles(ctx: dict | None = None) -> int:
     """对账（cron）：孤儿 RUNNING / 滞留 PENDING 回收重排。"""
     del ctx  # ARQ cron 注入的作业上下文（对账不使用）
     now = utc_now()
-    targets: list[int] = []
+    targets: list[tuple[int, int, str | None]] = []
     async with pg_manager.get_async_session_context() as session:
         stale = (
             (
                 await session.execute(
                     select(LiteratureCompileJob)
                     .where(
-                        LiteratureCompileJob.status.in_(("RUNNING", "PENDING")),
-                        LiteratureCompileJob.updated_at < now - timedelta(seconds=RUNNING_LEASE_SECONDS),
+                        or_(
+                            and_(
+                                LiteratureCompileJob.status == "RUNNING",
+                                LiteratureCompileJob.updated_at < now - timedelta(seconds=RUNNING_LEASE_SECONDS),
+                            ),
+                            and_(
+                                LiteratureCompileJob.status == "PENDING",
+                                LiteratureCompileJob.updated_at < now - timedelta(seconds=PENDING_REQUEUE_SECONDS),
+                            ),
+                        ),
                     )
                     .with_for_update()
                 )
@@ -762,14 +864,19 @@ async def reconcile_stale_literature_compiles(ctx: dict | None = None) -> int:
             .all()
         )
         for job in stale:
-            job.status = "PENDING"
+            if job.status == "RUNNING":
+                job.attempt = int(job.attempt or 0) + 1
+            job.status = "DEAD" if job.attempt >= MAX_COMPILE_ATTEMPTS else "PENDING"
             job.updated_at = now
-            targets.append(job.id)
+            if job.status == "PENDING":
+                targets.append((job.id, job.attempt, job.llm_run_id))
+            elif not job.error:
+                job.error = "编译任务超出租约，已耗尽重试次数"
         await session.commit()
-    for job_id in targets:
+    for job_id, attempt, run_id in targets:
         try:
             queue = await get_arq_pool()
-            await queue.enqueue_job(COMPILE_JOB_NAME, job_id, _job_id=_compile_job_id(job_id))
+            await queue.enqueue_job(COMPILE_JOB_NAME, job_id, _job_id=_compile_job_id(job_id, attempt, run_id))
         except Exception:  # noqa: BLE001
             logger.exception("编译对账重排入队失败（下一轮重试）: job=%s", job_id)
     if targets:

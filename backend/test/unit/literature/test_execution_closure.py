@@ -333,7 +333,8 @@ async def test_fulltext_projection_queries_without_minio_and_rejects_stale(env, 
     assert not storage.files
 
 
-async def test_native_graph_candidate_cache_preserves_messages_usage_and_current_gates(env):
+@pytest.mark.parametrize("session_kind", ["paper", "chat"])
+async def test_native_graph_candidate_cache_preserves_messages_usage_and_current_gates(env, session_kind):
     from dataclasses import dataclass
     from langchain.agents import create_agent
     from langchain.agents.middleware.types import AgentMiddleware
@@ -393,9 +394,9 @@ async def test_native_graph_candidate_cache_preserves_messages_usage_and_current
 
     context = Context(
         _literature_session_context={
-            "session_kind": "paper",
+            "session_kind": session_kind,
             "tenant_id": TENANT,
-            "bound_rid": RID,
+            "bound_rid": RID if session_kind == "paper" else "",
             "source_revision_id": REVISION,
             "reading_version": 1,
         }
@@ -1060,7 +1061,7 @@ async def test_historical_review_maps_exact_human_choice_without_replaying(env, 
     assert repeated["skipped"] == 1
 
 
-@pytest.mark.parametrize("failure", [None, "digest", "version", "revoked", "parse_only"])
+@pytest.mark.parametrize("failure", [None, "text_only", "digest", "version", "revoked", "parse_only", "status_changed"])
 async def test_canonical_parse_reading_fallback_is_verified_and_not_reviewed(env, failure):
     import hashlib
     from dataclasses import replace
@@ -1083,6 +1084,8 @@ async def test_canonical_parse_reading_fallback_is_verified_and_not_reviewed(env
         revision = await db.get(KnowledgeParseRevision, 1)
         revision.status = "PARSED_ONLY"
         revision.processing_mode = "parse_only"
+    elif failure == "text_only":
+        (await db.get(KnowledgeParseRevision, 1)).status = "INDEXED_TEXT_ONLY"
     await db.commit()
     original = storage.adownload_file
 
@@ -1090,6 +1093,9 @@ async def test_canonical_parse_reading_fallback_is_verified_and_not_reviewed(env
         if failure == "version":
             paper = await db.get(LiteraturePaper, 1)
             paper.reading_version += 1
+            await db.commit()
+        elif failure == "status_changed":
+            (await db.get(KnowledgeParseRevision, 1)).status = "REJECTED"
             await db.commit()
         return await original(bucket, name)
 
@@ -1100,7 +1106,7 @@ async def test_canonical_parse_reading_fallback_is_verified_and_not_reviewed(env
             return replace(scope, rids=frozenset())
 
         monkeypatch.setattr("yuxi.literature.access.build_access", revoked)
-    if failure in {"digest", "version", "revoked"}:
+    if failure in {"digest", "version", "revoked", "status_changed"}:
         with pytest.raises((ValueError, PermissionError)):
             await reader_bundle.get_reader_bundle(TENANT, RID)
     else:
@@ -1298,11 +1304,168 @@ async def env(monkeypatch):
         for module in ("products", "history_import", "history_archive"):
             monkeypatch.setattr(f"yuxi.literature.{module}.get_minio_client", lambda: storage)
         monkeypatch.setattr(cleaning, "build_access", fresh_access)
+        # 模型供应商预检（网络探测）不属于本文件的编排语义测试范围。
+        from yuxi.literature.translate import service as translate_service
+
+        async def _skip_precheck(paper_id, requested_by, **kwargs):
+            return None
+
+        monkeypatch.setattr(translate_service, "_precheck_translation_model", _skip_precheck)
         try:
             yield db, storage, monkeypatch, scope
         finally:
             _access.reset(token)
     await engine.dispose()
+
+
+async def test_translation_retry_survives_arq_deduplication(env, monkeypatch):
+    from yuxi.literature.translate import service
+
+    db, _, _, _ = env
+    job = LiteratureTranslationJob(id=101, tenant_id=TENANT, paper_id=1, source_revision_id=REVISION, variant_kind="zh")
+    db.add(job)
+    await db.commit()
+    blocked = {f"lit-translate:{job.id}"}
+    scheduled = []
+
+    class Queue:
+        async def enqueue_job(self, _name, *args, _job_id):
+            if _job_id in blocked:
+                return None
+            blocked.add(_job_id)
+            scheduled.append((args, _job_id))
+            return object()
+
+    async def pool():
+        return Queue()
+
+    monkeypatch.setattr(service, "get_arq_pool", pool)
+    # Missing render is a durable failure. Both retries must be dispatched
+    # despite the original job still occupying ARQ's deduplication key.
+    for _ in range(service.MAX_TRANSLATE_ATTEMPTS):
+        result = await service.process_literature_translation({}, job.id)
+    assert result["status"] == "DEAD" and job.attempt == service.MAX_TRANSLATE_ATTEMPTS
+    assert len(scheduled) == service.MAX_TRANSLATE_ATTEMPTS - 1
+    assert len({key for _, key in scheduled}) == len(scheduled)
+
+
+async def test_translation_pending_recovery_keeps_attempt_identity(env, monkeypatch):
+    from datetime import timedelta
+    from yuxi.literature.translate import service
+
+    db, _, _, _ = env
+    job = LiteratureTranslationJob(
+        id=101,
+        tenant_id=TENANT,
+        paper_id=1,
+        source_revision_id=REVISION,
+        variant_kind="zh",
+        attempt=1,
+        updated_at=service.utc_now() - timedelta(seconds=service.PENDING_REQUEUE_SECONDS + 1),
+    )
+    db.add(job)
+    await db.commit()
+    scheduled = []
+
+    class Queue:
+        async def enqueue_job(self, _name, *args, _job_id):
+            scheduled.append(_job_id)
+
+    async def pool():
+        return Queue()
+
+    monkeypatch.setattr(service, "get_arq_pool", pool)
+    assert await service.reconcile_stale_literature_translations() == 1
+    assert scheduled == [f"lit-translate:{job.id}:attempt:1"]
+    job.status = "RUNNING"
+    job.attempt = service.MAX_TRANSLATE_ATTEMPTS - 1
+    job.updated_at = service.utc_now() - timedelta(seconds=service.RUNNING_LEASE_SECONDS + 1)
+    await db.commit()
+    assert await service.reconcile_stale_literature_translations() == 0
+    assert job.status == "DEAD"
+
+
+async def test_governed_translation_resubmission_survives_cached_arq_results(env, monkeypatch):
+    from yuxi.literature import llm_gateway
+    from yuxi.literature.translate import service, settings
+
+    db, _, _, _ = env
+    scheduled = []
+    runs = iter(("first-submission", "second-submission"))
+
+    async def freeze(*args, **kwargs):
+        return SimpleNamespace(
+            run_id=next(runs),
+            model_spec="fixture:model",
+            credential_source="platform",
+            credential_id=None,
+            provider_id="fixture",
+            policy_version=1,
+        )
+
+    async def options(*args):
+        return {}
+
+    class Queue:
+        async def enqueue_job(self, _name, *args, _job_id):
+            scheduled.append(_job_id)
+
+    async def pool():
+        return Queue()
+
+    monkeypatch.setattr(llm_gateway, "freeze_literature_policy", freeze)
+    monkeypatch.setattr(settings, "translation_options", options)
+    monkeypatch.setattr(service, "get_arq_pool", pool)
+    # SQLite's BIGINT fixture needs an explicit ID.
+    db.add(
+        LiteratureTranslationJob(
+            id=101, tenant_id=TENANT, paper_id=1, source_revision_id=REVISION, variant_kind="zh", status="DEAD"
+        )
+    )
+    await db.commit()
+    first = await service.enqueue_literature_translation(paper_id=1, requested_by="u1")
+    job = await db.get(LiteratureTranslationJob, first["job_id"])
+    job.status = "DEAD"
+    await db.commit()
+    again = await service.enqueue_literature_translation(paper_id=1, requested_by="u1")
+    assert again["job_id"] != first["job_id"] and not again["reused"]
+    assert job.status == "DEAD", "新译文代次不得清除旧任务历史"
+    assert len(scheduled) == 2 and scheduled[0] != scheduled[1]
+
+
+async def test_translation_cancellation_is_durable(env, monkeypatch):
+    import asyncio
+    from yuxi.literature.translate import service
+
+    db, _, _, _ = env
+    paper = await db.get(LiteraturePaper, 1)
+    paper.artifact_pointers = {"document": "test-document"}
+    job = LiteratureTranslationJob(id=101, tenant_id=TENANT, paper_id=1, source_revision_id=REVISION, variant_kind="zh")
+    db.add(job)
+    await db.commit()
+    scheduled = []
+
+    async def interrupted(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    class Queue:
+        async def enqueue_job(self, _name, *args, _job_id):
+            scheduled.append(_job_id)
+
+    async def pool():
+        return Queue()
+
+    monkeypatch.setattr(service, "get_arq_pool", pool)
+    monkeypatch.setattr(artifacts, "resolve_effective_document", interrupted)
+    with pytest.raises(asyncio.CancelledError):
+        await service.process_literature_translation({}, job.id)
+    assert job.status == "PENDING" and job.attempt == 1
+    assert "WORKER_INTERRUPTED" in job.error
+    assert scheduled == [f"lit-translate:{job.id}:attempt:1"]
+    job.status = "SUCCEEDED"
+    await db.commit()
+    assert await service._finish_translation_failure(job.id, 0, "late cancellation") == "STALE"
+    assert job.status == "SUCCEEDED"
 
 
 async def test_metadata_cas_invalidates_notes_but_not_source_evidence(env):
@@ -1324,8 +1487,15 @@ async def test_metadata_cas_invalidates_notes_but_not_source_evidence(env):
         )
     await db.refresh(paper)
     assert paper.title == "人工标题"
-    with pytest.raises(ValueError, match="身份"):
+    # DOI 已放开人工编辑（P1 死锁修复）：非法形态仍拒绝，且 RID 身份不变。
+    with pytest.raises(ValueError, match="DOI"):
         await management.update_metadata(TENANT, RID, expected_token=result["metadata_token"], changes={"doi": "evil"})
+    doi_result = await management.update_metadata(
+        TENANT, RID, expected_token=result["metadata_token"], changes={"doi": "10.1186/s12284-022-00562-8"}
+    )
+    assert doi_result["doi"] == "10.1186/s12284-022-00562-8"
+    await db.refresh(paper)
+    assert paper.doi == "10.1186/s12284-022-00562-8" and paper.rid == RID
 
 
 async def test_directory_filters_use_current_compile_identity_and_escape_like(env):
@@ -1443,7 +1613,14 @@ async def test_diary_export_month_and_uid_isolation(env):
     from datetime import date
     from yuxi.literature import diary
 
-    db, _, _, _ = env
+    db, _, monkeypatch, scope = env
+
+    async def unchanged_access(*args, **kwargs):
+        return scope
+
+    # This fixture isolates diary storage, not the knowledge-source ACL tables.
+    # Revocation at delivery is exercised by test_semantic_parity independently.
+    monkeypatch.setattr(diary, "build_access", unchanged_access)
     for idx, uid, day, text in (
         (1, "u1", "2026-10-03", "十月心得"),
         (2, "u2", "2026-10-03", "其他人"),
@@ -1652,6 +1829,154 @@ async def test_enrich_human_lock_after_provider_call_protects_every_field(env):
     result = await enrich.enrich_paper(TENANT, RID)
     assert result["reason"] == "meta_locked"
     assert paper.title is None and paper.journal is None and paper.pub_year is None
+
+
+@pytest.mark.parametrize("mutation", [None, "version", "lock", "doi"])
+async def test_doi_backfill_reads_document_json_and_preserves_concurrent_edits(env, mutation):
+    db, _, monkeypatch, _ = env
+    paper = await db.get(LiteraturePaper, 1)
+    original_version = paper.reading_version
+
+    async def document(*args, **kwargs):
+        if mutation == "version":
+            paper.reading_version += 1
+        elif mutation == "lock":
+            paper.meta_locked = True
+        elif mutation == "doi":
+            paper.doi = "10.1000/manual"
+        await db.commit()
+        return {
+            "content": json.dumps(
+                {
+                    "paragraphs": [
+                        {"text_en": "DOI: 10.1000/article"},
+                        {"text_en": "References\nhttps://doi.org/10.1000/reference"},
+                    ]
+                }
+            ).encode()
+        }
+
+    monkeypatch.setattr(artifacts, "resolve_effective_document", document)
+    result = await enrich._backfill_doi_from_document(TENANT, paper)
+    if mutation in {"lock", "version"}:
+        assert result is None and paper.doi is None
+    else:
+        assert result == ("10.1000/manual" if mutation == "doi" else "10.1000/article")
+        assert paper.doi == result and paper.rid == RID and paper.source_revision_id == REVISION
+        assert paper.reading_version == original_version
+
+
+async def test_enrich_queue_is_durable_actor_bound_and_metadata_only(env):
+    from yuxi.storage.postgres.models_business import User
+
+    db, _, monkeypatch, scope = env
+    db.add(User(id=1, uid="u1", username="owner", password_hash="fixture-unused"))
+    await db.commit()
+    fetched = []
+
+    async def unavailable(_run_id):
+        return False
+
+    async def actor(_run):
+        return scope.user
+
+    async def metadata(tenant, rid):
+        assert (tenant, rid) == (TENANT, RID)
+        fetched.append(rid)
+        return {"rid": rid, "ok": True, "filled": ["title"]}
+
+    monkeypatch.setattr(library_pipeline, "_dispatch", unavailable)
+    started = await enrich.enqueue_enrich_pending(TENANT)
+    assert started["enqueue_deferred"] and not fetched and started["batch_size"] == 1
+    again = await enrich.enqueue_enrich_pending(TENANT)
+    assert again["reused"] and again["run_id"] == started["run_id"]
+    run = (await db.execute(select(LiteratureLibraryRun))).scalar_one()
+    assert run.requested_by == "u1" and run.payload_json["rids"] == [RID]
+    monkeypatch.setattr(workflow, "_request_user", actor)
+    monkeypatch.setattr(enrich, "enrich_paper", metadata)
+    result = await library_pipeline.process_literature_library({}, run.run_id)
+    assert result["status"] == "SUCCEEDED" and fetched == [RID]
+    state = await library_pipeline.get_library_run(TENANT, run.run_id)
+    assert state["steps"]["enrich_metadata"]["detail"]["processed"] == 1
+    assert all(
+        state["steps"][name]["detail"]["skipped"] for name in library_pipeline.STEP_NAMES if name != "enrich_metadata"
+    )
+
+
+async def test_enrich_queue_rechecks_revoked_sources_before_external_calls(env):
+    from yuxi.storage.postgres.models_business import User
+    from yuxi.utils.datetime_utils import utc_now
+
+    db, _, monkeypatch, scope = env
+    db.add(User(id=1, uid="u1", username="owner", password_hash="fixture-unused"))
+    await db.commit()
+    started = await enrich.enqueue_enrich_pending(TENANT)
+    paper = await db.get(LiteraturePaper, 1)
+    paper.trashed_at = utc_now()
+    await db.commit()
+
+    async def actor(_run):
+        return scope.user
+
+    async def forbidden(*args):
+        pytest.fail("Revoked sources must never reach a metadata supplier")
+
+    monkeypatch.setattr(workflow, "_request_user", actor)
+    monkeypatch.setattr(enrich, "enrich_paper", forbidden)
+    result = await library_pipeline.process_literature_library({}, started["run_id"])
+    assert result["status"] == "FAILED"
+
+
+@pytest.mark.parametrize("status", ["PENDING", "RUNNING", "SUCCEEDED"])
+async def test_translation_reuse_does_not_probe_unavailable_provider(env, status):
+    from yuxi.literature.translate import service, settings
+
+    db, _, monkeypatch, _ = env
+    db.add(
+        LiteratureTranslationJob(
+            id=701,
+            tenant_id=TENANT,
+            paper_id=1,
+            variant_kind="zh",
+            source_revision_id=REVISION,
+            status=status,
+            config_digest="",
+        )
+    )
+    await db.commit()
+
+    async def options(*args):
+        return {}
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Existing translation must be reusable during a provider outage")
+
+    monkeypatch.setattr(settings, "translation_options", options)
+    monkeypatch.setattr(service, "_precheck_translation_model", forbidden)
+    result = await service.enqueue_literature_translation(paper_id=1, requested_by="u1")
+    assert result == {"job_id": 701, "status": status, "reused": True}
+
+
+async def test_new_translation_failed_precheck_creates_no_job_or_run(env):
+    from yuxi.literature.translate import service, settings
+    from yuxi.literature.model_precheck import ModelPrecheckError
+    from yuxi.storage.postgres.models_business import AgentRun
+    from sqlalchemy import func
+
+    db, _, monkeypatch, _ = env
+
+    async def options(*args):
+        return {}
+
+    async def unavailable(*args, **kwargs):
+        raise ModelPrecheckError("供应商不可达；请切换模型")
+
+    monkeypatch.setattr(settings, "translation_options", options)
+    monkeypatch.setattr(service, "_precheck_translation_model", unavailable)
+    with pytest.raises(ModelPrecheckError):
+        await service.enqueue_literature_translation(paper_id=1, requested_by="u1")
+    assert (await db.execute(select(func.count()).select_from(LiteratureTranslationJob))).scalar_one() == 0
+    assert (await db.execute(select(func.count()).select_from(AgentRun))).scalar_one() == 0
 
 
 async def test_journal_step_persists_latest_metric_and_keeps_locked_papers(env):
@@ -2201,3 +2526,48 @@ async def test_export_rechecks_recompile_generation_without_reading_change(env):
     monkeypatch.setattr(storage, "adownload_file", recompiled)
     with pytest.raises(ValueError, match="重编译或重译"):
         await export_vault.export_obsidian_vault(TENANT)
+
+
+async def test_manual_trash_audits_and_roundtrips(env):
+    """手动移入回收站：审计三件套落库、原因必填、重复回收 409、查询侧隐藏、恢复清空。"""
+    import httpx
+    from fastapi import FastAPI
+    import server.routers.literature_router as router
+
+    db, _, monkeypatch, scope = env
+
+    async def tenant(_user):
+        return TENANT
+
+    monkeypatch.setattr(router, "_current_tenant", tenant)
+    app = FastAPI()
+    app.include_router(router.literature, prefix="/api")
+    app.dependency_overrides[router.get_required_user] = lambda: scope.user
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        blank = await client.post(f"/api/literature/papers/{RID}/trash", json={"reason": "   "})
+        assert blank.status_code == 422, "空原因必须 422（审计要求）"
+
+        ok = await client.post(f"/api/literature/papers/{RID}/trash", json={"reason": "重复导入，保留另一份"})
+        assert ok.status_code == 200, ok.text
+        body = ok.json()
+        assert body["trashed"] is True and body["trashed_by"] == "u1"
+        paper = await db.get(LiteraturePaper, 1)
+        assert paper.trashed_at is not None
+        assert paper.trashed_by == "u1"
+        assert paper.trashed_reason.startswith("重复导入")
+
+        assert (await client.get(f"/api/literature/papers/{RID}")).status_code == 404, (
+            "回收后 paper_visibility 必须隐藏"
+        )
+        again = await client.post(f"/api/literature/papers/{RID}/trash", json={"reason": "再删一次"})
+        assert again.status_code == 409, "已在回收站应幂等提示 409 而非报 500"
+
+        trash_items = (await client.get("/api/literature/library/trash")).json()["items"]
+        entry = next(item for item in trash_items if item["rid"] == RID)
+        assert entry["trashed_by"] == "u1"
+        assert entry["trashed_reason"].startswith("重复导入")
+
+        assert (await client.post(f"/api/literature/library/trash/{RID}/restore")).status_code == 200
+        paper = await db.get(LiteraturePaper, 1)
+        assert paper.trashed_at is None and paper.trashed_by is None and paper.trashed_reason is None
+        assert (await client.get(f"/api/literature/papers/{RID}")).status_code == 200, "恢复后立即回到可见集"

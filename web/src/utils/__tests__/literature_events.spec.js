@@ -38,7 +38,7 @@ assert.equal(log.length, 2, '新出现的活跃任务不记事件，状态跃迁
 assert.ok(log[0].message.includes('编译 8:L1 RUNNING→SUCCEEDED'))
 assert.equal(log[0].level, 'info')
 assert.equal(log[1].level, 'error', 'DEAD/FAILED 标红')
-assert.ok(log[1].message.includes('ModelCallError'))
+assert.ok(log[1].message.includes('：x'), '面向用户剥离异常类前缀')
 
 // 首次快照：只记录非初始态
 log.length = 0

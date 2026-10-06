@@ -218,6 +218,10 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
             .scalars()
             .all()
         )
+        latest_translations = {}
+        for job in sorted(translation_jobs, key=lambda item: item.id, reverse=True):
+            if source_matches(job, paper) and job.generator_version == "literature-translate-v1":
+                latest_translations.setdefault(job.variant_kind, job)
         attachments = (
             (await session.execute(select(LiteratureAttachment).where(LiteratureAttachment.paper_id == paper.id)))
             .scalars()
@@ -276,13 +280,18 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
         ],
         "translation_jobs": [
             {
+                "job_id": job.id,
                 "variant_kind": job.variant_kind,
                 "status": job.status,
                 "variant_uri": job.variant_uri,
                 "error": job.error,
+                "options": {
+                    key: value
+                    for key, value in (job.options_json or {}).items()
+                    if key in {"batch_chars", "reasoning_effort"}
+                },
             }
-            for job in translation_jobs
-            if source_matches(job, paper) and job.generator_version == "literature-translate-v1"
+            for job in latest_translations.values()
         ],
         "attachments": [
             {"kind": a.kind, "filename": a.filename, "uri": a.uri, "text_uri": a.text_uri} for a in attachments
@@ -343,6 +352,7 @@ _INGEST_STAGE_LABELS = {
     "INDEXING": "索引构建中",
     "INDEXED_FULL": "已索引（完整），等待激活",
     "INDEXED_CONTENT_ONLY": "已索引（仅内容），等待激活",
+    "INDEXED_TEXT_ONLY": "已索引（纯文本），等待激活",
     "ACTIVE": "激活中",
     "READY": "解析就绪",
     "PARSED_ONLY": "仅解析完成（草稿）",
@@ -358,12 +368,20 @@ _INGEST_STAGE_LABELS = {
 #: failure=失败类；terminal=用户视角已有终局；retryable=存在用户可执行的补救
 #: （FAILED 可重新导入同一文件，sha 复用会命中同一 revision 单号）。
 _INGEST_ACTIVE_STATUSES = frozenset(
-    {"PENDING", "WAITING_CACHE", "RUNNING", "BUILDING", "INDEXING", "INDEXED_FULL", "INDEXED_CONTENT_ONLY", "ACTIVE"}
+    {
+        "PENDING",
+        "WAITING_CACHE",
+        "RUNNING",
+        "BUILDING",
+        "INDEXING",
+        "INDEXED_FULL",
+        "INDEXED_CONTENT_ONLY",
+        "INDEXED_TEXT_ONLY",
+        "ACTIVE",
+    }
 )
 _INGEST_FAILURE_STATUSES = frozenset({"REJECTED", "FAILED"})
-_INGEST_TERMINAL_STATUSES = frozenset(
-    {"READY", "PARSED_ONLY", "REJECTED", "FAILED", "SKIPPED", "CANCELLED"}
-)
+_INGEST_TERMINAL_STATUSES = frozenset({"READY", "PARSED_ONLY", "REJECTED", "FAILED", "SKIPPED", "CANCELLED"})
 
 #: 域任务（渲染/编译/翻译）的展示阶段与同一套权威布尔位。
 _DOMAIN_STAGE_LABELS = {
@@ -447,13 +465,10 @@ async def _project_ingest_tasks(session, tenant_id: int, limit: int) -> list[dic
             "stage": (
                 "入库完成（已登记文献）"
                 if rid_by_revision.get(revision.revision_id)
-                and revision.status
-                not in ("REJECTED", "FAILED", "SKIPPED", "CANCELLED", "PARSED_ONLY")
+                and revision.status not in ("REJECTED", "FAILED", "SKIPPED", "CANCELLED", "PARSED_ONLY")
                 else _INGEST_STAGE_LABELS.get(revision.status, revision.status)
             ),
-            **_ingest_task_flags(
-                revision.status, registered=bool(rid_by_revision.get(revision.revision_id))
-            ),
+            **_ingest_task_flags(revision.status, registered=bool(rid_by_revision.get(revision.revision_id))),
             "detail": original or filename or revision.revision_id,
             "paper_rid": rid_by_revision.get(revision.revision_id),
             "processing_mode": revision.processing_mode,

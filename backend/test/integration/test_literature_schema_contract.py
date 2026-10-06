@@ -36,6 +36,8 @@ async def test_literature_orm_columns_migrations_and_rls_match_live_database():
                 for column in table.columns
             }
             assert expected <= actual, f"Missing literature columns: {sorted(expected - actual)}"
+            unmapped = {(table, column) for table, column in actual - expected if table.startswith("literature_")}
+            assert not unmapped, f"Migrated literature columns missing ORM: {sorted(unmapped)}"
             versions = set((await connection.execute(text("SELECT version FROM schema_migrations"))).scalars())
             assert {
                 "0085_literature_revision_contracts",
@@ -47,36 +49,49 @@ async def test_literature_orm_columns_migrations_and_rls_match_live_database():
                 "0091_literature_fulltext",
                 "0092_literature_review_artifacts",
                 "0093_literature_fulltext_retry",
+                "0096_literature_topics",
+                "0097_literature_original_history_search",
+                "0098_literature_attachment_search",
+                "0099_literature_translation_workspace",
+                "0100_literature_trash_reason",
+                "0101_literature_translation_generation",
+                "0102_literature_reader_generation",
+                "0103_literature_paper_session_unique",
             } <= versions
             protected = (
                 await connection.execute(
                     text(
                         "SELECT relname, relrowsecurity FROM pg_class WHERE relname IN "
                         "('literature_navigation_indexes', 'literature_library_runs', 'literature_cleaning_plans', "
-                        "'literature_history_items', 'literature_note_search')"
+                        "'literature_history_items', 'literature_note_search', 'literature_topic_sets', "
+                        "'literature_original_search', 'literature_translation_settings', "
+                        "'literature_translation_tasks')"
                     )
                 )
             ).all()
-            assert len(protected) == 5 and all(rls for _, rls in protected)
+            assert len(protected) == 9 and all(rls for _, rls in protected)
             policies = set(
                 (
                     await connection.execute(
                         text(
                             "SELECT tablename FROM pg_policies WHERE tablename IN "
                             "('literature_navigation_indexes', 'literature_library_runs', 'literature_cleaning_plans', "
-                            "'literature_history_items', 'literature_note_search')"
+                            "'literature_history_items', 'literature_note_search', 'literature_topic_sets', "
+                            "'literature_original_search', 'literature_translation_settings', "
+                            "'literature_translation_tasks')"
                         )
                     )
                 ).scalars()
             )
-            assert len(policies) == 5
+            assert len(policies) == 9
             indexes = dict(
                 (
                     await connection.execute(
                         text(
                             "SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN "
                             "('uq_literature_compile_jobs_key', 'uq_literature_global_cards', "
-                            "'ix_literature_note_search_fts')"
+                            "'ix_literature_note_search_fts', 'uq_conversations_literature_paper_session', "
+                            "'uq_literature_translation_jobs_key')"
                         )
                     )
                 ).all()
@@ -84,6 +99,14 @@ async def test_literature_orm_columns_migrations_and_rls_match_live_database():
             assert "card_revision" in indexes.get("uq_literature_compile_jobs_key", "")
             assert "WHERE (paper_id IS NULL)" in indexes.get("uq_literature_global_cards", "")
             assert "USING gin" in indexes.get("ix_literature_note_search_fts", "")
+            session_index = indexes.get("uq_conversations_literature_paper_session", "")
+            assert all(
+                part in session_index for part in ("UNIQUE", "tenant_id", "uid", "literature_session", "rid", "deleted")
+            )
+            assert all(
+                part in indexes.get("uq_literature_translation_jobs_key", "")
+                for part in ("UNIQUE", "config_digest", "generation")
+            )
     finally:
         await engine.dispose()
 

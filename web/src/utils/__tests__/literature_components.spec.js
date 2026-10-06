@@ -86,6 +86,12 @@ async function mount(
         })
       }
     if (id === '@/utils/literature_chrome') return chromeUtils
+    if (id === '@/composables/useLiteratureTaskFeed')
+      return { useLiteratureTaskFeed: () => ({ tasks: ref([]), feedError: ref(''), refresh: async () => {} }) }
+    if (id === '@/composables/useLiteraturePollingScope')
+      return { useLiteraturePollingScope: () => ref(true) }
+    if (id === 'ant-design-vue')
+      return { message: { info() {}, success() {}, error() {}, warning() {} } }
     if (id === '@/stores/chatUI') {
       return { useChatUIStore: () => chatUIStore }
     }
@@ -567,6 +573,7 @@ try {
     '../../components/literature/ReviewPanel.vue',
     { rid: 'paper' },
     {
+      '@/apis/literature_api': { literatureWorkspaceApi: { sourcePdf: async () => new Blob([]) } },
       '@/apis/base': { apiGet: async () => structuredClone(reviewData), apiPost: async () => ({}) }
     },
     window

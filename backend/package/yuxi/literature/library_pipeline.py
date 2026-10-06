@@ -40,8 +40,8 @@ async def _dispatch(run_id: str) -> bool:
     try:
         queue = await get_arq_pool()
         slot = int(utc_now().timestamp()) // 60
-        await queue.enqueue_job("process_literature_library", run_id, _job_id=f"lit-library:{run_id}:{slot}")
-        return True
+        job = await queue.enqueue_job("process_literature_library", run_id, _job_id=f"lit-library:{run_id}:{slot}")
+        return job is not None
     except Exception:  # noqa: BLE001 - durable outbox recovery
         logger.warning("建库运行 %s 等待队列调度补偿", run_id)
         return False
@@ -371,7 +371,7 @@ async def process_literature_library(ctx: dict, run_id: str):
                 run.payload_json = payload
             if status != "SUCCEEDED":
                 return {"run_id": run_id, "status": status, "waiting_for": step}
-        await _record(run_id, token, step, "SUCCEEDED", detail, run_status="SUCCEEDED")
+        await _record(run_id, token, step, "SUCCEEDED", run.steps_json[step].get("detail"), run_status="SUCCEEDED")
         return {"run_id": run_id, "status": "SUCCEEDED"}
     except Exception as exc:  # noqa: BLE001 - never convert incomplete steps to success
         logger.warning("建库失败 %s / %s (%s)", run_id, step, type(exc).__name__)
