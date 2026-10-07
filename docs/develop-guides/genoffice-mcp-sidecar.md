@@ -133,5 +133,49 @@ docker compose up -d api worker
 - 健康：`GET :3093/health`（免鉴权）；Yuxi 侧 `GET /api/system/mcp-servers/genoffice/health`；
 - 审计：`mcp_call_audit` 表按 server_slug='genoffice' 聚合成功率/时延；
   401 → token 漂移；MCP_TIMEOUT → 调大 sse_read_timeout 或检查并发；
+- 运营查询（验收实测口径）：
+
+```sql
+-- 近 24h 成功率与延迟分布
+SELECT date_trunc('hour', created_at) AS hr,
+       count(*) AS calls,
+       round(100.0 * count(*) FILTER (WHERE status='success') / count(*), 1) AS success_pct,
+       round(avg(duration_ms) FILTER (WHERE status='success')) AS avg_ms,
+       max(duration_ms) FILTER (WHERE status='success') AS p100_ms
+FROM mcp_call_audit WHERE server_slug='genoffice' AND created_at > now() - interval '24 hours'
+GROUP BY 1 ORDER BY 1;
+
+-- 交付可靠性：成功调用但零产物登记（可能中继失败只剩信封）——人工抽查信号
+SELECT a.id, a.capability_name, a.created_at
+FROM mcp_call_audit a
+LEFT JOIN run_artifacts r
+  ON r.origin->>'mcp_call_audit_id' = a.id::text
+WHERE a.server_slug='genoffice' AND a.status='success'
+  AND a.capability_name IN ('create_docx','create_xlsx','create_pptx','create_pdf')
+  AND r.id IS NULL
+ORDER BY a.id DESC LIMIT 50;
+```
+
+- 告警建议阈值：成功率 <95%（小时窗）、avg duration >30s、连续 3 次 `/{slug}/test` 失败；
 - dev 形态日志：sidecar 控制台；prod：`docker logs genoffice-mcp`；
 - SSRF 豁免只在日志启动时告警一次（`MCP SSRF policy: trusted private endpoints active`）。
+
+## 验收与演练记录（2026-10-07）
+
+以下为真实聊天链路（agent-invocation API）实测结论，环境：Linux 容器形态
+sidecar + 全默认 agent 绑定：
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| 默认配置日常聊天 | ✅ | gene-authority OCI 镜像补齐后 AUTHORITATIVE 阻断消除 |
+| 默认配置文档生成 | ✅ | create_docx 全默认绑定 success + 产物登记 |
+| 容器形态 PDF（xvfb） | ✅ | create_pdf 5406ms、635KB、文件桥参与 |
+| 租户/线程隔离 | ✅ | 跨用户/伪造线程/共享路径下载均 404，本人对照 200 |
+| sidecar 停机降级 | ✅ | OPTIONAL 跳过，模型如实告知不可用、拒绝伪造 |
+| worker 重启恢复 | ✅ | 运行中 run 干净 cancelled 终态、无僵尸，后续 run 正常 |
+| 并发（3 并行 run） | ✅ | 全部 completed、产物各自独立落盘 |
+| >2MB 交付兜底 | ✅ | 4.47MB xlsx 经 resource_link 同会话下载物化 |
+| 产物下载 | ✅ | viewer 端点归属校验 + 魔数校验 |
+
+已知边界（未演练项）：多用户高并发容量上限、sidecar 容器升级回滚、
+APISIX 公网路由（不适用——3093 仅内网）。
