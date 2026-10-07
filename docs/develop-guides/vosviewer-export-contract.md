@@ -29,9 +29,13 @@ curl -H "Authorization: Bearer <token>" \
 | `vosviewer.json` | 官方 JSON 契约：`network.items`（整数 id、label、descriptions[实体类型+entity_id]、weights[Links/Total link strength/Distinct facts]）+ `network.links`（source/target/strength）+ `info`。不预置 x/y/cluster——布局与聚类留给 VOSviewer |
 | `identity-map.json` | VOS 编号 ↔ entity_id/名称/类型/度数；每条连线的事实 triple_ids 清单 |
 | `facts.jsonl` | 每条去重事实：triple_id、端点（entity_id）、谓词、审核态、代表 chunk/file 定位、self_loop/resolved 标记 |
-| `map.txt` / `network.txt` | 传统制表符格式（同一快照生成；map 字段已清洗制表/换行） |
+| `network.txt` | 传统 network 格式（source/target/strength，同一快照生成）；**单独打开此文件时 VOSviewer 自动创建地图并布局** |
 | `manifest.json` | 快照范围、审核策略、UTC 时间、截断原因、全部计数与恒等式、排除明细、各成员 sha256、`DERIVED_ANALYSIS_ONLY` |
-| `README.txt` | 使用说明与安全提示（Share 会上传公开） |
+| `README.txt` | 打开方式与安全提示（Share 会上传公开） |
+
+**不导出 map.txt**：VOSviewer map 文件强制要求 X/Y 坐标列，而快照在布局发生前
+没有坐标（伪造坐标会让全部点塌缩在原点）。正确入口是 `vosviewer.json`
+（JSON，自动建图）或 `network.txt`（network file，自动建图并布局）。
 
 ## 语义契约
 
@@ -56,8 +60,8 @@ curl -H "Authorization: Bearer <token>" \
 ```
 distinct_facts == total_link_strength + self_loop_facts + dangling_facts
 items == entities == identity-map.items
-links == network.txt 行数；map.txt 行数 == entities + 1
-全部成员 sha256 与 manifest 一致
+network.txt 行数 == links；全部成员 sha256 与 manifest 一致
+包内不含 map.txt（无坐标 map 会被 VOSviewer 拒绝：X and Y columns are missing）
 ```
 
 注意粒度：VOSviewer 是**实体级**网络，与三视图的**类型级**数字不可直接互比；

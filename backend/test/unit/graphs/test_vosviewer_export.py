@@ -226,13 +226,12 @@ def test_zip_members_sha256_and_deterministic_order():
         "vosviewer.json",
         "identity-map.json",
         "facts.jsonl",
-        "map.txt",
         "network.txt",
         "README.txt",
         "manifest.json",
     }
     manifest = json.loads(read_member(package, "manifest.json"))
-    for name in ("vosviewer.json", "identity-map.json", "facts.jsonl", "map.txt", "network.txt", "README.txt"):
+    for name in ("vosviewer.json", "identity-map.json", "facts.jsonl", "network.txt", "README.txt"):
         import hashlib
 
         assert manifest["files"][name]["sha256"] == hashlib.sha256(read_member(package, name)).hexdigest()
@@ -243,12 +242,19 @@ def test_zip_members_sha256_and_deterministic_order():
     )
 
 
-def test_map_txt_sanitizes_control_characters():
+def test_no_map_file_without_coordinates():
+    # VOSviewer map 文件强制要求 X/Y 坐标列；快照在布局前无坐标，
+    # 导出包不得包含 map.txt（否则 File → Open map 报 "X and Y columns are missing"）。
+    # 正确入口：vosviewer.json（JSON，自动建图）或 network.txt（network file，自动建图）。
     dirty = node("a", "Gene\tA\nB", "Gene")
     data = base_data([dirty, node("b", "B", "Gene")], [edge("e1", "a", "b")])
     package = build(data)
-    lines = read_member(package, "map.txt").decode().splitlines()
-    row = lines[1].split("\t")
-    assert len(row) == 6  # 制表符/换行未破坏列结构
-    assert "\t" not in row[1] and "\n" not in row[1]
-    assert row[1] == "Gene A B"
+    with zipfile.ZipFile(io.BytesIO(package["content"])) as archive:
+        names = archive.namelist()
+        network = json.loads(archive.read("vosviewer.json"))
+    assert "map.txt" not in names
+    # 制表符/换行污染的名称在 JSON label 中原样保留（JSON 字符串安全），识别走 label
+    labels = [i["label"] for i in network["network"]["items"]]
+    assert "Gene\tA\nB" in labels
+
+

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import csv
 import hashlib
 import hmac
 import html
@@ -249,38 +248,22 @@ def build_vosviewer_package(
             for (source, target), ids in sorted(pair_facts.items())
         ],
     }
-    map_text = io.StringIO(newline="")
-    writer = csv.writer(map_text, delimiter="\t", lineterminator="\n")
-    writer.writerow(
-        ["id", "label", "description", "weight<Links>", "weight<Total link strength>", "weight<Distinct facts>"]
-    )
-
-    def _map_field(text: str) -> str:
-        # map.txt 是制表符分隔的固定列格式，不支持引号转义；字段内控制字符替换为空格
-        return " ".join(str(text).split())
-
-    for item in items:
-        writer.writerow(
-            [
-                item["id"],
-                _map_field(item["label"]),
-                _map_field(item["description"]),
-                *item["weights"].values(),
-            ]
-        )
     members = {
         "vosviewer.json": _json(network),
         "identity-map.json": _json(identity),
         "facts.jsonl": b"".join(
             _json(fact) + b"\n" for fact in sorted(facts.values(), key=lambda row: row["triple_id"])
         ),
-        "map.txt": map_text.getvalue().encode("utf-8"),
+        # 注意：不导出 map.txt——VOSviewer map 文件强制要求 X/Y 坐标列，而快照
+        # 在布局发生前没有坐标；伪造坐标会让所有点塌缩在原点。正确入口是
+        # vosviewer.json（JSON，自动建图）或 network.txt（VOSviewer 自动建图布局）。
         "network.txt": "".join(
             f"{link['source_id']}\t{link['target_id']}\t{link['strength']}\n" for link in links
         ).encode("utf-8"),
         "README.txt": (
-            "解压后在 VOSviewer File > Open 中选择 vosviewer.json；无坐标时可在 Create 中选择基于网络数据创建地图。\n"
-            "或在稻芯智析设置中选择 VOSviewer 程序，并打开此目录的 manifest.json。\n"
+            "打开方式：VOSviewer File > Open，文件类型选 VOSviewer JSON file，打开 vosviewer.json；\n"
+            "或选 VOSviewer network file 打开 network.txt——VOSviewer 会自动创建地图并运行布局。\n"
+            "请勿先打开无坐标的 map 文件（本包不含 map.txt，坐标由 VOSviewer 布局生成）。\n"
             "首次分析保留全部连通分量；孤立实体、自环及排除事实以 manifest.json 和 facts.jsonl 为准。\n"
             "请记录归一化、分辨率、随机种子，并用 Save 保存坐标与聚类；结果仅用于派生分析。\n"
             "私有图谱保持本地或企业内网使用；VOSviewer Share 会上传地图并公开分享文件。\n"
