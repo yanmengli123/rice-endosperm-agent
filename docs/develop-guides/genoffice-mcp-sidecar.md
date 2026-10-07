@@ -105,10 +105,18 @@ docker compose up -d api worker
 
 1. **云工具隔离**：sidecar 不得使用个人 Genspark 登录态（`GENOFFICE_AUTH_DIR` /
    `GENOFFICE_AI_SETTINGS` 重定向到空配置），注册层面再禁 `search/image/media`；
-2. **不登记 capability_registry**：genoffice 保持 GENERIC_MCP 档——产物不进事实账本、
-   不充当答案证据（ADR-0001 派生物不回流证据通道）；
-3. **凭据卫生**：token 只走 `${VAR}` 整值引用（DB 不落明文），api/worker 容器外不可见；
-4. **网络边界**：3093 永不发布到宿主机/公网（prod expose-only；dev 只绑 127.0.0.1）。
+2. **deck 流程在聊天链路禁用**：GenOffice 的 deck 状态活在**每个 MCP session 的
+   scratch 目录**，而聊天链路每次工具调用开新 session——`deck_start` 的目录在
+   `deck_page` 的 session 里不存在，状态必然分裂。四个 deck 工具已在
+   `disabled_tools` 禁用（止血）；恢复路径是给同一 run 的 sidecar 调用维持
+   粘性 session 或把 deck 目录落 `GENOFFICE_ALLOWED_ROOTS` 持久共享目录；
+3. **不登记证据能力**：genoffice 登记为 `PRODUCTIVITY_TOOL` profile（服务器级
+   fail-closed）——answer_eligible=False、无证据义务；来源门控对该档豁免
+   （文档生成与工作区工具同类，不按数据来源裁决可见性），派生 Office 产物
+   永不回流证据通道（ADR-0001）；
+4. **凭据卫生**：token 只走 `${VAR}` 整值引用（DB 不落明文），api/worker 容器外不可见；
+5. **网络边界**：3093 永不发布到宿主机/公网（prod expose-only；dev 只绑 127.0.0.1）；
+   中继大文件下载有同源硬校验（host/scheme/port 三比对）。
 
 ## 升级
 

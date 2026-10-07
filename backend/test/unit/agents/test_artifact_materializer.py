@@ -376,3 +376,50 @@ async def test_file_blobs_invalid_entries_skipped_gracefully(materialize_outputs
         mcp_call_audit_id=None,
     )
     assert entries == []
+
+
+# ── 中继大文件兜底（resource_link 同会话下载，同源硬校验）────────────
+
+
+def _relay_host():
+    from yuxi.agents.mcp.host import LegacyLangChainHost
+
+    return LegacyLangChainHost()
+
+
+async def test_download_within_session_accepts_same_origin(monkeypatch):
+    import httpx
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, content=b"large-docx-bytes")
+
+    def fake_client(**kwargs):
+        kwargs.pop("trust_env", None)
+        return real_async_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+
+    host = _relay_host()
+    data = await host._download_within_session(
+        {"url": "http://genoffice:3093/mcp", "headers": {"Authorization": "Bearer t"}},
+        "http://genoffice:3093/files/abc/big.xlsx",
+    )
+    assert data == b"large-docx-bytes"
+    assert captured["auth"] == "Bearer t"
+
+
+async def test_download_within_session_rejects_cross_origin_and_port():
+    host = _relay_host()
+    config = {"url": "http://genoffice:3093/mcp", "headers": {}}
+    # 跨主机
+    assert await host._download_within_session(config, "http://evil.example.com/files/x.xlsx") is None
+    # 跨端口
+    assert await host._download_within_session(config, "http://genoffice:8080/files/x.xlsx") is None
+    # 跨 scheme
+    assert await host._download_within_session(config, "https://genoffice:3093/files/x.xlsx") is None
+    # 非 http(s)
+    assert await host._download_within_session(config, "file:///etc/passwd") is None

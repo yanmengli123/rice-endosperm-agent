@@ -445,67 +445,120 @@ class LegacyLangChainHost(McpHost):
         """官方 SDK 中继会话重放工具调用，从内嵌 resource/image 块物化文件交付物。
 
         任何失败（非 http 传输、会话/调用错误、无内嵌字节）都返回空列表，由
-        调用方回退到 JSON 信封物化；绝不影响主调用结果。
+        调用方回退到 JSON 信封物化；绝不影响主调用结果。大文件（>2MB）只有
+        resource_link + 与会话同寿命的 URL，因此在**中继会话存活期内**补一次
+        带凭据的下载——出块后再取 URL 必然 404。
         """
         if str((config or {}).get("transport") or "") not in {"sse", "streamable_http"}:
             return []
         try:
             async with self._official_session(config) as session:
                 relayed = await session.call_tool(tool_name, dict(arguments or {}))
+                if getattr(relayed, "isError", False):
+                    return []
+
+                name_hints: dict[str, str] = {}
+                relayed_text = next(
+                    (
+                        str(getattr(block, "text", "") or "")
+                        for block in getattr(relayed, "content", None) or []
+                        if getattr(block, "type", None) == "text"
+                    ),
+                    "",
+                )
+                for name, url in parse_file_output_envelope(relayed_text):
+                    name_hints[str(url)] = str(name)
+                blobs: list[tuple[str, str | None, bytes]] = []
+                fetched_urls: set[str] = set()
+                image_index = 0
+                for block in getattr(relayed, "content", None) or []:
+                    block_type = getattr(block, "type", None)
+                    if block_type == "resource":
+                        resource = getattr(block, "resource", None)
+                        blob_text = getattr(resource, "blob", None)
+                        uri = str(getattr(resource, "uri", "") or "")
+                        if not blob_text:
+                            continue
+                        name = name_hints.get(uri) or str(uri.rstrip("/").rsplit("/", 1)[-1] or "download")
+                        media_type = getattr(resource, "mimeType", None)
+                        try:
+                            data = base64.b64decode(blob_text)
+                        except Exception:  # noqa: BLE001 —— 非法 base64 跳过该块
+                            continue
+                        fetched_urls.add(uri)
+                        blobs.append((name, media_type, data))
+                    elif block_type == "image":
+                        data_text = getattr(block, "data", None)
+                        if not data_text:
+                            continue
+                        image_index += 1
+                        media_type = str(getattr(block, "mimeType", None) or "image/png")
+                        suffix = (
+                            "png"
+                            if "png" in media_type
+                            else ("jpg" if "jpeg" in media_type or "jpg" in media_type else "img")
+                        )
+                        try:
+                            data = base64.b64decode(data_text)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        blobs.append((f"render_{image_index:02d}.{suffix}", media_type, data))
+                # resource_link 兜底（大文件）：URL 只在本会话内存活，立刻下载。
+                for block in getattr(relayed, "content", None) or []:
+                    if getattr(block, "type", None) != "resource_link":
+                        continue
+                    uri = str(getattr(block, "uri", "") or "")
+                    if not uri or uri in fetched_urls or not uri.startswith(("http://", "https://")):
+                        continue
+                    data = await self._download_within_session(config, uri)
+                    if data is None:
+                        continue
+                    fetched_urls.add(uri)
+                    name = name_hints.get(uri) or str(uri.rstrip("/").rsplit("/", 1)[-1] or "download")
+                    blobs.append((name, None, data))
         except Exception as error:  # noqa: BLE001 —— 中继是增强通道
             logger.warning(f"MCP file deliverable relay skipped ({slug}/{tool_name}): {type(error).__name__}: {error}")
             return []
-        if getattr(relayed, "isError", False):
-            return []
-
-        name_hints: dict[str, str] = {}
-        relayed_text = next(
-            (
-                str(getattr(block, "text", "") or "")
-                for block in getattr(relayed, "content", None) or []
-                if getattr(block, "type", None) == "text"
-            ),
-            "",
-        )
-        for name, url in parse_file_output_envelope(relayed_text):
-            name_hints[str(url)] = str(name)
-        blobs: list[tuple[str, str | None, bytes]] = []
-        image_index = 0
-        for block in getattr(relayed, "content", None) or []:
-            block_type = getattr(block, "type", None)
-            if block_type == "resource":
-                resource = getattr(block, "resource", None)
-                blob_text = getattr(resource, "blob", None)
-                if not blob_text:
-                    continue
-                uri = str(getattr(resource, "uri", "") or "")
-                name = name_hints.get(uri) or str(uri.rstrip("/").rsplit("/", 1)[-1] or "download")
-                media_type = getattr(resource, "mimeType", None)
-                try:
-                    data = base64.b64decode(blob_text)
-                except Exception:  # noqa: BLE001 —— 非法 base64 跳过该块
-                    continue
-                blobs.append((name, media_type, data))
-            elif block_type == "image":
-                data_text = getattr(block, "data", None)
-                if not data_text:
-                    continue
-                image_index += 1
-                media_type = str(getattr(block, "mimeType", None) or "image/png")
-                suffix = (
-                    "png" if "png" in media_type else ("jpg" if "jpeg" in media_type or "jpg" in media_type else "img")
-                )
-                try:
-                    data = base64.b64decode(data_text)
-                except Exception:  # noqa: BLE001
-                    continue
-                blobs.append((f"render_{image_index:02d}.{suffix}", media_type, data))
         return await persist_mcp_file_blobs(
             server_slug=slug,
             tool_name=tool_name,
             blobs=blobs,
             mcp_call_audit_id=mcp_call_audit_id,
         )
+
+    async def _download_within_session(self, config: dict[str, Any], url: str) -> bytes | None:
+        """中继会话存活期内按 URL 下载大文件交付物（resource_link 兜底）。
+
+        仅接受与服务器端点同源的 URL（防工具结果借道宿主客户端打向任意外部
+        地址）；沿用安全工厂语义：禁重定向、禁环境代理、带服务器凭据头。
+        """
+        from urllib.parse import urlparse
+
+        server = urlparse(str(config.get("url") or ""))
+        candidate = urlparse(url)
+        if not server.hostname or candidate.scheme != server.scheme:
+            return None
+        if str(candidate.hostname or "").rstrip(".").lower() != str(server.hostname).rstrip(".").lower():
+            return None
+        server_port = server.port or (443 if server.scheme == "https" else 80)
+        candidate_port = candidate.port or (443 if candidate.scheme == "https" else 80)
+        if candidate_port != server_port:
+            return None
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(
+                headers=dict(config.get("headers") or {}) or None,
+                timeout=httpx.Timeout(120.0),
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.content
+        except Exception as error:  # noqa: BLE001 —— 增强通道，失败回退信封物化
+            logger.warning(f"MCP large deliverable download skipped: {type(error).__name__}: {error}")
+            return None
 
     async def call_tool(
         self,
