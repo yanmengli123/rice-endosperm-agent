@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from yuxi.knowledge.planning.turn_execution_plan import Capability, TaskIntent, plan_turn
+from yuxi.knowledge.planning.turn_execution_plan import Capability, SourcePolicy, TaskIntent, plan_turn
 
 pytestmark = [pytest.mark.unit]
 
@@ -268,3 +268,28 @@ def test_genoffice_profile_is_productivity_not_evidence():
     assert profile.max_evidence_obligation is None
     # fail-closed：未列名工具无 profile
     assert profile_for_server_tool("genoffice", "totally_unknown_tool") is None
+
+
+def test_mention_productivity_server_is_directive_not_source_binding():
+    """@mcp:genoffice 是指令性提及：不绑 required_server、不触发 MCP_ONLY 值投影。
+
+    生产力服务器无数据值语义，值投影只会得到"未获取到可发布的数据值"；
+    点名约束仍由 middleware 的 USER_MENTIONS 注入（本测试只锁 planning 层）。
+    """
+    plan = plan_turn(
+        "@mcp:genoffice 请用 guide 工具查询 slides 域的 op 参考",
+        has_knowledge_scope=True,
+        configured_mcps=_ALL_SERVERS + ["genoffice"],
+        known_mcps=_ALL_SERVERS + ["genoffice"],
+        mentioned_mcp_slugs=["genoffice"],
+    )
+    assert plan.required_server is None
+    assert plan.source.policy != SourcePolicy.MCP_ONLY
+    # 文本点名（非 @ 协议）同样不绑定
+    plan2 = plan_turn(
+        "用 genoffice 服务器查一下 slides op 参考",
+        has_knowledge_scope=True,
+        configured_mcps=_ALL_SERVERS + ["genoffice"],
+        known_mcps=_ALL_SERVERS + ["genoffice"],
+    )
+    assert plan2.required_server != "genoffice"

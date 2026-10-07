@@ -423,3 +423,48 @@ async def test_download_within_session_rejects_cross_origin_and_port():
     assert await host._download_within_session(config, "https://genoffice:3093/files/x.xlsx") is None
     # 非 http(s)
     assert await host._download_within_session(config, "file:///etc/passwd") is None
+
+
+# ── 文件桥：工作区路径 → sidecar URL 参数改写 ────────────────────────
+
+
+async def test_file_bridge_rewrites_workspace_path_argument(monkeypatch, run_scope, tmp_path):
+    from yuxi.agents.mcp import host as host_mod
+
+    target_file = tmp_path / "report.md"
+    target_file.write_text("# x", encoding="utf-8")
+    monkeypatch.setattr(
+        "yuxi.agents.backends.sandbox.paths.resolve_virtual_path",
+        lambda thread_id, virtual_path, *, uid: target_file,
+    )
+
+    async def fake_upload(config, local_path):
+        return "http://genoffice:3093/files/abc123/report.md"
+
+    monkeypatch.setattr(host_mod.LegacyLangChainHost, "_upload_to_mcp_server", staticmethod(fake_upload))
+    host = host_mod.LegacyLangChainHost()
+    bridged = await host._bridge_file_arguments(
+        {"transport": "streamable_http", "url": "http://genoffice:3093/mcp"},
+        {"from": "/home/gem/user-data/outputs/report.md", "markdown": "# 内联不受影响"},
+    )
+    assert bridged["from"] == "http://genoffice:3093/files/abc123/report.md"
+    assert bridged["markdown"] == "# 内联不受影响"
+
+
+async def test_file_bridge_leaves_urls_and_foreign_paths_untouched(monkeypatch, run_scope):
+    from yuxi.agents.mcp import host as host_mod
+
+    def boom(*args, **kwargs):  # pragma: no cover - 不应触发上传
+        raise AssertionError("upload must not be called")
+
+    monkeypatch.setattr(host_mod.LegacyLangChainHost, "_upload_to_mcp_server", staticmethod(boom))
+    host = host_mod.LegacyLangChainHost()
+    config = {"transport": "streamable_http", "url": "http://genoffice:3093/mcp"}
+    args = {
+        "from": "http://example.com/a.md",
+        "file": "C:/Users/32110/dead-session-path.docx",
+        "outline": "/nonexistent/outline.json",
+    }
+    assert await host._bridge_file_arguments(config, dict(args)) == args
+    # 非 http 传输 / 无执行身份：原样返回
+    assert await host._bridge_file_arguments({"transport": "stdio"}, {"from": "/home/gem/x"}) == {"from": "/home/gem/x"}

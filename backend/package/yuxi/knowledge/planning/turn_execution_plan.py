@@ -364,6 +364,14 @@ _MECHANISM_OR_LITERATURE_CLAIM = re.compile(
 # need an explicit source phrase.
 RICE_SOURCE_MCP = "ricekb"
 
+#: 生产力服务器（capability_registry 里 PRODUCTIVITY_TOOL 档，如 genoffice
+#: 文档引擎）：不构成数据来源、不产生事实值。点名它们是"指令性提及"
+#: （middleware 的 USER_MENTIONS 已注入约束），不得触发 required_server
+#: 绑定与 MCP_ONLY/值投影链路——值投影对生产力工具无语义，只会得到
+#: "未获取到可发布的数据值"。按 slug 硬编码与 RICE_SOURCE_MCP 同款先例
+#: （能力档真源在 agents.mcp.capability_registry，planning 反向 import 会环依赖）。
+PRODUCTIVITY_MCP_SLUGS = frozenset({"genoffice"})
+
 _FIXED_SOURCE_ROUTES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(?:NCBI|Entrez|UniProt|Europe\s*PMC|PRIDE)\b", re.I), "gene-authority"),
     (re.compile(r"\bGramene(?:\s*MCP)?\b", re.I), "gramene"),
@@ -437,11 +445,17 @@ def _resolve_mentioned_server(
     """
     configured = [str(slug).strip() for slug in (configured_mcps or []) if str(slug or "").strip()]
     for slug in configured:
+        if slug in PRODUCTIVITY_MCP_SLUGS:
+            continue
         if _server_mention_pattern(slug).search(text):
             return slug, None
     configured_set = set(configured)
     for slug in dict.fromkeys(str(item).strip() for item in (known_mcps or []) if str(item or "").strip()):
-        if slug not in configured_set and _server_mention_pattern(slug).search(text):
+        if (
+            slug not in configured_set
+            and slug not in PRODUCTIVITY_MCP_SLUGS
+            and _server_mention_pattern(slug).search(text)
+        ):
             return None, slug
     return None, None
 
@@ -479,10 +493,14 @@ def plan_turn(
     locator = detect_locator_intent(text)
 
     configured = [str(slug).strip() for slug in (configured_mcps or []) if str(slug or "").strip()]
-    mentioned = list(
-        dict.fromkeys(str(slug).strip() for slug in (mentioned_mcp_slugs or []) if str(slug or "").strip())
-    )
+    mentioned = [
+        slug
+        for slug in dict.fromkeys(str(slug).strip() for slug in (mentioned_mcp_slugs or []) if str(slug or "").strip())
+        if slug not in PRODUCTIVITY_MCP_SLUGS
+    ]
     fixed_route = _resolve_fixed_source_route(text)
+    if fixed_route in PRODUCTIVITY_MCP_SLUGS:
+        fixed_route = None
     if fixed_route == "ricekb-profile" and not re.search(r"档案|完整信息|RiceKB\s*Gene\s*Profile", text, re.I):
         fixed_route = (
             "ricekb-profile" if "ricekb-profile" in configured else "ricekb" if "ricekb" in configured else None

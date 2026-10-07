@@ -53,6 +53,12 @@ from yuxi.utils import logger
 ADAPTER_LEGACY_HTTP_DIALECT = "streamable-http"
 ADAPTER_MODERN_HTTP_DIALECT = "streamable_http"
 
+#: 文件桥参数键（GenOffice CLI PATH_KEYS 口径）：这些参数接受"宿主侧文件路径"，
+#: 聊天链路里模型会给工作区虚拟路径——sidecar 在另一台机器/文件系统上，须先
+#: 上传成 sidecar URL 再调用。
+_FILE_BRIDGE_ARG_KEYS = ("from", "file", "outline")
+_FILE_BRIDGE_MAX_BYTES = 50 * 1024 * 1024
+
 #: 迁移到官方 SDK v2 前的兼容性说明，透出给健康诊断与管理界面
 PROTOCOL_NOTE_PREFIX = "legacy-client-via-langchain-mcp-adapters"
 
@@ -234,7 +240,19 @@ def _detect_tool_error(
     if isinstance(artifact_data, dict) and (artifact_data.get("is_error") or artifact_data.get("isError")):
         return True
     head = str(text or "").lstrip().lower()
-    return head.startswith(_TOOL_ERROR_TEXT_PREFIXES) or bool(_BRACKETED_ERROR_PREFIX.match(head))
+    if head.startswith(_TOOL_ERROR_TEXT_PREFIXES) or bool(_BRACKETED_ERROR_PREFIX.match(head)):
+        return True
+    # JSON 错误信封（GenOffice CLI 约定 {"status":"error",...}）：正文是单个
+    # JSON 对象且顶层 status=error 时按失败判定——否则失败会以 success 进审计
+    # 与事实账本口径（错误文本绝不能以 success 身份进入事实账本）。
+    if head.startswith("{") and '"status"' in head[:512]:
+        try:
+            envelope = json.loads(str(text))
+        except json.JSONDecodeError:
+            envelope = None
+        if isinstance(envelope, dict) and str(envelope.get("status") or "").lower() == "error":
+            return True
+    return False
 
 
 def _normalize_tool_output(output: Any, *, provenance: dict[str, Any]) -> McpToolResult:
@@ -526,6 +544,90 @@ class LegacyLangChainHost(McpHost):
             mcp_call_audit_id=mcp_call_audit_id,
         )
 
+    async def _bridge_file_arguments(
+        self,
+        config: dict[str, Any],
+        arguments: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """文件参数桥：from/file/outline 指向本线程工作区文件时，上传 sidecar 换 URL。
+
+        sidecar 与后端不在同一文件系统（容器 Linux / 宿主 Windows），模型给的
+        工作区虚拟路径对 sidecar 不存在；PUT /files 上传后以 URL 引用。任何
+        失败（无执行身份、路径不可解析、文件不存在、上传错误）保持原值——
+        由服务器侧返回结构化错误，绝不伪造成功。
+        """
+        if not isinstance(arguments, dict) or not arguments:
+            return arguments or {}
+        if str((config or {}).get("transport") or "") not in {"sse", "streamable_http"}:
+            return arguments
+        from yuxi.agents.mcp.execution import get_mcp_execution_context
+
+        context = get_mcp_execution_context()
+        if context is None or not context.thread_id:
+            return arguments
+        bridged = dict(arguments)
+        for key in _FILE_BRIDGE_ARG_KEYS:
+            value = bridged.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            text = value.strip()
+            if text.startswith(("http://", "https://", "data:")):
+                continue
+            local_path = self._resolve_workspace_file(context, text)
+            if local_path is None:
+                continue
+            url = await self._upload_to_mcp_server(config, local_path)
+            if url:
+                logger.info(f"MCP file bridge: {key}={text} -> {url}")
+                bridged[key] = url
+        return bridged
+
+    @staticmethod
+    def _resolve_workspace_file(context, value: str):
+        from yuxi.agents.backends.sandbox.paths import resolve_virtual_path
+
+        try:
+            path = resolve_virtual_path(str(context.thread_id), value, uid=str(context.uid))
+        except Exception:  # noqa: BLE001 —— 非工作区虚拟路径（含跨机绝对路径）不桥接
+            return None
+        try:
+            return path if path.is_file() else None
+        except OSError:
+            return None
+
+    @staticmethod
+    async def _upload_to_mcp_server(config: dict[str, Any], local_path) -> str | None:
+        from urllib.parse import quote, urlparse
+
+        server = urlparse(str(config.get("url") or ""))
+        if server.scheme not in {"http", "https"} or not server.netloc:
+            return None
+        origin = f"{server.scheme}://{server.netloc}"
+        try:
+            data = await asyncio.to_thread(local_path.read_bytes)
+        except OSError as error:
+            logger.warning(f"MCP file bridge upload skipped (read): {type(error).__name__}: {error}")
+            return None
+        if len(data) > _FILE_BRIDGE_MAX_BYTES:
+            logger.warning(f"MCP file bridge upload skipped: {local_path.name} exceeds {_FILE_BRIDGE_MAX_BYTES} bytes")
+            return None
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(
+                headers=dict(config.get("headers") or {}) or None,
+                timeout=httpx.Timeout(120.0),
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.put(f"{origin}/files/{quote(local_path.name)}", content=data)
+                response.raise_for_status()
+                url = (response.json() or {}).get("url")
+                return str(url) if url else None
+        except Exception as error:  # noqa: BLE001 —— 桥接是增强通道，失败保持原参数
+            logger.warning(f"MCP file bridge upload skipped: {type(error).__name__}: {error}")
+            return None
+
     async def _download_within_session(self, config: dict[str, Any], url: str) -> bytes | None:
         """中继会话存活期内按 URL 下载大文件交付物（resource_link 兜底）。
 
@@ -580,7 +682,11 @@ class LegacyLangChainHost(McpHost):
                 code=CODE_DISCOVERY_FAILED,
             )
         try:
-            output = await target.ainvoke(dict(arguments or {}))
+            # 文件桥：吃文件路径的参数（from/file/outline）若指向本线程工作区，
+            # 先上传到 sidecar 文件仓换成 URL——sidecar 与后端不在同一文件系统，
+            # 直接传容器路径必然 file_not_found。失败保持原值（服务器侧报错）。
+            bridged_arguments = await self._bridge_file_arguments(config, arguments)
+            output = await target.ainvoke(dict(bridged_arguments or {}))
         except Exception as e:  # noqa: BLE001 —— 适配器会先拦截 ToolException 为字符串，这里兜运行期错误
             raised = failure_from_exception(e, fallback_stage=STAGE_TRANSPORT)
             if raised.code in (CODE_DISCOVERY_FAILED, CODE_CLIENT_INIT_FAILED):
@@ -624,7 +730,7 @@ class LegacyLangChainHost(McpHost):
             server_slug=slug,
             capability_type="tool",
             capability_name=tool_name,
-            arguments=arguments or {},
+            arguments=bridged_arguments if isinstance(bridged_arguments, dict) else (arguments or {}),
             result=result.to_dict(),
             status="error" if result.is_error else "success",
             duration_ms=int((time.perf_counter() - started) * 1000),
@@ -648,7 +754,7 @@ class LegacyLangChainHost(McpHost):
             # 数重放一次调用，从完整结果里取内嵌文件字节落盘。有文件交付物时不
             # 再物化 JSON 信封（避免同一结果双产物噪音）。
             file_deliverable_entries = await self._relay_inline_file_deliverables(
-                slug, config, tool_name, arguments, mcp_call_audit_id=audit_id
+                slug, config, tool_name, bridged_arguments, mcp_call_audit_id=audit_id
             )
         if (
             not result.is_error
