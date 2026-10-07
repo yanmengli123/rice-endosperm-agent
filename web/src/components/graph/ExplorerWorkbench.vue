@@ -101,6 +101,18 @@
                     证据明细（Excel）
                   </a-menu-item>
                   <a-menu-item
+                    key="vosviewer"
+                    title="仅已审核关系的实体关联网络（无向连线强度=不同三元组数），解压后在 VOSviewer File → Open 打开 vosviewer.json；方向与谓词见包内 facts.jsonl"
+                  >
+                    VOSviewer 分析包（仅已审核）
+                  </a-menu-item>
+                  <a-menu-item
+                    key="vosviewerExplore"
+                    title="含 AI 候选关系的探索用途分析包；正式分析请使用仅已审核版本"
+                  >
+                    VOSviewer 分析包（含 AI 候选，探索用）
+                  </a-menu-item>
+                  <a-menu-item
                     key="projection"
                     title="Neo4j 投影的全部实体节点、块节点与全部关系，附逐条原文引文、段落全文与人工决策（JSONL + 清单）"
                   >
@@ -558,6 +570,16 @@ const onExportMenuClick = ({ key }) => {
 const EXPORT_MENU_ITEMS = {
   roundtrip: { variant: 'roundtrip', label: '标准往返包' },
   evidence: { variant: 'evidence', label: '证据明细' },
+  vosviewer: {
+    variant: 'vosviewer',
+    options: { reviewPolicy: 'approved_only' },
+    label: 'VOSviewer 分析包（实体网络快照）'
+  },
+  vosviewerExplore: {
+    variant: 'vosviewer',
+    options: { reviewPolicy: 'candidates_visible' },
+    label: 'VOSviewer 分析包（含 AI 候选，探索用）'
+  },
   projection: {
     variant: 'projection',
     options: { includeEvidence: true, includeChunkText: true },
@@ -601,6 +623,31 @@ const formatEvidenceSummary = (raw) => {
     .join(' · ')
 }
 
+const VOSVIEWER_SUMMARY_LABELS = {
+  entities: '实体',
+  facts: '去重事实',
+  links: '无向连线',
+  isolated: '孤立实体',
+  self_loops: '自环',
+  exploration: '探索'
+}
+
+const formatVosviewerSummary = (raw) => {
+  if (!raw) return ''
+  return String(raw)
+    .split(';')
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => {
+      const [key, value] = token.split('=').map((item) => (item || '').trim())
+      if (key === 'exploration') return value === 'true' ? '含 AI 候选（探索用）' : ''
+      const label = VOSVIEWER_SUMMARY_LABELS[key]
+      return label && value ? `${label} ${value}` : ''
+    })
+    .filter(Boolean)
+    .join(' · ')
+}
+
 const exportGraph = async (menuKey) => {
   const item = EXPORT_MENU_ITEMS[menuKey]
   if (!item || !kbId.value || exportingGraph.value) return
@@ -621,10 +668,13 @@ const exportGraph = async (menuKey) => {
     link.click()
     document.body.removeChild(link)
     window.URL.revokeObjectURL(url)
-    const summary = formatEvidenceSummary(
+    const rawSummary =
       response.headers.get('X-Export-Evidence-Summary') ||
-        response.headers.get('x-export-evidence-summary')
-    )
+      response.headers.get('x-export-evidence-summary')
+    const summary =
+      item.variant === 'vosviewer'
+        ? formatVosviewerSummary(rawSummary)
+        : formatEvidenceSummary(rawSummary)
     message.success(`${item.label}导出成功${summary ? `（${summary}）` : ''}`)
   } catch (error) {
     console.error('图谱导出失败:', error)
@@ -774,7 +824,11 @@ const loadGraphBuildStatus = async () => {
     }
   } catch (e) {
     console.error('Failed to load graph build status:', e)
-    if (requestSeq === graphStatusRequestSeq && currentDatabaseId === kbId.value && isGraphAccessDenied(e)) {
+    if (
+      requestSeq === graphStatusRequestSeq &&
+      currentDatabaseId === kbId.value &&
+      isGraphAccessDenied(e)
+    ) {
       clearGraphAccessState()
     }
   } finally {

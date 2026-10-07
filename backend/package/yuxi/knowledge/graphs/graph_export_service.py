@@ -59,7 +59,8 @@ from yuxi.storage.neo4j import get_shared_neo4j_connection, safe_neo4j_label
 from yuxi.utils import logger
 
 EXPORT_TOOL_VERSION = "graph-export-v1"
-EXPORT_VARIANTS = ("roundtrip", "evidence", "projection")
+EXPORT_VARIANTS = ("roundtrip", "evidence", "projection", "vosviewer")
+VOSVIEWER_REVIEW_POLICIES = ("approved_only", "candidates_visible")
 PROJECTION_SCHEMA_VERSION = "neo4j-projection-jsonl-v1"
 # v2：在 nodes/relationships 之外追加 evidence/chunks/decisions 三个成员（原文证据与人工决策）
 PROJECTION_EVIDENCE_SCHEMA_VERSION = "neo4j-projection-jsonl-v2"
@@ -1597,6 +1598,8 @@ class ManagedGraphExportService:
         exported_by: str = "system",
         include_evidence: bool = True,
         include_chunk_text: bool = True,
+        review_policy: str = "approved_only",
+        snapshot_token: str | None = None,
     ) -> dict[str, Any]:
         if variant not in EXPORT_VARIANTS:
             raise ValueError(f"不支持的导出变体: {variant}（可选 {'/'.join(EXPORT_VARIANTS)}）")
@@ -1606,6 +1609,10 @@ class ManagedGraphExportService:
                 exported_by=exported_by,
                 include_evidence=include_evidence,
                 include_chunk_text=include_chunk_text,
+            )
+        if variant == "vosviewer":
+            return await self._export_vosviewer(
+                kb_id, exported_by=exported_by, review_policy=review_policy, snapshot_token=snapshot_token
             )
 
         snapshot = await self.repository.export_snapshot(kb_id)
@@ -1641,6 +1648,67 @@ class ManagedGraphExportService:
             f"图谱导出完成 kb={kb_id} variant={variant} by={exported_by} "
             f"entities={len(entities)} triples={len(triples)} evidence={len(evidence)}"
         )
+        return package
+
+    async def _export_vosviewer(
+        self,
+        kb_id: str,
+        *,
+        exported_by: str,
+        review_policy: str,
+        snapshot_token: str | None,
+    ) -> dict[str, Any]:
+        """VOSviewer 分析包：快照取可视化查询路径（dedupe_facts + 审核策略）。
+
+        与三视图同源同口径——review_policy 钉死导出用的审核过滤；可选 snapshot_token
+        （HMAC 签名、15 分钟、绑定库与操作者）在导出时复验指纹，图谱已变化则拒绝出包。
+        """
+        from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
+        from yuxi.knowledge.graphs.vosviewer_export import (
+            build_vosviewer_package,
+            issue_snapshot,
+            verify_snapshot,
+        )
+
+        if review_policy not in VOSVIEWER_REVIEW_POLICIES:
+            raise ValueError(f"不支持的审核策略: {review_policy}（可选 {'/'.join(VOSVIEWER_REVIEW_POLICIES)}）")
+        service = MilvusGraphService(kb_id=kb_id, review_policy=review_policy)
+        data = await service.query_full_graph(exclude_chunk=True)
+        # 空结果统一按「没有可导出」映射 404（与 roundtrip/evidence 一致）
+        if not (data.get("nodes") or []):
+            raise ValueError("当前知识库没有可导出的图谱数据")
+        fingerprint_now = None
+        if snapshot_token:
+            claims = verify_snapshot(snapshot_token, kb_id=kb_id, actor_uid=str(exported_by))
+            from yuxi.knowledge.graphs.vosviewer_export import graph_fingerprint
+
+            fingerprint_now = graph_fingerprint(data)
+            if fingerprint_now != claims["sha256"]:
+                raise ValueError("图谱自快照签发后已变化，请刷新图谱后重新导出")
+        snapshot = issue_snapshot(
+            data, kb_id=kb_id, actor_uid=str(exported_by), query={"review_policy": review_policy, "scope": "full_graph"}
+        )
+        if fingerprint_now is not None:
+            snapshot["sha256"] = claims["sha256"]
+        package = build_vosviewer_package(
+            kb_id=kb_id,
+            data=data,
+            snapshot=snapshot,
+            exported_by=exported_by,
+            allow_candidates=review_policy == "candidates_visible",
+        )
+        package["summary"] = {
+            key: package["manifest"]["counts"][source]
+            for key, source in (
+                ("entities", "entities"),
+                ("facts", "distinct_facts"),
+                ("links", "links"),
+                ("isolated", "isolated_entities"),
+                ("self_loops", "self_loop_facts"),
+            )
+        }
+        if review_policy == "candidates_visible":
+            package["summary"]["exploration"] = "true"
         return package
 
     async def _export_projection(

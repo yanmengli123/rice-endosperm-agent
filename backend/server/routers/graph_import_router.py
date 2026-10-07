@@ -139,16 +139,25 @@ async def list_source_assets(kb_id: str, current_user: User = Depends(get_admin_
 @graph_import.get("/databases/{kb_id}/graph-export")
 async def export_graph(
     kb_id: str,
-    variant: Literal["roundtrip", "evidence", "projection"] = Query(default="roundtrip"),
+    variant: Literal["roundtrip", "evidence", "projection", "vosviewer"] = Query(default="roundtrip"),
     include_evidence: bool = Query(default=True, description="projection：是否带上原文证据 / 段落 / 决策成员"),
     include_chunk_text: bool = Query(default=True, description="projection：是否导出被引用段落全文"),
+    review_policy: Literal["approved_only", "candidates_visible"] = Query(
+        default="approved_only", description="vosviewer：正式分析默认仅已审核；候选关系为探索用途"
+    ),
+    snapshot_token: str | None = Query(default=None, description="vosviewer：可选签名快照凭证，导出时复验图谱未变化"),
     current_user: User = Depends(get_admin_user),
 ):
     """导出图谱数据：roundtrip / evidence 取自 PostgreSQL 规范层，projection 取自 Neo4j 投影（全部节点与关系）。
 
     projection 默认含证据成员（evidence / chunks / decisions，v2 契约）：
     - include_evidence=false → 仅结构轻量包（v1 契约，无证据成员）；
-    - include_chunk_text=false → 含引文但不含段落全文（大库逃生口，仅保留 content_sha256）。
+    - include_chunk_text=false → 含引文但不含段落全文（大库逃生口，仅保留 content_sha256））。
+
+    vosviewer 生成外部 VOSviewer 分析包（无向实体关联投影 + 事实明细）：
+    - 快照走可视化查询口径（dedupe_facts + review_policy），与三视图同源；
+    - 无向连线强度 = 不同 triple_id 数；方向、谓词与审核态在 facts.jsonl；
+    - 派生分析（布局/聚类）永不回写事实层或证据通道。
     """
     try:
         package = await ManagedGraphExportService().export(
@@ -157,6 +166,8 @@ async def export_graph(
             exported_by=current_user.uid,
             include_evidence=include_evidence,
             include_chunk_text=include_chunk_text,
+            review_policy=review_policy,
+            snapshot_token=snapshot_token,
         )
     except ValueError as exc:
         message = str(exc)
@@ -167,6 +178,9 @@ async def export_graph(
     headers = {"Content-Disposition": content_disposition_header(package["filename"])}
     # ASCII 摘要，供客户端在读不到包内容时也能提示证据规模（CORS expose_headers 已登记）
     summary = evidence_summary_header(package)
+    if not summary and variant == "vosviewer":
+        tokens = package.get("summary") or {}
+        summary = "; ".join(f"{key}={value}" for key, value in tokens.items())
     if summary:
         headers["X-Export-Evidence-Summary"] = summary
     return Response(content=package["content"], media_type=package["media_type"], headers=headers)
