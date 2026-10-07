@@ -1,0 +1,38 @@
+# GenOffice MCP sidecar 生产编排片段（叠加在基础 docker-compose.yml 之上）。
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.genoffice.yml up -d genoffice-mcp
+#   # 之后在 /extensions?tab=mcp 将服务器 url 指向 http://genoffice-mcp:3093/mcp
+#   # （api/worker 的 YUXI_MCP_TRUSTED_PRIVATE_HOSTS 同步加 genoffice-mcp:3093）
+#
+# 安全边界：
+# - 不发布端口（expose only）——仅 compose 内网可达，浏览器/公网永不见 3093；
+# - token 从 .env 注入（GENOFFICE_MCP_TOKEN），缺失时 entrypoint fail-closed；
+# - restart 策略补足 sidecar 无进程守护的缺口（session 上限 100，TTL 1h）。
+services:
+  genoffice-mcp:
+    build:
+      context: ./docker/mcp/genoffice
+      args:
+        GENOFFICE_VERSION: ${GENOFFICE_VERSION:-0.11.0}
+        GENOFFICE_DEB_SHA256: ${GENOFFICE_DEB_SHA256:-a59241bd30dcee12314990f7d438ec2bc4a5e93c5c1c242b203361529dc44c29}
+    image: yuxi-genoffice-mcp:${GENOFFICE_VERSION:-0.11.0}
+    container_name: genoffice-mcp
+    restart: unless-stopped
+    environment:
+      GENOFFICE_MCP_TOKEN: ${GENOFFICE_MCP_TOKEN:?GENOFFICE_MCP_TOKEN is required}
+      # 大文档渲染并发：官方建议 2-4；调大需评估 CPU（每次渲染一个隐藏 Electron）
+      GENOFFICE_PARALLEL: "2"
+    expose:
+      - "3093"
+    # scratch/上传文件（FileStore TTL 1h、session scratch）落在 tmpfs：
+    # 生命周期与会话语义一致，容器重启即清空，无残留清理负担。
+    tmpfs:
+      - /tmp:size=2g
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/3093"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    networks:
+      - app-network

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import os
 import socket
 from collections.abc import Iterable
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 class McpSecurityError(ValueError):
@@ -28,6 +31,58 @@ def allow_insecure_remote_http() -> bool:
     return os.getenv("YUXI_MCP_ALLOW_INSECURE_HTTP", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
+#: 受信私网 MCP 端点清单环境变量：逗号分隔的 ``host`` 或 ``host:port``。
+#: 专为内网 sidecar（如 genoffice-mcp）放行 —— 命中者豁免"私网地址拒绝"与
+#: "HTTPS 强制"两条；敏感端口、credentials-in-URL、metadata 主机与重定向/
+#: 代理禁用永不豁免。默认空 = 现行为 fail-closed。
+TRUSTED_PRIVATE_HOSTS_ENV = "YUXI_MCP_TRUSTED_PRIVATE_HOSTS"
+
+_trusted_log_marker: str | None = None
+
+
+def trusted_private_endpoints() -> tuple[frozenset[str], frozenset[tuple[str, int]]]:
+    """解析受信端点清单：返回 (任意端口主机集, (主机, 端口) 集)。
+
+    条目 ``host`` 匹配该主机的任意端口；``host:port`` 只匹配显式端口。
+    IPv6 字面量建议写成 ``[::1]:3093``，裸 ``::1`` 视为无端口主机。
+    """
+    raw = os.getenv(TRUSTED_PRIVATE_HOSTS_ENV, "")
+    any_port_hosts: set[str] = set()
+    host_ports: set[tuple[str, int]] = set()
+    for entry in raw.split(","):
+        cleaned = entry.strip().lower().rstrip(".")
+        if not cleaned:
+            continue
+        if cleaned.startswith("["):
+            closing = cleaned.find("]")
+            if closing == -1:
+                continue
+            host = cleaned[1:closing]
+            rest = cleaned[closing + 1 :]
+            if rest.startswith(":") and rest[1:].isdigit():
+                host_ports.add((host, int(rest[1:])))
+            else:
+                any_port_hosts.add(host)
+        elif cleaned.count(":") == 1:
+            host, _, port_text = cleaned.rpartition(":")
+            if host and port_text.isdigit():
+                host_ports.add((host, int(port_text)))
+        else:
+            any_port_hosts.add(cleaned)
+    global _trusted_log_marker
+    if raw.strip() and raw != _trusted_log_marker:
+        logger.warning("MCP SSRF policy: trusted private endpoints active → %s", raw.strip())
+        _trusted_log_marker = raw
+    return frozenset(any_port_hosts), frozenset(host_ports)
+
+
+def _is_trusted_private_endpoint(host: str, port: int | None) -> bool:
+    any_port_hosts, host_ports = trusted_private_endpoints()
+    if host in any_port_hosts:
+        return True
+    return port is not None and (host, port) in host_ports
+
+
 def _assert_public_address(address: str) -> None:
     ip = ipaddress.ip_address(address)
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
@@ -41,22 +96,27 @@ def validate_remote_url_static(raw_url: str, *, allow_insecure_http: bool | None
         raise McpSecurityError("MCP endpoint must be an absolute http(s) URL")
     if parsed.username or parsed.password or parsed.fragment:
         raise McpSecurityError("MCP endpoint must not contain credentials or a URL fragment")
-    insecure_allowed = allow_insecure_remote_http() if allow_insecure_http is None else allow_insecure_http
-    if parsed.scheme != "https" and not insecure_allowed:
-        raise McpSecurityError("remote MCP endpoints must use HTTPS")
     host = parsed.hostname.rstrip(".").lower()
-    if host in _METADATA_HOSTS or host == "localhost" or host.endswith(".localhost"):
+    trusted = _is_trusted_private_endpoint(host, parsed.port)
+    insecure_allowed = allow_insecure_remote_http() if allow_insecure_http is None else allow_insecure_http
+    if parsed.scheme != "https" and not (insecure_allowed or trusted):
+        raise McpSecurityError("remote MCP endpoints must use HTTPS")
+    # metadata 主机是云凭据边界，永不豁免——即使被误列进受信清单。
+    if host in _METADATA_HOSTS:
+        raise McpSecurityError("MCP endpoint host is blocked by SSRF policy")
+    if not trusted and (host == "localhost" or host.endswith(".localhost")):
         raise McpSecurityError("MCP endpoint host is blocked by SSRF policy")
     if parsed.port in _BLOCKED_PORTS:
         raise McpSecurityError(f"MCP endpoint port {parsed.port} is blocked")
-    try:
-        # 仅容忍"主机名不是 IP 字面量"的解析失败；McpSecurityError 必须
-        # 穿透（它也是 ValueError 子类，裸 except 会放行 127.0.0.1/169.254.x 等）。
-        _assert_public_address(host.strip("[]"))
-    except McpSecurityError:
-        raise
-    except ValueError:
-        pass
+    if not trusted:
+        try:
+            # 仅容忍"主机名不是 IP 字面量"的解析失败；McpSecurityError 必须
+            # 穿透（它也是 ValueError 子类，裸 except 会放行 127.0.0.1/169.254.x 等）。
+            _assert_public_address(host.strip("[]"))
+        except McpSecurityError:
+            raise
+        except ValueError:
+            pass
     return parsed.geturl()
 
 
@@ -66,6 +126,7 @@ async def validate_remote_url_dns(raw_url: str, *, allow_insecure_http: bool | N
     parsed = urlparse(normalized)
     host = parsed.hostname or ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    trusted = _is_trusted_private_endpoint(host.rstrip(".").lower(), parsed.port)
     try:
         answers = await asyncio.to_thread(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
     except OSError as exc:
@@ -73,8 +134,9 @@ async def validate_remote_url_dns(raw_url: str, *, allow_insecure_http: bool | N
     addresses = {answer[4][0] for answer in answers if answer and answer[4]}
     if not addresses:
         raise McpSecurityError("MCP endpoint DNS returned no addresses")
-    for address in addresses:
-        _assert_public_address(address)
+    if not trusted:
+        for address in addresses:
+            _assert_public_address(address)
     return normalized
 
 
@@ -143,7 +205,9 @@ def validate_oci_runtime_artifact(
 
 __all__ = [
     "McpSecurityError",
+    "TRUSTED_PRIVATE_HOSTS_ENV",
     "allow_insecure_remote_http",
+    "trusted_private_endpoints",
     "validate_remote_url_static",
     "validate_remote_url_dns",
     "assert_no_inline_secrets",

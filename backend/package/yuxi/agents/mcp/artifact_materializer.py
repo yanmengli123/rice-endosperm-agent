@@ -42,6 +42,22 @@ _MATERIALIZED_MIN_TEXT_CHARS = 2000
 _MAX_ARTIFACT_BYTES = 10 * 1024 * 1024
 #: 单 run 物化文件数上限（护栏：异常工具循环不得刷爆线程 outputs）
 _MAX_FILES_PER_RUN = 20
+#: 单个文件交付物下载上限（Office 文档/PDF 渲染产物可显著大于 JSON 信封）
+_MAX_FILE_DELIVERABLE_BYTES = 50 * 1024 * 1024
+#: 文件交付物扩展名媒体类型表（容器 slim 镜像常缺 /etc/mime.types，Office
+#: OOXML 类型 Python 内建表也没有；显式表保证跨环境一致）
+_FILE_DELIVERABLE_MEDIA_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".csv": "text/csv",
+    ".md": "text/markdown",
+    ".html": "text/html",
+}
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
@@ -200,6 +216,142 @@ async def note_delivered_artifact(entry: MaterializedArtifact) -> None:
             _emit_artifact_trace(entry)
 
 
+def parse_file_output_envelope(result_text: str) -> list[tuple[str, str]]:
+    """识别 MCP 工具结果信封里的文件输出（GenOffice --http 约定），返回 (文件名, URL) 列表。
+
+    识别三处：顶层 ``output_url``、``detail.files[].url``、``detail.previews[].url``。
+    仅做识别与命名映射，不做任何网络请求——文件字节由调用方（host 中继会话）
+    从工具结果的内嵌 resource 块取得：--http 模式下 output_url 与 MCP 会话同寿命，
+    会话关闭即失效，事后按 URL 下载不可靠。
+    """
+    try:
+        payload = json.loads(str(result_text or ""))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    collected: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(name: str | None, url: Any) -> None:
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")) or url in seen:
+            return
+        seen.add(url)
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            clean_name = str(url.rstrip("/").rsplit("/", 1)[-1] or "download")
+        collected.append((clean_name, url))
+
+    _add(None, payload.get("output_url"))
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        for item in detail.get("files") or []:
+            if isinstance(item, dict):
+                _add(item.get("name"), item.get("url"))
+        for item in detail.get("previews") or []:
+            if isinstance(item, dict):
+                _add(item.get("name"), item.get("url"))
+    return collected
+
+
+def _media_type_for(filename: str) -> str:
+    import mimetypes
+
+    lowered = filename.lower()
+    for suffix, media_type in _FILE_DELIVERABLE_MEDIA_TYPES.items():
+        if lowered.endswith(suffix):
+            return media_type
+    return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+async def persist_mcp_file_blobs(
+    *,
+    server_slug: str,
+    tool_name: str,
+    blobs: list[tuple[str, str | None, bytes]],
+    mcp_call_audit_id: int | None,
+) -> list[MaterializedArtifact]:
+    """把 MCP 工具结果内嵌的文件字节（resource blob / 渲染 PNG）落盘为线程 outputs 交付物。
+
+    与 ``materialize_mcp_data_result`` 同源的尽力而为语义：无 run 上下文、超限、
+    IO 错误都跳过该文件并只记日志，绝不阻断工具调用主流程。
+    """
+    if not blobs:
+        return []
+    accumulator = _ARTIFACT_ACCUMULATOR.get()
+    if accumulator is None:
+        return []
+    from yuxi.agents.mcp.execution import get_mcp_execution_context
+
+    context = get_mcp_execution_context()
+    if context is None or not context.thread_id:
+        return []
+
+    entries: list[MaterializedArtifact] = []
+    for original_name, media_type, data in blobs:
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            continue
+        if len(data) > _MAX_FILE_DELIVERABLE_BYTES:
+            logger.warning(
+                f"MCP file deliverable skipped ({server_slug}/{tool_name}): "
+                f"{len(data)} bytes exceeds {_MAX_FILE_DELIVERABLE_BYTES}"
+            )
+            continue
+        if accumulator.materialized_count >= _MAX_FILES_PER_RUN:
+            logger.warning(
+                f"MCP file deliverables skipped ({server_slug}/{tool_name}): "
+                f"per-run artifact limit {_MAX_FILES_PER_RUN} reached"
+            )
+            break
+
+        digest = hashlib.sha256(data).hexdigest()
+        safe_name = _safe_filename_part(str(original_name or ""), "download")
+        filename = (
+            f"{_safe_filename_part(server_slug, 'mcp')}_{_safe_filename_part(tool_name, 'tool')}"
+            f"_{digest[:8]}_{safe_name}"
+        )
+        thread_id = str(context.thread_id)
+        uid = str(context.uid)
+        resolved_media_type = str(media_type or "").strip() or _media_type_for(safe_name)
+
+        def _write_file() -> None:
+            from yuxi.agents.backends.sandbox import ensure_thread_dirs, sandbox_outputs_dir
+
+            ensure_thread_dirs(thread_id, uid)
+            target_dir = sandbox_outputs_dir(thread_id) / MCP_RESULTS_DIR_NAME
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / filename).write_bytes(data)
+
+        try:
+            await asyncio.to_thread(_write_file)
+        except Exception as error:  # noqa: BLE001 —— 物化是增强通道，绝不阻断工具调用主流程
+            logger.warning(f"MCP artifact materialization skipped: {type(error).__name__}: {error}")
+            continue
+
+        entry = MaterializedArtifact(
+            virtual_path=f"{VIRTUAL_PATH_OUTPUTS}/{MCP_RESULTS_DIR_NAME}/{filename}",
+            name=filename,
+            sha256=digest,
+            size_bytes=len(data),
+            media_type=resolved_media_type,
+            origin={
+                "source": "mcp",
+                "kind": "file_deliverable",
+                "mcp_server": server_slug,
+                "mcp_tool": tool_name,
+                "mcp_call_audit_id": mcp_call_audit_id,
+            },
+        )
+        accumulator.materialized_count += 1
+        accumulator.entries.append(entry)
+        registered = await register_run_artifact(context=context, entry=entry)
+        if registered:
+            _emit_artifact_trace(entry)
+        logger.info(f"Materialized MCP file deliverable: {entry.virtual_path} ({entry.size_bytes} bytes)")
+        entries.append(entry)
+    return entries
+
+
 async def materialize_mcp_data_result(
     *,
     server_slug: str,
@@ -293,6 +445,8 @@ __all__ = [
     "drain_materialized_artifacts",
     "end_artifact_accumulation",
     "materialize_mcp_data_result",
+    "parse_file_output_envelope",
+    "persist_mcp_file_blobs",
     "note_delivered_artifact",
     "register_run_artifact",
 ]

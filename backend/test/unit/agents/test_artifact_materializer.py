@@ -20,6 +20,8 @@ from yuxi.agents.mcp.artifact_materializer import (
     drain_materialized_artifacts,
     end_artifact_accumulation,
     materialize_mcp_data_result,
+    parse_file_output_envelope,
+    persist_mcp_file_blobs,
 )
 from yuxi.agents.mcp.execution import McpExecutionContext, reset_mcp_execution_context, set_mcp_execution_context
 
@@ -281,3 +283,96 @@ async def test_present_artifacts_registers_run_level_entry(materialize_outputs, 
     assert len(entries[0].sha256) == 64
     # DB 登记通道：登记尝试发生（真实落库由 SQLite 写侧用例覆盖）
     assert [entry.virtual_path for entry in registration_attempts] == [expected_virtual_path]
+
+
+# ── 文件交付物物化（信封识别 + 内嵌 blob 落盘）─────────────────────
+
+
+async def test_parse_file_output_envelope_recognizes_genoffice_convention():
+    from yuxi.agents.mcp.artifact_materializer import parse_file_output_envelope
+
+    envelope = {
+        "status": "ok",
+        "command": "create",
+        "summary": "created report.docx",
+        "output_url": "http://genoffice:3093/files/abc/report.docx",
+        "detail": {
+            "files": [{"name": "report.docx", "url": "http://genoffice:3093/files/abc/report.docx"}],
+            "previews": [{"name": "page-1.png", "url": "http://genoffice:3093/files/abc/page-1.png"}],
+        },
+    }
+    specs = parse_file_output_envelope(json.dumps(envelope))
+    # output_url 与 detail.files 同 URL 去重 + previews 一并识别
+    assert [name for name, _url in specs] == ["report.docx", "page-1.png"]
+    # 非信封/非 JSON/无文件输出 → 空列表
+    assert parse_file_output_envelope("plain text") == []
+    assert parse_file_output_envelope(json.dumps([1, 2, 3])) == []
+    assert parse_file_output_envelope(json.dumps({"status": "ok"})) == []
+    assert parse_file_output_envelope("") == []
+
+
+async def test_file_blobs_persist_as_deliverables(materialize_outputs, run_scope):
+    from yuxi.agents.mcp.artifact_materializer import persist_mcp_file_blobs
+
+    docx_blob = b"PK-fake-docx-bytes"
+    png_blob = b"PNGDATA"
+    entries = await persist_mcp_file_blobs(
+        server_slug="genoffice",
+        tool_name="create_docx",
+        blobs=[("report.docx", None, docx_blob), (None, "image/png", png_blob)],
+        mcp_call_audit_id=11,
+    )
+    assert len(entries) == 2
+    first, second = entries
+    assert first.name.endswith("report.docx")
+    # 媒体类型：显式表优先于 octet-stream 兜底
+    assert first.media_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert first.origin == {
+        "source": "mcp",
+        "kind": "file_deliverable",
+        "mcp_server": "genoffice",
+        "mcp_tool": "create_docx",
+        "mcp_call_audit_id": 11,
+    }
+    assert first.size_bytes == len(docx_blob)
+    assert (materialize_outputs / MCP_RESULTS_DIR_NAME / first.name).read_bytes() == docx_blob
+    # 显式 media_type 透传；无名 blob 用安全兜底名
+    assert second.media_type == "image/png"
+    assert "download" in second.name
+
+
+async def test_file_blobs_skipped_without_scope_or_over_limit(materialize_outputs, monkeypatch):
+    from yuxi.agents.mcp.artifact_materializer import _MAX_FILE_DELIVERABLE_BYTES, persist_mcp_file_blobs
+
+    # 无累积器（run 边界外）：直接空返回
+    assert (
+        await persist_mcp_file_blobs(
+            server_slug="s", tool_name="t", blobs=[("a.docx", None, b"x")], mcp_call_audit_id=None
+        )
+        == []
+    )
+
+    oversized = b"x" * (_MAX_FILE_DELIVERABLE_BYTES + 1)
+    token = set_mcp_execution_context(McpExecutionContext(tenant_id=1, uid="u1", thread_id="t-x"))
+    accumulation_token = begin_artifact_accumulation()
+    try:
+        entries = await persist_mcp_file_blobs(
+            server_slug="s", tool_name="t", blobs=[("big.docx", None, oversized)], mcp_call_audit_id=None
+        )
+        assert entries == []
+        assert not (materialize_outputs / MCP_RESULTS_DIR_NAME).exists()
+    finally:
+        end_artifact_accumulation(accumulation_token)
+        reset_mcp_execution_context(token)
+
+
+async def test_file_blobs_invalid_entries_skipped_gracefully(materialize_outputs, run_scope):
+    from yuxi.agents.mcp.artifact_materializer import persist_mcp_file_blobs
+
+    entries = await persist_mcp_file_blobs(
+        server_slug="s",
+        tool_name="t",
+        blobs=[("empty.bin", None, b""), ("bad", None, "not-bytes")],  # type: ignore[list-item]
+        mcp_call_audit_id=None,
+    )
+    assert entries == []

@@ -1,0 +1,25 @@
+#!/bin/bash
+# GenOffice MCP sidecar 入口：`genoffice mcp --http` Streamable HTTP 服务器。
+#
+# 治理要点（与 runbook 对齐）：
+# - token 必须注入：GENOFFICE_MCP_TOKEN 缺失时 fail-closed 拒绝启动，
+#   避免无鉴权的 MCP 端点被内网横移利用；
+# - GENOFFICE_ALLOWED_ROOTS 缺省不设置：工具被关在服务器自身文件仓内；
+# - 云工具（search/image/media）由镜像内 ai-settings.json（cloudToolsEnabled
+#   false）事实禁用，不走租户凭据体系。
+set -euo pipefail
+
+if [ -z "${GENOFFICE_MCP_TOKEN:-}" ]; then
+  echo "[genoffice-mcp] FATAL: GENOFFICE_MCP_TOKEN is required (fail-closed)" >&2
+  exit 1
+fi
+
+PORT="${GENOFFICE_MCP_HTTP_PORT:-3093}"
+HOST="${GENOFFICE_MCP_HOST:-0.0.0.0}"
+
+# xvfb-run：render / convert --to pdf / create_pdf 会拉起隐藏 Electron 进程
+# 做排版，Linux 容器需要虚拟 X 显示（纯 Node 工具不受影响）。
+# ELECTRON_RUN_AS_NODE=1：CLI 以纯 Node 跑（官方 mcp-launch 同款处理）。
+export ELECTRON_RUN_AS_NODE=1
+exec xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" \
+  /opt/GenOffice/resources/cli/genoffice mcp --http "$PORT" --host "$HOST" --token "$GENOFFICE_MCP_TOKEN"

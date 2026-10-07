@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -22,7 +23,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from yuxi.agents.mcp.artifact_materializer import materialize_mcp_data_result
+from yuxi.agents.mcp.artifact_materializer import (
+    materialize_mcp_data_result,
+    parse_file_output_envelope,
+    persist_mcp_file_blobs,
+)
 from yuxi.agents.mcp.capability_registry import profile_for_server_tool
 from yuxi.agents.mcp.error_semantics import apply_failure_provenance
 from yuxi.agents.mcp.execution import get_mcp_execution_context, record_mcp_call
@@ -43,6 +48,7 @@ from yuxi.agents.mcp.sequence_deliverable import (
     record_sequence_deliverable,
 )
 from yuxi.agents.mcp.spec import to_camel_case
+from yuxi.utils import logger
 
 ADAPTER_LEGACY_HTTP_DIALECT = "streamable-http"
 ADAPTER_MODERN_HTTP_DIALECT = "streamable_http"
@@ -427,6 +433,80 @@ class LegacyLangChainHost(McpHost):
         )
         return descriptors, info
 
+    async def _relay_inline_file_deliverables(
+        self,
+        slug: str,
+        config: dict[str, Any],
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        *,
+        mcp_call_audit_id: int | None,
+    ) -> list:
+        """官方 SDK 中继会话重放工具调用，从内嵌 resource/image 块物化文件交付物。
+
+        任何失败（非 http 传输、会话/调用错误、无内嵌字节）都返回空列表，由
+        调用方回退到 JSON 信封物化；绝不影响主调用结果。
+        """
+        if str((config or {}).get("transport") or "") not in {"sse", "streamable_http"}:
+            return []
+        try:
+            async with self._official_session(config) as session:
+                relayed = await session.call_tool(tool_name, dict(arguments or {}))
+        except Exception as error:  # noqa: BLE001 —— 中继是增强通道
+            logger.warning(f"MCP file deliverable relay skipped ({slug}/{tool_name}): {type(error).__name__}: {error}")
+            return []
+        if getattr(relayed, "isError", False):
+            return []
+
+        name_hints: dict[str, str] = {}
+        relayed_text = next(
+            (
+                str(getattr(block, "text", "") or "")
+                for block in getattr(relayed, "content", None) or []
+                if getattr(block, "type", None) == "text"
+            ),
+            "",
+        )
+        for name, url in parse_file_output_envelope(relayed_text):
+            name_hints[str(url)] = str(name)
+        blobs: list[tuple[str, str | None, bytes]] = []
+        image_index = 0
+        for block in getattr(relayed, "content", None) or []:
+            block_type = getattr(block, "type", None)
+            if block_type == "resource":
+                resource = getattr(block, "resource", None)
+                blob_text = getattr(resource, "blob", None)
+                if not blob_text:
+                    continue
+                uri = str(getattr(resource, "uri", "") or "")
+                name = name_hints.get(uri) or str(uri.rstrip("/").rsplit("/", 1)[-1] or "download")
+                media_type = getattr(resource, "mimeType", None)
+                try:
+                    data = base64.b64decode(blob_text)
+                except Exception:  # noqa: BLE001 —— 非法 base64 跳过该块
+                    continue
+                blobs.append((name, media_type, data))
+            elif block_type == "image":
+                data_text = getattr(block, "data", None)
+                if not data_text:
+                    continue
+                image_index += 1
+                media_type = str(getattr(block, "mimeType", None) or "image/png")
+                suffix = (
+                    "png" if "png" in media_type else ("jpg" if "jpeg" in media_type or "jpg" in media_type else "img")
+                )
+                try:
+                    data = base64.b64decode(data_text)
+                except Exception:  # noqa: BLE001
+                    continue
+                blobs.append((f"render_{image_index:02d}.{suffix}", media_type, data))
+        return await persist_mcp_file_blobs(
+            server_slug=slug,
+            tool_name=tool_name,
+            blobs=blobs,
+            mcp_call_audit_id=mcp_call_audit_id,
+        )
+
     async def call_tool(
         self,
         slug: str,
@@ -501,11 +581,28 @@ class LegacyLangChainHost(McpHost):
         final_only_artifacts = bool(
             execution_context and execution_context.artifact_policy in {"sequence_only", "value_only"}
         )
+        file_deliverable_entries: list = []
         if (
             not result.is_error
             and slug != "data-aggregator"
             and tool_name != SEQUENCE_DELIVERABLE_TOOL
             and not final_only_artifacts
+            and parse_file_output_envelope(result.text)
+        ):
+            # MCP 文件交付物（GenOffice --http 约定）：--http 模式下 output_url 与
+            # MCP 会话同寿命，适配层会话在调用返回即关闭、URL 随之失效，且内嵌
+            # resource 块会被 langchain 适配层丢弃。因此用官方 SDK 中继会话按原参
+            # 数重放一次调用，从完整结果里取内嵌文件字节落盘。有文件交付物时不
+            # 再物化 JSON 信封（避免同一结果双产物噪音）。
+            file_deliverable_entries = await self._relay_inline_file_deliverables(
+                slug, config, tool_name, arguments, mcp_call_audit_id=audit_id
+            )
+        if (
+            not result.is_error
+            and slug != "data-aggregator"
+            and tool_name != SEQUENCE_DELIVERABLE_TOOL
+            and not final_only_artifacts
+            and not file_deliverable_entries
         ):
             # MCP 数据产物确定性物化：成功的数据查询结果由程序落盘为可下载交付物，
             # 是否出现产物不再依赖模型调用 present_artifacts。必须先于下方
@@ -543,6 +640,17 @@ class LegacyLangChainHost(McpHost):
             )
             if deliverable_notice is not None:
                 result.text = append_deliverable_notice(result.text, deliverable_notice)
+        if file_deliverable_entries:
+            # 文件交付物通知：虚拟路径经 workspace viewer 端点可下载，模型可据此
+            # 指引用户获取产物（sidecar 侧 URL 是短命的，不直接暴露给用户）。
+            notice = {
+                "files": [
+                    {"name": entry.name, "virtual_path": entry.virtual_path, "size_bytes": entry.size_bytes}
+                    for entry in file_deliverable_entries
+                ]
+            }
+            notice_payload = json.dumps(notice, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            result.text = f"{result.text.rstrip()}\n\n<mcp-file-deliverables>{notice_payload}</mcp-file-deliverables>"
         return result
 
     @asynccontextmanager

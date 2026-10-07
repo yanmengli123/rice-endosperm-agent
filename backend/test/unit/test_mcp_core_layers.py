@@ -261,6 +261,50 @@ class TestSecurityGuards:
         with pytest.raises(security_mod.McpSecurityError):
             asyncio.run(security_mod.validate_remote_url_dns("https://rebind.example.com/mcp"))
 
+    def test_trusted_private_endpoints_allow_insecure_private_http(self, monkeypatch):
+        monkeypatch.delenv("YUXI_MCP_ALLOW_INSECURE_HTTP", raising=False)
+        monkeypatch.setenv(
+            security_mod.TRUSTED_PRIVATE_HOSTS_ENV,
+            "host.docker.internal:3093, genoffice-mcp:3093",
+        )
+        # 未列出的主机维持全量拒绝（http + 私网/回环）
+        with pytest.raises(security_mod.McpSecurityError):
+            security_mod.validate_remote_url_static("http://127.0.0.1:8080/mcp")
+        # 列出的 host:port 放行 http scheme 与私网 IP 字面量
+        normalized = security_mod.validate_remote_url_static("http://host.docker.internal:3093/mcp")
+        assert normalized.startswith("http://host.docker.internal:3093")
+        # 端口不匹配（含缺省端口）不放行
+        with pytest.raises(security_mod.McpSecurityError):
+            security_mod.validate_remote_url_static("http://host.docker.internal:8080/mcp")
+        with pytest.raises(security_mod.McpSecurityError):
+            security_mod.validate_remote_url_static("http://host.docker.internal/mcp")
+        # 敏感端口永不放行
+        with pytest.raises(security_mod.McpSecurityError):
+            security_mod.validate_remote_url_static("http://genoffice-mcp:6379/mcp")
+
+    def test_trusted_endpoints_survive_private_dns_resolution(self, monkeypatch):
+        import socket as _socket
+
+        # 裸主机条目（无端口）匹配该主机任意端口
+        monkeypatch.setenv(security_mod.TRUSTED_PRIVATE_HOSTS_ENV, "sidecar.internal")
+        real_getaddrinfo = _socket.getaddrinfo
+
+        def fake_getaddrinfo(host, port, **kwargs):
+            if host.endswith(".internal"):
+                return [(2, 1, 6, "", ("192.168.65.2", port))]
+            return real_getaddrinfo(host, port, **kwargs)
+
+        monkeypatch.setattr(_socket, "getaddrinfo", fake_getaddrinfo)
+        assert asyncio.run(security_mod.validate_remote_url_dns("http://sidecar.internal:3093/mcp"))
+        # 未受信主机解析到同一私网地址仍被拒绝（DNS rebinding 防线不因豁免松动）
+        with pytest.raises(security_mod.McpSecurityError):
+            asyncio.run(security_mod.validate_remote_url_dns("https://untrusted.internal/mcp"))
+
+    def test_metadata_hosts_never_trusted(self, monkeypatch):
+        monkeypatch.setenv(security_mod.TRUSTED_PRIVATE_HOSTS_ENV, "metadata.google.internal")
+        with pytest.raises(security_mod.McpSecurityError):
+            security_mod.validate_remote_url_static("http://metadata.google.internal/computeMetadata/v1/")
+
     def test_inline_secrets_blocked_but_refs_allowed(self):
         with pytest.raises(security_mod.McpSecurityError):
             security_mod.assert_no_inline_secrets({"Authorization": "Bearer sk-live"}, section="headers")
