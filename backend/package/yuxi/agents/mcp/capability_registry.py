@@ -361,6 +361,23 @@ _DATA_AGGREGATOR_DISCOVERY = ToolCapabilityProfile(
 )
 _DATA_AGGREGATOR_TOOLS = frozenset({"search", "resolve", "relate", "list_sources"})
 
+#: GenOffice 生产力 profile：不支撑任何 Claim、不满足证据义务；仅作为
+#: "工具可见性与来源门控解耦"的标记档（PRODUCTIVITY_TOOL 豁免见
+#: knowledge_context.filter_tools_by_turn_plan）。
+_GENOFFICE_PRODUCTIVITY = ToolCapabilityProfile(
+    capabilities=frozenset({Capability.GENERIC_MCP}),
+    source_class="PRODUCTIVITY_TOOL",
+    answer_eligible=False,
+    authority_level="LOCAL_ENGINE",
+    provider="GenOffice CLI (genspark-ai/genoffice, Apache-2.0)",
+    provider_version="sidecar release",
+    supported_claim_types=frozenset(),
+    max_evidence_obligation=None,
+    license_scope="LOCAL_ONLY_NO_NETWORK_EXCEPT_CONFIGURED_CLOUD_TOOLS",
+    failure_semantics="TOOL_ISERROR;NO_EVIDENCE_CLAIMS",
+    egress_class="local",
+)
+
 RICEKB_TOOL_NAMES: frozenset[str] = frozenset(_RICEKB_VENDORED_TOOLS)
 
 # 服务器级限定 profile：通用上游工具名（search/resolve/...）只在其评审过的
@@ -396,6 +413,51 @@ _BIO_MCP_TOOLS = frozenset(
 _SERVER_SCOPED_PROFILES: dict[str, dict[str, ToolCapabilityProfile]] = {
     "data-aggregator": {name: _DATA_AGGREGATOR_DISCOVERY for name in sorted(_DATA_AGGREGATOR_TOOLS)},
     "bio-mcp": {name: _BIO_MCP_STRUCTURED_LOOKUP for name in sorted(_BIO_MCP_TOOLS)},
+    # GenOffice（Apache-2.0 sidecar，docker/mcp/genoffice）：生产力工具面
+    # （Office 文档生成/转换/审阅）。它不产生任何答案证据、不构成数据来源
+    # （ADR-0001：派生 Office 产物永不回流证据通道），answer_eligible=False
+    # 且 max_evidence_obligation=None；source_class=PRODUCTIVITY_TOOL 使
+    # 来源门控（knowledge_context.filter_tools_by_turn_plan）豁免——文档
+    # 生成与 ls/write_file 同类，不应按"数据来源"裁决可见性。
+    # 覆盖工具清单与 --http server 实测 30 个工具对齐（open/selection 仅
+    # stdio 形态存在，不含在内）。
+    "genoffice": {
+        name: _GENOFFICE_PRODUCTIVITY
+        for name in sorted(
+            {
+                "info",
+                "convert",
+                "create_docx",
+                "create_xlsx",
+                "create_pdf",
+                "create_pptx",
+                "docs_read",
+                "docs_apply",
+                "docs_check",
+                "merge",
+                "pdf_read",
+                "sheet_read",
+                "sheet_apply",
+                "sheet_check",
+                "slides_read",
+                "slides_apply",
+                "slides_audit",
+                "slides_render",
+                "slides_check",
+                "slides_replace",
+                "render",
+                "guide",
+                "capabilities",
+                "search",
+                "image",
+                "media",
+                "deck_start",
+                "deck_page",
+                "deck_build",
+                "deck_replace",
+            }
+        )
+    },
 }
 
 

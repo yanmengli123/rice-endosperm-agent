@@ -100,6 +100,11 @@ def filter_tools_by_turn_plan(tools: list[Any], plan: TurnExecutionPlan) -> list
             if not mcp_tool:
                 continue
             profile = profile_for_tool(tool)
+            # 生产力工具（如 GenOffice 文档生成）不是数据来源、不产生证据，
+            # 不受 MCP_ONLY 的来源能力裁决——与工作区工具同类，始终可见。
+            if profile and profile.source_class == "PRODUCTIVITY_TOOL":
+                filtered.append(tool)
+                continue
             if required and not profile:
                 continue
             if profile and required.isdisjoint(profile.capabilities):
@@ -108,6 +113,10 @@ def filter_tools_by_turn_plan(tools: list[Any], plan: TurnExecutionPlan) -> list
             continue
         if mcp_tool:
             profile = profile_for_tool(tool)
+            # 同上：生产力工具豁免 AUTO/KB_ONLY 等轮的来源门控。
+            if profile and profile.source_class == "PRODUCTIVITY_TOOL":
+                filtered.append(tool)
+                continue
             profile_source = (
                 SourceClass.BIBLIOGRAPHY
                 if profile and profile.source_class == "BIBLIOGRAPHY"

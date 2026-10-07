@@ -215,3 +215,56 @@ def test_profile_intent_single_server_fanout():
     servers = {tool.metadata["server"] for tool in filtered}
     assert servers == {"ricekb-profile"}, f"档案意图应收敛到单服务器，实际 {servers}"
     assert plan.answer.mode == "MCP_VALUE_ONLY"
+
+
+def test_productivity_tools_visible_in_auto_turn():
+    """生产力工具（GenOffice 文档生成）不受来源门控：AUTO 轮始终可见。
+
+    来源门控裁决的是"数据来源/证据权威"；文档生成与 ls/write_file 同类，
+    不产生证据、不构成来源（PRODUCTIVITY_TOOL profile，answer_eligible=False）。
+    若被 AUTO 轮的 allowed_sources 滤除，模型将永远看不到文档工具。
+    """
+    from yuxi.agents.middlewares.knowledge_context import filter_tools_by_turn_plan
+
+    plan = plan_turn(
+        "帮我生成一个 Word 周报文档",
+        has_knowledge_scope=True,
+        configured_mcps=_ALL_SERVERS + ["genoffice"],
+        known_mcps=_ALL_SERVERS + ["genoffice"],
+    )
+    tools = [_fake_mcp_tool(f"t_{slug}", slug) for slug in _ALL_SERVERS]
+    tools.extend(_fake_mcp_tool(name, "genoffice") for name in ("create_docx", "docs_apply", "render"))
+    filtered = filter_tools_by_turn_plan(tools, plan)
+    names = {tool.name for tool in filtered}
+    assert {"create_docx", "docs_apply", "render"} <= names
+    # 其他服务器的数据源工具在 AUTO 轮维持原门控行为（无 profile → 滤除）
+    assert not names.intersection(f"t_{slug}" for slug in _ALL_SERVERS)
+
+
+def test_productivity_tools_pinned_by_required_server():
+    """点名其他 MCP 服务器时，genoffice 生产力工具仍被服务器收敛剥除。"""
+    from yuxi.agents.middlewares.knowledge_context import filter_tools_by_turn_plan
+
+    plan = plan_turn(
+        "@mcp:ricekb 查一下 Wx 基因",
+        has_knowledge_scope=True,
+        configured_mcps=_ALL_SERVERS + ["genoffice"],
+        known_mcps=_ALL_SERVERS + ["genoffice"],
+    )
+    tools = [_fake_mcp_tool("create_docx", "genoffice"), _fake_mcp_tool("ricekb_sequence", "ricekb")]
+    filtered = filter_tools_by_turn_plan(tools, plan)
+    servers = {tool.metadata["server"] for tool in filtered}
+    assert "genoffice" not in servers
+
+
+def test_genoffice_profile_is_productivity_not_evidence():
+    """genoffice 服务器 profile：PRODUCTIVITY_TOOL 档，无证据义务。"""
+    from yuxi.agents.mcp.capability_registry import profile_for_server_tool
+
+    profile = profile_for_server_tool("genoffice", "create_docx")
+    assert profile is not None
+    assert profile.source_class == "PRODUCTIVITY_TOOL"
+    assert profile.answer_eligible is False
+    assert profile.max_evidence_obligation is None
+    # fail-closed：未列名工具无 profile
+    assert profile_for_server_tool("genoffice", "totally_unknown_tool") is None
