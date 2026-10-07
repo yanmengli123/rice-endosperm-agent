@@ -15,6 +15,7 @@ from yuxi.knowledge.graphs.review_overlay import KIND_ENTITY, KIND_TRIPLE, STATU
 from yuxi.repositories.knowledge_graph_repository import build_extracted_alias_rows, refresh_triple_support_statement
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeBase,
     KnowledgeBaseMember,
     KnowledgeChunk,
     KnowledgeFile,
@@ -1015,10 +1016,21 @@ class KnowledgeGraphReviewRepository:
             ]
 
     async def get_member_capability(self, kb_id: str, uid: str) -> str | None:
+        from yuxi.services.principal import PrincipalResolutionError, resolve_tenant_id
+
         async with pg_manager.get_async_session_context() as session:
+            try:
+                tenant_id = await resolve_tenant_id(session, uid)
+            except PrincipalResolutionError:
+                return None
             value = await session.scalar(
-                select(KnowledgeBaseMember.capability).where(
-                    KnowledgeBaseMember.kb_id == kb_id, KnowledgeBaseMember.uid == uid
+                select(KnowledgeBaseMember.capability)
+                .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeBaseMember.kb_id)
+                .where(
+                    KnowledgeBaseMember.kb_id == kb_id,
+                    KnowledgeBaseMember.uid == uid,
+                    KnowledgeBaseMember.tenant_id == tenant_id,
+                    KnowledgeBase.tenant_id == tenant_id,
                 )
             )
         return str(value) if value else None
@@ -1031,7 +1043,8 @@ class KnowledgeGraphReviewRepository:
                 insert(KnowledgeBaseMember)
                 .values(kb_id=kb_id, tenant_id=tenant_id, uid=uid, capability=capability, created_by=created_by)
                 .on_conflict_do_update(
-                    index_elements=["kb_id", "uid"], set_={"capability": capability, "created_by": created_by}
+                    index_elements=["kb_id", "uid"],
+                    set_={"tenant_id": tenant_id, "capability": capability, "created_by": created_by},
                 )
             )
             await session.execute(stmt)

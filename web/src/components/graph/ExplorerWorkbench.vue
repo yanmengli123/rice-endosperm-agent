@@ -145,6 +145,13 @@
             >
               <Network :size="16" />
             </a-button>
+            <a-button
+              class="action-btn"
+              @click="toggleInsightPanel"
+              title="图谱洞察：弦图 / 流向 / 矩阵（统计口径与当前画布一致）"
+            >
+              <ChartPie :size="16" />
+            </a-button>
             <a-button class="action-btn" @click="toggleSettingsPanel" title="设置">
               <Settings :size="16" />
             </a-button>
@@ -203,6 +210,7 @@
       :kb-id="kbId"
       @close="graph.handleCanvasClick"
       @reviewed="loadGraph"
+      @access-denied="clearGraphAccessState"
     />
 
     <!-- 构建进度横幅（任务活跃 / 失败 / 有剩余段时显示，权威计数来自 getStatus） -->
@@ -325,6 +333,25 @@
       </div>
     </transition>
 
+    <GraphInsightPanel
+      v-model:open="showInsight"
+      :graph-data="graph.graphData"
+      :truncated="graphTruncated"
+      :total-entities="graphTotalEntities"
+      :loading="graph.fetching"
+      :load-error="loadError"
+      :kb-id="kbId"
+      :review-policy="sessionFilter === 'inherit' ? null : sessionFilter"
+      @type-select="onInsightTypeSelect"
+      @edge-select="onInsightEdgeSelect"
+      @access-denied="clearGraphAccessState"
+    />
+    <!-- 托管图谱导入弹窗：挂载曾误摘导致工具栏导入按钮点击无响应 -->
+    <GraphImportModal
+      v-model:open="showGraphImport"
+      :kb-id="kbId"
+      @imported="handleGraphImported"
+    />
     <GraphExtractorConfigModal
       v-model:open="showGraphConfig"
       :kb-id="kbId"
@@ -340,7 +367,8 @@
 <script setup>
 import { ref, computed, watch, nextTick, onUnmounted, reactive } from 'vue'
 import { useDatabaseStore } from '@/stores/database'
-import { useTaskerStore } from '@/stores/tasker'
+import { useUserStore } from '@/stores/user'
+import { isGraphAccessDenied } from '@/utils/graph/graphAccess'
 import {
   RefreshCw,
   Settings,
@@ -353,7 +381,8 @@ import {
   ScanText,
   ClipboardCheck,
   Database,
-  RotateCcw
+  RotateCcw,
+  ChartPie
 } from '@lucide/vue'
 import GraphCanvas from '@/components/GraphCanvas.vue'
 import GraphDetailPanel from '@/components/GraphDetailPanel.vue'
@@ -362,12 +391,14 @@ import GraphReviewQueue from '@/components/GraphReviewQueue.vue'
 import GateReviewQueue from '@/components/GateReviewQueue.vue'
 import ConflictQueue from '@/components/ConflictQueue.vue'
 import GraphExtractorConfigModal from '@/components/graph/GraphExtractorConfigModal.vue'
+import GraphInsightPanel from '@/components/graph/GraphInsightPanel.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
 import { unifiedApi } from '@/apis/graph_api'
 import { graphExportApi } from '@/apis/knowledge_api'
 import { message, Modal } from 'ant-design-vue'
 import { useGraph } from '@/composables/useGraph'
 import { normalizeBuildStatus, buildStatusSummary, buildTaskLabel } from '@/utils/graph/reviewMeta'
+import { getNodeVisualLabel } from '@/utils/graph/graphPalette'
 
 const DEFAULT_GRAPH_VIEW_SETTINGS = Object.freeze({
   maxNodes: 100,
@@ -381,7 +412,7 @@ const props = defineProps({
 })
 
 const store = useDatabaseStore()
-const taskerStore = useTaskerStore()
+const userStore = useUserStore()
 
 const kbId = computed(() => store.kbId)
 
@@ -395,6 +426,33 @@ const isLlmGraphAllowed = computed(() => kbContractKey.value !== 'managed_graph'
 
 const graphRef = ref(null)
 const showSettings = ref(false)
+// 图谱洞察（弦图）面板：与显示设置同在右侧浮动位，二者互斥
+const showInsight = ref(false)
+const toggleInsightPanel = () => {
+  const opening = !showInsight.value
+  showInsight.value = opening
+  if (opening) showSettings.value = false
+}
+// 弧段点击 → 画布高亮该类型实体（GraphCanvas.highlightType，再次点击取消）。
+// 全图口径下弧段类型可能不在画布子图中：直接高亮会把整幅画布压暗成 inactive，
+// 必须先确认画布存在该类型，缺失时提示而非误导。
+const onInsightTypeSelect = (name) => {
+  const exists = graph.graphData.nodes.some((node) => getNodeVisualLabel(node) === name)
+  if (!exists) {
+    message.info('画布子图中没有该类型实体（弦图当前为全图口径），已跳过高亮')
+    return
+  }
+  graphRef.value?.highlightType('node', name)
+}
+// 逐条关系点击 → 复用画布边点击形状，进入既有 GraphDetailPanel 的证据/原文链路
+const onInsightEdgeSelect = (edge) => {
+  graph.handleEdgeClick({
+    id: edge.id,
+    source: edge.source_id,
+    target: edge.target_id,
+    data: { label: edge.type, original: edge }
+  })
+}
 const subgraphParams = reactive({ ...DEFAULT_GRAPH_VIEW_SETTINGS })
 const settingsForm = reactive({ ...DEFAULT_GRAPH_VIEW_SETTINGS })
 // 画布会话级显示过滤（不持久化、不影响检索）：inherit = 跟随生产策略
@@ -413,7 +471,8 @@ const searchInput = ref('')
 // 对话关系图深链：?seed= 预填画布检索词（一次性，不覆盖用户后续输入）
 {
   const seedFromRoute = String(
-    (typeof window !== 'undefined' && window.location.search.match(/[?&]seed=([^&]+)/) || [])[1] || ''
+    ((typeof window !== 'undefined' && window.location.search.match(/[?&]seed=([^&]+)/)) ||
+      [])[1] || ''
   )
   if (seedFromRoute) {
     try {
@@ -427,11 +486,15 @@ const showGraphConfig = ref(false)
 const showGraphImport = ref(false)
 const showReviewQueue = ref(false)
 const showGateReviewQueue = ref(false)
+// 冲突队列开合状态：模板/挂载处使用而声明曾遗失（点击即 ReferenceError 被吞，入口失灵）——必须声明
+const showConflictQueue = ref(false)
 const graphBuildStatus = ref(null)
 const graphBuildLoading = ref(false)
 let buildStatusPollTimer = null
 let graphStatusRequestSeq = 0
 let graphLoadRequestSeq = 0
+// 查询失败状态：洞察面板据此显示错误并保留上次成功数据，不伪装成空图
+const loadError = ref('')
 
 const isBuildActive = computed(() => {
   const s = graphBuildStatus.value?.build_task_status
@@ -458,6 +521,7 @@ const toggleSettingsPanel = async () => {
   const opening = !showSettings.value
   showSettings.value = opening
   if (opening) {
+    showInsight.value = false
     await loadGraphSettings()
     Object.assign(settingsForm, subgraphParams)
   }
@@ -670,6 +734,10 @@ const loadGraphSettings = async (force = false) => {
     } catch (e) {
       console.error('Failed to load graph view settings:', e)
       if (requestSeq === graphSettingsRequestSeq && currentDatabaseId === kbId.value) {
+        if (isGraphAccessDenied(e)) {
+          clearGraphAccessState()
+          return false
+        }
         resetGraphViewSettings()
         graphSettingsLoadedKbId.value = currentDatabaseId
         message.warning('读取图谱显示设置失败，已暂时使用默认值')
@@ -706,6 +774,9 @@ const loadGraphBuildStatus = async () => {
     }
   } catch (e) {
     console.error('Failed to load graph build status:', e)
+    if (requestSeq === graphStatusRequestSeq && currentDatabaseId === kbId.value && isGraphAccessDenied(e)) {
+      clearGraphAccessState()
+    }
   } finally {
     if (requestSeq === graphStatusRequestSeq) {
       graphBuildLoading.value = false
@@ -780,14 +851,15 @@ const loadGraph = async () => {
   if (!kbId.value) return
 
   const requestedDatabaseId = kbId.value
+  const requestSeq = ++graphLoadRequestSeq
   await loadGraphSettings()
+  if (requestSeq !== graphLoadRequestSeq) return
   if (requestedDatabaseId !== kbId.value) {
     // 等待期间库已切换：让位给当前库的调度，绝不静默中止（冷启动白板的根因之一）
     if (kbId.value) scheduleGraphLoad(0)
     return
   }
 
-  const requestSeq = ++graphLoadRequestSeq
   const currentDatabaseId = kbId.value
   graph.fetching = true
   if (!hasGraphNodes.value) {
@@ -810,24 +882,34 @@ const loadGraph = async () => {
     }
     const res = await unifiedApi.getSubgraph(requestParams)
 
-    if (
-      requestSeq === graphLoadRequestSeq &&
-      currentDatabaseId === kbId.value &&
-      res.success &&
-      res.data
-    ) {
-      graph.updateGraphData(res.data.nodes, res.data.edges)
-      graphTruncated.value = subgraphParams.fullGraph
-        ? Boolean(res.data.truncated)
-        : (res.data.nodes || []).length >= subgraphParams.maxNodes
-      if (graphTruncated.value && subgraphParams.fullGraph) {
-        message.warning(
-          '全图规模超过安全上限（节点 3000 / 关系 6000），画布已截断；建议改用搜索或类型过滤缩小范围'
-        )
-      }
+    if (requestSeq !== graphLoadRequestSeq || currentDatabaseId !== kbId.value) return
+    if (!res?.success || !Array.isArray(res.data?.nodes) || !Array.isArray(res.data?.edges)) {
+      throw new Error('Invalid graph query response')
+    }
+    // 审核策略、统计口径与加载时间由后端确定，继承策略时也必须显示真实策略。
+    graph.updateGraphData(res.data.nodes, res.data.edges, {
+      ...res.data.meta,
+      truncation_reasons: res.data.truncation_reasons || []
+    })
+    graphTruncated.value = Boolean(res.data.truncated)
+    loadError.value = ''
+    if (graphTruncated.value && subgraphParams.fullGraph) {
+      message.warning(
+        res.data.truncation_reasons?.includes('concurrent_update')
+          ? '图谱正在更新，当前结果不完整，请刷新获取完整结果'
+          : '全图规模超过安全上限（节点 3000 / 关系 6000），画布已截断；建议改用搜索或类型过滤缩小范围'
+      )
     }
   } catch (e) {
+    if (requestSeq !== graphLoadRequestSeq || currentDatabaseId !== kbId.value) return
+    if (isGraphAccessDenied(e)) {
+      clearGraphAccessState()
+      return
+    }
     console.error('Failed to load graph:', e)
+    loadError.value = hasGraphNodes.value
+      ? '图谱查询失败，已保留上次成功加载的数据；可稍后重试刷新。'
+      : '图谱查询失败，可稍后重试刷新。'
     message.error('加载图谱失败')
   } finally {
     if (requestSeq === graphLoadRequestSeq) {
@@ -939,15 +1021,43 @@ watch(kbId, (_next, previous) => {
   graphLoaded.value = false
   graph.clearGraph()
   graphBuildStatus.value = null
+  graphBuildLoading.value = false
   if (previous) {
     loadGraphBuildStatus()
     scheduleGraphLoad(300)
   }
 })
 
+function clearGraphAccessState() {
+  graphLoadRequestSeq += 1
+  graphStatusRequestSeq += 1
+  graphSettingsRequestSeq += 1
+  graphSettingsLoadedKbId.value = ''
+  graphSettingsLoadPromise = null
+  graphSettingsLoading.value = false
+  graph.clearGraph()
+  graphBuildStatus.value = null
+  graphBuildLoading.value = false
+  graphTruncated.value = false
+  graph.fetching = false
+  graphLoaded.value = true
+  loadError.value = '当前知识库不可访问，图谱数据已清除。'
+}
+
+watch(
+  () => userStore.token,
+  () => {
+    clearGraphAccessState()
+    if (props.active && userStore.isLoggedIn && kbId.value) scheduleGraphLoad(0)
+  }
+)
+
 defineExpose({ openGraphConfig, loadGraph, loadGraphBuildStatus })
 
 onUnmounted(() => {
+  graphLoadRequestSeq += 1
+  graphSettingsRequestSeq += 1
+  graphStatusRequestSeq += 1
   if (pendingLoadTimer) {
     clearTimeout(pendingLoadTimer)
     pendingLoadTimer = null

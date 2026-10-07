@@ -437,14 +437,13 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch, defineComponent, h } from 'vue'
-import { Modal, message } from 'ant-design-vue'
+import { computed, reactive, ref, watch, defineComponent, h, onUnmounted } from 'vue'
+import { message } from 'ant-design-vue'
 import { X } from '@lucide/vue'
 import { graphApi } from '@/apis/graph_api'
+import { isGraphAccessDenied } from '@/utils/graph/graphAccess'
 import {
   REASON_CODES,
-  REVIEW_STATUS_META,
-  TRUST_META,
   auditActionLabel,
   composeReason,
   reviewStatusColor,
@@ -530,7 +529,7 @@ const props = defineProps({
   kbId: String
 })
 
-const emit = defineEmits(['close', 'reviewed'])
+const emit = defineEmits(['close', 'reviewed', 'access-denied'])
 
 const expandedKeys = reactive(new Set())
 const expandedMentions = reactive(new Set())
@@ -615,9 +614,17 @@ const selectedAddMention = computed(
   () => evidence.value?.mentions?.find((m) => m.chunk_id === addForm.chunk_id) || null
 )
 
+let evidenceRequestSeq = 0
+let historyRequestSeq = 0
+const requestContext = () => JSON.stringify([props.kbId, props.type, reviewTargetId.value, props.visible])
+
 const loadEvidence = async () => {
+  const seq = ++evidenceRequestSeq
+  const context = requestContext()
   evidence.value = null
   evidenceError.value = null
+  evidenceLoading.value = false
+  selectedPinnedChunkId.value = null
   expandedMentions.clear()
   if (!props.visible || !props.item || !props.kbId) return
   if (!reviewTargetId.value) {
@@ -633,16 +640,21 @@ const loadEvidence = async () => {
       props.type === 'edge'
         ? await graphApi.getTripleEvidence(props.kbId, reviewTargetId.value)
         : await graphApi.getEntityEvidence(props.kbId, reviewTargetId.value)
+    if (seq !== evidenceRequestSeq || context !== requestContext()) return
     evidence.value = response?.data || null
     selectedPinnedChunkId.value = defaultPinnedChunkId(evidence.value?.mentions)
   } catch (e) {
+    if (seq !== evidenceRequestSeq || context !== requestContext()) return
+    if (isGraphAccessDenied(e)) emit('access-denied')
     evidenceError.value = e?.response?.data?.detail || e?.message || '原文加载失败'
   } finally {
-    evidenceLoading.value = false
+    if (seq === evidenceRequestSeq && context === requestContext()) evidenceLoading.value = false
   }
 }
 
 const loadHistory = async () => {
+  const seq = ++historyRequestSeq
+  const context = requestContext()
   history.value = []
   if (!props.visible || !reviewTargetId.value || !props.kbId) return
   try {
@@ -651,8 +663,11 @@ const loadHistory = async () => {
       target_id: reviewTargetId.value,
       limit: 20
     })
+    if (seq !== historyRequestSeq || context !== requestContext()) return
     history.value = res?.data?.items || []
-  } catch {
+  } catch (e) {
+    if (seq !== historyRequestSeq || context !== requestContext()) return
+    if (isGraphAccessDenied(e)) emit('access-denied')
     history.value = []
   }
 }
@@ -896,8 +911,13 @@ watch(
   }
 )
 
-watch([() => props.item, () => props.visible, () => props.kbId], loadEvidence, { immediate: true })
-watch([() => props.item, () => props.visible], loadHistory, { immediate: true })
+const requestSources = [() => props.kbId, () => props.type, reviewTargetId, () => props.visible]
+watch(requestSources, loadEvidence, { immediate: true })
+watch(requestSources, loadHistory, { immediate: true })
+onUnmounted(() => {
+  evidenceRequestSeq += 1
+  historyRequestSeq += 1
+})
 
 const isOverThreshold = (value) => typeof value === 'string' && value.length > STACK_THRESHOLD
 

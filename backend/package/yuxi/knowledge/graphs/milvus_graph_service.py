@@ -5,6 +5,8 @@ import json
 import weakref
 from typing import Any
 
+from neo4j import Query, READ_ACCESS
+
 from yuxi.knowledge.graphs.doclex.service import DocLexService
 from yuxi.knowledge.graphs.extractors import GraphExtractor, GraphExtractorFactory, normalize_extraction_result
 from yuxi.knowledge.graphs.graph_utils import (
@@ -60,6 +62,7 @@ _VISIBLE_UNDER_APPROVED_ONLY = frozenset({STATUS_APPROVED, STATUS_CANONICAL})
 # 全图模式的硬安全上限：超过即截断并置 truncated 标志，保护浏览器渲染与 Neo4j 查询
 FULL_GRAPH_NODE_CAP = 3000
 FULL_GRAPH_EDGE_CAP = 6000
+VISUALIZATION_QUERY_TIMEOUT_SECONDS = 10.0
 _neo4j_query_offload_semaphore_refs: dict[
     int,
     tuple[weakref.ReferenceType[asyncio.AbstractEventLoop], weakref.ReferenceType[asyncio.Semaphore]],
@@ -117,7 +120,12 @@ def _finalize_full_graph_result(
     node_ids = {node["id"] for node in final_nodes}
     bounded_edges = [edge for edge in edges if edge.get("source_id") in node_ids and edge.get("target_id") in node_ids]
     final_edges = bounded_edges[:edge_cap]
-    return {"nodes": final_nodes, "edges": final_edges, "truncated": truncated}
+    reasons = []
+    if len(nodes) > node_cap:
+        reasons.append("node_safety_cap")
+    if len(edges) > edge_cap:
+        reasons.append("edge_safety_cap")
+    return {"nodes": final_nodes, "edges": final_edges, "truncated": truncated, "truncation_reasons": reasons}
 
 
 def _merge_extraction_stats(total: dict[str, Any], metadata: dict[str, Any]) -> None:
@@ -1163,6 +1171,7 @@ class MilvusGraphService:
         max_nodes: int = 50,
         exclude_chunk: bool = False,
         raise_on_error: bool = False,
+        dedupe_facts: bool = False,
     ) -> dict[str, Any]:
         effective_kb_id = kb_id or self.kb_id
         if not effective_kb_id:
@@ -1180,7 +1189,11 @@ class MilvusGraphService:
                 limit,
                 max_depth,
                 exclude_chunk,
+                policy,
+                dedupe_facts,
             )
+            if dedupe_facts:
+                return self._visualization_meta(result, policy, "subgraph")
             return filter_edges_by_policy(result, policy)
         except Exception as e:
             logger.error(f"Milvus graph query failed: {e}")
@@ -1196,31 +1209,37 @@ class MilvusGraphService:
         limit: int,
         max_depth: int,
         exclude_chunk: bool,
+        review_policy: str = REVIEW_POLICY_CANDIDATES_VISIBLE,
+        dedupe_facts: bool = True,
     ) -> dict[str, Any]:
         with self.driver.session() as session:
             query_params: dict[str, Any] = {
                 "keyword": keyword,
                 "limit": limit,
+                "approved_only": review_policy == REVIEW_POLICY_APPROVED_ONLY,
             }
             if max_depth > 0:
                 max_depth = min(max_depth, 3)
                 query_params["path_limit"] = max(limit, 1) * 10
-            result = session.run(
-                self._build_query(label, keyword, limit, max_depth, exclude_chunk),
-                **query_params,
-            )
+            query = self._build_query(label, keyword, limit, max_depth, exclude_chunk)
+            if dedupe_facts:
+                query = Query(query, timeout=VISUALIZATION_QUERY_TIMEOUT_SECONDS)
+            result = session.run(query, **query_params)
             if max_depth <= 0:
                 return self._process_query_result(result, limit, kb_id, exclude_chunk)
             record = result.single()
             if not record:
                 return {"nodes": [], "edges": []}
-            return self._process_subgraph_record(record, limit, kb_id)
+            return self._process_subgraph_record(
+                record, limit, kb_id, review_policy=review_policy, dedupe_facts=dedupe_facts
+            )
 
     async def query_full_graph(
         self,
         kb_id: str | None = None,
         *,
         exclude_chunk: bool = False,
+        raise_on_error: bool = False,
     ) -> dict[str, Any]:
         """全图查询：不做种子抽样/路径预算/深度截断，仅受硬安全上限保护。
 
@@ -1233,30 +1252,70 @@ class MilvusGraphService:
         label = safe_neo4j_label(effective_kb_id)
         try:
             policy = await self.resolve_review_policy(effective_kb_id)
-            result = await _run_neo4j_query_io(self._query_full_graph_sync, effective_kb_id, label, exclude_chunk)
-            return filter_edges_by_policy(result, policy)
+            result = await _run_neo4j_query_io(
+                self._query_full_graph_sync, effective_kb_id, label, exclude_chunk, policy
+            )
+            return self._visualization_meta(result, policy, "full_graph")
         except Exception as e:
             logger.error(f"Milvus full graph query failed: {e}")
+            if raise_on_error:
+                raise
             return {"nodes": [], "edges": [], "truncated": False}
 
-    def _query_full_graph_sync(self, kb_id: str, label: str, exclude_chunk: bool) -> dict[str, Any]:
+    @staticmethod
+    def _visualization_meta(result: dict[str, Any], policy: str, scope: str) -> dict[str, Any]:
+        return {
+            **result,
+            "truncated": bool(result.get("truncated")),
+            "truncation_reasons": result.get("truncation_reasons", []),
+            "meta": {
+                "metric": "distinct_triples",
+                "scope": scope,
+                "review_policy": policy,
+                "generated_at": utc_isoformat(),
+            },
+        }
+
+    def _query_full_graph_sync(
+        self,
+        kb_id: str,
+        label: str,
+        exclude_chunk: bool,
+        review_policy: str = REVIEW_POLICY_CANDIDATES_VISIBLE,
+    ) -> dict[str, Any]:
         node_where = "WHERE NOT n:Chunk" if exclude_chunk else ""
-        edge_where = "WHERE NOT a:Chunk AND NOT b:Chunk" if exclude_chunk else ""
-        node_cypher = f"""
-        MATCH (n:MilvusKB:`{label}`)
-        {node_where}
-        RETURN n
-        LIMIT {FULL_GRAPH_NODE_CAP + 1}
+        edge_clauses = [
+            "(NOT $approved_only OR r.review_status IN ['APPROVED', 'CANONICAL'] OR r.managed_projection = true)"
+        ]
+        if exclude_chunk:
+            edge_clauses.append("NOT a:Chunk AND NOT b:Chunk")
+        edge_where = "WHERE " + " AND ".join(edge_clauses)
+        # 一次响应内物化属性，不跨两个自动提交事务拼接节点和关系。
+        # 两个有界子查询独立物化，避免把节点属性列表复制到每条关系的执行行。
+        # Python 收尾限定端点，并披露并发修改造成的不完整投影。
+        cypher = f"""
+        CALL {{
+            MATCH (n:MilvusKB:`{label}`)
+            {node_where}
+            WITH n ORDER BY elementId(n) LIMIT {FULL_GRAPH_NODE_CAP + 1}
+            RETURN collect({{id: elementId(n), labels: labels(n), properties: properties(n)}}) AS nodes
+        }}
+        CALL {{
+            MATCH (a:MilvusKB:`{label}`)-[r]->(b:MilvusKB:`{label}`)
+            {edge_where}
+            WITH a, r, b ORDER BY elementId(r) LIMIT {FULL_GRAPH_EDGE_CAP + 1}
+            RETURN collect({{id: elementId(r), source_id: elementId(a), target_id: elementId(b),
+                type: coalesce(r.type, type(r)), relationship_type: type(r), properties: properties(r)}}) AS edges
+        }}
+        RETURN nodes, edges
         """
-        edge_cypher = f"""
-        MATCH (a:MilvusKB:`{label}`)-[r]->(b:MilvusKB:`{label}`)
-        {edge_where}
-        RETURN a, r, b
-        LIMIT {FULL_GRAPH_EDGE_CAP + 1}
-        """
-        with self.driver.session() as session:
-            raw_nodes = [record["n"] for record in session.run(node_cypher)]
-            raw_edges = [(record["r"]) for record in session.run(edge_cypher)]
+        with self.driver.session(default_access_mode=READ_ACCESS) as session:
+            record = session.run(
+                Query(cypher, timeout=VISUALIZATION_QUERY_TIMEOUT_SECONDS),
+                approved_only=review_policy == REVIEW_POLICY_APPROVED_ONLY,
+            ).single()
+            raw_nodes = record["nodes"] if record else []
+            raw_edges = record["edges"] if record else []
 
         nodes = []
         node_ids = set()
@@ -1272,11 +1331,20 @@ class MilvusGraphService:
             if edge and edge["id"] not in edge_ids:
                 edges.append(edge)
                 edge_ids.add(edge["id"])
+        # 审核状态可能在 Cypher 过滤后变化；复核实际返回的属性，禁止候选关系进入 approved_only。
+        edges = filter_edges_by_policy({"edges": edges}, review_policy)["edges"]
         edges = _dedupe_edges_by_semantic_key(edges)
         result = _finalize_full_graph_result(nodes, edges, FULL_GRAPH_NODE_CAP, FULL_GRAPH_EDGE_CAP)
+        if len(raw_nodes) <= FULL_GRAPH_NODE_CAP and any(
+            edge["source_id"] not in node_ids or edge["target_id"] not in node_ids for edge in edges
+        ):
+            result["truncated"] = True
+            result["truncation_reasons"].append("concurrent_update")
         # 去重可能把超限的原始取数压回上限内；截断判定必须以原始取数为准
         if len(raw_nodes) > FULL_GRAPH_NODE_CAP or len(raw_edges) > FULL_GRAPH_EDGE_CAP:
             result["truncated"] = True
+            if len(raw_edges) > FULL_GRAPH_EDGE_CAP and "edge_safety_cap" not in result["truncation_reasons"]:
+                result["truncation_reasons"].append("edge_safety_cap")
         return result
 
     async def query_seed_subgraph(
@@ -1332,7 +1400,7 @@ class MilvusGraphService:
             ).single()
             if not record:
                 return {"nodes": [], "edges": []}
-            return self._process_subgraph_record(record, max_nodes, kb_id)
+            return self._process_subgraph_record(record, max_nodes, kb_id, dedupe_facts=False)
 
     async def query_and_rank_chunks_by_ppr(
         self,
@@ -1592,19 +1660,27 @@ class MilvusGraphService:
         return f"""
         MATCH (n:MilvusKB:`{label}`)
         {where}
-        WITH n LIMIT $limit
-        WITH collect(n) AS seeds
+        WITH n ORDER BY elementId(n) LIMIT $limit + 1
+        WITH collect(n) AS matched_seeds
+        WITH matched_seeds[0..$limit] AS seeds, size(matched_seeds) > $limit AS seed_limit_reached
         UNWIND seeds AS seed
         OPTIONAL MATCH p = (seed)-[*1..{max_depth}]-(m:MilvusKB:`{label}`)
         WHERE all(path_node IN nodes(p) WHERE {path_node_filter})
-        WITH seeds, p
-        LIMIT $path_limit
-        WITH seeds, collect(p) AS paths
+          AND all(path_edge IN relationships(p) WHERE NOT $approved_only
+              OR path_edge.review_status IN ['APPROVED', 'CANONICAL'] OR path_edge.managed_projection = true)
+        WITH seeds, seed_limit_reached, p
+        LIMIT $path_limit + 1
+        WITH seeds, seed_limit_reached, collect(p) AS matched_paths
+        WITH seeds, seed_limit_reached, matched_paths[0..$path_limit] AS paths,
+             size(matched_paths) > $path_limit AS path_limit_reached
         RETURN reduce(path_nodes = [], path IN paths | path_nodes + nodes(path)) + seeds AS nodes,
-               reduce(path_edges = [], path IN paths | path_edges + relationships(path)) AS edges
+               reduce(path_edges = [], path IN paths | path_edges + relationships(path)) AS edges,
+               seed_limit_reached, path_limit_reached
         """
 
     def _process_query_result(self, result, limit: int, kb_id: str, exclude_chunk: bool = False) -> dict[str, Any]:
+        if limit <= 0:
+            return {"nodes": [], "edges": []}
         nodes = []
         edges = []
         node_ids = set()
@@ -1633,7 +1709,15 @@ class MilvusGraphService:
 
         return self._finalize_subgraph_result(nodes, edges, limit)
 
-    def _process_subgraph_record(self, record: Any, limit: int, kb_id: str) -> dict[str, Any]:
+    def _process_subgraph_record(
+        self,
+        record: Any,
+        limit: int,
+        kb_id: str,
+        *,
+        dedupe_facts: bool = True,
+        review_policy: str = REVIEW_POLICY_CANDIDATES_VISIBLE,
+    ) -> dict[str, Any]:
         nodes = []
         edges = []
         node_ids = set()
@@ -1645,9 +1729,6 @@ class MilvusGraphService:
                 continue
             nodes.append(node)
             node_ids.add(node["id"])
-            if len(nodes) >= limit:
-                break
-
         for raw_edge in record.get("edges") or []:
             edge = self._normalize_edge(raw_edge)
             if not edge or edge["id"] in edge_ids:
@@ -1657,7 +1738,15 @@ class MilvusGraphService:
             edges.append(edge)
             edge_ids.add(edge["id"])
 
-        return self._finalize_subgraph_result(nodes, edges, limit)
+        edges = filter_edges_by_policy({"edges": edges}, review_policy)["edges"]
+        if dedupe_facts:
+            edges = _dedupe_edges_by_semantic_key(edges)
+        result = self._finalize_subgraph_result(nodes, edges, limit)
+        for reason in ("seed_limit", "path_limit"):
+            if record.get(f"{reason}_reached"):
+                result["truncation_reasons"].append(reason)
+        result["truncated"] = bool(result["truncation_reasons"])
+        return result
 
     @staticmethod
     def _finalize_subgraph_result(
@@ -1669,7 +1758,17 @@ class MilvusGraphService:
         final_edges = [
             edge for edge in edges if edge.get("source_id") in node_ids and edge.get("target_id") in node_ids
         ]
-        return {"nodes": final_nodes, "edges": final_edges[: limit * 2]}
+        reasons = []
+        if len(nodes) > limit:
+            reasons.append("node_limit")
+        if len(final_edges) > limit * 2:
+            reasons.append("edge_limit")
+        return {
+            "nodes": final_nodes,
+            "edges": final_edges[: limit * 2],
+            "truncated": bool(reasons),
+            "truncation_reasons": reasons,
+        }
 
     def _normalize_node(self, raw_node: Any, kb_id: str | None = None) -> dict[str, Any]:
         if hasattr(raw_node, "element_id"):
@@ -1701,6 +1800,8 @@ class MilvusGraphService:
             "id": node_id,
             "name": name,
             "original_id": node_id,
+            "entity_id": properties.get("entity_id"),
+            "node_kind": "chunk" if "Chunk" in labels else "entity",
             "type": entity_type,
             "labels": filtered_labels,
             "properties": properties,
@@ -1719,6 +1820,7 @@ class MilvusGraphService:
             source_id = raw_edge.start_node.element_id
             target_id = raw_edge.end_node.element_id
             properties = dict(raw_edge.items())
+            relationship_type = edge_type
             edge_type = properties.get("type") or edge_type
         elif isinstance(raw_edge, dict):
             edge_id = raw_edge.get("id")
@@ -1726,6 +1828,7 @@ class MilvusGraphService:
             source_id = raw_edge.get("source_id")
             target_id = raw_edge.get("target_id")
             properties = raw_edge.get("properties", {})
+            relationship_type = raw_edge.get("relationship_type") or edge_type
         else:
             return {}
 
@@ -1735,6 +1838,8 @@ class MilvusGraphService:
             "target_id": target_id,
             "type": edge_type,
             "properties": properties,
+            "triple_id": properties.get("triple_id"),
+            "edge_kind": "mention" if relationship_type == "MENTIONS" else "relation",
             "normalized": {
                 "type": edge_type,
                 "direction": "directed",

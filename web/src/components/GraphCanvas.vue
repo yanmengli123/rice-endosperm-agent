@@ -236,6 +236,7 @@ let renderTimeout = null
 let retryCount = 0
 let resizeTimer = null
 let layoutTimeout = null
+let layoutStopTimer = null
 let highlightTimeout = null
 let isMounted = false
 const MAX_RETRIES = 5
@@ -247,6 +248,10 @@ const defaultLayout = {
   alphaMin: 0.01,
   velocityDecay: 0.6,
   iterations: 150,
+  // 布局不做逐 tick 动画：G6 在 animation:true 时每个 tick 都全量重绘元素
+  // （150 tick × ~150ms = 20s+ 主线程占用，看门狗前实测持续数十秒）。
+  // 关闭后布局同步计算、位置一次性应用，代价变为单次有界任务。
+  animation: false,
   force: {
     center: { x: 0.5, y: 0.5, strength: 0.1 },
     charge: { strength: -400, distanceMax: 600 },
@@ -404,6 +409,17 @@ function clearTypeHighlight() {
   if (!selectedTypeHighlight.value) return
   selectedTypeHighlight.value = null
   applyTypeHighlight()
+}
+
+// 外部视图联动入口（洞察面板弦图弧段点击等）：等价于点击类型统计行，
+// 同一 (dimension, name) 再次调用取消高亮
+async function highlightType(dimension, name) {
+  if (dimension !== 'node' && dimension !== 'edge') return
+  activeStatsPanel.value = dimension
+  const current = selectedTypeHighlight.value
+  selectedTypeHighlight.value =
+    current && current.dimension === dimension && current.name === name ? null : { dimension, name }
+  await applyTypeHighlight()
 }
 
 async function applyTypeHighlight() {
@@ -662,6 +678,14 @@ function initGraph() {
 function setGraphData() {
   if (!graphInstance || !isMounted) initGraph()
   if (!graphInstance || !isMounted) return
+  // 先停掉仍在运行的旧布局实例：render() 每次都会新建布局实例，而 G6 的
+  // stopLayout 只停最新一个（this.instance），旧实例会继续 tick 到迭代上限
+  // （实测 ~200ms/tick 长任务持续数十秒，独占主线程拖慢同页一切交互）
+  try {
+    graphInstance.stopLayout?.()
+  } catch {
+    // ignore
+  }
   const data = formatData()
 
   console.log('开始设置图谱数据:', {
@@ -672,18 +696,27 @@ function setGraphData() {
   graphInstance.setData(data)
   graphInstance.render()
 
+  // 布局看门狗：d3-force 在 preventOverlap/collide 与电荷力互推下可能永不收敛
+  // （实测 RC-G3 100 节点持续 tick 数分钟、每 tick ~200ms 长任务独占主线程，
+  // 连带拖慢同页所有交互）。6 秒后强制停止迭代，节点冻结在当前位置。
+  clearTimeout(layoutStopTimer)
+  layoutStopTimer = setTimeout(() => {
+    if (!isMounted || !graphInstance) return
+    try {
+      // 运行中的布局已结束时 stopLayout 幂等无害
+      graphInstance.stopLayout?.()
+    } catch (error) {
+      console.warn('布局看门狗停止失败:', error)
+    }
+  }, 6000)
+
   // 手动触发布局重新计算，确保节点分布
+  // 注意：render() 已自动启动一次布局；此处不再手动 layout()——那会创建第二个
+  // 并行布局实例，而 G6 的 stopLayout 只停最新实例，旧实例会继续 tick 到迭代
+  // 上限（实测 ~30s 主线程占用，看门狗无法覆盖）。
   clearTimeout(layoutTimeout)
   layoutTimeout = setTimeout(() => {
     if (!isMounted || !graphInstance) return
-    try {
-      if (graphInstance && graphInstance.layout) {
-        graphInstance.layout()
-        console.log('触发布局重新计算')
-      }
-    } catch (error) {
-      console.warn('布局重新计算失败:', error)
-    }
 
     // 等待力导向布局稳定后再应用高亮
     clearTimeout(highlightTimeout)
@@ -897,6 +930,7 @@ onUnmounted(() => {
   clearTimeout(renderTimeout)
   clearTimeout(resizeTimer)
   clearTimeout(layoutTimeout)
+  clearTimeout(layoutStopTimer)
   clearTimeout(highlightTimeout)
   try {
     graphInstance?.destroy()
@@ -916,7 +950,8 @@ defineExpose({
   clearFocus,
   setData: setGraphData,
   applyHighlightKeywords,
-  clearHighlights
+  clearHighlights,
+  highlightType
 })
 </script>
 

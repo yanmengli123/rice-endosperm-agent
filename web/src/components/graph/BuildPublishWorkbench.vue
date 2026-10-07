@@ -356,7 +356,6 @@ let buildPollTimer = null
 const buildModel = computed(() => normalizeBuildStatus(buildStatus.value))
 const buildStatusLabel = computed(() => buildTaskLabel(buildModel.value))
 const buildActive = computed(() => buildModel.value.active)
-const pendingChunks = computed(() => buildModel.value.pending)
 
 const extractorLabel = (type) =>
   ({ llm: 'LLM（开放 Schema）', llm_scientific: '科研闭集' })[type] || type || '—'

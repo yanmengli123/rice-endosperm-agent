@@ -600,7 +600,7 @@ def test_milvus_graph_service_query_nodes_sync_returns_complete_multi_hop_path()
     assert [node["id"] for node in result["nodes"]] == ["node-a", "node-b", "node-c"]
     assert [edge["id"] for edge in result["edges"]] == ["edge-a-b", "edge-b-c"]
     query, query_params = session.run.call_args
-    assert "[*1..2]" in query[0]
+    assert "[*1..2]" in query[0].text
     assert query_params["path_limit"] == 30
 
 
@@ -624,7 +624,7 @@ def test_milvus_graph_service_query_nodes_sync_caps_max_depth():
     )
 
     query, _ = session.run.call_args
-    assert "[*1..3]" in query[0]
+    assert "[*1..3]" in query[0].text
 
 
 @pytest.mark.asyncio
@@ -655,6 +655,10 @@ async def test_contract_gate_blocks_writes_but_not_status(monkeypatch):
     from types import SimpleNamespace
 
     service = MilvusGraphService(
+        review_repo=SimpleNamespace(
+            list_promoted_aliases=AsyncMock(return_value=[]),
+            recompute_risk_scores_for_kb=AsyncMock(return_value=0),
+        ),
         kb_repo=SimpleNamespace(
             get_by_kb_id=AsyncMock(
                 return_value=SimpleNamespace(

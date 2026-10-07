@@ -2,6 +2,7 @@
  * 契约能力判定测试（裸 node 运行）：node src/utils/__tests__/kbContract.spec.js
  */
 import assert from 'node:assert/strict'
+import process from 'node:process'
 
 import { contractAllows, pickLatestContract } from '../kbContract.js'
 

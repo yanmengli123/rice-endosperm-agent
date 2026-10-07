@@ -73,3 +73,57 @@ def test_dedupe_prefers_triple_id_and_falls_back_to_semantic_key():
     deduped = _dedupe_edges_by_semantic_key(edges)
 
     assert [edge["id"] for edge in deduped] == ["e1", "e3", "e4", "e6"]
+
+
+def test_full_graph_materializes_one_bounded_read_with_a_timeout():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from neo4j import Query
+
+    from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
+
+    session = MagicMock()
+    session.run.return_value.single.return_value = {
+        "nodes": [
+            {"id": "a", "labels": ["Entity"], "properties": {"name": "A", "label": "Gene"}},
+            {"id": "b", "labels": ["Entity"], "properties": {"name": "B", "label": "Trait"}},
+        ],
+        "edges": [
+            {**_edge("e1", "a", "b", triple_id="t1"), "properties": {"triple_id": "t1", "review_status": "APPROVED"}}
+        ],
+    }
+    driver = MagicMock()
+    driver.session.return_value.__enter__.return_value = session
+    service = MilvusGraphService(neo4j_connection=SimpleNamespace(driver=driver))
+    result = service._query_full_graph_sync("kb_test", "kb_test", True, "approved_only")
+
+    assert len(result["nodes"]) == 2
+    assert len(result["edges"]) == 1
+    session.run.assert_called_once()
+    query = session.run.call_args.args[0]
+    assert isinstance(query, Query)
+    assert 0 < query.timeout < 30
+    assert "WITH node_ids" not in query.text
+    assert "properties(r)" in query.text
+    assert session.run.call_args.kwargs["approved_only"] is True
+
+
+def test_full_graph_rechecks_materialized_review_status():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
+
+    session = MagicMock()
+    session.run.return_value.single.return_value = {
+        "nodes": [{"id": "a", "labels": ["Entity"]}, {"id": "b", "labels": ["Entity"]}],
+        "edges": [
+            {**_edge("e1", "a", "b", triple_id="t1"), "properties": {"triple_id": "t1", "review_status": "CANDIDATE"}}
+        ],
+    }
+    driver = MagicMock()
+    driver.session.return_value.__enter__.return_value = session
+    service = MilvusGraphService(neo4j_connection=SimpleNamespace(driver=driver))
+    result = service._query_full_graph_sync("kb_test", "kb_test", True, "approved_only")
+    assert result["edges"] == []

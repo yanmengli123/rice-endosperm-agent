@@ -1,6 +1,6 @@
 """知识库路径级授权依赖：统一覆盖文件、图谱、查询和托管导入端点。"""
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Response
 
 from server.utils.auth_middleware import get_authenticated_user
 from yuxi.knowledge.runtime import knowledge_base
@@ -59,8 +59,8 @@ _GRAPH_CAPABILITY_RANK = {"viewer": 0, "reviewer": 1, "publisher": 2, "admin": 3
 
 
 async def _kb_id_from_request(request: Request) -> str | None:
-    kb_id = request.path_params.get("kb_id") or request.query_params.get("kb_id")
-    if not kb_id and request.method != "GET":
+    candidates = [request.path_params.get("kb_id"), request.query_params.get("kb_id")]
+    if request.method != "GET":
         # 部分写端点（如 POST /files/fetch-url）把 kb_id 放在 JSON body 中
         try:
             body = await request.body()
@@ -70,15 +70,19 @@ async def _kb_id_from_request(request: Request) -> str | None:
             if isinstance(parsed, dict):
                 candidate = parsed.get("kb_id")
                 if isinstance(candidate, str) and candidate.strip():
-                    kb_id = candidate.strip()
+                    candidates.append(candidate.strip())
         except Exception:
             pass  # 非 JSON body 的端点本就不携带 kb_id，交由后续处理
-    return kb_id
+    identifiers = {str(value).strip() for value in candidates if value and str(value).strip()}
+    if len(identifiers) > 1:
+        raise HTTPException(status_code=400, detail="请求中的知识库标识不一致")
+    return next(iter(identifiers), None)
 
 
 async def authorize_graph_path(
     request: Request,
     current_user: User = Depends(get_authenticated_user),
+    response: Response = None,
 ) -> None:
     """图谱路由授权：既有 accessible/manageable 语义不变（admin 通道），
     叠加 knowledge_base_members 能力通道——读需 viewer，写需 reviewer。
@@ -86,6 +90,8 @@ async def authorize_graph_path(
     share_config 决定"能否看见"，成员表决定"能做什么"；两者任一满足即放行。
     失败仍统一 404，不向跨租户调用者泄露资源是否存在。
     """
+    if response is not None:
+        response.headers["Cache-Control"] = "private, no-store"
     kb_id = await _kb_id_from_request(request)
     if not kb_id:
         return

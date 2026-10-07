@@ -3,6 +3,7 @@
  *   node src/utils/graph/__tests__/reviewMeta.spec.js
  */
 import assert from 'node:assert/strict'
+import process from 'node:process'
 
 import {
   REVIEW_STATUS_META,

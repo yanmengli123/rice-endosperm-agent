@@ -8,7 +8,9 @@ export function useGraph(graphRef) {
 
   const graphData = reactive({
     nodes: [],
-    edges: []
+    edges: [],
+    // 口径 meta（可选）：截断原因/会话过滤口径/加载时间，供洞察面板呈现统计范围
+    meta: {}
   })
 
   const handleNodeClick = (nodeData) => {
@@ -38,12 +40,14 @@ export function useGraph(graphRef) {
   const clearGraph = () => {
     graphData.nodes = []
     graphData.edges = []
+    graphData.meta = {}
     handleCanvasClick()
   }
 
-  const updateGraphData = (nodes, edges) => {
+  const updateGraphData = (nodes, edges, meta = {}) => {
     graphData.nodes = nodes || []
     graphData.edges = edges || []
+    graphData.meta = meta
     // Refresh graph visual after data update
     refreshGraph()
   }

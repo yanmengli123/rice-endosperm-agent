@@ -149,20 +149,22 @@ async def get_subgraph(
         )
         service = await _get_graph_service(kb_id, review_policy=policy)
         if full_graph:
-            result_data = await service.query_full_graph(exclude_chunk=exclude_chunk)
+            result_data = await service.query_full_graph(exclude_chunk=exclude_chunk, raise_on_error=True)
         else:
             result_data = await service.query_nodes(
                 keyword=node_label,
                 max_depth=max_depth,
                 max_nodes=max_nodes,
                 exclude_chunk=exclude_chunk,
+                raise_on_error=True,
+                dedupe_facts=True,
             )
         return {"success": True, "data": result_data}
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Failed to get subgraph: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get subgraph: {str(e)}")
+        raise HTTPException(status_code=500, detail="Graph query failed; please retry")
 
 
 @graph.get("/settings")
@@ -999,14 +1001,19 @@ async def governance_list_members(
 @graph.put("/governance/members")
 async def governance_upsert_member(body: MemberUpsertBody, current_user: User = Depends(get_admin_user)):
     """授予/更新 KB 协作能力（admin）：viewer 只读治理视图，reviewer 可裁决，publisher 可发布。"""
-    await _get_graph_kb_record(body.kb_id)
+    kb = await _get_graph_kb_record(body.kb_id)
     if body.capability not in _CAPABILITY_LEVELS:
         raise HTTPException(status_code=400, detail=f"capability 必须是 {list(_CAPABILITY_LEVELS)} 之一")
-    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.services.principal import PrincipalResolutionError, resolve_tenant_id
     from yuxi.storage.postgres.manager import pg_manager
 
     async with pg_manager.get_async_session_context() as session:
-        tenant_id = await resolve_tenant_id(session, str(current_user.uid))
+        try:
+            tenant_id = await resolve_tenant_id(session, body.uid)
+        except PrincipalResolutionError:
+            raise HTTPException(status_code=400, detail="协作成员必须属于知识库所在的活跃租户")
+    if kb.tenant_id is None or int(kb.tenant_id) != tenant_id:
+        raise HTTPException(status_code=400, detail="协作成员必须属于知识库所在的活跃租户")
     data = await KnowledgeGraphReviewRepository().upsert_member(
         kb_id=body.kb_id,
         tenant_id=tenant_id,
