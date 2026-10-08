@@ -4,13 +4,14 @@
 # 治理要点（与 runbook 对齐）：
 # - token 必须注入：GENOFFICE_MCP_TOKEN 缺失时 fail-closed 拒绝启动，
 #   避免无鉴权的 MCP 端点被内网横移利用；
-# - GENOFFICE_ALLOWED_ROOTS 缺省不设置：工具被关在服务器自身文件仓内；
+# - GENOFFICE_ALLOWED_ROOTS=/tmp：限定 sidecar 可读写目录；平台再限制工作区输入；
 # - 云工具（search/image/media）由镜像内 ai-settings.json（cloudToolsEnabled
 #   false）事实禁用，不走租户凭据体系。
 set -euo pipefail
 
-if [ -z "${GENOFFICE_MCP_TOKEN:-}" ]; then
-  echo "[genoffice-mcp] FATAL: GENOFFICE_MCP_TOKEN is required (fail-closed)" >&2
+TOKEN="${GENOFFICE_MCP_TOKEN:-}"
+if [ "${#TOKEN}" -lt 32 ]; then
+  echo "[genoffice-mcp] FATAL: GENOFFICE_MCP_TOKEN must contain at least 32 characters" >&2
   exit 1
 fi
 
@@ -22,4 +23,4 @@ HOST="${GENOFFICE_MCP_HOST:-0.0.0.0}"
 # ELECTRON_RUN_AS_NODE=1：CLI 以纯 Node 跑（官方 mcp-launch 同款处理）。
 export ELECTRON_RUN_AS_NODE=1
 exec xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" \
-  /opt/GenOffice/resources/cli/genoffice mcp --http "$PORT" --host "$HOST" --token "$GENOFFICE_MCP_TOKEN"
+  /opt/GenOffice/resources/cli/genoffice mcp --http "$PORT" --host "$HOST" --token "$TOKEN"

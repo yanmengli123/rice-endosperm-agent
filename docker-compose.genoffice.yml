@@ -9,6 +9,22 @@
 # - token 从 .env 注入（GENOFFICE_MCP_TOKEN），缺失时 entrypoint fail-closed；
 # - restart 策略补足 sidecar 无进程守护的缺口（session 上限 100，TTL 1h）。
 services:
+  api:
+    environment:
+      YUXI_MCP_TRUSTED_PRIVATE_HOSTS: ${YUXI_MCP_TRUSTED_PRIVATE_HOSTS:-genoffice-mcp:3093}
+      GENOFFICE_MCP_AUTH_HEADER: "Bearer ${GENOFFICE_MCP_TOKEN:?GENOFFICE_MCP_TOKEN is required}"
+      YUXI_GENOFFICE_MAX_CONCURRENT: "2"
+    networks:
+      - app-network
+      - genoffice-network
+  worker:
+    environment:
+      YUXI_MCP_TRUSTED_PRIVATE_HOSTS: ${YUXI_MCP_TRUSTED_PRIVATE_HOSTS:-genoffice-mcp:3093}
+      GENOFFICE_MCP_AUTH_HEADER: "Bearer ${GENOFFICE_MCP_TOKEN:?GENOFFICE_MCP_TOKEN is required}"
+      YUXI_GENOFFICE_MAX_CONCURRENT: "2"
+    networks:
+      - app-network
+      - genoffice-network
   genoffice-mcp:
     build:
       context: ./docker/mcp/genoffice
@@ -18,6 +34,14 @@ services:
     image: yuxi-genoffice-mcp:${GENOFFICE_VERSION:-0.11.0}
     container_name: genoffice-mcp
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 3g
+    cpus: 2
+    pids_limit: 256
+    stop_grace_period: 30s
     environment:
       GENOFFICE_MCP_TOKEN: ${GENOFFICE_MCP_TOKEN:?GENOFFICE_MCP_TOKEN is required}
       # 大文档渲染并发：官方建议 2-4；调大需评估 CPU（每次渲染一个隐藏 Electron）
@@ -29,10 +53,18 @@ services:
     tmpfs:
       - /tmp:size=2g
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/3093"]
+      test: ["CMD-SHELL", "ELECTRON_RUN_AS_NODE=1 /opt/GenOffice/genoffice /etc/genoffice/healthcheck.cjs"]
       interval: 30s
       timeout: 5s
       start_period: 15s
       retries: 3
     networks:
-      - app-network
+      - genoffice-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+networks:
+  genoffice-network:
+    internal: true

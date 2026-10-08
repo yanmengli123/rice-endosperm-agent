@@ -11,6 +11,7 @@ from typing import Any
 
 from yuxi.storage.postgres.models_business import MCPCallAudit
 from yuxi.utils import logger
+from yuxi.utils.datetime_utils import utc_now
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,7 @@ async def record_mcp_call(
                 error_excerpt=(provenance or {}).get("error_excerpt"),
                 argument_shape=argument_shape(arguments),
                 provenance=dict(provenance or {}),
+                created_at=utc_now(),
             )
             session.add(audit)
             await session.flush()

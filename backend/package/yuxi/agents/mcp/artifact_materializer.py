@@ -153,6 +153,8 @@ async def register_run_artifact(*, context, entry: MaterializedArtifact) -> bool
         return False
     from yuxi.storage.postgres.manager import pg_manager
     from yuxi.storage.postgres.models_business import RunArtifact
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
 
     try:
         async with pg_manager.get_async_session_context() as session:
@@ -170,7 +172,21 @@ async def register_run_artifact(*, context, entry: MaterializedArtifact) -> bool
                     media_type=entry.media_type,
                 )
             )
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                existing = (
+                    await session.execute(
+                        select(RunArtifact).where(
+                            RunArtifact.run_id == str(run_id),
+                            RunArtifact.virtual_path == entry.virtual_path,
+                            RunArtifact.uid == str(context.uid),
+                            RunArtifact.sha256 == entry.sha256,
+                        )
+                    )
+                ).scalar_one_or_none()
+                return existing is not None
         return True
     except Exception as error:  # noqa: BLE001 —— 登记是增强通道；唯一约束冲突/库不可用都不阻断主流程
         logger.info(f"Run artifact registration skipped for {entry.virtual_path}: {type(error).__name__}")
@@ -220,7 +236,7 @@ def parse_file_output_envelope(result_text: str) -> list[tuple[str, str]]:
     """识别 MCP 工具结果信封里的文件输出（GenOffice --http 约定），返回 (文件名, URL) 列表。
 
     识别三处：顶层 ``output_url``、``detail.files[].url``、``detail.previews[].url``。
-    仅做识别与命名映射，不做任何网络请求——文件字节由调用方（host 中继会话）
+    仅做识别与命名映射，不做任何网络请求——文件字节由调用方（host 原调用会话）
     从工具结果的内嵌 resource 块取得：--http 模式下 output_url 与 MCP 会话同寿命，
     会话关闭即失效，事后按 URL 下载不可靠。
     """
@@ -270,34 +286,45 @@ async def persist_mcp_file_blobs(
     tool_name: str,
     blobs: list[tuple[str, str | None, bytes]],
     mcp_call_audit_id: int | None,
+    strict: bool = False,
 ) -> list[MaterializedArtifact]:
     """把 MCP 工具结果内嵌的文件字节（resource blob / 渲染 PNG）落盘为线程 outputs 交付物。
 
-    与 ``materialize_mcp_data_result`` 同源的尽力而为语义：无 run 上下文、超限、
-    IO 错误都跳过该文件并只记日志，绝不阻断工具调用主流程。
+    默认保持数据产物的尽力而为语义；GenOffice strict 模式要求完整写入及
+    run_artifacts 登记，缺上下文、超限或 IO/登记错误均向上传播交付失败。
     """
     if not blobs:
         return []
     accumulator = _ARTIFACT_ACCUMULATOR.get()
     if accumulator is None:
+        if strict:
+            raise RuntimeError("MCP_DELIVERY_FAILED: missing artifact accumulator")
         return []
     from yuxi.agents.mcp.execution import get_mcp_execution_context
 
     context = get_mcp_execution_context()
     if context is None or not context.thread_id:
+        if strict:
+            raise RuntimeError("MCP_DELIVERY_FAILED: missing execution identity")
         return []
 
     entries: list[MaterializedArtifact] = []
     for original_name, media_type, data in blobs:
         if not isinstance(data, (bytes, bytearray)) or not data:
+            if strict:
+                raise RuntimeError("MCP_DELIVERY_FAILED: empty output file")
             continue
         if len(data) > _MAX_FILE_DELIVERABLE_BYTES:
+            if strict:
+                raise RuntimeError("MCP_DELIVERY_FAILED: output exceeds 50 MiB")
             logger.warning(
                 f"MCP file deliverable skipped ({server_slug}/{tool_name}): "
                 f"{len(data)} bytes exceeds {_MAX_FILE_DELIVERABLE_BYTES}"
             )
             continue
         if accumulator.materialized_count >= _MAX_FILES_PER_RUN:
+            if strict:
+                raise RuntimeError("MCP_DELIVERY_FAILED: per-run artifact limit reached")
             logger.warning(
                 f"MCP file deliverables skipped ({server_slug}/{tool_name}): "
                 f"per-run artifact limit {_MAX_FILES_PER_RUN} reached"
@@ -319,12 +346,23 @@ async def persist_mcp_file_blobs(
 
             ensure_thread_dirs(thread_id, uid)
             target_dir = sandbox_outputs_dir(thread_id) / MCP_RESULTS_DIR_NAME
+            if not target_dir.resolve().is_relative_to(sandbox_outputs_dir(thread_id).absolute()):
+                raise ValueError("artifact output directory escaped its thread")
             target_dir.mkdir(parents=True, exist_ok=True)
-            (target_dir / filename).write_bytes(data)
+            import uuid
+
+            temporary = target_dir / f".{uuid.uuid4().hex}.part"
+            try:
+                temporary.write_bytes(data)
+                temporary.replace(target_dir / filename)
+            finally:
+                temporary.unlink(missing_ok=True)
 
         try:
             await asyncio.to_thread(_write_file)
         except Exception as error:  # noqa: BLE001 —— 物化是增强通道，绝不阻断工具调用主流程
+            if strict:
+                raise RuntimeError("MCP_DELIVERY_FAILED: output persistence failed") from error
             logger.warning(f"MCP artifact materialization skipped: {type(error).__name__}: {error}")
             continue
 
@@ -342,9 +380,11 @@ async def persist_mcp_file_blobs(
                 "mcp_call_audit_id": mcp_call_audit_id,
             },
         )
+        registered = await register_run_artifact(context=context, entry=entry)
+        if strict and context.run_id and not registered:
+            raise RuntimeError("MCP_DELIVERY_FAILED: artifact registration failed")
         accumulator.materialized_count += 1
         accumulator.entries.append(entry)
-        registered = await register_run_artifact(context=context, entry=entry)
         if registered:
             _emit_artifact_trace(entry)
         logger.info(f"Materialized MCP file deliverable: {entry.virtual_path} ({entry.size_bytes} bytes)")

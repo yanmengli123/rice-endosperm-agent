@@ -36,6 +36,13 @@ def test_genomics_builtins_use_the_governed_launcher_and_start_disabled(slug, mo
     assert config["transport"] == "stdio"
     monkeypatch.setenv("ALLOW_DEVELOPMENT_MCP_RUNTIME", "true")
     monkeypatch.setattr(mcp_service, "_genomics_mcp_runtime_ready", lambda candidate: candidate == slug)
+
+    # Unit contract: installed host images must not determine the artifact kind.
+    def inspect_image(command, **_kwargs):
+        assert command[:3] == ["docker", "image", "inspect"]
+        return SimpleNamespace(returncode=0, stdout="sha256:" + "a" * 64)
+
+    monkeypatch.setattr(mcp_service.subprocess, "run", inspect_image)
     values = mcp_service._builtin_row_values(slug, config)
     assert values["enabled"] == 0
     assert values["lifecycle_status"] == "READY"
@@ -144,9 +151,7 @@ def test_synthesis_and_analysis_tools_are_excluded_from_the_trust_registry(name)
 
 
 def test_plant_synthesis_tools_are_disabled_for_new_installations():
-    values = mcp_service._builtin_row_values(
-        "plant-genomics", mcp_service._DEFAULT_MCP_SERVERS["plant-genomics"]
-    )
+    values = mcp_service._builtin_row_values("plant-genomics", mcp_service._DEFAULT_MCP_SERVERS["plant-genomics"])
     assert set(values["disabled_tools"]) == {
         "analyze_locus_synth",
         "find_homologs_synth",

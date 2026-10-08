@@ -1102,7 +1102,7 @@ class MCPCallAudit(Base):
     error_excerpt = Column(String(500), nullable=True)
     argument_shape = Column(JSON, nullable=True)
     provenance = Column(JSON, nullable=False, default=dict)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, index=True)
 
 
 class CustomTool(Base):

@@ -39,6 +39,13 @@ def classify_mcp_failure(value: Any, *, stage_hint: str | None = None) -> McpFai
     status_match = _HTTP_STATUS_RE.search(text)
     http_status = int(status_match.group(1)) if status_match else None
 
+    if "mcp_delivery_failed" in lowered:
+        return McpFailureClassification(
+            "MCP_DELIVERY_FAILED", "delivery", "ERROR", "文件生成后未能完整交付，请检查产物存储。"
+        )
+    if "mcp_upload_failed" in lowered:
+        return McpFailureClassification("MCP_UPLOAD_FAILED", "upload", "ERROR", "工作区文件上传到文档引擎失败。")
+
     if (
         any(
             marker in lowered

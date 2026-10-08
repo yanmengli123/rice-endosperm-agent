@@ -86,7 +86,7 @@ async def _build_middlewares(context):
         TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
         PatchToolCallsMiddleware(),
         _SubAgentToolFilterMiddleware(),
-        ModelRetryMiddleware(),
+        ModelRetryMiddleware(on_failure="error"),
         ImageInputCompatibilityMiddleware(),
         TokenUsageMiddleware(),
     ]

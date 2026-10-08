@@ -20,8 +20,6 @@ from yuxi.agents.mcp.artifact_materializer import (
     drain_materialized_artifacts,
     end_artifact_accumulation,
     materialize_mcp_data_result,
-    parse_file_output_envelope,
-    persist_mcp_file_blobs,
 )
 from yuxi.agents.mcp.execution import McpExecutionContext, reset_mcp_execution_context, set_mcp_execution_context
 
@@ -390,6 +388,11 @@ def _relay_host():
 async def test_download_within_session_accepts_same_origin(monkeypatch):
     import httpx
 
+    async def validated(url):
+        return url
+
+    monkeypatch.setattr("yuxi.agents.mcp.host.validate_remote_url_dns", validated)
+
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -434,8 +437,9 @@ async def test_file_bridge_rewrites_workspace_path_argument(monkeypatch, run_sco
     target_file = tmp_path / "report.md"
     target_file.write_text("# x", encoding="utf-8")
     monkeypatch.setattr(
-        "yuxi.agents.backends.sandbox.paths.resolve_virtual_path",
-        lambda thread_id, virtual_path, *, uid: target_file,
+        host_mod.LegacyLangChainHost,
+        "_resolve_workspace_file",
+        staticmethod(lambda context, value: target_file),
     )
 
     async def fake_upload(config, local_path):

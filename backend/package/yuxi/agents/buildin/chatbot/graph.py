@@ -21,6 +21,7 @@ from yuxi.agents.middlewares import (
     save_attachments_to_fs,
 )
 from yuxi.agents.middlewares.artifact_state import ArtifactStateMiddleware
+from yuxi.agents.middlewares.office_delivery import OfficeDeliveryMiddleware
 from yuxi.agents.middlewares.skills import SkillsMiddleware
 from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
 from yuxi.agents.middlewares.trace import TraceMiddleware
@@ -76,7 +77,8 @@ async def _build_middlewares(context):
             summary_middleware,
             TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
             PatchToolCallsMiddleware(),
-            ModelRetryMiddleware(max_retries=getattr(context, "model_retry_times", 2)),
+            ModelRetryMiddleware(max_retries=getattr(context, "model_retry_times", 2), on_failure="error"),
+            OfficeDeliveryMiddleware(),
             ImageInputCompatibilityMiddleware(),
             TokenUsageMiddleware(),
             LiteratureCandidateCacheMiddleware(),

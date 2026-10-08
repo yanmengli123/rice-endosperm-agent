@@ -372,6 +372,27 @@ class LegacyLangChainHost(McpHost):
         processed: list[Any] = []
         by_name: dict[str, Any] = {}
         for tool in raw_tools:
+            if slug == "genoffice":
+                from yuxi.agents.mcp.genoffice import DISABLED_TOOLS, platform_tool_schema
+
+                if tool.name in DISABLED_TOOLS:
+                    continue
+                schema = getattr(tool, "args_schema", None)
+                if isinstance(schema, type):
+                    schema = schema.model_json_schema()
+                if isinstance(schema, dict):
+                    tool.args_schema = platform_tool_schema(tool.name, schema)
+                tool.description = (
+                    f"{tool.description}\nPlatform rule: file/from/outline accept only this thread's "
+                    "workspace virtual paths. Omit out. Do not pass URLs or host filesystem paths. "
+                    "The platform uploads inputs and displays downloadable outputs automatically. "
+                    "Do not call present_artifacts for these outputs or claim they cannot be downloaded."
+                )
+                if tool.name in {"create_pptx", "guide"}:
+                    tool.description += (
+                        " Platform PPT workflow: use create_pptx with an inline spec object (all pages). "
+                        "Directory workflows in upstream guides do not work here: do not use spec_dir or outline."
+                    )
             try:
                 tool.handle_tool_error = True
             except Exception:  # noqa: BLE001 —— 非 LC 工具对象防御
@@ -451,110 +472,164 @@ class LegacyLangChainHost(McpHost):
         )
         return descriptors, info
 
-    async def _relay_inline_file_deliverables(
-        self,
-        slug: str,
-        config: dict[str, Any],
-        tool_name: str,
-        arguments: dict[str, Any] | None,
-        *,
-        mcp_call_audit_id: int | None,
-    ) -> list:
-        """官方 SDK 中继会话重放工具调用，从内嵌 resource/image 块物化文件交付物。
+    async def _collect_file_blobs(self, response, result_text: str, config: dict[str, Any]) -> list:
+        """Collect files in the original session; never replay a tool invocation."""
+        from urllib.parse import unquote
 
-        任何失败（非 http 传输、会话/调用错误、无内嵌字节）都返回空列表，由
-        调用方回退到 JSON 信封物化；绝不影响主调用结果。大文件（>2MB）只有
-        resource_link + 与会话同寿命的 URL，因此在**中继会话存活期内**补一次
-        带凭据的下载——出块后再取 URL 必然 404。
-        """
-        if str((config or {}).get("transport") or "") not in {"sse", "streamable_http"}:
-            return []
-        try:
-            async with self._official_session(config) as session:
-                relayed = await session.call_tool(tool_name, dict(arguments or {}))
-                if getattr(relayed, "isError", False):
-                    return []
+        outputs = parse_file_output_envelope(result_text)
+        for block in response.content:
+            if block.type == "text":
+                outputs.extend(parse_file_output_envelope(block.text))
+            elif block.type == "resource_link":
+                outputs.append((block.name, str(block.uri)))
+        structured = getattr(response, "structuredContent", None)
+        if isinstance(structured, dict):
+            outputs.extend(parse_file_output_envelope(json.dumps(structured)))
+        names = {url: unquote(name) for name, url in outputs}
+        blobs = []
+        fetched = set()
+        digests = set()
+        total_bytes = 0
 
-                name_hints: dict[str, str] = {}
-                relayed_text = next(
-                    (
-                        str(getattr(block, "text", "") or "")
-                        for block in getattr(relayed, "content", None) or []
-                        if getattr(block, "type", None) == "text"
-                    ),
-                    "",
+        def add_blob(name, media_type, data):
+            nonlocal total_bytes
+            digest = hashlib.sha256(data).hexdigest()
+            if digest in digests:
+                return
+            if not data or len(data) > _FILE_BRIDGE_MAX_BYTES:
+                raise ValueError("MCP_DELIVERY_FAILED: empty or oversized output")
+            if len(blobs) >= 20 or total_bytes + len(data) > 100 * 1024 * 1024:
+                raise ValueError("MCP_DELIVERY_FAILED: output collection limit exceeded")
+            digests.add(digest)
+            total_bytes += len(data)
+            blobs.append((name, media_type, data))
+
+        for block in response.content:
+            if block.type == "resource":
+                resource = block.resource
+                encoded = getattr(resource, "blob", None)
+                if encoded is None:
+                    continue
+                if len(encoded) > ((_FILE_BRIDGE_MAX_BYTES + 2) // 3) * 4:
+                    raise ValueError("MCP_DELIVERY_FAILED: file exceeds 50 MiB")
+                uri = str(resource.uri)
+                add_blob(
+                    names.get(uri) or unquote(uri.rsplit("/", 1)[-1]),
+                    resource.mimeType,
+                    base64.b64decode(encoded, validate=True),
                 )
-                for name, url in parse_file_output_envelope(relayed_text):
-                    name_hints[str(url)] = str(name)
-                blobs: list[tuple[str, str | None, bytes]] = []
-                fetched_urls: set[str] = set()
-                image_index = 0
-                for block in getattr(relayed, "content", None) or []:
-                    block_type = getattr(block, "type", None)
-                    if block_type == "resource":
-                        resource = getattr(block, "resource", None)
-                        blob_text = getattr(resource, "blob", None)
-                        uri = str(getattr(resource, "uri", "") or "")
-                        if not blob_text:
-                            continue
-                        name = name_hints.get(uri) or str(uri.rstrip("/").rsplit("/", 1)[-1] or "download")
-                        media_type = getattr(resource, "mimeType", None)
-                        try:
-                            data = base64.b64decode(blob_text)
-                        except Exception:  # noqa: BLE001 —— 非法 base64 跳过该块
-                            continue
-                        fetched_urls.add(uri)
-                        blobs.append((name, media_type, data))
-                    elif block_type == "image":
-                        data_text = getattr(block, "data", None)
-                        if not data_text:
-                            continue
-                        image_index += 1
-                        media_type = str(getattr(block, "mimeType", None) or "image/png")
-                        suffix = (
-                            "png"
-                            if "png" in media_type
-                            else ("jpg" if "jpeg" in media_type or "jpg" in media_type else "img")
-                        )
-                        try:
-                            data = base64.b64decode(data_text)
-                        except Exception:  # noqa: BLE001
-                            continue
-                        blobs.append((f"render_{image_index:02d}.{suffix}", media_type, data))
-                # resource_link 兜底（大文件）：URL 只在本会话内存活，立刻下载。
-                for block in getattr(relayed, "content", None) or []:
-                    if getattr(block, "type", None) != "resource_link":
-                        continue
-                    uri = str(getattr(block, "uri", "") or "")
-                    if not uri or uri in fetched_urls or not uri.startswith(("http://", "https://")):
-                        continue
-                    data = await self._download_within_session(config, uri)
-                    if data is None:
-                        continue
-                    fetched_urls.add(uri)
-                    name = name_hints.get(uri) or str(uri.rstrip("/").rsplit("/", 1)[-1] or "download")
-                    blobs.append((name, None, data))
-        except Exception as error:  # noqa: BLE001 —— 中继是增强通道
-            logger.warning(f"MCP file deliverable relay skipped ({slug}/{tool_name}): {type(error).__name__}: {error}")
-            return []
-        return await persist_mcp_file_blobs(
-            server_slug=slug,
-            tool_name=tool_name,
-            blobs=blobs,
-            mcp_call_audit_id=mcp_call_audit_id,
-        )
+                fetched.add(uri)
+            elif block.type == "image":
+                if len(block.data) > ((_FILE_BRIDGE_MAX_BYTES + 2) // 3) * 4:
+                    raise ValueError("MCP_DELIVERY_FAILED: image exceeds 50 MiB")
+                suffix = "jpg" if block.mimeType == "image/jpeg" else "png"
+                add_blob(
+                    f"render_{len(blobs) + 1:02d}.{suffix}",
+                    block.mimeType,
+                    base64.b64decode(block.data, validate=True),
+                )
+        for name, url in outputs:
+            if url in fetched:
+                continue
+            data = await self._download_within_session(config, url)
+            if data is None:
+                raise RuntimeError("MCP_DELIVERY_FAILED: output download failed")
+            add_blob(unquote(name), None, data)
+            fetched.add(url)
+        return blobs
+
+    async def _call_genoffice(self, config, tool_name, arguments):
+        from yuxi.agents.mcp.genoffice import DISABLED_TOOLS, genoffice_slot
+
+        if tool_name in DISABLED_TOOLS:
+            raise ValueError("invalid tool arguments: GenOffice tool is disabled by platform policy")
+        if arguments.get("out"):
+            raise ValueError("invalid tool arguments: omit out; platform delivers the output file automatically")
+        if tool_name == "create_pptx" and any(arguments.get(key) for key in ("spec_dir", "outline")):
+            raise ValueError("invalid tool arguments: use create_pptx with an inline spec object, not a directory")
+        if str(config.get("transport")) != "streamable_http":
+            raise ValueError("GenOffice requires streamable_http")
+        deadline = min(float(config.get("sse_read_timeout") or 300), 300.0)
+        async with genoffice_slot(str(config.get("url")), deadline_seconds=deadline):
+            async with asyncio.timeout(deadline):
+                bridged = await self._bridge_file_arguments(config, arguments, strict=True)
+                async with self._official_session(config) as session:
+                    response = await session.call_tool(tool_name, bridged)
+                    blocks = [_jsonable(block) for block in response.content if block.type == "text"]
+                    result = _normalize_tool_output(
+                        (blocks, {"structured_content": response.structuredContent, "is_error": response.isError}),
+                        provenance={"server_slug": "genoffice", "tool": tool_name, "protocol": "official-mcp-sdk"},
+                    )
+                    envelopes = [response.structuredContent]
+                    for block in response.content:
+                        if block.type == "text":
+                            try:
+                                envelopes.append(json.loads(block.text))
+                            except json.JSONDecodeError:
+                                pass
+                    for envelope in envelopes:
+                        if isinstance(envelope, dict) and str(envelope.get("status", "")).lower() in {
+                            "error",
+                            "partial",
+                        }:
+                            result.is_error = True
+                            result.provenance["provider_status"] = str(envelope["status"]).upper()
+                    blobs = [] if result.is_error else await self._collect_file_blobs(response, result.text, config)
+                entries = []
+                if (
+                    not result.is_error
+                    and not blobs
+                    and tool_name
+                    in {
+                        "create_docx",
+                        "create_xlsx",
+                        "create_pptx",
+                        "create_pdf",
+                        "convert",
+                        "render",
+                        "docs_apply",
+                        "slides_apply",
+                        "sheet_apply",
+                        "slides_replace",
+                        "merge",
+                        "slides_render",
+                    }
+                ):
+                    raise RuntimeError("MCP_DELIVERY_FAILED: tool returned no output file")
+                if blobs:
+                    entries = await persist_mcp_file_blobs(
+                        server_slug="genoffice",
+                        tool_name=tool_name,
+                        blobs=blobs,
+                        mcp_call_audit_id=None,
+                        strict=True,
+                    )
+                result.provenance["delivery_status"] = "delivered" if entries else "no_file_output"
+                result.metadata["delivered_files"] = [
+                    {
+                        "name": entry.name,
+                        "virtual_path": entry.virtual_path,
+                        "size_bytes": entry.size_bytes,
+                        "sha256": entry.sha256,
+                    }
+                    for entry in entries
+                ]
+                result.provenance["delivered_files"] = result.metadata["delivered_files"]
+                return result, bridged, entries
 
     async def _bridge_file_arguments(
         self,
         config: dict[str, Any],
         arguments: dict[str, Any] | None,
+        *,
+        strict: bool = False,
     ) -> dict[str, Any]:
         """文件参数桥：from/file/outline 指向本线程工作区文件时，上传 sidecar 换 URL。
 
         sidecar 与后端不在同一文件系统（容器 Linux / 宿主 Windows），模型给的
         工作区虚拟路径对 sidecar 不存在；PUT /files 上传后以 URL 引用。任何
-        失败（无执行身份、路径不可解析、文件不存在、上传错误）保持原值——
-        由服务器侧返回结构化错误，绝不伪造成功。
+        GenOffice strict 模式在无执行身份、非法路径或上传失败时拒绝调用。
+        存量服务器保留尽力而为桥接语义。
         """
         if not isinstance(arguments, dict) or not arguments:
             return arguments or {}
@@ -564,6 +639,8 @@ class LegacyLangChainHost(McpHost):
 
         context = get_mcp_execution_context()
         if context is None or not context.thread_id:
+            if strict:
+                raise ValueError("forbidden: file input requires an execution identity and thread")
             return arguments
         bridged = dict(arguments)
         for key in _FILE_BRIDGE_ARG_KEYS:
@@ -572,22 +649,39 @@ class LegacyLangChainHost(McpHost):
                 continue
             text = value.strip()
             if text.startswith(("http://", "https://", "data:")):
+                if strict:
+                    raise ValueError("forbidden: file input must be a current workspace virtual path, not a URL")
                 continue
             local_path = self._resolve_workspace_file(context, text)
             if local_path is None:
+                if strict:
+                    raise ValueError("forbidden: file input is missing or outside the current workspace")
                 continue
             url = await self._upload_to_mcp_server(config, local_path)
             if url:
-                logger.info(f"MCP file bridge: {key}={text} -> {url}")
+                logger.info(f"MCP file bridge uploaded argument {key}")
                 bridged[key] = url
+            elif strict:
+                raise RuntimeError("MCP_UPLOAD_FAILED: workspace file upload failed")
         return bridged
 
     @staticmethod
     def _resolve_workspace_file(context, value: str):
-        from yuxi.agents.backends.sandbox.paths import resolve_virtual_path
+        from yuxi.agents.backends.sandbox.paths import (
+            resolve_virtual_path,
+            sandbox_user_data_dir,
+            sandbox_workspace_dir,
+        )
 
         try:
             path = resolve_virtual_path(str(context.thread_id), value, uid=str(context.uid))
+            # Do not let a symlink redefine the user's or thread's allowed root.
+            roots = (
+                sandbox_user_data_dir(str(context.thread_id)).absolute(),
+                sandbox_workspace_dir(str(context.thread_id), str(context.uid)).absolute(),
+            )
+            if not any(path.resolve().is_relative_to(root) for root in roots):
+                return None
         except Exception:  # noqa: BLE001 —— 非工作区虚拟路径（含跨机绝对路径）不桥接
             return None
         try:
@@ -595,16 +689,23 @@ class LegacyLangChainHost(McpHost):
         except OSError:
             return None
 
-    @staticmethod
-    async def _upload_to_mcp_server(config: dict[str, Any], local_path) -> str | None:
+    async def _upload_to_mcp_server(self, config: dict[str, Any], local_path) -> str | None:
         from urllib.parse import quote, urlparse
 
         server = urlparse(str(config.get("url") or ""))
         if server.scheme not in {"http", "https"} or not server.netloc:
             return None
         origin = f"{server.scheme}://{server.netloc}"
+        await validate_remote_url_dns(str(config.get("url") or ""))
         try:
-            data = await asyncio.to_thread(local_path.read_bytes)
+            if local_path.stat().st_size > _FILE_BRIDGE_MAX_BYTES:
+                return None
+
+            def read_bounded():
+                with local_path.open("rb") as file:
+                    return file.read(_FILE_BRIDGE_MAX_BYTES + 1)
+
+            data = await asyncio.to_thread(read_bounded)
         except OSError as error:
             logger.warning(f"MCP file bridge upload skipped (read): {type(error).__name__}: {error}")
             return None
@@ -623,29 +724,38 @@ class LegacyLangChainHost(McpHost):
                 response = await client.put(f"{origin}/files/{quote(local_path.name)}", content=data)
                 response.raise_for_status()
                 url = (response.json() or {}).get("url")
-                return str(url) if url else None
+                return str(url) if url and self._same_origin(config, str(url)) else None
         except Exception as error:  # noqa: BLE001 —— 桥接是增强通道，失败保持原参数
             logger.warning(f"MCP file bridge upload skipped: {type(error).__name__}: {error}")
             return None
 
+    @staticmethod
+    def _same_origin(config: dict[str, Any], url: str) -> bool:
+        from urllib.parse import urlparse
+
+        server, candidate = urlparse(str(config.get("url") or "")), urlparse(url)
+        try:
+            return bool(
+                server.hostname
+                and not candidate.username
+                and not candidate.password
+                and candidate.scheme == server.scheme
+                and candidate.hostname == server.hostname
+                and (candidate.port or (443 if candidate.scheme == "https" else 80))
+                == (server.port or (443 if server.scheme == "https" else 80))
+            )
+        except ValueError:
+            return False
+
     async def _download_within_session(self, config: dict[str, Any], url: str) -> bytes | None:
-        """中继会话存活期内按 URL 下载大文件交付物（resource_link 兜底）。
+        """原调用会话存活期内按 URL 下载大文件交付物（resource_link 兜底）。
 
         仅接受与服务器端点同源的 URL（防工具结果借道宿主客户端打向任意外部
         地址）；沿用安全工厂语义：禁重定向、禁环境代理、带服务器凭据头。
         """
-        from urllib.parse import urlparse
-
-        server = urlparse(str(config.get("url") or ""))
-        candidate = urlparse(url)
-        if not server.hostname or candidate.scheme != server.scheme:
+        if not self._same_origin(config, url):
             return None
-        if str(candidate.hostname or "").rstrip(".").lower() != str(server.hostname).rstrip(".").lower():
-            return None
-        server_port = server.port or (443 if server.scheme == "https" else 80)
-        candidate_port = candidate.port or (443 if candidate.scheme == "https" else 80)
-        if candidate_port != server_port:
-            return None
+        await validate_remote_url_dns(str(config.get("url") or ""))
         try:
             import httpx
 
@@ -655,9 +765,16 @@ class LegacyLangChainHost(McpHost):
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                return response.content
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    if int(response.headers.get("Content-Length", "0")) > _FILE_BRIDGE_MAX_BYTES:
+                        return None
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(data) + len(chunk) > _FILE_BRIDGE_MAX_BYTES:
+                            return None
+                        data.extend(chunk)
+                    return bytes(data)
         except Exception as error:  # noqa: BLE001 —— 增强通道，失败回退信封物化
             logger.warning(f"MCP large deliverable download skipped: {type(error).__name__}: {error}")
             return None
@@ -681,19 +798,39 @@ class LegacyLangChainHost(McpHost):
                 stage="discovery",
                 code=CODE_DISCOVERY_FAILED,
             )
+        file_deliverable_entries = []
+        native_result = None
         try:
             # 文件桥：吃文件路径的参数（from/file/outline）若指向本线程工作区，
             # 先上传到 sidecar 文件仓换成 URL——sidecar 与后端不在同一文件系统，
-            # 直接传容器路径必然 file_not_found。失败保持原值（服务器侧报错）。
-            bridged_arguments = await self._bridge_file_arguments(config, arguments)
-            output = await target.ainvoke(dict(bridged_arguments or {}))
+            # GenOffice 严格拒绝非法输入或桥接失败，其他服务器保留原值兼容。
+            if slug == "genoffice":
+                native_result, bridged_arguments, file_deliverable_entries = await self._call_genoffice(
+                    config, tool_name, dict(arguments or {})
+                )
+                output = None
+            else:
+                bridged_arguments = await self._bridge_file_arguments(config, arguments)
+                output = await target.ainvoke(dict(bridged_arguments or {}))
+        except asyncio.CancelledError:
+            await record_mcp_call(
+                server_slug=slug,
+                capability_type="tool",
+                capability_name=tool_name,
+                arguments=arguments or {},
+                result={"is_error": True, "code": "MCP_CANCELLED"},
+                status="error",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                provenance={"error_class": "MCP_CANCELLED", "error_stage": "execution"},
+            )
+            raise
         except Exception as e:  # noqa: BLE001 —— 适配器会先拦截 ToolException 为字符串，这里兜运行期错误
             raised = failure_from_exception(e, fallback_stage=STAGE_TRANSPORT)
             if raised.code in (CODE_DISCOVERY_FAILED, CODE_CLIENT_INIT_FAILED):
                 raise McpHostError(raised.message, stage=raised.stage, code=raised.code) from e
             provenance = {"protocol": self._note_adapter_version()}
             apply_failure_provenance(provenance, e, stage_hint=raised.stage)
-            result = McpToolResult(text=f"Error: {e}", is_error=True, provenance=provenance)
+            result = McpToolResult(text=f"Error: {type(e).__name__}: {e}", is_error=True, provenance=provenance)
             await record_mcp_call(
                 server_slug=slug,
                 capability_type="tool",
@@ -705,7 +842,7 @@ class LegacyLangChainHost(McpHost):
                 provenance=provenance,
             )
             return result
-        result = _normalize_tool_output(
+        result = native_result or _normalize_tool_output(
             output,
             provenance={"server_slug": slug, "tool": tool_name, "protocol": self._note_adapter_version()},
         )
@@ -740,22 +877,13 @@ class LegacyLangChainHost(McpHost):
         final_only_artifacts = bool(
             execution_context and execution_context.artifact_policy in {"sequence_only", "value_only"}
         )
-        file_deliverable_entries: list = []
-        if (
-            not result.is_error
-            and slug != "data-aggregator"
-            and tool_name != SEQUENCE_DELIVERABLE_TOOL
-            and not final_only_artifacts
-            and parse_file_output_envelope(result.text)
-        ):
-            # MCP 文件交付物（GenOffice --http 约定）：--http 模式下 output_url 与
-            # MCP 会话同寿命，适配层会话在调用返回即关闭、URL 随之失效，且内嵌
-            # resource 块会被 langchain 适配层丢弃。因此用官方 SDK 中继会话按原参
-            # 数重放一次调用，从完整结果里取内嵌文件字节落盘。有文件交付物时不
-            # 再物化 JSON 信封（避免同一结果双产物噪音）。
-            file_deliverable_entries = await self._relay_inline_file_deliverables(
-                slug, config, tool_name, bridged_arguments, mcp_call_audit_id=audit_id
+        if slug == "genoffice" and audit_id is None:
+            result.is_error = True
+            result.text = (
+                "Error: MCP_AUDIT_FAILED: tool executed but platform could not record the call; "
+                "do not retry automatically"
             )
+            result.provenance["error_class"] = "MCP_AUDIT_FAILED"
         if (
             not result.is_error
             and slug != "data-aggregator"
@@ -799,7 +927,7 @@ class LegacyLangChainHost(McpHost):
             )
             if deliverable_notice is not None:
                 result.text = append_deliverable_notice(result.text, deliverable_notice)
-        if file_deliverable_entries:
+        if not result.is_error and file_deliverable_entries:
             # 文件交付物通知：虚拟路径经 workspace viewer 端点可下载，模型可据此
             # 指引用户获取产物（sidecar 侧 URL 是短命的，不直接暴露给用户）。
             notice = {
