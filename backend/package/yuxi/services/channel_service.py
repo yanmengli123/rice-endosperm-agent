@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from yuxi.channels.adapters.base import ChannelPushError
 from yuxi.channels.contracts import ChannelEnvelope, OutboundPayload
 from yuxi.channels.registry import channel_registry
 from yuxi.channels.signing import ChannelSignatureError
@@ -873,13 +874,33 @@ async def test_channel_app_view(db: AsyncSession, current_user: User, app_id: in
     try:
         await _probe_platform_credentials(app, credentials)
     except Exception as error:  # noqa: BLE001 - 管理测试把平台错误收敛为结构化结论
-        blocking.append({"code": "CREDENTIALS_INVALID", "ok": False, "message": str(error)[:300]})
+        message = (
+            str(error)[:300]
+            if isinstance(error, ChannelPushError)
+            else f"{app.channel_type} 凭据验证失败或容器无法访问平台；请检查凭据与出站网络（{type(error).__name__}）"
+        )
+        blocking.append({"code": "CREDENTIALS_INVALID", "ok": False, "message": message})
+    if app.channel_type == "dingtalk" and not blocking:
+        checks.append(
+            {
+                "code": "CONFIG_ONLY_PROBE",
+                "ok": True,
+                "message": "钉钉无稳定的只读连接探测接口；安全配置已通过，激活后需发送真实消息完成验收",
+            }
+        )
 
     tested_at = utc_now().isoformat()
+    ready_code = "READY_CONFIG_ONLY" if app.channel_type == "dingtalk" else "READY"
     result = {
         "ok": not blocking,
-        "code": "READY" if not blocking else str(blocking[0]["code"]),
-        "message": "连接与安全前置条件验证通过" if not blocking else str(blocking[0]["message"]),
+        "code": ready_code if not blocking else str(blocking[0]["code"]),
+        "message": (
+            "安全配置已通过；激活后需发送真实钉钉消息完成端到端验收"
+            if not blocking and app.channel_type == "dingtalk"
+            else "连接与安全前置条件验证通过"
+            if not blocking
+            else str(blocking[0]["message"])
+        ),
         "checks": checks + [item for item in blocking if item not in checks],
         "tested_at": tested_at,
     }
@@ -1792,9 +1813,11 @@ async def _probe_platform_credentials(app: ChannelApp, credentials: dict[str, An
 
         username = await TelegramAdapter().resolve_bot_username(credentials, app.platform_app_id)
         if not username:
-            raise RuntimeError("Telegram getMe 未返回 bot 身份，请检查 Bot Token 与外网连通性")
+            raise ChannelPushError(
+                "Telegram getMe 未返回 bot 身份，请检查 Bot Token 与外网连通性", retryable=False
+            )
         if str(app.platform_app_id).lstrip("@").casefold() != str(username).lstrip("@").casefold():
-            raise RuntimeError("Telegram bot username 与 platform_app_id 不一致")
+            raise ChannelPushError("Telegram bot username 与 platform_app_id 不一致", retryable=False)
     elif app.channel_type == "dingtalk":
         return
 
