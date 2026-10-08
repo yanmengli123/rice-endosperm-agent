@@ -479,21 +479,14 @@ export const graphImportApi = {
 // =============================================================================
 
 export const graphExportApi = {
-  // variant: 'roundtrip'（v3 往返包 zip）| 'evidence'（证据明细 xlsx）| 'projection'（Neo4j 投影全量 JSONL zip）| 'vosviewer'（VOSviewer 分析包）
+  // variant: 'roundtrip'（v3 往返包 zip）| 'evidence'（证据明细 xlsx）| 'projection'（Neo4j 投影全量 JSONL zip）
   // projection 可选 includeEvidence / includeChunkText：原文证据成员与段落全文的开关
-  // vosviewer 可选 reviewPolicy：approved_only（正式分析，默认）/ candidates_visible（探索用）
-  exportGraph: async (
-    kbId,
-    variant,
-    { includeEvidence = true, includeChunkText = true, reviewPolicy } = {}
-  ) => {
+  // VOSviewer 分析包不走本端点：经 /api/graph/vosviewer/export 以签名快照凭证出包（graphApi.exportVOSviewer）
+  exportGraph: async (kbId, variant, { includeEvidence = true, includeChunkText = true } = {}) => {
     const params = new URLSearchParams({ variant })
     if (variant === 'projection') {
       params.set('include_evidence', String(includeEvidence))
       params.set('include_chunk_text', String(includeChunkText))
-    }
-    if (variant === 'vosviewer' && reviewPolicy) {
-      params.set('review_policy', reviewPolicy)
     }
     return apiAdminGet(
       `/api/knowledge/databases/${kbId}/graph-export?${params.toString()}`,

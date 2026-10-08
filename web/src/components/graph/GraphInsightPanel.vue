@@ -33,6 +33,7 @@
             <a-radio-button value="chord">弦图</a-radio-button>
             <a-radio-button value="sankey">流向</a-radio-button>
             <a-radio-button value="heatmap">矩阵</a-radio-button>
+            <a-radio-button value="vosviewer">VOSviewer</a-radio-button>
           </a-radio-group>
         </div>
         <div
@@ -76,6 +77,16 @@
           >
         </div>
         <template v-if="sourceData">
+          <GraphVOSviewerPanel
+            v-if="activeView === 'vosviewer'"
+            :kb-id="kbId"
+            :data="sourceData"
+            :pending="isFullScope ? fullLoading : loading"
+            :truncated="effectiveTruncated"
+            @refresh="isFullScope ? ensureFullData() : emit('refresh')"
+            @access-denied="emit('access-denied')"
+          />
+          <template v-else>
           <div class="insight-summary">
             <span>{{ fullMeta.entityNodes }} 个实体 · {{ fullMeta.typeCount }} 个类型</span>
             <span>{{ fullMeta.relationEdges }} 条去重实体关系</span>
@@ -262,6 +273,7 @@
               >当前为全图口径：类型高亮仅作用于画布已加载子图，画布中不存在的类型无法高亮。</template
             >
           </div>
+          </template>
         </template>
       </div>
     </div>
@@ -276,6 +288,7 @@ import { useThemeStore } from '@/stores/theme'
 import { useUserStore } from '@/stores/user'
 import { isGraphAccessDenied } from '@/utils/graph/graphAccess'
 import { graphApi } from '@/apis/graph_api'
+import GraphVOSviewerPanel from './GraphVOSviewerPanel.vue'
 import {
   NODE_LABEL_COLORS,
   getPaletteColor,
@@ -313,7 +326,7 @@ const props = defineProps({
   reviewPolicy: { type: String, default: null }
 })
 
-const emit = defineEmits(['update:open', 'type-select', 'edge-select', 'access-denied'])
+const emit = defineEmits(['update:open', 'type-select', 'edge-select', 'access-denied', 'refresh'])
 
 const themeStore = useThemeStore()
 const userStore = useUserStore()
@@ -528,6 +541,7 @@ const onViewChange = (e) => {
 const keptNodeNames = computed(() => chordData.value.nodes.map((n) => n.name))
 
 const viewRenderable = computed(() => {
+  if (activeView.value === 'vosviewer') return false
   if (activeView.value === 'heatmap') {
     // 保留孤立类型坐标，内部关系在对角线中展示。
     return chordData.value.nodes.length > 0

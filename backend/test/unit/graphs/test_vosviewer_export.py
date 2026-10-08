@@ -1,8 +1,9 @@
 """VOSviewer 分析包构建器与签名快照契约测试。
 
 纯函数用例：无向合并、自环/悬空/结构排除、候选门禁、审核态校验、
-恒等式 fail-closed、官方 JSON 契约（links source/target、descriptions 数组）、
-zip 成员与 sha256、map.txt 字段清洗、快照签名（TTL/操作者/篡改/过期）。
+恒等式 fail-closed、官方 JSON 契约（links source_id/target_id、description
+单数、weights 命名对象、平铺 x/y 坐标）、确定性种子布局与连通分量、
+zip 成员与 sha256、启动器内容、快照签名（TTL/操作者/篡改/过期）。
 """
 
 import io
@@ -89,7 +90,8 @@ def test_undirected_merge_and_direction_preserved_in_facts():
     links = network["network"]["links"]
     assert len(links) == 1
     assert links[0]["strength"] == 3
-    assert set(links[0]) == {"source", "target", "strength"}
+    # 官方契约（1.6.21 FileData 常量池 + 官方示例双重验证）：source_id/target_id
+    assert set(links[0]) == {"source_id", "target_id", "strength"}
     facts = [json.loads(line) for line in read_member(package, "facts.jsonl").decode().splitlines()]
     predicates = {(f["predicate"], f["source_entity_id"]) for f in facts}
     assert ("activates", "eid-a") in predicates and ("inhibits", "eid-b") in predicates
@@ -137,8 +139,11 @@ def test_items_contract_and_identity_map():
     package = build(data)
     network = json.loads(read_member(package, "vosviewer.json"))
     item = network["network"]["items"][0]
-    assert set(item) == {"id", "label", "descriptions", "weights"}
-    assert isinstance(item["descriptions"], list) and isinstance(item["weights"], list)
+    # 官方契约：description 单数字符串、weights 命名对象、平铺 x/y；cluster 为连通分量编号
+    assert set(item) == {"id", "label", "description", "x", "y", "cluster", "weights"}
+    assert isinstance(item["description"], str) and isinstance(item["weights"], dict)
+    assert item["cluster"] == 1  # 两个实体相连 → 同一连通分量
+    assert set(item["weights"]) == {"Links", "Total link strength", "Distinct facts"}
     labels = [i["label"] for i in network["network"]["items"]]
     assert "基因甲" in labels  # 中文名原样保留（UTF-8）
     identity = json.loads(read_member(package, "identity-map.json"))
@@ -147,6 +152,53 @@ def test_items_contract_and_identity_map():
     assert vos_ids == [1, 2]
     link = identity["links"][0]
     assert link["triple_ids"] == ["tid-e1"]
+
+
+def test_seed_layout_deterministic_finite_and_effective():
+    # 两簇各 3 个实体，簇内相连、簇间无连线：布局应有限、唯一、且簇内平均距离小于簇间
+    nodes = [node(f"n{i}", f"N{i}", "Gene", entity_id=f"eid-{i}") for i in range(6)]
+    edges = [edge(f"e{i}", f"n{i}", f"n{(i + 1) % 3}", triple_id=f"tid-{i}") for i in range(3)]
+    edges += [edge(f"f{i}", f"n{i + 3}", f"n{3 + (i + 1) % 3}", triple_id=f"fid-{i}") for i in range(3)]
+    data = base_data(nodes, edges)
+    package = build(data)
+    network = json.loads(read_member(package, "vosviewer.json"))
+    items = {item["id"]: item for item in network["network"]["items"]}
+    positions = [(item["x"], item["y"]) for item in network["network"]["items"]]
+    assert len(set(positions)) == len(positions)  # 无坐标塌缩
+    import math
+
+    assert all(math.isfinite(x) and math.isfinite(y) for x, y in positions)
+    def distance(a, b):
+        return math.hypot(items[a]["x"] - items[b]["x"], items[a]["y"] - items[b]["y"])
+
+    cluster_a, cluster_b = [1, 2, 3], [4, 5, 6]
+    within = sum(distance(a, b) for a in cluster_a for b in cluster_a if a < b) / 3
+    across = sum(distance(a, b) for a in cluster_a for b in cluster_b) / 9
+    assert within < across  # 弹簧引力确实把相连实体放得更近
+    manifest = json.loads(read_member(package, "manifest.json"))
+    analysis = manifest["analysis"]
+    assert analysis["coordinates_included"] is True
+    assert analysis["coordinates"]["deterministic"] is True
+    assert analysis["coordinates"]["replaceable_in_viewer"] is True
+    assert analysis["clusters_included"] is True
+    assert manifest["counts"]["connected_components"] == 2
+    # 确定性：同数据两次构建全字节一致（含坐标量化）
+    assert package["content"] == build(base_data(nodes, edges))["content"]
+
+
+def test_cluster_omitted_when_components_exceed_viewer_limit():
+    # 1001 个互不相连的实体 → 1001 个连通分量，超过 VOSviewer cluster 上限 1000：
+    # 宁缺毋假——省略 cluster 字段，但 manifest 仍如实披露分量总数。
+    nodes = [node(f"n{i}", f"N{i}", "Gene", entity_id=f"eid-{i}") for i in range(1001)]
+    package = build(base_data(nodes, []))
+    network = json.loads(read_member(package, "vosviewer.json"))
+    assert all("cluster" not in item for item in network["network"]["items"])
+    manifest = json.loads(read_member(package, "manifest.json"))
+    assert manifest["analysis"]["clusters_included"] is False
+    assert manifest["analysis"]["clustering"]["omitted_reason"] == "components_exceed_viewer_limit_1000"
+    assert manifest["analysis"]["clustering"]["count"] == 1001
+    assert manifest["counts"]["connected_components"] == 1001
+    assert manifest["counts"]["isolated_entities"] == 1001
 
 
 def test_candidate_gate_requires_explicit_allow():
@@ -227,25 +279,42 @@ def test_zip_members_sha256_and_deterministic_order():
         "identity-map.json",
         "facts.jsonl",
         "network.txt",
+        "open-with-vosviewer.cmd",
         "README.txt",
         "manifest.json",
     }
     manifest = json.loads(read_member(package, "manifest.json"))
-    for name in ("vosviewer.json", "identity-map.json", "facts.jsonl", "network.txt", "README.txt"):
+    for name in (
+        "vosviewer.json",
+        "identity-map.json",
+        "facts.jsonl",
+        "network.txt",
+        "open-with-vosviewer.cmd",
+        "README.txt",
+    ):
         import hashlib
 
         assert manifest["files"][name]["sha256"] == hashlib.sha256(read_member(package, name)).hexdigest()
-    # 确定性：同数据两次构建字节一致（固定 zip 时间戳 + 排序）
+    # 确定性：同数据两次构建字节一致（固定 zip 时间戳 + 排序 + 坐标量化）
     assert (
         package["content"]
         == build(base_data([node("a", "A", "Gene"), node("b", "B", "Gene")], [edge("e1", "a", "b")]))["content"]
     )
 
 
-def test_no_map_file_without_coordinates():
-    # VOSviewer map 文件强制要求 X/Y 坐标列；快照在布局前无坐标，
-    # 导出包不得包含 map.txt（否则 File → Open map 报 "X and Y columns are missing"）。
-    # 正确入口：vosviewer.json（JSON，自动建图）或 network.txt（network file，自动建图）。
+def test_launcher_is_crlf_batch_with_json_flag():
+    package = build(base_data([node("a", "A", "Gene"), node("b", "B", "Gene")], [edge("e1", "a", "b")]))
+    raw = read_member(package, "open-with-vosviewer.cmd")
+    text = raw.decode("ascii")
+    assert "\r\n" in text and "\n" not in text.replace("\r\n", "")  # 批处理要求 CRLF
+    assert '-json "%~dp0vosviewer.json"' in text  # 手册 5.1：-json 打开（或创建）地图
+    assert "VOSVIEWER_PATH" in text  # 定位顺序：环境变量 → 默认路径 → PATH
+    assert "D:\\yuxi\\VOSviewer_1.6.21_exe\\VOSviewer.exe" in text
+
+
+def test_no_map_file_single_coordinate_authority():
+    # 不导出 map.txt：坐标的权威副本只在 vosviewer.json（items.x/y），另造一份
+    # map 文件副本只会与 JSON 漂移；打开入口统一为 -json（打开即显示地图）。
     dirty = node("a", "Gene\tA\nB", "Gene")
     data = base_data([dirty, node("b", "B", "Gene")], [edge("e1", "a", "b")])
     package = build(data)

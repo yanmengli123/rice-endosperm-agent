@@ -1,6 +1,16 @@
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from './base'
 
 export const graphApi = {
+  exportVOSviewer: async (kbId, snapshotToken, allowCandidates = false) => {
+    return apiPost(
+      '/api/graph/vosviewer/export',
+      { kb_id: kbId, snapshot_token: snapshotToken, allow_candidates: allowCandidates },
+      {},
+      true,
+      'blob'
+    )
+  },
+
   getGraphs: async () => {
     return await apiGet('/api/graph/list', {}, true)
   },

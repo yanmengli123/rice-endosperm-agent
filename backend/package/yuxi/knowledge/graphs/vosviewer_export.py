@@ -8,6 +8,7 @@ import hmac
 import html
 import io
 import json
+import math
 import time
 import zipfile
 from collections import Counter
@@ -17,6 +18,10 @@ from yuxi.utils.auth_utils import _get_jwt_secret_key
 
 FORMAT = "yuxi-vosviewer-v1"
 SNAPSHOT_TTL_SECONDS = 900
+LAYOUT_ALGORITHM = "yuxi-seeded-force-v1"
+# 斥力只对网格近邻桶内前 N 个邻居计算：聚团最坏情况的确定性预算上限。
+LAYOUT_NEIGHBOR_CAP = 48
+VOSVIEWER_MAX_CLUSTER = 1000
 
 
 class SnapshotExpiredError(ValueError):
@@ -83,6 +88,132 @@ def verify_snapshot(token: str, *, kb_id: str, actor_uid: str) -> dict:
 def _snapshot_key() -> bytes:
     # 独立签名域，分析凭证不是登录令牌，也不能用公开的 account_scope_id 签名。
     return hmac.new(_get_jwt_secret_key().encode(), FORMAT.encode(), hashlib.sha256).digest()
+
+
+def _layout_iterations(count: int) -> int:
+    return 250 if count <= 300 else (150 if count <= 1200 else 80)
+
+
+def _seed_layout(count: int, links: list[dict]) -> tuple[list[float], list[float]]:
+    """确定性种子布局：黄金角螺旋初始化 + 网格桶斥力与弹簧引力的固定步迭代。
+
+    无随机源，节点遍历按 vos_id 升序、连线按已排序对遍历，同一网络在同一
+    运行时必然得到同一坐标。坐标量化到 1e-6 并线性归一到单位圆盘。布局仅是
+    导出时的初始视图（让 -json 打开即显示地图），可在 VOSviewer 内重排替换，
+    不代表任何事实语义。
+    """
+    if count <= 0:
+        return [], []
+    if count == 1:
+        return [0.0], [0.0]
+    golden = 2.399963229728653
+    xs = [((i + 1) / count) ** 0.5 * math.cos(golden * i) for i in range(count)]
+    ys = [((i + 1) / count) ** 0.5 * math.sin(golden * i) for i in range(count)]
+    iterations = _layout_iterations(count)
+    ideal = (1.0 / count) ** 0.5
+    cell = max(ideal, 1e-6)
+    max_strength = max((link["strength"] for link in links), default=1)
+    delta_x = [0.0] * count
+    delta_y = [0.0] * count
+    for step in range(iterations):
+        temperature = 0.1 * (1.0 - step / iterations)
+        for i in range(count):
+            delta_x[i] = 0.0
+            delta_y[i] = 0.0
+        # 斥力：只对自身网格单元及半开邻域（东/北/东北/东南）内的节点生效，
+        # 保证每对节点恰好计一次；桶内按 id 升序截断到邻居预算上限。
+        buckets: dict[tuple[int, int], list[int]] = {}
+        for i in range(count):
+            buckets.setdefault((int(xs[i] / cell) + 2, int(ys[i] / cell) + 2), []).append(i)
+        for gx, gy in sorted(buckets):
+            members = buckets[(gx, gy)]
+            same_bucket = ((0, 0),)
+            half_space = ((1, 0), (0, 1), (1, 1), (1, -1))
+            for offset_x, offset_y in same_bucket + half_space:
+                if offset_x == offset_y == 0:
+                    others = members
+                else:
+                    others = buckets.get((gx + offset_x, gy + offset_y))
+                if not others:
+                    continue
+                for i in members[:LAYOUT_NEIGHBOR_CAP]:
+                    for j in others[:LAYOUT_NEIGHBOR_CAP]:
+                        if i == j or (i > j and offset_x == offset_y == 0):
+                            continue
+                        diff_x = xs[i] - xs[j]
+                        diff_y = ys[i] - ys[j]
+                        distance = math.sqrt(diff_x * diff_x + diff_y * diff_y)
+                        if distance < 1e-9:
+                            # 初始位置唯一，重合只可能来自数值塌缩：按 id 差定向推开。
+                            diff_x, diff_y, distance = 1e-9 * (i - j), 0.0, 1e-9
+                        force = ideal * ideal / distance
+                        push_x = force * diff_x / distance
+                        push_y = force * diff_y / distance
+                        delta_x[i] += push_x
+                        delta_y[i] += push_y
+                        delta_x[j] -= push_x
+                        delta_y[j] -= push_y
+        # 引力：连线弹簧，强度归一后按距离超调拉回。
+        for link in links:
+            i, j = link["source_id"] - 1, link["target_id"] - 1
+            diff_x = xs[i] - xs[j]
+            diff_y = ys[i] - ys[j]
+            distance = math.sqrt(diff_x * diff_x + diff_y * diff_y)
+            if distance < 1e-9:
+                continue
+            force = distance * distance / ideal * (link["strength"] / max_strength)
+            pull_x = force * diff_x / distance
+            pull_y = force * diff_y / distance
+            delta_x[i] -= pull_x
+            delta_y[i] -= pull_y
+            delta_x[j] += pull_x
+            delta_y[j] += pull_y
+        for i in range(count):
+            shift = math.sqrt(delta_x[i] * delta_x[i] + delta_y[i] * delta_y[i])
+            if shift > temperature:
+                scale = temperature / shift
+                delta_x[i] *= scale
+                delta_y[i] *= scale
+            xs[i] += delta_x[i]
+            ys[i] += delta_y[i]
+    mean_x = sum(xs) / count
+    mean_y = sum(ys) / count
+    spread = max(
+        math.sqrt((xs[i] - mean_x) ** 2 + (ys[i] - mean_y) ** 2) for i in range(count)
+    ) or 1.0
+    scale = 1.0 / spread
+    return (
+        [round((xs[i] - mean_x) * scale, 6) for i in range(count)],
+        [round((ys[i] - mean_y) * scale, 6) for i in range(count)],
+    )
+
+
+def _connected_components(count: int, links: list[dict]) -> tuple[list[int] | None, int]:
+    """无向连通分量编号（1..C，按分量内最小 vos_id 升序）与分量总数。
+
+    连通分量是纯结构事实而非派生聚类；分量数超过 VOSviewer 的 cluster
+    上限时编号返回 None（宁缺毋假），但总数仍如实返回供 manifest 披露。
+    """
+    parent = list(range(count + 1))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for link in links:
+        root_source, root_target = find(link["source_id"]), find(link["target_id"])
+        if root_source != root_target:
+            if root_source < root_target:
+                parent[root_target] = root_source
+            else:
+                parent[root_source] = root_target
+    roots = sorted({find(i) for i in range(1, count + 1)})
+    if len(roots) > VOSVIEWER_MAX_CLUSTER:
+        return None, len(roots)
+    numbering = {root: index for index, root in enumerate(roots, 1)}
+    return [numbering[find(i)] for i in range(1, count + 1)], len(roots)
 
 
 def build_vosviewer_package(
@@ -214,31 +345,38 @@ def build_vosviewer_package(
     }
     if counts["distinct_facts"] != counts["total_link_strength"] + self_loops + dangling:
         raise ValueError("VOSviewer 包对账失败：事实数 != 连线强度合计 + 自环 + 悬空，拒绝出包")
-    # 官方 JSON 契约：items.descriptions 为字符串数组；links 字段名为 source/target；
-    # weights 为数值数组（标签仅在 map.txt 头部承载，JSON 端按 manifest 顺序解读）
+    # 官方 JSON 契约（VOSviewer 1.6.21 FileData 二进制常量池 + 官方示例文件双重验证）：
+    # items 携带平铺 x/y 坐标（-json 打开即显示地图）、description 单数字符串、
+    # weights 命名对象；links 字段名为 source_id/target_id。坐标与 cluster 是
+    # 导出侧的确定性种子视图，可随时在查看器内重排替换，不构成事实语义。
+    xs, ys = _seed_layout(len(items), links)
+    clusters, component_count = _connected_components(len(items), links)
+    counts["connected_components"] = component_count
+    network_items = []
+    for item in items:
+        number = item["id"]
+        entry = {
+            "id": number,
+            "label": item["label"],
+            "description": item["description"],
+            "x": xs[number - 1],
+            "y": ys[number - 1],
+            "weights": item["weights"],
+        }
+        if clusters is not None:
+            entry["cluster"] = clusters[number - 1]
+        network_items.append(entry)
     network = {
         "network": {
-            "items": [
-                {
-                    "id": item["id"],
-                    "label": item["label"],
-                    "descriptions": [item["description"]],
-                    "weights": [
-                        item["weights"]["Links"],
-                        item["weights"]["Total link strength"],
-                        item["weights"]["Distinct facts"],
-                    ],
-                }
-                for item in items
-            ],
-            "links": [
-                {"source": link["source_id"], "target": link["target_id"], "strength": link["strength"]}
-                for link in links
-            ],
+            "items": network_items,
+            "links": links,
         },
         "info": {
             "title": "知识图谱实体关联分析",
-            "description": "无向连线强度为不同三元组数量；方向、谓词与审核状态见 facts.jsonl。聚类与密度属于派生分析。",
+            "description": (
+                "无向连线强度为不同三元组数量；方向、谓词与审核状态见 facts.jsonl。"
+                "坐标与连通分量为导出侧种子视图，可在 VOSviewer 内重排。"
+            ),
         },
     }
     identity = {
@@ -248,30 +386,67 @@ def build_vosviewer_package(
             for (source, target), ids in sorted(pair_facts.items())
         ],
     }
+    launcher = r"""@echo off
+rem Yuxi VOSviewer package launcher - opens vosviewer.json directly as a map.
+rem Lookup order: VOSVIEWER_PATH env var, default install path, system PATH.
+setlocal
+set "EXE="
+set "DEFAULT_EXE=D:\yuxi\VOSviewer_1.6.21_exe\VOSviewer.exe"
+if defined VOSVIEWER_PATH set "EXE=%VOSVIEWER_PATH%"
+if not defined EXE if exist "%DEFAULT_EXE%" set "EXE=%DEFAULT_EXE%"
+if not defined EXE (
+  where VOSviewer.exe >nul 2>nul
+  if not errorlevel 1 set "EXE=VOSviewer.exe"
+)
+if not defined EXE (
+  echo VOSviewer.exe not found.
+  echo Set VOSVIEWER_PATH to the full path of VOSviewer.exe and run this file again.
+  pause
+  exit /b 1
+)
+start "" "%EXE%" -json "%~dp0vosviewer.json"
+endlocal
+""".replace("\n", "\r\n").encode("ascii")
     members = {
         "vosviewer.json": _json(network),
         "identity-map.json": _json(identity),
         "facts.jsonl": b"".join(
             _json(fact) + b"\n" for fact in sorted(facts.values(), key=lambda row: row["triple_id"])
         ),
-        # 注意：不导出 map.txt——VOSviewer map 文件强制要求 X/Y 坐标列，而快照
-        # 在布局发生前没有坐标；伪造坐标会让所有点塌缩在原点。正确入口是
-        # vosviewer.json（JSON，自动建图）或 network.txt（VOSviewer 自动建图布局）。
+        # 不导出 map.txt：map 文件强制要求 X/Y 坐标列，独立维护一份坐标副本只会
+        # 与 vosviewer.json 漂移；地图入口统一是 vosviewer.json（已含种子坐标，
+        # -json 打开即显示地图）。
         "network.txt": "".join(
             f"{link['source_id']}\t{link['target_id']}\t{link['strength']}\n" for link in links
         ).encode("utf-8"),
+        "open-with-vosviewer.cmd": launcher,
         "README.txt": (
-            "打开方式：VOSviewer File > Open，文件类型选 VOSviewer JSON file，打开 vosviewer.json；\n"
-            "或选 VOSviewer network file 打开 network.txt——VOSviewer 会自动创建地图并运行布局。\n"
-            "请勿先打开无坐标的 map 文件（本包不含 map.txt，坐标由 VOSviewer 布局生成）。\n"
-            "首次分析保留全部连通分量；孤立实体、自环及排除事实以 manifest.json 和 facts.jsonl 为准。\n"
-            "请记录归一化、分辨率、随机种子，并用 Save 保存坐标与聚类；结果仅用于派生分析。\n"
-            "私有图谱保持本地或企业内网使用；VOSviewer Share 会上传地图并公开分享文件。\n"
+            "语析知识图谱 VOSviewer 分析包\n"
+            "================================\n"
+            "\n"
+            "打开方式（任选其一，均打开即显示地图——vosviewer.json 已含确定性种子坐标）：\n"
+            "1. 双击 open-with-vosviewer.cmd：自动定位 VOSviewer（优先 VOSVIEWER_PATH 环境变量，\n"
+            "   其次本机默认安装路径，最后系统 PATH），以 -json 参数打开 vosviewer.json。\n"
+            "2. 命令行：VOSviewer.exe -json <本目录>\\vosviewer.json\n"
+            "3. VOSviewer 内 File > Open，文件类型选 VOSviewer JSON files，选择 vosviewer.json。\n"
+            "\n"
+            "坐标与聚类说明：x/y 为导出时按固定规则计算的种子布局（算法与参数见 manifest.json\n"
+            "的 analysis 节），仅作初始视图；如需 VOSviewer 官方布局，在查看器内重排并另存。\n"
+            "cluster 为无向连通分量编号（纯结构事实）；分量数超过查看器上限时省略 cluster。\n"
+            "\n"
+            "口径与审计：\n"
+            "- 连线为无向投影，强度 = 两实体间不同三元组数；方向、谓词、审核状态与证据定位\n"
+            "  以 facts.jsonl 为准（含 triple_id，可在语析内回查证据）。\n"
+            "- 实体身份对照见 identity-map.json；孤立实体、自环与排除事实以 manifest.json 为准。\n"
+            "- 本包为派生分析（DERIVED_ANALYSIS_ONLY）：聚类、密度、坐标结论均不写回知识库，\n"
+            "  也不构成事实证据。\n"
+            "\n"
+            "安全提示：私有图谱保持本地或企业内网使用；VOSviewer 的 Share 会上传地图并公开分享。\n"
         ).encode(),
     }
     manifest = {
         "format": FORMAT,
-        "adapter_version": "1",
+        "adapter_version": "2",
         "target_version": "1.6.21",
         "kb_id": kb_id,
         "snapshot_id": snapshot["sha256"],
@@ -289,8 +464,24 @@ def build_vosviewer_package(
         "counts": counts,
         "excluded_facts": exclusions,
         "analysis": {
-            "coordinates_included": False,
-            "clusters_included": False,
+            "coordinates_included": True,
+            "coordinates": {
+                "algorithm": LAYOUT_ALGORITHM,
+                "deterministic": True,
+                "iterations": _layout_iterations(len(items)),
+                "neighbor_cap": LAYOUT_NEIGHBOR_CAP,
+                "quantization": 0.000001,
+                "replaceable_in_viewer": True,
+                "note": "种子布局仅作初始视图；查看器内重排后的坐标不回写语析",
+            },
+            "clusters_included": clusters is not None,
+            "clustering": {
+                "algorithm": "connected_components",
+                "count": component_count,
+                "omitted_reason": (
+                    None if clusters is not None else "components_exceed_viewer_limit_1000"
+                ),
+            },
             "random_seeds": None,
             "parameters": "record_in_viewer_when_analysis_is_saved",
         },

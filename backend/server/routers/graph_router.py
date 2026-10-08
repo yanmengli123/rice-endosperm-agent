@@ -22,6 +22,13 @@ from yuxi.knowledge.graphs.review_overlay import (
     REVIEW_STATUSES,
     compose_reason,
 )
+from yuxi.knowledge.graphs.vosviewer_export import (
+    SnapshotExpiredError,
+    build_vosviewer_package,
+    graph_fingerprint,
+    issue_snapshot,
+    verify_snapshot,
+)
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.repositories.knowledge_graph_review_repository import (
@@ -31,6 +38,8 @@ from yuxi.repositories.knowledge_graph_review_repository import (
     ReviewTargetReadOnlyError,
 )
 from yuxi.services.task_service import TaskContext, tasker
+from yuxi.services.principal import resolve_tenant_id
+from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.datetime_utils import utc_now
 from yuxi.utils.logging_config import logger
@@ -159,12 +168,105 @@ async def get_subgraph(
                 raise_on_error=True,
                 dedupe_facts=True,
             )
+        result_data.setdefault("meta", {})["vosviewer_snapshot"] = issue_snapshot(
+            result_data,
+            kb_id=kb_id,
+            actor_uid=str(current_user.uid),
+            query={
+                "node_label": node_label,
+                "max_depth": max_depth,
+                "max_nodes": max_nodes,
+                "exclude_chunk": exclude_chunk,
+                "full_graph": full_graph,
+                "review_policy": policy,
+            },
+        )
         return {"success": True, "data": result_data}
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Failed to get subgraph: {e}")
         raise HTTPException(status_code=500, detail="Graph query failed; please retry")
+
+
+class VOSviewerExportBody(BaseModel):
+    kb_id: str = Field(min_length=1, max_length=128)
+    snapshot_token: str = Field(min_length=1, max_length=16384)
+    allow_candidates: bool = False
+
+
+@graph.post("/vosviewer/export")
+async def export_vosviewer(body: VOSviewerExportBody, current_user: User = Depends(get_admin_user)):
+    """重新授权并复核已加载快照；不接受客户端提供的节点、关系或租户身份。"""
+    try:
+        snapshot = verify_snapshot(body.snapshot_token, kb_id=body.kb_id, actor_uid=str(current_user.uid))
+    except SnapshotExpiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    query = snapshot["query"]
+    service = await _get_graph_service(body.kb_id, review_policy=query["review_policy"])
+    if query["full_graph"]:
+        data = await service.query_full_graph(exclude_chunk=query["exclude_chunk"], raise_on_error=True)
+    else:
+        data = await service.query_nodes(
+            keyword=query["node_label"],
+            max_depth=query["max_depth"],
+            max_nodes=query["max_nodes"],
+            exclude_chunk=query["exclude_chunk"],
+            raise_on_error=True,
+            dedupe_facts=True,
+        )
+    if graph_fingerprint(data) != snapshot["sha256"]:
+        raise HTTPException(status_code=409, detail="图谱内容或审核范围已变化，请刷新图谱后重新导出")
+    try:
+        package = build_vosviewer_package(
+            kb_id=body.kb_id,
+            data=data,
+            snapshot=snapshot,
+            exported_by=str(current_user.uid),
+            allow_candidates=body.allow_candidates,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    async with pg_manager.get_async_session_context() as session:
+        tenant_id = await resolve_tenant_id(session, str(current_user.uid))
+    await KnowledgeGraphReviewRepository().append_audit(
+        kb_id=body.kb_id,
+        tenant_id=tenant_id,
+        target_kind="GRAPH",
+        target_id=snapshot["sha256"],
+        action="VOSVIEWER_EXPORT",
+        actor_uid=str(current_user.uid),
+        after_snapshot={
+            "snapshot_id": snapshot["sha256"],
+            "counts": package["manifest"]["counts"],
+            "review_policy": package["manifest"]["review_policy"],
+            "truncated": package["manifest"]["truncated"],
+        },
+    )
+    counts = package["manifest"]["counts"]
+    summary_tokens = "; ".join(
+        f"{key}={counts[source]}"
+        for key, source in (
+            ("entities", "entities"),
+            ("facts", "distinct_facts"),
+            ("links", "links"),
+            ("isolated", "isolated_entities"),
+            ("self_loops", "self_loop_facts"),
+        )
+    )
+    if package["manifest"]["allow_candidates"]:
+        summary_tokens += "; exploration=true"
+    return Response(
+        content=package["content"],
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{package["filename"]}"',
+            "X-Export-Evidence-Summary": summary_tokens,
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @graph.get("/settings")
