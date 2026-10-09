@@ -21,12 +21,12 @@
 ## 用户使用（BrowserSkill，本机默认）
 
 1. 安装 BrowserSkill Chrome 扩展和同版本 `bsk` CLI。扩展弹窗的地址应为 `Local · ws://127.0.0.1:52800`。
-2. 首次安装执行 `powershell -ExecutionPolicy Bypass -File scripts/install-browser-skill-tasks.ps1`。脚本注册**两个独立**登录启动任务 `Yuxi BrowserSkill Daemon`（`bsk daemon`，52800）与 `Yuxi BrowserSkill Bridge`（鉴权桥，52801），动作直接指向可执行文件；每分钟恢复触发器配合 `IgnoreNew`，健康时不重复启动，被外部清理终止（包括 `0xC000013A`）后最多 1 分钟自动拉起。临时前台联调才使用 `scripts/start-browser-skill-bridge.ps1`。
+2. 首次安装执行 `powershell -ExecutionPolicy Bypass -File scripts/install-browser-skill-tasks.ps1`。脚本注册**两个独立**登录启动任务 `Yuxi BrowserSkill Daemon`（`bsk daemon`，52800）与 `Yuxi BrowserSkill Bridge`（鉴权桥，52801）；每分钟恢复触发器配合 `IgnoreNew`，健康时不重复启动，被外部清理终止（包括 `0xC000013A`）后最多 1 分钟自动拉起。两个任务都经 `pythonw` 无窗口运行：daemon 由 `scripts/bsk_daemon_launcher.py` 以 `CREATE_NO_WINDOW` 派生（stdout/stderr 追加到 `tmp/browser-skill-bridge/daemon.log`），桥内所有 `bsk` 子进程同样禁止控制台分配——**桌面无任何常驻/闪现终端窗口**。临时前台联调才使用 `scripts/start-browser-skill-bridge.ps1`。
 3. 用 `bsk doctor --json` 验证 daemon、扩展连接和协议兼容全部通过。
 4. 启动语析。`docker-compose.override.yml` 给 api/worker 配置桥接地址并只读挂载密钥；工具箱会显示“BrowserSkill 已连接”，不再要求二次配对。
 5. 在智能推理输入框打开“本机浏览器”开关后提交任务。开关按 run 冻结；未开启时模型看不到浏览器工具。
 
-首次调用时 BrowserSkill 创建独立 Agent Window。登录或验证码由用户在该窗口完成；`browser_get_status` 返回任务标签和可见的用户标签，其他工具可用 `tab_id` 定向操作。
+首次调用时 BrowserSkill 创建独立 Agent Window（bsk 无最小化/无头模式，无法完全隐藏；桥以 `--no-focus` + 小窗创建，默认 420×280，经 `BROWSER_SKILL_WINDOW_WIDTH`/`BROWSER_SKILL_WINDOW_HEIGHT` 环境变量可调，范围 100–7680——窗口越小截图/预览视口越小，按需权衡）。登录或验证码由用户在该窗口完成；`browser_get_status` 返回任务标签和可见的用户标签，其他工具可用 `tab_id` 定向操作。实时观察任务执行请用 Web 端「浏览器连接 → 实时预览」。
 
 ### 项目自带扩展（远程/WSS 兼容模式）
 
@@ -34,7 +34,7 @@
 2. **配对**：Web 端「工具箱 → 浏览器连接」生成**一次性配对链接**（5 分钟有效、单次使用），在扩展「设置页 → 远程连接」粘贴保存。同一账号只保留一个活跃设备，新设备激活自动替换旧设备（旧令牌立即失效）。
 3. **使用**：在智能推理输入框打开「本机浏览器」开关后提交任务。**配对成功不代表每轮自动启用**——开关按轮生效，随 run 创建冻结；未开启时模型完全看不到浏览器工具。
 
-首次调用浏览器工具时，扩展会创建独立的**任务窗口**；命令只作用于任务窗口内的标签页，或你在扩展弹窗里显式「借出」的标签页。智能体通过 `browser_get_status` 发现借出标签的 `tab_id`，再定向读取、导航、点击、输入或截屏。登录/验证码请自行在浏览器中完成后继续。
+首次调用浏览器工具时，扩展会创建独立的**任务窗口**（最小化、不抢焦点，截图时临时恢复）；命令只作用于任务窗口内的标签页，或你在扩展弹窗里显式「借出」的标签页。智能体通过 `browser_get_status` 发现借出标签的 `tab_id`，再定向读取、导航、点击、输入或截屏。登录/验证码请自行在浏览器中完成后继续。
 
 ### 错误码（工具结果内结构化返回）
 

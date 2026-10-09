@@ -286,8 +286,10 @@ async function opNavigate(payload) {
 
   let tab;
   if (!windowAlive) {
-    // 无任务窗口:navigate 负责创建(增量更新,保留借出集合)
-    const win = await chrome.windows.create({ url, focused: true });
+    // 无任务窗口:navigate 负责创建(增量更新,保留借出集合)。
+    // 最小化 + 不抢焦点:任务窗口常驻后台,不弹出打扰用户;
+    // 截图路径(opScreenshot)会按需临时恢复窗口。
+    const win = await chrome.windows.create({ url, focused: false, state: "minimized" });
     tab = win.tabs && win.tabs[0] ? win.tabs[0] : null;
     if (!tab) {
       const tabs = await chrome.tabs.query({ windowId: win.id });

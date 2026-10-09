@@ -30,6 +30,28 @@ class BridgeError(Exception):
         self.status = status
 
 
+# Agent Window 目标尺寸:bsk 只接受 100..=7680 且 --width/--height 必须成对出现。
+# 默认小窗(不抢焦点)把对桌面的干扰降到最低;需要更大预览/截图视口时经
+# BROWSER_SKILL_WINDOW_WIDTH / BROWSER_SKILL_WINDOW_HEIGHT 环境变量覆盖。
+_BSK_WINDOW_MIN = 100
+_BSK_WINDOW_MAX = 7680
+_BSK_WINDOW_DEFAULT_WIDTH = 420
+_BSK_WINDOW_DEFAULT_HEIGHT = 280
+
+
+def _session_window_args() -> list[str]:
+    def _read(name: str, default: int) -> int:
+        try:
+            value = int(os.getenv(name, "") or default)
+        except ValueError:
+            value = default
+        return max(_BSK_WINDOW_MIN, min(_BSK_WINDOW_MAX, value))
+
+    width = _read("BROWSER_SKILL_WINDOW_WIDTH", _BSK_WINDOW_DEFAULT_WIDTH)
+    height = _read("BROWSER_SKILL_WINDOW_HEIGHT", _BSK_WINDOW_DEFAULT_HEIGHT)
+    return ["--width", str(width), "--height", str(height)]
+
+
 class BrowserSkillRuntime:
     def __init__(self, bsk_path: Path, *, session_ttl_s: int = 900):
         self.bsk_path = bsk_path
@@ -171,8 +193,20 @@ class BrowserSkillRuntime:
             if existing:
                 return existing
             name = f"Yuxi {run_key[:32]}"
+            # Agent Window 无法完全隐藏(bsk 无最小化/无头参数),只能以小窗 +
+            # 不抢焦点(--no-focus)把干扰降到最低;尺寸经环境变量可调。
             result = self._as_dict(
-                self._run(["session", "start", "--no-focus", "--name", name, "--json"])
+                self._run(
+                    [
+                        "session",
+                        "start",
+                        "--no-focus",
+                        "--name",
+                        name,
+                        *_session_window_args(),
+                        "--json",
+                    ]
+                )
             )
             session_id = str(result.get("session_id") or "")
             if not session_id:
@@ -234,6 +268,9 @@ class BrowserSkillRuntime:
 
     def _run(self, args: list[str], *, timeout: float = 35) -> Any:
         env = {**os.environ, "BSK_AUTO_START": "0"}
+        # pythonw 无控制台;不禁止子进程控制台分配的话,每次 bsk 调用都会
+        # 闪现一个终端窗口(Windows Terminal 新标签),且个别计划任务环境下
+        # 控制台分配失败会让 bsk 无输出地立刻退出。输出走管道,不需要控制台。
         try:
             completed = subprocess.run(
                 [str(self.bsk_path), *args],
@@ -243,6 +280,7 @@ class BrowserSkillRuntime:
                 errors="replace",
                 env=env,
                 timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except subprocess.TimeoutExpired as error:
             raise BridgeError(

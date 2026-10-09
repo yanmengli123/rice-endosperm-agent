@@ -21,15 +21,20 @@ if ($Uninstall) {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $workspaceRoot = Split-Path -Parent $repoRoot
 $bridgeScript = Join-Path $PSScriptRoot "browser_skill_bridge.py"
-$secretFile = Join-Path $workspaceRoot "tmp\browser-skill-bridge\secret"
+$daemonLauncher = Join-Path $PSScriptRoot "bsk_daemon_launcher.py"
+$bridgeStateDir = Join-Path $workspaceRoot "tmp\browser-skill-bridge"
+$secretFile = Join-Path $bridgeStateDir "secret"
+# 无窗口守护进程的 stdout/stderr 落盘:CREATE_NO_WINDOW 下不重定向就永远丢失。
+$daemonLogFile = Join-Path $bridgeStateDir "daemon.log"
 $bsk = Join-Path $env:USERPROFILE ".local\bin\bsk.exe"
 $pythonw = (Get-Command pythonw.exe -ErrorAction Stop).Source
 
-foreach ($path in @($bsk, $pythonw, $bridgeScript)) {
+foreach ($path in @($bsk, $pythonw, $bridgeScript, $daemonLauncher)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required BrowserSkill component not found: $path"
     }
 }
+New-Item -ItemType Directory -Force -Path $bridgeStateDir | Out-Null
 
 $user = "$env:USERDOMAIN\$env:USERNAME"
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
@@ -39,11 +44,13 @@ $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 # the long-running task is healthy and starts it again after an external kill.
 # RepetitionDuration must be explicit: on older Windows/PowerShell the default
 # repetition window is 1 hour, after which self-healing silently stops.
+# 注意:[TimeSpan]::MaxValue 会序列化成 P99999999DT23H59M59S,超出任务计划
+# XML 取值范围,Register-ScheduledTask 直接拒绝注册;用 10 年近似「无限」。
 $recoveryTrigger = New-ScheduledTaskTrigger `
     -Once `
     -At (Get-Date).AddSeconds(10) `
     -RepetitionInterval (New-TimeSpan -Minutes 1) `
-    -RepetitionDuration ([TimeSpan]::MaxValue)
+    -RepetitionDuration ([TimeSpan]::FromDays(3650))
 $triggers = @($logonTrigger, $recoveryTrigger)
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
@@ -55,7 +62,11 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -MultipleInstances IgnoreNew
 
-$daemonAction = New-ScheduledTaskAction -Execute $bsk -Argument "daemon start --foreground"
+# bsk daemon start 只能前台运行;直接执行 bsk.exe 会在 InteractiveToken 会话弹
+# 出常驻控制台窗口,且被自恢复触发器反复拉起。改经 pythonw + CREATE_NO_WINDOW
+# 启动器隐藏运行,退出码原样透传,自恢复语义不变。
+$daemonArguments = "`"$daemonLauncher`" --bsk `"$bsk`" --log `"$daemonLogFile`" -- --foreground"
+$daemonAction = New-ScheduledTaskAction -Execute $pythonw -Argument $daemonArguments
 Register-ScheduledTask `
     -TaskName $daemonTask `
     -Action $daemonAction `
