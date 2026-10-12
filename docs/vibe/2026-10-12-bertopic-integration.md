@@ -56,8 +56,10 @@ uv run --no-sync --group test pytest test/unit/literature/ \
 
 - 结果：**555 passed, 1 skipped, 2 warnings**（此前轮次的 533/614 为不同目录组合口径，一律以本口径为准）；
 - 1 skipped：`test_risbz1_sample.py`（本地 PDF fixture，与 BERTopic 无关的既有可选项）；
-- 2 warnings：`knowledge/parser/unified.py:19` langchain-community 弃用告警——第三方依赖
-  sunset 提示，非本批代码，迁移到独立集成包属独立依赖治理事项，不在本批范围；
+- 2 warnings（均为第三方 sunset 提示，非本批代码，列待办 #4/#5）：
+  ① `knowledge/parser/unified.py:19` DeprecationWarning——langchain-community 弃用；
+  ② `fastapi/testclient.py:1` StarletteDeprecationWarning（由 test_journals_import 的
+  TestClient 触发）——starlette 测试客户端 httpx→httpx2 迁移提示，测试基建层；
 - topic 引擎 e2e（topic-worker 容器，真实 BERTopic 0.17.4 CPU 执行）：1 passed；
   legacy e2e 1 skipped（需 LITERATURE_TOPIC_SAMPLES 真实样本，与常绿单测互补）；
 - 前端：eslint 零告警；生产构建通过（最近一次 13.7s）。
@@ -68,3 +70,4 @@ uv run --no-sync --group test pytest test/unit/literature/ \
 2. 真实规模（22k+）租约恢复演练。
 3. legacy ZIP 基准文件就位后补 e2e skipped 项。
 4. langchain-community 弃用迁移（独立依赖治理事项）。
+5. starlette.testclient 的 httpx→httpx2 迁移（测试基建层）。
