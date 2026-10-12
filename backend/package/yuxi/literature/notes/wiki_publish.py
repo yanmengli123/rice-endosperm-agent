@@ -9,8 +9,8 @@ from typing import Any
 
 from sqlalchemy import select
 
-from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.literature.provenance import current_job
+from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.services.wiki_service import activate_derived_navigation_publication
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager

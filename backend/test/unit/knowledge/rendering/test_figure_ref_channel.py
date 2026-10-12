@@ -78,14 +78,17 @@ def test_iter_figure_labels_multi_mention_shapes():
         "figure 4",
         "figure 2",
         "figure 2",
+        "figure 2",
+        "figure 2",
         "table 1",
+        "figure 3",
         "figure 3",
         "table 2",
         "figure s4",
         "figure ed2",
     ]
     panels = {item["raw"]: item["panel"] for item in labels}
-    assert panels["图3A"] == "a"  # panel 字母与绑定键分离（P3 panel 联动用）
+    assert panels["Figure 3A"] == "a"  # panel 字母与绑定键分离（P3 panel 联动用）
 
 
 def test_verified_supplementary_range_expands_and_signs_every_member():

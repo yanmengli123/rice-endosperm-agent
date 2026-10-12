@@ -51,7 +51,17 @@ def test_registry_snapshot_exposes_both_categories():
     assert snapshot["literature_notes"]["trust_class"] == "DERIVED"
     assert snapshot["literature_notes"]["authority_class"] == "NAVIGATION_ONLY"
     # 快照锁面：登记条目集合即产品目录，增删都必须是有意为之
-    assert set(snapshot) == {"milvus", "dify", "notion", "llmwiki", "literature_notes"}
+    assert set(snapshot) == {"milvus", "dify", "notion", "llmwiki", "literature_notes", "literature_topics"}
+
+
+def test_bibliometric_topics_are_navigation_only_and_cannot_become_evidence():
+    spec = get_product_spec("literature_topics")
+    assert spec.category == "derived_product"
+    assert spec.authority_class == "NAVIGATION_ONLY"
+    assert not spec.capabilities.supports_upload
+    assert not spec.capabilities.supports_raw_evidence
+    with pytest.raises(AuthorityGateError, match="cannot enter the evidence channel"):
+        to_evidence_envelope({"evidence_id": "topic_1", "content": "a cluster", "kb_type": "literature_topics"})
 
 
 def test_require_capability_rejects_upload_for_llmwiki():

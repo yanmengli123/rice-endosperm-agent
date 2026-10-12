@@ -36,6 +36,15 @@ class _RecordingConnection:
             return _EmptySelectResult()
         return None
 
+    async def run_sync(self, fn, *args, **kwargs):
+        """版本化迁移（如 0021/0080 建表）用 await conn.run_sync(fn) 执行 DDL。
+
+        替身不建真表：只登记该调用（迁移不消费返回值；表已存在的语义由
+        checkfirst/create_all 在真实库上保证），语句级断言走 statements 列表。
+        """
+        self.statements.append(f"__run_sync__:{getattr(fn, '__qualname__', 'callable')}")
+        return None
+
 
 class _RecordingBegin:
     def __init__(self, connection: _RecordingConnection):
@@ -54,6 +63,29 @@ class _RecordingEngine:
 
     def begin(self):
         return _RecordingBegin(self.connection)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation", ["create_tables", "create_business_tables", "ensure_knowledge_schema", "ensure_business_schema"]
+)
+async def test_all_startup_ddl_uses_the_same_transaction_lock(operation):
+    manager = PostgresManager()
+    original_initialized, original_engine = manager._initialized, manager.async_engine
+    connection = _RecordingConnection()
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await getattr(manager, operation)()
+    finally:
+        manager._initialized, manager.async_engine = original_initialized, original_engine
+
+    lock = "SELECT pg_advisory_xact_lock(hashtext('yuxi-schema-migrations'))"
+    assert connection.statements[0] == lock
+    assert connection.statements.count(lock) == (2 if operation == "ensure_business_schema" else 1)
+    if operation == "ensure_business_schema":
+        last_lock = max(i for i, value in enumerate(connection.statements) if value == lock)
+        assert last_lock < connection.statements.index("SELECT count(*) FROM api_keys WHERE user_id IS NULL")
 
 
 class _RecordingSession:

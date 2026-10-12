@@ -101,9 +101,7 @@ def test_sse_chunk_keys_within_whitelist() -> None:
 
 def test_sse_fixture_contains_decoupled_v4_table_frame() -> None:
     """跨端语料必须真实覆盖 citation 缺席、figure_refs/tables 独立发布。"""
-    chunks = [
-        (frame.get("data") or {}).get("payload", {}).get("chunk", {}) for frame in _load_frames()
-    ]
+    chunks = [(frame.get("data") or {}).get("payload", {}).get("chunk", {}) for frame in _load_frames()]
     assert any(
         chunk.get("status") == "citation_ready"
         and "citation" not in chunk

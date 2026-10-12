@@ -98,9 +98,7 @@ def test_service_does_not_pass_full_url_as_object_name() -> None:
     asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
         minio.adownload_file(markdown_bucket, markdown_object)
     )
-    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        minio.adownload_file(pdf_bucket, pdf_object)
-    )
+    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(minio.adownload_file(pdf_bucket, pdf_object))
     assert minio.downloads == [
         (service_module.RENDER_BUCKET, "tenants/1/documents/" + "d" * 64 + "/mineru/full.md"),
         (service_module.RENDER_BUCKET, "tenants/1/documents/" + "d" * 64 + "/original.pdf"),

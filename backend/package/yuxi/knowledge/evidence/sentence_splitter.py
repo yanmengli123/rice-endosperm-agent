@@ -13,10 +13,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-SPLITTER_VERSION = "1.4"
+SPLITTER_VERSION = "2.1"
 
 # 句边界：全角 。！？ 无歧义直接切；ASCII .!? 需后随空白/闭合引号括号或文末
 # （小数 "7.0"、URL 因后随非空白不会被切）。1.1 起纳入 ASCII 句号。
@@ -40,6 +40,7 @@ _CAPTION_ANY = re.compile(
 )
 # 表格行：以管线或首列单元开头的单行（如 "| OsMYB73 | 115-164 |"）
 _TABLE_ROW = re.compile(r"^\s*\|?\s*[^\s|]+\s*\|")
+_PANEL_PREFIX = re.compile(r"^(?:\([a-zA-Z]\)\s*)+")
 _DOI_IN_SENTENCE = re.compile(r"doi[:：]?\s*\S+", re.IGNORECASE)
 # 句内缩写与人名首字母（"Fig. 5" / "et al. (2020)" / "J. Liu"）：其后的点不是句界
 _ABBREVIATION_DOT = re.compile(
@@ -58,6 +59,11 @@ class EvidenceUnit:
     row_key: str | None = None
     sentence_index: int = 0
     anchor_id: str | None = None
+    source_start: int | None = None
+    source_end: int | None = None
+    offset_scope: str = "anchor"
+    ambiguous_anchor_ids: tuple[str, ...] = ()
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 def split_evidence_units(
@@ -77,8 +83,16 @@ def split_evidence_units(
     seen_quotes: set[str] = set()
     index = 0
     for anchor in anchors:
-        quote = str(getattr(anchor, "quote", "") or "").strip()
-        if not quote or quote in seen_quotes:
+        original_quote = str(getattr(anchor, "quote", "") or "")
+        leading = len(original_quote) - len(original_quote.lstrip())
+        quote = original_quote.strip()
+        kind, _, _ = _classify_quote(quote)
+        anchor_type = str(getattr(anchor, "anchor_type", ""))
+        panel_prefix = _PANEL_PREFIX.match(quote) if anchor_type in {"image", "figure", "chart"} else None
+        caption_after_panel = bool(panel_prefix and _CAPTION_START.match(quote[panel_prefix.end() :]))
+        panel_only = bool(panel_prefix and panel_prefix.end() == len(quote))
+        caption_in_footer = anchor_type == "footer" and kind == "caption" and len(quote.split()) >= 4
+        if not quote or (anchor_type in {"header", "footer", "page_number", "aside_text"} and not caption_in_footer):
             continue
         anchor_id = str(getattr(anchor, "anchor_id", "") or "")
         # Some PDF extractors concatenate consecutive supplementary captions
@@ -86,11 +100,20 @@ def split_evidence_units(
         # that blob as S5 poisons both identities.  Split only when the quote
         # starts with a caption and another label begins after a sentence
         # boundary; every child retains the same physical anchor/page lineage.
-        parts = split_caption_sequence(quote)
+        if caption_after_panel:
+            parts = [quote[: panel_prefix.end()].strip(), *split_caption_sequence(quote[panel_prefix.end() :])]
+        else:
+            parts = split_sentences(quote) if kind == "sentence" else split_caption_sequence(quote)
         seen_quotes.add(quote)
+        cursor = 0
         for part in parts:
+            part = part.strip()
+            offset = quote.index(part, cursor)
+            cursor = offset + len(part)
             seen_quotes.add(part)
             evidence_type, container_label, row_key = _classify_quote(part)
+            if panel_only or caption_after_panel and offset == 0:
+                evidence_type = "caption"
             units.append(
                 EvidenceUnit(
                     evidence_type=evidence_type,
@@ -99,12 +122,23 @@ def split_evidence_units(
                     row_key=row_key,
                     sentence_index=index,
                     anchor_id=anchor_id,
+                    source_start=offset + leading,
+                    source_end=cursor + leading,
                 )
             )
             index += 1
 
     body_units = _split_body_lines(markdown_body or "", seen_quotes)
     for unit in body_units:
+        # Markdown is a display projection. A sentence already represented by
+        # its source occurrence must not create another unbound copy.
+        matches = [a for a in anchors if unit[1] in str(getattr(a, "quote", "") or "")]
+        if matches and any(u.quote == unit[1] and u.anchor_id for u in units):
+            continue
+        matched = matches[0] if len(matches) == 1 else None
+        source_quote = str(getattr(matched, "quote", "") or "")
+        occurrences = list(re.finditer(re.escape(unit[1]), source_quote)) if matched else []
+        offset = occurrences[0].start() if len(occurrences) == 1 else None
         units.append(
             EvidenceUnit(
                 evidence_type=unit[0],
@@ -112,7 +146,11 @@ def split_evidence_units(
                 container_label=unit[2],
                 row_key=unit[3],
                 sentence_index=index,
-                anchor_id=None,
+                anchor_id=str(matched.anchor_id) if matched and offset is not None else None,
+                source_start=offset,
+                source_end=offset + len(unit[1]) if offset is not None else None,
+                offset_scope="anchor" if offset is not None else "unbound",
+                ambiguous_anchor_ids=tuple(str(a.anchor_id) for a in matches) if offset is None else (),
             )
         )
         index += 1

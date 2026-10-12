@@ -39,9 +39,7 @@ class _AsyncSessionContext:
 
 
 def _kb(kb_id: str, *, contract: str = "pdf_evidence", tenant: int = TENANT) -> KnowledgeBase:
-    return KnowledgeBase(
-        kb_id=kb_id, tenant_id=tenant, name=kb_id, kb_type="pdf", contract_key=contract
-    )
+    return KnowledgeBase(kb_id=kb_id, tenant_id=tenant, name=kb_id, kb_type="pdf", contract_key=contract)
 
 
 async def _revision(
@@ -101,9 +99,7 @@ async def env(monkeypatch):
         session.add(_kb("kb-lit"))
         session.add(_kb("kb-other", contract="markdown_notes"))
         await session.commit()
-        monkeypatch.setattr(
-            readops.pg_manager, "get_async_session_context", lambda: _AsyncSessionContext(session)
-        )
+        monkeypatch.setattr(readops.pg_manager, "get_async_session_context", lambda: _AsyncSessionContext(session))
         yield session
     await engine.dispose()
 

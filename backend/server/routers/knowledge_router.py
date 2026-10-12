@@ -78,7 +78,9 @@ from yuxi.services.scientific_pdf_ingest_service import (
     create_or_reuse_scientific_pdf_ingest,
     get_scientific_pdf_index_lineage,
     get_scientific_pdf_status,
+    list_pdf_evidence_upgrade_candidates,
     rebuild_figure_index_for_file,
+    schedule_pdf_evidence_upgrades,
 )
 from yuxi.services.knowledge_asset_service import (
     KnowledgeAssetError,
@@ -156,6 +158,19 @@ class MoveDocumentsRequest(BaseModel):
 
 class PendingIndexDocumentsRequest(BaseModel):
     params: dict | None = None
+
+
+class PdfEvidenceUpgradeRequest(BaseModel):
+    file_ids: list[str] = Field(..., min_length=1, max_length=100)
+    dry_run: bool = True
+
+    @field_validator("file_ids")
+    @classmethod
+    def normalize_file_ids(cls, value: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+        if not normalized:
+            raise ValueError("至少选择一个文件")
+        return normalized
 
 
 media_types = {
@@ -261,6 +276,21 @@ def _http_from_contract_error(exc: SourceContractError) -> HTTPException:
     return HTTPException(status_code=exc.http_status, detail=f"[{exc.error_code}] {exc}")
 
 
+async def _require_pdf_evidence_contract(kb_id: str, operation: str):
+    """加载契约 spec 供升级端点比对 contract_key。
+
+    ``_ensure_database_supports_documents`` 在 command=None 时按设计返回
+    None（只做能力检查）——升级端点不能把 None 当"非 pdf_evidence"拒绝，
+    否则端点对合法库恒 400（2026-10 实测：升级入口从未经 HTTP 可达）。
+    """
+    from yuxi.knowledge.source_contracts import SourceContractError, load_kb_contract
+
+    try:
+        return await load_kb_contract(kb_id)
+    except SourceContractError as exc:
+        raise _http_from_contract_error(exc) from exc
+
+
 async def _gate_kb_file_deletion(kb_id: str, operation: str) -> None:
     """文件删除门禁：csv 契约的数据集删除走 dataset_delete，其余走 document_delete。
 
@@ -274,9 +304,7 @@ async def _gate_kb_file_deletion(kb_id: str, operation: str) -> None:
     except SourceContractError as exc:
         raise _http_from_contract_error(exc) from exc
     command = (
-        COMMAND_DATASET_DELETE
-        if spec.contract_key in {"csv_record", "csv_qa", "glossary"}
-        else COMMAND_DOCUMENT_DELETE
+        COMMAND_DATASET_DELETE if spec.contract_key in {"csv_record", "csv_qa", "glossary"} else COMMAND_DOCUMENT_DELETE
     )
     await _ensure_database_supports_documents(kb_id, operation, command)
 
@@ -1618,6 +1646,63 @@ async def scientific_pdf_evidence_status(
     if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
         raise HTTPException(status_code=404, detail="Database not found")
     return await get_scientific_pdf_status(kb_id=kb_id, file_id=file_id)
+
+
+@knowledge.get("/databases/{kb_id}/pdf-evidence-upgrades")
+async def pdf_evidence_upgrade_inventory(
+    kb_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    after_file_id: str | None = Query(default=None, max_length=64),
+    current_user: User = Depends(get_admin_user),
+):
+    """List current and stale PDF evidence revisions for an explicit knowledge base."""
+    if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
+        raise HTTPException(status_code=404, detail="Database not found")
+    await _ensure_database_supports_documents(kb_id, "科研 PDF 升级盘点")
+    contract_spec = await _require_pdf_evidence_contract(kb_id, "科研 PDF 升级盘点")
+    if contract_spec.contract_key != "pdf_evidence":
+        raise HTTPException(status_code=400, detail="仅 pdf_evidence 知识源支持版本升级盘点")
+    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.storage.postgres.manager import pg_manager
+
+    async with pg_manager.get_async_session_context() as session:
+        tenant_id = await resolve_tenant_id(session, str(current_user.uid))
+    return await list_pdf_evidence_upgrade_candidates(
+        tenant_id=tenant_id,
+        kb_id=kb_id,
+        limit=limit,
+        after_file_id=after_file_id,
+    )
+
+
+@knowledge.post("/databases/{kb_id}/pdf-evidence-upgrades", status_code=202)
+async def upgrade_pdf_evidence_batch(
+    kb_id: str,
+    request: PdfEvidenceUpgradeRequest,
+    current_user: User = Depends(get_admin_user),
+):
+    """Dry-run or enqueue an explicit, bounded set of stale PDF revisions."""
+    if not await knowledge_base.check_accessible({"role": current_user.role, "uid": current_user.uid}, kb_id):
+        raise HTTPException(status_code=404, detail="Database not found")
+    await _ensure_database_supports_documents(kb_id, "科研 PDF 批量升级")
+    contract_spec = await _require_pdf_evidence_contract(kb_id, "科研 PDF 批量升级")
+    if contract_spec.contract_key != "pdf_evidence":
+        raise HTTPException(status_code=400, detail="仅 pdf_evidence 知识源支持批量升级")
+    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.storage.postgres.manager import pg_manager
+
+    async with pg_manager.get_async_session_context() as session:
+        tenant_id = await resolve_tenant_id(session, str(current_user.uid))
+    try:
+        return await schedule_pdf_evidence_upgrades(
+            tenant_id=tenant_id,
+            kb_id=kb_id,
+            file_ids=request.file_ids,
+            operator_id=str(current_user.uid),
+            dry_run=request.dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @knowledge.get("/databases/{kb_id}/documents/{file_id}/index-lineage")

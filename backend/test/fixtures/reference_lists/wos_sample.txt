@@ -1,0 +1,65 @@
+FN Clarivate Analytics Web of Science
+VR 1.0
+PT J
+AU Zhang, W
+   Li, M
+AF Zhang, Wei
+   Li, Ming
+TI Grain number determination in rice panicles: molecular regulators and
+   breeding strategies
+SO RICE SCIENCE
+SN 1672-6308
+EI 1672-6308X
+PY 2024
+VL 31
+IS 5
+BP 501
+EP 512
+DI 10.1016/j.rsci.2024.07.001
+LA English
+DT Article
+DE grain number; panicle architecture; rice
+ID RICE YIELD; CYTOKININ OXIDASE
+AB Grain number is a key determinant of rice yield. This review summarizes
+   molecular regulators of panicle architecture.
+C1 [Zhang, Wei; Li, Ming] Natl Rice Res Inst, Hangzhou, Peoples R China
+   [Zhang, Wei] Natl Rice Res Inst, State Key Lab Rice Biol, Hangzhou, Peoples R China
+RP Zhang, W, Natl Rice Res Inst, Hangzhou 310006, Peoples R China
+CR Doe A, 2019, SCIENCE, V363, P135, DOI 10.1126/science.aaw1234
+   Smith B, 2020, NATURE, V583, P782, DOI 10.1038/s41586-020-2452-z
+   Chen C, 2018, P NATL ACAD SCI USA, V115, DOI 10.1073/pnas.1718920115
+NR 3
+TC 5
+PU SCIENCE PRESS
+PI BEIJING
+J9 RICE SCI
+JF Rice Science
+JA Rice Sci
+PD SEP
+WC Plant Sciences; Agronomy
+SC Plant Sciences; Agriculture
+UT WOS:000129290300001
+ER
+
+PT J
+AU Wang, H
+AF Wang, Hong
+TI Heterosis in rice hybrids
+SO THEORETICAL AND APPLIED GENETICS
+SN 0040-5752
+PY 2019
+VL 132
+IS 8
+DI 10.1007/s00122-019-03341-2
+LA English
+DT Review Article
+DE heterosis; rice
+AB Heterosis contributes to yield improvement in rice breeding.
+C1 [Wang, Hong] Huazhong Agr Univ, Wuhan, Peoples R China
+CR Smith B, 2020, NATURE, V583, P782, DOI 10.1038/s41586-020-2452-z
+NR 1
+TC 2
+WC Genetics & Heredity
+SC Genetics & Heredity
+UT WOS:000483920400006
+ER

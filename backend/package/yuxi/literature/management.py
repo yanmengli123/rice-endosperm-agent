@@ -156,9 +156,9 @@ def _run_view(row, kind: str, key: str, **extra: Any) -> dict:
 
 
 async def resolve_reader_target(tenant_id: int, target: str, *, source_rid: str = "") -> dict:
-    from yuxi.literature.identity.rid import make_rid, is_doi
     from sqlalchemy import func, or_
 
+    from yuxi.literature.identity.rid import is_doi, make_rid
     from yuxi.literature.reader_links import parse_reader_target
 
     parsed = parse_reader_target(target)

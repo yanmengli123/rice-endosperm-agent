@@ -7,15 +7,20 @@
 from __future__ import annotations
 
 import re
-from datetime import date as date_type, UTC
+from datetime import UTC
+from datetime import date as date_type
 
 from sqlalchemy import delete, select
 
-from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_knowledge import LiteratureDiaryEntry
 from yuxi.literature.access import build_access, current_access, paper_visibility
 from yuxi.literature.provenance import current_job
-from yuxi.storage.postgres.models_knowledge import LiteraturePaper, LiteratureCompileJob, LiteratureVariant
+from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_knowledge import (
+    LiteratureCompileJob,
+    LiteratureDiaryEntry,
+    LiteraturePaper,
+    LiteratureVariant,
+)
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 

@@ -145,8 +145,10 @@ def _decide_payload(
 async def register_run_artifact(*, context, entry: MaterializedArtifact) -> bool:
     """写 run_artifacts 权威记录；同 run 同路径重复登记幂等，失败只记日志。
 
-    无 run_id（如同步直连链路未建 AgentRun）时不登记——文件与 state 通道
-    仍然生效，只有历史回看投影拿不到该轮产物（边界见设计文档）。
+    返回值语义是"本轮是否**新**登记"：重复（唯一约束冲突）与无 run_id、库
+    不可用一样返回 False——调用方据此不重复发产物轨迹事件（同一产物两次
+    materialized 事件会让遥测双计）。权威行以 run_artifacts 表为准，重复
+    登记不抛异常、不新增行。
     """
     run_id = getattr(context, "run_id", None)
     if not run_id:
@@ -186,7 +188,12 @@ async def register_run_artifact(*, context, entry: MaterializedArtifact) -> bool
                         )
                     )
                 ).scalar_one_or_none()
-                return existing is not None
+                if existing is None:
+                    logger.warning(
+                        "Run artifact unique conflict without matching authoritative row: "
+                        f"run={run_id} path={entry.virtual_path}"
+                    )
+                return False
         return True
     except Exception as error:  # noqa: BLE001 —— 登记是增强通道；唯一约束冲突/库不可用都不阻断主流程
         logger.info(f"Run artifact registration skipped for {entry.virtual_path}: {type(error).__name__}")

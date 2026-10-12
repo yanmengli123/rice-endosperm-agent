@@ -8,16 +8,13 @@
 
 from __future__ import annotations
 
-import re
 import hashlib
+import re
 from typing import Any
-
-from yuxi.literature.access import paper_visibility
-from yuxi.literature.access import report_visible
-from yuxi.literature.access import current_access
 
 from sqlalchemy import select
 
+from yuxi.literature.access import current_access, paper_visibility, report_visible
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager

@@ -20,20 +20,21 @@ from uuid import UUID
 
 import yaml
 from sqlalchemy import select
-from yuxi.literature.access import current_access, build_access
+
+from yuxi.literature.access import build_access, current_access
 from yuxi.literature.metrics import normalize_journal_name
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Conversation, Message, User
 from yuxi.storage.postgres.models_knowledge import (
-    LiteraturePaper,
-    LiteratureHistoryItem,
+    LiteratureAttachment,
     LiteratureCard,
     LiteratureDiaryEntry,
+    LiteratureHistoryItem,
     LiteratureJournalMetric,
+    LiteraturePaper,
     LiteratureReport,
-    LiteratureAttachment,
 )
 from yuxi.utils.datetime_utils import utc_now
 

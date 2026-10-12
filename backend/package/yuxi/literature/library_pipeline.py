@@ -216,8 +216,8 @@ async def _record(run_id, token, step, status, detail=None, *, run_status="RUNNI
 async def _execute(run, step, state, user):
     tenant_id = int(run.tenant_id)
     if step == "ingest_bib":
-        from yuxi.literature.bib_import import import_bib
         from yuxi.literature.access import build_access
+        from yuxi.literature.bib_import import import_bib
 
         before = current_access()
         if run.payload_json.get("bib_text", "").strip():

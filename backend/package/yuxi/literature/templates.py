@@ -26,8 +26,9 @@ plain         仅 EN（纯英文，不出译文）          无兜底
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 #: 模板稳定身份（进配置契约；重渲染不消耗 token，故可安全改选）
 TEMPLATE_BILINGUAL = "obsidian_bilingual"
@@ -119,9 +120,7 @@ def rerender_from_alignment(
 
     对标上游 ``rerender_paper``：上游重渲染会重跑翻译链（重新计费），Yuxi 只重排版。
     """
-    return render_markdown(
-        alignment_items(alignment), references=None, template=template, title=title
-    )
+    return render_markdown(alignment_items(alignment), references=None, template=template, title=title)
 
 
 def _para_text(item: dict[str, Any]) -> tuple[str, str]:
@@ -179,12 +178,16 @@ def _render_references(references: list[Any], *, placeholder: str) -> list[str]:
 
 
 _RENDERERS: dict[str, Callable[[list[dict[str, Any]], list[Any]], list[str]]] = {
-    TEMPLATE_BILINGUAL: lambda items, refs: _render_paragraphs(items, bilingual=True, labeled=False)
-    + _render_references(refs, placeholder=EMPTY_REFERENCES_PLACEHOLDER),
-    TEMPLATE_BILINGUAL_ALT: lambda items, refs: _render_paragraphs(items, bilingual=True, labeled=True)
-    + _render_references(refs, placeholder=""),
-    TEMPLATE_PLAIN: lambda items, refs: _render_paragraphs(items, bilingual=False, labeled=False)
-    + _render_references(refs, placeholder=""),
+    TEMPLATE_BILINGUAL: lambda items, refs: (
+        _render_paragraphs(items, bilingual=True, labeled=False)
+        + _render_references(refs, placeholder=EMPTY_REFERENCES_PLACEHOLDER)
+    ),
+    TEMPLATE_BILINGUAL_ALT: lambda items, refs: (
+        _render_paragraphs(items, bilingual=True, labeled=True) + _render_references(refs, placeholder="")
+    ),
+    TEMPLATE_PLAIN: lambda items, refs: (
+        _render_paragraphs(items, bilingual=False, labeled=False) + _render_references(refs, placeholder="")
+    ),
 }
 
 

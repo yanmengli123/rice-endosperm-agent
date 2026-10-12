@@ -105,6 +105,20 @@ def _repair_draft_text_blocks(candidate: str) -> str | None:
     return "\n\n".join(text_values)
 
 
+def _invalid_draft_metadata(source: str) -> dict[str, str]:
+    # Content-free diagnostics distinguish transport truncation from provider
+    # schema failures. Never log or persist an invalid raw draft here.
+    return {
+        "schema_version": ANSWER_DRAFT_SCHEMA_VERSION,
+        "status": "ANSWER_DRAFT_SCHEMA_INVALID",
+        "source_chars": str(len(source)),
+        "text_field_count": str(len(re.findall(r'"text"\s*:', source))),
+        "escaped_text_field_count": str(source.count('\\"text\\"')),
+        "opening_tag_count": str(source.count("<YUXI_ANSWER_DRAFT>")),
+        "closing_tag_count": str(source.count("</YUXI_ANSWER_DRAFT>")),
+    }
+
+
 def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None = None) -> tuple[str, dict[str, str]]:
     """Render a structured draft; preserve legacy Markdown on schema failure.
 
@@ -139,10 +153,9 @@ def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None =
             repaired = _repair_draft_text_blocks(source)
             if repaired:
                 return repaired, {"schema_version": ANSWER_DRAFT_SCHEMA_VERSION, "status": "ANSWER_DRAFT_REPAIRED"}
-            return "（模型输出的结构化草案未通过校验，已由后端替换为安全回答；请重新提问。）", {
-                "schema_version": ANSWER_DRAFT_SCHEMA_VERSION,
-                "status": "ANSWER_DRAFT_SCHEMA_INVALID",
-            }
+            return "（模型输出的结构化草案未通过校验，已由后端替换为安全回答；请重新提问。）", _invalid_draft_metadata(
+                source
+            )
         return text, {"schema_version": ANSWER_DRAFT_SCHEMA_VERSION, "status": "LEGACY_MARKDOWN"}
     try:
         draft = AnswerDraft.model_validate(json.loads(candidate))
@@ -154,10 +167,9 @@ def render_answer_draft(text: str, *, locator_bindings: dict[str, dict] | None =
         repaired = _repair_draft_text_blocks(candidate or source)
         if repaired:
             return repaired, {"schema_version": ANSWER_DRAFT_SCHEMA_VERSION, "status": "ANSWER_DRAFT_REPAIRED"}
-        return "（模型输出的结构化草案未通过校验，已由后端替换为安全回答；请重新提问。）", {
-            "schema_version": ANSWER_DRAFT_SCHEMA_VERSION,
-            "status": "ANSWER_DRAFT_SCHEMA_INVALID",
-        }
+        return "（模型输出的结构化草案未通过校验，已由后端替换为安全回答；请重新提问。）", _invalid_draft_metadata(
+            source
+        )
 
     lines: list[str] = []
     locator_blocks = 0

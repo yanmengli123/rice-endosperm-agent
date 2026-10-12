@@ -355,6 +355,8 @@ COMPACT_CHUNK_FIELDS: tuple[str, ...] = (
     "figure_refs",
     # 表格卡片投影（citation_ready.tables，ADR-0008 P2：受控解析的行列 JSON）
     "tables",
+    # 原文载体与关联状态，与实际发布的 citation_ready 一起重放。
+    "source_quotes",
     # 确定性关系图快照（graph_snapshot_ready）
     "graph_snapshot",
     # 跨文献歧义时的候选文献清单（locator_candidates 事件，只含文档身份）
@@ -619,13 +621,16 @@ async def _enforce_user_quota(
     db: AsyncSession,
     uid: str,
     credential_source: Literal["platform", "user_byok"] | None = "platform",
+    scope: Literal["chat", "literature"] = "chat",
 ) -> dict:
     """P5 权益驱动的配额预检；返回随 run 冻结的权益快照。
 
     行锁加在 tenant_user_entitlements 行上直到事务提交，串行化同一用户的并发创建。
-    每日运行次数始终生效；月度 token 只约束 ``platform``，用户 BYOK 永不占用
-    企业平台额度。传入 ``None`` 时只锁定权益并执行每日门禁，调用方在模型与凭据
-    来源确定后再执行平台月度门禁。
+    每日预算按 scope 分账：``chat`` 只数交互问答（run_type="chat"），``literature``
+    只数文献域后台任务（run_type="literature"，独立列 daily_literature_task_limit，
+    NULL=不限）——后台编译/翻译不再挤占聊天额度。月度 token 只约束 ``platform``，
+    用户 BYOK 永不占用企业平台额度。传入 ``None`` 时只锁定权益并执行每日门禁，
+    调用方在模型与凭据来源确定后再执行平台月度门禁。
     """
     if not uid:
         return {}
@@ -648,22 +653,31 @@ async def _enforce_user_quota(
         raise RuntimeError(f"用户权益行创建失败: uid={uid}, tenant_id={tenant_id}")
 
     now = utc_now_naive()
-    if entitlement.daily_run_limit is not None:
+    if scope == "chat":
+        daily_limit = entitlement.daily_run_limit
+    else:
+        daily_limit = entitlement.daily_literature_task_limit
+    if daily_limit is not None:
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         used_runs = (
             await db.execute(
                 select(func.count(AgentRun.id)).filter(
                     AgentRun.uid == uid,
                     AgentRun.created_at >= day_start,
-                    AgentRun.run_type.in_(("chat", "literature")),
+                    AgentRun.run_type == scope,
                     AgentRun.status.notin_(["failed", "cancelled"]),
                 )
             )
         ).scalar() or 0
-        if int(used_runs) >= int(entitlement.daily_run_limit):
+        if int(used_runs) >= int(daily_limit):
+            if scope == "chat":
+                raise _registry_error(
+                    "daily_run_quota_exceeded",
+                    message=f"今日运行次数已达配额（{daily_limit} 次），请联系管理员调整",
+                )
             raise _registry_error(
-                "daily_run_quota_exceeded",
-                message=f"今日运行次数已达配额（{entitlement.daily_run_limit} 次），请联系管理员调整",
+                "daily_literature_task_quota_exceeded",
+                message=f"今日文献任务次数已达配额（{daily_limit} 次），请联系管理员调整",
             )
 
     quota_snapshot = {
@@ -914,6 +928,33 @@ async def create_agent_run_view(
     except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    from yuxi.literature.reader_assistant import validate_reader_context
+
+    if run_type == "resume" and "literature_reader_context" in meta:
+        # A resumed run cannot acquire fresh client context in place of its parent.
+        raise _registry_error("literature_reader_context_invalid")
+    reader_context = validate_reader_context(
+        (parent_payload or {}).get("literature_reader_context")
+        if run_type == "resume"
+        else meta.get("literature_reader_context"),
+        knowledge_scope_snapshot,
+    )
+
+    if knowledge_scope_snapshot.get("literature_binding"):
+        from yuxi.config import config as app_config
+        from yuxi.literature.paper_enhancement import freeze_enhancement_options, freeze_rerank_credentials
+
+        # Resume keeps the parent's options; legacy parents without a snapshot stay unenhanced.
+        if run_type != "resume":
+            knowledge_scope_snapshot = freeze_enhancement_options(knowledge_scope_snapshot, app_config)
+        knowledge_scope_snapshot = await freeze_rerank_credentials(
+            db,
+            knowledge_scope_snapshot,
+            uid=current_uid,
+            credential_policy=effective_policy,
+            policy_version=entitlement_snapshot.get("policy_version"),
+        )
+
     run_input_message = _prepare_run_input_message(
         run_type=run_type,
         input_message=input_message,
@@ -938,6 +979,9 @@ async def create_agent_run_view(
     }
     if user_credential_ref:
         input_payload["user_credential"] = user_credential_ref
+    if reader_context is not None:
+        # Internal audit/version metadata only. It never enters EvidenceEnvelope.
+        input_payload["literature_reader_context"] = reader_context
     if mention_resolution_audit is not None:
         # 冻结的提及解析结论（含 query_raw / clean_question / 每条提及的解析状态）
         input_payload["mention_resolution"] = mention_resolution_audit

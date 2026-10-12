@@ -187,6 +187,8 @@ async def _seed_asset(
     sha: str = _SHA_B,
     role: str = "panel",
     group_index: int = 0,
+    panel_label: str = "",
+    locator_metadata: dict | None = None,
 ) -> None:
     """只追加资产行（同一实体的多资产场景，避免重复实体 PK/唯一键冲突）。"""
     session.add(
@@ -211,6 +213,8 @@ async def _seed_asset(
             page=4,
             role=role,
             group_index=group_index,
+            panel_label=panel_label,
+            locator_metadata=locator_metadata or {},
         )
     )
 
@@ -283,6 +287,56 @@ async def test_g1_figure_image_full_fields(figure_session):
     assert figure.kb_id == "kb-a" and figure.file_id == "file-a" and figure.revision_id == "pr_1"
     assert figure.projection_version == FIGURE_PROJECTION_VERSION
     assert figure.selection == {"asset_count": 1, "rule": "primary_first_then_reading_order"}
+
+
+# ---- G11：source_selector（v2）——原文跳转选择器只在身份齐全时携带，panel 双确认才发标签 ----
+
+
+@pytest.mark.asyncio
+async def test_g11_source_selector_panel_label_only_when_verified(figure_session):
+    await _seed_source(figure_session)
+    await _seed_figure(figure_session)
+    # panel A：题注+OCR 双确认 → 选择器带 panel_label
+    await _seed_asset(
+        figure_session,
+        entity_id=10,
+        asset_id=110,
+        asset_key="images/a.jpg",
+        object_name=f"tenants/1/documents/{_SHA_A}/mineru/pr_1/images/{'d' * 24}-a.jpg",
+        sha="d" * 64,
+        group_index=0,
+        panel_label="A",
+        locator_metadata={"panel_association": "VERIFIED_CAPTION_AND_OCR"},
+    )
+    # panel B：未验证关联 → 选择器不得携带 panel_label（抽屉将解析到图组 primary）
+    await _seed_asset(
+        figure_session,
+        entity_id=10,
+        asset_id=111,
+        asset_key="images/b.jpg",
+        object_name=f"tenants/1/documents/{_SHA_A}/mineru/pr_1/images/{'e' * 24}-b.jpg",
+        sha="e" * 64,
+        group_index=1,
+        panel_label="B",
+        locator_metadata={"panel_association": "UNRESOLVED"},
+    )
+    await figure_session.flush()
+    binding = _binding(locator_kind=LOCATOR_KIND_FIGURE_CAPTION, anchor_id="ea_cap1", asset_pdf_page_number=None)
+    figures, reason = await project_publishable_figures(figure_session, binding=binding, publish_allowed=True)
+    assert reason is None
+    by_panel = {figure.panel_label: figure for figure in figures}
+    selector_a = by_panel["A"].source_selector
+    assert selector_a["kb_id"] == "kb-a"
+    assert selector_a["file_id"] == "file-a"
+    assert selector_a["parse_revision_id"] == "pr_1"
+    assert selector_a["figure_label"] == "Figure 1"
+    assert selector_a["panel_label"] == "A"
+    # 未验证 Panel：figure_label 保留（解析到整图），panel_label 必须缺席
+    selector_b = by_panel["B"].source_selector
+    assert selector_b["figure_label"] == "Figure 1"
+    assert "panel_label" not in selector_b
+    # 纯函数契约：选择器键序稳定，供前端守卫（kb/file/revision 三键齐全才跳转）
+    assert set(selector_a) == {"kb_id", "file_id", "parse_revision_id", "figure_label", "panel_label"}
 
 
 # ---- G2：FIGURE_CAPTION 经实体 caption_anchor_id 中转；页码回落 Binding.page_number ----

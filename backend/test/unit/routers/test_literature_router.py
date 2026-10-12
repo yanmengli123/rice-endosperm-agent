@@ -59,6 +59,143 @@ async def _current_tenant_stub(_user):
     return 7
 
 
+async def test_reference_import_parameters_report_and_invalid_file(monkeypatch, client):
+    from yuxi.literature import reference_import
+
+    calls = []
+
+    async def importing(tenant, data, **kwargs):
+        calls.append((tenant, data, kwargs))
+        if data == b"bad":
+            raise ValueError("无法识别文献清单格式")
+        return {"papers_written": 1, "papers_skipped": 2, "format_detected": "wos-txt"}
+
+    monkeypatch.setattr(reference_import, "import_references", importing)
+    response = client.post(
+        "/api/literature/papers/import/references?tenant_id=999&format=wos-txt",
+        files={"file": ("records.txt", b"PT\tTI\nJ\tRice\n")},
+    )
+    assert response.status_code == 202 and response.json()["papers_written"] == 1
+    assert calls[0] == (7, b"PT\tTI\nJ\tRice\n", {"fmt": "wos-txt", "source_name": "records.txt"})
+    assert (
+        client.post("/api/literature/papers/import/references?format=invalid", files={"file": ("a", b"a")}).status_code
+        == 422
+    )
+    assert client.post("/api/literature/papers/import/references", files={"file": ("a", b"bad")}).status_code == 422
+
+
+async def test_bibliometrics_network_contract_bounds_acl_and_budget(monkeypatch, client):
+    from yuxi.literature import bibliometrics
+
+    async def metrics(tenant, **kwargs):
+        assert tenant == 7 and kwargs == {
+            "journals_top": 10,
+            "batch_ids": [],
+            "only_imports": False,
+            "database": "",
+            "query": "",
+            "year_from": None,
+            "year_to": None,
+        }
+        return {"overview": {"papers": 2, "missing_year": 1}}
+
+    async def network(tenant, **kwargs):
+        assert tenant == 7 and kwargs == {
+            "field": "authors",
+            "top": 20,
+            "min_pair": 1,
+            "batch_ids": [],
+            "only_imports": False,
+            "database": "",
+            "query": "",
+            "year_from": None,
+            "year_to": None,
+        }
+        return {"nodes": [], "links": [], "stats": {"pairs_scope": "top_nodes"}}
+
+    monkeypatch.setattr(bibliometrics, "bibliometrics", metrics)
+    monkeypatch.setattr(bibliometrics, "metric_network", network)
+    assert (
+        client.get("/api/literature/metrics/bibliometrics?journals_top=10&tenant_id=999").json()["overview"][
+            "missing_year"
+        ]
+        == 1
+    )
+    response = client.get("/api/literature/metrics/networks?type=author&top=20&min_pair=1&tenant_id=999")
+    assert response.status_code == 200 and response.json()["stats"]["pairs_scope"] == "top_nodes"
+    for params in ("type=secret", "top=201", "min_pair=0"):
+        assert client.get("/api/literature/metrics/networks?" + params).status_code == 422
+
+    async def budget(*args, **kwargs):
+        raise ValueError("安全预算")
+
+    monkeypatch.setattr(bibliometrics, "metric_network", budget)
+    assert client.get("/api/literature/metrics/networks").status_code == 422
+
+    async def forbidden(*args, **kwargs):
+        raise PermissionError("需要当前用户访问上下文")
+
+    monkeypatch.setattr(bibliometrics, "metric_network", forbidden)
+    assert client.get("/api/literature/metrics/networks").status_code == 403
+
+
+async def test_reference_batch_catalog_and_shared_filters_http_contract(monkeypatch, client):
+    from yuxi.literature import reference_batches, bibliometrics
+
+    calls = []
+
+    async def listing(tenant, **kwargs):
+        assert tenant == 7
+        calls.append(kwargs)
+        if kwargs.get("batch_ids") == ["forbidden"]:
+            raise PermissionError("导入批次不存在或无权访问")
+        return {"items": [], "total": 2, "overview": {"papers": 2}}
+
+    monkeypatch.setattr(reference_batches, "list_records", listing)
+    monkeypatch.setattr(reference_batches, "list_batches", listing)
+    monkeypatch.setattr(bibliometrics, "bibliometrics", listing)
+    params = (
+        "only_imports=true&database=wos&batch_ids=a&batch_ids=b&query=rice%25&year_from=2020&year_to=2026&tenant_id=999"
+    )
+    response = client.get(f"/api/literature/metrics/records?{params}&limit=25&offset=25")
+    assert response.status_code == 200 and response.json()["total"] == 2
+    assert calls[-1] == {
+        "limit": 25,
+        "offset": 25,
+        "only_imports": True,
+        "database": "wos",
+        "batch_ids": ["a", "b"],
+        "query": "rice%",
+        "year_from": 2020,
+        "year_to": 2026,
+    }
+    assert client.get(f"/api/literature/metrics/bibliometrics?{params}").status_code == 200
+    assert calls[-1]["query"] == "rice%" and calls[-1]["batch_ids"] == ["a", "b"]
+    assert client.get("/api/literature/reference-batches?limit=10&offset=50").status_code == 200
+    assert calls[-1] == {"limit": 10, "offset": 50}
+    assert client.get("/api/literature/metrics/records?batch_ids=forbidden").status_code == 403
+    for query in ("limit=101", "offset=-1", "year_from=1499", "year_to=2101", "database=invalid"):
+        assert client.get(f"/api/literature/metrics/records?{query}").status_code == 422
+
+
+async def test_database_source_counts_use_principal_and_fail_closed(monkeypatch, client):
+    from yuxi.literature import reference_batches
+
+    async def counts(tenant):
+        assert tenant == 7
+        return {"items": [{"database": "cnki", "papers": 5}]}
+
+    monkeypatch.setattr(reference_batches, "list_sources", counts)
+    response = client.get("/api/literature/metrics/sources?tenant_id=999&uid=other")
+    assert response.status_code == 200 and response.json()["items"][0]["papers"] == 5
+
+    async def forbidden(tenant):
+        raise PermissionError("缺少当前用户作用域")
+
+    monkeypatch.setattr(reference_batches, "list_sources", forbidden)
+    assert client.get("/api/literature/metrics/sources").status_code == 403
+
+
 def test_business_backup_route_principal_and_fail_closed(monkeypatch, client):
     from yuxi.literature import backup
     from yuxi.literature.export_vault import ExportLimitError

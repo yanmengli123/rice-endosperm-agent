@@ -15,8 +15,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from server.utils.auth_middleware import get_admin_user, get_current_user, get_db, get_required_user
 from yuxi.config import UserConfig, UserConfigSchema
 from yuxi.models.providers.cache import model_cache
 from yuxi.services.operation_log_service import log_operation, resolve_operator_tenant_id
@@ -24,9 +22,9 @@ from yuxi.services.run_queue_service import publish_cancel_signal
 from yuxi.storage.minio import upload_image_to_minio
 from yuxi.storage.postgres.models_business import (
     AGENT_RUN_TERMINAL_STATUSES,
-    APIKey,
     AgentEnv,
     AgentRun,
+    APIKey,
     CLIAuthSession,
     Conversation,
     Message,
@@ -38,6 +36,8 @@ from yuxi.storage.postgres.models_business import (
 )
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import coerce_any_to_utc_datetime, format_utc_datetime, utc_now_naive
+
+from server.utils.auth_middleware import get_admin_user, get_current_user, get_db, get_required_user
 
 user_router = APIRouter(prefix="/user", tags=["user"])
 
@@ -736,6 +736,7 @@ async def get_managed_user_stats(
         "entitlement": {
             "credential_policy": entitlement.credential_policy if entitlement else "byok_optional",
             "daily_run_limit": entitlement.daily_run_limit if entitlement else None,
+            "daily_literature_task_limit": (entitlement.daily_literature_task_limit if entitlement else None),
             "monthly_platform_token_limit": entitlement.monthly_platform_token_limit if entitlement else None,
             "policy_version": entitlement.policy_version if entitlement else None,
         },
@@ -1145,6 +1146,7 @@ async def get_my_quota(current_user: User = Depends(get_required_user), db: Asyn
     return {
         "tenant_id": tenant_id,
         "daily_run_limit": entitlement.daily_run_limit,
+        "daily_literature_task_limit": entitlement.daily_literature_task_limit,
         "monthly_token_limit": entitlement.monthly_platform_token_limit,
         "model_access_policy": entitlement.credential_policy,
         "byok_platform_token_exempt": entitlement.byok_platform_token_exempt,
@@ -1155,6 +1157,9 @@ async def get_my_quota(current_user: User = Depends(get_required_user), db: Asyn
 
 class QuotaUpdate(BaseModel):
     daily_run_limit: int | None = Field(None, ge=1)
+    daily_literature_task_limit: int | None = Field(
+        None, ge=1, description="文献域后台任务（编译/翻译等）独立每日次数上限"
+    )
     monthly_token_limit: int | None = Field(None, ge=1)
     model_access_policy: str | None = Field(None, description="platform_only / byok_optional / byok_required")
     byok_platform_token_exempt: bool | None = Field(None, description="自有密钥流量是否豁免平台月度 token 限额")
@@ -1171,6 +1176,7 @@ async def get_user_quota(uid: str, current_user: User = Depends(get_required_use
     return {
         "uid": uid,
         "daily_run_limit": entitlement.daily_run_limit,
+        "daily_literature_task_limit": entitlement.daily_literature_task_limit,
         "monthly_token_limit": entitlement.monthly_platform_token_limit,
         "model_access_policy": entitlement.credential_policy,
         "byok_platform_token_exempt": entitlement.byok_platform_token_exempt,
@@ -1200,6 +1206,8 @@ async def put_user_quota(
     fields_set = data.model_fields_set
     if "daily_run_limit" in fields_set:
         entitlement.daily_run_limit = data.daily_run_limit
+    if "daily_literature_task_limit" in fields_set:
+        entitlement.daily_literature_task_limit = data.daily_literature_task_limit
     if "monthly_token_limit" in fields_set:
         entitlement.monthly_platform_token_limit = data.monthly_token_limit
     if data.model_access_policy is not None:
@@ -1218,6 +1226,7 @@ async def put_user_quota(
             operation="更新用户配额",
             details=(
                 f"uid={uid}, daily_run_limit={entitlement.daily_run_limit}, "
+                f"daily_literature_task_limit={entitlement.daily_literature_task_limit}, "
                 f"monthly_platform_token_limit={entitlement.monthly_platform_token_limit}, "
                 f"model_access_policy={entitlement.credential_policy}, "
                 f"byok_exempt={entitlement.byok_platform_token_exempt}, "
@@ -1229,6 +1238,7 @@ async def put_user_quota(
     return {
         "uid": uid,
         "daily_run_limit": entitlement.daily_run_limit,
+        "daily_literature_task_limit": entitlement.daily_literature_task_limit,
         "monthly_token_limit": entitlement.monthly_platform_token_limit,
         "model_access_policy": entitlement.credential_policy,
         "byok_platform_token_exempt": entitlement.byok_platform_token_exempt,

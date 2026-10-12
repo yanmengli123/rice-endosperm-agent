@@ -8,6 +8,7 @@
     "resume_run_request_desktop.json": "f926b4e8cd3b74ed14d443581c2ddf6272ccd2c14d41062cc3f0c493567bcdfc",
     "run_context.json": "c00154e3018784a85788736e8dd5b50775431ef993f4b5b74dccfb6568b30a85",
     "run_results.json": "10c17d7f115c5385577d6ac329915c0f012a341fe78646fa8617031fc47c7110",
-    "sse_frames.jsonl": "ba4f5713c37617650b85af61d441b32731aefc84790de5a570ca0cb2b0cd391a"
+    "sse_frames.jsonl": "f00409de0b2b137c6ecb09a29330db39d35596d307017aae317ff7e2f950f38d",
+    "source_quotes.json": "5ae24cc3136bb2fe4ae8365d778193e8b13f2957b529477ebb02b6c5cfafa319"
   }
 }

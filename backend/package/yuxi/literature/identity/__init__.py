@@ -5,7 +5,7 @@
 在各函数 docstring 中显式声明。
 """
 
-from yuxi.literature.identity.kinds import ATTACHMENT_KINDS, KINDS, KIND_PREFIX
+from yuxi.literature.identity.kinds import ATTACHMENT_KINDS, KIND_PREFIX, KINDS
 from yuxi.literature.identity.rid import (
     doi_to_dirname,
     is_doi,

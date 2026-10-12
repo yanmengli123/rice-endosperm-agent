@@ -60,6 +60,31 @@ def test_config_switch_defaults_off():
     assert Config.model_fields["graph_card_enabled"].default is False
 
 
+@pytest.mark.asyncio
+async def test_tool_dispatch_does_not_publish_duplicate_locator_refusal(monkeypatch):
+    class Repo:
+        calls = []
+
+        async def add_message_by_thread_id(self, **kwargs):
+            self.saved = kwargs
+            return SimpleNamespace(id=1)
+
+        async def add_tool_call(self, **kwargs):
+            self.calls.append(kwargs)
+
+    repo = Repo()
+    monkeypatch.setattr(svc, "apply_citation_channel", lambda *_args, **_kw: pytest.fail("dispatch is not final"))
+    await svc._save_ai_message(
+        repo,
+        "thread",
+        {"content": "intermediate draft", "tool_calls": [{"name": "query_knowledge_scope", "args": {}}]},
+        knowledge_contract={"status": "COMPLETED", "answer_policy": {"document_citations_allowed": False}},
+    )
+    assert repo.saved["content"] == ""
+    assert repo.saved["extra_metadata"]["publication_role"] == "TOOL_DISPATCH"
+    assert len(repo.calls) == 1
+
+
 def test_ordinary_figure_answer_removes_ungrounded_mechanism_claim(monkeypatch):
     from yuxi.knowledge.rendering.claim_evidence_resolver import normalize_for_match
 

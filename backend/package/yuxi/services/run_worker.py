@@ -776,6 +776,8 @@ async def process_agent_run(ctx, run_id: str):
         "run_type": run_type,
         "created_by_run_id": run.created_by_run_id,
     }
+    if isinstance(frozen_scope, dict) and frozen_scope.get("literature_binding"):
+        meta["input_message_id"] = input_message.id
     if run_type == "subagent":
         # 三个线程 ID 在 subagent_run_service 创建 run 时已写入 runtime，此处不再二次兜底；
         # 缺失会在 chat_service._apply_subagent_runtime_context 处直接报错。

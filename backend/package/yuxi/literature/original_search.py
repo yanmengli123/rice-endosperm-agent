@@ -9,11 +9,11 @@ from datetime import UTC, timedelta
 from sqlalchemy import Integer, cast, exists, func, literal_column, or_, select
 
 from yuxi.literature.access import paper_visibility
-from yuxi.literature.fulltext import lexical_text, MAX_NOTE_BYTES
+from yuxi.literature.fulltext import MAX_NOTE_BYTES, lexical_text
 from yuxi.literature.reader_bundle import get_reader_bundle
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_knowledge import LiteraturePaper, LiteratureOriginalSearch, LiteratureReaderRender
-from yuxi.utils.datetime_utils import utc_now, ensure_utc
+from yuxi.storage.postgres.models_knowledge import LiteratureOriginalSearch, LiteraturePaper, LiteratureReaderRender
+from yuxi.utils.datetime_utils import ensure_utc, utc_now
 
 
 def current_projection():

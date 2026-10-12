@@ -33,9 +33,7 @@ async def main() -> int:
         missing = sorted(set(expected) - set(discovered))
         unexpected = sorted(set(discovered) - set(expected))
         if missing or unexpected:
-            failures.append(
-                f"{slug}: tools/list mismatch; missing={missing or '-'} unexpected={unexpected or '-'}"
-            )
+            failures.append(f"{slug}: tools/list mismatch; missing={missing or '-'} unexpected={unexpected or '-'}")
             print(f"[{index:02d}/38] FAILED {slug}: tools/list mismatch", flush=True)
             continue
 

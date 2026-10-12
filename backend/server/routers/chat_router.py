@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi import config as conf
 from yuxi.models import select_model
-from yuxi.services.chat_service import get_agent_state_view
+from yuxi.services.chat_service import get_agent_state_view, persist_direct_call_usage
 from yuxi.services.conversation_export_service import export_message_html_view, export_thread_html_view
 from yuxi.services.conversation_service import (
     confirm_tmp_thread_attachments_view,
@@ -77,7 +77,12 @@ def _extract_generation_params(meta: dict) -> dict:
 
 
 @chat.post("/call")
-async def call(query: str = Body(...), meta: dict = Body(None), current_user: User = Depends(get_required_user)):
+async def call(
+    query: str = Body(...),
+    meta: dict = Body(None),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
     """调用模型进行简单问答（需要登录）"""
     meta = meta or {}
 
@@ -85,13 +90,30 @@ async def call(query: str = Body(...), meta: dict = Body(None), current_user: Us
     if "request_id" not in meta or not meta.get("request_id"):
         meta["request_id"] = str(uuid.uuid4())
 
+    model_spec = meta.get("model_spec") or meta.get("model") or conf.default_model
     model = select_model(
-        model_spec=meta.get("model_spec") or meta.get("model") or conf.default_model,
+        model_spec=model_spec,
         **_extract_generation_params(meta),
     )
 
     response = await model.call(query)
     logger.debug({"query": query, "response": response.content})
+
+    # 直调也必须计费（usage_ledger 唯一权威）：记账失败宁可拒绝返回，不留计费缺口
+    try:
+        await persist_direct_call_usage(
+            db,
+            uid=str(current_user.uid),
+            model_spec=str(model_spec),
+            query_text=query,
+            response=response,
+            request_id=str(meta["request_id"]),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("chat/call 用量记账失败: uid=%s request_id=%s", current_user.uid, meta["request_id"])
+        raise HTTPException(status_code=500, detail="用量记账失败，请稍后重试") from exc
 
     return {"response": response.content, "request_id": meta["request_id"]}
 

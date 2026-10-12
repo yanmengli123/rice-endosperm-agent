@@ -6,18 +6,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections import Counter
 from types import SimpleNamespace
-
-from yuxi.literature.access import paper_visibility
+from typing import Any
 
 from sqlalchemy import select
-from collections import Counter
-from yuxi.literature.identity.rid import doi_to_dirname, is_doi
 
-from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_knowledge import LiteratureCitation, LiteraturePaper, LiteratureCompileJob
+from yuxi.literature.access import paper_visibility
+from yuxi.literature.identity.rid import doi_to_dirname, is_doi
 from yuxi.literature.provenance import current_job
+from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_knowledge import LiteratureCitation, LiteratureCompileJob, LiteraturePaper
 
 MAX_NODE_LIMIT = 5000
 

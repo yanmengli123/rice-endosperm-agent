@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -262,10 +263,14 @@ class KnowledgeParseRevision(Base):
     file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False, index=True)
     source_sha256 = Column(String(64), nullable=False, index=True)
     parser_fingerprint = Column(String(64), nullable=False, index=True)
+    parser_params = Column(JSON_VALUE, nullable=True)
+    sealed_at = Column(DateTime(timezone=True))
     pipeline_version = Column(String(32), nullable=False)
     processing_mode = Column(String(32), nullable=False, default="activate")
     status = Column(String(32), nullable=False, default="PENDING", index=True)
     attempt = Column(Integer, nullable=False, default=0)
+    retry_budget_start = Column(Integer, nullable=False, default=0, server_default="0")
+    retry_generation = Column(Integer, nullable=False, default=0, server_default="0")
     lease_owner = Column(String(128))
     lease_expires_at = Column(DateTime(timezone=True))
     article_uri = Column(String(1024))
@@ -456,6 +461,74 @@ class EvidenceSpanRecord(Base):
     row_key = Column(String(128))
     metadata_json = Column(JSON_VALUE, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class PdfSourceRegionRecord(Base):
+    """Immutable physical region, including images without a textual quote."""
+
+    __tablename__ = "pdf_source_regions"
+    __table_args__ = (UniqueConstraint("parse_revision_id", "region_id", name="uq_pdf_region_revision"),)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    parse_revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    region_id = Column(String(64), nullable=False, index=True)
+    source_block_id = Column(String(128), nullable=False)
+    kind = Column(String(32), nullable=False)
+    page_index = Column(Integer, nullable=False)
+    page_label = Column(String(64))
+    bbox = Column(JSON_VALUE, nullable=False)
+    text = Column(Text)
+    selector = Column(JSON_VALUE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class EvidenceSpanRegionRecord(Base):
+    """Source occurrence binding; selector.source_offsets declares the offset scope."""
+
+    __tablename__ = "evidence_span_regions"
+    __table_args__ = (UniqueConstraint("span_record_id", "region_record_id", name="uq_span_region_binding"),)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    span_record_id = Column(BigInteger, ForeignKey("evidence_spans.id", ondelete="CASCADE"), nullable=False, index=True)
+    region_record_id = Column(
+        BigInteger, ForeignKey("pdf_source_regions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_start = Column(Integer)
+    source_end = Column(Integer)
+    selector = Column(JSON_VALUE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class PdfTableRecord(Base):
+    __tablename__ = "pdf_tables"
+    __table_args__ = (UniqueConstraint("parse_revision_id", "table_id", name="uq_pdf_table_revision"),)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    parse_revision_id = Column(
+        String(64), ForeignKey("knowledge_parse_revisions.revision_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id = Column(String(64), nullable=False)
+    caption = Column(Text)
+    region_ids = Column(JSON_VALUE, nullable=False, default=list)
+    metadata_json = Column(JSON_VALUE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class PdfTableCellRecord(Base):
+    __tablename__ = "pdf_table_cells"
+    __table_args__ = (UniqueConstraint("table_record_id", "row_index", "column_index", name="uq_pdf_table_cell"),)
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    table_record_id = Column(BigInteger, ForeignKey("pdf_tables.id", ondelete="CASCADE"), nullable=False, index=True)
+    region_record_id = Column(BigInteger, ForeignKey("pdf_source_regions.id", ondelete="SET NULL"), index=True)
+    row_index = Column(Integer, nullable=False)
+    column_index = Column(Integer, nullable=False)
+    row_span = Column(Integer, nullable=False, default=1)
+    column_span = Column(Integer, nullable=False, default=1)
+    raw_value = Column(Text, nullable=False)
+    is_header = Column(Boolean, nullable=False, default=False)
+    metadata_json = Column(JSON_VALUE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class ScientificLexicalIndexRecord(Base):
@@ -2070,6 +2143,8 @@ class FigureAssetRecord(Base):
     role = Column(String(16), nullable=False, default="panel")
     group_index = Column(Integer, nullable=False, default=0)
     panel_label = Column(String(16), nullable=False, default="")
+    region_id = Column(String(64), index=True)
+    locator_metadata = Column(JSON_VALUE, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
@@ -2139,6 +2214,7 @@ class LiteraturePaper(Base):
         UniqueConstraint("tenant_id", "rid", name="uq_literature_papers_tenant_rid"),
         Index("ix_literature_papers_tenant_doi", "tenant_id", "doi"),
         Index("ix_literature_papers_tenant_kind", "tenant_id", "kind"),
+        Index("ix_literature_papers_tenant_pmid", "tenant_id", "pmid"),
     )
 
     id = Column(BigIntPk, primary_key=True, autoincrement=True)
@@ -2160,6 +2236,11 @@ class LiteraturePaper(Base):
     keywords_json = Column(JSON_VALUE)
     wos_categories_json = Column(JSON_VALUE)
     research_areas_json = Column(JSON_VALUE)
+    # 清单导入（0110）：PubMed 身份别名（仅列级查重，不进 make_rid）/ 语言维度 /
+    # 机构计量底座（WoS C1、PubMed AD、知网/万方机构标签）
+    pmid = Column(String(32))
+    language = Column(String(16))
+    affiliations_json = Column(JSON_VALUE)
     external_cited = Column(Integer)
     meta_locked = Column(Boolean, nullable=False, default=False)
     is_reference = Column(Boolean, nullable=False, default=False)
@@ -2180,6 +2261,111 @@ class LiteraturePaper(Base):
     topic_score = Column(Float)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteratureReferenceBatch(Base):
+    """用户上传清单的幂等回执；题录不是 PDF 证据，不改变原文契约。"""
+
+    __tablename__ = "literature_reference_batches"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "batch_id", name="uq_reference_batches_tenant_id"),
+        Index("ix_reference_batches_owner", "tenant_id", "created_by", "created_at"),
+    )
+    batch_id = Column(String(64), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    created_by = Column(String(64), nullable=False)
+    source_name = Column(String(512), nullable=False)
+    source_sha256 = Column(String(64), nullable=False)
+    format = Column(String(32), nullable=False)
+    report_json = Column(JSON_VALUE, nullable=False)
+    source_object = Column(String(1024))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureReferenceMember(Base):
+    """批次去重成员；关系子查询避免大清单产生第二组数万条 IN 绑定参数。"""
+
+    __tablename__ = "literature_reference_members"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "batch_id"],
+            ["literature_reference_batches.tenant_id", "literature_reference_batches.batch_id"],
+            ondelete="CASCADE",
+            name="fk_reference_member_batch",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "rid"],
+            ["literature_papers.tenant_id", "literature_papers.rid"],
+            ondelete="CASCADE",
+            name="fk_reference_member_paper",
+        ),
+        Index("ix_reference_members_tenant_rid", "tenant_id", "rid"),
+    )
+    batch_id = Column(String(64), primary_key=True)
+    rid = Column(String(160), primary_key=True)
+    tenant_id = Column(BigInteger, nullable=False)
+
+
+class LiteratureReferenceRecord(Base):
+    """Immutable export occurrences; duplicates share a RID, not a record key."""
+
+    __tablename__ = "literature_reference_records"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "batch_id"],
+            ["literature_reference_batches.tenant_id", "literature_reference_batches.batch_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    batch_id = Column(String(64), primary_key=True)
+    record_no = Column(Integer, primary_key=True)
+    tenant_id = Column(BigInteger, nullable=False)
+    rid = Column(String(160))
+    payload_json = Column(JSON_VALUE, nullable=False)
+
+
+class LiteratureTopicRun(Base):
+    """Owner-scoped analysis; PostgreSQL is authoritative, Redis only schedules."""
+
+    __tablename__ = "literature_topic_runs"
+    __table_args__ = (UniqueConstraint("tenant_id", "run_id", name="uq_literature_topic_runs_tenant"),)
+    run_id = Column(String(64), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    created_by = Column(String(64), nullable=False)
+    name = Column(String(160), nullable=False)
+    status = Column(String(32), nullable=False)
+    mode = Column(String(32), nullable=False)
+    input_digest = Column(String(64), nullable=False)
+    config_json = Column(JSON_VALUE, nullable=False)
+    progress_json = Column(JSON_VALUE, nullable=False)
+    result_object = Column(String(1024))
+    error = Column(String(512))
+    attempts = Column(Integer, nullable=False)
+    lease_token = Column(String(64))
+    heartbeat_at = Column(DateTime(timezone=True))
+    cancel_requested = Column(Boolean, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class LiteratureTopicDocument(Base):
+    """Frozen authorized input; topic IDs live in a run/model namespace."""
+
+    __tablename__ = "literature_topic_documents"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "run_id"],
+            ["literature_topic_runs.tenant_id", "literature_topic_runs.run_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    run_id = Column(String(64), primary_key=True)
+    document_key = Column(String(160), primary_key=True)
+    tenant_id = Column(BigInteger, nullable=False)
+    rid = Column(String(160), nullable=False)
+    ordinal = Column(Integer, nullable=False)
+    text_sha256 = Column(String(64), nullable=False)
+    payload_json = Column(JSON_VALUE, nullable=False)
 
 
 class LiteratureCompileJob(Base):

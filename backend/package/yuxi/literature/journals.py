@@ -25,8 +25,8 @@ from __future__ import annotations
 import csv
 import io
 import re
-from typing import Any
 from collections.abc import Iterable
+from typing import Any
 
 from sqlalchemy import func, select
 

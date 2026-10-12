@@ -563,9 +563,7 @@ async def test_table_cards_from_citation_ready_are_escaped_and_structured():
             ]
         }
     }
-    html = _render(
-        [dict(_msg("human", "q"), id=1), dict(_msg("ai", "见表。", extra_metadata=metadata), id=2)]
-    )
+    html = _render([dict(_msg("human", "q"), id=1), dict(_msg("ai", "见表。", extra_metadata=metadata), id=2)])
     soup = _soup(html)
 
     card = soup.select_one("figure.table-card")

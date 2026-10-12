@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import statistics
 import unicodedata
 from pathlib import Path
@@ -8,8 +9,27 @@ from pathlib import Path
 import fitz
 
 from yuxi.knowledge.pdf_evidence.contracts import EvidenceAnchor, EvidenceFragment, NativePdfSnapshot
+from yuxi.knowledge.pdf_evidence.text_geometry import collect_page_characters, page_geometry
 
 PYMUPDF_PROVIDER_VERSION = str(fitz.VersionBind)
+
+
+class PdfInputError(ValueError):
+    """A deterministic input rejection, never retried as a supplier outage."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def input_policy() -> dict[str, int]:
+    limits = {
+        "max_bytes": int(os.getenv("PDF_EVIDENCE_MAX_BYTES", str(100 * 1024 * 1024))),
+        "max_pages": int(os.getenv("PDF_EVIDENCE_MAX_PAGES", "2000")),
+    }
+    if min(limits.values()) <= 0:
+        raise ValueError("PDF_INPUT_POLICY_INVALID")
+    return limits
 
 
 def _digest(value: str) -> str:
@@ -30,14 +50,29 @@ def _printable_ratio(value: str) -> float:
 def inspect_native_pdf(file_path: str | Path) -> NativePdfSnapshot:
     """Collect deterministic page/word geometry and stable evidence anchors."""
     path = Path(file_path)
-    source_bytes = path.read_bytes()
-    pdf_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    limits = input_policy()
+    if path.stat().st_size > limits["max_bytes"]:
+        raise PdfInputError("PDF_INPUT_BYTE_BUDGET_EXCEEDED")
+    with path.open("rb") as source:
+        pdf_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
     pages: list[dict] = []
     anchors: list[EvidenceAnchor] = []
     page_char_counts: list[int] = []
 
-    with fitz.open(path) as document:
+    try:
+        document = fitz.open(path)
+    except (fitz.FileDataError, fitz.EmptyFileError) as exc:
+        raise PdfInputError("PDF_INVALID_DOCUMENT") from exc
+    with document:
+        if not document.is_pdf:
+            raise PdfInputError("PDF_INVALID_DOCUMENT")
+        if document.needs_pass:
+            raise PdfInputError("PDF_PASSWORD_REQUIRED")
+        if document.page_count > limits["max_pages"]:
+            raise PdfInputError("PDF_INPUT_PAGE_BUDGET_EXCEEDED")
         for page_index, page in enumerate(document):
+            geometry = page_geometry(page, page_index)
+            glyphs = collect_page_characters(page)
             words = page.get_text("words", sort=True)
             word_rows = [
                 {
@@ -53,6 +88,8 @@ def inspect_native_pdf(file_path: str | Path) -> NativePdfSnapshot:
             page_char_counts.append(len(page_text))
             blocks: list[dict] = []
             for block_index, raw_block in enumerate(page.get_text("blocks", sort=True)):
+                if len(raw_block) > 6 and raw_block[6] != 0:
+                    continue
                 quote = _normalized_text(str(raw_block[4]))
                 if not quote:
                     continue
@@ -118,12 +155,10 @@ def inspect_native_pdf(file_path: str | Path) -> NativePdfSnapshot:
 
             pages.append(
                 {
-                    "page": page_index + 1,
-                    "width": round(float(page.rect.width), 2),
-                    "height": round(float(page.rect.height), 2),
-                    "cropbox": [round(float(value), 2) for value in page.cropbox],
-                    "mediabox": [round(float(value), 2) for value in page.mediabox],
-                    "rotation": int(page.rotation),
+                    **geometry,
+                    "characters": glyphs["characters"],
+                    "raw_text": glyphs["text"],
+                    "native_text_usable": len(glyphs["text"]) >= 20 and _printable_ratio(glyphs["text"]) >= 0.9,
                     "text": page_text,
                     "words": word_rows,
                     "blocks": blocks,
@@ -162,6 +197,12 @@ def inspect_native_pdf(file_path: str | Path) -> NativePdfSnapshot:
                 "cropbox": page["cropbox"],
                 "mediabox": page["mediabox"],
                 "rotation": page["rotation"],
+                "render_width": page["render_width"],
+                "render_height": page["render_height"],
+                "page_label": page["page_label"],
+                "coordinate_frame": page["coordinate_frame"],
+                "canonical_to_pdf": page["canonical_to_pdf"],
+                "render_to_canonical": page["render_to_canonical"],
             }
             for index, page in enumerate(pages)
         ],

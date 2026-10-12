@@ -28,6 +28,8 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeChunk,
     KnowledgeFile,
     KnowledgeParseRevision,
+    PdfTableRecord,
+    PdfTableCellRecord,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -139,6 +141,8 @@ async def table_session():
         await connection.run_sync(KnowledgeChunk.__table__.create)
         await connection.run_sync(KnowledgeFile.__table__.create)
         await connection.run_sync(KnowledgeParseRevision.__table__.create)
+        await connection.run_sync(PdfTableRecord.__table__.create)
+        await connection.run_sync(PdfTableCellRecord.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         # SQLite 方言：自增主键显式 id（AGENTS.md 测试注意事项）
@@ -218,6 +222,58 @@ async def test_gates_attached_full_fields(table_session):
     assert table.table_id.startswith("tbl_") and len(table.table_id) == 24  # 确定性派生
     assert table.selection["chunk_id"] == "file-a_rev_1_chunk_0"
     assert table.truncated is False and table.limited is False  # 完整小表不得标截断
+
+
+async def test_cell_selectors_bind_complete_rows_to_canonical_source(table_session):
+    from sqlalchemy import select
+
+    anchor = (await table_session.execute(select(EvidenceAnchorRecord))).scalar_one()
+    anchor.fragments = [{"region_id": "physical-region", "page_index": 10, "bbox": anchor.bbox}]
+    table_session.add(
+        KnowledgeParseRevision(
+            id=1,
+            revision_id="pr_1",
+            tenant_id=1,
+            kb_id="kb-a",
+            file_id="file-a",
+            source_sha256="a" * 64,
+            parser_fingerprint="b" * 64,
+            pipeline_version="test",
+        )
+    )
+    table_session.add(
+        PdfTableRecord(
+            id=1, table_id="canonical-table", parse_revision_id="pr_1", tenant_id=1, region_ids=["physical-region"]
+        )
+    )
+    values = [["Material", "Starch", "Protein"], ["WT", "75.2", "8.9"], ["osmyb73", "68.4", "10.2"]]
+    for row, cells in enumerate(values):
+        for col, value in enumerate(cells):
+            table_session.add(
+                PdfTableCellRecord(
+                    id=row * 3 + col + 1, table_record_id=1, row_index=row, column_index=col, raw_value=value
+                )
+            )
+    await table_session.flush()
+    table, reason = await _project(table_session)
+    assert reason is None
+    assert table.rows[1][1].source_selector == {
+        "kb_id": "kb-a",
+        "file_id": "file-a",
+        "parse_revision_id": "pr_1",
+        "source_sha256": "a" * 64,
+        "table_id": "canonical-table",
+        "row_index": 1,
+        "column_index": 1,
+    }
+    # Identical physical rows are ambiguous; never bind the first occurrence.
+    for col, value in enumerate(values[1]):
+        table_session.add(
+            PdfTableCellRecord(id=10 + col, table_record_id=1, row_index=3, column_index=col, raw_value=value)
+        )
+    await table_session.flush()
+    table, reason = await _project(table_session)
+    assert reason is None and all(cell.source_selector is None for cell in table.rows[1])
 
 
 @pytest.mark.asyncio

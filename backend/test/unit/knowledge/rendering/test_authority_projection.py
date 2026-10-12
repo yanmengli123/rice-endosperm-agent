@@ -48,4 +48,3 @@ def test_ncbi_official_link_is_derived_from_verified_gene_id():
         requires_mcp=True,
     )
     assert audit["status"] == "PASSED", audit
-

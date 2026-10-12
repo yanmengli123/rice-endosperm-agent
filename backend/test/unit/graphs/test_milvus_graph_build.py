@@ -666,7 +666,7 @@ async def test_contract_gate_blocks_writes_but_not_status(monkeypatch):
                     additional_params={"graph_build_config": {"locked": True, "extractor_type": "llm"}},
                 )
             )
-        )
+        ),
     )
 
     class _StrictSpec(SimpleNamespace):

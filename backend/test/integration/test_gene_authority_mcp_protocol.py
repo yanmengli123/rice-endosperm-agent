@@ -18,11 +18,18 @@ class GeneAuthorityProtocolTests(unittest.IsolatedAsyncioTestCase):
                 await session.initialize()
                 listed = await session.list_tools()
                 names = {tool.name for tool in listed.tools}
-                self.assertTrue({
-                    "ncbi_eutils_search_rest", "ncbi_eutils_summary_rest", "ncbi_eutils_fetch_rest",
-                    "pride_search_projects_rest", "pride_project_rest", "pride_project_files_rest",
-                    "europe_pmc_oa_passages_rest",
-                } <= names)
+                self.assertTrue(
+                    {
+                        "ncbi_eutils_search_rest",
+                        "ncbi_eutils_summary_rest",
+                        "ncbi_eutils_fetch_rest",
+                        "pride_search_projects_rest",
+                        "pride_project_rest",
+                        "pride_project_files_rest",
+                        "europe_pmc_oa_passages_rest",
+                    }
+                    <= names
+                )
                 result = await session.call_tool("pride_project_rest", {"accession": "PXD082271"})
                 self.assertFalse(result.isError)
                 self.assertIsInstance(result.structuredContent, dict)

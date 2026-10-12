@@ -11,8 +11,8 @@ evidence_id/quote 定位必须逐条不变（test_translation_evidence_stability
 
 from __future__ import annotations
 
-import hashlib
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -214,7 +214,7 @@ async def enqueue_literature_translation(
     """排一个翻译任务，且不以 ``force`` 抢占仍持有有效租约的 worker。"""
     if variant_kind not in VALID_VARIANT_KINDS:
         raise ValueError(f"非法变体类型: {variant_kind}")
-    from yuxi.literature.translate.settings import translation_options, options_digest
+    from yuxi.literature.translate.settings import options_digest, translation_options
 
     # Existing products/in-flight work stay usable during a provider outage.
     # Snapshot options once, probe outside locks, then recheck reuse under the paper lock.

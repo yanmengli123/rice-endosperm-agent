@@ -174,3 +174,22 @@ def test_answer_source_guard_event_is_registered_with_closed_attribute_set():
             "repair_elapsed_ms",
         }
     )
+
+
+def test_figure_table_operational_events_are_closed_and_emitted():
+    from yuxi.trace.protocol import EVENT_ATTRIBUTE_SCHEMAS, EVENT_EMITTER_INDEX
+
+    assert EVENT_ATTRIBUTE_SCHEMAS["knowledge.source_reference.completed"] == frozenset(
+        {
+            "status",
+            "source_count",
+            "target_count",
+            "caption_evidence_count",
+            "resolved_count",
+            "missing_count",
+            "ambiguous_count",
+            "budget_exceeded_count",
+        }
+    )
+    assert "knowledge.source_reference.completed" in EVENT_EMITTER_INDEX
+    assert "knowledge.figure_table_publication.completed" in EVENT_EMITTER_INDEX

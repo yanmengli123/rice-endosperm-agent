@@ -7,9 +7,7 @@ from yuxi.knowledge.scope_gateway import query_single_kb_unified
 
 async def test_managed_graph_contract_uses_graph_channel(monkeypatch):
     contract = type("Spec", (), {"contract_key": "managed_graph"})()
-    monkeypatch.setattr(
-        "yuxi.knowledge.source_contracts.gate.load_kb_contract", AsyncMock(return_value=contract)
-    )
+    monkeypatch.setattr("yuxi.knowledge.source_contracts.gate.load_kb_contract", AsyncMock(return_value=contract))
 
     graph_rows = [
         {
@@ -62,9 +60,7 @@ async def test_managed_graph_contract_uses_graph_channel(monkeypatch):
 
 async def test_document_contract_passes_through_aquery(monkeypatch):
     contract = type("Spec", (), {"contract_key": "pdf_evidence"})()
-    monkeypatch.setattr(
-        "yuxi.knowledge.source_contracts.gate.load_kb_contract", AsyncMock(return_value=contract)
-    )
+    monkeypatch.setattr("yuxi.knowledge.source_contracts.gate.load_kb_contract", AsyncMock(return_value=contract))
 
     doc_hits = [
         {"content": "chunk 文本", "score": 0.8, "metadata": {"chunk_id": "c1", "file_id": "f1"}},

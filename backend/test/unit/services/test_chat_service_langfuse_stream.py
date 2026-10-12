@@ -97,6 +97,24 @@ def test_stream_boundary_redacts_tagged_reasoning_across_deltas() -> None:
     assert "private chain" not in json.dumps((first, second, third))
 
 
+def test_message_stream_preserves_typed_text_blocks_without_reasoning_or_tools() -> None:
+    events = svc._message_chunk_yuxi_events(
+        {
+            "content": [
+                {"type": "text", "text": '{"text":"Figure'},
+                {"type": "reasoning", "text": "private chain"},
+                {"type": "tool_call", "text": "private args"},
+                {"type": "output_text", "text": ' 2"}'},
+            ]
+        },
+        message_id="message-1",
+        thread_id="thread-1",
+        namespace=[],
+    )
+    assert events[0]["content"] == '{"text":"Figure 2"}'
+    assert "private" not in json.dumps(events)
+
+
 def test_deterministic_locator_answer_uses_only_verified_locator_dto() -> None:
     verified = {
         "retrieval_plan": {"answer_mode": "DETERMINISTIC_LOCATOR"},
@@ -290,8 +308,10 @@ def test_build_langfuse_run_context_reads_evaluation_from_invocation_meta(monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("paper_state", [None, "valid", "revoked"])
 async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_context(
     monkeypatch: pytest.MonkeyPatch,
+    paper_state,
 ):
     calls: dict[str, object] = {}
     db = _FakeSession()
@@ -366,6 +386,38 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
     )
     monkeypatch.setattr(svc, "flush_langfuse", lambda: calls.setdefault("flushed", True))
 
+    if paper_state:
+        from contextlib import asynccontextmanager
+        from yuxi.literature import session as paper_session
+        from yuxi.services import principal
+
+        snapshot = {"effective_kb_ids": [], "allow_web": True, "literature_binding": {"rid": "paper"}}
+
+        async def frozen_scope(**kwargs):
+            return snapshot
+
+        async def tenant_id(*args):
+            return 1
+
+        async def authorize(**kwargs):
+            assert kwargs["snapshot"] is snapshot
+            calls["paper_authorized"] = True
+            if paper_state == "revoked":
+                raise PermissionError("fixture revoked source")
+
+        async def partial(*args, **kwargs):
+            calls["failed_state"] = kwargs
+
+        @asynccontextmanager
+        async def session_context():
+            yield db
+
+        monkeypatch.setattr(svc, "_ensure_knowledge_scope_snapshot", frozen_scope)
+        monkeypatch.setattr(principal, "resolve_tenant_id", tenant_id)
+        monkeypatch.setattr(paper_session, "validate_frozen_paper_scope", authorize)
+        monkeypatch.setattr(svc, "save_partial_message", partial)
+        monkeypatch.setattr(svc.pg_manager, "get_async_session_context", session_context)
+
     chunks = []
     async for chunk in svc.stream_agent_chat(
         agent_slug="test-agent",
@@ -392,6 +444,16 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
         "metadata": {"langfuse_user_id": "user-1", "langfuse_session_id": "thread-1"},
         "tags": ["yuxi", "chat"],
     }
+    if paper_state:
+        # Even a non-retrieval turn revalidates its server-owned paper binding.
+        assert calls["paper_authorized"] is True
+    if paper_state == "revoked":
+        assert chunks[-1]["status"] == "error" and chunks[-1]["error_type"] == "literature_source_changed"
+        assert "saved_state" not in calls
+        assert calls["failed_state"]["knowledge_contract"] is None
+        assert calls["failed_state"]["full_msg"].content == chunks[-1]["error_message"]
+        assert calls["failed_state"]["full_msg"].content != "hello"
+        return
     assert calls["saved_state"]["trace_info"] == {
         "langfuse_trace_id": "trace-runtime",
         "langfuse_session_id": "thread-1",

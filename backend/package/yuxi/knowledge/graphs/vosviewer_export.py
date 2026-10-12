@@ -178,9 +178,7 @@ def _seed_layout(count: int, links: list[dict]) -> tuple[list[float], list[float
             ys[i] += delta_y[i]
     mean_x = sum(xs) / count
     mean_y = sum(ys) / count
-    spread = max(
-        math.sqrt((xs[i] - mean_x) ** 2 + (ys[i] - mean_y) ** 2) for i in range(count)
-    ) or 1.0
+    spread = max(math.sqrt((xs[i] - mean_x) ** 2 + (ys[i] - mean_y) ** 2) for i in range(count)) or 1.0
     scale = 1.0 / spread
     return (
         [round((xs[i] - mean_x) * scale, 6) for i in range(count)],
@@ -240,8 +238,8 @@ def build_vosviewer_package(
         entities[str(entity_id)] = entity
         physical_entities[str(node["id"])] = str(entity_id)
 
-    if not entities:
-        raise ValueError("当前范围没有可导出的实体")
+    if len(entities) < 3:
+        raise ValueError("VOSviewer 1.6.21 至少需要 3 个实体，请扩大图谱范围后重新导出")
 
     facts = {}
     excluded_edges = duplicate_edges = 0
@@ -478,9 +476,7 @@ endlocal
             "clustering": {
                 "algorithm": "connected_components",
                 "count": component_count,
-                "omitted_reason": (
-                    None if clusters is not None else "components_exceed_viewer_limit_1000"
-                ),
+                "omitted_reason": (None if clusters is not None else "components_exceed_viewer_limit_1000"),
             },
             "random_seeds": None,
             "parameters": "record_in_viewer_when_analysis_is_saved",

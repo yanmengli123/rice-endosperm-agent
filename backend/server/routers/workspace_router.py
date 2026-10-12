@@ -195,11 +195,22 @@ async def download_workspace_knowledge_file(
     kb_id: str = Query(..., description="知识库 ID"),
     file_id: str = Query(..., description="知识库文件 ID"),
     variant: str = Query("original", description="下载模式：original 或 parsed"),
+    parse_revision_id: str | None = Query(None),
+    source_sha256: str | None = Query(None, min_length=64, max_length=64),
     current_user: User = Depends(get_required_user),
 ):
     await _ensure_knowledge_read_access(current_user, kb_id)
     try:
-        data = await knowledge_base.get_file_download(kb_id=kb_id, file_id=file_id, variant=variant)
+        if source_sha256 and (not parse_revision_id or variant != "original"):
+            raise ValueError("PDF_SOURCE_REVISION_REQUIRED")
+        if parse_revision_id and variant == "original":
+            from yuxi.services.pdf_evidence_service import download_pdf_original
+
+            data = await download_pdf_original(
+                kb_id=kb_id, file_id=file_id, parse_revision_id=parse_revision_id, source_sha256=source_sha256
+            )
+        else:
+            data = await knowledge_base.get_file_download(kb_id=kb_id, file_id=file_id, variant=variant)
     except ValueError as error:
         _raise_knowledge_read_error(error)
 
@@ -207,8 +218,51 @@ async def download_workspace_knowledge_file(
     return StreamingResponse(
         io.BytesIO(data["content"]),
         media_type=data["media_type"],
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            **({"ETag": f'"{data["etag"]}"', "Cache-Control": "private, no-cache"} if data.get("etag") else {}),
+        },
     )
+
+
+@workspace.get("/knowledge/locator")
+async def get_workspace_pdf_locator(
+    kb_id: str,
+    file_id: str,
+    parse_revision_id: str | None = None,
+    source_sha256: str | None = None,
+    span_id: str | None = None,
+    region_id: str | None = None,
+    anchor_id: str | None = None,
+    table_id: str | None = None,
+    row_index: int | None = Query(None, ge=0),
+    column_index: int | None = Query(None, ge=0),
+    figure_label: str | None = None,
+    panel_label: str | None = Query(None, min_length=1, max_length=1),
+    quote_text: str | None = Query(None, max_length=10000),
+    current_user: User = Depends(get_required_user),
+):
+    await _ensure_knowledge_read_access(current_user, kb_id)
+    from yuxi.services.pdf_evidence_service import resolve_pdf_evidence
+
+    try:
+        return await resolve_pdf_evidence(
+            kb_id=kb_id,
+            file_id=file_id,
+            parse_revision_id=parse_revision_id,
+            source_sha256=source_sha256,
+            span_id=span_id,
+            region_id=region_id,
+            anchor_id=anchor_id,
+            table_id=table_id,
+            row_index=row_index,
+            column_index=column_index,
+            figure_label=figure_label,
+            panel_label=panel_label,
+            quote=quote_text,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @workspace.put("/file", response_model=dict)

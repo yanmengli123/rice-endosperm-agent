@@ -157,6 +157,48 @@ def test_llm_context_exposes_full_citation_channel_budget_and_primary_figure_rul
     assert "不得用双突变体比较图、过表达图或工作模型图冒充主证据" in context
 
 
+def test_document_body_survives_context_projection_with_physical_ref_mapping():
+    text = "Mutants showed longer grains (Figure 2e). Abdominal endosperm filling was deficient (Figure 2f)."
+    context = build_answer_context(
+        {
+            "claims": [],
+            "evidence": [{"evidence_id": "physical-body", "source_type": "DOCUMENT", "content": text}],
+            "citations": [
+                {"ref": "E3", "evidence_id": "span-body", "_physical_evidence_id": "physical-body", "zone": "MAIN_TEXT"}
+            ],
+        }
+    )
+    assert text in context
+    assert '"citation_refs":["E3"]' in context
+    assert "Claim 为空不代表文献原文为空" in context
+    assert "不能宣称论文未讨论该图或未返回正文" in context
+
+
+def test_unbound_document_text_does_not_enter_narrative_context():
+    context = build_answer_context(
+        {"evidence": [{"evidence_id": "unbound", "source_type": "DOCUMENT", "content": "UNBOUND_BODY"}]}
+    )
+    assert "UNBOUND_BODY" not in context
+
+
+def test_document_spans_keep_exact_refs_and_body_budget_before_captions():
+    import json
+
+    context = build_answer_context(
+        {
+            "evidence": [{"evidence_id": "chunk", "source_type": "DOCUMENT", "content": "whole chunk"}],
+            "citations": [
+                {"ref": "E1", "evidence_id": "chunk", "_quote": "Figure 2 Caption."},
+                {"ref": "E2", "evidence_id": "chunk", "_quote": "Body explains phenotype."},
+            ],
+        },
+        narrative_evidence_limit=1,
+    )
+    payload = json.loads(context.split("\n", 1)[1].split("\n</", 1)[0])
+    assert payload["selected_evidence"][0]["evidence_quote"] == "Body explains phenotype."
+    assert payload["selected_evidence"][0]["citation_refs"] == ["E2"]
+
+
 def test_figure_question_receives_parallel_answer_output_contract():
     context = build_answer_context(
         {

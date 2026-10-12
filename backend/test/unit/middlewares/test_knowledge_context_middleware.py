@@ -23,6 +23,21 @@ class _Request:
         )
 
 
+def test_fragmented_draft_is_guarded_once_without_inventing_transport_newlines():
+    from yuxi.agents.middlewares.knowledge_context import _sanitize_message_content
+
+    image = {"type": "image_url", "image_url": {"url": "https://example.test/figure.png"}}
+    content = [
+        {"type": "text", "text": '<YUXI_ANSWER_DRAFT>{"schema_version":"answer-draft.v2","blocks":['},
+        {"type": "text", "text": '{"type":"paragraph","text":"原文指出粒'},
+        image,
+        {"type": "output_text", "text": '长增加。","evidence_refs":[]}]}</YUXI_ANSWER_DRAFT>'},
+    ]
+    guarded, _, _, validation = _sanitize_message_content(content, contract={})
+    assert validation["answer_draft"]["status"] == "RENDERED_V2"
+    assert guarded == [{"type": "text", "text": "原文指出粒长增加。"}, image]
+
+
 @pytest.mark.asyncio
 async def test_authoritative_scope_marks_stale_assistant_runtime_state_non_authoritative():
     request = _Request(

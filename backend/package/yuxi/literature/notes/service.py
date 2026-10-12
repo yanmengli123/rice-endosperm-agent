@@ -12,9 +12,9 @@ document.json（段落 [Pxxx] 锚点）。编译产物落 MinIO
 
 from __future__ import annotations
 
-import json
 import asyncio
 import hashlib
+import json
 import logging
 import uuid
 from datetime import timedelta
@@ -33,9 +33,9 @@ from yuxi.services.run_queue_service import get_arq_pool
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeParseRevision,
     LiteratureCompileJob,
     LiteraturePaper,
-    KnowledgeParseRevision,
 )
 from yuxi.utils.datetime_utils import UTC, utc_now
 

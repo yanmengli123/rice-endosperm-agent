@@ -82,7 +82,8 @@ def _patch_unlocated_pipeline(
             "warnings": [],
         }
 
-    async def fake_citations(_db, rows):
+    async def fake_citations(_db, rows, *, include_section=False):
+        assert include_section is False
         assert rows
         return citations
 

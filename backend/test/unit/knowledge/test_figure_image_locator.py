@@ -472,12 +472,14 @@ def test_query_crop_variants_generated():
     # 用 640x480 大图确保所有裁剪区域 ≥ 100px
     from PIL import Image, ImageDraw
     import io
+
     image = Image.new("RGB", (640, 480), "white")
     draw = ImageDraw.Draw(image)
     for i, h in enumerate((200, 150, 100, 240, 180)):
         x0 = 60 + i * 110
         draw.rectangle((x0, 480 - h, x0 + 70, 460), fill=(30, 144, 255))
-    buf = io.BytesIO(); image.save(buf, format="PNG")
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
     variants = query_crop_variants(buf.getvalue())
     labels = [label for _bytes, label in variants]
     assert "normalized_whole" in labels
@@ -497,7 +499,9 @@ def test_query_crop_variants_degenerate():
 
 def test_observation_summary_carried_on_failure():
     """P0：V2/V3 全 miss 时，observation_summary 应携带到 NOT_FOUND resolution。"""
-    observation = _observation(figure_label="Figure 2", visible_entities=["OsMYB73", "GUS"], visible_text=["Bar, 1.0 cm"])
+    observation = _observation(
+        figure_label="Figure 2", visible_entities=["OsMYB73", "GUS"], visible_text=["Bar, 1.0 cm"]
+    )
     # 用空候选列表让裁决全部 miss
     resolution = adjudicate_figure_candidates(observation, [])
     assert resolution.get("status") != "VERIFIED"

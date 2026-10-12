@@ -7,17 +7,16 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
 import json
+import logging
 from typing import Any
 from urllib.parse import quote, urlparse
 
 import httpx
-from yuxi.literature.access import paper_visibility
-
 from sqlalchemy import select
 
+from yuxi.literature.access import paper_visibility
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import LiteraturePaper
 

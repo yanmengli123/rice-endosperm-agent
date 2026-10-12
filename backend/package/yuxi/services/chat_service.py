@@ -17,6 +17,7 @@ import base64
 import json
 import time
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -657,31 +658,36 @@ async def _figure_refs_public_payload(
             attached_table_id: str | None = None
             published_kind: str | None = None
             if ref.get("kind") == "table" and ref.get("anchor_id") and ref.get("revision_id"):
-                # Table（P2）：题注锚点 → 含锚点脚注的 chunk → <table> 受控解析
-                from yuxi.knowledge.contracts.table_asset_projection import project_publishable_table
+                if not getattr(conf, "table_cell_enabled", True):
+                    # 灰度回滚（ADR-0008 P2）：关闭表格通道不撤芯片——正文锚点
+                    # 照常跳原文，visual_status 经 has_caption_evidence 自然回落。
+                    suppressed_reason = "table_channel_disabled"
+                else:
+                    # Table（P2）：题注锚点 → 含锚点脚注的 chunk → <table> 受控解析
+                    from yuxi.knowledge.contracts.table_asset_projection import project_publishable_table
 
-                try:
-                    table, reason = await project_publishable_table(
-                        db,
-                        kb_id=str(ref.get("kb_id") or ""),
-                        file_id=str(ref.get("file_id") or ""),
-                        revision_id=str(ref.get("revision_id") or ""),
-                        anchor_id=str(ref.get("anchor_id") or ""),
-                        evidence_id=str(ref.get("evidence_id") or ""),
-                        page=ref.get("page"),
-                        label=str(ref.get("label") or ""),
-                        caption=str(ref.get("quote_head") or ""),
-                        publish_allowed=publish_allowed,
-                    )
-                    if table is not None:
-                        mention_tables.append(table.model_dump(mode="json"))
-                        attached_table_id = table.table_id
-                        published_kind = "table"
-                    else:
-                        suppressed_reason = reason or "table_html_missing"
-                except Exception as error:  # noqa: BLE001 - 投影失败只影响该锚点的卡片
-                    logger.warning(f"table ref mention projection failed: {error}")
-                    suppressed_reason = "projection_error"
+                    try:
+                        table, reason = await project_publishable_table(
+                            db,
+                            kb_id=str(ref.get("kb_id") or ""),
+                            file_id=str(ref.get("file_id") or ""),
+                            revision_id=str(ref.get("revision_id") or ""),
+                            anchor_id=str(ref.get("anchor_id") or ""),
+                            evidence_id=str(ref.get("evidence_id") or ""),
+                            page=ref.get("page"),
+                            label=str(ref.get("label") or ""),
+                            caption=str(ref.get("quote_head") or ""),
+                            publish_allowed=publish_allowed,
+                        )
+                        if table is not None:
+                            mention_tables.append(table.model_dump(mode="json"))
+                            attached_table_id = table.table_id
+                            published_kind = "table"
+                        else:
+                            suppressed_reason = reason or "table_html_missing"
+                    except Exception as error:  # noqa: BLE001 - 投影失败只影响该锚点的卡片
+                        logger.warning(f"table ref mention projection failed: {error}")
+                        suppressed_reason = "projection_error"
             elif ref.get("kind") == "figure" and ref.get("anchor_id") and ref.get("revision_id"):
                 from yuxi.knowledge.contracts.figure_asset_projection import (
                     project_publishable_figures_for_mention,
@@ -721,6 +727,7 @@ async def _figure_refs_public_payload(
                     "file_id": str(ref.get("file_id") or ""),
                     "revision_id": str(ref.get("revision_id") or ""),
                     "page": ref.get("page"),
+                    "panel_label": ref.get("panel_label") or "",
                     "figure_index": None,
                     "table_index": None,
                     "suppressed_reason": suppressed_reason,
@@ -758,7 +765,10 @@ async def _augmented_citation_ready(
     """
     locator_verified = isinstance(locator, dict) and str(locator.get("status") or "") == "VERIFIED"
     refs, mention_figures, mention_tables = await _figure_refs_public_payload(db, text=text, contract=contract)
-    if not locator_verified and not refs:
+    from yuxi.knowledge.evidence.reference_recall import cited_reference_sources
+
+    sources = cited_reference_sources(text, contract) if isinstance(contract, dict) else []
+    if not locator_verified and not refs and not sources:
         return None
     payload: dict[str, Any] = _citation_ready_payload(locator) if locator_verified else {}
     if refs:
@@ -775,13 +785,43 @@ async def _augmented_citation_ready(
         if merged:
             payload["figures"] = merged
             first_index_by_binding: dict[str, int] = {}
+            whole_index_by_binding: dict[str, int] = {}
             for index, figure in enumerate(merged):
                 binding_id = str(figure.get("binding_id") or "")
                 if binding_id and binding_id not in first_index_by_binding:
                     first_index_by_binding[binding_id] = index
+                if binding_id and not (figure.get("source_selector") or {}).get("panel_label"):
+                    whole_index_by_binding.setdefault(binding_id, index)
             for ref in payload["figure_refs"]:
                 anchor_binding = f"figref:{ref.get('anchor_id')}"
-                ref["figure_index"] = first_index_by_binding.get(anchor_binding)
+                panel = str(ref.get("panel_label") or "").upper()
+                # 灰度回滚（ADR-0008 P1）：panel 精度通道关闭 → 不做 panel 精确
+                # 匹配，panel ref 走整图回退（panel_status=WHOLE_FIGURE_FALLBACK，
+                # figure_index 指向整图帧），芯片与 panel 标签保留。
+                panel_match_enabled = bool(panel) and bool(getattr(conf, "panel_locator_enabled", True))
+                panel_index = next(
+                    (
+                        index
+                        for index, figure in enumerate(merged)
+                        if figure.get("binding_id") == anchor_binding
+                        and panel_match_enabled
+                        and str((figure.get("source_selector") or {}).get("panel_label") or "").upper() == panel
+                    ),
+                    None,
+                )
+                ref["figure_index"] = (
+                    (panel_index if panel_index is not None else whole_index_by_binding.get(anchor_binding))
+                    if panel
+                    else first_index_by_binding.get(anchor_binding)
+                )
+                if panel:
+                    ref["panel_status"] = (
+                        "VERIFIED"
+                        if panel_index is not None
+                        else "WHOLE_FIGURE_FALLBACK"
+                        if ref["figure_index"] is not None
+                        else "CAPTION_FALLBACK"
+                    )
     if mention_tables:
         # 表格卡片（ADR-0008 P2）：按 table_id 去重合并，ref 的 table_index 回填
         # 指向 tables[] 下标（figure_index/table_index 为两个独立下标域）
@@ -805,6 +845,70 @@ async def _augmented_citation_ready(
                 if anchor_table_id is not None:
                     ref["table_index"] = index_by_table.get(str(anchor_table_id))
                     ref.pop("_table_id", None)
+    if sources:
+        payload["source_quotes"] = [
+            {
+                key: source[key]
+                for key in ("evidence_id", "quote", "quote_hash", "page_number", "source", "locator", "targets")
+            }
+            for source in sources
+        ]
+        from yuxi.knowledge.evidence.caption_locator import canonical_figure_label
+
+        for source in payload["source_quotes"]:
+            targets = []
+            for target in source["targets"]:
+                matching = next(
+                    (
+                        ref
+                        for ref in refs
+                        if ref.get("file_id") == source["source"]["file_id"]
+                        and ref.get("revision_id") == source["source"]["parse_revision_id"]
+                        and ref.get("anchor_id") == target.get("anchor_id")
+                        and canonical_figure_label(ref.get("label")) == canonical_figure_label(target["label"])
+                    ),
+                    None,
+                )
+                published_target = {**target, "visual_status": (matching or {}).get("visual_status", "REFERENCE_ONLY")}
+                if matching is None and target.get("status") == "RESOLVED":
+                    from yuxi.knowledge.rendering.figure_ref_channel import MAX_FIGURE_REF_KEYS
+
+                    if len({str(ref["ref"]) for ref in refs if ref.get("ref")}) >= MAX_FIGURE_REF_KEYS:
+                        published_target["status"] = "BUDGET_EXCEEDED"
+                targets.append(published_target)
+            source["targets"] = targets
+    try:
+        from yuxi.trace import emit_trace
+
+        published_refs = payload.get("figure_refs") or []
+        visual_counts = Counter(str(ref.get("visual_status") or "REFERENCE_ONLY") for ref in published_refs)
+        panel_counts = Counter(str(ref.get("panel_status") or "") for ref in published_refs)
+        emit_trace(
+            category="KNOWLEDGE",
+            operation="figure_table_publication",
+            event_type="knowledge.figure_table_publication.completed",
+            title="图表证据发布",
+            summary=(
+                f"发布 {len(published_refs)} 个图表锚点、"
+                f"{len(payload.get('figures') or [])} 个图资产、{len(payload.get('tables') or [])} 张表"
+            ),
+            attributes={
+                "source_quote_count": len(payload.get("source_quotes") or []),
+                "figure_ref_count": len(published_refs),
+                "figure_asset_count": len(payload.get("figures") or []),
+                "table_count": len(payload.get("tables") or []),
+                "visual_verified_count": visual_counts.get("VERIFIED_WITH_ASSET", 0)
+                + visual_counts.get("VERIFIED_WITH_TABLE", 0),
+                "caption_only_count": visual_counts.get("VERIFIED_CAPTION_ONLY", 0),
+                "reference_only_count": visual_counts.get("REFERENCE_ONLY", 0),
+                "panel_verified_count": panel_counts.get("VERIFIED", 0),
+                "whole_figure_fallback_count": panel_counts.get("WHOLE_FIGURE_FALLBACK", 0),
+                "caption_fallback_count": panel_counts.get("CAPTION_FALLBACK", 0),
+            },
+            visibility="ADMIN",
+        )
+    except Exception:  # publication telemetry must never block an answer
+        pass
     return payload
 
 
@@ -942,6 +1046,19 @@ async def _project_semantic_tables(db, contract: dict[str, Any]) -> tuple[list[d
     }
 
 
+def _citation_output_requires_guard(evidence_level, contract: dict[str, Any] | None) -> bool:
+    """Ordinary QA with physical source references also needs pre-publication signing."""
+    return bool(
+        contract
+        and contract.get("status") != "SKIPPED"
+        and (
+            evidence_level in {EvidenceLevel.CLAIM_EVIDENCE, EvidenceLevel.VERBATIM_LOCATOR}
+            or getattr(conf, "figure_ref_anchor_enabled", False)
+            and (contract.get("source_references") or {}).get("sources")
+        )
+    )
+
+
 def _guard_knowledge_answer(
     text: str,
     contract: dict[str, Any],
@@ -1069,6 +1186,56 @@ def _guard_knowledge_answer(
             locator=locator_resolution,
             observation=observation if isinstance(observation, dict) and "figure_label" in observation else None,
         )
+    if getattr(conf, "figure_ref_anchor_enabled", False) and not (
+        isinstance(answer_policy, dict) and answer_policy.get("document_citations_allowed") is False
+    ):
+        from yuxi.knowledge.evidence.reference_recall import cited_reference_sources
+        from yuxi.knowledge.evidence.caption_locator import canonical_figure_label
+        from yuxi.knowledge.rendering.citation_channel import _sign_figure_refs
+        from yuxi.knowledge.rendering.figure_ref_channel import parse_figure_ref_chips
+
+        labels = list(
+            dict.fromkeys(
+                target["label"]
+                for source in cited_reference_sources(guarded, contract)
+                for target in source["targets"]
+                if target["status"] == "RESOLVED"
+            )
+        )
+        existing_labels = {canonical_figure_label(item["label"]) for item in parse_figure_ref_chips(guarded)}
+        missing = [label for label in labels if canonical_figure_label(label) not in existing_labels]
+        if missing:
+            with_navigation, refs, stats = _sign_figure_refs(
+                guarded.rstrip() + "\n\n原句关联图表：" + "、".join(missing),
+                contract.get("citations") or [],
+                locator_resolution,
+            )
+            if refs:
+                guarded = with_navigation
+                citation_validation["source_reference_navigation"] = stats
+    # 发布顺序收口（第二落点）：enforce_explanation_grounding 在
+    # apply_citation_channel 之后运行，会拆除无 VERIFIED 绑定句的接地后缀/
+    # 删句——芯片被拆后的因果断言不得以"无绑定"形态残留。此位置在守卫链
+    # 所有引用变更点之后（导航补签只增不减）。含冻结引文子串的行是逐字
+    # 原文载体，引文即绑定，天然豁免。
+    if contract.get("citations") and semantic_question:
+        from yuxi.knowledge.validation.document_release_hygiene import strip_unbound_assertions_after_render
+
+        guarded, late_render_hygiene = strip_unbound_assertions_after_render(
+            guarded,
+            contract.get("citations") or [],
+            question=semantic_question,
+        )
+        if late_render_hygiene["removed_line_count"]:
+            _hygiene = citation_validation.get("document_release_hygiene") or {}
+            _counts = Counter(_hygiene.get("reason_counts") or {})
+            _counts.update(late_render_hygiene["reason_counts"])
+            citation_validation["document_release_hygiene"] = {
+                **late_render_hygiene,
+                "removed_line_count": int(_hygiene.get("removed_line_count") or 0)
+                + late_render_hygiene["removed_line_count"],
+                "reason_counts": dict(_counts),
+            }
     return guarded, citation_validation
 
 
@@ -2145,6 +2312,15 @@ def _message_chunk_yuxi_events(
     reasoning_state = additional_kwargs.get("reasoning_state")
 
     message_event: dict[str, Any] = {"type": "message_delta", "message_id": message_id, **route}
+    if isinstance(content, list):
+        # OpenAI-compatible providers can switch between string deltas and
+        # typed text blocks. Dropping the latter truncates an otherwise valid
+        # answer draft. Never project reasoning, images or tool arguments here.
+        content = "".join(
+            block if isinstance(block, str) else str(block.get("text") or "")
+            for block in content
+            if isinstance(block, str) or isinstance(block, dict) and block.get("type") in {"text", "output_text"}
+        )
     if isinstance(content, str) and content:
         message_event["content"] = content
     has_reasoning = (isinstance(reasoning_content, str) and bool(reasoning_content)) or (
@@ -2335,7 +2511,13 @@ async def _save_ai_message(
     extra_metadata = redact_reasoning_metadata(msg_dict)
     additional_kwargs = msg_dict.get("additional_kwargs")
     already_guarded = bool(isinstance(additional_kwargs, dict) and additional_kwargs.get("locator_validation"))
-    if knowledge_contract and knowledge_contract.get("status") != "SKIPPED" and not already_guarded:
+    if knowledge_contract and knowledge_contract.get("status") != "SKIPPED" and tool_calls_data:
+        # Tool-dispatch messages are not answers. Running the terminal citation
+        # gate on empty dispatch content fabricates one refusal per tool and
+        # duplicates it in history. Preserve the calls, publish no draft prose.
+        content = ""
+        extra_metadata["publication_role"] = "TOOL_DISPATCH"
+    elif knowledge_contract and knowledge_contract.get("status") != "SKIPPED" and not already_guarded:
         content, citation_validation = apply_citation_channel(
             content,
             knowledge_contract.get("citations") or [],
@@ -2593,6 +2775,50 @@ async def _persist_run_total_tokens(
     await db.flush()
 
 
+async def persist_direct_call_usage(
+    db,
+    *,
+    uid: str,
+    model_spec: str | None,
+    query_text: str,
+    response,
+    request_id: str,
+) -> None:
+    """/api/chat/call 模型直调计费：没有 AgentRun，但 usage_ledger 仍是计费唯一权威，
+    run_id 用 direct-call:{request_id} 命名空间隔离。上游未回传 usage 时按字符
+    粗估（4 字符 ≈ 1 token，estimated=True），口径与文献域 llm_gateway 一致。"""
+    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.storage.postgres.models_business import UsageLedger
+    from yuxi.utils.datetime_utils import utc_now
+
+    usage_metadata = getattr(response, "usage_metadata", None) or {}
+    response_metadata = getattr(response, "response_metadata", None)
+    token_usage = (response_metadata.get("token_usage") if isinstance(response_metadata, dict) else None) or {}
+    input_tokens = int(usage_metadata.get("input_tokens") or token_usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage_metadata.get("output_tokens") or token_usage.get("completion_tokens") or 0)
+    estimated = False
+    if not (input_tokens or output_tokens):
+        input_tokens = max(1, len(str(query_text or "")) // 4)
+        output_tokens = max(1, len(str(getattr(response, "content", "") or "")) // 4)
+        estimated = True
+    tenant_id = await resolve_tenant_id(db, uid)
+    db.add(
+        UsageLedger(
+            run_id=f"direct-call:{request_id}",
+            uid=str(uid),
+            tenant_id=tenant_id,
+            model_spec=model_spec,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            estimated=estimated,
+            credential_source="platform",
+            created_at=utc_now(),
+        )
+    )
+    await db.commit()
+
+
 async def save_messages_from_langgraph_state(
     agent_instance,
     thread_id: str,
@@ -2688,14 +2914,15 @@ async def save_messages_from_langgraph_state(
         locator = knowledge_contract.get("locator_resolution")
         locator = locator if isinstance(locator, dict) else {}
         _answer_has_chips = "〔图表F" in str(last_ai_message.content or "")
-        if locator or _answer_has_chips:
+        _answer_has_sources = bool((knowledge_contract.get("source_references") or {}).get("sources"))
+        if locator or _answer_has_chips or _answer_has_sources:
             persisted = {
                 **dict(last_ai_message.extra_metadata or {}),
                 "knowledge_retrieval_id": knowledge_contract.get("retrieval_id"),
             }
             if locator:
                 persisted["citation_binding"] = locator
-            if str(locator.get("status") or "") == "VERIFIED" or _answer_has_chips:
+            if str(locator.get("status") or "") == "VERIFIED" or _answer_has_chips or _answer_has_sources:
                 # 与流末 citation_ready 事件同一载荷（历史恢复只读它，不读审计用的
                 # binding）：定位 VERIFIED 或正文已签发图表锚点（ADR-0008 发射解耦）。
                 augmented_payload = await _augmented_citation_ready(
@@ -3050,6 +3277,7 @@ async def stream_agent_chat(
         agent_slug=agent_item.slug,
         meta=meta,
     )
+    paper_input_message_id = meta.get("input_message_id")
 
     messages = [human_message]
     input_context = await build_agent_input_context(
@@ -3192,7 +3420,7 @@ async def stream_agent_chat(
 
         if save_user_message:
             try:
-                await conv_repo.add_message_by_thread_id(
+                saved_input_message = await conv_repo.add_message_by_thread_id(
                     thread_id=thread_id,
                     role="user",
                     content=query,
@@ -3205,6 +3433,8 @@ async def stream_agent_chat(
                         "turn_execution_plan": turn_plan.public_dict(),
                     },
                 )
+                if knowledge_scope_snapshot.get("literature_binding") and saved_input_message is not None:
+                    paper_input_message_id = saved_input_message.id
             except Exception as e:
                 logger.error(f"Error saving user message: {e}")
 
@@ -3520,18 +3750,92 @@ async def stream_agent_chat(
             yield make_chunk(status="finished", meta=meta)
             return
 
+        # 批次 2（文献追问指代消解）：仅 paper 会话（literature_binding）且开关开启时，
+        # 把最近历史用户问题里的实体锚点折叠进检索查询。只改检索词（question=），
+        # 不改用户可见 query、不参与证据资格判定；fail-open。
+        retrieval_query = query
+        paper_options = knowledge_scope_snapshot.get("literature_enhancement") or {}
+        if (
+            knowledge_scope_snapshot.get("literature_binding")
+            and paper_options.get("coreference_enabled")
+            and paper_input_message_id
+        ):
+            try:
+                from yuxi.literature.followup_resolution import resolve_retrieval_query
+
+                _history_user_queries = await conv_repo.get_recent_user_queries(
+                    thread_id,
+                    before_message_id=int(paper_input_message_id),
+                    limit=2,
+                )
+                retrieval_query = resolve_retrieval_query(query, _history_user_queries)
+            except Exception:  # noqa: BLE001 - 指代消解失败绝不能阻断回答
+                retrieval_query = query
+
         if turn_plan.requires_document_retrieval or Capability.CANONICAL_LOOKUP in turn_plan.required_capabilities:
             retrieval_id = f"kr_{uuid.uuid4().hex}"
+            enhancement_kwargs = {}
+            if knowledge_scope_snapshot.get("literature_binding"):
+                from functools import partial
+                from yuxi.literature.paper_enhancement import score_paper_evidence
+                from yuxi.literature.session import validate_frozen_paper_scope
+                from yuxi.services.principal import resolve_tenant_id
+
+                paper_tenant_id = await resolve_tenant_id(db, uid)
+                await validate_frozen_paper_scope(
+                    user=current_user,
+                    tenant_id=paper_tenant_id,
+                    snapshot=knowledge_scope_snapshot,
+                )
+                if paper_options.get("rerank_enabled"):
+                    enhancement_kwargs["literature_evidence_scorer"] = partial(
+                        score_paper_evidence,
+                        user=current_user,
+                        tenant_id=paper_tenant_id,
+                        snapshot=knowledge_scope_snapshot,
+                        run_id=meta.get("run_id"),
+                    )
+            # 批次 1（文献深读导航块）：services 层构建（可安全 import literature，
+            # 守 ADR-0010 L0-1），发观测 trace 并把渲染后的导航文本以不透明参数传给
+            # 知识编排器（knowledge 层不感知文献域）。fail-open：任一环节失败即 None。
+            literature_map_text = None
+            try:
+                from yuxi.literature.deepread_context import build_deepread_payload
+
+                _deepread = await build_deepread_payload(db, knowledge_scope_snapshot, run_id=meta.get("run_id"))
+            except Exception:  # noqa: BLE001 - 深读装配失败绝不能阻断回答
+                _deepread = None
+            if _deepread:
+                literature_map_text = _deepread.get("text")
+                emit_trace(
+                    category="ANSWER",
+                    operation="literature_document_map",
+                    event_type="answer.literature_document_map.injected",
+                    session_kind="paper",
+                    section_count=_deepread.get("section_count", 0),
+                    figure_count=_deepread.get("figure_count", 0),
+                    table_count=_deepread.get("table_count", 0),
+                    character_count=_deepread.get("character_count", 0),
+                    revision_id=_deepread.get("revision_id", ""),
+                )
             knowledge_contract = await prepare_knowledge_context(
                 db,
-                question=query,
+                question=retrieval_query,
                 scope_snapshot=knowledge_scope_snapshot,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
                 retrieval_id=retrieval_id,
                 image_bytes=_decode_image_bytes(image_content),
                 mention_resolution=_frozen_mention_resolution(meta) or None,
+                literature_document_map_text=literature_map_text,
+                **enhancement_kwargs,
             )
+            if knowledge_scope_snapshot.get("literature_binding"):
+                await validate_frozen_paper_scope(
+                    user=current_user,
+                    tenant_id=paper_tenant_id,
+                    snapshot=knowledge_scope_snapshot,
+                )
             input_context["_knowledge_contract"] = knowledge_contract
             setattr(context, "_knowledge_contract", knowledge_contract)
             # ADR-0008 边界修复（来源透明）：问题中的 @doc/DOI/标题片段等显式文献
@@ -3549,10 +3853,7 @@ async def stream_agent_chat(
                     meta=meta,
                 )
             knowledge_source_used = knowledge_contract.get("status") != "SKIPPED"
-            citation_sensitive_output = knowledge_source_used and turn_plan.evidence.level in {
-                EvidenceLevel.CLAIM_EVIDENCE,
-                EvidenceLevel.VERBATIM_LOCATOR,
-            }
+            citation_sensitive_output = _citation_output_requires_guard(turn_plan.evidence.level, knowledge_contract)
             if knowledge_source_used:
                 source_manifest.knowledge_retrieval_count = 1
                 _append_knowledge_source_uses(
@@ -3818,6 +4119,14 @@ async def stream_agent_chat(
                 )
 
         frozen_mention_resolution = _frozen_mention_resolution(meta)
+        if knowledge_scope_snapshot.get("literature_binding"):
+            from yuxi.literature.session import validate_frozen_paper_scope
+
+            await validate_frozen_paper_scope(
+                user=current_user,
+                tenant_id=await resolve_tenant_id(db, uid),
+                snapshot=knowledge_scope_snapshot,
+            )
         mcp_source_valid = await _finalize_mcp_manifest(
             db,
             run_id=meta.get("run_id"),
@@ -4205,6 +4514,7 @@ async def stream_agent_chat(
             if (
                 citation_sensitive_output
                 or _answer_has_figure_chips
+                or bool(((knowledge_contract or {}).get("source_references") or {}).get("sources"))
                 or _published_graph_snapshot(knowledge_contract) is not None
             ):
                 save_kwargs["knowledge_contract"] = knowledge_contract
@@ -4354,9 +4664,18 @@ async def stream_agent_chat(
         yield make_chunk(**abort_payload)
 
     except Exception as e:
-        logger.exception(f"Error streaming messages: {e}")
+        paper_source_changed = bool(knowledge_scope_snapshot.get("literature_binding")) and isinstance(
+            e, PermissionError
+        )
+        if paper_source_changed:
+            logger.warning("Paper chat stopped because its frozen source is no longer authorized")
+        else:
+            logger.exception(f"Error streaming messages: {e}")
 
-        if is_model_connection_error(e):
+        if paper_source_changed:
+            error_type = "literature_source_changed"
+            error_msg = "绑定文献的访问权限或解析版本已变化，请重新发起本文会话。"
+        elif is_model_connection_error(e):
             # 连接类失败与通用异常分流：前者可重试且文案指向模型服务，
             # 不再让"检索/看门狗"类超时文案掩盖真实故障层。
             error_type = MODEL_CONNECTION_ERROR
@@ -4368,7 +4687,11 @@ async def stream_agent_chat(
         full_msg = _ensure_full_msg(full_msg, accumulated_content)
         # 同一红线修复：通用异常路径的 protected 轮同样改存确定性降级内容。
         guard_metadata = None
-        if protected_output:
+        if paper_source_changed:
+            # Do not persist an unpublished draft or references to a revoked source.
+            full_msg = AIMessage(id=f"msg_{uuid.uuid4().hex}", content=error_msg)
+            knowledge_contract = None
+        elif protected_output:
             emergency = _emergency_source_text(source_manifest)
             if emergency is not None:
                 full_msg = AIMessage(

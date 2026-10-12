@@ -133,9 +133,7 @@ async def test_builtin_sync_backfills_agent_binding_from_runtime_config(monkeypa
 
     await mcp_service.ensure_builtin_mcp_servers_in_db()
 
-    bindings = (
-        await mcp_session.scalars(select(AgentMCPBinding).where(AgentMCPBinding.agent_id == agent.id))
-    ).all()
+    bindings = (await mcp_session.scalars(select(AgentMCPBinding).where(AgentMCPBinding.agent_id == agent.id))).all()
     assert len(bindings) == 2
 
 
@@ -365,9 +363,7 @@ async def test_gene_authority_package_download_is_hard_filtered_by_protocol_name
                 McpToolDescriptor(server_slug=slug, name="ncbi_datasets_gene_report_rest", stable_id="report"),
                 McpToolDescriptor(server_slug=slug, name="ncbi_datasets_gene_package_cli", stable_id="package"),
             ]
-            return descriptors, SimpleNamespace(
-                server_slug=slug, duration_ms=1, tool_count=2, protocol_note="fake"
-            )
+            return descriptors, SimpleNamespace(server_slug=slug, duration_ms=1, tool_count=2, protocol_note="fake")
 
         async def call_tool(self, *_args, **_kwargs):  # pragma: no cover - 本用例不触发
             raise AssertionError
@@ -380,9 +376,7 @@ async def test_gene_authority_package_download_is_hard_filtered_by_protocol_name
             return None
 
     monkeypatch.setattr(mcp_service, "get_host", lambda: _FakeHost())
-    tools = await mcp_service.get_mcp_tools(
-        "gene-authority", additional_servers={"gene-authority": config}
-    )
+    tools = await mcp_service.get_mcp_tools("gene-authority", additional_servers={"gene-authority": config})
     assert [tool.metadata["mcp_tool_name"] for tool in tools] == ["ncbi_datasets_gene_report_rest"]
 
     async def fake_config(server_name: str, db=None):

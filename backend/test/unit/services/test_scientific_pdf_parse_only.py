@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 import hashlib
 import json
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
@@ -69,6 +70,7 @@ async def test_parse_only_finishes_without_serving_pointer_or_activation(active,
             processing_mode="parse_only",
             status="RUNNING",
             lease_owner="worker",
+            lease_expires_at=service._workflow_now() + timedelta(minutes=5),
             created_by="u1",
         )
         kb = KnowledgeBase(
@@ -163,7 +165,7 @@ async def test_parse_only_finishes_without_serving_pointer_or_activation(active,
             monkeypatch.setattr(service, "ScientificPdfPipeline", Pipeline)
             outcome = await service._process_scientific_pdf_ingest({"job_id": "worker"}, "draft")
             assert outcome == (
-                {"revision_id": "draft", "status": "REJECTED"}
+                {"revision_id": "draft", "status": "REJECTED", "activated": False}
                 if rejected
                 else {"revision_id": "draft", "status": "PARSED_ONLY", "activated": False}
             )

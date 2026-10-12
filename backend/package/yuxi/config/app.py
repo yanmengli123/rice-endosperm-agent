@@ -88,7 +88,54 @@ class Config(BaseModel):
         default=False,
         description="对话关系图：是否发布规范关系子图（投影与审计恒开启，本开关只控制 SSE 与消息附件）",
     )
+    panel_locator_enabled: bool = Field(
+        default=True,
+        description=(
+            "Panel 级定位精度（ADR-0008 P1，灰度开关）：关闭后锚点芯片不再按"
+            " panel 精确匹配图资产，panel_status 降级 WHOLE_FIGURE_FALLBACK/"
+            "CAPTION_FALLBACK（整图卡或题注卡照常发布）。只降精度不撤通道；"
+            "物理定位服务与历史已存载荷不受影响。"
+        ),
+    )
+    table_cell_enabled: bool = Field(
+        default=True,
+        description=(
+            "表格卡片与单元格定位通道（ADR-0008 P2，灰度开关）：关闭后 tables[]"
+            " 不再随 citation_ready 发布，Table 锚点芯片 suppressed_reason="
+            "table_channel_disabled、visual_status 回落题注/仅引用。解析与审计恒"
+            "开启；历史已存载荷不受影响。"
+        ),
+    )
     default_ocr_engine: str = Field(default=DEFAULT_OCR_ENGINE, description="默认 OCR 解析引擎")
+    literature_deepread_enabled: bool = Field(
+        default=True,
+        description=(
+            "文献深读增强（默认开启，新运行冻结开关）：paper 文献专属会话注入单篇"
+            "文档结构地图（Navigation 平面）与文献深读作答策略（结论先行/分域/证据不足"
+            "明说）。闸门信号为 scope_snapshot 携带 literature_binding（当前仅 paper 会话"
+            "写入该绑定，global-qa 等其他 kind 不生效）；普通科研问答行为逐字节不变。地图"
+            "不进证据通道，深读策略不豁免定位硬约束与 source_guard 门禁；门禁指标回退时"
+            "可关闭新运行增强（含章节标签），恢复沿用原快照；正在执行的运行可取消。生产灰度建议先置 False 逐步开启。"
+        ),
+    )
+    literature_coreference_enabled: bool = Field(
+        default=True,
+        description=(
+            "文献追问指代消解（默认开启，新运行冻结开关）：仅 paper 会话读取当前输入之前"
+            "最近已完成用户轮次；仅补入最近单一实体，当前问题有明确实体或存在指代歧义时不改写。"
+            "不改用户可见文本、不参与证据资格判定；关闭后新运行不启用，恢复沿用原快照。"
+        ),
+    )
+    literature_rerank_enabled: bool = Field(
+        default=False,
+        description=(
+            "文献证据重排（默认关闭，新运行冻结开关/模型/凭据引用）：仅 paper 会话通过治理 scorer "
+            "调用供应商，沿用配额、BYOK、append-only 账本和调用前后文献权限/版本复验。"
+            "单次最多 48 候选、单文档 4000 字符、供应商 3 秒；严格索引双射/数量/有限分数校验，"
+            "不使用静默 0.5。供应商故障回退原序，来源权限或版本变化必须拒绝继续用证据。"
+            "在证据契约与引用编号构建前排序；须完成质量评测后再开启。"
+        ),
+    )
 
     _config_file: Path | None = PrivateAttr(default=None)
     _runtime_sync_thread: Any = PrivateAttr(default=None)

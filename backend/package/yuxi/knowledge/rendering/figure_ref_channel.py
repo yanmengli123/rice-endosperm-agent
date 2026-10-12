@@ -323,6 +323,13 @@ def resolve_figure_refs(
         return {"refs": [], "stats": stats}
 
     masked = _mask_authority_spans(source)
+    from yuxi.knowledge.rendering.markdown_protection import protected_block_ranges, protected_inline_ranges
+
+    masked.extend(protected_block_ranges(source))
+    offset = 0
+    for line in source.splitlines(keepends=True):
+        masked.extend((left + offset, right + offset) for left, right in protected_inline_ranges(line))
+        offset += len(line)
 
     def _in_marker(start: int, end: int) -> bool:
         return any(start < mend and end > mstart for mstart, mend in masked)
@@ -330,6 +337,9 @@ def resolve_figure_refs(
     seen: dict[str, dict[str, Any]] = {}
     for mention in iter_figure_labels(source):
         stats["mentions_total"] += 1
+        if not mention.get("complete", True):
+            stats["unresolved"][UNRESOLVED_BUDGET] += 1
+            continue
         if _in_marker(mention["start"], mention["end"]):
             continue  # 芯片载荷内的编号（上一轮签发产物），幂等跳过
         key = mention["canonical"]
@@ -342,14 +352,14 @@ def resolve_figure_refs(
         if entry.get("ambiguous"):
             stats["unresolved"][UNRESOLVED_AMBIGUOUS_SCOPE] += 1
             continue
-        existing = seen.get(entry["key"])
+        existing = seen.get(key)
         if existing is not None:
             existing["occurrences"] += 1
             continue
         if len(seen) >= MAX_FIGURE_REF_KEYS:
             stats["unresolved"][UNRESOLVED_BUDGET] += 1
             continue
-        seen[entry["key"]] = {
+        seen[key] = {
             **_public_entry(entry),
             "mention_raw": mention["raw"],
             "mention_key": key,
@@ -407,6 +417,7 @@ def match_chips_to_registry(
         stats["matched"] += 1
         seen_refs.add(chip["ref"])
         refs.append({**_public_entry(entry), "ref": chip["ref"], "label": chip["label"]})
+        refs[-1]["panel_label"] = (canonical[len(base_key) :] or "").upper()
     return {"refs": refs, "stats": stats}
 
 

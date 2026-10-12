@@ -21,19 +21,19 @@ from sqlalchemy import or_, select
 from yuxi.literature import access as literature_access
 from yuxi.literature.access import authorize_asset, current_access, paper_visibility, report_visible
 from yuxi.literature.export_vault import ExportLimitError, export_obsidian_vault
-from yuxi.literature.history_archive import _build_archive, MAX_ARCHIVE_BYTES
+from yuxi.literature.history_archive import MAX_ARCHIVE_BYTES, _build_archive
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.literature.readops import validate_literature_asset_uri
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Conversation, Message
 from yuxi.storage.postgres.models_knowledge import (
-    LiteraturePaper,
-    LiteratureCard,
-    LiteratureDiaryEntry,
-    LiteratureReport,
     LiteratureAttachment,
+    LiteratureCard,
     LiteratureCitation,
+    LiteratureDiaryEntry,
+    LiteraturePaper,
+    LiteratureReport,
     LiteratureReviewDecision,
 )
 

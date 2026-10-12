@@ -320,7 +320,7 @@ def test_mineru_bbox_is_normalized_to_authoritative_pdf_geometry():
     assert anchors[0].fragments[0].source_block_id == "mineru:0:0"
 
 
-def test_decorative_image_without_scientific_caption_is_not_an_anchor():
+def test_captionless_visual_region_keeps_physical_identity_without_fake_quote():
     artifacts = [
         ParserArtifact(
             kind="mineru_content_list",
@@ -349,12 +349,13 @@ def test_decorative_image_without_scientific_caption_is_not_an_anchor():
 
     anchors = build_mineru_anchors("a" * 64, artifacts)
 
-    assert len(anchors) == 1
-    assert anchors[0].page == 2
-    assert anchors[0].quote == "Fig. 1 Starch synthesis pathway"
+    assert len(anchors) == 2
+    assert anchors[0].quote == ""
+    assert anchors[1].page == 2
+    assert anchors[1].quote == "Fig. 1 Starch synthesis pathway"
 
 
-def test_mineru_merges_empty_cross_page_table_continuation_into_anchor_fragments():
+def test_mineru_retains_empty_table_region_until_continuity_is_verified():
     artifacts = [
         ParserArtifact(
             kind="mineru_content_list",
@@ -393,11 +394,11 @@ def test_mineru_merges_empty_cross_page_table_continuation_into_anchor_fragments
         [anchor.to_dict() for anchor in anchors],
     )
 
-    assert len(anchors) == 2
-    table_anchor = next(anchor for anchor in anchors if anchor.anchor_type == "table")
-    assert [fragment.page_index for fragment in table_anchor.fragments] == [2, 3]
-    assert matches[0]["pages"] == [3, 4]
-    assert matches[0]["anchor_ids"] == [table_anchor.anchor_id, table_anchor.anchor_id]
+    assert len(anchors) == 3
+    table_anchor = next(anchor for anchor in anchors if anchor.anchor_type == "table" and anchor.quote)
+    assert [fragment.page_index for fragment in table_anchor.fragments] == [2]
+    assert matches[0]["pages"] == [3]
+    assert matches[0]["anchor_ids"] == [table_anchor.anchor_id]
 
 
 def test_academic_chunking_does_not_cross_sections_or_index_references():
@@ -614,7 +615,10 @@ async def test_pipeline_keeps_mineru_canonical_and_grobid_as_annotation(tmp_path
         stage_callback=record_stage,
     )
 
-    assert result.capability == "INDEXED_FULL"
+    # Producer boxes deliberately do not match the native PDF fixture; block
+    # alignment cannot confer character-level/full evidence capability.
+    assert result.capability == "INDEXED_CONTENT_ONLY"
+    assert result.qa_report["locator_profile"]["precision_gate_passed"] is False
     assert result.unified_article is not None
     assert result.unified_article.title == "GROBID title"
     assert result.unified_article.markdown.startswith("# MinerU title")

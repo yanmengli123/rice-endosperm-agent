@@ -17,7 +17,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from yuxi.knowledge.chunking.ragflow_like.parsers.academic import ACADEMIC_CHUNKER_VERSION
 from yuxi.knowledge.pdf_evidence.asset_paths import revision_image_prefix
 from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact, PipelineResult, UnifiedArticle
-from yuxi.knowledge.pdf_evidence.pipeline import PIPELINE_VERSION, ScientificPdfPipeline, build_parser_fingerprint
+from yuxi.knowledge.pdf_evidence.pipeline import (
+    PIPELINE_VERSION,
+    ScientificPdfPipeline,
+    build_parser_fingerprint,
+    build_mineru_stage_fingerprint,
+)
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.knowledge.utils import is_minio_url, parse_minio_url
 from yuxi.knowledge.utils.kb_utils import sanitize_processing_params
@@ -41,11 +46,21 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseArtifact,
     KnowledgeParseRevision,
     KnowledgeParseStage,
+    PdfSourceRegionRecord,
+    PdfTableRecord,
+    PdfTableCellRecord,
 )
 from yuxi.utils.datetime_utils import utc_now
 from yuxi.utils.logging_config import logger
 
-TERMINAL_PARSE_STATUSES = {"INDEXED_FULL", "INDEXED_CONTENT_ONLY", "INDEXED_TEXT_ONLY", "REJECTED", "PARSED_ONLY"}
+TERMINAL_PARSE_STATUSES = {
+    "INDEXED_FULL",
+    "INDEXED_CONTENT_ONLY",
+    "INDEXED_TEXT_ONLY",
+    "REJECTED",
+    "PARSED_ONLY",
+    "FAILED",
+}
 LEASE_MINUTES = 30
 LEASE_HEARTBEAT_SECONDS = 60
 PARSE_STAGE_NAMES = ("NATIVE", "MINERU", "GROBID", "UNIFIED", "QUALITY", "INDEX", "ACTIVATE")
@@ -76,7 +91,7 @@ def _extract_article_doi(article: dict[str, Any] | None) -> str:
     if isinstance(metadata, dict):
         candidate = str(metadata.get("doi") or "").strip()
         if candidate:
-            from yuxi.literature.identity.rid import normalize_doi, is_doi
+            from yuxi.literature.identity.rid import is_doi, normalize_doi
 
             if is_doi(candidate):
                 return normalize_doi(candidate)
@@ -244,9 +259,89 @@ async def get_scientific_pdf_index_lineage(*, kb_id: str, file_id: str) -> dict[
     return {**report, "kb_id": kb_id, "managed": True, "consistent": not problems, "problems": problems}
 
 
-def _ingest_job_id(revision_id: str, attempt: int) -> str:
+def _ingest_job_id(revision_id: str, attempt: int, generation: int = 0) -> str:
     """Keep concurrent submissions idempotent while allowing a failed attempt to be retried."""
-    return f"scientific-pdf:{revision_id}:{max(int(attempt or 0), 0)}"
+    base = f"scientific-pdf:{revision_id}:{max(int(attempt or 0), 0)}"
+    return f"{base}:r{generation}" if generation else base
+
+
+INGEST_RETRYABLE_STATUSES = ("FAILED", "REJECTED")
+
+#: 失败自动重试预算（含首发，对标文献域编译 MAX_COMPILE_ATTEMPTS）：异常失败在
+#: 预算内先回 PENDING，由 5 分钟对账 cron 以新 attempt 重排（新 job id）；预算
+#: 耗尽才置 FAILED 死信（管理员经 /ingest/{rid}/retry 人工恢复兜底）。确定性
+#: 拒绝（REJECTED）走正常返回路径，不进异常分支、不消耗预算。
+MAX_INGEST_ATTEMPTS = 3
+
+
+def _retry_budget_spent(revision: Any) -> bool:
+    return int(revision.attempt or 0) - int(getattr(revision, "retry_budget_start", 0) or 0) >= MAX_INGEST_ATTEMPTS
+
+
+async def request_scientific_pdf_retry(*, revision_id: str, tenant_id: int, operator_id: str) -> dict[str, Any]:
+    """死信人工恢复：FAILED/REJECTED 终态解析版本复位并重新入队（管理员）。
+
+    与 reconcile（只捞 PENDING/滞留 RUNNING）互补：这是终端死信的唯一
+    人工恢复路径。attempt 先自增再入队，保证 ARQ job id 与已死任务不撞。
+    重复 PDF 等确定性拒绝重跑仍可能再次 REJECTED——这是诚实语义，不是缺陷。
+    """
+    async with pg_manager.get_async_session_context() as session:
+        row = (
+            await session.execute(
+                select(KnowledgeParseRevision, KnowledgeBase.tenant_id.label("kb_tenant"))
+                .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeParseRevision.kb_id)
+                .where(
+                    KnowledgeParseRevision.revision_id == revision_id,
+                    KnowledgeBase.tenant_id == int(tenant_id),
+                )
+                .with_for_update(of=KnowledgeParseRevision)
+            )
+        ).first()
+        if row is None:
+            raise ValueError("解析版本不存在或不属于当前租户")
+        revision, _ = row
+        if revision.status not in INGEST_RETRYABLE_STATUSES:
+            raise ValueError(f"仅终态 FAILED/REJECTED 可人工恢复，当前状态: {revision.status}")
+        revision.retry_budget_start = int(revision.attempt or 0)
+        revision.retry_generation = int(getattr(revision, "retry_generation", 0) or 0) + 1
+        new_attempt = revision.attempt
+        generation = revision.retry_generation
+        revision.status = "PENDING"
+        revision.lease_owner = None
+        revision.lease_expires_at = None
+        revision.error_message = None
+        stages = (
+            (
+                await session.execute(
+                    select(KnowledgeParseStage).where(
+                        KnowledgeParseStage.revision_id == revision_id,
+                        KnowledgeParseStage.status.in_(("RUNNING", "FAILED")),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for stage in stages:
+            stage.status = "PENDING"
+            stage.lease_owner = None
+            stage.lease_expires_at = None
+        file_row = (
+            await session.execute(
+                select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if file_row is not None and file_row.evidence_status in ("FAILED", "REJECTED"):
+            file_row.evidence_status = "PENDING"
+        await session.commit()
+    queue = await get_arq_pool()
+    await queue.enqueue_job(
+        "process_scientific_pdf_ingest",
+        revision_id,
+        _job_id=_ingest_job_id(revision_id, new_attempt, generation),
+    )
+    logger.info("死信人工恢复已入队: revision=%s attempt=%s operator=%s", revision_id, new_attempt, operator_id)
+    return {"revision_id": revision_id, "status": "PENDING", "attempt": new_attempt, "retried": True}
 
 
 def _stage_id(revision_id: str, stage_name: str) -> str:
@@ -324,6 +419,7 @@ async def create_or_reuse_scientific_pdf_ingest(
                 file_id=file_id,
                 source_sha256=source_sha256,
                 parser_fingerprint=fingerprint,
+                parser_params=sanitize_processing_params(processing_params),
                 pipeline_version=PIPELINE_VERSION,
                 processing_mode=mode,
                 status="PENDING",
@@ -383,6 +479,8 @@ async def create_or_reuse_scientific_pdf_ingest(
                         f"problems={'; '.join(lineage_broken_reasons)}"
                     )
                 revision.status = "PENDING"
+                revision.retry_budget_start = int(revision.attempt or 0)
+                revision.retry_generation = int(revision.retry_generation or 0) + 1
                 revision.completed_at = None
                 revision.error_message = None
                 revision.reused_from_revision_id = revision_id
@@ -453,7 +551,7 @@ async def create_or_reuse_scientific_pdf_ingest(
             await queue.enqueue_job(
                 "process_scientific_pdf_ingest",
                 revision_id,
-                _job_id=_ingest_job_id(revision_id, revision.attempt),
+                _job_id=_ingest_job_id(revision_id, revision.attempt, int(revision.retry_generation or 0)),
                 # 篇间间隔（对标 PaperAgent 批量节流）：批量导入时按序号错峰入队
                 **({"_defer_by": timedelta(seconds=defer_by_seconds)} if defer_by_seconds > 0 else {}),
             )
@@ -484,6 +582,8 @@ async def _set_stage_status(
 ) -> None:
     now = _workflow_now()
     async with pg_manager.get_async_session_context() as session:
+        if worker_id is not None:
+            await _owned_revision(session, revision_id, worker_id)
         stage = (
             await session.execute(
                 select(KnowledgeParseStage).where(
@@ -519,10 +619,15 @@ async def _fail_running_stages(revision_id: str, worker_id: str, exc: Exception)
         stages = list(
             (
                 await session.execute(
-                    select(KnowledgeParseStage).where(
+                    select(KnowledgeParseStage)
+                    .join(KnowledgeParseRevision, KnowledgeParseRevision.revision_id == KnowledgeParseStage.revision_id)
+                    .where(
                         KnowledgeParseStage.revision_id == revision_id,
                         KnowledgeParseStage.status == "RUNNING",
                         KnowledgeParseStage.lease_owner == worker_id,
+                        KnowledgeParseRevision.status == "RUNNING",
+                        KnowledgeParseRevision.lease_owner == worker_id,
+                        KnowledgeParseRevision.lease_expires_at > now,
                     )
                 )
             )
@@ -534,7 +639,7 @@ async def _fail_running_stages(revision_id: str, worker_id: str, exc: Exception)
             stage.finished_at = now
             stage.lease_owner = None
             stage.lease_expires_at = None
-            stage.error_code = type(exc).__name__
+            stage.error_code = getattr(exc, "code", type(exc).__name__)
             stage.error_detail = str(exc)
 
 
@@ -619,6 +724,9 @@ async def _load_cached_pipeline_result(source_revision_id: str, parser_fingerpri
             return None
         bucket, object_name = parse_minio_url(artifact.object_uri)
         content = await minio.adownload_file(bucket, object_name)
+        if _digest(content) != artifact.sha256:
+            logger.warning(f"Scientific PDF cache hash mismatch: artifact={artifact.artifact_id}")
+            return None
         downloaded[artifact.kind] = content
         if artifact.kind not in {"original_pdf", "indexed_markdown"}:
             filename = str((artifact.metadata_json or {}).get("filename") or f"{artifact.kind}.bin")
@@ -735,8 +843,13 @@ async def _load_compatible_mineru_cache(
         try:
             bucket, object_name = parse_minio_url(article_row.object_uri)
             article_payload = await minio.adownload_file(bucket, object_name)
+            if _digest(article_payload) != article_row.sha256:
+                continue
             article = json.loads(article_payload.decode("utf-8"))
             if article.get("source_sha256") != target_revision.source_sha256:
+                continue
+            source_stage = (article.get("parser_provenance") or {}).get("mineru", {}).get("stage_fingerprint")
+            if source_stage != build_mineru_stage_fingerprint(dict(target_revision.parser_params or {})):
                 continue
             await materialize_reused_revision_assets(source_revision, target_revision)
             markdown = rewrite_kbasset_uri(
@@ -750,6 +863,8 @@ async def _load_compatible_mineru_cache(
             for row in mineru_rows:
                 bucket, object_name = parse_minio_url(row.object_uri)
                 content = await minio.adownload_file(bucket, object_name)
+                if _digest(content) != row.sha256:
+                    raise ValueError("PDF_CACHE_ARTIFACT_HASH_MISMATCH")
                 filename = str((row.metadata_json or {}).get("filename") or f"{row.kind}.bin")
                 lowered = filename.casefold()
                 if lowered.endswith("content_list_v2.json"):
@@ -768,6 +883,9 @@ async def _load_compatible_mineru_cache(
                         content_type=row.content_type or "application/octet-stream",
                     )
                 )
+            raw_markdown = next((a.content.decode("utf-8") for a in copied if a.kind == "mineru_markdown"), None)
+            if raw_markdown is not None:
+                markdown = raw_markdown
             if markdown.strip():
                 logger.info(
                     "Reusing immutable MinerU artifacts for downstream PDF pipeline upgrade: "
@@ -826,7 +944,7 @@ async def _publish_identity_cache(revision: KnowledgeParseRevision) -> None:
             await queue.enqueue_job(
                 "process_scientific_pdf_ingest",
                 waiter.revision_id,
-                _job_id=_ingest_job_id(waiter.revision_id, waiter.attempt),
+                _job_id=_ingest_job_id(waiter.revision_id, waiter.attempt, int(waiter.retry_generation or 0)),
             )
 
 
@@ -873,7 +991,7 @@ async def _release_identity_cache(revision: KnowledgeParseRevision) -> None:
             await queue.enqueue_job(
                 "process_scientific_pdf_ingest",
                 waiter.revision_id,
-                _job_id=_ingest_job_id(waiter.revision_id, waiter.attempt),
+                _job_id=_ingest_job_id(waiter.revision_id, waiter.attempt, int(waiter.retry_generation or 0)),
             )
 
 
@@ -914,6 +1032,13 @@ async def _claim_revision(revision_id: str, worker_id: str) -> KnowledgeParseRev
         if revision is None or revision.status in TERMINAL_PARSE_STATUSES | {"WAITING_CACHE"}:
             return None
         if revision.status == "RUNNING" and revision.lease_expires_at and revision.lease_expires_at > now:
+            return None
+        if _retry_budget_spent(revision):
+            revision.status = "FAILED"
+            revision.error_message = "PDF_RETRY_BUDGET_EXHAUSTED"
+            revision.completed_at = now
+            revision.lease_owner = None
+            revision.lease_expires_at = None
             return None
         revision.status = "RUNNING"
         revision.attempt = int(revision.attempt or 0) + 1
@@ -979,11 +1104,14 @@ async def _renew_revision_lease(revision_id: str, worker_id: str, stop: asyncio.
 async def _owned_revision(session, revision_id: str, worker_id: str) -> KnowledgeParseRevision:
     revision = (
         await session.execute(
-            select(KnowledgeParseRevision).where(
+            select(KnowledgeParseRevision)
+            .where(
                 KnowledgeParseRevision.revision_id == revision_id,
                 KnowledgeParseRevision.status == "RUNNING",
                 KnowledgeParseRevision.lease_owner == worker_id,
+                KnowledgeParseRevision.lease_expires_at > _workflow_now(),
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if revision is None:
@@ -991,7 +1119,9 @@ async def _owned_revision(session, revision_id: str, worker_id: str) -> Knowledg
     return revision
 
 
-async def _store_artifacts(revision: KnowledgeParseRevision, artifacts: list[ParserArtifact]) -> dict[str, str]:
+async def _store_artifacts(
+    revision: KnowledgeParseRevision, artifacts: list[ParserArtifact], *, worker_id: str | None = None
+) -> dict[str, str]:
     minio = get_minio_client()
     uris: dict[str, str] = {}
     artifact_rows: list[dict[str, Any]] = []
@@ -1035,6 +1165,15 @@ async def _store_artifacts(revision: KnowledgeParseRevision, artifacts: list[Par
             }
         )
     async with pg_manager.get_async_session_context() as session:
+        if worker_id:
+            await _owned_revision(session, revision.revision_id, worker_id)
+        if revision.sealed_at is not None or revision.status in {
+            "INDEXED_FULL",
+            "INDEXED_CONTENT_ONLY",
+            "INDEXED_TEXT_ONLY",
+            "PARSED_ONLY",
+        }:
+            raise ValueError("PUBLISHED_PDF_EVIDENCE_IMMUTABLE")
         for row in artifact_rows:
             await session.execute(
                 pg_insert(KnowledgeParseArtifact)
@@ -1055,11 +1194,62 @@ async def _store_artifacts(revision: KnowledgeParseRevision, artifacts: list[Par
 
 
 async def _persist_article_records(
-    revision_id: str, article: dict[str, Any], *, markdown_body: str = ""
+    revision_id: str,
+    article: dict[str, Any],
+    *,
+    markdown_body: str = "",
+    worker_id: str | None = None,
+    prepared_figures: bool = False,
 ) -> dict[str, Any]:
     summaries: dict[str, Any] = {}
     async with pg_manager.get_async_session_context() as session:
         # A retry rebuilds the exact same immutable revision; replace partial rows left by a process crash.
+        if worker_id is not None:
+            await _owned_revision(session, revision_id, worker_id)
+        revision = (
+            await session.execute(
+                select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == revision_id)
+            )
+        ).scalar_one_or_none()
+        if revision is not None and (revision.sealed_at is not None or revision.status in TERMINAL_PARSE_STATUSES):
+            raise ValueError("PUBLISHED_PDF_EVIDENCE_IMMUTABLE")
+        await session.execute(delete(PdfTableRecord).where(PdfTableRecord.parse_revision_id == revision_id))
+        await session.execute(
+            delete(PdfSourceRegionRecord).where(PdfSourceRegionRecord.parse_revision_id == revision_id)
+        )
+        region_rows = {}
+        if revision is not None:
+            for region in article.get("regions") or []:
+                row = PdfSourceRegionRecord(tenant_id=revision.tenant_id, parse_revision_id=revision_id, **region)
+                session.add(row)
+                region_rows[region["region_id"]] = row
+            await session.flush()
+            for table in article.get("tables") or []:
+                table_row = PdfTableRecord(
+                    tenant_id=revision.tenant_id,
+                    parse_revision_id=revision_id,
+                    table_id=table["table_id"],
+                    caption=table["caption"],
+                    region_ids=table["region_ids"],
+                    metadata_json=table["metadata"],
+                )
+                session.add(table_row)
+                await session.flush()
+                for cell in table["cells"]:
+                    region = region_rows.get(cell.get("region_id"))
+                    session.add(
+                        PdfTableCellRecord(
+                            table_record_id=table_row.id,
+                            region_record_id=region.id if region else None,
+                            row_index=cell["row_index"],
+                            column_index=cell["column_index"],
+                            row_span=cell["row_span"],
+                            column_span=cell["column_span"],
+                            raw_value=cell["raw_value"],
+                            is_header=cell["is_header"],
+                            metadata_json=cell["metadata"],
+                        )
+                    )
         await session.execute(delete(EvidenceAnchorRecord).where(EvidenceAnchorRecord.parse_revision_id == revision_id))
         await session.execute(delete(ArticleReference).where(ArticleReference.parse_revision_id == revision_id))
         await session.execute(delete(CitationMention).where(CitationMention.parse_revision_id == revision_id))
@@ -1126,7 +1316,9 @@ async def _persist_article_records(
         anchor_rows = (
             (
                 await session.execute(
-                    select(EvidenceAnchorRecord).where(EvidenceAnchorRecord.parse_revision_id == revision_id)
+                    select(EvidenceAnchorRecord)
+                    .where(EvidenceAnchorRecord.parse_revision_id == revision_id)
+                    .order_by(EvidenceAnchorRecord.page, EvidenceAnchorRecord.anchor_id)
                 )
             )
             .scalars()
@@ -1148,6 +1340,8 @@ async def _persist_article_records(
                 revision=revision,
                 anchors=list(anchor_rows),
                 markdown_body=markdown_body,
+                prepared_units=article.get("evidence_units") or None,
+                regions=region_rows,
             )
             spans = (
                 (
@@ -1170,9 +1364,13 @@ async def _persist_article_records(
             from yuxi.knowledge.vision.figure_ingestor import persist_figure_index
 
             source_file = (
-                (await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == str(revision.file_id))))
-                .scalars()
-                .first()
+                None
+                if prepared_figures
+                else (
+                    (await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == str(revision.file_id))))
+                    .scalars()
+                    .first()
+                )
             )
 
             async def _load_pdf_for_figures() -> bytes | None:
@@ -1185,6 +1383,7 @@ async def _persist_article_records(
                 spans=list(spans),
                 anchors=list(anchor_rows),
                 pdf_bytes_loader=_load_pdf_for_figures,
+                prepared=prepared_figures,
             )
             summaries = {
                 "evidence_spans": spans_summary,
@@ -1194,8 +1393,9 @@ async def _persist_article_records(
     return summaries
 
 
-async def _link_stage_artifacts(revision_id: str) -> None:
+async def _link_stage_artifacts(revision_id: str, *, worker_id: str) -> None:
     async with pg_manager.get_async_session_context() as session:
+        await _owned_revision(session, revision_id, worker_id)
         artifacts = list(
             (
                 await session.execute(
@@ -1304,6 +1504,7 @@ async def _complete_parse_only(
         }
         current.status = "PARSED_ONLY"
         current.completed_at = _workflow_now()
+        current.sealed_at = current.sealed_at or current.completed_at
         current.lease_owner = None
         current.lease_expires_at = None
         file_row = (
@@ -1367,9 +1568,26 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                     )
                 ).scalar_one_or_none()
             previous_activation = _snapshot_active_file_state(file_record, active_revision)
-            params = dict(file_record.processing_params or {})
+            params = dict(
+                revision.parser_params if revision.parser_params is not None else file_record.processing_params or {}
+            )
             filename = str(file_record.original_filename or file_record.filename or "document.pdf")
-        source_bytes = await _load_source(file_record)
+        if revision.sealed_at is not None:
+            from yuxi.services.pdf_evidence_service import download_pdf_original
+
+            original = await download_pdf_original(
+                kb_id=revision.kb_id,
+                file_id=revision.file_id,
+                parse_revision_id=revision.revision_id,
+                source_sha256=revision.source_sha256,
+            )
+            source_bytes = original["content"]
+            pipeline_result = await _load_cached_pipeline_result(revision.revision_id, revision.parser_fingerprint)
+            if pipeline_result is not None:
+                for stage_name in ("NATIVE", "MINERU", "GROBID", "UNIFIED", "QUALITY"):
+                    await _set_stage_status(revision_id, stage_name, "REUSED", worker_id=worker_id)
+        else:
+            source_bytes = await _load_source(file_record)
         if _digest(source_bytes) != revision.source_sha256:
             raise ValueError("原始 PDF 内容哈希与解析版本不一致，已拒绝继续处理")
 
@@ -1388,7 +1606,7 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             revision.revision_id,
             Path(object_name).name,
         )
-        if revision.reused_from_revision_id:
+        if revision.reused_from_revision_id and pipeline_result is None and revision.sealed_at is None:
             pipeline_result = await _load_cached_pipeline_result(
                 revision.reused_from_revision_id,
                 revision.parser_fingerprint,
@@ -1418,6 +1636,8 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 for stage_name in ("NATIVE", "MINERU", "GROBID", "UNIFIED", "QUALITY"):
                     await _set_stage_status(revision_id, stage_name, "REUSED", worker_id=worker_id)
         if pipeline_result is None:
+            if revision.sealed_at is not None:
+                raise ValueError("PUBLISHED_PDF_CACHE_UNAVAILABLE_CREATE_NEW_REVISION")
             mineru_cache = await _load_compatible_mineru_cache(revision)
             pipeline_result = await ScientificPdfPipeline().run(
                 temp_path,
@@ -1428,20 +1648,37 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
         article: dict[str, Any] | None = None
         if pipeline_result.capability != "REJECTED" and pipeline_result.unified_article is not None:
             article = pipeline_result.unified_article.to_dict()
+            if revision.processing_mode != "parse_only" and revision.sealed_at is None:
+                from yuxi.knowledge.vision.figure_ingestor import prepare_figure_assets
+
+                await prepare_figure_assets(revision, article, pipeline_result.artifacts, source_bytes)
             projection_summaries = (
                 {}
                 if revision.processing_mode == "parse_only"
+                else dict(revision.qa_report or {})
+                if revision.sealed_at is not None
                 else await _persist_article_records(
                     revision_id,
                     article,
                     markdown_body=pipeline_result.annotated_markdown or "",
+                    worker_id=worker_id,
+                    prepared_figures=True,
                 )
             )
             pipeline_result.qa_report.update(projection_summaries)
+            pipeline_result.artifacts[:] = [a for a in pipeline_result.artifacts if a.kind != "unified_article"] + [
+                ParserArtifact(
+                    "unified_article",
+                    "unified-article.json",
+                    json.dumps(article, ensure_ascii=False, sort_keys=True).encode(),
+                    "application/json",
+                )
+            ]
             figure_summary = dict(projection_summaries.get("figure_index") or {})
             pipeline_result.qa_report["capabilities"] = {
                 **dict(pipeline_result.qa_report.get("capabilities") or {}),
                 "figure_image_locator": bool(figure_summary.get("locator_ready_assets")),
+                "panel_locator": any(a.get("panel_label") for a in article.get("assets", [])),
             }
         artifacts = [
             ParserArtifact("original_pdf", _safe_name(filename), source_bytes, "application/pdf"),
@@ -1496,8 +1733,21 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 "application/json",
             )
         )
-        artifact_uris = await _store_artifacts(revision, artifacts)
-        await _link_stage_artifacts(revision_id)
+        if revision.sealed_at is not None:
+            async with pg_manager.get_async_session_context() as session:
+                artifact_rows = (
+                    (
+                        await session.execute(
+                            select(KnowledgeParseArtifact).where(KnowledgeParseArtifact.revision_id == revision_id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                artifact_uris = {a.kind: a.object_uri for a in artifact_rows}
+        else:
+            artifact_uris = await _store_artifacts(revision, artifacts, worker_id=worker_id)
+        await _link_stage_artifacts(revision_id, worker_id=worker_id)
 
         if pipeline_result.capability == "REJECTED" or pipeline_result.unified_article is None:
             async with pg_manager.get_async_session_context() as session:
@@ -1520,25 +1770,26 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 file_row = (
                     await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id))
                 ).scalar_one()
-                file_row.status = "error_parsing"
-                file_row.evidence_status = "REJECTED"
-                file_row.evidence_capabilities = {
-                    "state": "REJECTED",
-                    "fulltext_search": False,
-                    "academic_structure": False,
-                    "citation_navigation": False,
-                    "pdf_highlight": False,
-                    "figure_retrieval": False,
-                    "table_retrieval": False,
-                    "formula_retrieval": False,
-                    "qa": pipeline_result.qa_report,
-                }
-                file_row.error_message = "; ".join(pipeline_result.qa_report.get("reasons") or ["PDF 质量门禁拒绝"])
-                if revision.processing_mode == "parse_only" and file_row.active_parse_revision_id:
+                if file_row.active_parse_revision_id:
                     if file_row.active_parse_revision_id == previous_activation.get("active_parse_revision_id"):
                         _restore_active_file_state(file_row, previous_activation)
+                else:
+                    file_row.status = "error_parsing"
+                    file_row.evidence_status = "REJECTED"
+                    file_row.evidence_capabilities = {
+                        "state": "REJECTED",
+                        "fulltext_search": False,
+                        "academic_structure": False,
+                        "citation_navigation": False,
+                        "pdf_highlight": False,
+                        "figure_retrieval": False,
+                        "table_retrieval": False,
+                        "formula_retrieval": False,
+                        "qa": pipeline_result.qa_report,
+                    }
+                    file_row.error_message = "; ".join(pipeline_result.qa_report.get("reasons") or ["PDF 质量门禁拒绝"])
             await _publish_identity_cache(revision)
-            return {"revision_id": revision_id, "status": "REJECTED"}
+            return {"revision_id": revision_id, "status": "REJECTED", "activated": False}
 
         assert article is not None
         if revision.processing_mode == "parse_only":
@@ -1589,12 +1840,9 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             file_row = (
                 await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id))
             ).scalar_one()
-            file_row.markdown_file = markdown_uri
-            file_row.status = "parsed"
-            file_row.processing_params = _persistent_processing_params(params, chunking)
-            file_row.evidence_status = "INDEXING"
-            file_row.evidence_capabilities = {**capability_contract, "qa": pipeline_result.qa_report}
-            file_row.error_message = None
+            if not file_row.active_index_revision_id:
+                file_row.status = "indexing"
+                file_row.evidence_status = "INDEXING"
 
         await _publish_identity_cache(revision)
 
@@ -1604,7 +1852,7 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             revision.file_id,
             operator_id=revision.created_by,
             params={
-                **chunking,
+                **_persistent_processing_params(params, chunking),
                 "_index_revision_id": index_revision_id,
                 "_parse_revision_id": revision_id,
             },
@@ -1628,6 +1876,7 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
         async with pg_manager.get_async_session_context() as session:
             current = await _owned_revision(session, revision_id, worker_id)
             current.status = pipeline_result.capability
+            current.sealed_at = current.sealed_at or now
             current.completed_at = now
             current.lease_owner = None
             current.lease_expires_at = None
@@ -1640,13 +1889,38 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
             index_revision.token_count = int(index_result.get("token_count") or 0)
             index_revision.completed_at = now
             file_row = (
-                await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id))
+                await session.execute(
+                    select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id).with_for_update()
+                )
             ).scalar_one()
+            if file_row.active_parse_revision_id != previous_activation.get("active_parse_revision_id"):
+                serving = (
+                    await session.execute(
+                        select(KnowledgeParseRevision).where(
+                            KnowledgeParseRevision.revision_id == file_row.active_parse_revision_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                previous_activation = _snapshot_active_file_state(file_row, serving)
             previous_status = str(previous_activation.get("evidence_status") or "")
             quality_downgrade = bool(
                 previous_activation.get("active_index_revision_id")
                 and _CAPABILITY_RANK.get(previous_status, 0) > _CAPABILITY_RANK.get(pipeline_result.capability, 0)
             )
+            from yuxi.knowledge.pdf_evidence.quality import quality_regressions
+
+            regressions = quality_regressions(
+                dict((previous_activation.get("evidence_capabilities") or {}).get("qa") or {}),
+                pipeline_result.qa_report,
+            )
+            quality_downgrade = quality_downgrade or bool(
+                previous_activation.get("active_index_revision_id") and regressions
+            )
+            if regressions:
+                current.qa_report = {
+                    **pipeline_result.qa_report,
+                    "activation_rejected": {"reason": "QUALITY_REGRESSION", "metrics": regressions},
+                }
             if quality_downgrade:
                 index_revision.status = "SUPERSEDED"
                 file_row.active_parse_revision_id = previous_activation.get("active_parse_revision_id")
@@ -1674,7 +1948,14 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 index_revision.activated_at = now
                 file_row.active_parse_revision_id = revision_id
                 file_row.active_index_revision_id = index_revision_id
+                file_row.markdown_file = markdown_uri
+                file_row.status = "indexed"
+                file_row.processing_params = _persistent_processing_params(params, chunking)
                 file_row.evidence_status = pipeline_result.capability
+                file_row.evidence_capabilities = {**capability_contract, "qa": current.qa_report}
+                file_row.error_message = None
+                file_row.chunk_count = int(index_result.get("chunk_count") or 0)
+                file_row.token_count = int(index_result.get("token_count") or 0)
                 from yuxi.literature.provenance import invalidate_note_publications
                 from yuxi.literature.reconcile import record_source_event
 
@@ -1682,7 +1963,17 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                 if previous_parse and previous_parse != revision_id:
                     await invalidate_note_publications(session, str(previous_parse))
                 await record_source_event(session, revision_id, int(revision.tenant_id))
-        await _set_stage_status(revision_id, "ACTIVATE", "SUCCEEDED", worker_id=worker_id)
+            # Complete the stage in the same owned transaction that releases
+            # the revision lease, avoiding an unfenced post-activation write.
+            await session.execute(
+                update(KnowledgeParseStage)
+                .where(
+                    KnowledgeParseStage.revision_id == revision_id,
+                    KnowledgeParseStage.stage_name == "ACTIVATE",
+                    KnowledgeParseStage.lease_owner == worker_id,
+                )
+                .values(status="SUCCEEDED", finished_at=now, updated_at=now, lease_owner=None, lease_expires_at=None)
+            )
         active_index_revision_id = (
             str(previous_activation.get("active_index_revision_id")) if quality_downgrade else index_revision_id
         )
@@ -1726,38 +2017,49 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
         async with pg_manager.get_async_session_context() as session:
             current = (
                 await session.execute(
-                    select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == revision_id)
+                    select(KnowledgeParseRevision)
+                    .where(
+                        KnowledgeParseRevision.revision_id == revision_id,
+                        KnowledgeParseRevision.status == "RUNNING",
+                        KnowledgeParseRevision.lease_owner == worker_id,
+                        KnowledgeParseRevision.lease_expires_at > _workflow_now(),
+                    )
+                    .with_for_update()
                 )
             ).scalar_one_or_none()
-            owns_revision = bool(
-                current and current.status not in TERMINAL_PARSE_STATUSES and current.lease_owner == worker_id
-            )
+            owns_revision = current is not None
             file_row = (
                 await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == revision.file_id))
             ).scalar_one_or_none()
             active_index_survived = bool(
                 file_row
-                and previous_activation.get("active_index_revision_id")
-                and previous_activation.get("active_index_revision_id") != index_revision_id
+                and file_row.active_index_revision_id
+                and file_row.active_index_revision_id != index_revision_id
             )
-            if owns_revision and active_index_survived:
-                # A shadow-index failure must never take a previously active
-                # parse/index offline. The candidate itself must remain FAILED
-                # with its diagnostic so it can be retried deterministically;
-                # reporting the pipeline capability here creates a false-success
-                # terminal revision with zero evidence rows.
-                current.status = "FAILED"
-                current.error_message = str(exc)
-                current.completed_at = _workflow_now()
-                current.lease_owner = None
-                current.lease_expires_at = None
-                _restore_active_file_state(file_row, previous_activation)
-                file_row.error_message = None
-            elif owns_revision:
-                current.status = "FAILED"
+            retry_scheduled = False
+            if owns_revision:
+                # 重试预算：预算内异常先回 PENDING 交由对账 cron 重排；预算耗尽
+                # 才置 FAILED 死信（人工恢复端点兜底）。
+                from yuxi.knowledge.pdf_evidence.native import PdfInputError
+
+                retry_scheduled = not isinstance(exc, PdfInputError) and not _retry_budget_spent(current)
+                if isinstance(exc, PdfInputError):
+                    current.qa_report = {"failure": {"code": exc.code, "retryable": False}}
+                current.status = "PENDING" if retry_scheduled else "FAILED"
                 current.error_message = str(exc)
                 current.lease_owner = None
                 current.lease_expires_at = None
+                if not retry_scheduled:
+                    current.completed_at = _workflow_now()
+                if active_index_survived:
+                    # A shadow-index failure must never take a previously active
+                    # parse/index offline. The candidate itself stays retryable
+                    # (budget exhausted → FAILED with its diagnostic); reporting
+                    # the pipeline capability here creates a false-success
+                    # terminal revision with zero evidence rows.
+                    if file_row.active_parse_revision_id == previous_activation.get("active_parse_revision_id"):
+                        _restore_active_file_state(file_row, previous_activation)
+                    file_row.error_message = None
             if index_revision_id and owns_revision:
                 index_revision = (
                     await session.execute(
@@ -1768,11 +2070,18 @@ async def _process_scientific_pdf_ingest(ctx: dict[str, Any], revision_id: str) 
                     index_revision.status = "FAILED"
                     index_revision.error_message = str(exc)
                     index_revision.completed_at = _workflow_now()
-            if file_row and owns_revision and not active_index_survived:
-                file_row.status = "error_indexing" if current and current.article_uri else "error_parsing"
-                file_row.evidence_status = "FAILED"
-                file_row.error_message = str(exc)
-        await _release_identity_cache(revision)
+            if file_row and owns_revision:
+                if retry_scheduled and not active_index_survived:
+                    # 预算内重试：文件回到解析中口径，错误详情留在 revision 上
+                    file_row.status = "parsing"
+                    file_row.evidence_status = "PENDING"
+                    file_row.error_message = None
+                elif not active_index_survived:
+                    file_row.status = "error_indexing" if current and current.article_uri else "error_parsing"
+                    file_row.evidence_status = "FAILED"
+                    file_row.error_message = str(exc)
+        if owns_revision:
+            await _release_identity_cache(revision)
         raise
     finally:
         lease_stop.set()
@@ -1829,6 +2138,13 @@ async def recover_stale_scientific_pdf_ingests(ctx: dict[str, Any] | None = None
             .all()
         )
         for row in rows:
+            if _retry_budget_spent(row):
+                row.status = "FAILED"
+                row.error_message = "PDF_RETRY_BUDGET_EXHAUSTED"
+                row.completed_at = now
+                row.lease_owner = None
+                row.lease_expires_at = None
+                continue
             if row.status == "RUNNING":
                 row.status = "PENDING"
                 row.lease_owner = None
@@ -1899,10 +2215,12 @@ async def recover_stale_scientific_pdf_ingests(ctx: dict[str, Any] | None = None
         return recovered_orphans
     queue = await get_arq_pool()
     for row in rows:
+        if row.status != "PENDING":
+            continue
         await queue.enqueue_job(
             "process_scientific_pdf_ingest",
             row.revision_id,
-            _job_id=_ingest_job_id(row.revision_id, row.attempt),
+            _job_id=_ingest_job_id(row.revision_id, row.attempt, int(getattr(row, "retry_generation", 0) or 0)),
         )
     return recovered_orphans + len(rows)
 
@@ -2007,6 +2325,197 @@ async def get_scientific_pdf_status(*, kb_id: str, file_id: str) -> dict[str, An
             }
             for row in rows
         ],
+    }
+
+
+def classify_pdf_evidence_upgrade(
+    file_record: KnowledgeFile, revision: KnowledgeParseRevision | None
+) -> dict[str, Any]:
+    """Classify one active PDF without mutating or downloading its source."""
+    reasons: list[str] = []
+    source_sha256 = str(file_record.content_hash or "")
+    expected_fingerprint = None
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", source_sha256):
+        reasons.append("SOURCE_HASH_REQUIRES_BACKFILL")
+    else:
+        expected_fingerprint = build_parser_fingerprint(
+            source_sha256.lower(), dict(file_record.processing_params or {})
+        )
+    if not file_record.active_parse_revision_id:
+        reasons.append("NO_ACTIVE_PARSE_REVISION")
+    elif revision is None:
+        reasons.append("ACTIVE_PARSE_REVISION_MISSING")
+    else:
+        if str(revision.pipeline_version or "") != PIPELINE_VERSION:
+            reasons.append("PIPELINE_VERSION_OUTDATED")
+        if expected_fingerprint and str(revision.parser_fingerprint or "") != expected_fingerprint:
+            reasons.append("PARSER_FINGERPRINT_OUTDATED")
+        if revision.sealed_at is None:
+            reasons.append("ACTIVE_REVISION_NOT_SEALED")
+        if str(revision.status or "") not in {
+            "INDEXED_FULL",
+            "INDEXED_CONTENT_ONLY",
+            "INDEXED_TEXT_ONLY",
+        }:
+            reasons.append("ACTIVE_REVISION_NOT_INDEXED")
+    # 升级前后质量对比的"前"基线：当前活跃能力面的质量向量摘要（只读投影，
+    # 操作员判断"这次升级值不值"的依据；升级失败/质量回退时激活守卫保持现状）。
+    current_quality = None
+    capabilities = getattr(file_record, "evidence_capabilities", None)
+    if isinstance(capabilities, dict):
+        vector = (capabilities.get("qa") or {}).get("quality_vector")
+        if isinstance(vector, dict):
+            current_quality = {
+                key: vector.get(key)
+                for key in (
+                    "version",
+                    "source_binding_coverage",
+                    "text_precise_locator_coverage",
+                    "figure_region_locator_coverage",
+                    "figure_ocr_ready_coverage",
+                    "table_cell_locator_coverage",
+                    "raw_block_acceptance",
+                )
+                if vector.get(key) is not None
+            } or None
+    return {
+        "file_id": str(file_record.file_id),
+        "kb_id": str(file_record.kb_id),
+        "filename": str(file_record.original_filename or file_record.filename or file_record.file_id),
+        "active_parse_revision_id": str(file_record.active_parse_revision_id or "") or None,
+        "active_pipeline_version": str(revision.pipeline_version or "") if revision else None,
+        "active_status": str(revision.status or "") if revision else None,
+        "expected_pipeline_version": PIPELINE_VERSION,
+        "expected_parser_fingerprint": expected_fingerprint,
+        "current_quality_vector": current_quality,
+        "upgrade_required": bool(reasons),
+        "reasons": reasons,
+    }
+
+
+async def list_pdf_evidence_upgrade_candidates(
+    *, tenant_id: int, kb_id: str, limit: int = 100, after_file_id: str | None = None
+) -> dict[str, Any]:
+    """Return a tenant-scoped, stable page of PDF evidence upgrade inventory."""
+    bounded_limit = max(1, min(int(limit), 500))
+    async with pg_manager.get_async_session_context() as session:
+        query = (
+            select(KnowledgeFile, KnowledgeParseRevision)
+            .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeFile.kb_id)
+            .outerjoin(
+                KnowledgeParseRevision,
+                KnowledgeParseRevision.revision_id == KnowledgeFile.active_parse_revision_id,
+            )
+            .where(
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.kb_id == kb_id,
+                KnowledgeBase.contract_key == "pdf_evidence",
+                KnowledgeFile.is_folder.is_not(True),
+                or_(
+                    KnowledgeFile.file_type == "pdf",
+                    KnowledgeFile.filename.ilike("%.pdf"),
+                    KnowledgeFile.original_filename.ilike("%.pdf"),
+                ),
+            )
+            .order_by(KnowledgeFile.file_id)
+            .limit(bounded_limit + 1)
+        )
+        if after_file_id:
+            query = query.where(KnowledgeFile.file_id > after_file_id)
+        rows = list((await session.execute(query)).all())
+    has_more = len(rows) > bounded_limit
+    page = rows[:bounded_limit]
+    items = [classify_pdf_evidence_upgrade(file_record, revision) for file_record, revision in page]
+    return {
+        "schema": "pdf-evidence-upgrade-inventory.v1",
+        "kb_id": kb_id,
+        "expected_pipeline_version": PIPELINE_VERSION,
+        "items": items,
+        "page_count": len(items),
+        "upgrade_required_count": sum(int(item["upgrade_required"]) for item in items),
+        "next_cursor": str(page[-1][0].file_id) if has_more and page else None,
+    }
+
+
+async def schedule_pdf_evidence_upgrades(
+    *, tenant_id: int, kb_id: str, file_ids: list[str], operator_id: str, dry_run: bool = True
+) -> dict[str, Any]:
+    """Plan or enqueue explicitly selected upgrades; never schedules an implicit whole KB."""
+    selected = list(dict.fromkeys(str(item).strip() for item in file_ids if str(item).strip()))
+    if not selected or len(selected) > 100:
+        raise ValueError("file_ids 必须包含 1-100 个唯一文件")
+    async with pg_manager.get_async_session_context() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(KnowledgeFile, KnowledgeParseRevision)
+                    .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeFile.kb_id)
+                    .outerjoin(
+                        KnowledgeParseRevision,
+                        KnowledgeParseRevision.revision_id == KnowledgeFile.active_parse_revision_id,
+                    )
+                    .where(
+                        KnowledgeBase.tenant_id == tenant_id,
+                        KnowledgeBase.kb_id == kb_id,
+                        KnowledgeBase.contract_key == "pdf_evidence",
+                        KnowledgeFile.file_id.in_(selected),
+                        KnowledgeFile.is_folder.is_not(True),
+                        or_(
+                            KnowledgeFile.file_type == "pdf",
+                            KnowledgeFile.filename.ilike("%.pdf"),
+                            KnowledgeFile.original_filename.ilike("%.pdf"),
+                        ),
+                    )
+                    .order_by(KnowledgeFile.file_id)
+                )
+            ).all()
+        )
+    by_file = {str(file_record.file_id): (file_record, revision) for file_record, revision in rows}
+    missing = [file_id for file_id in selected if file_id not in by_file]
+    if missing:
+        raise ValueError(f"文件不存在、越权或不属于 pdf_evidence：{', '.join(missing[:5])}")
+    plan = [classify_pdf_evidence_upgrade(*by_file[file_id]) for file_id in selected]
+    if dry_run:
+        return {
+            "schema": "pdf-evidence-upgrade-batch.v1",
+            "dry_run": True,
+            "kb_id": kb_id,
+            "requested": len(selected),
+            "upgrade_required": sum(int(item["upgrade_required"]) for item in plan),
+            "items": plan,
+        }
+    results: list[dict[str, Any]] = []
+    for index, item in enumerate(plan):
+        if not item["upgrade_required"]:
+            results.append({**item, "enqueue_status": "SKIPPED_CURRENT"})
+            continue
+        try:
+            queued = await create_or_reuse_scientific_pdf_ingest(
+                kb_id=kb_id,
+                file_id=item["file_id"],
+                operator_id=operator_id,
+                defer_by_seconds=min(index * 0.25, 10.0),
+            )
+            results.append(
+                {
+                    **item,
+                    "enqueue_status": "QUEUED" if not queued.get("enqueue_deferred") else "DEFERRED",
+                    "revision_id": queued.get("revision_id"),
+                    "revision_status": queued.get("status"),
+                }
+            )
+        except Exception as exc:  # one bad file must not hide the rest of the explicit batch
+            logger.exception("Failed to schedule PDF evidence upgrade for %s", item["file_id"])
+            results.append({**item, "enqueue_status": "FAILED", "error": str(exc)[:500]})
+    return {
+        "schema": "pdf-evidence-upgrade-batch.v1",
+        "dry_run": False,
+        "kb_id": kb_id,
+        "requested": len(selected),
+        "queued": sum(int(item.get("enqueue_status") in {"QUEUED", "DEFERRED"}) for item in results),
+        "failed": sum(int(item.get("enqueue_status") == "FAILED") for item in results),
+        "skipped_current": sum(int(item.get("enqueue_status") == "SKIPPED_CURRENT") for item in results),
+        "items": results,
     }
 
 
@@ -2186,12 +2695,7 @@ async def list_scientific_pdf_pipeline_tasks(*, status: str | None = None, limit
 
 
 async def rebuild_figure_index_for_file(*, kb_id: str, file_id: str, render_synthetic: bool = True) -> dict[str, Any]:
-    """不重解析地用当前 figure_ingestor 重建 active revision 的图表索引（ADR-0004 §11）。
-
-    用途：ingestor 升级（v4 多 panel 聚合）后对存量文献补索引，或对象存储/MinerU 不可用时
-    仍要拿到图组与锚点配对。只读 MinIO 中的 unified_article 产物与图片字节；``render_synthetic``
-    关闭时完全不写对象存储。实体/资产行按 revision 级联重建（幂等）。
-    """
+    """Legacy repair path; published figure facts require a new parse revision."""
     async with pg_manager.get_async_session_context() as session:
         file_record = (
             (
@@ -2217,6 +2721,8 @@ async def rebuild_figure_index_for_file(*, kb_id: str, file_id: str, render_synt
         )
         if revision is None:
             raise ValueError("激活的解析版本不存在")
+        if revision.sealed_at is not None:
+            raise ValueError("PUBLISHED_PDF_EVIDENCE_IMMUTABLE_CREATE_NEW_REVISION")
         artifact = (
             (
                 await session.execute(

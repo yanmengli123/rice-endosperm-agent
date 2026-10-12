@@ -65,9 +65,7 @@ def test_xlsx_cas_sheet_maps_zone_and_sheet_year_is_default():
 
 
 def test_unrecognized_columns_are_ignored_not_guessed():
-    parsed = journals.parse_journals_table(
-        "期刊名,some column,JIF,年份\nA Journal,xyz,2.0,2023\n".encode(), "x.csv"
-    )
+    parsed = journals.parse_journals_table("期刊名,some column,JIF,年份\nA Journal,xyz,2.0,2023\n".encode(), "x.csv")
     assert parsed["sheets"][0]["columns"] == ["jif", "journal", "year"]
     assert parsed["rows"][0]["jif"] == 2.0
 

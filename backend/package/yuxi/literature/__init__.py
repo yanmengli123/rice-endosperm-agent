@@ -17,8 +17,8 @@ from yuxi.literature.contracts import (
 )
 from yuxi.literature.identity.kinds import (
     ATTACHMENT_KINDS,
-    KINDS,
     KIND_PREFIX,
+    KINDS,
 )
 from yuxi.literature.identity.rid import (
     doi_to_dirname,

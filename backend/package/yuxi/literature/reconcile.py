@@ -90,40 +90,44 @@ async def register_scientific_revision(revision_id: str, *, enqueue_render: bool
     }
 
 
-async def reconcile_scientific_literature_papers(ctx: dict | None = None, *, limit: int = 100) -> int:
-    """Repair missing registration, missing render rows and pending activation events."""
+async def reconcile_scientific_literature_papers(
+    ctx: dict | None = None, *, limit: int = 100, dry_run: bool = False, tenant_id: int | None = None
+) -> int:
+    """Repair missing registration, missing render rows and pending activation events.
+
+    ``dry_run=True`` 只返回待对账数量（手动入口默认预览）；``tenant_id``
+    限定单租户（手动入口必传），cron 传 None 做全局补偿——该函数本身
+    无请求 scope，租户过滤是它面向 HTTP 暴露时的边界。
+    """
     del ctx
     async with pg_manager.get_async_session_context() as session:
-        revisions = list(
-            (
-                await session.execute(
-                    select(KnowledgeParseRevision.revision_id)
-                    .join(KnowledgeFile, KnowledgeFile.active_parse_revision_id == KnowledgeParseRevision.revision_id)
-                    .outerjoin(
-                        LiteraturePaper,
-                        (LiteraturePaper.tenant_id == KnowledgeParseRevision.tenant_id)
-                        & (LiteraturePaper.source_revision_id == KnowledgeParseRevision.revision_id),
-                    )
-                    .outerjoin(
-                        LiteratureReaderRender, LiteratureReaderRender.revision_id == KnowledgeParseRevision.revision_id
-                    )
-                    .outerjoin(
-                        LiteratureSourceEvent, LiteratureSourceEvent.revision_id == KnowledgeParseRevision.revision_id
-                    )
-                    .where(
-                        KnowledgeParseRevision.pipeline_version.like("scientific_pdf_%"),
-                        or_(
-                            LiteraturePaper.id.is_(None),
-                            LiteratureReaderRender.id.is_(None),
-                            LiteratureSourceEvent.status == "PENDING",
-                        ),
-                    )
-                    .group_by(KnowledgeParseRevision.revision_id, KnowledgeParseRevision.completed_at)
-                    .order_by(KnowledgeParseRevision.completed_at.asc())
-                    .limit(limit)
-                )
-            ).scalars()
+        query = (
+            select(KnowledgeParseRevision.revision_id)
+            .join(KnowledgeFile, KnowledgeFile.active_parse_revision_id == KnowledgeParseRevision.revision_id)
+            .outerjoin(
+                LiteraturePaper,
+                (LiteraturePaper.tenant_id == KnowledgeParseRevision.tenant_id)
+                & (LiteraturePaper.source_revision_id == KnowledgeParseRevision.revision_id),
+            )
+            .outerjoin(LiteratureReaderRender, LiteratureReaderRender.revision_id == KnowledgeParseRevision.revision_id)
+            .outerjoin(LiteratureSourceEvent, LiteratureSourceEvent.revision_id == KnowledgeParseRevision.revision_id)
+            .where(
+                KnowledgeParseRevision.pipeline_version.like("scientific_pdf_%"),
+                or_(
+                    LiteraturePaper.id.is_(None),
+                    LiteratureReaderRender.id.is_(None),
+                    LiteratureSourceEvent.status == "PENDING",
+                ),
+            )
+            .group_by(KnowledgeParseRevision.revision_id, KnowledgeParseRevision.completed_at)
+            .order_by(KnowledgeParseRevision.completed_at.asc())
+            .limit(limit)
         )
+        if tenant_id is not None:
+            query = query.where(KnowledgeParseRevision.tenant_id == int(tenant_id))
+        revisions = list((await session.execute(query)).scalars())
+    if dry_run:
+        return len(revisions)
     completed = 0
     for revision_id in revisions:
         try:

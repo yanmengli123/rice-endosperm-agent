@@ -3,7 +3,7 @@
 from sqlalchemy import Integer, cast, func, literal_column, or_, select
 
 from yuxi.literature.access import build_access, current_access
-from yuxi.literature.retrieval import escape_like, tokenize, _excerpt
+from yuxi.literature.retrieval import _excerpt, escape_like, tokenize
 from yuxi.literature.session import SESSION_KINDS
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Conversation, Message

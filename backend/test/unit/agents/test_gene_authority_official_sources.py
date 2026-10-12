@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+
 # 与 test_genomics_mcp_builtins 同款加载方式：vendored 脚本按 ROOT 相对路径编译执行，
 # 构建上下文未挂载进 API 测试容器时整模块 skip（而不是收集期 ImportError 中断整套）。
 def _find_repo_root() -> Path | None:
@@ -57,9 +58,7 @@ class _Response:
 
 class OfficialSourceTests(unittest.TestCase):
     def test_http_200_provider_error_is_not_a_found_record(self):
-        self.assertFalse(
-            sources._has_records({"messages": [{"error": {"reason": "invalid taxonomy token"}}]})
-        )
+        self.assertFalse(sources._has_records({"messages": [{"error": {"reason": "invalid taxonomy token"}}]}))
 
     def test_entrez_search_discovery_does_not_leak_api_key(self):
         body = b'{"esearchresult":{"count":"1","idlist":["123"]}}'
@@ -84,9 +83,7 @@ class OfficialSourceTests(unittest.TestCase):
     def test_entrez_gene_symbol_resolution_is_allowlisted(self):
         body = b'{"esearchresult":{"count":"1","idlist":["4340018"]}}'
         with patch.object(sources.urllib.request, "urlopen", return_value=_Response(body)) as open_url:
-            result = sources.ncbi_eutils_search_rest(
-                "gene", "Wx[Gene Name] AND Oryza sativa[Organism]", retmax=10
-            )
+            result = sources.ncbi_eutils_search_rest("gene", "Wx[Gene Name] AND Oryza sativa[Organism]", retmax=10)
         self.assertEqual(result["data"]["esearchresult"]["idlist"], ["4340018"])
         self.assertIn("db=gene", open_url.call_args.args[0].full_url)
 
@@ -132,9 +129,7 @@ class OfficialSourceTests(unittest.TestCase):
         )
         with patch.object(sources, "ncbi_eutils_search_rest", side_effect=[empty, found]) as search:
             with patch.object(sources, "_request_json", return_value=dataset) as request:
-                result = sources.ncbi_gene_report_rest(
-                    ["WAXY", "Wx"], identifier_type="symbol", taxon="4530"
-                )
+                result = sources.ncbi_gene_report_rest(["WAXY", "Wx"], identifier_type="symbol", taxon="4530")
         self.assertEqual(result["status"], "FOUND")
         self.assertEqual(result["data"]["symbol_resolution"]["gene_ids"], ["4340018"])
         self.assertEqual(search.call_count, 2)
@@ -171,7 +166,7 @@ class OfficialSourceTests(unittest.TestCase):
                 sources.europe_pmc_oa_passages_rest("PMC12345", "data")
 
     def test_efetch_xml_is_bounded_and_private_parameters_are_redacted(self):
-        xml = b'<PubmedArticleSet><PubmedArticle /></PubmedArticleSet>'
+        xml = b"<PubmedArticleSet><PubmedArticle /></PubmedArticleSet>"
         with patch.dict("os.environ", {"NCBI_API_KEY": "secret-key", "YUXI_NCBI_EMAIL": "admin@example.org"}):
             with patch.object(sources.urllib.request, "urlopen", return_value=_Response(xml)) as open_url:
                 result = sources.ncbi_eutils_fetch_rest("pubmed", ["123"])
@@ -211,9 +206,7 @@ class CircuitBreakerAndCliFallbackContract(unittest.TestCase):
         self.assertFalse(sources._breaker_allows("NCBI_DATASETS"))
 
     def test_non_transient_http_error_does_not_poison_breaker(self):
-        error = sources.urllib.error.HTTPError(
-            sources.NCBI_BASE + "/gene", 400, "bad request", hdrs=None, fp=None
-        )
+        error = sources.urllib.error.HTTPError(sources.NCBI_BASE + "/gene", 400, "bad request", hdrs=None, fp=None)
         with patch.object(sources.urllib.request, "urlopen", side_effect=error):
             with self.assertRaises(sources.AuthorityError) as ctx:
                 sources._request_json("NCBI_DATASETS", sources.NCBI_BASE + "/gene")
@@ -234,9 +227,7 @@ class CircuitBreakerAndCliFallbackContract(unittest.TestCase):
     def test_retries_record_breaker_failure_then_open(self):
         # 三次重试全失败 → 记一次 breaker 失败；重复 5 轮 → 熔断打开
         for _ in range(sources._BREAKER_THRESHOLD):
-            with patch.object(
-                sources.urllib.request, "urlopen", side_effect=sources.urllib.error.URLError("refused")
-            ):
+            with patch.object(sources.urllib.request, "urlopen", side_effect=sources.urllib.error.URLError("refused")):
                 with self.assertRaises(sources.AuthorityError):
                     sources._request_json("NCBI_DATASETS", sources.NCBI_BASE + "/gene")
         self.assertFalse(sources._breaker_allows("NCBI_DATASETS"))
@@ -249,9 +240,10 @@ class CircuitBreakerAndCliFallbackContract(unittest.TestCase):
             "retrieved_at": sources._now(),
             "data": {"reports": []},
         }
-        with patch.object(
-            sources, "_request_json", side_effect=sources.AuthorityError("NCBI_DATASETS request failed")
-        ), patch.object(sources, "ncbi_gene_summary_cli", return_value=cli_envelope) as cli:
+        with (
+            patch.object(sources, "_request_json", side_effect=sources.AuthorityError("NCBI_DATASETS request failed")),
+            patch.object(sources, "ncbi_gene_summary_cli", return_value=cli_envelope) as cli,
+        ):
             result = sources.ncbi_gene_report_rest(["4340018"], identifier_type="gene-id")
         cli.assert_called_once()
         self.assertEqual(result["status"], "FOUND")
@@ -259,18 +251,15 @@ class CircuitBreakerAndCliFallbackContract(unittest.TestCase):
         self.assertIn("NCBI_DATASETS request failed", result["data"]["rest_fallback"]["rest_error"])
 
     def test_rest_and_cli_both_failing_raises_unavailable(self):
-        with patch.object(
-            sources, "_request_json", side_effect=sources.AuthorityError("NCBI_DATASETS request failed")
-        ), patch.object(
-            sources, "ncbi_gene_summary_cli", side_effect=sources.AuthorityError("CLI rejected")
+        with (
+            patch.object(sources, "_request_json", side_effect=sources.AuthorityError("NCBI_DATASETS request failed")),
+            patch.object(sources, "ncbi_gene_summary_cli", side_effect=sources.AuthorityError("CLI rejected")),
         ):
             with self.assertRaises(sources.AuthorityError):
                 sources.ncbi_gene_report_rest(["4340018"], identifier_type="gene-id")
 
     def test_invalid_page_size_never_invokes_rest_or_cli(self):
-        with patch.object(sources, "_request_json") as request, patch.object(
-            sources, "ncbi_gene_summary_cli"
-        ) as cli:
+        with patch.object(sources, "_request_json") as request, patch.object(sources, "ncbi_gene_summary_cli") as cli:
             with self.assertRaises(sources.AuthorityError):
                 sources.ncbi_gene_report_rest(["4340018"], identifier_type="gene-id", page_size=0)
         request.assert_not_called()
@@ -281,9 +270,7 @@ class CircuitBreakerAndCliFallbackContract(unittest.TestCase):
             with self.assertRaisesRegex(sources.AuthorityError, "could not be started"):
                 sources._run_datasets(["summary", "gene", "gene-id", "4340018"])
 
-        completed = sources.subprocess.CompletedProcess(
-            args=["datasets"], returncode=0, stdout="not-json\n", stderr=""
-        )
+        completed = sources.subprocess.CompletedProcess(args=["datasets"], returncode=0, stdout="not-json\n", stderr="")
         with patch.object(sources, "_run_datasets", return_value=completed):
             with self.assertRaisesRegex(sources.AuthorityError, "malformed JSON Lines"):
                 sources.ncbi_gene_summary_cli(["4340018"])

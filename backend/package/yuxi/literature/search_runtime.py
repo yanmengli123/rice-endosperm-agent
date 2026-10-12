@@ -7,19 +7,20 @@ import json
 import math
 import uuid
 
-from sqlalchemy import select
 from redis.exceptions import RedisError
+from sqlalchemy import select
+
 from yuxi.literature.access import build_access, current_access
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
-    LiteraturePaper,
+    LiteratureAttachment,
+    LiteratureCard,
+    LiteratureCitation,
     LiteratureCompileJob,
     LiteratureNavigationIndex,
     LiteratureNoteSearch,
-    LiteratureAttachment,
     LiteratureOriginalSearch,
-    LiteratureCard,
-    LiteratureCitation,
+    LiteraturePaper,
     LiteratureReaderRender,
 )
 
@@ -142,7 +143,10 @@ async def search_identity(tenant_id: int, request: dict) -> str | None:
         "originals": sorted(map(tuple, originals)),
         "renders": sorted(map(tuple, renders)),
     }
-    return "yuxi:lit:search:" + hashlib.sha256(json.dumps(manifest, sort_keys=True, default=str).encode()).hexdigest()
+    digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, default=str).encode()).hexdigest()
+    # 租户前缀键（v3）：管理端可按租户扫描/清理；manifest 仍完整参与哈希，
+    # 跨租户不可伪造。旧 v2 纯哈希键靠 TTL 自然淘汰，无需迁移。
+    return f"yuxi:lit:search:t{tenant_id}:{digest}"
 
 
 async def read_cache(key: str | None):
@@ -179,7 +183,7 @@ async def rerank(tenant_id: int, query: str, hits: list[dict], model_spec: str) 
     from yuxi.agents.models import apply_credential_override
     from yuxi.literature import llm_gateway
     from yuxi.models.providers.cache import model_cache
-    from yuxi.models.rerank import OpenAIReranker, DashscopeReranker
+    from yuxi.models.rerank import DashscopeReranker, OpenAIReranker
 
     scope = current_access()
     if scope is None or scope.tenant_id != tenant_id:

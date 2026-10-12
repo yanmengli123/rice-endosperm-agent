@@ -8,6 +8,7 @@ from yuxi.knowledge.graphs.graph_utils import TIER_C, predicate_tier
 from yuxi.knowledge.products.authority_gate import AuthorityGate
 from yuxi.knowledge.products.registry import is_evidence_authority
 from yuxi.knowledge.rendering.citation_channel import public_citations
+from yuxi.knowledge.rendering.literature_deepread import build_literature_deepread_section
 from yuxi.knowledge.validation.citation_validator import redact_narrative_citation_identifiers
 
 
@@ -163,11 +164,16 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
     narrative_evidence = []
     citation_refs_by_evidence: dict[str, list[str]] = {}
     for citation in contract.get("citations") or []:
-        evidence_id = str(citation.get("evidence_id") or "")
         ref = str(citation.get("ref") or "")
-        if evidence_id and ref:
-            citation_refs_by_evidence.setdefault(evidence_id, []).append(ref)
+        for key in ("evidence_id", "_physical_evidence_id"):
+            evidence_id = str(citation.get(key) or "")
+            if evidence_id and ref:
+                refs = citation_refs_by_evidence.setdefault(evidence_id, [])
+                if ref not in refs:
+                    refs.append(ref)
     for evidence in evidence_rows:
+        if str(evidence.get("source_type") or "").upper() == "DOCUMENT":
+            continue
         if len(narrative_evidence) >= max(0, int(narrative_evidence_limit)):
             break
         item = {
@@ -192,7 +198,41 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         refs = citation_refs_by_evidence.get(str(evidence.get("evidence_id") or ""), [])
         if refs:
             item["citation_refs"] = refs
-        narrative_evidence.append(item)
+        if item:
+            narrative_evidence.append(item)
+    document_rows = {
+        str(row.get("evidence_id")): row
+        for row in evidence_rows
+        if str(row.get("source_type") or "").upper() == "DOCUMENT" and row.get("evidence_id")
+    }
+    document_quotes = []
+    for citation in (contract.get("citations") or [])[:16]:
+        row = document_rows.get(str(citation.get("_physical_evidence_id") or citation.get("evidence_id") or ""))
+        ref = str(citation.get("ref") or "")
+        if row is None or not ref:
+            continue
+        # A chunk may produce several independently anchored spans. Give each
+        # exact span its own ref, never attach several refs to the whole chunk.
+        quote = str(citation.get("_quote") or "")
+        if not quote and len(citation_refs_by_evidence.get(str(row.get("evidence_id")), [])) == 1:
+            quote = str(row.get("evidence_quote") or row.get("content") or "")
+        if not quote:
+            continue
+        document_quotes.append(
+            {
+                "carrier": "DOCUMENT",
+                "zone": citation.get("zone"),
+                "evidence_type": citation.get("_evidence_type") or row.get("evidence_type"),
+                "evidence_quote": redact_narrative_citation_identifiers(quote[:6000]),
+                "quote_truncated": len(quote) > 6000,
+                "citation_refs": [ref],
+            }
+        )
+    # Reserve body context before supplementary caption lists can consume the
+    # narrative budget; a figure explanation needs both carriers.
+    document_quotes.sort(key=lambda item: bool(re.match(r"\s*(?:Figure|Fig\.|Table)\s", item["evidence_quote"], re.I)))
+    remaining = max(0, int(narrative_evidence_limit) - len(narrative_evidence))
+    narrative_evidence.extend(document_quotes[:remaining])
     graph_expansion = contract.get("graph_expansion") or {}
     graph_nodes = [
         {
@@ -295,6 +335,18 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
             )
         )
     output_profile_rules = _output_profile_rules(answer_output)
+    # 文献深读 additive 尾段（批次 1）：仅当 orchestrator 判定为 literature 会话
+    # 且写入 contract["literature_document_map"]/["literature_deepread"] 时才注入。
+    # 普通科研问答（无这些键）deepread_section 为空串，模型上下文逐字节不变。
+    # 定位题硬约束（page_claim_allowed=False）不在此尾段处理，仍由 policy_rules
+    # 优先约束；本地图注入的也是导航数据、非证据、非指令。
+    deepread_parts: list[str] = []
+    literature_map_text = str(contract.get("literature_document_map") or "")
+    if literature_map_text:
+        deepread_parts.append(literature_map_text)
+    if contract.get("literature_deepread"):
+        deepread_parts.append(build_literature_deepread_section())
+    deepread_section = ("\n".join(deepread_parts) + "\n") if deepread_parts else ""
     return (
         "<AUTHORITATIVE_KNOWLEDGE_CONTRACT>\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -303,7 +355,8 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         + ("\n" if policy_rules else "")
         + output_profile_rules
         + ("\n" if output_profile_rules else "")
-        + "规则：仅依据上面的 Claim 组织科研解释。PMID、DOI、evidence_id 和完整结构化表由后端工具卡呈现，"
+        + "规则：图谱问题依据上面的 Claim；文献解读依据 selected_evidence 中携带 citation_refs 的原文证据。"
+        "Claim 为空不代表文献原文为空。PMID、DOI、evidence_id 和完整结构化表由后端工具卡呈现，"
         "不要自行生成、补全或改写这些引文标识符；plant_gene_lookup 等工具返回的官方基因、转录本、蛋白和"
         "RAP/MSU 位点 ID 不属于引文标识，可以在正文保留。即使存在引文标识格式问题，也必须完成基于 Claim 的"
         "科研解读，不得改为拒答或只返回计数。FUNCTIONAL_REGULATION 可表述为功能调控；"
@@ -328,14 +381,19 @@ def build_answer_context(contract: dict[str, Any], *, narrative_evidence_limit: 
         "定位部分不要复述页码（后端已确定性渲染定位行），直接继续回答解释部分；"
         "解释部分每个关键结论句末必须带 [E#] 占位符，含数字/基因符号/缩写的句子尤其必须标注，"
         "未标注的硬约束句会被后端自动核验，核验不过会在答案中明示‘未定位到依据’。"
-        "图注类引文（quote_head 以 Figure/Table 开头）的含义解释必须优先依据 locator.backlinks 中"
-        "正文分区（MAIN_TEXT）的讨论段，并引用其 [E#]；backlinks 为空时明示‘原文未在正文展开讨论该图’，"
-        "只解释图注字面内容，不得编造实验结论。"
+        "图注类引文（quote_head 以 Figure/Table 开头）的含义解释优先依据 selected_evidence 中"
+        "与该图相关的正文或 locator.backlinks 中 MAIN_TEXT 讨论段，并引用其 citation_refs；"
+        "backlinks 为空只说明未建立反向关联，不能宣称论文未讨论该图或未返回正文。"
+        "本轮没有相关正文证据时，只解释图注字面内容，不得编造实验结论。"
+        "每个 paragraph/bullet 只承载一个可核验主张及其对应 evidence_refs；区分测量项目和实际结果，"
+        "保留原文的否定词、比较对象与时间范围，不得把时间上的伴随改写成因果。"
+        "不要输出‘内、外？’、‘或为某值’等未定稿候选；声称来源相互矛盾时必须分别给出两个来源的"
+        "明确原句及对应引用，不能把‘位置不在结构域内，但结构域受影响’误判为矛盾。"
         "同一表型有多张图时，主依据必须选直接回答该材料与表型的题注；单突变体问题优先单突变体图，"
         "不得用双突变体比较图、过表达图或工作模型图冒充主证据。后几类只能作为明确标注的补充证据。"
         "输出协议：只输出 <YUXI_ANSWER_DRAFT> 与 </YUXI_ANSWER_DRAFT> 包裹的严格 JSON。"
         'JSON 形状为 {"schema_version":"answer-draft.v2","blocks":[{"type":'
         '"heading|paragraph|bullet","text":"自然语言","evidence_refs":["E1"]}]}。'
         "不要自建‘参考文献/证据引用/资料来源’章节；后端会根据 evidence_refs 完成验证、渲染 Markdown 和"
-        "【证据引用】区块。不要在 text 中复制 [E#]、[citation omitted] 或任何〔…〕引用标记。"
+        "【证据引用】区块。不要在 text 中复制 [E#]、[citation omitted] 或任何〔…〕引用标记。" + deepread_section
     )

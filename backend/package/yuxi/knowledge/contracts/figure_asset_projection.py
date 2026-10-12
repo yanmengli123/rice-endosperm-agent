@@ -42,7 +42,7 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils import logger
 
-FIGURE_PROJECTION_VERSION = "figure_projection_v1"
+FIGURE_PROJECTION_VERSION = "figure_projection_v2"
 
 # 抑制原因闭合枚举（P0-4 SLA 字典：trace attribute 与落库 JSON 共用词表）
 SUPPRESS_BINDING_NOT_VERIFIED = "binding_not_verified"
@@ -108,6 +108,10 @@ class PublishableFigure(BaseModel):
     # 资产自身所在页（跨页图表：题注页 == page/Binding，图页 == asset_page；相同则只显示一个）
     asset_page: int = 0
     selection: dict[str, Any] = Field(default_factory=dict)
+    # 原文跳转选择器（v2）：figure 通道经 resolve_pdf_evidence 定位到图/Panel 区域。
+    # panel_label 只在 panel_association == VERIFIED_CAPTION_AND_OCR 时携带——
+    # 未验证 Panel 不发标签，抽屉将解析到图组 primary（诚实降级而非报错）。
+    source_selector: dict[str, Any] = Field(default_factory=dict)
 
 
 def derive_asset_name(object_name: str) -> str | None:
@@ -355,6 +359,17 @@ async def _project_entity_group(
         member_sha = str(member.asset_sha256 or "")
         if member_name is None or not member_sha:
             continue
+        member_panel = str(getattr(member, "panel_label", "") or "").strip()
+        association = (getattr(member, "locator_metadata", None) or {}).get("panel_association")
+        panel_verified = bool(member_panel) and association == "VERIFIED_CAPTION_AND_OCR"
+        selector: dict[str, Any] = {
+            "kb_id": kb_id,
+            "file_id": file_id,
+            "parse_revision_id": revision_id,
+            "figure_label": str(entity.container_label or "").strip(),
+        }
+        if panel_verified:
+            selector["panel_label"] = member_panel
         figures.append(
             PublishableFigure(
                 binding_id=binding_id,
@@ -376,6 +391,7 @@ async def _project_entity_group(
                 panel_label=str(getattr(member, "panel_label", "") or ""),
                 asset_page=int(getattr(member, "page", 0) or 0),
                 selection={"asset_count": len(ordered), "rule": _SELECTION_RULE},
+                source_selector=selector,
             )
         )
     if not figures:

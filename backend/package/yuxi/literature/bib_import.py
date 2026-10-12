@@ -16,8 +16,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from yuxi.literature.identity.rid import doi_to_dirname, is_doi, make_rid
 from yuxi.literature.access import current_access
+from yuxi.literature.identity.rid import doi_to_dirname, is_doi, make_rid
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
@@ -269,6 +269,7 @@ async def import_markdown_document(
         content_type="text/markdown",
     )
     import json
+
     from yuxi.literature.access import access_scope
     from yuxi.literature.artifacts import ArtifactKind, store_revision
 

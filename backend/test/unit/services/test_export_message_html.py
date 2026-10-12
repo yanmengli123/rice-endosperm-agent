@@ -20,7 +20,13 @@ pytestmark = [pytest.mark.unit]
 
 
 def _msg(msg_id: int, msg_type: str, content: str = "") -> dict:
-    return {"id": msg_id, "type": msg_type, "content": content, "created_at": "2026-09-22T08:30:00", "extra_metadata": {}}
+    return {
+        "id": msg_id,
+        "type": msg_type,
+        "content": content,
+        "created_at": "2026-09-22T08:30:00",
+        "extra_metadata": {},
+    }
 
 
 def test_pick_single_round_takes_question_and_answer():

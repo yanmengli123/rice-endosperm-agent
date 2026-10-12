@@ -88,6 +88,18 @@ _usage_context: contextvars.ContextVar[_Usage | None] = contextvars.ContextVar("
 _model_options: contextvars.ContextVar[dict] = contextvars.ContextVar("literature_model_options", default={})
 
 
+def account_embedding_usage(total_tokens: int | None, texts: list[str]) -> None:
+    """Meter topic embedding batches in the existing append-only governed runtime."""
+    usage = _usage_context.get()
+    if usage is None:
+        raise RuntimeError("Embedding 调用缺少治理运行上下文")
+    valid = type(total_tokens) is int and total_tokens >= 0
+    usage.input_tokens += total_tokens if valid else sum(max(1, len(text) // 4) for text in texts)
+    usage.estimated = usage.estimated or not valid
+    if total_tokens is not None and not valid:
+        raise ValueError("Embedding 用量字段无效；本次调用已按估算用量结算")
+
+
 async def resolve_effective_model_spec(
     session,
     *,
@@ -130,6 +142,7 @@ async def freeze_literature_policy(
     resource_ref: str,
     model_spec: str | None = None,
     model_type: str = "chat",
+    frozen_credentials: dict | None = None,
 ) -> LiteratureLlmPolicy:
     """Resolve and persist a fail-closed model/credential policy snapshot."""
     if not uid:
@@ -138,24 +151,41 @@ async def freeze_literature_policy(
     from yuxi.services.agent_run_service import _enforce_platform_token_quota, _enforce_user_quota
     from yuxi.services.user_credential_service import get_active_user_credential, list_active_custom_model_specs
 
-    entitlement = await _enforce_user_quota(db=session, uid=uid, credential_source=None)
+    entitlement = await _enforce_user_quota(db=session, uid=uid, credential_source=None, scope="literature")
     if int(entitlement.get("tenant_id") or 0) != int(tenant_id):
         raise ValueError("LLM 文献任务的用户与租户归属不一致")
 
     custom_specs = await list_active_custom_model_specs(session, uid)
     model_spec = await resolve_effective_model_spec(session, uid=uid, explicit_spec=model_spec, model_type=model_type)
     provider_id = model_spec.split(":", 1)[0] if model_spec else None
-    policy_name = str(entitlement.get("credential_policy") or "platform_only")
+    policy_name = str(
+        (frozen_credentials or {}).get("credential_policy") or entitlement.get("credential_policy") or "platform_only"
+    )
     is_custom = model_spec in custom_specs
     if is_custom and policy_name == "platform_only":
         raise ValueError("当前账号策略不允许使用自有模型")
 
     credential = None
-    if provider_id and policy_name != "platform_only":
+    if frozen_credentials is not None:
+        if frozen_credentials.get("provider_id") != provider_id:
+            raise ValueError("冻结的重排凭据与模型供应商不一致")
+        credential_source = frozen_credentials.get("credential_source")
+        credential_id = frozen_credentials.get("credential_id")
+        if credential_source not in {"platform", "user_byok"} or (credential_source == "user_byok") != bool(
+            credential_id
+        ):
+            raise ValueError("冻结的重排凭据来源无效")
+        if policy_name == "byok_required" and not credential_id:
+            raise ValueError("当前运行要求使用冻结的自有凭据")
+        if policy_name == "platform_only" and credential_id:
+            raise ValueError("当前运行不允许使用自有凭据")
+    elif provider_id and policy_name != "platform_only":
         credential = await get_active_user_credential(session, uid, provider_id)
-    if policy_name == "byok_required" and credential is None:
+    if frozen_credentials is None and policy_name == "byok_required" and credential is None:
         raise ValueError("当前账号要求使用自有模型，请先在设置中配置模型凭据")
-    credential_source = "user_byok" if credential is not None else "platform"
+    if frozen_credentials is None:
+        credential_source = "user_byok" if credential is not None else "platform"
+        credential_id = int(credential.id) if credential is not None else None
     if credential_source == "platform":
         await _enforce_platform_token_quota(
             db=session,
@@ -177,9 +207,11 @@ async def freeze_literature_policy(
         operation=operation,
         model_spec=model_spec,
         credential_source=credential_source,
-        credential_id=int(credential.id) if credential is not None else None,
+        credential_id=credential_id,
         provider_id=provider_id,
-        policy_version=entitlement.get("policy_version"),
+        policy_version=frozen_credentials.get("policy_version")
+        if frozen_credentials is not None
+        else entitlement.get("policy_version"),
     )
     session.add(
         AgentRun(
@@ -249,6 +281,7 @@ async def policy_for_job_attempt(job: Any, *, operation: str) -> LiteratureLlmPo
             db=session,
             uid=policy.uid,
             credential_source=policy.credential_source,
+            scope="literature",
         )
         if int(entitlement.get("tenant_id") or 0) != policy.tenant_id:
             raise ValueError("LLM 文献重试的用户与租户归属不一致")

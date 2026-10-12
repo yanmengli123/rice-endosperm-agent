@@ -3,6 +3,7 @@ import io
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from yuxi.knowledge.graphs.extractors.llm_scientific import SCIENTIFIC_RELATION_TYPES
@@ -45,7 +46,7 @@ from yuxi.utils.datetime_utils import utc_now
 from yuxi.utils.logging_config import logger
 
 from server.utils.auth_middleware import get_admin_user, get_authenticated_user
-from server.utils.knowledge_access import authorize_graph_path
+from server.utils.knowledge_access import authorize_graph_path, authorize_knowledge_resource
 
 graph = APIRouter(
     prefix="/graph",
@@ -137,7 +138,7 @@ async def get_graphs(current_user: User = Depends(get_authenticated_user)):
 @graph.get("/subgraph")
 async def get_subgraph(
     kb_id: str = Query(..., description="Milvus 知识库ID"),
-    node_label: str = Query("*", description="节点标签或查询关键词"),
+    node_label: str = Query("*", description="节点标签或查询关键词", max_length=512),
     max_depth: int = Query(2, description="最大深度", ge=1, le=5),
     max_nodes: int = Query(100, description="节点数", ge=1, le=1000),
     exclude_chunk: bool = Query(False, description="是否排除 Chunk 节点"),
@@ -220,7 +221,8 @@ async def export_vosviewer(body: VOSviewerExportBody, current_user: User = Depen
     if graph_fingerprint(data) != snapshot["sha256"]:
         raise HTTPException(status_code=409, detail="图谱内容或审核范围已变化，请刷新图谱后重新导出")
     try:
-        package = build_vosviewer_package(
+        package = await run_in_threadpool(
+            build_vosviewer_package,
             kb_id=body.kb_id,
             data=data,
             snapshot=snapshot,
@@ -229,6 +231,8 @@ async def export_vosviewer(body: VOSviewerExportBody, current_user: User = Depen
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 布局及打包耗时期间可能撤销资源权限，交付前重新核验。
+    await authorize_knowledge_resource(current_user, body.kb_id, manage=True)
     async with pg_manager.get_async_session_context() as session:
         tenant_id = await resolve_tenant_id(session, str(current_user.uid))
     await KnowledgeGraphReviewRepository().append_audit(

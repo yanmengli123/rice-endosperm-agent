@@ -7,6 +7,7 @@
 
 核心不变量：切换模板**零 LLM 调用**（纯函数），且产物不含证据资格声明。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -52,9 +53,7 @@ def test_bilingual_layout_matches_upstream():
 
 
 def test_bilingual_alt_uses_labels():
-    out = templates.render_markdown(
-        ITEMS, references=REFS, title="Rice", template=templates.TEMPLATE_BILINGUAL_ALT
-    )
+    out = templates.render_markdown(ITEMS, references=REFS, title="Rice", template=templates.TEMPLATE_BILINGUAL_ALT)
     assert "**EN** Rice endosperm." in out
     assert "**ZH** 水稻胚乳。" in out
     # 无译文的段落不得输出空的 **ZH** 标签

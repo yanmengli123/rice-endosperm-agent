@@ -9,12 +9,10 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from yuxi.literature.access import paper_visibility
-from yuxi.literature.access import current_access
-from yuxi.literature.provenance import current_job, source_matches
-
 from sqlalchemy import func, select
 
+from yuxi.literature.access import current_access, paper_visibility
+from yuxi.literature.provenance import current_job, source_matches
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
@@ -33,9 +31,9 @@ _ALLOWED_ASSET_SEGMENTS = {"reader_render", "variants", "notes", "attachments", 
 
 async def read_current_note(tenant_id: int, rid: str, level: str, *, max_chars: int = 12000) -> str:
     """Bounded navigation text from the current successful job, never evidence."""
-    from yuxi.storage.minio import get_minio_client
-    from yuxi.literature.reading.service import RENDER_BUCKET
     from yuxi.literature.access import build_access
+    from yuxi.literature.reading.service import RENDER_BUCKET
+    from yuxi.storage.minio import get_minio_client
 
     uri = await get_note_uri(tenant_id, rid, level)
     if not uri:

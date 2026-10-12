@@ -73,6 +73,10 @@ async def authorize_literature_request(request: Request, current_user: User = De
 
 literature = APIRouter(prefix="/literature", tags=["literature"], dependencies=[Depends(authorize_literature_request)])
 
+from server.routers.literature_topic_router import router as topic_router  # noqa: E402
+
+literature.include_router(topic_router)
+
 _ASSET_CONTENT_TYPES = {
     ".md": "text/markdown",
     ".json": "application/json",
@@ -610,6 +614,35 @@ async def import_paperagent_endpoint(
     return {"status": 202, **report}
 
 
+@literature.post("/papers/import/references", status_code=202)
+async def import_references_endpoint(
+    file: UploadFile,
+    format: Literal[
+        "auto",
+        "pubmed-nbib",
+        "pubmed-csv",
+        "wos-txt",
+        "wos-csv",
+        "cnki-xls",
+        "wanfang-xlsx",
+        "ris",
+        "endnote",
+        "bibtex",
+    ] = Query(default="auto"),
+    current_user: User = Depends(get_required_user),
+):
+    """文献清单导入（PubMed .nbib / WoS Tab-delimited / RIS / EndNote；幂等：DOI/PMID/指纹已存在跳过）。"""
+    from yuxi.literature import reference_import
+
+    tenant_id = await _current_tenant(current_user)
+    data = await _read_bounded_upload(file, limit=reference_import.MAX_REFERENCE_BYTES)
+    try:
+        report = await reference_import.import_references(tenant_id, data, fmt=format, source_name=file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": 202, **report}
+
+
 # ---------------------------------------------------------------- 期刊指标（JCR / 中科院）
 
 
@@ -663,6 +696,137 @@ async def enrich_paper_endpoint(rid: str, current_user: User = Depends(get_requi
     """富化单篇（Crossref/OpenAlex/S2 免费源，只填空字段）。"""
     tenant_id = await _current_tenant(current_user)
     result = await enrich_module.enrich_paper(tenant_id, rid)
+    return {"status": 202, **result}
+
+
+@literature.get("/metrics/quality")
+async def get_quality_metrics(
+    days: int = Query(default=7, ge=1, le=90),
+    current_user: User = Depends(get_admin_user),
+):
+    """文献域质量指标（拒绝率/降级率/修复成功率 + 任务/入库健康），投产观测口径。"""
+    from yuxi.literature.quality_metrics import quality_metrics
+
+    return await quality_metrics(await _current_tenant(current_user), days=days)
+
+
+def _bibliometric_filters(
+    batch_ids: list[str] = Query(default=[], max_length=50),
+    only_imports: bool = Query(default=False),
+    database: Literal["", "pubmed", "wos", "cnki", "wanfang", "other"] = Query(default=""),
+    query: str = Query(default="", max_length=200),
+    year_from: int | None = Query(default=None, ge=1500, le=2100),
+    year_to: int | None = Query(default=None, ge=1500, le=2100),
+):
+    return {
+        "batch_ids": batch_ids,
+        "only_imports": only_imports,
+        "database": database,
+        "query": query,
+        "year_from": year_from,
+        "year_to": year_to,
+    }
+
+
+@literature.get("/reference-batches")
+async def list_reference_batches_endpoint(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1000000),
+    current_user: User = Depends(get_required_user),
+):
+    from yuxi.literature.reference_batches import list_batches
+
+    tenant_id = await _current_tenant(current_user)
+    return await list_batches(tenant_id, limit=limit, offset=offset)
+
+
+@literature.get("/metrics/sources")
+async def get_bibliometric_sources_endpoint(current_user: User = Depends(get_required_user)):
+    from yuxi.literature.reference_batches import list_sources
+
+    try:
+        return await list_sources(await _current_tenant(current_user))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@literature.get("/metrics/records")
+async def get_bibliometric_records_endpoint(
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1000000),
+    filters: dict = Depends(_bibliometric_filters),
+    current_user: User = Depends(get_required_user),
+):
+    from yuxi.literature.reference_batches import list_records
+
+    tenant_id = await _current_tenant(current_user)
+    try:
+        return await list_records(tenant_id, limit=limit, offset=offset, **filters)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@literature.get("/metrics/bibliometrics")
+async def get_bibliometrics_endpoint(
+    journals_top: int = Query(default=20, ge=1, le=100),
+    filters: dict = Depends(_bibliometric_filters),
+    current_user: User = Depends(get_required_user),
+):
+    """文献计量总览（趋势/期刊/机构/国家；同清单范围，排除参考条目/回收站，50000 篇预算）。"""
+    from yuxi.literature import bibliometrics
+
+    tenant_id = await _current_tenant(current_user)
+    try:
+        return await bibliometrics.bibliometrics(tenant_id, journals_top=journals_top, **filters)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@literature.get("/metrics/networks")
+async def get_metric_networks_endpoint(
+    network_type: Literal["keyword", "author"] = Query(default="keyword", alias="type"),
+    top: int = Query(default=50, ge=5, le=200),
+    min_pair: int = Query(default=2, ge=1, le=100),
+    filters: dict = Depends(_bibliometric_filters),
+    current_user: User = Depends(get_required_user),
+):
+    """共现网络数据（关键词/作者：节点=频次 TopN，边=同篇共现次数 ≥ min_pair）。"""
+    from yuxi.literature import bibliometrics
+
+    tenant_id = await _current_tenant(current_user)
+    try:
+        return await bibliometrics.metric_network(
+            tenant_id,
+            field="keywords" if network_type == "keyword" else "authors",
+            top=top,
+            min_pair=min_pair,
+            **filters,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@literature.post("/ingest/{revision_id}/retry", status_code=202)
+async def retry_failed_ingest(
+    revision_id: str,
+    current_user: User = Depends(get_admin_user),
+):
+    """死信人工恢复：FAILED/REJECTED 终态解析版本复位并重新入队（管理员操作）。"""
+    from yuxi.services.scientific_pdf_ingest_service import request_scientific_pdf_retry
+
+    tenant_id = await _current_tenant(current_user)
+    try:
+        result = await request_scientific_pdf_retry(
+            revision_id=revision_id, tenant_id=tenant_id, operator_id=current_user.uid
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 202, **result}
 
 
@@ -1601,33 +1765,47 @@ async def invalidate_paper_cache(rid: str, current_user: User = Depends(get_requ
     return {"invalidated": count}
 
 
-_SEARCH_CACHE_PATTERN = "yuxi:lit:search:*"
+def _search_cache_pattern(tenant_id: int, *, global_scope: bool = False) -> str:
+    # v3 键带租户前缀；全局模式仅供超级管理员维护使用（跨租户影响面显式化）。
+    return "yuxi:lit:search:*" if global_scope else f"yuxi:lit:search:t{tenant_id}:*"
 
 
-async def _scan_search_cache_keys() -> list[str]:
+async def _scan_search_cache_keys(pattern: str) -> list[str]:
     from yuxi.storage.redis import get_async_redis_client
 
     client = await get_async_redis_client()
     if not client:
         return []
-    return [key async for key in client.scan_iter(match=_SEARCH_CACHE_PATTERN, count=200)]
+    return [key async for key in client.scan_iter(match=pattern, count=200)]
 
 
 @literature.get("/search/cache/stats")
-async def search_cache_stats(current_user: User = Depends(get_admin_user)):
-    """检索缓存统计（对标 PaperAgent 缓存统计：条目数 + TTL 概览，键级版本化自然失效）。"""
-    await _current_tenant(current_user)
-    keys = await _scan_search_cache_keys()
-    return {"entries": len(keys), "ttl_seconds": 300, "pattern": _SEARCH_CACHE_PATTERN}
+async def search_cache_stats(
+    scope: str = Query(default="tenant", pattern="^(tenant|global)$"),
+    current_user: User = Depends(get_admin_user),
+):
+    """检索缓存统计（租户范围；global 仅超级管理员，避免跨租户干扰面）。"""
+    tenant_id = await _current_tenant(current_user)
+    global_scope = scope == "global" and getattr(current_user, "role", "") == "superadmin"
+    keys = await _scan_search_cache_keys(_search_cache_pattern(tenant_id, global_scope=global_scope))
+    return {
+        "entries": len(keys),
+        "ttl_seconds": 300,
+        "pattern": _search_cache_pattern(tenant_id, global_scope=global_scope),
+    }
 
 
 @literature.post("/search/cache/clear")
-async def clear_search_cache(current_user: User = Depends(get_admin_user)):
-    """清空检索缓存（缓存键由内容版本清单派生，清空只损失热度不损失正确性）。"""
-    await _current_tenant(current_user)
+async def clear_search_cache(
+    scope: str = Query(default="tenant", pattern="^(tenant|global)$"),
+    current_user: User = Depends(get_admin_user),
+):
+    """清空检索缓存（默认仅本租户；缓存键由内容版本清单派生，清空只损失热度不损失正确性）。"""
+    tenant_id = await _current_tenant(current_user)
+    global_scope = scope == "global" and getattr(current_user, "role", "") == "superadmin"
     from yuxi.storage.redis import get_async_redis_client
 
-    keys = await _scan_search_cache_keys()
+    keys = await _scan_search_cache_keys(_search_cache_pattern(tenant_id, global_scope=global_scope))
     deleted = 0
     if keys:
         client = await get_async_redis_client()
@@ -1642,16 +1820,16 @@ async def reconcile_library(payload: dict, current_user: User = Depends(get_admi
     """手动对账（对标 PaperAgent「同步磁盘」）：修复缺登记/缺渲染/滞留激活事件。
 
     dry_run 默认开——先预览待对账数量，确认后带 dry_run=false 执行；
-    修复动作幂等（与每 5 分钟的 cron 同一入口）。
+    修复动作幂等（与每 5 分钟的 cron 同一入口），范围限定当前租户。
     """
-    await _current_tenant(current_user)
+    tenant_id = await _current_tenant(current_user)
     from yuxi.literature.reconcile import reconcile_scientific_literature_papers
 
     dry_run = bool(payload.get("dry_run", True))
     limit = int(payload.get("limit") or 100)
     if not 1 <= limit <= 1000:
         raise HTTPException(status_code=422, detail="limit 取值范围 1-1000")
-    repaired = await reconcile_scientific_literature_papers(limit=limit, dry_run=dry_run)
+    repaired = await reconcile_scientific_literature_papers(limit=limit, dry_run=dry_run, tenant_id=tenant_id)
     return {"dry_run": dry_run, "repaired": repaired if not dry_run else None, "pending": repaired if dry_run else 0}
 
 
@@ -1743,12 +1921,23 @@ async def literature_runs(
 
 
 @literature.get("/sessions")
-async def list_literature_sessions(archived: bool = False, current_user: User = Depends(get_required_user)):
-    return {
-        "items": await lit_session.list_literature_sessions(
-            await _current_tenant(current_user), current_user.uid, archived=archived
-        )
-    }
+async def list_literature_sessions(
+    archived: bool = False,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    current_user: User = Depends(get_required_user),
+):
+    # 多取一行只为计算 has_more；next_offset 按实际返回数推进
+    items = await lit_session.list_literature_sessions(
+        await _current_tenant(current_user),
+        current_user.uid,
+        archived=archived,
+        offset=offset,
+        limit=limit + 1,
+    )
+    has_more = len(items) > limit
+    items = items[:limit]
+    return {"items": items, "has_more": has_more, "next_offset": offset + len(items)}
 
 
 @literature.get("/sessions/search")

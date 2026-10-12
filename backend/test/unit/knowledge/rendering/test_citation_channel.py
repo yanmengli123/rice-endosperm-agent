@@ -473,9 +473,7 @@ def test_f4_table_footnote_one_per_table():
 def test_f4_two_tables_get_one_footnote_each():
     """每表独立：两张表各绑同一证据 → 共 2 枚（每表一枚，不是每答一枚）。"""
     citations = [_table_citation("E1", MAIN_PARAGRAPH_QUOTE)]
-    out, _bound, _uncovered = reverse_bind_citations(
-        "表一：\n" + _SANT_TABLE + "\n\n表二：\n" + _SANT_TABLE, citations
-    )
+    out, _bound, _uncovered = reverse_bind_citations("表一：\n" + _SANT_TABLE + "\n\n表二：\n" + _SANT_TABLE, citations)
     assert out.count(_TABLE_FOOTNOTE_PREFIX) == 2
 
 
@@ -492,3 +490,97 @@ def test_f4_idempotent_double_application():
     assert once.count(_TABLE_FOOTNOTE_PREFIX) == 1
     twice, _bound2, _uncovered2 = reverse_bind_citations(once, citations)
     assert twice.count(_TABLE_FOOTNOTE_PREFIX) == 1 and twice == once
+
+
+# ---------- batch3：细粒度章节标签（§section，渲染专用） ----------
+
+
+def test_citation_chip_without_section_is_byte_identical():
+    """回归护栏：legacy dict 无 section（或空）时，芯片逐字节不变。"""
+    citation = {
+        "ref": "E1",
+        "locatable": True,
+        "zone": ZONE_MAIN_TEXT,
+        "page_numbers": [3],
+        "filename": "Paper.pdf",
+    }
+    assert render_citation_chip(citation) == "〔证据E1｜正文·第3页｜Paper.pdf〕"
+    citation_with_empty_section = {**citation, "section": ""}
+    assert render_citation_chip(citation_with_empty_section) == render_citation_chip(citation)
+
+
+def test_citation_chip_with_section_appends_section_segment():
+    citation = {
+        "ref": "E1",
+        "locatable": True,
+        "zone": ZONE_MAIN_TEXT,
+        "page_numbers": [3],
+        "filename": "Paper.pdf",
+        "section": "3.2 Abiotic stress responses",
+    }
+    chip = render_citation_chip(citation)
+    assert "§3.2 Abiotic stress responses" in chip
+    # 章节段落在页码之后、文件名之前
+    assert chip == "〔证据E1｜正文·第3页｜§3.2 Abiotic stress responses｜Paper.pdf〕"
+
+
+def test_chip_section_label_extracts_tail_and_truncates():
+    from yuxi.knowledge.rendering.citation_channel import (
+        CHIP_SECTION_CHARS,
+        _chip_section_label,
+    )
+
+    # 正常：取末段
+    row = {"source_provenance": {"section_path": ["Results", "3.2 Abiotic stress"]}}
+    assert _chip_section_label(row) == "3.2 Abiotic stress"
+    # 超长截断
+    long_tail = "X" * (CHIP_SECTION_CHARS + 20)
+    row_long = {"source_provenance": {"section_path": ["Results", long_tail]}}
+    label = _chip_section_label(row_long)
+    assert len(label) == CHIP_SECTION_CHARS and label.endswith("…")
+
+
+def test_chip_section_label_fail_open_on_missing_or_malformed():
+    from yuxi.knowledge.rendering.citation_channel import _chip_section_label
+
+    assert _chip_section_label({}) == ""
+    assert _chip_section_label({"source_provenance": None}) == ""
+    assert _chip_section_label({"source_provenance": {}}) == ""
+    assert _chip_section_label({"source_provenance": {"section_path": []}}) == ""
+    assert _chip_section_label({"source_provenance": {"section_path": "not-a-list"}}) == ""
+    assert _chip_section_label({"source_provenance": {"section_path": ["Results", "  "]}}) == ""
+
+
+def test_build_citation_rows_injects_section_from_provenance():
+    """成功路径：检索行带 source_provenance.section_path 时，legacy dict 注入 section，
+    且不进 public_view() 模型可见白名单（反幻觉边界不破）。"""
+    rows = [
+        {
+            "evidence_id": "evdoc_main",
+            "kb_id": "kb_1",
+            "file_id": "file_main",
+            "parse_revision_id": "pr_active",
+            "source_provenance": {"section_path": ["Results", "3.2 Abiotic stress"]},
+            "content": f"【章节】论文标题\n【页码】3\n【证据锚点】{MAIN_ANCHOR_ID}\n正文段落……",
+        }
+    ]
+    citations = build_citation_rows(
+        rows,
+        anchor_index=_anchor_index(),
+        si_start_by_file={"file_main": 17},
+        filename_by_file={"file_main": "Paper.pdf"},
+        include_section=True,
+    )
+    assert citations[0].get("section") == "3.2 Abiotic stress"
+    ordinary = build_citation_rows(
+        rows,
+        anchor_index=_anchor_index(),
+        si_start_by_file={"file_main": 17},
+        filename_by_file={"file_main": "Paper.pdf"},
+    )
+    assert "section" not in ordinary[0]
+    # 模型可见白名单绝不含 section（public_citations 重建自 legacy dict）
+    from yuxi.knowledge.rendering.citation_channel import public_citations
+
+    public = public_citations(citations)
+    assert "section" not in public[0]

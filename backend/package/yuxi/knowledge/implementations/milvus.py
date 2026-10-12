@@ -10,6 +10,8 @@ from dataclasses import MISSING, dataclass, field, fields
 from functools import partial
 from typing import Any
 
+from sqlalchemy import select
+
 from pymilvus import (
     AnnSearchRequest,
     Collection,
@@ -32,6 +34,12 @@ from yuxi.knowledge.utils.kb_utils import resolve_processing_params
 from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
 from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeIndexRevision,
+    KnowledgeParseArtifact,
+    KnowledgeParseRevision,
+)
 from yuxi.utils import hashstr, logger
 
 MILVUS_AVAILABLE = True
@@ -335,9 +343,7 @@ class MilvusKB(KnowledgeBase):
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                connections.connect(
-                    alias=self.connection_alias, uri=self.milvus_uri, token=self.milvus_token
-                )
+                connections.connect(alias=self.connection_alias, uri=self.milvus_uri, token=self.milvus_token)
 
                 # 创建数据库（如果不存在）
                 try:
@@ -353,9 +359,7 @@ class MilvusKB(KnowledgeBase):
             except Exception as e:
                 last_error = e
                 if attempt < attempts:
-                    logger.warning(
-                        f"Milvus 未就绪（第 {attempt}/{attempts} 次，{delay:.0f}s 后重试）: {e}"
-                    )
+                    logger.warning(f"Milvus 未就绪（第 {attempt}/{attempts} 次，{delay:.0f}s 后重试）: {e}")
                     time.sleep(delay)
 
         logger.error(f"Failed to connect to Milvus after {attempts} attempts: {last_error}")
@@ -887,13 +891,46 @@ class MilvusKB(KnowledgeBase):
         if operator_id:
             claim_data["updated_by"] = operator_id
 
-        claimed_record = await KnowledgeFileRepository().update_fields_if_status(
-            kb_id=kb_id,
-            file_id=file_id,
-            allowed_statuses=allowed_statuses,
-            data=claim_data,
-        )
-        if claimed_record is None:
+        claimed_record = None
+        if shadow_revision_id:
+            # Shadow builds consume their own immutable artifact and never use
+            # the mutable serving pointer or publish file metadata mid-build.
+            async with pg_manager.get_async_session_context() as session:
+                row = (
+                    await session.execute(
+                        select(KnowledgeParseArtifact.object_uri, KnowledgeParseArtifact.sha256)
+                        .join(
+                            KnowledgeParseRevision,
+                            KnowledgeParseArtifact.revision_id == KnowledgeParseRevision.revision_id,
+                        )
+                        .join(
+                            KnowledgeIndexRevision,
+                            KnowledgeIndexRevision.parse_revision_id == KnowledgeParseRevision.revision_id,
+                        )
+                        .where(
+                            KnowledgeParseRevision.revision_id == parse_revision_id,
+                            KnowledgeParseRevision.kb_id == kb_id,
+                            KnowledgeParseRevision.file_id == file_id,
+                            KnowledgeParseArtifact.kind == "indexed_markdown",
+                            KnowledgeIndexRevision.revision_id == shadow_revision_id,
+                            KnowledgeIndexRevision.kb_id == kb_id,
+                            KnowledgeIndexRevision.file_id == file_id,
+                            KnowledgeIndexRevision.status == "BUILDING",
+                        )
+                    )
+                ).one_or_none()
+            if row is None:
+                raise ValueError("PDF_SHADOW_INDEX_SOURCE_MISMATCH")
+            source_uri, source_hash = row
+            file_meta = {**file_meta, "markdown_file": source_uri}
+        else:
+            claimed_record = await KnowledgeFileRepository().update_fields_if_status(
+                kb_id=kb_id,
+                file_id=file_id,
+                allowed_statuses=allowed_statuses,
+                data=claim_data,
+            )
+        if not shadow_revision_id and claimed_record is None:
             current_meta = await self._load_file_meta(kb_id, file_id)
             current_status = current_meta.get("status")
             raise ValueError(
@@ -901,7 +938,8 @@ class MilvusKB(KnowledgeBase):
                 f"File must be parsed first (status should be one of: {', '.join(allowed_statuses)})"
             )
 
-        file_meta = self._file_record_to_meta(claimed_record)
+        if claimed_record is not None:
+            file_meta = self._file_record_to_meta(claimed_record)
         if not file_meta.get("markdown_file"):
             await self._mark_file_unparsed(kb_id, file_id, operator_id)
             raise ValueError("File has not been parsed yet (no markdown_file)")
@@ -911,7 +949,13 @@ class MilvusKB(KnowledgeBase):
         chunks: list[dict] = []
         try:
             # Read markdown
-            markdown_content = await self._read_markdown_from_minio(file_meta["markdown_file"])
+            if shadow_revision_id:
+                source_bytes = await self._read_minio_bytes(source_uri)
+                if hashlib.sha256(source_bytes).hexdigest() != source_hash:
+                    raise ValueError("PDF_SHADOW_INDEX_ARTIFACT_HASH_MISMATCH")
+                markdown_content = source_bytes.decode("utf-8")
+            else:
+                markdown_content = await self._read_markdown_from_minio(file_meta["markdown_file"])
             filename = file_meta.get("filename")
 
             # Split
@@ -954,6 +998,9 @@ class MilvusKB(KnowledgeBase):
 
             logger.info(f"Indexed file {file_id} into Milvus")
 
+            if shadow_revision_id:
+                return {**file_meta, **chunk_stats, "status": FileStatus.INDEXED, "error": None}
+
             # Update status
             update_data = {"status": FileStatus.INDEXED, "error_message": None, **chunk_stats}
             if operator_id:
@@ -994,7 +1041,8 @@ class MilvusKB(KnowledgeBase):
             update_data = {"status": FileStatus.ERROR_INDEXING, "error_message": error_msg}
             if operator_id:
                 update_data["updated_by"] = operator_id
-            await KnowledgeFileRepository().update_fields(file_id=file_id, kb_id=kb_id, data=update_data)
+            if not shadow_revision_id:
+                await KnowledgeFileRepository().update_fields(file_id=file_id, kb_id=kb_id, data=update_data)
             raise
 
     async def update_content(self, kb_id: str, file_ids: list[str], params: dict | None = None) -> list[dict]:

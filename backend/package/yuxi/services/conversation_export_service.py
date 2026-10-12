@@ -504,10 +504,10 @@ def _render_table_cards(entry: dict) -> str:
                 colspan = _safe_span(cell.get("colspan"))
                 cells_html.append(
                     f'<{tag} rowspan="{rowspan}" colspan="{colspan}">'
-                    f'{escape_html(str(cell.get("text") or "")[:2000])}</{tag}>'
+                    f"{escape_html(str(cell.get('text') or '')[:2000])}</{tag}>"
                 )
             if cells_html:
-                rows_html.append(f'<tr>{"".join(cells_html)}</tr>')
+                rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
         if not rows_html:
             continue
         page = _as_int(table.get("page"))
@@ -525,7 +525,7 @@ def _render_table_cards(entry: dict) -> str:
             note = ""
         cards.append(
             '<figure class="table-card">'
-            f'<figcaption>{escape_html(title)}{page_html}</figcaption>'
+            f"<figcaption>{escape_html(title)}{page_html}</figcaption>"
             f'<div class="table-scroll"><table><tbody>{"".join(rows_html)}</tbody></table></div>'
             f"{note}</figure>"
         )

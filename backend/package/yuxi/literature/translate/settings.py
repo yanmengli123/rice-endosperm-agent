@@ -98,8 +98,8 @@ async def translation_options(tenant_id: int, uid: str, *, profile_id: str | Non
             raise ValueError("翻译配置不存在")
         return {**profile, "uid": uid, "schema": "translation-profile-v1"}
     from yuxi.config import config
-    from yuxi.storage.postgres.models_business import UserModelPreference
     from yuxi.services.user_credential_service import list_active_custom_model_specs
+    from yuxi.storage.postgres.models_business import UserModelPreference
 
     async with pg_manager.get_async_session_context() as db:
         preference = (

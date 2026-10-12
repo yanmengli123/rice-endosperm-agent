@@ -54,9 +54,7 @@ async def test_message_export_requires_authentication(test_client):
 
 
 async def test_message_export_returns_404_for_missing_thread(test_client, admin_headers):
-    response = await test_client.get(
-        f"/api/chat/thread/{uuid.uuid4()}/messages/1/export", headers=admin_headers
-    )
+    response = await test_client.get(f"/api/chat/thread/{uuid.uuid4()}/messages/1/export", headers=admin_headers)
     assert response.status_code == 404
 
 
@@ -70,9 +68,7 @@ async def test_message_export_rejects_foreign_thread(test_client, admin_headers,
 
 async def test_message_export_returns_404_for_missing_message(test_client, admin_headers):
     thread_id = await _create_thread_for_user(test_client, admin_headers)
-    response = await test_client.get(
-        f"/api/chat/thread/{thread_id}/messages/999999/export", headers=admin_headers
-    )
+    response = await test_client.get(f"/api/chat/thread/{thread_id}/messages/999999/export", headers=admin_headers)
     assert response.status_code == 404
 
 

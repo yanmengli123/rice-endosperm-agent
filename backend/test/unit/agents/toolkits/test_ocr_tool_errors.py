@@ -22,9 +22,7 @@ def _runtime() -> SimpleNamespace:
 
 
 async def test_ocr_invalid_path_returns_structured_error():
-    result = await ocr_parse_file.coroutine(
-        file_path="outputs/browser/browser_screenshot_1.png", runtime=_runtime()
-    )
+    result = await ocr_parse_file.coroutine(file_path="outputs/browser/browser_screenshot_1.png", runtime=_runtime())
     assert isinstance(result, dict)
     assert result.get("status") == "error"
     assert result.get("error_code") == "OCR_PATH_INVALID"

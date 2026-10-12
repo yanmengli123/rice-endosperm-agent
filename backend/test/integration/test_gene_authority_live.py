@@ -8,6 +8,7 @@ import types
 import unittest
 from pathlib import Path
 
+
 # 双运行方式兼容：
 # 1) 隔离镜像内（cwd=/app，模块随 COPY 落盘）→ 直接导入；
 # 2) 仓库/API 测试容器内 → 按 ROOT 相对路径编译执行（与 test_genomics_mcp_builtins 同款）；
@@ -32,9 +33,7 @@ def _load_sources():
     except ImportError:
         pass
     if GENE_AUTHORITY is None or not GENE_AUTHORITY.is_file():
-        raise unittest.SkipTest(
-            "gene-authority sources unavailable（在隔离镜像内运行，或挂载 docker 构建上下文）"
-        )
+        raise unittest.SkipTest("gene-authority sources unavailable（在隔离镜像内运行，或挂载 docker 构建上下文）")
     name = "gene_authority_mcp"
     module = types.ModuleType(name)
     sys.modules[name] = module

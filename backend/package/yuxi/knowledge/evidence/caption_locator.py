@@ -1,4 +1,4 @@
-"""Caption Locator v3：科研题注确定性定位（label 硬约束 + T0-T3 分级匹配）。
+"""Caption Locator v4：科研题注确定性定位与有界 Figure/Table 交叉引用解析。
 
 2026-09 Figure 5 事故根因：引文抽取取 ``max(candidates, key=len)``，而科研题注
 尾部常带跨图几乎相同的统计模板句（``Bar, 1.0 cm`` / ``ANOVA`` / ``Tukey`` /
@@ -36,7 +36,7 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseRevision,
 )
 
-CAPTION_LOCATOR_VERSION = "caption_locator_v3"
+CAPTION_LOCATOR_VERSION = "caption_locator_v4"
 
 # 匹配分级（从强到弱）；模糊层级必须叠加硬约束才可发布页码
 TIER_T0_RAW_EXACT = "T0_RAW_EXACT"
@@ -54,11 +54,16 @@ TIER_T3_WHITESPACE_COMPRESSED = "T3_WHITESPACE_COMPRESSED"
 # 归一成同一键，跨文献/同文献都会被误判为 MULTIPLE。
 _LABEL_QUALIFIER = r"(?:(supplementa(?:ry|l)|extended\s+data|ext\.?\s*data)\s+)?"
 _LABEL_PATTERN = re.compile(
-    _LABEL_QUALIFIER + r"(?:fig(?:ure)?s?\.?|table|图|表)\s*[sS]?\s*\d{1,3}(?:[A-Za-z](?![A-Za-z0-9]))?",
+    r"(?<![A-Za-z0-9_])"
+    + _LABEL_QUALIFIER
+    + r"(?:fig(?:ure)?s?\.?|tables?|图|表)\s*[sS]?\s*\d{1,3}(?!\d)"
+    + r"(?:[A-Za-z](?![A-Za-z0-9])|\([A-Za-z]\))?(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 _LABEL_FULL = re.compile(
-    _LABEL_QUALIFIER + r"(fig(?:ure)?s?|table|图|表)\.?\s*([sS])?\.?\s*(\d{1,3})(?:([A-Za-z])(?![A-Za-z0-9]))?",
+    _LABEL_QUALIFIER
+    + r"(fig(?:ure)?s?|tables?|图|表)\.?\s*([sS])?\.?\s*(\d{1,3})"
+    + r"(?:([A-Za-z])(?![A-Za-z0-9])|\(([A-Za-z])\))?",
     re.IGNORECASE,
 )
 
@@ -69,7 +74,8 @@ def canonical_figure_label(label: str | None) -> str | None:
     match = _LABEL_FULL.fullmatch(re.sub(r"\s+", " ", str(label or "").strip()))
     if not match:
         return None
-    qualifier, kind, suffix, number, panel = match.groups()
+    qualifier, kind, suffix, number, panel, parenthesized_panel = match.groups()
+    panel = panel or parenthesized_panel
     kind_key = "table" if kind.lower().startswith("tab") or kind == "表" else "figure"
     prefix = ""
     if qualifier:
@@ -92,6 +98,127 @@ def extract_figure_label(text: str | None) -> str | None:
     return re.sub(r"\s+", " ", match.group(0)).strip() if match else None
 
 
+_REFERENCE_TAIL = re.compile(
+    r"\s*(?P<separator>[-–—~～]|至|到|[,，、]|\band\b|\bor\b|和|及)\s*"
+    r"(?P<head>(?:fig(?:ure)?s?|tables?|图|表)\.?\s*)?"
+    r"(?P<label>[sS]?\s*\d{1,3}(?!\d)(?:[A-Za-z](?![A-Za-z0-9]))?|[A-Za-z](?![A-Za-z0-9]))",
+    re.IGNORECASE,
+)
+_PANEL_RANGE = re.compile(r"\(([A-Za-z])\s*[-–—~～]\s*([A-Za-z])\)")
+
+
+def iter_figure_label_groups(text: str | None) -> list[dict[str, Any]]:
+    """Parse bounded reference lists without losing their original source offsets.
+
+    A range is one source interval with several targets. Consumers must bind the
+    complete group or retain the original expression; partial range signing is
+    misleading. Never interpret the plural suffix in Tables as supplementary S.
+    """
+    source = str(text or "")
+    groups = []
+    consumed = 0
+    for match in _LABEL_PATTERN.finditer(source):
+        if match.start() < consumed:
+            continue
+        raw = re.sub(r"\s+", " ", match.group(0)).strip()
+        key = canonical_figure_label(raw)
+        if key is None:
+            continue
+        parts = re.fullmatch(r"(figure|table) (ed|s)?(\d+)([a-z]?)", key)
+        kind, prefix, number, panel = parts.groups()
+        prefix = prefix or ""
+        number = int(number)
+        targets = [(number, panel)]
+        end = match.end()
+        ranged = False
+        complete = True
+        parenthesized = _PANEL_RANGE.match(source, end)
+        if parenthesized and not panel:
+            start_letter, end_letter = [s.lower() for s in parenthesized.groups()]
+            if 0 <= ord(end_letter) - ord(start_letter) < 8:
+                targets = [(number, chr(i)) for i in range(ord(start_letter), ord(end_letter) + 1)]
+                end = parenthesized.end()
+                ranged = True
+            else:
+                end = parenthesized.end()
+                complete = False
+        while len(targets) < 8:
+            tail = _REFERENCE_TAIL.match(source, end)
+            if tail is None:
+                break
+            token = re.sub(r"\s+", "", tail["label"]).lower()
+            if tail["head"]:
+                if tail["separator"] not in "-–—~～至到":
+                    break  # each fully qualified list member owns its own source interval
+                next_key = canonical_figure_label(tail["head"] + tail["label"])
+                if not next_key or not next_key.startswith(kind + " "):
+                    break
+                next_prefix = re.fullmatch(r"(?:figure|table) (ed|s)?\d+[a-z]?", next_key)[1] or ""
+                if next_prefix != prefix:
+                    break
+            previous_number, previous_panel = targets[-1]
+            if token.isalpha():
+                if not previous_panel:
+                    break
+                next_number, next_panel = previous_number, token
+            else:
+                next_parts = re.fullmatch(r"(s)?(\d+)([a-z]?)", token)
+                if next_parts is None or (next_parts[1] and prefix != "s"):
+                    break
+                next_number, next_panel = int(next_parts[2]), next_parts[3]
+            separator = tail["separator"]
+            if separator in "-–—~～至到":
+                if previous_panel and next_panel and next_number == previous_number:
+                    distance = ord(next_panel) - ord(previous_panel)
+                    additions = [(next_number, chr(i)) for i in range(ord(previous_panel) + 1, ord(next_panel) + 1)]
+                elif not previous_panel and not next_panel:
+                    distance = next_number - previous_number
+                    additions = [(i, "") for i in range(previous_number + 1, next_number + 1)]
+                else:
+                    break
+                if distance < 0 or distance >= 8 or len(targets) + len(additions) > 8:
+                    end = tail.end()
+                    complete = False
+                    break
+                ranged = True
+            else:
+                additions = [(next_number, next_panel)]
+            targets.extend(additions)
+            end = tail.end()
+        next_tail = _REFERENCE_TAIL.match(source, end)
+        if len(targets) == 8 and next_tail and not next_tail["head"]:
+            complete = False
+        mentions = []
+        for target_number, target_panel in dict.fromkeys(targets):
+            base = f"{kind} {prefix}{target_number}"
+            head = ("Extended Data " if prefix == "ed" else "") + ("Table" if kind == "table" else "Figure")
+            label = f"{head} {'S' if prefix == 's' else ''}{target_number}{target_panel.upper()}"
+            mentions.append(
+                {
+                    "raw": raw if len(targets) == 1 else label,
+                    "start": match.start(),
+                    "end": end,
+                    "canonical": base + target_panel,
+                    "base_key": base,
+                    "kind": kind,
+                    "panel": target_panel,
+                    "complete": complete,
+                }
+            )
+        groups.append(
+            {
+                "start": match.start(),
+                "end": end,
+                "raw": source[match.start() : end],
+                "mentions": mentions,
+                "range": ranged,
+                "complete": complete,
+            }
+        )
+        consumed = end
+    return groups
+
+
 def iter_figure_labels(text: str | None) -> list[dict[str, Any]]:
     """抽取文本中**全部**图表编号提及（多值版，ADR-0008 图表锚点通道用）。
 
@@ -106,27 +233,7 @@ def iter_figure_labels(text: str | None) -> list[dict[str, Any]]:
     图表整体解析，panel 字母保留在展示层（P3 panel 级联动用），不参与实体
     匹配，避免同图多 panel 分裂成多个键互相撞歧义。
     """
-    mentions: list[dict[str, Any]] = []
-    for match in _LABEL_PATTERN.finditer(str(text or "")):
-        raw = re.sub(r"\s+", " ", match.group(0)).strip()
-        canonical = canonical_figure_label(raw)
-        if canonical is None:
-            continue
-        base_key = re.sub(r"(?<=\d)[A-Za-z]$", "", canonical)
-        kind = "table" if canonical.startswith("table") else "figure"
-        panel = canonical[len(base_key) :]
-        mentions.append(
-            {
-                "raw": raw,
-                "start": match.start(),
-                "end": match.end(),
-                "canonical": canonical,
-                "base_key": base_key,
-                "kind": kind,
-                "panel": panel,
-            }
-        )
-    return mentions
+    return [mention for group in iter_figure_label_groups(text) for mention in group["mentions"]]
 
 
 def label_conflicts(input_label: str | None, candidate_label: str | None) -> bool:

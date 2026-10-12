@@ -78,7 +78,7 @@ def read_member(package, name):
 
 def test_undirected_merge_and_direction_preserved_in_facts():
     data = base_data(
-        [node("a", "GeneA", "Gene"), node("b", "ProteinB", "Protein")],
+        [node("a", "GeneA", "Gene"), node("b", "ProteinB", "Protein"), node("iso", "Isolated", "Gene")],
         [
             edge("e1", "a", "b", "activates"),
             edge("e2", "a", "b", "activates"),
@@ -135,7 +135,10 @@ def test_self_loop_dangling_and_structural_exclusion_counted():
 
 
 def test_items_contract_and_identity_map():
-    data = base_data([node("a", "基因甲", "Gene"), node("b", "ProteinB", "Protein")], [edge("e1", "a", "b")])
+    data = base_data(
+        [node("a", "基因甲", "Gene"), node("b", "ProteinB", "Protein"), node("iso", "Isolated", "Gene")],
+        [edge("e1", "a", "b")],
+    )
     package = build(data)
     network = json.loads(read_member(package, "vosviewer.json"))
     item = network["network"]["items"][0]
@@ -147,9 +150,9 @@ def test_items_contract_and_identity_map():
     labels = [i["label"] for i in network["network"]["items"]]
     assert "基因甲" in labels  # 中文名原样保留（UTF-8）
     identity = json.loads(read_member(package, "identity-map.json"))
-    assert len(identity["items"]) == 2
+    assert len(identity["items"]) == 3
     vos_ids = sorted(i["vos_id"] for i in identity["items"])
-    assert vos_ids == [1, 2]
+    assert vos_ids == [1, 2, 3]
     link = identity["links"][0]
     assert link["triple_ids"] == ["tid-e1"]
 
@@ -168,6 +171,7 @@ def test_seed_layout_deterministic_finite_and_effective():
     import math
 
     assert all(math.isfinite(x) and math.isfinite(y) for x, y in positions)
+
     def distance(a, b):
         return math.hypot(items[a]["x"] - items[b]["x"], items[a]["y"] - items[b]["y"])
 
@@ -202,11 +206,14 @@ def test_cluster_omitted_when_components_exceed_viewer_limit():
 
 
 def test_candidate_gate_requires_explicit_allow():
-    data = base_data([node("a", "A", "Gene"), node("b", "B", "Gene")], [edge("e1", "a", "b", status="CANDIDATE")])
+    data = base_data(
+        [node("a", "A", "Gene"), node("b", "B", "Gene"), node("iso", "Isolated", "Gene")],
+        [edge("e1", "a", "b", status="CANDIDATE")],
+    )
     with pytest.raises(ValueError, match="未审核关系"):
         build(data)
     explore = base_data(
-        [node("a", "A", "Gene"), node("b", "B", "Gene")],
+        [node("a", "A", "Gene"), node("b", "B", "Gene"), node("iso", "Isolated", "Gene")],
         [edge("e1", "a", "b", status="CANDIDATE")],
         policy="candidates_visible",
     )
@@ -218,7 +225,10 @@ def test_candidate_gate_requires_explicit_allow():
 
 
 def test_rejected_relation_and_inconsistent_projection_fail_closed():
-    data = base_data([node("a", "A", "Gene"), node("b", "B", "Gene")], [edge("e1", "a", "b", status="REJECTED")])
+    data = base_data(
+        [node("a", "A", "Gene"), node("b", "B", "Gene"), node("iso", "Isolated", "Gene")],
+        [edge("e1", "a", "b", status="REJECTED")],
+    )
     with pytest.raises(ValueError, match="已拒绝关系"):
         build(data, allow_candidates=True)
     bad = base_data(
@@ -230,7 +240,10 @@ def test_rejected_relation_and_inconsistent_projection_fail_closed():
 
 
 def test_concurrent_update_blocks_export():
-    data = base_data([node("a", "A", "Gene"), node("b", "B", "Gene")], [edge("e1", "a", "b")])
+    data = base_data(
+        [node("a", "A", "Gene"), node("b", "B", "Gene"), node("iso", "Isolated", "Gene")],
+        [edge("e1", "a", "b")],
+    )
     data["truncation_reasons"] = ["concurrent_update"]
     with pytest.raises(ValueError, match="正在更新"):
         build(data)
@@ -267,7 +280,10 @@ def test_fingerprint_ignores_ordering_and_time():
 
 
 def test_zip_members_sha256_and_deterministic_order():
-    data = base_data([node("a", "A", "Gene"), node("b", "B", "Gene")], [edge("e1", "a", "b")])
+    data = base_data(
+        [node("a", "A", "Gene"), node("b", "B", "Gene"), node("iso", "Isolated", "Gene")],
+        [edge("e1", "a", "b")],
+    )
     package = build(data)
     # 路由契约：导出服务统一返回 content/filename/media_type（缺 media_type 会在路由层 KeyError）
     assert package["media_type"] == "application/zip"
@@ -296,14 +312,16 @@ def test_zip_members_sha256_and_deterministic_order():
 
         assert manifest["files"][name]["sha256"] == hashlib.sha256(read_member(package, name)).hexdigest()
     # 确定性：同数据两次构建字节一致（固定 zip 时间戳 + 排序 + 坐标量化）
-    assert (
-        package["content"]
-        == build(base_data([node("a", "A", "Gene"), node("b", "B", "Gene")], [edge("e1", "a", "b")]))["content"]
-    )
+    assert package["content"] == build(base_data(data["nodes"], data["edges"]))["content"]
 
 
 def test_launcher_is_crlf_batch_with_json_flag():
-    package = build(base_data([node("a", "A", "Gene"), node("b", "B", "Gene")], [edge("e1", "a", "b")]))
+    package = build(
+        base_data(
+            [node("a", "A", "Gene"), node("b", "B", "Gene"), node("iso", "Isolated", "Gene")],
+            [edge("e1", "a", "b")],
+        )
+    )
     raw = read_member(package, "open-with-vosviewer.cmd")
     text = raw.decode("ascii")
     assert "\r\n" in text and "\n" not in text.replace("\r\n", "")  # 批处理要求 CRLF
@@ -316,7 +334,7 @@ def test_no_map_file_single_coordinate_authority():
     # 不导出 map.txt：坐标的权威副本只在 vosviewer.json（items.x/y），另造一份
     # map 文件副本只会与 JSON 漂移；打开入口统一为 -json（打开即显示地图）。
     dirty = node("a", "Gene\tA\nB", "Gene")
-    data = base_data([dirty, node("b", "B", "Gene")], [edge("e1", "a", "b")])
+    data = base_data([dirty, node("b", "B", "Gene"), node("iso", "Isolated", "Gene")], [edge("e1", "a", "b")])
     package = build(data)
     with zipfile.ZipFile(io.BytesIO(package["content"])) as archive:
         names = archive.namelist()
@@ -327,3 +345,12 @@ def test_no_map_file_single_coordinate_authority():
     assert "Gene\tA\nB" in labels
 
 
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_viewer_minimum_requires_three_distinct_business_entities(count):
+    # 原版 FileData 解析器对少于 3 个 item 明确拒绝，不能补造占位实体。
+    nodes = [node(str(i), f"N{i}", "Gene") for i in range(count)]
+    if nodes:
+        nodes.append(dict(nodes[0], id="same-business-identity"))
+    nodes.append({"id": "chunk", "labels": ["Chunk"], "node_kind": "chunk"})
+    with pytest.raises(ValueError, match="至少需要 3 个实体"):
+        build(base_data(nodes, []))

@@ -7,6 +7,7 @@
 Yuxi 的取舍：比上游更保守——非法/零面积 bbox 整体丢弃为 None（而非退化
 [0,0,0,0]），因为零面积框画到页图上会误导人工裁决；丢弃不阻断仲裁。
 """
+
 import pytest
 
 from yuxi.literature.review_contract import (

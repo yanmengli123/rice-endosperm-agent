@@ -294,6 +294,33 @@ class ConversationRepository:
 
         return await self.get_messages(conversation.id, limit, offset)
 
+    async def get_recent_user_queries(self, thread_id: str, *, before_message_id: int, limit: int = 2) -> list[str]:
+        """Newest-first history before this run's input; never include a later or failed turn."""
+        from sqlalchemy import or_
+        from yuxi.storage.postgres.models_business import AgentRun
+
+        conversation = await self.get_conversation_by_thread_id(thread_id)
+        if not conversation:
+            return []
+        boundary = await self.db.get(Message, before_message_id)
+        if boundary is None or boundary.conversation_id != conversation.id or boundary.role != "user":
+            return []
+        result = await self.db.execute(
+            select(Message.content)
+            .outerjoin(AgentRun, AgentRun.id == Message.run_id)
+            .where(
+                Message.conversation_id == conversation.id,
+                Message.id < before_message_id,
+                Message.role == "user",
+                Message.content.isnot(None),
+                Message.content != "",
+                or_(Message.run_id.is_(None), AgentRun.status == "completed"),
+            )
+            .order_by(Message.id.desc())
+            .limit(limit)
+        )
+        return [str(content) for content in result.scalars() if str(content).strip()]
+
     async def list_conversations(
         self,
         uid: str | None = None,

@@ -63,6 +63,41 @@ x-api-worker-env: &api-worker-env
   no_proxy: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd-dev,etcd,mineru,grobid,paddlex,sandbox-provisioner,api.siliconflow.cn
 
 services:
+  topic-worker:
+    build:
+      context: .
+      dockerfile: docker/topic-worker.Dockerfile
+      args:
+        YUXI_BASE_IMAGE: yuxi-api:${YUXI_VERSION:-0.7.1}
+    image: yuxi-topic-worker:${YUXI_VERSION:-0.7.1}
+    container_name: topic-worker-dev
+    profiles: [analytics]
+    working_dir: /app
+    volumes:
+      - ./backend/package:/app/package:ro
+      - ./backend/test:/app/test:ro
+      - ./docker/volumes/yuxi:/app/saves
+      - ./.env:/app/.env:ro
+    env_file: [.env]
+    environment:
+      <<: *api-worker-env
+    networks: [app-network]
+    cpus: 2
+    mem_limit: 6g
+    pids_limit: 256
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, arq, yuxi.literature.topic_worker.WorkerSettings, --check]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
   api:
     build:
       context: .

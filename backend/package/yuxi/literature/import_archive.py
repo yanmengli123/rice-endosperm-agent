@@ -13,8 +13,8 @@ from pathlib import Path, PurePosixPath
 
 from fastapi import UploadFile
 
+from yuxi.literature.history_import import discover, import_history
 from yuxi.literature.importer import import_paperagent_data
-from yuxi.literature.history_import import import_history, discover
 
 MAX_COMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024

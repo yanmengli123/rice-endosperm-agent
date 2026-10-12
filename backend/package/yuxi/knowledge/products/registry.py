@@ -104,12 +104,26 @@ LITERATURE_NOTES = KnowledgeProductSpec(
     capabilities=_LLMWIKI_CAPABILITIES,
 )
 
+LITERATURE_TOPICS = KnowledgeProductSpec(
+    kb_type="literature_topics",
+    category="derived_product",
+    trust_class="DERIVED",
+    authority_class="NAVIGATION_ONLY",
+    capabilities=KnowledgeProductCapabilities(
+        supports_upload=False,
+        supports_source_binding=True,
+        supports_raw_evidence=False,
+        supports_publication=True,
+    ),
+)
+
 _REGISTRY: dict[str, KnowledgeProductSpec] = {
     _AUTHORITY_SOURCE.kb_type: _AUTHORITY_SOURCE,
     DIFY.kb_type: DIFY,
     NOTION.kb_type: NOTION,
     LLMWIKI.kb_type: LLMWIKI,
     LITERATURE_NOTES.kb_type: LITERATURE_NOTES,
+    LITERATURE_TOPICS.kb_type: LITERATURE_TOPICS,
 }
 
 

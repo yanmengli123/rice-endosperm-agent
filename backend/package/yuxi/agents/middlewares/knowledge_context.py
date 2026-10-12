@@ -223,6 +223,11 @@ def _narrative_text(content) -> str:
             parts.append(block)
         elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
             parts.append(str(block.get("text") or ""))
+    joined = "".join(parts)
+    if "<YUXI_ANSWER_DRAFT>" in joined or "answer-draft.v" in joined:
+        # Transport block boundaries are not JSON whitespace. Adding newlines
+        # inside a split JSON string or parsing each fragment loses valid text.
+        return joined
     return "\n".join(parts)
 
 
@@ -261,7 +266,23 @@ def _sanitize_message_content(content, *, contract: dict | None):
             citation_validation = None  # 兜底文本由后端生成，无需再过引用通道
         return guarded, validation, warnings, citation_validation
 
-    _, aggregate_validation, aggregate_warnings = sanitize_narrative_citations(_narrative_text(content))
+    narrative = _narrative_text(content)
+    if "<YUXI_ANSWER_DRAFT>" in narrative or "answer-draft.v" in narrative:
+        guarded, validation, warnings, citation_validation = _sanitize_message_content(narrative, contract=contract)
+        # Render the complete protocol once, retaining non-text payloads. Plain
+        # multi-part prose keeps its original shape in the legacy branch below.
+        rendered_blocks = []
+        inserted = False
+        for block in content:
+            is_text = isinstance(block, str) or isinstance(block, dict) and block.get("type") in {"text", "output_text"}
+            if is_text:
+                if not inserted:
+                    rendered_blocks.append({"type": "text", "text": guarded})
+                    inserted = True
+            else:
+                rendered_blocks.append(block)
+        return rendered_blocks, validation, warnings, citation_validation
+    _, aggregate_validation, aggregate_warnings = sanitize_narrative_citations(narrative)
     sanitized_blocks = []
     aggregate_citation_validation: dict[str, Any] | None = None
     for block in content:

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 import yuxi.services.agent_run_service as agent_run_service
 from yuxi.services.input_message_service import (
     build_chat_input_message,
@@ -45,6 +46,75 @@ def stub_mention_authorizer(monkeypatch):
 
 def _chat_input(content: str, image_content: str | None = None):
     return build_chat_input_message(content, image_content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["accepted", "stale", "wrong-paper", "ordinary"])
+async def test_reader_capture_is_fenced_before_message_or_run_persistence(monkeypatch, case):
+    db = _patch_agent_run_creation(monkeypatch)
+    from yuxi.config import config
+
+    monkeypatch.setattr(config, "literature_rerank_enabled", False)
+    binding = {"rid": "r", "parse_revision_id": "rev", "reading_version": 2, "kb_id": "kb-rice", "file_id": "f"}
+
+    async def bind(**kwargs):
+        snapshot = dict(kwargs["snapshot"])
+        if case != "ordinary":
+            snapshot["literature_binding"] = binding
+        return snapshot, kwargs["mentions"]
+
+    monkeypatch.setattr("yuxi.literature.session.bind_paper_evidence_scope", bind)
+    context = {
+        "schema_version": 1,
+        "rid": "other" if case == "wrong-paper" else "r",
+        "source_revision_id": "rev",
+        "reading_version": 1 if case == "stale" else 2,
+        "surface": "original",
+        "action": "explain",
+    }
+    kwargs = dict(
+        input_message=_chat_input("Explain my selection"),
+        agent_slug="default",
+        thread_id="thread-1",
+        meta={"request_id": "req-1", "literature_reader_context": context},
+        current_uid="user-1",
+        db=db,
+    )
+    if case == "accepted":
+        await agent_run_service.create_agent_run_view(**kwargs)
+        assert db.created_run_kwargs["input_payload"]["literature_reader_context"] == context
+        assert db.created_run_kwargs["input_payload"]["knowledge_scope_snapshot"]["effective_kb_ids"] == ["kb-rice"]
+    else:
+        with pytest.raises(HTTPException) as raised:
+            await agent_run_service.create_agent_run_view(**kwargs)
+        assert raised.value.status_code == (422 if case == "ordinary" else 409)
+        assert db.created_run_kwargs is None
+        assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_resume_cannot_replace_reader_capture(monkeypatch):
+    parent = SimpleNamespace(
+        id="parent-run",
+        conversation_thread_id="thread-1",
+        status="interrupted",
+        input_payload={"model_spec": "parent-model", "knowledge_scope_snapshot": {"effective_kb_ids": ["kb-rice"]}},
+    )
+    db = _patch_agent_run_creation(monkeypatch, parent_run=parent)
+    monkeypatch.setattr("yuxi.literature.session.validate_frozen_paper_scope", AsyncMock())
+    with pytest.raises(HTTPException) as raised:
+        await agent_run_service.create_agent_run_view(
+            input_message=None,
+            resume={"answer": "continue"},
+            created_by_run_id="parent-run",
+            agent_slug="default",
+            thread_id="thread-1",
+            meta={"request_id": "resume-1", "literature_reader_context": {}},
+            current_uid="user-1",
+            db=db,
+        )
+    assert raised.value.status_code == 422
+    assert db.created_run_kwargs is None
 
 
 def _assert_run_input_payload(payload: dict, *, clean_question: str) -> None:
@@ -855,6 +925,100 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
     assert db.added[0].extra_metadata["raw_message"]["content"] == "hello"
     assert "run_id" not in db.added[0].extra_metadata
     assert "run_type" not in db.added[0].extra_metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "deepread,coreference,rerank",
+    [
+        (False, False, False),
+        (False, False, True),
+        (False, True, False),
+        (False, True, True),
+        (True, False, False),
+        (True, False, True),
+        (True, True, False),
+        (True, True, True),
+    ],
+)
+async def test_ordinary_run_payload_is_unchanged_for_paper_flags(monkeypatch, deepread, coreference, rerank):
+    from yuxi.config import config
+    from yuxi.literature import paper_enhancement
+
+    monkeypatch.setattr(config, "literature_deepread_enabled", deepread)
+    monkeypatch.setattr(config, "literature_coreference_enabled", coreference)
+    monkeypatch.setattr(config, "literature_rerank_enabled", rerank)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("ordinary run must not freeze paper options")
+
+    monkeypatch.setattr(paper_enhancement, "freeze_enhancement_options", forbidden)
+    db = _patch_agent_run_creation(monkeypatch)
+    await agent_run_service.create_agent_run_view(
+        input_message=_chat_input("hello"),
+        agent_slug="default",
+        thread_id="thread-1",
+        meta={"request_id": "req-1"},
+        current_uid="user-1",
+        db=db,
+    )
+    _assert_run_input_payload(db.created_run_kwargs["input_payload"], clean_question="hello")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
+async def test_paper_run_freezes_options_and_resume_ignores_changed_config(monkeypatch, resume):
+    from yuxi.config import config
+
+    frozen_options = {
+        "version": "paper-enhancement.v2",
+        "deepread_enabled": True,
+        "coreference_enabled": True,
+        "rerank_enabled": False,
+        "rerank_model": "provider:ranker",
+    }
+    scope = {
+        "scope_version": 7,
+        "tenant_id": 1,
+        "effective_kb_ids": ["kb-rice"],
+        "literature_binding": {"rid": "r", "kb_id": "kb-rice", "file_id": "f", "parse_revision_id": "rev"},
+        "document_scope_ceiling": {"file_ids": ["f"]},
+    }
+    if resume:
+        scope["literature_enhancement"] = frozen_options
+    parent = (
+        SimpleNamespace(
+            id="parent-run",
+            conversation_thread_id="thread-1",
+            status="interrupted",
+            input_payload={"model_spec": "parent-model", "knowledge_scope_snapshot": scope},
+        )
+        if resume
+        else None
+    )
+    db = _patch_agent_run_creation(monkeypatch, parent_run=parent)
+
+    async def bind(**kwargs):
+        return dict(scope), kwargs["mentions"]
+
+    monkeypatch.setattr("yuxi.literature.session.bind_paper_evidence_scope", bind)
+    monkeypatch.setattr("yuxi.literature.session.validate_frozen_paper_scope", AsyncMock())
+    monkeypatch.setattr(config, "literature_deepread_enabled", not resume)
+    monkeypatch.setattr(config, "literature_coreference_enabled", not resume)
+    monkeypatch.setattr(config, "literature_rerank_enabled", False)
+    monkeypatch.setattr(config, "reranker", "changed:model" if resume else "provider:ranker")
+    await agent_run_service.create_agent_run_view(
+        input_message=None if resume else _chat_input("question"),
+        agent_slug="default",
+        thread_id="thread-1",
+        meta={"request_id": "req-paper"},
+        current_uid="user-1",
+        db=db,
+        resume={"language": "python"} if resume else None,
+        created_by_run_id="parent-run" if resume else None,
+    )
+    snapshot = db.created_run_kwargs["input_payload"]["knowledge_scope_snapshot"]
+    assert snapshot["literature_enhancement"] == frozen_options
 
 
 @pytest.mark.asyncio

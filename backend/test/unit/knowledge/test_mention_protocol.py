@@ -261,7 +261,9 @@ def test_actor_outside_agent_scope_is_unavailable():
     assert mcp.mentions[0].reason_code == "MCP_SERVER_UNAVAILABLE"
     assert mention_public_error(mcp)["code"] == "MENTION_RESOURCE_UNAVAILABLE"
 
-    assert resolve_mentions(query_raw="@skill:writing 写一段", authorizer=authorizer).status == ResolutionStatus.REJECTED
+    assert (
+        resolve_mentions(query_raw="@skill:writing 写一段", authorizer=authorizer).status == ResolutionStatus.REJECTED
+    )
     assert (
         resolve_mentions(query_raw="@subagent:literature-reviewer 查文献", authorizer=authorizer).status
         == ResolutionStatus.REJECTED
@@ -334,6 +336,7 @@ def test_request_defaults_follow_mention_type():
     assert MentionRequest(type="document", resource_id="file_a").action_value.value == "SCOPE"
     assert MentionRequest(type="subagent", resource_id="x").strength_value.value == "REQUIRED"
 
+
 # ---- mention.v2 第二阶段：文本 @doc 文件名别名 / 子运行继承口径 ----
 
 
@@ -364,8 +367,7 @@ def test_scope_only_resolution_inherits_scope_not_actors():
 
     resolution = resolve_mentions(
         query_raw=(
-            '@doc:file_a @knowledge:"水稻文献库" @mcp:ricekb @skill:writing '
-            "@subagent:literature-reviewer 查一下"
+            '@doc:file_a @knowledge:"水稻文献库" @mcp:ricekb @skill:writing @subagent:literature-reviewer 查一下'
         ),
         authorizer=_authorizer(),
     )

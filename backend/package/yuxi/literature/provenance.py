@@ -32,13 +32,13 @@ async def require_current_input(session, job):
         await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == job.paper_id).with_for_update())
     ).scalar_one()
     if job.requested_by and not job.requested_by.startswith("system:"):
-        from yuxi.storage.postgres.models_business import User
         from yuxi.literature.access import build_access
+        from yuxi.storage.postgres.models_business import User
 
         user = (await session.execute(select(User).where(User.uid == job.requested_by))).scalar_one_or_none()
         allowed = user is not None and not user.is_disabled and not user.is_deleted
         if allowed:
-            from yuxi.services.principal import resolve_tenant_id, PrincipalResolutionError
+            from yuxi.services.principal import PrincipalResolutionError, resolve_tenant_id
 
             try:
                 allowed = await resolve_tenant_id(session, user.uid) == paper.tenant_id

@@ -195,3 +195,36 @@ async def test_active_byok_run_does_not_reserve_platform_budget(quota_session):
     await db.commit()
 
     await _enforce_user_quota(db=db, uid=user.uid)
+
+
+async def test_daily_quota_no_longer_counts_literature_tasks(quota_session):
+    """P2-10 分账：文献域后台任务不得挤占交互问答的每日额度。"""
+    db, user, quota, conversation = quota_session
+    quota.daily_run_limit = 1
+    db.add(_run(user=user, conversation=conversation, run_type="literature", status="completed"))
+    await db.commit()
+
+    await _enforce_user_quota(db=db, uid=user.uid)
+
+
+async def test_literature_scope_uses_its_own_budget(quota_session):
+    db, user, quota, conversation = quota_session
+    quota.daily_literature_task_limit = 1
+    db.add(_run(user=user, conversation=conversation, run_type="literature", status="completed"))
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await _enforce_user_quota(db=db, uid=user.uid, scope="literature")
+    assert exc.value.status_code == 429
+    assert exc.value.detail["code"] == "daily_literature_task_quota_exceeded"
+
+    # 文献预算耗尽不影响 chat 预算（分账互不挤占）
+    await _enforce_user_quota(db=db, uid=user.uid)
+
+
+async def test_literature_scope_unlimited_when_budget_unset(quota_session):
+    db, user, quota, conversation = quota_session
+    db.add(_run(user=user, conversation=conversation, run_type="literature", status="completed"))
+    await db.commit()
+
+    await _enforce_user_quota(db=db, uid=user.uid, scope="literature")

@@ -492,9 +492,7 @@ async def _review_render(tenant_id: int, revision_id: str, *, require_dual: bool
             query = query.where(LiteratureReaderRender.render_version == render_version_for(True))
         return (
             await session.execute(
-                query.order_by(
-                    LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc()
-                ).limit(1)
+                query.order_by(LiteratureReaderRender.updated_at.desc(), LiteratureReaderRender.id.desc()).limit(1)
             )
         ).scalar_one_or_none()
 

@@ -19,6 +19,9 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
+import hashlib
 import re
 from typing import Any
 
@@ -53,6 +56,7 @@ CITATION_CHANNEL_VERSION = "citation_channel_v3"
 MAX_CITATIONS = 16  # G2（2026-09-26）：12→16，caption span 覆盖率提升（Q3 no_registry_match=31 实测）
 MAX_ANCHORS_PER_CITATION = 4
 CHIP_FILENAME_CHARS = 24
+CHIP_SECTION_CHARS = 32  # 用户可见芯片的细粒度章节标签上限（来自 chunk source_provenance.section_path）
 _QUOTE_FINGERPRINT_CHARS = 80
 # 归一化完整引文（仅后端内部使用，永不进入模型 payload）
 _QUOTE_NORM_CHARS = 4000
@@ -175,6 +179,28 @@ def _shorten_filename(filename: Any) -> str:
     return text[: CHIP_FILENAME_CHARS - 1].rstrip() + "…"
 
 
+def _chip_section_label(row: dict[str, Any]) -> str:
+    """从检索证据行的 source_provenance.section_path 派生细粒度章节标签。
+
+    section_path 是 chunk 溯源里的章节路径列表（如 ["Results", "3.2 Abiotic stress"]）。
+    取末段作为最具体章节，超长截断。缺失/空/非 list 一律返回 ""（芯片逐字节不变）。
+    纯渲染素材：只进 legacy dict 的 ``section`` 键，绝不进 ``public_view()`` 模型可见白名单，
+    也不进 contract 冻结快照——避免反幻觉白名单与跨端 wire 契约漂移。
+    """
+    provenance = row.get("source_provenance")
+    if not isinstance(provenance, dict):
+        return ""
+    section_path = provenance.get("section_path")
+    if not isinstance(section_path, (list, tuple)) or not section_path:
+        return ""
+    tail = str(section_path[-1] or "").strip()
+    if not tail:
+        return ""
+    if len(tail) <= CHIP_SECTION_CHARS:
+        return tail
+    return tail[: CHIP_SECTION_CHARS - 1].rstrip() + "…"
+
+
 def render_citation_chip(citation: dict[str, Any]) -> str:
     """后端确定性渲染的引用芯片；页码来自锚点权威值，模型无法伪造。"""
     ref = citation.get("ref") or "?"
@@ -182,6 +208,10 @@ def render_citation_chip(citation: dict[str, Any]) -> str:
         return f"〔证据{ref}｜无法定位页码〕"
     zone_label = ZONE_LABELS.get(str(citation.get("zone")), str(citation.get("zone") or "正文"))
     parts = [f"证据{ref}", f"{zone_label}·第{format_pages(citation.get('page_numbers') or [])}页"]
+    # 细粒度章节（batch3）：仅当 legacy dict 带非空 section 时追加，无 section 时逐字节不变。
+    section = str(citation.get("section") or "").strip()
+    if section:
+        parts.append(f"§{section}")
     file_label = _shorten_filename(citation.get("filename"))
     if file_label:
         parts.append(file_label)
@@ -426,7 +456,11 @@ def _normalize_snippet(sentence: str) -> str:
 
 
 def reverse_bind_citations(
-    text: str, citations: list[dict[str, Any]], *, partition_intent: str | None = None
+    text: str,
+    citations: list[dict[str, Any]],
+    *,
+    partition_intent: str | None = None,
+    verbatim_quotes: dict[str, str] | None = None,
 ) -> tuple[str, int, list[str]]:
     """反向绑定（引用完备性兜底，零 LLM，Markdown 结构感知）。
 
@@ -450,6 +484,7 @@ def reverse_bind_citations(
         """返回芯片文本；None = 保持原句（必要时记入 uncovered）。"""
         nonlocal processed
         clean = sentence.replace(" " + NARRATIVE_LOCATOR_MARKER, "").replace(NARRATIVE_LOCATOR_MARKER, "").strip()
+        clean = _restore_verbatim_context(clean, verbatim_quotes)
         if not clean or "证据E" in sentence or "引文定位" in sentence:
             return None
         hard = extract_hard_constraints(clean)
@@ -698,7 +733,11 @@ def strip_bare_locators(text: str, *, replacement: str | None = None) -> tuple[s
 
 
 def expand_placeholders(
-    text: str, citations: list[dict[str, Any]], *, partition_intent: str | None = None
+    text: str,
+    citations: list[dict[str, Any]],
+    *,
+    partition_intent: str | None = None,
+    verbatim_quotes: dict[str, str] | None = None,
 ) -> tuple[str, int, list[dict[str, Any]]]:
     """``[E#]`` 提议 → resolver 验证 → 权威芯片；验证失败剥离为失败关闭标记。
 
@@ -714,7 +753,9 @@ def expand_placeholders(
         ref = match.group(1)
         proposed = by_ref.get(ref)
         binding = resolve_binding(
-            claim_context=_claim_context_around(text, match.start(), match.end()),
+            claim_context=_restore_verbatim_context(
+                _claim_context_around(text, match.start(), match.end()), verbatim_quotes
+            ),
             proposed_ref=ref if proposed else None,
             citations=pool,
             partition_intent=partition_intent,
@@ -735,6 +776,7 @@ def _rewrite_fabricated_chips(
     *,
     partition_intent: str | None = None,
     locator_chip: str | None = None,
+    verbatim_quotes: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """伪造芯片处理：模型模仿渲染产物手写的芯片不是权威。
 
@@ -776,7 +818,9 @@ def _rewrite_fabricated_chips(
             return fallback or NARRATIVE_LOCATOR_MARKER
         ref_match = re.search(r"E\d{1,3}", chip)
         binding = resolve_binding(
-            claim_context=_claim_context_around(text, match.start(), match.end()),
+            claim_context=_restore_verbatim_context(
+                _claim_context_around(text, match.start(), match.end()), verbatim_quotes
+            ),
             proposed_ref=ref_match.group(0) if ref_match else None,
             citations=_citation_pool(citations),
             partition_intent=partition_intent,
@@ -828,7 +872,8 @@ def _sign_figure_refs(
     （守卫+落库双重应用幂等）。F# 按**实际签发顺序**编号（表格内提及不签发也
     不占号），并避开文本中既存芯片已占用的编号。
     """
-    from yuxi.knowledge.evidence.caption_locator import iter_figure_labels
+    from yuxi.knowledge.evidence.caption_locator import iter_figure_label_groups
+    from yuxi.knowledge.rendering.markdown_protection import overlaps, protected_block_ranges, protected_inline_ranges
     from yuxi.knowledge.rendering.figure_ref_channel import (
         parse_figure_ref_chips,
         render_figure_ref_chip,
@@ -836,7 +881,7 @@ def _sign_figure_refs(
     )
 
     plan = resolve_figure_refs(text, citations, locator)
-    resolvable = {entry["key"]: entry for entry in plan["refs"]}
+    resolvable = {entry["mention_key"]: entry for entry in plan["refs"]}
     if not resolvable:
         return str(text or ""), [], plan["stats"]
 
@@ -852,25 +897,40 @@ def _sign_figure_refs(
                 return candidate
 
     signed: dict[str, dict[str, Any]] = {}
+    ranges_signed = 0
 
     def _sign_line(line: str) -> str:
-        mentions = iter_figure_labels(line)
-        if not mentions:
+        nonlocal ranges_signed
+        groups = iter_figure_label_groups(line)
+        if not groups:
             return line
+        protected = protected_inline_ranges(line)
         rebuilt: list[str] = []
         cursor = 0
         changed = False
-        for mention in mentions:
-            entry = resolvable.get(mention["canonical"]) or resolvable.get(mention["base_key"])
-            if entry is None:
+        for group in groups:
+            if not group["complete"]:
                 continue
-            key_id = str(entry["key"])
-            if key_id not in signed:
-                signed[key_id] = {**entry, "ref": _next_ref(), "occurrences": 0, "mention_raw": mention["raw"]}
-            signed[key_id]["occurrences"] += 1
-            rebuilt.append(line[cursor : mention["start"]])
-            rebuilt.append(render_figure_ref_chip(signed[key_id]["ref"], mention["raw"]))
-            cursor = mention["end"]
+            if overlaps(group["start"], group["end"], protected):
+                continue
+            if any(m["canonical"] not in resolvable for m in group["mentions"]):
+                continue
+            new_keys = {m["canonical"] for m in group["mentions"]} - signed.keys()
+            if len(signed) + len(claimed_refs) + len(new_keys) > 8:
+                continue
+            chips = []
+            for mention in group["mentions"]:
+                key_id = mention["canonical"]
+                entry = resolvable[key_id]
+                if key_id not in signed:
+                    signed[key_id] = {**entry, "ref": _next_ref(), "occurrences": 0, "mention_raw": mention["raw"]}
+                signed[key_id]["occurrences"] += 1
+                chips.append(render_figure_ref_chip(signed[key_id]["ref"], mention["raw"]))
+            rebuilt.append(line[cursor : group["start"]])
+            rebuilt.append("、".join(chips))
+            if group["range"]:
+                ranges_signed += 1
+            cursor = group["end"]
             changed = True
         if not changed:
             return line
@@ -878,6 +938,10 @@ def _sign_figure_refs(
         return "".join(rebuilt)
 
     lines, blocks = _iter_markdown_blocks(str(text or ""))
+    block_protection = protected_block_ranges(text)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
     output_lines: list[str] = []
     for kind, start, end in blocks:
         if kind in ("codefence", "heading", "references", "table"):
@@ -885,49 +949,48 @@ def _sign_figure_refs(
             continue
         for line_index in range(start, end + 1):
             line = lines[line_index]
-            if "〔图表" in line:
+            if "〔图表" in line or overlaps(offsets[line_index], offsets[line_index + 1], block_protection):
                 output_lines.append(line)
                 continue
             output_lines.append(_sign_line(line))
-    stats = {**plan["stats"], "signed": len(signed)}
+    stats = {**plan["stats"], "signed": len(signed), "ranges_signed": ranges_signed}
     return "\n".join(output_lines), list(signed.values()), stats
 
 
-_FIGURE_RANGE_PATTERN = re.compile(
-    r"(?P<head>(?:Figure|Fig\.?|图|Table|表)\s*)(?P<prefix>S?)(?P<start>\d{1,3})"
-    r"\s*(?:[-–—~～]|至|到)\s*(?:(?:Figure|Fig\.?|图|Table|表)\s*)?"
-    r"(?P<end_prefix>S?)(?P<end>\d{1,3})",
-    re.IGNORECASE,
-)
+def _restore_verbatim_context(text: str, quotes: dict[str, str] | None) -> str:
+    for token, quote in (quotes or {}).items():
+        text = text.replace(token, quote)
+    return text
 
 
-def _expand_verified_figure_ranges(text: str, registry: dict[str, dict[str, Any]]) -> tuple[str, int]:
-    """Expand a compact verified range so every member receives its own F#.
+def _protect_verbatim_quotes(text: str, citations: list[dict[str, Any]]) -> tuple[str, dict[str, str]]:
+    """Preserve exact authorized source text through all display normalization.
 
-    ``Figure S17–S20`` must not publish one signed chip followed by three
-    unsigned implied figures.  Expansion is allowed only when every member is
-    present and unambiguous in the frozen run-local registry; otherwise the
-    original range is retained for the ordinary fail-closed path.
+    Only exact frozen, locatable carriers qualify. Their E#/Figure navigation is
+    rendered on a separate line, never inserted into the source string itself.
     """
+    from yuxi.knowledge.evidence.caption_locator import iter_figure_label_groups
 
-    expanded = 0
-
-    def _replace(match: re.Match[str]) -> str:
-        nonlocal expanded
-        start = int(match.group("start"))
-        end = int(match.group("end"))
-        prefix = (match.group("prefix") or match.group("end_prefix") or "").lower()
-        if end < start or end - start > 7:
-            return match.group(0)
-        kind = "table" if match.group("head").strip().casefold().startswith(("table", "表")) else "figure"
-        keys = [f"{kind} {prefix}{number}" for number in range(start, end + 1)]
-        entries = [registry.get(key) for key in keys]
-        if any(not entry or entry.get("ambiguous") for entry in entries):
-            return match.group(0)
-        expanded += 1
-        return "、".join(str(entry.get("label") or key) for entry, key in zip(entries, keys, strict=True))
-
-    return _FIGURE_RANGE_PATTERN.sub(_replace, str(text or "")), expanded
+    protected = {}
+    navigation = []
+    for row in sorted(citations, key=lambda r: -len(str(r.get("_quote") or ""))):
+        quote = str(row.get("_quote") or "")
+        if not row.get("locatable") or len(quote) < 20 or quote not in text:
+            continue
+        digest = hashlib.sha256(quote.encode()).hexdigest()[:16]
+        token = f"YUXIVERBATIM{digest}Q{len(protected)}END"
+        if token in text:
+            continue
+        text = text.replace(quote, token)
+        protected[token] = quote
+        labels = [m["raw"] for g in iter_figure_label_groups(quote) for m in g["mentions"]]
+        ref = str(row.get("ref") or "")
+        refs = f" [{ref}]" if re.fullmatch(r"E\d{1,3}", ref) else ""
+        if not re.search(rf"〔证据{re.escape(ref)}｜", text):
+            navigation.append("图表出处：" + "、".join(dict.fromkeys(labels)) + refs if labels else "原文出处：" + refs)
+    if navigation:
+        text = text.rstrip() + "\n\n" + "\n".join(dict.fromkeys(navigation))
+    return text, protected
 
 
 _SUPPLEMENT_FIGURE_PATTERN = re.compile(r"\b(?:Figure|Fig\.?)\s*S\s*(\d{1,3})\b", re.IGNORECASE)
@@ -1007,7 +1070,9 @@ def _repair_unique_supplement_inventory(
         if not caption:
             report["status"] = "NO_UNIQUE_COMPLETION"
             return source, report
-        bullets.append((number, f"- {label}：{caption}"))
+        citation_ref = str(entry.get("citation_ref") or "")
+        suffix = f" [{citation_ref}]" if re.fullmatch(r"E\d{1,3}", citation_ref) else ""
+        bullets.append((number, f"- {label}：{caption}{suffix}"))
 
     repaired = source
     for number, bullet in bullets:
@@ -1042,16 +1107,16 @@ def _repair_unique_supplement_inventory(
         for number in verified_interval:
             entry = registry[f"figure s{number}"]
             label = str(entry.get("label") or f"Figure S{number}").strip()
-            caption = re.sub(
-                r"\s+", " ", str(entry.get("_caption_quote") or entry.get("quote_head") or "")
-            ).strip()
+            caption = re.sub(r"\s+", " ", str(entry.get("_caption_quote") or entry.get("quote_head") or "")).strip()
             caption = re.sub(
                 rf"^\s*(?:Figure|Fig\.?)\s*S\s*{number}\s*[.:：-]?\s*",
                 "",
                 caption,
                 flags=re.IGNORECASE,
             ).strip()
-            inventory.append(f"- {label}：{caption[:500].rstrip()}")
+            citation_ref = str(entry.get("citation_ref") or "")
+            suffix = f" [{citation_ref}]" if re.fullmatch(r"E\d{1,3}", citation_ref) else ""
+            inventory.append(f"- {label}：{caption[:500].rstrip()}{suffix}")
         repaired = repaired.rstrip() + "\n\n" + "\n".join(inventory)
         report["inventory_labels"] = [f"Figure S{number}" for number in verified_interval]
         if report["status"] == "VERIFIED":
@@ -1128,6 +1193,10 @@ def apply_citation_channel(
         LEGACY_NARRATIVE_LOCATOR_MARKER,
         locator_chip or NARRATIVE_LOCATOR_MARKER,
     )
+    source, verbatim_quotes = _protect_verbatim_quotes(source, effective_citations)
+    from yuxi.knowledge.validation.document_release_hygiene import guard_document_release_hygiene
+
+    document_release_hygiene: dict[str, Any] = {"status": "NOT_APPLICABLE", "removed_line_count": 0}
 
     # 图表锚点注册表（本轮可信作用域）：只在开关开启且引用未收权时构建；
     # 入站 F# 一律剥壳，签发只认该注册表，模型选择的编号不参与任何裁决。
@@ -1143,13 +1212,17 @@ def apply_citation_channel(
         effective_citations,
         partition_intent=partition_intent,
         locator_chip=locator_chip,
+        verbatim_quotes=verbatim_quotes,
     )
-    rewritten, figure_ranges_expanded = _expand_verified_figure_ranges(rewritten, figure_registry)
     rewritten, supplement_inventory_repair = _repair_unique_supplement_inventory(
         rewritten,
         question=semantic_question,
         registry=figure_registry,
     )
+    if effective_citations:
+        rewritten, document_release_hygiene = guard_document_release_hygiene(
+            rewritten, effective_citations, question=semantic_question
+        )
 
     # 1a) 图表语义发布门禁：身份可解析不等于描述正确。任何声称某 Figure/Table
     # “展示/证明/支持”具体内容的句子，必须先与本轮冻结题注证据相容，才有资格
@@ -1316,7 +1389,7 @@ def apply_citation_channel(
 
     # 3) [E#] 提议：resolver 验证后展开（Legacy Citation Repair 兼容层）
     expanded, expanded_count, bindings = expand_placeholders(
-        stripped, effective_citations, partition_intent=partition_intent
+        stripped, effective_citations, partition_intent=partition_intent, verbatim_quotes=verbatim_quotes
     )
     expanded = _ADJACENT_LOCATOR_MARKERS.sub(lambda _: locator_chip or NARRATIVE_LOCATOR_MARKER, expanded)
 
@@ -1325,12 +1398,29 @@ def apply_citation_channel(
     uncovered: list[str] = []
     if _citation_pool(effective_citations):
         expanded, reverse_bound, uncovered = reverse_bind_citations(
-            expanded, effective_citations, partition_intent=partition_intent
+            expanded, effective_citations, partition_intent=partition_intent, verbatim_quotes=verbatim_quotes
         )
 
     # 5) 展示层占位符终点（P3）：模型通道占位符/仿写区块头/行内标记剥除。
     #    必须先于文末提示——被剥除的标记语义由提示统一承担，且提示本身幂等。
     expanded, markers_stripped, placeholders_stripped = _strip_display_placeholders(expanded)
+
+    # A later validator can revoke a proposed citation or detach its suffix.
+    # Recheck publication coverage against the *rendered* evidence chips: a
+    # pre-render [E#] proposal must not authorize an unbound final assertion.
+    if effective_citations and semantic_question:
+        expanded, final_hygiene = guard_document_release_hygiene(
+            expanded, effective_citations, question=semantic_question
+        )
+        if final_hygiene["removed_line_count"]:
+            reason_counts = Counter(document_release_hygiene.get("reason_counts") or {})
+            reason_counts.update(final_hygiene["reason_counts"])
+            document_release_hygiene = {
+                **final_hygiene,
+                "removed_line_count": int(document_release_hygiene.get("removed_line_count") or 0)
+                + final_hygiene["removed_line_count"],
+                "reason_counts": dict(reason_counts),
+            }
 
     # 6) 未定位依据明示（P2 幂等：提示前缀已存在则不重复追加）
     #    F5：不再罗列未覆盖原句——曾把模型泄漏的过程叙述（"Let me try…"）展示
@@ -1443,13 +1533,37 @@ def apply_citation_channel(
     expanded, figure_label_mismatches = _check_figure_label_consistency(expanded, effective_citations)
     expanded, meta_descriptions_stripped = _strip_model_meta_descriptions(expanded)
 
+    # 13b) 发布顺序收口（终态无绑定断言清理）：步骤 9/9b/12/13 可能在步骤 5
+    # 的卫生复查之后剥离行内芯片/声明（策略收权、矛盾句、标签声明），使"渲染
+    # 时已绑定"的因果断言变成无绑定残留。逐字原文此时仍是 YUXIVERBATIM
+    # token（下两行才还原），排除规则天然覆盖。verbat 不等于语义验证。
+    if effective_citations and semantic_question:
+        from yuxi.knowledge.validation.document_release_hygiene import strip_unbound_assertions_after_render
+
+        expanded, final_render_hygiene = strip_unbound_assertions_after_render(
+            expanded, effective_citations, question=semantic_question
+        )
+        if final_render_hygiene["removed_line_count"]:
+            _merged_counts = Counter(document_release_hygiene.get("reason_counts") or {})
+            _merged_counts.update(final_render_hygiene["reason_counts"])
+            document_release_hygiene = {
+                **final_render_hygiene,
+                "removed_line_count": int(document_release_hygiene.get("removed_line_count") or 0)
+                + final_render_hygiene["removed_line_count"],
+                "reason_counts": dict(_merged_counts),
+            }
+    for token, quote in verbatim_quotes.items():
+        expanded = expanded.replace(token, quote)
+
     validation = {
         "version": CITATION_CHANNEL_VERSION,
+        "verbatim_quotes_preserved": len(verbatim_quotes),
         "locator": locator_validation,
         "fabrication": fabrication,
         "placeholder_expanded": expanded_count,
         "reverse_bound": reverse_bound,
         "uncovered_claims": uncovered,
+        "document_release_hygiene": document_release_hygiene,
         "markers_stripped": markers_stripped,
         "display_placeholders_stripped": placeholders_stripped,
         "references_rendered": references_rendered,
@@ -1476,7 +1590,7 @@ def apply_citation_channel(
         },
         "figure_claim_validation": figure_claim_validation,
         "table_claim_validation": table_claim_validation,
-        "figure_ranges_expanded": figure_ranges_expanded,
+        "figure_ranges_expanded": int(figure_ref_stats.get("ranges_signed") or 0),
         "supplement_inventory_repair": supplement_inventory_repair,
         "figure_refs": figure_refs[:8],
         "figure_ref_stats": figure_ref_stats,
@@ -2010,6 +2124,7 @@ def build_citation_rows(
     anchor_index: dict[tuple[str, str], Any],
     si_start_by_file: dict[str, int],
     filename_by_file: dict[str, str],
+    include_section: bool = False,
 ) -> list[dict[str, Any]]:
     """按证据行顺序构建 E1..En 引用（纯函数，便于单测）。
 
@@ -2138,33 +2253,37 @@ def build_citation_rows(
             elif zone == ZONE_MAIN_TEXT and fingerprint:
                 fingerprints.setdefault(fingerprint, ref)
             primary_quote = re.sub(r"\s+", " ", str(anchor.quote or "").strip())
-            citations.append(
-                CitationBindingCandidate(
-                    ref=ref,
-                    retrieval_evidence_id=row.get("evidence_id"),
-                    physical_evidence_id=row.get("physical_evidence_id") or row.get("evidence_id"),
-                    span_evidence_id=row.get("span_evidence_id") or row.get("verbatim_evidence_id"),
-                    kb_id=row.get("kb_id"),
-                    file_id=file_id,
-                    filename=filename_by_file.get(file_id, ""),
-                    zone=zone,
-                    evidence_type=row_evidence_type,
-                    page_numbers=[page],
-                    quote_head=primary_quote[:80],
-                    anchor_id=str(anchor.anchor_id),
-                    span_id=row.get("span_id"),
-                    parse_revision_id=parse_revision_id,
-                    index_revision_id=row.get("_active_index_revision_id"),
-                    source_sha256=row.get("_source_sha256"),
-                    retrieval_channel=row.get("retrieval_channel") or row.get("source_type"),
-                    quote=primary_quote,
-                    quote_norm=normalize_for_match(anchor.quote)[:_QUOTE_NORM_CHARS],
-                    locatable=not toc_line,
-                    toc_line=toc_line,
-                    secondary_of=secondary_of,
-                    lineage_dropped=dropped_by_lineage,
-                ).to_legacy_dict()
-            )
+            citation_row = CitationBindingCandidate(
+                ref=ref,
+                retrieval_evidence_id=row.get("evidence_id"),
+                physical_evidence_id=row.get("physical_evidence_id") or row.get("evidence_id"),
+                span_evidence_id=row.get("span_evidence_id") or row.get("verbatim_evidence_id"),
+                kb_id=row.get("kb_id"),
+                file_id=file_id,
+                filename=filename_by_file.get(file_id, ""),
+                zone=zone,
+                evidence_type=row_evidence_type,
+                page_numbers=[page],
+                quote_head=primary_quote[:80],
+                anchor_id=str(anchor.anchor_id),
+                span_id=row.get("span_id"),
+                parse_revision_id=parse_revision_id,
+                index_revision_id=row.get("_active_index_revision_id"),
+                source_sha256=row.get("_source_sha256"),
+                retrieval_channel=row.get("retrieval_channel") or row.get("source_type"),
+                quote=primary_quote,
+                quote_norm=normalize_for_match(anchor.quote)[:_QUOTE_NORM_CHARS],
+                locatable=not toc_line,
+                toc_line=toc_line,
+                secondary_of=secondary_of,
+                lineage_dropped=dropped_by_lineage,
+            ).to_legacy_dict()
+            # batch3：细粒度章节标签（渲染专用，不进 public_view/contract）。
+            # 仅文献专属会话（paper，include_section=True）注入；默认科研问答不注入
+            # 该键，render_citation_chip 见空即不追加，芯片逐字节不变。
+            if include_section:
+                citation_row["section"] = _chip_section_label(row)
+            citations.append(citation_row)
     return citations
 
 
@@ -2173,8 +2292,14 @@ def public_citations(citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [CitationBindingCandidate.from_legacy_dict(citation).public_view() for citation in citations or []]
 
 
-async def build_citations_for_contract(db, evidence_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """从证据行构建权威引用（单次 DB 往返取锚点/文件名/SI 分区阈值；失败返回 [] 走失败关闭）。"""
+async def build_citations_for_contract(
+    db, evidence_rows: list[dict[str, Any]], *, include_section: bool = False
+) -> list[dict[str, Any]]:
+    """从证据行构建权威引用（单次 DB 往返取锚点/文件名/SI 分区阈值；失败返回 [] 走失败关闭）。
+
+    ``include_section`` 仅文献专属会话（paper）为 True：控制引用芯片是否渲染细粒度
+    ``§章节`` 标签。默认 False 保持既有科研问答输出逐字节不变。
+    """
     rows = [row for row in evidence_rows or [] if isinstance(row, dict)]
     anchor_ids_by_row: list[list[str]] = []
     file_ids: set[str] = set()
@@ -2277,6 +2402,7 @@ async def build_citations_for_contract(db, evidence_rows: list[dict[str, Any]]) 
             anchor_index=anchor_index,
             si_start_by_file={},
             filename_by_file=filename_by_file,
+            include_section=include_section,
         )
     except Exception as exc:  # noqa: BLE001
         # 失败关闭：引用构建失败时不给模型任何可引用页码，输出门禁仍会剥离裸页码

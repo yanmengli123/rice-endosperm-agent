@@ -19,14 +19,14 @@ from typing import Any
 
 from sqlalchemy import Integer, and_, cast, exists, func, or_, select
 
-from yuxi.literature.access import paper_visibility, current_access
+from yuxi.literature.access import current_access, paper_visibility
 from yuxi.literature.provenance import current_job
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
-    LiteratureCompileJob,
-    LiteraturePaper,
     LiteratureCard,
     LiteratureCitation,
+    LiteratureCompileJob,
+    LiteraturePaper,
 )
 
 #: 上游 RRF 口径（retrieve.py::rrf_fuse：k=60，Σ w/(k+rank)）

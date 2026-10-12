@@ -105,6 +105,7 @@ async def test_graph_guard_falls_back_to_member_capability_for_reads(monkeypatch
     锁定 /api/graph/evidence/* 的授权语义——聊天关系图展开证据时不得因 share_config
     不可见而误杀已授权审阅者，也不得向跨租户调用者泄露资源存在性。
     """
+
     async def denied(_user, _kb_id):
         return False
 

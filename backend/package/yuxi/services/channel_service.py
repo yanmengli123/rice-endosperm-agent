@@ -1813,9 +1813,7 @@ async def _probe_platform_credentials(app: ChannelApp, credentials: dict[str, An
 
         username = await TelegramAdapter().resolve_bot_username(credentials, app.platform_app_id)
         if not username:
-            raise ChannelPushError(
-                "Telegram getMe 未返回 bot 身份，请检查 Bot Token 与外网连通性", retryable=False
-            )
+            raise ChannelPushError("Telegram getMe 未返回 bot 身份，请检查 Bot Token 与外网连通性", retryable=False)
         if str(app.platform_app_id).lstrip("@").casefold() != str(username).lstrip("@").casefold():
             raise ChannelPushError("Telegram bot username 与 platform_app_id 不一致", retryable=False)
     elif app.channel_type == "dingtalk":

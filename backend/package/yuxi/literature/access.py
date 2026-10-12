@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import String, and_, any_, literal, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
@@ -31,6 +32,8 @@ class LiteratureAccess:
     revisions: dict[str, str]
     sources: dict[str, dict]
     user: object
+    # Internal version authority also covers bibliography without a PDF source.
+    reading_versions: dict[str, int] = field(default_factory=dict)
 
 
 _access: ContextVar[LiteratureAccess | None] = ContextVar("literature_access", default=None)
@@ -41,7 +44,13 @@ def paper_visibility(tenant_id: int):
     condition = and_(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.trashed_at.is_(None))
     if scope is None:  # trusted background use, never an unauthenticated HTTP entry
         return condition
-    return and_(condition, LiteraturePaper.rid.in_(scope.rids if scope.tenant_id == tenant_id else ()))
+    rids = list(scope.rids if scope.tenant_id == tenant_id else ())
+    # Large export corpora exceed asyncpg's 32767 expanded-bind limit. One typed
+    # array retains exactly the same ACL predicate without loosening visibility.
+    engine = pg_manager.async_engine
+    if engine is not None and engine.dialect.name == "postgresql":
+        return and_(condition, LiteraturePaper.rid == any_(literal(rids, type_=ARRAY(String(160)))))
+    return and_(condition, LiteraturePaper.rid.in_(rids))
 
 
 def current_access() -> LiteratureAccess | None:
@@ -130,7 +139,13 @@ async def build_access(user, tenant_id: int, *, include_trashed: bool = False) -
                 "imported": row.pipeline_version == "paperagent_import_v4",
             }
     return LiteratureAccess(
-        tenant_id, frozenset(row.rid for row in rows), frozenset(row.id for row in rows), revisions, sources, user
+        tenant_id,
+        frozenset(row.rid for row in rows),
+        frozenset(row.id for row in rows),
+        revisions,
+        sources,
+        user,
+        {row.rid: row.reading_version for row in rows},
     )
 
 

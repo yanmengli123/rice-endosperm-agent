@@ -120,6 +120,9 @@ class TenantUserEntitlement(Base):
     # 企业默认允许成员自带模型；管理员仍可显式收紧为 platform_only。
     credential_policy = Column(String(16), nullable=False, default=CREDENTIAL_POLICY_BYOK_OPTIONAL)
     daily_run_limit = Column(Integer, nullable=True)
+    # 文献域后台任务（编译/翻译/综述等 run_type="literature"）独立每日预算；
+    # NULL = 不限。与交互问答（daily_run_limit）分账，避免后台任务吃掉聊天额度。
+    daily_literature_task_limit = Column(Integer, nullable=True)
     monthly_platform_token_limit = Column(BigInteger, nullable=True)  # 仅统计平台凭据消耗；BYOK 不占
     concurrent_run_limit = Column(Integer, nullable=True)  # P5b 预留：并发上限，暂不强制
     # 兼容字段：BYOK 用量在 usage_ledger 中独立分域，默认不占平台 token 配额。

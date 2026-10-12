@@ -16,7 +16,9 @@ from yuxi.knowledge.rendering.typed_value_renderers import (
 pytestmark = [pytest.mark.unit]
 
 
-def _use(audit_id: int, operation: str, facts: list[dict], *, adopted: bool = True, provider: str = "gene-authority") -> dict:
+def _use(
+    audit_id: int, operation: str, facts: list[dict], *, adopted: bool = True, provider: str = "gene-authority"
+) -> dict:
     return {
         "source_use_id": f"mcp:{audit_id}",
         "provider_id": provider,
@@ -43,7 +45,11 @@ _UNIPROT_FACTS = [
     _f("f_0000000000000b02", "/data/results/0/entryType", "UniProtKB reviewed (Swiss-Prot)"),
     _f("f_0000000000000b03", "/data/results/0/organism/scientificName", "Oryza sativa"),
     _f("f_0000000000000b04", "/data/results/0/sequence/length", 609),
-    _f("f_0000000000000b05", "/data/results/0/proteinDescription/recommendedName/fullName/value", "Granule-bound starch synthase 1"),
+    _f(
+        "f_0000000000000b05",
+        "/data/results/0/proteinDescription/recommendedName/fullName/value",
+        "Granule-bound starch synthase 1",
+    ),
 ]
 
 

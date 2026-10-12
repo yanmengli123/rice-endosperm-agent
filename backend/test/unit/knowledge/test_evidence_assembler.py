@@ -233,6 +233,76 @@ async def test_assembler_fails_closed_without_authorized_scope(evidence_session)
     assert result["issues"] == [{"code": "NO_AUTHORIZED_KNOWLEDGE_SCOPE"}]
 
 
+@pytest.mark.parametrize("failure", [None, "scope", "identity", "revision", "hash", "page", "tenant"])
+async def test_assembler_replays_audited_caption_span_without_inventing_a_chunk(evidence_session, failure):
+    session, records = evidence_session
+    quote = "Figure 2 Grain phenotype of the CRISPR mutants."
+    _add_source(
+        session,
+        row_id=1,
+        revision_id="spr_caption",
+        kb_id="kb_allowed",
+        file_id="file_caption",
+        chunk_id="not_retrieved_chunk",
+        anchor_id="ea_caption",
+        quote=quote,
+        page=5,
+    )
+    session.add(
+        KnowledgeFile(
+            id=1,
+            file_id="file_caption",
+            kb_id="kb_allowed",
+            filename="paper.pdf",
+            active_parse_revision_id="spr_other" if failure == "revision" else "spr_caption",
+            active_index_revision_id="sir_caption",
+        )
+    )
+    session.add(
+        EvidenceSpanRecord(
+            id=1,
+            tenant_id=2 if failure == "tenant" else 1,
+            parse_revision_id="spr_caption",
+            kb_id="kb_allowed",
+            file_id="file_caption",
+            span_id="es_caption",
+            anchor_id="ea_caption",
+            sentence_index=0,
+            quote=quote,
+            quote_hash="0" * 64 if failure == "hash" else _digest(quote),
+            page_number=9 if failure == "page" else 5,
+            evidence_type="caption",
+            document_partition="MAIN_TEXT",
+            partition_confidence=1.0,
+            container_label="Figure 2",
+            evidence_id="evs_caption",
+        )
+    )
+    record = _retrieval("es_caption")
+    record.evidence_ids_json = ["evs_other" if failure == "identity" else "evs_caption"]
+    records.append(record)
+    await session.commit()
+
+    result = await assemble_evidence_for_run(
+        session,
+        "run_caption",
+        allowed_kb_ids={"kb_other" if failure == "scope" else "kb_allowed"},
+    )
+
+    if failure:
+        assert result["evidence"] == []
+    else:
+        dto = result["evidence"][0]
+        assert dto["evidence_id"].startswith("ev_")  # physical identity algorithm unchanged
+        assert dto["source"]["span_evidence_id"] == "evs_caption"
+        assert dto["source"]["span_id"] == "es_caption"
+        assert dto["source"]["chunk_id"] is None
+        assert dto["source"]["parse_revision_id"] == "spr_caption"
+        assert dto["locator"]["fragments"][0]["page_number"] == 5
+        assert dto["verification"]["status"] == "OK"
+        assert result["issues"] == []
+
+
 async def test_assembler_reports_evidence_limit_instead_of_silent_truncation(
     evidence_session,
     monkeypatch,
@@ -296,7 +366,10 @@ async def test_assembler_attaches_sentence_highlight_without_changing_identity(e
         question_text="The structure of OsMYB73 protein was also predicted and the results revealed?",
     )
 
-    assert "highlight" not in plain["evidence"][0]["locator"]
+    # v4 起 locator 永远携带诚实的精度基线：未精化时 highlight 为 REGION 占位，
+    # 不再以"键缺失"表达降级（抽屉按 precision 徽标区分已验证/区域级）
+    assert plain["evidence"][0]["locator"]["precision"] == "REGION"
+    assert plain["evidence"][0]["locator"]["highlight"]["precision"] == "REGION"
     highlight = refined["evidence"][0]["locator"]["highlight"]
     assert highlight["quote"] == (
         "The structure of OsMYB73 protein was also predicted and the results revealed two SANT domains."

@@ -117,3 +117,28 @@ def test_group_query_reports_missing_physicochemical_pairs():
         tables=_tables(),
     )
     assert report["missing_pair_metrics"] == ["amylose", "chalkiness", "gelatinization_temperature"]
+
+
+def test_figure_phenotype_is_not_checked_against_nonexistent_table():
+    text = "Figure 2 显示突变体粒长变长并出现腹白垩白。"
+    cleaned, report = validate_table_claims(text, question="依据图注与正文解释突变体粒长和垩白的原因", tables=[])
+    assert cleaned == text
+    assert report["status"] == "NOT_APPLICABLE"
+
+
+def test_missing_table_still_refuses_heat_ranking():
+    cleaned, report = validate_table_claims(
+        "osmyb73 热胁迫后垩白度为 26.8%，受影响最大。",
+        question="哪个基因型的垩白度受热胁迫影响最大？",
+        tables=[],
+    )
+    assert report["status"] == "REFUSED_INCOMPLETE_OPERANDS"
+    assert "26.8" not in cleaned
+
+
+def test_missing_table_nonheat_disclosure_does_not_invent_heat_conditions():
+    cleaned, report = validate_table_claims(
+        "Table 1 显示 osmyb73 粒长为 9.5 mm。", question="根据表格比较粒长", tables=[]
+    )
+    assert report["removed_sentence_count"] == 1
+    assert "热胁迫" not in cleaned

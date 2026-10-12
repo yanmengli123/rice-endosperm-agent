@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Collection
 from types import SimpleNamespace
 from typing import Any
@@ -454,6 +455,49 @@ async def assemble_evidence_for_run(
             }
         )
 
+    # Caption recall audits span ids, not index chunks. Replay only the exact
+    # audited span/evidence pair in an authorized, still-active source lineage.
+    audited_ids = {str(item) for record in records for item in (record.evidence_ids_json or []) if item}
+    direct_rows = (
+        (
+            await db.execute(
+                select(EvidenceSpanRecord, EvidenceAnchorRecord, KnowledgeFile, KnowledgeParseRevision)
+                .join(
+                    EvidenceAnchorRecord,
+                    (
+                        (EvidenceAnchorRecord.parse_revision_id == EvidenceSpanRecord.parse_revision_id)
+                        & (EvidenceAnchorRecord.anchor_id == EvidenceSpanRecord.anchor_id)
+                    ),
+                )
+                .join(KnowledgeFile, KnowledgeFile.file_id == EvidenceSpanRecord.file_id)
+                .join(
+                    KnowledgeParseRevision, KnowledgeParseRevision.revision_id == EvidenceSpanRecord.parse_revision_id
+                )
+                .where(
+                    EvidenceSpanRecord.span_id.in_(chunk_ids),
+                    EvidenceSpanRecord.evidence_id.in_(audited_ids),
+                    EvidenceSpanRecord.kb_id.in_(permitted_kb_ids),
+                    KnowledgeFile.kb_id == EvidenceSpanRecord.kb_id,
+                    KnowledgeFile.active_parse_revision_id == EvidenceSpanRecord.parse_revision_id,
+                    KnowledgeParseRevision.kb_id == EvidenceSpanRecord.kb_id,
+                    KnowledgeParseRevision.file_id == EvidenceSpanRecord.file_id,
+                    KnowledgeParseRevision.tenant_id == EvidenceSpanRecord.tenant_id,
+                )
+            )
+        ).all()
+        if chunk_ids and audited_ids
+        else []
+    )
+    direct_by_pair = {}
+    for span, anchor, knowledge_file, revision in direct_rows:
+        if (
+            span.page_number == anchor.page
+            and str(span.quote or "").strip()
+            and hashlib.sha256(span.quote.encode()).hexdigest() == span.quote_hash
+            and span.quote in str(anchor.quote or "")
+        ):
+            direct_by_pair[(str(span.span_id), str(span.evidence_id))] = (span, anchor, knowledge_file, revision)
+
     chunks = (
         (
             await db.execute(
@@ -533,6 +577,7 @@ async def assemble_evidence_for_run(
         if revision_ids
         else []
     )
+    spans.extend(row[0] for row in direct_by_pair.values())
     span_by_anchor_key: dict[tuple[str, str], Any] = {}
     for span in spans:
         key = (str(span.parse_revision_id), str(span.anchor_id))
@@ -551,7 +596,29 @@ async def assemble_evidence_for_run(
             "role": "RETRIEVAL_CANDIDATE",
         }
         for rank, chunk_id in enumerate(record.chunk_ids_json or [], start=1):
-            chunk = chunk_by_id.get(str(chunk_id))
+            direct = next(
+                (
+                    direct_by_pair[(str(chunk_id), str(evidence_id))]
+                    for evidence_id in (record.evidence_ids_json or [])
+                    if (str(chunk_id), str(evidence_id)) in direct_by_pair
+                ),
+                None,
+            )
+            if direct:
+                direct_span, direct_anchor, knowledge_file, direct_revision = direct
+                chunk = SimpleNamespace(
+                    kb_id=direct_span.kb_id,
+                    file_id=direct_span.file_id,
+                    chunk_id=None,
+                    content=str(direct_anchor.quote or ""),
+                    source_provenance={
+                        "parse_revision_id": direct_revision.revision_id,
+                        "index_revision_id": knowledge_file.active_index_revision_id or "DIRECT_SPAN",
+                        "evidence_anchor_ids": [direct_anchor.anchor_id],
+                    },
+                )
+            else:
+                chunk = chunk_by_id.get(str(chunk_id))
             if chunk is None:
                 if str(chunk_id) in chunk_ids:
                     _append_issue(
@@ -563,7 +630,7 @@ async def assemble_evidence_for_run(
                 continue
             provenance = dict(chunk.source_provenance or {})
             parse_revision_id = str(provenance.get("parse_revision_id") or "")
-            revision = revision_by_id.get(parse_revision_id)
+            revision = direct_revision if direct else revision_by_id.get(parse_revision_id)
             if (
                 revision is None
                 or str(revision.kb_id) != str(chunk.kb_id)
@@ -578,7 +645,7 @@ async def assemble_evidence_for_run(
                 )
                 continue
             for anchor_id in provenance.get("evidence_anchor_ids") or provenance.get("anchor_ids") or []:
-                anchor = anchor_by_key.get((parse_revision_id, str(anchor_id)))
+                anchor = direct_anchor if direct else anchor_by_key.get((parse_revision_id, str(anchor_id)))
                 if anchor is None:
                     _append_issue(
                         issues,
@@ -595,10 +662,10 @@ async def assemble_evidence_for_run(
                     chunk=chunk,
                     source_sha256=source_sha,
                     verification=verification,
-                    span=span_by_anchor_key.get((parse_revision_id, str(anchor_id))),
+                    span=direct_span if direct else span_by_anchor_key.get((parse_revision_id, str(anchor_id))),
                     retrieval={
                         **retrieval_frame,
-                        "chunk_id": str(chunk.chunk_id),
+                        "chunk_id": chunk.chunk_id,
                         "rank": rank,
                     },
                 )

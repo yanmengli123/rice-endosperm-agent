@@ -8,8 +8,8 @@
 
 from __future__ import annotations
 
-from typing import Any
 import json
+from typing import Any
 
 from sqlalchemy import select
 
@@ -256,7 +256,11 @@ async def load_conversation_session(thread_id: str, uid: str) -> dict | None:
     return context
 
 
-async def list_literature_sessions(tenant_id: int, uid: str, *, archived: bool = False) -> list[dict]:
+async def list_literature_sessions(
+    tenant_id: int, uid: str, *, archived: bool = False, offset: int = 0, limit: int = 100
+) -> list[dict]:
+    from sqlalchemy import or_
+
     from yuxi.literature.access import build_access, current_access
     from yuxi.storage.postgres.models_business import Conversation
 
@@ -264,7 +268,14 @@ async def list_literature_sessions(tenant_id: int, uid: str, *, archived: bool =
     if scope is None or scope.user.uid != uid:
         raise PermissionError("会话列表必须绑定请求者")
     visible = (await build_access(scope.user, tenant_id)).rids
+    offset, limit = max(0, offset), max(1, min(limit, 100))
     async with pg_manager.get_async_session_context() as db:
+        binding = Conversation.extra_metadata["literature_session"]
+        # 可见性过滤放进 SQL：分页 offset/limit 才不会被过滤掉的 paper 会话挤出行隙
+        visible_clause = or_(
+            binding["kind"].as_string() != "paper",
+            binding["rid"].as_string().in_(visible),
+        )
         rows = (
             await db.execute(
                 select(Conversation)
@@ -272,10 +283,12 @@ async def list_literature_sessions(tenant_id: int, uid: str, *, archived: bool =
                     Conversation.tenant_id == tenant_id,
                     Conversation.uid == uid,
                     Conversation.status == ("archived" if archived else "active"),
-                    Conversation.extra_metadata["literature_session"]["kind"].as_string().in_(SESSION_KINDS),
+                    binding["kind"].as_string().in_(SESSION_KINDS),
+                    visible_clause,
                 )
                 .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
-                .limit(100)
+                .offset(offset)
+                .limit(limit)
             )
         ).scalars()
         return [
@@ -283,19 +296,18 @@ async def list_literature_sessions(tenant_id: int, uid: str, *, archived: bool =
                 "id": row.thread_id,
                 "title": row.title,
                 "status": row.status,
+                "agent_id": row.agent_id,
                 "session": row.extra_metadata["literature_session"],
                 "updated_at": row.updated_at.isoformat(),
             }
             for row in rows
-            if row.extra_metadata["literature_session"].get("kind") != "paper"
-            or row.extra_metadata["literature_session"].get("rid") in visible
         ]
 
 
 async def update_literature_session(tenant_id: int, uid: str, thread_id: str, *, title=None, status=None) -> dict:
     from yuxi.literature.access import build_access, current_access
-    from yuxi.storage.postgres.models_business import Conversation
     from yuxi.services.conversation_service import update_thread_view
+    from yuxi.storage.postgres.models_business import Conversation
 
     scope = current_access()
     if scope is None or scope.user.uid != uid or scope.tenant_id != tenant_id:
@@ -344,6 +356,10 @@ async def bind_paper_evidence_scope(*, user, tenant_id: int, binding, snapshot: 
     if rid not in access.rids:
         raise PermissionError("绑定文献不存在或来源权限已撤销")
     source = access.sources.get(rid) or {}
+    source = {
+        **source,
+        "reading_version": getattr(access, "reading_versions", {}).get(rid, source.get("reading_version")),
+    }
     # Imported reading derivatives and standalone bibliography are not evidence.
     kb_id = source.get("kb_id") if not source.get("imported") else None
     file_id = source.get("file_id") if kb_id else None
@@ -391,6 +407,10 @@ async def validate_frozen_paper_scope(*, user, tenant_id: int, snapshot: dict) -
     access = await build_access(user, tenant_id)
     rid = binding["rid"]
     source = access.sources.get(rid) or {}
+    source = {
+        **source,
+        "reading_version": getattr(access, "reading_versions", {}).get(rid, source.get("reading_version")),
+    }
     if rid not in access.rids or any(
         source.get(key) != binding.get(key) for key in ("kb_id", "file_id", "parse_revision_id", "reading_version")
     ):

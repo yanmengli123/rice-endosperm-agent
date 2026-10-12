@@ -18,14 +18,16 @@ from typing import Any
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.knowledge.evidence.sentence_splitter import SPLITTER_VERSION, split_evidence_units
+from yuxi.knowledge.evidence.sentence_splitter import EvidenceUnit, SPLITTER_VERSION, split_evidence_units
 from yuxi.storage.postgres.models_knowledge import (
     EvidenceSpanRecord,
     KnowledgeParseRevision,
     ScientificLexicalIndexRecord,
+    PdfSourceRegionRecord,
+    EvidenceSpanRegionRecord,
 )
 
-EVIDENCE_SPAN_BUILDER_VERSION = "1.0"
+EVIDENCE_SPAN_BUILDER_VERSION = "2.0"
 
 # 科研标识符：OsMYB73 / LOC_Os01g01010 / RAP 形态 等
 _IDENTIFIER_PATTERN = re.compile(r"(?<![A-Za-z])(?:Os[A-Z][A-Za-z0-9]+|LOC_Os\w+|Os\d+g\w+)\b")
@@ -108,9 +110,22 @@ async def build_evidence_spans(
     revision: KnowledgeParseRevision,
     anchors: list[Any],
     markdown_body: str,
+    prepared_units: list[dict[str, Any]] | None = None,
+    regions: dict[str, PdfSourceRegionRecord] | None = None,
 ) -> dict[str, Any]:
     """切分并写入 evidence_spans；幂等（先清后写，同事务）。"""
-    units = split_evidence_units(anchors=anchors, markdown_body=markdown_body)
+    if getattr(revision, "sealed_at", None) is not None or getattr(revision, "status", "") in {
+        "INDEXED_FULL",
+        "INDEXED_CONTENT_ONLY",
+        "INDEXED_TEXT_ONLY",
+        "PARSED_ONLY",
+    }:
+        raise ValueError("PUBLISHED_PDF_EVIDENCE_IMMUTABLE")
+    units = (
+        [EvidenceUnit(**{k: v for k, v in item.items() if k != "locator"}) for item in prepared_units]
+        if prepared_units is not None
+        else split_evidence_units(anchors=anchors, markdown_body=markdown_body)
+    )
     anchor_by_id = {str(getattr(a, "anchor_id", "") or ""): a for a in anchors}
 
     await db.execute(delete(EvidenceSpanRecord).where(EvidenceSpanRecord.parse_revision_id == revision.revision_id))
@@ -118,26 +133,38 @@ async def build_evidence_spans(
     for unit in units:
         anchor = anchor_by_id.get(unit.anchor_id) if unit.anchor_id else None
         quote_hash = hashlib.sha256(unit.quote.encode("utf-8")).hexdigest()
-        start_char = _find_in_chunk(unit.quote, markdown_body)
+        start_char = unit.source_start
         page_number = int(getattr(anchor, "page", 0) or 0) if anchor else None
-        evidence_id = _span_evidence_id(
-            parse_revision_id=revision.revision_id,
-            sentence_index=unit.sentence_index,
-            quote_hash=quote_hash,
+        occurrence = (
+            f"{revision.revision_id}|{unit.anchor_id}|{unit.offset_scope}|"
+            f"{unit.source_start}:{unit.source_end}|{quote_hash}"
         )
+        if not unit.anchor_id:
+            occurrence += f"|unbound:{unit.sentence_index}"
+        evidence_id = "evs_" + hashlib.sha256(occurrence.encode()).hexdigest()[:20]
+        prepared = prepared_units[unit.sentence_index] if prepared_units is not None else {}
+        source_offsets = {
+            "scope": f"anchor:{unit.anchor_id}" if unit.offset_scope == "anchor" else unit.offset_scope,
+            "start": unit.source_start,
+            "end": unit.source_end,
+            "basis": "unicode_code_point",
+        }
+        locator_fragments = (prepared.get("locator") or {}).get("fragments") or []
+        if locator_fragments:
+            page_number = locator_fragments[0]["page_index"] + 1
         rows.append(
             EvidenceSpanRecord(
                 tenant_id=revision.tenant_id,
                 parse_revision_id=revision.revision_id,
                 kb_id=revision.kb_id,
                 file_id=revision.file_id,
-                span_id=f"es_{revision.revision_id}_{unit.sentence_index}_{quote_hash[:8]}",
+                span_id="es_" + hashlib.sha256(occurrence.encode()).hexdigest()[:40],
                 anchor_id=unit.anchor_id,
                 sentence_index=unit.sentence_index,
                 quote=unit.quote,
                 quote_hash=quote_hash,
                 start_char=start_char,
-                end_char=(start_char + len(unit.quote) if start_char is not None else None),
+                end_char=unit.source_end,
                 page_number=page_number if page_number and page_number >= 1 else None,
                 evidence_type=unit.evidence_type,
                 document_partition=str(getattr(anchor, "document_partition", "UNKNOWN") or "UNKNOWN"),
@@ -149,6 +176,16 @@ async def build_evidence_spans(
                     "splitter_version": SPLITTER_VERSION,
                     "builder_version": EVIDENCE_SPAN_BUILDER_VERSION,
                     "anchor_locatable": bool(getattr(anchor, "locatable", False)) if anchor else False,
+                    "offset_scope": unit.offset_scope,
+                    "offset_basis": "unicode_code_point",
+                    "source_offsets": source_offsets,
+                    "text_hash": quote_hash
+                    if unit.offset_scope.startswith(("region:", "table:"))
+                    else getattr(anchor, "quote_hash", None),
+                    "ambiguous_anchor_ids": list(unit.ambiguous_anchor_ids),
+                    "pdf_locator": prepared.get("locator") or {"precision": "REGION", "status": "UNREFINED"},
+                    "context": unit.context,
+                    "text_origin": "OCR" if getattr(anchor, "source", "") == "rapidocr" else "PARSED_SOURCE",
                 },
             )
         )
@@ -156,6 +193,23 @@ async def build_evidence_spans(
         db.add_all(rows)
     summary = {"total": len(rows), "types": _type_counts(rows), "version": EVIDENCE_SPAN_BUILDER_VERSION}
     await db.flush()
+    if regions:
+        for row in rows:
+            locator = row.metadata_json["pdf_locator"]
+            for fragment in locator.get("fragments", []):
+                region = regions.get(fragment.get("region_id"))
+                if region is None or region.parse_revision_id != revision.revision_id:
+                    raise ValueError("PDF_SPAN_REGION_REVISION_MISMATCH")
+                db.add(
+                    EvidenceSpanRegionRecord(
+                        span_record_id=row.id,
+                        region_record_id=region.id,
+                        source_start=row.start_char,
+                        source_end=row.end_char,
+                        selector={**fragment, "source_offsets": row.metadata_json["source_offsets"]},
+                    )
+                )
+        await db.flush()
     return summary
 
 

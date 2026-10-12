@@ -32,11 +32,32 @@ ERROR_REGISTRY: dict[str, ErrorSpec] = {
     spec.code: spec
     for spec in (
         ErrorSpec(
+            code="literature_reader_context_invalid",
+            status_code=422,
+            action="refresh_paper_reader",
+            retryable=False,
+            default_message="阅读上下文无效或会话不是本文会话，请在文献工作台重新选择",
+        ),
+        ErrorSpec(
+            code="literature_reader_source_changed",
+            status_code=409,
+            action="refresh_paper_reader",
+            retryable=False,
+            default_message="文献来源或阅读版本已更新，请刷新阅读器并重新选择；旧选区未发送",
+        ),
+        ErrorSpec(
             code="daily_run_quota_exceeded",
             status_code=429,
             action="contact_admin",
             retryable=False,
             default_message="今日运行次数已达配额，请联系管理员调整",
+        ),
+        ErrorSpec(
+            code="daily_literature_task_quota_exceeded",
+            status_code=429,
+            action="contact_admin",
+            retryable=False,
+            default_message="今日文献任务次数已达配额，请联系管理员调整",
         ),
         ErrorSpec(
             code="platform_token_quota_exceeded",

@@ -1,0 +1,25 @@
+%0 Journal Article
+%A 张伟
+%A 李明
+%+ 中国农业科学院水稻研究所
+%T 稻穗粒数决定的分子调控研究
+%J 中国水稻科学
+%D 2023
+%K 穗粒数;水稻;分子调控
+%X 穗粒数是水稻产量的关键决定因子。本文综述了调控穗粒数的主要分子调控因子及其育种应用。
+%V 37
+%N 5
+%P 501-512
+%G zh
+%U https://kns.cnki.net/kcms/detail/detail.aspx?dbcode=CJFD&filename=DBZY202305001
+%R 10.16819/j.cnki.rice.2023.05.001
+
+%0 Journal Article
+%A 王红
+%+ 华中农业大学
+%T 杂交水稻优势研究进展
+%J 杂交水稻
+%D 2019
+%K 杂种优势;水稻
+%X 杂种优势利用是水稻育种的重要途径。
+%G zh

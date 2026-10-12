@@ -101,9 +101,17 @@ async def test_ocr_parse_file_uses_default_engine(tmp_path, monkeypatch: pytest.
 @pytest.mark.asyncio
 async def test_ocr_parse_file_rejects_non_user_data_path(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("yuxi.config.save_dir", str(tmp_path))
+    called = {"parser": False}
 
-    with pytest.raises(ValueError, match="只允许解析"):
-        await ocr_parse_file.coroutine(file_path="/etc/passwd", runtime=_runtime())
+    async def forbidden_aparse(*_args, **_kwargs):
+        called["parser"] = True
+        raise AssertionError("越权路径不得到达解析器")
+
+    monkeypatch.setattr(Parser, "aparse", forbidden_aparse)
+    result = await ocr_parse_file.coroutine(file_path="/etc/passwd", runtime=_runtime())
+    assert result["status"] == "error" and result["error_code"] == "OCR_PATH_INVALID"
+    assert "只允许解析" in result["message"]
+    assert called["parser"] is False
 
 
 @pytest.mark.asyncio
@@ -113,17 +121,32 @@ async def test_ocr_parse_file_rejects_directory(tmp_path, monkeypatch: pytest.Mo
     uid = "user-1"
     ensure_thread_dirs(thread_id, uid)
     dir_virtual_path = virtual_path_for_thread_file(thread_id, sandbox_workspace_dir(thread_id, uid), uid=uid)
+    called = {"parser": False}
 
-    with pytest.raises(ValueError, match="路径不是普通文件"):
-        await ocr_parse_file.coroutine(file_path=dir_virtual_path, runtime=_runtime(thread_id=thread_id, uid=uid))
+    async def forbidden_aparse(*_args, **_kwargs):
+        called["parser"] = True
+        raise AssertionError("目录路径不得到达解析器")
+
+    monkeypatch.setattr(Parser, "aparse", forbidden_aparse)
+    result = await ocr_parse_file.coroutine(file_path=dir_virtual_path, runtime=_runtime(thread_id=thread_id, uid=uid))
+    assert result["status"] == "error" and result["error_code"] == "OCR_PATH_INVALID"
+    assert "路径不是普通文件" in result["message"]
+    assert called["parser"] is False
 
 
 @pytest.mark.asyncio
 async def test_ocr_parse_file_rejects_path_traversal(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("yuxi.config.save_dir", str(tmp_path))
+    called = {"parser": False}
 
-    with pytest.raises(ValueError, match="只允许解析"):
-        await ocr_parse_file.coroutine(
-            file_path="/home/gem/user-data/../secrets.png",
-            runtime=_runtime(),
-        )
+    async def forbidden_aparse(*_args, **_kwargs):
+        called["parser"] = True
+        raise AssertionError("穿越路径不得到达解析器")
+
+    monkeypatch.setattr(Parser, "aparse", forbidden_aparse)
+    result = await ocr_parse_file.coroutine(
+        file_path="/home/gem/user-data/../secrets.png",
+        runtime=_runtime(),
+    )
+    assert result["status"] == "error" and result["error_code"] == "OCR_PATH_INVALID"
+    assert called["parser"] is False

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+
 from sqlalchemy import select
 
 from yuxi.knowledge.manager import KnowledgeBaseManager
@@ -13,8 +14,8 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
     KnowledgeFile,
-    KnowledgeParseRevision,
     KnowledgeParseArtifact,
+    KnowledgeParseRevision,
 )
 
 

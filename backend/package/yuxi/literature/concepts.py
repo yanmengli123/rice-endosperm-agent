@@ -12,10 +12,9 @@ import json
 import re
 from typing import Any
 
-from yuxi.literature.access import paper_visibility
-
 from sqlalchemy import select
 
+from yuxi.literature.access import paper_visibility
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager

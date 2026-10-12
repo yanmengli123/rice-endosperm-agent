@@ -259,7 +259,8 @@ def _patch_text_locator_failure(monkeypatch: pytest.MonkeyPatch, *, citations: l
             "warnings": [],
         }
 
-    async def fake_citations(_db, rows):
+    async def fake_citations(_db, rows, *, include_section=False):
+        assert include_section is False
         return citations
 
     async def fake_quote_locator(_db, *, question, kb_ids, file_ids=None):
@@ -341,7 +342,8 @@ async def test_g2_verified_text_locator_keeps_citations(monkeypatch: pytest.Monk
     async def fake_gateway(*, query_text, scope_snapshot, top_k=12, verbatim=None):
         return {"evidence": [{"evidence_id": "ev-quote", "kb_id": "kb-a", "file_id": "file-a"}], "warnings": []}
 
-    async def fake_citations(_db, rows):
+    async def fake_citations(_db, rows, *, include_section=False):
+        assert include_section is False
         return [citation]
 
     monkeypatch.setattr(scope_gateway_module, "query_knowledge_scope_gateway", fake_gateway)
@@ -478,7 +480,8 @@ def _patch_unlocated(monkeypatch, citations):
     async def fake_gateway(*, query_text, scope_snapshot, top_k=12, verbatim=None):
         return {"evidence": [{"evidence_id": "evdoc", "kb_id": "kb-a", "file_id": "file-a"}], "warnings": []}
 
-    async def fake_citations(_db, rows):
+    async def fake_citations(_db, rows, *, include_section=False):
+        assert include_section is False
         return citations
 
     async def fake_quote(_db, *, question, kb_ids):

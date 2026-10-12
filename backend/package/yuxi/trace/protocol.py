@@ -212,6 +212,18 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     # 图卡资产投影（ADR-0004 P0-4 SLA 采集点）：reason 为 9 种抑制原因闭合枚举之一
     "knowledge.figure_projection.attached": frozenset({"reason", "figure_count", "locator_kind"}),
     "knowledge.figure_projection.suppressed": frozenset({"reason", "figure_count", "locator_kind"}),
+    "knowledge.source_reference.completed": frozenset(
+        {
+            "status",
+            "source_count",
+            "target_count",
+            "caption_evidence_count",
+            "resolved_count",
+            "missing_count",
+            "ambiguous_count",
+            "budget_exceeded_count",
+        }
+    ),
     # 图表锚点（ADR-0008 SLA 采集点）：resolved 的 reason 固定 "ok"；unresolved 的
     # reason 为闭合枚举（orphan_chip；签发侧统计 no_registry_match/ambiguous_scope/
     # budget_exceeded 走 locator_validation 审计字段）；kind = figure|table|mixed
@@ -223,6 +235,20 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     ),
     "knowledge.table_claim.validated": frozenset(
         {"status", "checked_count", "unsupported_removed", "facts_available", "missing_pair_metric_count"}
+    ),
+    "knowledge.figure_table_publication.completed": frozenset(
+        {
+            "source_quote_count",
+            "figure_ref_count",
+            "figure_asset_count",
+            "table_count",
+            "visual_verified_count",
+            "caption_only_count",
+            "reference_only_count",
+            "panel_verified_count",
+            "whole_figure_fallback_count",
+            "caption_fallback_count",
+        }
     ),
     "knowledge.graph_snapshot.attached": frozenset(
         {"outcome", "node_count", "edge_count", "truncated", "review_policy"}
@@ -237,6 +263,14 @@ EVENT_ATTRIBUTE_SCHEMAS: dict[str, frozenset[str]] = {
     "system.execution.started": frozenset(),
     "system.execution.completed": frozenset(),
     "system.execution.failed": _COMMON_ATTRIBUTES,
+    # 文献深读增强（批次 1）：单篇文档地图注入观测。session_kind 由 scope 闸门
+    # 保证恒为 "paper"；revision_id 为解析修订标识（低基数、非敏感）。
+    "answer.literature_document_map.injected": frozenset(
+        {"session_kind", "section_count", "figure_count", "table_count", "token_count", "revision_id"}
+    ),
+    # 文献检索证据重排（批次 4）：用量计量。applied 布尔、reason 低基数（截断 64）、
+    # evidence_count/duration_ms 纯计数。
+    "answer.literature_evidence_reranked": frozenset({"applied", "evidence_count", "duration_ms", "reason"}),
 }
 
 # 预留/兼容事件：登记在 schema 但当前无发射点。
@@ -327,11 +361,17 @@ EVENT_EMITTER_INDEX: dict[str, tuple[tuple[str, str], ...]] = {
     "knowledge.figure_projection.suppressed": (
         ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.figure_projection."),
     ),
+    "knowledge.source_reference.completed": (
+        ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.source_reference.completed"),
+    ),
     # 图表锚点（ADR-0008）：chat 层在 citation_ready v3 载荷构建时发射
     "knowledge.figure_ref.resolved": (("services/chat_service.py", "knowledge.figure_ref."),),
     "knowledge.figure_ref.unresolved": (("services/chat_service.py", "knowledge.figure_ref."),),
     "knowledge.figure_claim.validated": (("services/chat_service.py", "knowledge.figure_claim.validated"),),
     "knowledge.table_claim.validated": (("services/chat_service.py", "knowledge.table_claim.validated"),),
+    "knowledge.figure_table_publication.completed": (
+        ("services/chat_service.py", "knowledge.figure_table_publication.completed"),
+    ),
     "knowledge.graph_snapshot.attached": (
         ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.graph_snapshot."),
     ),
@@ -346,6 +386,14 @@ EVENT_EMITTER_INDEX: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "knowledge.document_scope.unresolved": (
         ("knowledge/orchestration/retrieval_orchestrator.py", "knowledge.document_scope."),
+    ),
+    # 文献深读增强（批次 1）：发射点在 services/chat_service（services 层可安全 import literature）
+    "answer.literature_document_map.injected": (
+        ("services/chat_service.py", "answer.literature_document_map.injected"),
+    ),
+    # 文献深读增强（批次 4）：检索证据后置重排发射点
+    "answer.literature_evidence_reranked": (
+        ("knowledge/rendering/evidence_rerank.py", "answer.literature_evidence_reranked"),
     ),
 }
 

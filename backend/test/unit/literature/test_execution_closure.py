@@ -2571,3 +2571,60 @@ async def test_manual_trash_audits_and_roundtrips(env):
         paper = await db.get(LiteraturePaper, 1)
         assert paper.trashed_at is None and paper.trashed_by is None and paper.trashed_reason is None
         assert (await client.get(f"/api/literature/papers/{RID}")).status_code == 200, "恢复后立即回到可见集"
+
+
+async def test_reconcile_dry_run_previews_and_tenant_scopes(env, monkeypatch):
+    """新③：手动对账 dry_run 只计数不修复；tenant_id 传入作为 HTTP 边界。"""
+    from yuxi.literature import reconcile as lit_reconcile
+    from yuxi.storage.postgres.models_knowledge import KnowledgeFile, LiteratureSourceEvent
+
+    db, _, _, _ = env
+    # env 未建 knowledge_files / literature_source_events（reconcile 查询依赖）；就地补建
+    await db.run_sync(
+        lambda session: (
+            KnowledgeFile.__table__.create(session.connection(), checkfirst=True),
+            LiteratureSourceEvent.__table__.create(session.connection(), checkfirst=True),
+        )
+    )
+    db.add(
+        KnowledgeFile(
+            id=1,
+            kb_id="kb-closure",
+            file_id="file-closure",
+            filename="a.pdf",
+            active_parse_revision_id=REVISION,
+        )
+    )
+    # 对账只认 scientific_pdf_* 契约版本（env fixture 默认 pipeline_version=test）
+    from yuxi.storage.postgres.models_knowledge import KnowledgeParseRevision as _KPR
+
+    revision_row = await db.get(_KPR, 1)
+    revision_row.pipeline_version = "scientific_pdf_test"
+    await db.commit()
+    repaired = []
+
+    async def fake_register(revision_id, *, enqueue_render=True):
+        repaired.append(revision_id)
+        return {"status": "REGISTERED"}
+
+    monkeypatch.setattr(lit_reconcile, "register_scientific_revision", fake_register)
+    # env 已登记 paper 但无渲染行 → "缺渲染"即为待修项（group by 单 revision 计 1）
+    pending = await lit_reconcile.reconcile_scientific_literature_papers(limit=10, dry_run=True, tenant_id=TENANT)
+    assert pending == 1 and repaired == [], "dry_run 只计数，不得触达修复"
+    # 再破坏登记（paper 与 revision 脱钩）：仍单 revision 计 1，且依旧不修复
+    paper = await db.get(LiteraturePaper, 1)
+    paper.source_revision_id = "sir_orphan"
+    await db.commit()
+    pending = await lit_reconcile.reconcile_scientific_literature_papers(limit=10, dry_run=True, tenant_id=TENANT)
+    assert pending == 1 and repaired == []
+    # 执行模式真正修复（register 被调用）
+    done = await lit_reconcile.reconcile_scientific_literature_papers(limit=10, tenant_id=TENANT)
+    assert done == 1 and repaired
+
+
+def test_search_cache_pattern_is_tenant_scoped():
+    """新④：检索缓存管理默认租户前缀，global 仅显式请求（router 层权限再校验）。"""
+    from server.routers.literature_router import _search_cache_pattern
+
+    assert _search_cache_pattern(7) == "yuxi:lit:search:t7:*"
+    assert _search_cache_pattern(7, global_scope=True) == "yuxi:lit:search:*"

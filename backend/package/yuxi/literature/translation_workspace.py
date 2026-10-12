@@ -10,18 +10,18 @@ import logging
 import re
 from datetime import timedelta
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 
 from yuxi.literature.access import access_scope
-from yuxi.literature.translate.settings import require_owner, translation_options, model_options, options_digest
-from yuxi.literature.translate.service import (
-    _translate_document,
-    _is_refusal,
-    renew_translation_lease,
-    _newer_translation_submission,
-)
 from yuxi.literature.provenance import StaleLiteratureInput
 from yuxi.literature.reading.service import RENDER_BUCKET
+from yuxi.literature.translate.service import (
+    _is_refusal,
+    _newer_translation_submission,
+    _translate_document,
+    renew_translation_lease,
+)
+from yuxi.literature.translate.settings import model_options, options_digest, require_owner, translation_options
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import LiteratureTranslationTask
@@ -54,8 +54,8 @@ async def enqueue_task(
     if task_kind == "draft":
         options = {**options, "source_title": source["title"]}
     async with pg_manager.get_async_session_context() as db:
-        from yuxi.storage.postgres.models_business import User
         from yuxi.literature.llm_gateway import freeze_literature_policy
+        from yuxi.storage.postgres.models_business import User
 
         await db.execute(select(User.uid).where(User.uid == uid).with_for_update())
         rows = list(
@@ -193,8 +193,8 @@ async def process_literature_translation_task(ctx: dict, task_id: int) -> dict |
         attempt = row.attempt
         await db.commit()
     try:
-        from yuxi.literature.workflow import _request_user
         from yuxi.literature.llm_gateway import governed_runtime, policy_for_job_attempt
+        from yuxi.literature.workflow import _request_user
 
         user = await _request_user(row)
         async with access_scope(user, int(row.tenant_id)):
@@ -340,8 +340,8 @@ async def _source(tenant_id: int, kind: str, ref: str) -> tuple[dict, str]:
 
         source = await read_draft(tenant_id, ref)
     else:
+        from yuxi.literature.access import build_access, current_access
         from yuxi.literature.reader_bundle import get_reader_bundle
-        from yuxi.literature.access import current_access, build_access
 
         scope = current_access()
         if scope is None or ref not in (await build_access(scope.user, tenant_id)).rids:
@@ -360,13 +360,13 @@ async def _source(tenant_id: int, kind: str, ref: str) -> tuple[dict, str]:
 
 async def probe_sources(tenant_id: int) -> list[dict]:
     """Bounded corpus inventory sorted by size, ACL before any text reads."""
-    from yuxi.literature.drafts import list_drafts
     from yuxi.literature.access import paper_visibility
+    from yuxi.literature.drafts import list_drafts
     from yuxi.literature.original_search import current_projection
     from yuxi.storage.postgres.models_knowledge import (
-        LiteraturePaper,
-        LiteratureOriginalSearch,
         KnowledgeParseArtifact,
+        LiteratureOriginalSearch,
+        LiteraturePaper,
     )
 
     drafts = {item["revision_id"]: item for item in await list_drafts(tenant_id) if item["ready"]}

@@ -25,8 +25,8 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from yuxi.knowledge.utils.text_utils import validate_markdown_quality
 from yuxi.knowledge.utils import is_minio_url, parse_minio_url
+from yuxi.knowledge.utils.text_utils import validate_markdown_quality
 from yuxi.literature.contracts import READER_RENDER_DUAL_VERSION, READER_RENDER_VERSION
 from yuxi.literature.reading.process import (
     DEFAULT_RENDER_TIMEOUT_S,
@@ -38,9 +38,9 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseArtifact,
     KnowledgeParseRevision,
-    LiteratureReaderRender,
-    LiteraturePaper,
     LiteratureArtifactRevision,
+    LiteraturePaper,
+    LiteratureReaderRender,
 )
 from yuxi.utils.datetime_utils import utc_now
 

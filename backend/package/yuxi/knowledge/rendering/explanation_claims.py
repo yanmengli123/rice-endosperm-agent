@@ -201,11 +201,7 @@ def _drop_dangling_grounding_fragments(text: str) -> tuple[str, int]:
     kept: list[str] = []
     for line in str(text or "").splitlines():
         stripped = line.strip()
-        if (
-            stripped
-            and not stripped.startswith(("【", "（注：", "###"))
-            and _DANGLING_CLAIM_TAIL.search(stripped)
-        ):
+        if stripped and not stripped.startswith(("【", "（注：", "###")) and _DANGLING_CLAIM_TAIL.search(stripped):
             removed += 1
             continue
         kept.append(line)

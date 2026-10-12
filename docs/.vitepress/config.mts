@@ -76,6 +76,8 @@ export default defineConfig({
           { text: '版本变更记录', link: '/develop-guides/changelog' },
           { text: '界面设计规范', link: '/develop-guides/design' },
           { text: '测试规范', link: '/develop-guides/testing-guidelines' },
+          { text: 'VOSviewer 图谱分析接入', link: '/develop-guides/vosviewer-export-contract' },
+          { text: 'PDF 多模态原件证据', link: '/develop-guides/pdf-physical-evidence' },
         ]
       }
     ],

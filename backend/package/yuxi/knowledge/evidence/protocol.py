@@ -114,6 +114,20 @@ def _normalize_fragments(fragments: Any) -> list[dict[str, Any]]:
                 "coordinate_space": str(fragment.get("coordinate_space") or "pdf_points"),
                 "origin": FRAGMENT_ORIGIN_TOP_LEFT,
                 "rotation": int(fragment.get("rotation") or 0),
+                **{
+                    key: fragment[key]
+                    for key in (
+                        "region_id",
+                        "coordinate_frame",
+                        "canonical_to_pdf",
+                        "page_label",
+                        "page_width",
+                        "page_height",
+                        "precision",
+                        "quads",
+                    )
+                    if key in fragment
+                },
             }
         )
     return result
@@ -168,6 +182,11 @@ def build_evidence_dto(
         else []
     )
     identity_fragment = fragments[0] if fragments else None
+    span_locator = (
+        dict((getattr(span, "metadata_json", None) or {}).get("pdf_locator") or {}) if span is not None else {}
+    )
+    if span_locator.get("fragments"):
+        fragments = _normalize_fragments(span_locator["fragments"])
     identity_page_number = int(identity_fragment["page_number"]) if identity_fragment else int(anchor_page or 0)
     identity_bbox = identity_fragment["bbox"] if identity_fragment else getattr(anchor, "bbox", None)
 
@@ -194,6 +213,7 @@ def build_evidence_dto(
             "index_revision_id": provenance.get("index_revision_id"),
             "anchor_id": getattr(anchor, "anchor_id", None),
             "span_id": getattr(span, "span_id", None) if span is not None else None,
+            "span_evidence_id": getattr(span, "evidence_id", None) if span is not None else None,
         },
         "semantic_location": semantic_location
         or _build_semantic_location(anchor=anchor, provenance=provenance, span=span),
@@ -213,6 +233,11 @@ def build_evidence_dto(
             "confidence": float(getattr(anchor, "confidence", 0.0) or 0.0),
             "locatable": bool(getattr(anchor, "locatable", False)),
             "fragments": fragments,
+            "precision": span_locator.get("precision") or "REGION",
+            "highlight": {
+                "quote": getattr(span, "quote", None),
+                "precision": span_locator.get("precision") or "REGION",
+            },
         },
         "verification": verification,
     }
@@ -235,4 +260,5 @@ def _build_semantic_location(*, anchor: Any, provenance: dict[str, Any], span: A
             location["container_label"] = span.container_label
         if getattr(span, "row_key", None):
             location["row_key"] = span.row_key
+        location["context"] = dict((getattr(span, "metadata_json", None) or {}).get("context") or {})
     return location

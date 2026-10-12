@@ -17,9 +17,9 @@
 
 from __future__ import annotations
 
-import re
 import hashlib
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any
@@ -169,10 +169,7 @@ class ReviewItem:
             page=int(payload.get("page", 0) or 0),
             ai_verdict=str(payload.get("ai_verdict") or ""),
             # 上游取值顺序：PaddleOCR 块优先，回落 MinerU 块（review_service.py:216）
-            bbox=normalize_bbox(
-                paddle.get("bbox") or mineru.get("bbox") or payload.get("bbox")
-            )
-            or (),
+            bbox=normalize_bbox(paddle.get("bbox") or mineru.get("bbox") or payload.get("bbox")) or (),
         )
 
     def to_payload(self) -> dict[str, Any]:

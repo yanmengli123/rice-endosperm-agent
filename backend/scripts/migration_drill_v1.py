@@ -8,6 +8,7 @@ Operates only on scratch databases (yuxi_mig_drill / yuxi_mig_upgrade).
 Use: prove Fresh→0018 and 0016→0017→0018 upgrade paths, old-data preservation,
 application-boot probes after upgrade, and re-run idempotency.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -55,30 +56,63 @@ EXPECTED_VERSIONS = [v for v, _ in pg_manager._VERSIONED_MIGRATIONS]
 # (table, column, expects_not_null) — lease/heartbeat/retry/identity/shadow critical columns
 CRITICAL_COLUMNS = {
     "knowledge_parse_revisions": [
-        ("revision_id", True), ("tenant_id", True), ("source_sha256", True), ("parser_fingerprint", True),
-        ("pipeline_version", True), ("status", True), ("attempt", True), ("lease_owner", False),
-        ("lease_expires_at", False), ("error_message", False), ("reused_from_revision_id", False),
+        ("revision_id", True),
+        ("tenant_id", True),
+        ("source_sha256", True),
+        ("parser_fingerprint", True),
+        ("pipeline_version", True),
+        ("status", True),
+        ("attempt", True),
+        ("lease_owner", False),
+        ("lease_expires_at", False),
+        ("error_message", False),
+        ("reused_from_revision_id", False),
     ],
     "knowledge_parse_stages": [
-        ("stage_id", True), ("stage_name", True), ("status", True), ("attempt", True),
-        ("lease_owner", False), ("lease_expires_at", False), ("input_fingerprint", True),
-        ("output_artifact_id", False), ("error_code", False), ("error_detail", False),
+        ("stage_id", True),
+        ("stage_name", True),
+        ("status", True),
+        ("attempt", True),
+        ("lease_owner", False),
+        ("lease_expires_at", False),
+        ("input_fingerprint", True),
+        ("output_artifact_id", False),
+        ("error_code", False),
+        ("error_detail", False),
     ],
     "knowledge_document_identity_cache": [
-        ("tenant_id", True), ("source_sha256", True), ("parser_fingerprint", True),
-        ("canonical_revision_id", False), ("status", True),
+        ("tenant_id", True),
+        ("source_sha256", True),
+        ("parser_fingerprint", True),
+        ("canonical_revision_id", False),
+        ("status", True),
     ],
     "knowledge_parse_artifacts": [
-        ("artifact_id", True), ("revision_id", True), ("kind", True), ("object_uri", True),
-        ("sha256", True), ("size_bytes", True),
+        ("artifact_id", True),
+        ("revision_id", True),
+        ("kind", True),
+        ("object_uri", True),
+        ("sha256", True),
+        ("size_bytes", True),
     ],
     "knowledge_index_revisions": [
-        ("parse_revision_id", True), ("chunker_fingerprint", True), ("status", True),
-        ("chunk_count", True), ("token_count", True), ("activated_at", False),
+        ("parse_revision_id", True),
+        ("chunker_fingerprint", True),
+        ("status", True),
+        ("chunk_count", True),
+        ("token_count", True),
+        ("activated_at", False),
     ],
     "evidence_anchors": [
-        ("anchor_id", True), ("page", True), ("bbox", True), ("word_start", True), ("word_end", True),
-        ("quote_hash", True), ("prefix_hash", True), ("suffix_hash", True), ("quote", True),
+        ("anchor_id", True),
+        ("page", True),
+        ("bbox", True),
+        ("word_start", True),
+        ("word_end", True),
+        ("quote_hash", True),
+        ("prefix_hash", True),
+        ("suffix_hash", True),
+        ("quote", True),
     ],
     "article_references": [("reference_id", True), ("title", False), ("doi", False)],
     "citation_mentions": [("reference_id", False), ("mention_text", False), ("anchor_id", False)],
@@ -125,13 +159,17 @@ async def verify_v1_schema() -> dict:
     async with pg_manager.get_async_session_context() as session:
         # 1) tables exist
         rows = (
-            await session.execute(
-                text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema='public' AND table_name IN :names"
-                ).bindparams(bindparam("names", expanding=True, value=tuple(V1_TABLES)))
+            (
+                await session.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema='public' AND table_name IN :names"
+                    ).bindparams(bindparam("names", expanding=True, value=tuple(V1_TABLES)))
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         checks["tables_exist"] = sorted(rows) == sorted(V1_TABLES)
 
         # 2) knowledge_files V1 columns exist (nullable)
@@ -156,8 +194,7 @@ async def verify_v1_schema() -> dict:
                 row = (
                     await session.execute(
                         text(
-                            "SELECT is_nullable FROM information_schema.columns "
-                            "WHERE table_name=:t AND column_name=:c"
+                            "SELECT is_nullable FROM information_schema.columns WHERE table_name=:t AND column_name=:c"
                         ),
                         {"t": table, "c": column_name},
                     )
@@ -176,7 +213,9 @@ async def verify_v1_schema() -> dict:
                         bindparam("names", expanding=True, value=tuple(EXPECTED_CONSTRAINTS))
                     )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         checks["constraints"] = found == EXPECTED_CONSTRAINTS
         if found != EXPECTED_CONSTRAINTS:
@@ -185,10 +224,14 @@ async def verify_v1_schema() -> dict:
         # 5) indexes
         found_idx = set(
             (
-                await session.execute(text("SELECT indexname FROM pg_indexes WHERE indexname IN :names").bindparams(
-                    bindparam("names", expanding=True, value=tuple(EXPECTED_INDEXES))
-                ))
-            ).scalars().all()
+                await session.execute(
+                    text("SELECT indexname FROM pg_indexes WHERE indexname IN :names").bindparams(
+                        bindparam("names", expanding=True, value=tuple(EXPECTED_INDEXES))
+                    )
+                )
+            )
+            .scalars()
+            .all()
         )
         checks["indexes"] = found_idx == EXPECTED_INDEXES
         if found_idx != EXPECTED_INDEXES:
@@ -201,6 +244,7 @@ async def boot_probes(expect_old_data: bool) -> dict:
     probes: dict = {}
     try:
         import yuxi.services.scientific_pdf_ingest_service  # noqa: F401  module load = service construction
+
         probes["ingest_service_import"] = True
     except Exception as exc:
         probes["ingest_service_import"] = f"ERR {type(exc).__name__}: {exc}"
@@ -221,16 +265,20 @@ async def boot_probes(expect_old_data: bool) -> dict:
                 probes[f"orm_{model.__tablename__}_read"] = count == 0 or count > 0
             if expect_old_data:
                 files = (
-                    await session.execute(
-                        select(KnowledgeFile).where(KnowledgeFile.file_id.in_(("file_old_1", "file_old_2")))
+                    (
+                        await session.execute(
+                            select(KnowledgeFile).where(KnowledgeFile.file_id.in_(("file_old_1", "file_old_2")))
+                        )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 probes["old_files_readable"] = len(files) == 2
                 chunks = (
-                    await session.execute(
-                        select(KnowledgeChunk).where(KnowledgeChunk.kb_id == "kb_drill_old")
-                    )
-                ).scalars().all()
+                    (await session.execute(select(KnowledgeChunk).where(KnowledgeChunk.kb_id == "kb_drill_old")))
+                    .scalars()
+                    .all()
+                )
                 probes["old_chunks_readable"] = len(chunks) == 3
                 probes["old_file_status_preserved"] = {f.status for f in files} == {"done", "failed"}
                 probes["old_file_counter_preserved"] = {f.chunk_count for f in files} == {0, 3}
@@ -321,7 +369,9 @@ async def verify_0016_state(applied: list[str]) -> dict:
                 await session.execute(
                     text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         checks["v1_tables_absent"] = not (set(V1_TABLES) & present)
         checks["versions_cap_at_16"] = applied == EXPECTED_VERSIONS[: len(EXPECTED_VERSIONS) - 2]

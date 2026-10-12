@@ -52,8 +52,11 @@ def _patch_pipeline(
     *,
     citations: list[dict],
     direct_locator: dict | None = None,
+    query_log: list[dict] | None = None,
 ):
     async def fake_gateway(*, query_text, scope_snapshot, top_k=12, verbatim=None, file_ids=None):
+        if query_log is not None:
+            query_log.append({"query": query_text, "file_ids": file_ids})
         # 引用池由冻结证据行构建：每条 citation 的物理证据 id 必须能回指一条
         # 已冻结的 gateway 证据行（Locator Authority 出口不变量的前提）。
         return {
@@ -79,7 +82,8 @@ def _patch_pipeline(
             "warnings": [],
         }
 
-    async def fake_citations(_db, rows):
+    async def fake_citations(_db, rows, *, include_section=False):
+        assert include_section is False
         assert rows, "evidence rows must not be empty"
         return citations
 
@@ -109,6 +113,34 @@ _SCOPE = {
     "knowledge_strategy": "KNOWLEDGE_FIRST",
     "members": [{"kb_id": "kb-a", "kb_name": "Paper", "kb_type": "milvus"}],
 }
+
+
+@pytest.mark.asyncio
+async def test_resource_selector_is_not_a_scientific_query_term(monkeypatch):
+    from yuxi.knowledge.planning import document_scope
+
+    raw = '@knowledge:"kb-a" @doc:"file_708e44" OsMYB73 如何调控籽粒表型？'
+    clean = "OsMYB73 如何调控籽粒表型？"
+    queries = []
+    _patch_pipeline(
+        monkeypatch,
+        citations=[_citation("E1", 3, "OsMYB73 regulates grain phenotypes.")],
+        query_log=queries,
+    )
+
+    async def fake_scope(_db, *, question, kb_ids):
+        assert question == raw
+        return document_scope.DocumentScope(
+            status="RESOLVED", channel="MENTION", file_ids=["file-a"], clean_question=clean
+        )
+
+    monkeypatch.setattr(document_scope, "resolve_document_scope", fake_scope)
+    contract = await retrieval_orchestrator.prepare_knowledge_context(
+        object(), question=raw, scope_snapshot=_SCOPE, run_id="run-scope", request_id="req-scope"
+    )
+    assert queries and queries[0] == {"query": clean, "file_ids": ["file-a"]}
+    assert contract["retrieval_summary"]["query"] == clean
+    assert "file_708e44" not in " ".join(contract["warnings"])
 
 
 @pytest.mark.asyncio
@@ -179,7 +211,8 @@ async def test_full_scope_duplicate_cannot_be_hidden_by_top_k(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_figure_caption_direct_binding_cannot_be_overwritten_by_discussion_page(monkeypatch):
+@pytest.mark.parametrize("question", [None, "请解释 Figure 3 的粒型表型与机制，并展示对应原图。"])
+async def test_figure_caption_direct_binding_cannot_be_overwritten_by_discussion_page(monkeypatch, question):
     """Figure 题注物理绑定是终局；正文复述不能用引用池把第 7 页改成第 5 页。"""
     caption = "Figure 3 Rice grain starch physicochemical characteristics in ZH11 and cr-myb73."
     direct = {
@@ -216,7 +249,7 @@ async def test_figure_caption_direct_binding_cannot_be_overwritten_by_discussion
 
     contract = await retrieval_orchestrator.prepare_knowledge_context(
         object(),
-        question=f"{caption} 这段题注在哪一页？",
+        question=question or f"{caption} 这段题注在哪一页？",
         scope_snapshot=_SCOPE,
         run_id="run-figure-authority",
         request_id="req-figure-authority",
@@ -510,7 +543,8 @@ async def test_bifc_exact_anchor_is_frozen_into_answer_evidence(monkeypatch: pyt
     }
     _patch_pipeline(monkeypatch, citations=[], direct_locator=direct)
 
-    async def citations_from_frozen_evidence(_db, rows):
+    async def citations_from_frozen_evidence(_db, rows, *, include_section=False):
+        assert include_section is False
         assert rows[0]["retrieval_channel"] == "QUOTE_LOCATOR"
         assert rows[0]["page_number"] == 15
         assert rows[0]["evidence_quote"] == quote

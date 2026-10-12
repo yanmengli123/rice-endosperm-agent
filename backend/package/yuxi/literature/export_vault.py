@@ -17,8 +17,8 @@
 
 from __future__ import annotations
 
-import io
 import hashlib
+import io
 import json
 import re
 import zipfile
@@ -27,15 +27,15 @@ from urllib.parse import parse_qs, urlparse
 from sqlalchemy import func, select
 
 from yuxi.literature.access import paper_visibility
-from yuxi.literature.provenance import current_job, TRANSLATE_VERSION
+from yuxi.literature.provenance import TRANSLATE_VERSION, current_job
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
+    LiteratureArtifactRevision,
     LiteratureCompileJob,
     LiteraturePaper,
     LiteratureVariant,
-    LiteratureArtifactRevision,
 )
 
 #: 导出文件名映射（Yuxi → Obsidian 惯例）

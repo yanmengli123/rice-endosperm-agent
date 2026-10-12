@@ -667,10 +667,24 @@ async def test_search_captions_by_observation_matches_entities(caption_session):
 
     # 借用现有 fixture 的 Figure 4/5 题注（含 OsMYB73）
     # 先添加含目标词的题注
-    await _add_caption(caption_session, row_id=10, revision_id="pr_a", file_id="file_a",
-                       container_label="Figure 5", quote=f"Figure 5 OsMYB73 gene expression qRT-PCR analysis", page=10)
-    await _add_caption(caption_session, row_id=11, revision_id="pr_a", file_id="file_a",
-                       container_label="Figure 4", quote=f"Figure 4 OsMYB73 protein structure prediction", page=9)
+    await _add_caption(
+        caption_session,
+        row_id=10,
+        revision_id="pr_a",
+        file_id="file_a",
+        container_label="Figure 5",
+        quote=f"Figure 5 OsMYB73 gene expression qRT-PCR analysis",
+        page=10,
+    )
+    await _add_caption(
+        caption_session,
+        row_id=11,
+        revision_id="pr_a",
+        file_id="file_a",
+        container_label="Figure 4",
+        quote=f"Figure 4 OsMYB73 protein structure prediction",
+        page=9,
+    )
     await caption_session.commit()
     observation = SimpleNamespace(
         visible_entities=["OsMYB73"],

@@ -21,10 +21,10 @@ from yuxi.literature.access import access_scope, current_access, paper_visibilit
 from yuxi.literature.provenance import current_job
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
+    LiteratureAttachment,
     LiteratureCompileJob,
     LiteratureNavigationIndex,
     LiteraturePaper,
-    LiteratureAttachment,
 )
 from yuxi.utils.datetime_utils import utc_now
 
@@ -145,8 +145,8 @@ async def enqueue_navigation_index(tenant_id: int, *, requested_by: str, model_s
     if not model_spec:
         raise ValueError("未配置 Embedding 模型")
     async with pg_manager.get_async_session_context() as session:
-        from yuxi.storage.postgres.models_business import User
         from yuxi.literature.llm_gateway import freeze_literature_policy
+        from yuxi.storage.postgres.models_business import User
 
         # Serialize the actor's identical-corpus submissions before reuse or
         # quota policy creation. Cross-actor snapshots retain their own policy.
@@ -247,11 +247,11 @@ async def process_literature_navigation_index(ctx: dict, index_id: str):
         row.collection_name = f"literature_nav_{row.tenant_id}_{index_id[4:]}_a{attempt}"
         await session.commit()
     try:
-        from yuxi.literature.workflow import _request_user
         from yuxi.literature import embedding_gateway
         from yuxi.literature.llm_gateway import policy_for_job_attempt
-        from yuxi.storage.minio import get_minio_client
         from yuxi.literature.reading.service import RENDER_BUCKET
+        from yuxi.literature.workflow import _request_user
+        from yuxi.storage.minio import get_minio_client
 
         user = await _request_user(row)
         async with access_scope(user, int(row.tenant_id)):

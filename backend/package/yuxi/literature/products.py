@@ -1,18 +1,20 @@
 """Manual note/translation edits are CAS-protected frozen derived revisions."""
 
 import hashlib
+
 from sqlalchemy import select
+
 from yuxi.literature import artifacts
-from yuxi.literature.access import paper_visibility, current_access, build_access
+from yuxi.literature.access import build_access, current_access, paper_visibility
 from yuxi.literature.provenance import current_job
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
-    LiteraturePaper,
-    LiteratureCompileJob,
-    LiteratureVariant,
     LiteratureArtifactRevision,
+    LiteratureCompileJob,
+    LiteraturePaper,
+    LiteratureVariant,
 )
 
 KINDS = {"note_L1", "note_L2", "note_L3", "variant_zh", "variant_en_zh", "variant_summary"}

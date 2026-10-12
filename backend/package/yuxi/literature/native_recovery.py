@@ -11,13 +11,13 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import subprocess
 import tarfile
 import tempfile
 import uuid
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes

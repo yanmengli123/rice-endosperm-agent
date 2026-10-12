@@ -30,9 +30,7 @@ async def test_finished_chunk_gets_artifacts_when_present(monkeypatch):
     )
     chunk = await _attach_run_artifacts_to_finished_chunk("run-1", {"status": "finished", "request_id": "req"})
     assert chunk["status"] == "finished"
-    assert [item["virtual_path"] for item in chunk["artifacts"]] == [
-        "/home/gem/user-data/outputs/mcp_results/a.json"
-    ]
+    assert [item["virtual_path"] for item in chunk["artifacts"]] == ["/home/gem/user-data/outputs/mcp_results/a.json"]
     # 原 chunk 不被原地修改（调用方持有的 finished chunk 保持可复用）
     original = {"status": "finished"}
     enriched = await _attach_run_artifacts_to_finished_chunk("run-1", original)

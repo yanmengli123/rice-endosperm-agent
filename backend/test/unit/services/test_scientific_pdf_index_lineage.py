@@ -27,14 +27,10 @@ def _versioned_id(file_id: str, revision_id: str, index: int) -> str:
 
 async def test_healthy_lineage_has_no_problems(monkeypatch):
     revision_id = "sir_healthy"
-    chunks = [
-        _ChunkStub(_versioned_id("file1", revision_id, i), revision_id) for i in range(3)
-    ]
+    chunks = [_ChunkStub(_versioned_id("file1", revision_id, i), revision_id) for i in range(3)]
     _patch_chunks(monkeypatch, chunks)
 
-    report = await inspect_file_index_lineage(
-        file_id="file1", index_revision_id=revision_id, expected_chunk_count=3
-    )
+    report = await inspect_file_index_lineage(file_id="file1", index_revision_id=revision_id, expected_chunk_count=3)
 
     assert report["problems"] == []
     assert report["matched_chunks"] == 3
@@ -47,9 +43,7 @@ async def test_dangling_pointer_reports_no_versioned_chunks(monkeypatch):
     chunks = [_ChunkStub(f"file1_chunk_{i}", None) for i in range(21)]
     _patch_chunks(monkeypatch, chunks)
 
-    report = await inspect_file_index_lineage(
-        file_id="file1", index_revision_id=revision_id, expected_chunk_count=None
-    )
+    report = await inspect_file_index_lineage(file_id="file1", index_revision_id=revision_id, expected_chunk_count=None)
 
     assert report["matched_chunks"] == 0
     assert report["stale_chunks"] == 21
@@ -64,9 +58,7 @@ async def test_count_mismatch_is_a_gate_problem(monkeypatch):
     ]
     _patch_chunks(monkeypatch, chunks)
 
-    report = await inspect_file_index_lineage(
-        file_id="file1", index_revision_id=revision_id, expected_chunk_count=3
-    )
+    report = await inspect_file_index_lineage(file_id="file1", index_revision_id=revision_id, expected_chunk_count=3)
 
     assert any("chunk_count=3" in problem for problem in report["problems"])
 
@@ -76,9 +68,7 @@ async def test_provenance_mismatch_is_a_gate_problem(monkeypatch):
     chunks = [_ChunkStub(_versioned_id("file1", revision_id, 0), "sir_other")]
     _patch_chunks(monkeypatch, chunks)
 
-    report = await inspect_file_index_lineage(
-        file_id="file1", index_revision_id=revision_id, expected_chunk_count=1
-    )
+    report = await inspect_file_index_lineage(file_id="file1", index_revision_id=revision_id, expected_chunk_count=1)
 
     assert any("source_provenance" in problem for problem in report["problems"])
 
@@ -93,9 +83,7 @@ async def test_stale_chunks_alone_are_not_gate_problems(monkeypatch):
     ]
     _patch_chunks(monkeypatch, chunks)
 
-    report = await inspect_file_index_lineage(
-        file_id="file1", index_revision_id=revision_id, expected_chunk_count=2
-    )
+    report = await inspect_file_index_lineage(file_id="file1", index_revision_id=revision_id, expected_chunk_count=2)
 
     assert report["problems"] == []
     assert report["stale_chunks"] == 1

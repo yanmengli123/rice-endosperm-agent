@@ -43,7 +43,7 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils import logger
 
-FIGURE_INGESTOR_VERSION = "figure_ingestor_v4_1"
+FIGURE_INGESTOR_VERSION = "figure_ingestor_v5"
 
 # 与 ScientificPdfPipeline engine_params 一致（图片上传的目标 bucket）
 FIGURE_ASSET_BUCKET = "knowledgebases"
@@ -371,6 +371,7 @@ def _render_region_png(pdf_bytes: bytes, page_index: int, region: tuple[float, f
         if page_index < 0 or page_index >= document.page_count:
             return None
         page = document[page_index]
+        page.set_rotation(0)
         page_rect = page.rect
         clip = fitz.Rect(*region) & page_rect
         if clip.is_empty or clip.width < 20 or clip.height < 20:
@@ -402,6 +403,7 @@ async def persist_figure_index(
     spans: list[Any],
     anchors: list[Any] | None = None,
     pdf_bytes_loader: PdfBytesLoader | None = None,
+    prepared: bool = False,
 ) -> dict[str, Any]:
     """为一个 parse revision 构建 figure_entities / figure_assets（幂等重试）。
 
@@ -416,7 +418,9 @@ async def persist_figure_index(
         asset
         for asset in (article_assets or [])
         if isinstance(asset, dict) and str(asset.get("kind") or "") == "figure" and int(asset.get("page") or 0) >= 1
-    ][:_MAX_ASSETS_PER_REVISION]
+    ]
+    if len(visual_assets) > _MAX_ASSETS_PER_REVISION:
+        raise ValueError("PDF_FIGURE_BUDGET_EXCEEDED")
     summary: dict[str, Any] = {
         "version": FIGURE_INGESTOR_VERSION,
         "entities": 0,
@@ -455,6 +459,17 @@ async def persist_figure_index(
 
     def pair_anchor(block: dict[str, Any]) -> Any | None:
         page_anchors = anchor_by_page.get(block["page"], [])
+        source_matches = [
+            a
+            for a in page_anchors
+            if any(
+                f.get("source_block_id") == block["block_id"]
+                for f in (getattr(a, "fragments", None) or [])
+                if isinstance(f, dict)
+            )
+        ]
+        if len(source_matches) == 1:
+            return source_matches[0]
         if block["bbox"] is not None:
             best, best_score = None, 0.0
             for anchor in page_anchors:
@@ -474,10 +489,9 @@ async def persist_figure_index(
         matched = anchor_by_identity.get((block["page"], block["caption"].strip()))
         if matched is not None:
             return matched
-        unpaired = [item for item in page_anchors if str(item.anchor_id) not in paired_anchor_ids]
-        return unpaired[0] if len(unpaired) == 1 else None
+        return None
 
-    object_by_name = await _resolve_asset_objects(revision)
+    object_by_name = {} if prepared else await _resolve_asset_objects(revision)
     minio_client = None
     pdf_bytes: bytes | None = None
     pdf_loaded = False
@@ -609,7 +623,13 @@ async def persist_figure_index(
             panel_phashes: dict[str, str] = {}
             width = height = 0
             mime = ""
-            if object_name:
+            fingerprint = block["asset"].get("prepared_fingerprint") or {}
+            if fingerprint:
+                object_name = fingerprint["object_name"]
+                asset_sha, asset_phash = fingerprint["asset_sha256"], fingerprint["asset_phash"]
+                panel_phashes = fingerprint["panel_phashes"]
+                width, height, mime = fingerprint["width"], fingerprint["height"], fingerprint["mime"]
+            elif object_name:
                 try:
                     from yuxi.storage.minio.client import get_minio_client
 
@@ -645,27 +665,56 @@ async def persist_figure_index(
                 height=height,
                 bbox=list(block["bbox"]) if block["bbox"] else block["asset"].get("bbox"),
                 page=page,
-                ocr_text=None,
+                ocr_text=block["asset"].get("ocr_text"),
                 # 单块图组即 primary；多块图组先让面积最大的块当 primary，合成整图成功后再让位
                 role=ROLE_PRIMARY if group_index == largest_index else ROLE_PANEL,
                 group_index=group_index,
-                panel_label="",
+                panel_label=block["asset"].get("panel_label") or "",
+                region_id=block["asset"].get("region_id"),
+                locator_metadata=block["asset"].get("locator_metadata") or {},
             )
             session.add(asset_row)
             member_rows.append(asset_row)
 
         # 多块图组：渲染合成整图作为 primary（有原 PDF 且并集几何合理时）；失败只计数
         if len(members) > 1 and label_key:
-            synthetic_row = await _persist_synthetic_whole(
-                session,
-                revision=revision,
-                entity_row=entity_row,
-                entity_key=entity_key,
-                members=members,
-                anchor_id=member_anchor_ids[largest_index] or next((item for item in member_anchor_ids if item), ""),
-                load_pdf=load_pdf,
-                summary=summary,
+            synthetic = next(
+                (m["asset"].get("prepared_synthetic") for m in members if m["asset"].get("prepared_synthetic")), None
             )
+            if prepared:
+                synthetic_row = None
+                if synthetic:
+                    synthetic_row = FigureAssetRecord(
+                        tenant_id=tenant_id,
+                        entity_id=entity_row.id,
+                        parse_revision_id=revision_id,
+                        kb_id=str(revision.kb_id),
+                        asset_key=f"synthetic:{entity_key}",
+                        anchor_id=member_anchor_ids[largest_index],
+                        object_bucket=FIGURE_ASSET_BUCKET,
+                        role=ROLE_PRIMARY,
+                        group_index=-1,
+                        panel_label="",
+                        **synthetic,
+                    )
+                    session.add(synthetic_row)
+                    summary["synthetic_primary"] += 1
+                    summary["assets"] += 1
+                    summary["fingerprinted"] += 1
+                    summary["anchored_assets"] += bool(member_anchor_ids[largest_index])
+                    summary["locator_ready_assets"] += bool(member_anchor_ids[largest_index])
+            else:
+                synthetic_row = await _persist_synthetic_whole(
+                    session,
+                    revision=revision,
+                    entity_row=entity_row,
+                    entity_key=entity_key,
+                    members=members,
+                    anchor_id=member_anchor_ids[largest_index]
+                    or next((item for item in member_anchor_ids if item), ""),
+                    load_pdf=load_pdf,
+                    summary=summary,
+                )
             if synthetic_row is not None:
                 member_rows[largest_index].role = ROLE_PANEL
                 entity_row.asset_count = len(members) + 1
@@ -673,6 +722,138 @@ async def persist_figure_index(
         if label_key and letters >= 2 and len(members) < letters:
             summary["partial_figure_suspected"] += 1
     return summary
+
+
+async def prepare_figure_assets(revision: Any, article: dict, artifacts: list, pdf_bytes: bytes) -> None:
+    """Render, fingerprint and upload before opening the evidence transaction."""
+    if getattr(revision, "sealed_at", None) is not None:
+        raise ValueError("PUBLISHED_PDF_EVIDENCE_IMMUTABLE_CREATE_NEW_REVISION")
+    from types import SimpleNamespace
+    import hashlib
+    from yuxi.knowledge.pdf_evidence.asset_paths import revision_image_prefix
+    from yuxi.storage.minio.client import get_minio_client
+
+    assets = list(article.get("assets") or [])
+    if not assets:
+        return
+    prefix = revision_image_prefix(
+        tenant_id=int(revision.tenant_id), source_sha256=revision.source_sha256, revision_id=revision.revision_id
+    )
+    client = get_minio_client()
+    by_kind = {a.kind: a.content for a in artifacts}
+
+    async def prepare_image(data: bytes, name: str) -> dict:
+        digest = compute_asset_digest(data)
+        object_name = f"{prefix}/{digest[:24]}-{name}"
+        await client.aupload_file(FIGURE_ASSET_BUCKET, object_name, data, content_type="image/png")
+        width, height, mime = image_dimensions(data)
+        return {
+            "object_name": object_name,
+            "asset_sha256": digest,
+            "asset_phash": compute_phash(data) or "",
+            "panel_phashes": compute_panel_phashes(data),
+            "width": width,
+            "height": height,
+            "mime": mime,
+        }
+
+    for asset in assets:
+        data = by_kind.get(asset.get("image_artifact_kind"))
+        if data is None:
+            data = await asyncio.to_thread(
+                _render_region_png, pdf_bytes, int(asset["page_index"]), tuple(asset["bbox"])
+            )
+        if not data:
+            raise ValueError("PDF_REGION_RENDER_FAILED")
+        asset["prepared_fingerprint"] = await prepare_image(data, posixpath.basename(asset["img_path"]))
+    blocks = [
+        {
+            "asset": a,
+            "caption": a.get("caption") or "",
+            "label_key": _entity_key_for_caption(a.get("caption") or ""),
+            "page": a["page"],
+            "page_index": a["page_index"],
+            "bbox": _bbox(a["bbox"]),
+            "img_path": a["img_path"],
+            "block_id": a["block_id"],
+        }
+        for a in assets
+    ]
+    spans = {
+        canonical_figure_label(u.get("container_label") or ""): SimpleNamespace(
+            **{
+                **u,
+                "page_number": next((a["page"] for a in article["anchors"] if a["anchor_id"] == u["anchor_id"]), None),
+            }
+        )
+        for u in article.get("evidence_units", [])
+        if u["evidence_type"] == "caption"
+    }
+    groups = _bind_orphan_captions(
+        group_visual_blocks(blocks),
+        span_by_label=spans,
+        anchors=[SimpleNamespace(**a) for a in article.get("anchors", [])],
+        summary={},
+    )
+    for label, members in groups:
+        # An OCR letter is a panel label only when it occurs in this caption
+        # and is unique within the same verified layout group.
+        caption = next((m["caption"] for m in members if m["label_key"]), "")
+        if not caption and label in spans:
+            caption = spans[label].quote
+        caption_letters = {value.upper() for value in _PANEL_LETTER.findall(caption)}
+        counts = {}
+        for member in members:
+            detected = member["asset"].get("locator_metadata", {}).get("detected_panel_labels", [])
+            letter = detected[0] if len(detected) == 1 else None
+            if letter:
+                counts[letter] = counts.get(letter, 0) + 1
+        for member in members:
+            asset = member["asset"]
+            detected = asset.get("locator_metadata", {}).get("detected_panel_labels", [])
+            letter = detected[0] if len(detected) == 1 else None
+            verified = bool(label and len(members) >= 2 and letter in caption_letters and counts.get(letter) == 1)
+            asset["panel_label"] = letter if verified else ""
+            asset["locator_metadata"]["panel_association"] = "VERIFIED_CAPTION_AND_OCR" if verified else "UNRESOLVED"
+            asset["locator_metadata"]["precision"] = "PANEL" if verified else "REGION"
+        if not label or len(members) < 2 or len({m["page"] for m in members}) != 1:
+            continue
+        box = _union_bbox([m["bbox"] for m in members])
+        data = await asyncio.to_thread(_render_region_png, pdf_bytes, members[0]["page_index"], box)
+        if not data:
+            continue
+        fingerprint = await prepare_image(data, f"synthetic_{re.sub(r'[^A-Za-z0-9]', '_', label)}.png")
+        parent = next(
+            (r for r in article.get("regions", []) if r["region_id"] == members[0]["asset"].get("region_id")), None
+        )
+        region_id = None
+        selector = {"precision": "REGION", "association_status": "GEOMETRY_GROUP"}
+        if parent:
+            region_id = "pr_" + hashlib.sha256(f"{revision.source_sha256}|{label}|{box}".encode()).hexdigest()[:40]
+            selector = {
+                **parent["selector"],
+                **selector,
+                "member_region_ids": [m["asset"]["region_id"] for m in members],
+            }
+            article["regions"].append(
+                {
+                    **parent,
+                    "region_id": region_id,
+                    "source_block_id": f"figure-group:{label}",
+                    "kind": "figure_group",
+                    "bbox": list(box),
+                    "text": caption or None,
+                    "selector": selector,
+                }
+            )
+        members[0]["asset"]["prepared_synthetic"] = {
+            **fingerprint,
+            "bbox": list(box),
+            "page": members[0]["page"],
+            "region_id": region_id,
+            "ocr_text": "\n".join(m["asset"].get("ocr_text") or "" for m in members) or None,
+            "locator_metadata": selector,
+        }
 
 
 async def _persist_synthetic_whole(

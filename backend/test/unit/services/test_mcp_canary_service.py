@@ -191,9 +191,7 @@ async def _async_noop():
 
 def test_contract_probes_cover_sequence_and_all_authority_paths():
     rice_tools = {probe.tool_name for probe in mcp_canary_service.CANARY_CONTRACT_PROBES["ricekb"]}
-    authority_tools = {
-        probe.tool_name for probe in mcp_canary_service.CANARY_CONTRACT_PROBES["gene-authority"]
-    }
+    authority_tools = {probe.tool_name for probe in mcp_canary_service.CANARY_CONTRACT_PROBES["gene-authority"]}
     assert rice_tools == {"ricekb_sequence"}
     assert authority_tools == {
         "ncbi_datasets_gene_report_rest",

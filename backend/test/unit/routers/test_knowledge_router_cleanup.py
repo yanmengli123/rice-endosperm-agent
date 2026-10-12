@@ -830,7 +830,7 @@ async def test_scientific_pdf_add_is_persisted_before_request_returns(monkeypatc
         captured["add"] = (kb_id, item_path, params, operator_id)
         return {"file_id": "file_pdf_1", "filename": "rice.pdf", "status": "uploaded"}
 
-    async def fake_create_or_reuse(*, kb_id: str, file_id: str, operator_id: str):
+    async def fake_create_or_reuse(*, kb_id: str, file_id: str, operator_id: str, processing_mode: str = "activate"):
         captured["revision"] = (kb_id, file_id, operator_id)
         return {
             "revision_id": "spr_1",

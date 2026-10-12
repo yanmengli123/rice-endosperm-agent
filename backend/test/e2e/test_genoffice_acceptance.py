@@ -234,16 +234,20 @@ async def test_real_llm_office_delivery_and_tenant_boundary():
                 if label == "word":
                     async with pg_manager.get_async_session_context() as db:
                         retrievals = (
-                            await db.execute(
-                                select(ToolCall.tool_name)
-                                .join(Message, ToolCall.message_id == Message.id)
-                                .where(
-                                    Message.run_id == run["run_id"],
-                                    ToolCall.status == "success",
-                                    ToolCall.tool_name.in_({"query_knowledge_scope", "search_knowledge_base"}),
+                            (
+                                await db.execute(
+                                    select(ToolCall.tool_name)
+                                    .join(Message, ToolCall.message_id == Message.id)
+                                    .where(
+                                        Message.run_id == run["run_id"],
+                                        ToolCall.status == "success",
+                                        ToolCall.tool_name.in_({"query_knowledge_scope", "search_knowledge_base"}),
+                                    )
                                 )
                             )
-                        ).scalars().all()
+                            .scalars()
+                            .all()
+                        )
                     assert retrievals, "Word acceptance must actually query the knowledge base"
                     case["knowledge_retrieval_tools"] = list(retrievals)
                 assert "Model call failed" not in result.get("output", ""), f"{label}: model reply failed"

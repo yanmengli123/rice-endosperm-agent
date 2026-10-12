@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Awaitable, Callable
+from collections import Counter
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +34,7 @@ from yuxi.storage.postgres.models_knowledge import KnowledgeRetrievalRun
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.logging_config import logger
 
-ORCHESTRATOR_VERSION = "1.1"
+ORCHESTRATOR_VERSION = "1.2"
 
 
 def _merge_gateway_results(
@@ -290,6 +292,48 @@ def _emit_document_scope_trace(retrieval_id: str, scope: Any) -> None:
         title="文献作用域解析",
         summary=summary,
         attributes={"channel": channel, "candidate_count": len(candidates), "file_count": len(file_ids)},
+        resource_refs=[{"type": "knowledge_retrieval", "id": retrieval_id}],
+        visibility="ADMIN",
+    )
+
+
+def _emit_source_reference_trace(retrieval_id: str, contract: dict[str, Any]) -> None:
+    """Emit bounded Figure/Table reference-recall outcomes without source text.
+
+    The trace deliberately stores counts only. Original quotes, labels and
+    physical selectors remain in the frozen retrieval contract so operational
+    dashboards cannot become a second evidence store.
+    """
+    report = contract.get("source_references")
+    if not isinstance(report, dict):
+        return
+    from yuxi.trace import emit_trace
+
+    sources = [item for item in report.get("sources") or [] if isinstance(item, dict)]
+    targets = [target for source in sources for target in source.get("targets") or [] if isinstance(target, dict)]
+    status_counts = Counter(str(target.get("status") or "UNAVAILABLE") for target in targets)
+    status = str(report.get("status") or "AVAILABLE")
+    emit_trace(
+        category="KNOWLEDGE",
+        operation="source_reference",
+        event_type="knowledge.source_reference.completed",
+        span_id=retrieval_id,
+        title="原文图表关联",
+        summary=(
+            f"检查 {len(targets)} 个原文图表提及，核验通过 {status_counts.get('RESOLVED', 0)} 个"
+            if status == "AVAILABLE"
+            else "原文图表关联服务不可用，已失败关闭"
+        ),
+        attributes={
+            "status": status,
+            "source_count": len(sources),
+            "target_count": len(targets),
+            "caption_evidence_count": len(contract.get("evidence") or []),
+            "resolved_count": status_counts.get("RESOLVED", 0),
+            "missing_count": status_counts.get("MISSING", 0),
+            "ambiguous_count": status_counts.get("AMBIGUOUS", 0),
+            "budget_exceeded_count": int(report.get("budget_exceeded") or 0),
+        },
         resource_refs=[{"type": "knowledge_retrieval", "id": retrieval_id}],
         visibility="ADMIN",
     )
@@ -585,6 +629,8 @@ def _build_answer_policy(
 
 def _unlocated_disclosure(*, vision_status: str, locator_reason: str, conservative_only: bool) -> str:
     """UNLOCATED 分因文案：用户拿到的永远是"原因 + 可行动建议"，绝不编页码。"""
+    if vision_status == "UNKNOWN":
+        return "未能在所选文献中唯一核验该原文或图表编号；请确认文献与编号，或粘贴需要定位的原文/题注。"
     if vision_status == "NOT_CONFIGURED":
         return (
             "当前未配置视觉定位模型，无法对图片进行可靠定位；可粘贴图注文字、输入 @ 指定文献，"
@@ -652,7 +698,15 @@ async def prepare_knowledge_context(
     retrieval_id: str | None = None,
     image_bytes: bytes | None = None,
     mention_resolution: dict | None = None,
+    literature_document_map_text: str | None = None,
+    literature_evidence_scorer: Callable[[str, list[dict[str, Any]]], Awaitable[list[float]]] | None = None,
 ) -> dict[str, Any]:
+    from yuxi.knowledge.planning.document_scope import extract_document_mentions
+
+    # Scope tokens are resource selectors, never scientific entities or search
+    # terms. Keep the original solely for deterministic document resolution.
+    raw_question = question
+    question, _ = extract_document_mentions(question)
     retrieval_id = retrieval_id or f"kr_{uuid.uuid4().hex}"
     started_at = utc_now_naive()
     members = [member for member in scope_snapshot.get("members") or [] if isinstance(member, dict)]
@@ -769,11 +823,12 @@ async def prepare_knowledge_context(
     from yuxi.knowledge.planning.document_scope import SCOPE_NONE, resolve_document_scope
 
     document_scope = await resolve_document_scope(
-        db, question=question, kb_ids=[str(member["kb_id"]) for member in raw_members]
+        db, question=raw_question, kb_ids=[str(member["kb_id"]) for member in raw_members]
     )
     contract["document_scope"] = document_scope.public_dict()
     scope_file_ids = document_scope.constraint_file_ids
     locator_question = document_scope.clean_question or question
+    question = locator_question
     if document_scope.status != SCOPE_NONE:
         _emit_document_scope_trace(retrieval_id, document_scope)
 
@@ -1295,6 +1350,19 @@ async def prepare_knowledge_context(
                             *(fallback.get("warnings") or []),
                         ],
                     }
+            # 文献专属会话·检索证据后置重排（批次 4）：仅 paper 会话 + flag 开，
+            # 严格校验 + 拒绝静默 0.5 + 重排后重鉴权；任何失败/闸门关 → 原序。
+            # 必须在 _gateway_contract 之前，使 claim 内顺序、citation 芯片 E# 编号、
+            # 模型可见顺序三者一致，血统不错位。详见 evidence_rerank.py。
+            if result.get("evidence"):
+                from yuxi.knowledge.rendering.evidence_rerank import rerank_literature_evidence
+
+                await rerank_literature_evidence(
+                    result,
+                    question=question,
+                    scope_snapshot=raw_scope_snapshot,
+                    scorer=literature_evidence_scorer,
+                )
             claims, context_evidence = _gateway_contract(result)
             contract.update(
                 {
@@ -1425,6 +1493,8 @@ async def prepare_knowledge_context(
             }
         )
     except Exception as exc:  # noqa: BLE001
+        if scope_snapshot.get("literature_binding") and isinstance(exc, PermissionError):
+            raise
         logger.exception("Knowledge-first retrieval failed: %s", exc)
         contract.update(
             {
@@ -1447,7 +1517,43 @@ async def prepare_knowledge_context(
     # 走失败关闭——模型没有可引用页码，输出门禁仍会剥离其自写的裸页码。
     from yuxi.knowledge.rendering.citation_channel import build_citations_for_contract
 
-    contract["citations"] = await build_citations_for_contract(db, contract.get("evidence") or [])
+    # 引用芯片的 §章节标签只用于文献专属会话（paper）；默认科研问答逐字节不变。
+    paper_mode = bool(
+        scope_snapshot.get("literature_binding")
+        and (scope_snapshot.get("literature_enhancement") or {}).get("deepread_enabled")
+    )
+    contract["citations"] = await build_citations_for_contract(
+        db, contract.get("evidence") or [], include_section=paper_mode
+    )
+    # Expand only physical source references before freezing the contract. No
+    # model-generated label, cross-file search or recursive caption expansion.
+    from yuxi.knowledge.evidence.reference_recall import recall_source_references
+
+    try:
+        async with db.begin_nested():
+            referenced, reference_report = await recall_source_references(
+                db,
+                tenant_id=scope_snapshot.get("tenant_id"),
+                kb_ids=[str(member["kb_id"]) for member in raw_members],
+                file_ids=scope_file_ids,
+                citations=contract["citations"],
+            )
+    except Exception as error:  # noqa: BLE001 - optional expansion cannot discard primary evidence
+        logger.warning(f"source reference recall failed: {type(error).__name__}")
+        referenced, reference_report = (
+            [],
+            {"version": "source-reference-recall.v1", "sources": [], "budget_exceeded": 0, "status": "UNAVAILABLE"},
+        )
+        contract["warnings"].append("原文图表关联暂不可用；本轮只使用已核验的原始检索证据。")
+    contract["source_references"] = reference_report
+    if referenced:
+        for field in ("evidence", "context_evidence"):
+            existing = contract.get(field) or []
+            ids = {item.get("evidence_id") for item in existing}
+            contract[field] = [*[item for item in referenced if item["evidence_id"] not in ids], *existing]
+        contract["citations"] = await build_citations_for_contract(db, contract["evidence"], include_section=paper_mode)
+    if reference_report["budget_exceeded"]:
+        contract["warnings"].append("本轮关联图表超过处理预算，部分图表未展开；请缩小文献或引用范围。")
     logger.info(
         f"CITATION_CHANNEL_PROBE retrieval={retrieval_id} evidence={len(contract.get('evidence') or [])} "
         f"citations={len(contract.get('citations') or [])}"
@@ -1458,7 +1564,10 @@ async def prepare_knowledge_context(
     # 反链解释依据仍来自检索证据本身）。图片附件流的裁决已在 FIGURE_IMAGE
     # 通道完成且终局，同样经此写回 locator_resolution 供门禁与渲染消费。
     if locator_pending and (
-        locator_intent.get("quote_text") or not locator_intent.get("compound") or (image_bytes and direct_locator)
+        locator_intent.get("quote_text")
+        or locator_intent.get("figure_label")
+        or not locator_intent.get("compound")
+        or (image_bytes and direct_locator)
     ):
         from yuxi.knowledge.evidence.quote_locator import resolve_quote_locator_from_citations
 
@@ -1689,6 +1798,15 @@ async def prepare_knowledge_context(
     from yuxi.knowledge.rendering.answer_context_builder import build_answer_output_profile
 
     contract["answer_output"] = build_answer_output_profile(contract)
+    # 文献深读导航块（批次 1）：由 chat_service（services 层，可安全 import
+    # literature）经 literature.deepread_context 构建后以不透明文本传入，此处只
+    # attach 进 contract（knowledge 层永不 import literature，守 ADR-0010 L0-1）。
+    # 地图是 Navigation 平面上下文（build_answer_context 的 AuthorityGate 只校验
+    # evidence 列表，地图不进该列表，永不进 EvidenceEnvelope）；非文献会话时该
+    # 参数为 None，模型上下文逐字节不变。
+    if literature_document_map_text and paper_mode:
+        contract["literature_document_map"] = literature_document_map_text
+        contract["literature_deepread"] = True
     contract["contract_hash"] = _hash_contract(contract)
     await _persist_audit(
         db,
@@ -1701,6 +1819,7 @@ async def prepare_knowledge_context(
         started_at=started_at,
     )
     _emit_knowledge_trace(retrieval_id, contract, started_at)
+    _emit_source_reference_trace(retrieval_id, contract)
     _emit_figure_projection_trace(retrieval_id, contract)
     _emit_graph_snapshot_trace(retrieval_id, contract)
     return contract

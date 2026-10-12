@@ -93,7 +93,7 @@ async def store_revision(
     from yuxi.storage.postgres.models_knowledge import LiteratureArtifactRevision
 
     async with pg_manager.get_async_session_context() as session:
-        from yuxi.literature.access import current_access, build_access
+        from yuxi.literature.access import build_access, current_access
 
         scope = current_access()
         if scope is not None and paper_rid not in (await build_access(scope.user, tenant_id)).rids:
@@ -149,8 +149,8 @@ async def store_revision(
                 )
                 if protected is None or expected_base_uri is _UNSPECIFIED:
                     raise RevisionConflictError("当前版本产物不存在，不能编辑过期产物")
-                from yuxi.storage.postgres.models_knowledge import LiteratureCompileJob, LiteratureVariant
                 from yuxi.literature.provenance import COMPILE_VERSION, TRANSLATE_VERSION
+                from yuxi.storage.postgres.models_knowledge import LiteratureCompileJob, LiteratureVariant
 
                 if kind.startswith("note_"):
                     identity = dict(

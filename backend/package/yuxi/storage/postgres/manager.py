@@ -17,6 +17,8 @@ from yuxi.utils.singleton import SingletonMeta
 # 合并两个 Base
 CombinedBase = declarative_base()
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
+# API/Worker 启动 DDL 共用同一事务锁，且必须先于任何表访问获取。
+SCHEMA_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('yuxi-schema-migrations'))"
 
 # 继承所有表
 for module in [KnowledgeBase, BusinessBase]:
@@ -100,6 +102,7 @@ class PostgresManager(metaclass=SingletonMeta):
         """创建所有表（知识库和业务表）"""
         self._check_initialized()
         async with self.async_engine.begin() as conn:
+            await conn.execute(text(SCHEMA_LOCK_SQL))
             await conn.run_sync(KnowledgeBase.metadata.create_all)
             await conn.run_sync(BusinessBase.metadata.create_all)
         logger.info("PostgreSQL tables created/checked (knowledge + business)")
@@ -108,6 +111,7 @@ class PostgresManager(metaclass=SingletonMeta):
         """创建所有业务数据表"""
         self._check_initialized()
         async with self.async_engine.begin() as conn:
+            await conn.execute(text(SCHEMA_LOCK_SQL))
             await conn.run_sync(BusinessBase.metadata.create_all)
         logger.info("PostgreSQL business tables created/checked")
 
@@ -648,6 +652,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ]
 
         async with self.async_engine.begin() as conn:
+            await conn.execute(text(SCHEMA_LOCK_SQL))
             for stmt in stmts:
                 await conn.execute(text(stmt))
 
@@ -1094,6 +1099,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0077_literature_source_revision_unique", "_migration_0077_literature_source_revision_unique"),
         ("0078_literature_llm_governance", "_migration_0078_literature_llm_governance"),
         ("0079_literature_source_contract_closure", "_migration_0079_literature_source_contract_closure"),
+        ("0080_pdf_physical_evidence", "_migration_0080_pdf_physical_evidence"),
         ("0080_literature_paper_metadata", "_migration_0080_literature_paper_metadata"),
         ("0081_literature_artifacts_workflow", "_migration_0081_literature_artifacts_workflow"),
         ("0082_literature_workflow_execution", "_migration_0082_literature_workflow_execution"),
@@ -1118,7 +1124,353 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0101_literature_translation_generation", "_migration_0101_literature_translation_generation"),
         ("0102_literature_reader_generation", "_migration_0102_literature_reader_generation"),
         ("0103_literature_paper_session_unique", "_migration_0103_literature_paper_session_unique"),
+        ("0104_pdf_physical_integrity", "_migration_0104_pdf_physical_integrity"),
+        ("0105_pdf_evidence_sealing", "_migration_0105_pdf_evidence_sealing"),
+        ("0106_pdf_parser_params", "_migration_0106_pdf_parser_params"),
+        ("0107_pdf_evidence_seal_timestamp", "_migration_0107_pdf_evidence_seal_timestamp"),
+        ("0108_pdf_source_immutability", "_migration_0108_pdf_source_immutability"),
+        ("0109_pdf_figure_sealing", "_migration_0109_pdf_figure_sealing"),
+        ("0110_literature_reference_import", "_migration_0110_literature_reference_import"),
+        ("0111_literature_reference_batches", "_migration_0111_literature_reference_batches"),
+        ("0112_literature_topic_analysis", "_migration_0112_literature_topic_analysis"),
     ]
+
+    async def _migration_0112_literature_topic_analysis(self, conn) -> None:
+        """原始行/不可变语料/私有分析运行。旧批次无行数据时不猜测补齐。"""
+        from yuxi.storage.postgres.models_knowledge import (
+            LiteratureReferenceRecord,
+            LiteratureTopicDocument,
+            LiteratureTopicRun,
+        )
+
+        await conn.execute(
+            text("ALTER TABLE literature_reference_batches ADD COLUMN IF NOT EXISTS source_object VARCHAR(1024)")
+        )
+        for model in (LiteratureReferenceRecord, LiteratureTopicRun, LiteratureTopicDocument):
+            await conn.run_sync(lambda sync_conn, table=model.__table__: table.create(sync_conn, checkfirst=True))
+            await conn.execute(text(f"ALTER TABLE {model.__tablename__} ENABLE ROW LEVEL SECURITY"))
+        for table, root, key in (
+            ("literature_reference_records", "literature_reference_batches", "batch_id"),
+            ("literature_topic_documents", "literature_topic_runs", "run_id"),
+        ):
+            await conn.execute(
+                text(
+                    f"CREATE POLICY {table}_owner ON {table} USING (EXISTS (SELECT 1 FROM {root} b "
+                    f"WHERE b.{key} = {table}.{key} AND b.tenant_id = {table}.tenant_id "
+                    "AND b.tenant_id::text = current_setting('yuxi.tenant_id', true) "
+                    "AND b.created_by = current_setting('yuxi.uid', true)))"
+                )
+            )
+        await conn.execute(
+            text(
+                "CREATE POLICY literature_topic_runs_owner ON literature_topic_runs USING "
+                "(tenant_id::text = current_setting('yuxi.tenant_id', true) "
+                "AND created_by = current_setting('yuxi.uid', true))"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_topic_runs_owner "
+                 "ON literature_topic_runs (tenant_id, created_by, created_at)")
+        )
+
+    async def _migration_0111_literature_reference_batches(self, conn) -> None:
+        """上传回执与成员：同事务、租户复合外键、账号 RLS；无旧数据重解释。"""
+        for statement in (
+            "CREATE TABLE IF NOT EXISTS literature_reference_batches ("
+            "batch_id VARCHAR(64) PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, "
+            "created_by VARCHAR(64) NOT NULL, source_name VARCHAR(512) NOT NULL, source_sha256 VARCHAR(64) NOT NULL, "
+            "format VARCHAR(32) NOT NULL, report_json JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL, "
+            "CONSTRAINT uq_reference_batches_tenant_id UNIQUE(tenant_id, batch_id))",
+            "CREATE TABLE IF NOT EXISTS literature_reference_members ("
+            "batch_id VARCHAR(64) NOT NULL, rid VARCHAR(160) NOT NULL, tenant_id BIGINT NOT NULL, "
+            "PRIMARY KEY (batch_id, rid), "
+            "CONSTRAINT fk_reference_member_batch FOREIGN KEY (tenant_id, batch_id) "
+            "REFERENCES literature_reference_batches(tenant_id, batch_id) ON DELETE CASCADE, "
+            "CONSTRAINT fk_reference_member_paper FOREIGN KEY (tenant_id, rid) "
+            "REFERENCES literature_papers(tenant_id, rid) ON DELETE CASCADE)",
+            "CREATE INDEX IF NOT EXISTS ix_reference_batches_owner "
+            "ON literature_reference_batches(tenant_id, created_by, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_reference_members_tenant_rid "
+            "ON literature_reference_members(tenant_id, rid)",
+            "ALTER TABLE literature_reference_batches ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE literature_reference_members ENABLE ROW LEVEL SECURITY",
+            "CREATE POLICY reference_batches_owner ON literature_reference_batches USING "
+            "(tenant_id::text = current_setting('yuxi.tenant_id', true) AND "
+            "created_by = current_setting('yuxi.uid', true))",
+            "CREATE POLICY reference_members_owner ON literature_reference_members USING (EXISTS "
+            "(SELECT 1 FROM literature_reference_batches b WHERE b.batch_id = literature_reference_members.batch_id "
+            "AND b.tenant_id = literature_reference_members.tenant_id "
+            "AND b.tenant_id::text = current_setting('yuxi.tenant_id', true) "
+            "AND b.created_by = current_setting('yuxi.uid', true)))",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0110_literature_reference_import(self, conn) -> None:
+        """文献清单导入（PubMed/WoS/RIS/EndNote）：pmid 查重键、语言维度、机构底座列。"""
+        for statement in (
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS pmid VARCHAR(32)",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS language VARCHAR(16)",
+            "ALTER TABLE literature_papers ADD COLUMN IF NOT EXISTS affiliations_json JSONB",
+            "CREATE INDEX IF NOT EXISTS ix_literature_papers_tenant_pmid ON literature_papers (tenant_id, pmid)",
+        ):
+            await conn.execute(text(statement))
+
+    async def _migration_0109_pdf_figure_sealing(self, conn) -> None:
+        await conn.execute(
+            text("""
+            CREATE OR REPLACE FUNCTION guard_pdf_figure_seal() RETURNS trigger AS $$
+            DECLARE images JSONB[]; image JSONB; selected_revision VARCHAR(64); sealed TIMESTAMPTZ;
+            BEGIN
+              IF TG_OP = 'UPDATE' THEN images := ARRAY[to_jsonb(OLD), to_jsonb(NEW)];
+              ELSIF TG_OP = 'DELETE' THEN images := ARRAY[to_jsonb(OLD)];
+              ELSE images := ARRAY[to_jsonb(NEW)]; END IF;
+              FOREACH image IN ARRAY images LOOP
+                selected_revision := image->>'parse_revision_id';
+                IF TG_TABLE_NAME = 'figure_assets' THEN
+                  SELECT parse_revision_id INTO selected_revision FROM figure_entities
+                    WHERE id = (image->>'entity_id')::BIGINT;
+                END IF;
+                SELECT sealed_at INTO sealed FROM knowledge_parse_revisions WHERE revision_id = selected_revision;
+                IF sealed IS NOT NULL THEN
+                  RAISE EXCEPTION 'PUBLISHED_PDF_FIGURE_IMMUTABLE' USING ERRCODE = '23514';
+                END IF;
+              END LOOP;
+              IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+              IF TG_TABLE_NAME = 'figure_assets' AND (to_jsonb(NEW)->>'region_id') IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM figure_entities e JOIN pdf_source_regions r ON r.region_id = (to_jsonb(NEW)->>'region_id')
+                  AND r.parse_revision_id = e.parse_revision_id AND r.tenant_id = e.tenant_id
+                WHERE e.id = (to_jsonb(NEW)->>'entity_id')::BIGINT
+              ) THEN
+                RAISE EXCEPTION 'PDF_FIGURE_REGION_REVISION_MISMATCH' USING ERRCODE = '23514';
+              END IF;
+              RETURN NEW;
+            END; $$ LANGUAGE plpgsql
+        """)
+        )
+        for table in ("figure_entities", "figure_assets"):
+            await conn.execute(
+                text(
+                    f"CREATE TRIGGER seal_{table}_published BEFORE INSERT OR UPDATE OR DELETE ON {table} "
+                    "FOR EACH ROW EXECUTE FUNCTION guard_pdf_figure_seal()"
+                )
+            )
+
+    async def _migration_0108_pdf_source_immutability(self, conn) -> None:
+        await conn.execute(
+            text("""
+            CREATE OR REPLACE FUNCTION guard_pdf_artifact_seal() RETURNS trigger AS $$
+            DECLARE selected_revision VARCHAR(64); sealed TIMESTAMPTZ;
+            BEGIN
+              IF TG_OP <> 'INSERT' THEN
+                SELECT sealed_at INTO sealed FROM knowledge_parse_revisions WHERE revision_id = OLD.revision_id;
+                IF sealed IS NOT NULL THEN
+                  RAISE EXCEPTION 'PUBLISHED_PDF_ARTIFACT_IMMUTABLE' USING ERRCODE = '23514';
+                END IF;
+              END IF;
+              IF TG_OP <> 'DELETE' THEN
+                SELECT sealed_at INTO sealed FROM knowledge_parse_revisions WHERE revision_id = NEW.revision_id;
+                IF sealed IS NOT NULL THEN
+                  RAISE EXCEPTION 'PUBLISHED_PDF_ARTIFACT_IMMUTABLE' USING ERRCODE = '23514';
+                END IF;
+              END IF;
+              IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+              RETURN NEW;
+            END; $$ LANGUAGE plpgsql
+        """)
+        )
+        await conn.execute(
+            text(
+                "CREATE TRIGGER seal_pdf_artifacts BEFORE INSERT OR UPDATE OR DELETE ON knowledge_parse_artifacts "
+                "FOR EACH ROW EXECUTE FUNCTION guard_pdf_artifact_seal()"
+            )
+        )
+        await conn.execute(
+            text("""
+            CREATE OR REPLACE FUNCTION guard_pdf_source_identity() RETURNS trigger AS $$
+            BEGIN
+              IF OLD.sealed_at IS NOT NULL AND (
+                  NEW.sealed_at IS DISTINCT FROM OLD.sealed_at OR
+                  NEW.source_sha256 IS DISTINCT FROM OLD.source_sha256 OR
+                  NEW.parser_fingerprint IS DISTINCT FROM OLD.parser_fingerprint OR
+                  NEW.parser_params IS DISTINCT FROM OLD.parser_params OR
+                  NEW.kb_id IS DISTINCT FROM OLD.kb_id OR NEW.file_id IS DISTINCT FROM OLD.file_id OR
+                  NEW.tenant_id IS DISTINCT FROM OLD.tenant_id) THEN
+                RAISE EXCEPTION 'PUBLISHED_PDF_SOURCE_IMMUTABLE' USING ERRCODE = '23514';
+              END IF;
+              RETURN NEW;
+            END; $$ LANGUAGE plpgsql
+        """)
+        )
+        await conn.execute(
+            text(
+                "CREATE TRIGGER seal_pdf_source_identity BEFORE UPDATE ON knowledge_parse_revisions "
+                "FOR EACH ROW EXECUTE FUNCTION guard_pdf_source_identity()"
+            )
+        )
+
+    async def _migration_0107_pdf_evidence_seal_timestamp(self, conn) -> None:
+        await conn.execute(text("ALTER TABLE knowledge_parse_revisions ADD COLUMN IF NOT EXISTS sealed_at TIMESTAMPTZ"))
+        await conn.execute(
+            text(
+                "UPDATE knowledge_parse_revisions SET sealed_at = COALESCE(completed_at, NOW()) "
+                "WHERE sealed_at IS NULL AND status IN "
+                "('INDEXED_FULL', 'INDEXED_CONTENT_ONLY', 'INDEXED_TEXT_ONLY', 'PARSED_ONLY')"
+            )
+        )
+        await conn.execute(
+            text("""
+            CREATE OR REPLACE FUNCTION guard_pdf_evidence_seal() RETURNS trigger AS $$
+            DECLARE images JSONB[]; image JSONB; selected_revision VARCHAR(64); sealed TIMESTAMPTZ; state VARCHAR(32);
+            BEGIN
+              IF TG_OP = 'UPDATE' THEN images := ARRAY[to_jsonb(OLD), to_jsonb(NEW)];
+              ELSIF TG_OP = 'DELETE' THEN images := ARRAY[to_jsonb(OLD)];
+              ELSE images := ARRAY[to_jsonb(NEW)]; END IF;
+              FOREACH image IN ARRAY images LOOP
+                selected_revision := image->>'parse_revision_id';
+                IF TG_TABLE_NAME = 'evidence_span_regions' THEN
+                  SELECT parse_revision_id INTO selected_revision FROM evidence_spans
+                    WHERE id = (image->>'span_record_id')::BIGINT;
+                ELSIF TG_TABLE_NAME = 'pdf_table_cells' THEN
+                  SELECT parse_revision_id INTO selected_revision FROM pdf_tables
+                    WHERE id = (image->>'table_record_id')::BIGINT;
+                END IF;
+                SELECT sealed_at, status INTO sealed, state FROM knowledge_parse_revisions
+                  WHERE revision_id = selected_revision;
+                IF sealed IS NOT NULL OR state IN (
+                    'INDEXED_FULL', 'INDEXED_CONTENT_ONLY', 'INDEXED_TEXT_ONLY', 'PARSED_ONLY') THEN
+                  RAISE EXCEPTION 'PUBLISHED_PDF_EVIDENCE_IMMUTABLE' USING ERRCODE = '23514';
+                END IF;
+              END LOOP;
+              IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+              RETURN NEW;
+            END; $$ LANGUAGE plpgsql
+        """)
+        )
+
+    async def _migration_0106_pdf_parser_params(self, conn) -> None:
+        await conn.execute(text("ALTER TABLE knowledge_parse_revisions ADD COLUMN IF NOT EXISTS parser_params JSONB"))
+
+    async def _migration_0105_pdf_evidence_sealing(self, conn) -> None:
+        await conn.execute(
+            text("""
+            CREATE OR REPLACE FUNCTION guard_pdf_evidence_seal() RETURNS trigger AS $$
+            DECLARE images JSONB[]; image JSONB; selected_revision VARCHAR(64); state VARCHAR(32);
+            BEGIN
+              IF TG_OP = 'UPDATE' THEN images := ARRAY[to_jsonb(OLD), to_jsonb(NEW)];
+              ELSIF TG_OP = 'DELETE' THEN images := ARRAY[to_jsonb(OLD)];
+              ELSE images := ARRAY[to_jsonb(NEW)]; END IF;
+              FOREACH image IN ARRAY images LOOP
+                selected_revision := image->>'parse_revision_id';
+                IF TG_TABLE_NAME = 'evidence_span_regions' THEN
+                  SELECT parse_revision_id INTO selected_revision FROM evidence_spans
+                    WHERE id = (image->>'span_record_id')::BIGINT;
+                ELSIF TG_TABLE_NAME = 'pdf_table_cells' THEN
+                  SELECT parse_revision_id INTO selected_revision FROM pdf_tables
+                    WHERE id = (image->>'table_record_id')::BIGINT;
+                END IF;
+                SELECT status INTO state FROM knowledge_parse_revisions WHERE revision_id = selected_revision;
+                IF state IN ('INDEXED_FULL', 'INDEXED_CONTENT_ONLY', 'INDEXED_TEXT_ONLY', 'PARSED_ONLY') THEN
+                  RAISE EXCEPTION 'PUBLISHED_PDF_EVIDENCE_IMMUTABLE' USING ERRCODE = '23514';
+                END IF;
+              END LOOP;
+              IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+              RETURN NEW;
+            END; $$ LANGUAGE plpgsql
+        """)
+        )
+        for table in (
+            "pdf_source_regions",
+            "pdf_tables",
+            "pdf_table_cells",
+            "evidence_span_regions",
+            "evidence_spans",
+            "evidence_anchors",
+        ):
+            await conn.execute(
+                text(
+                    f"CREATE TRIGGER seal_{table}_published BEFORE INSERT OR UPDATE OR DELETE ON {table} "
+                    "FOR EACH ROW EXECUTE FUNCTION guard_pdf_evidence_seal()"
+                )
+            )
+
+    async def _migration_0104_pdf_physical_integrity(self, conn) -> None:
+        """Database fencing for physical evidence ownership and published regions."""
+        for table, expression in (
+            ("pdf_source_regions", "tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT"),
+            ("pdf_tables", "tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT"),
+            (
+                "evidence_span_regions",
+                "EXISTS (SELECT 1 FROM pdf_source_regions r WHERE r.id = region_record_id "
+                "AND r.tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)",
+            ),
+            (
+                "pdf_table_cells",
+                "EXISTS (SELECT 1 FROM pdf_tables t WHERE t.id = table_record_id "
+                "AND t.tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::BIGINT)",
+            ),
+        ):
+            await conn.execute(text(f"DROP POLICY IF EXISTS p_{table}_tenant ON {table}"))
+            await conn.execute(
+                text(f"CREATE POLICY p_{table}_tenant ON {table} USING ({expression}) WITH CHECK ({expression})")
+            )
+        await conn.execute(
+            text("""
+            CREATE OR REPLACE FUNCTION verify_pdf_physical_binding() RETURNS trigger AS $$
+            BEGIN
+              IF TG_TABLE_NAME = 'evidence_span_regions' THEN
+                IF NOT EXISTS (SELECT 1 FROM evidence_spans s JOIN pdf_source_regions r
+                    ON r.id = NEW.region_record_id WHERE s.id = NEW.span_record_id
+                    AND s.tenant_id = r.tenant_id AND s.parse_revision_id = r.parse_revision_id) THEN
+                  RAISE EXCEPTION 'PDF_SPAN_REGION_REVISION_MISMATCH' USING ERRCODE = '23514';
+                END IF;
+              ELSIF NEW.region_record_id IS NOT NULL THEN
+                IF NOT EXISTS (SELECT 1 FROM pdf_tables t JOIN pdf_source_regions r
+                    ON r.id = NEW.region_record_id WHERE t.id = NEW.table_record_id
+                    AND t.tenant_id = r.tenant_id AND t.parse_revision_id = r.parse_revision_id) THEN
+                  RAISE EXCEPTION 'PDF_CELL_REGION_REVISION_MISMATCH' USING ERRCODE = '23514';
+                END IF;
+              END IF;
+              RETURN NEW;
+            END; $$ LANGUAGE plpgsql
+        """)
+        )
+        for table in ("evidence_span_regions", "pdf_table_cells"):
+            await conn.execute(
+                text(
+                    f"CREATE TRIGGER verify_{table}_binding BEFORE INSERT OR UPDATE ON {table} "
+                    "FOR EACH ROW EXECUTE FUNCTION verify_pdf_physical_binding()"
+                )
+            )
+        await conn.execute(
+            text("""
+            CREATE OR REPLACE FUNCTION guard_pdf_published_regions() RETURNS trigger AS $$
+            DECLARE selected_revision VARCHAR(64); selected_tenant BIGINT; revision_tenant BIGINT; state VARCHAR(32);
+            BEGIN
+              IF TG_OP = 'DELETE' THEN
+                selected_revision := OLD.parse_revision_id; selected_tenant := OLD.tenant_id;
+              ELSE
+                selected_revision := NEW.parse_revision_id; selected_tenant := NEW.tenant_id;
+              END IF;
+              SELECT tenant_id, status INTO revision_tenant, state FROM knowledge_parse_revisions
+                WHERE revision_id = selected_revision;
+              IF state IN ('INDEXED_FULL', 'INDEXED_CONTENT_ONLY', 'INDEXED_TEXT_ONLY', 'PARSED_ONLY') THEN
+                RAISE EXCEPTION 'PUBLISHED_PDF_EVIDENCE_IMMUTABLE' USING ERRCODE = '23514';
+              END IF;
+              IF TG_OP <> 'DELETE' AND selected_tenant IS DISTINCT FROM revision_tenant THEN
+                RAISE EXCEPTION 'PDF_REGION_TENANT_MISMATCH' USING ERRCODE = '23514';
+              END IF;
+              IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+              RETURN NEW;
+            END; $$ LANGUAGE plpgsql
+        """)
+        )
+        for table in ("pdf_source_regions", "pdf_tables"):
+            await conn.execute(
+                text(
+                    f"CREATE TRIGGER guard_{table}_published BEFORE INSERT OR UPDATE OR DELETE ON {table} "
+                    "FOR EACH ROW EXECUTE FUNCTION guard_pdf_published_regions()"
+                )
+            )
 
     async def _migration_0103_literature_paper_session_unique(self, conn) -> None:
         """文献专属会话一户一文一线程。
@@ -1564,6 +1916,47 @@ class PostgresManager(metaclass=SingletonMeta):
                 text(
                     f"CREATE POLICY p_{table}_tenant ON {table} USING "
                     f"(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+                )
+            )
+
+    async def _migration_0080_pdf_physical_evidence(self, conn) -> None:
+        from yuxi.storage.postgres.models_knowledge import (
+            EvidenceSpanRegionRecord,
+            PdfSourceRegionRecord,
+            PdfTableCellRecord,
+            PdfTableRecord,
+        )
+
+        for model in (PdfSourceRegionRecord, EvidenceSpanRegionRecord, PdfTableRecord, PdfTableCellRecord):
+            await conn.run_sync(lambda sync_conn, table=model.__table__: table.create(sync_conn, checkfirst=True))
+        for statement in (
+            "ALTER TABLE knowledge_parse_revisions ADD COLUMN IF NOT EXISTS "
+            "retry_budget_start INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE knowledge_parse_revisions ADD COLUMN IF NOT EXISTS "
+            "retry_generation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE figure_assets ADD COLUMN IF NOT EXISTS region_id VARCHAR(64)",
+            "ALTER TABLE figure_assets ADD COLUMN IF NOT EXISTS locator_metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "CREATE INDEX IF NOT EXISTS ix_figure_assets_region_id ON figure_assets (region_id)",
+        ):
+            await conn.execute(text(statement))
+        for table in ("pdf_source_regions", "pdf_tables"):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_tenant ON {table} USING "
+                    "(tenant_id = current_setting('yuxi.tenant_id', true)::bigint)"
+                )
+            )
+        for table, parent, key in (
+            ("evidence_span_regions", "pdf_source_regions", "region_record_id"),
+            ("pdf_table_cells", "pdf_tables", "table_record_id"),
+        ):
+            await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY p_{table}_tenant ON {table} USING "
+                    f"(EXISTS (SELECT 1 FROM {parent} p WHERE p.id = {table}.{key} "
+                    "AND p.tenant_id = current_setting('yuxi.tenant_id', true)::bigint))"
                 )
             )
 
@@ -4809,7 +5202,7 @@ class PostgresManager(metaclass=SingletonMeta):
         async with self.async_engine.begin() as conn:
             # API 与 Worker 都会在启动时执行迁移。事务级 advisory lock 保证同一数据库
             # 只有一个进程读取/应用版本，避免双方都观察到“未执行”后重复 DDL/INSERT。
-            await conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('yuxi-schema-migrations'))"))
+            await conn.execute(text(SCHEMA_LOCK_SQL))
             await conn.execute(
                 text(
                     "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -4843,6 +5236,11 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS content_hash VARCHAR(128)",
             "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE",
+            # 文献域后台任务独立每日预算（NULL=不限）；幂等 DDL，无数据回填
+            (
+                "ALTER TABLE IF EXISTS tenant_user_entitlements "
+                "ADD COLUMN IF NOT EXISTS daily_literature_task_limit INTEGER"
+            ),
             "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS env JSONB",
             "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS spec JSONB",
             "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS source_type VARCHAR(32)",
@@ -5226,6 +5624,7 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE INDEX IF NOT EXISTS ix_evidence_spans_quote_trgm ON evidence_spans USING gin (quote gin_trgm_ops)",
         ]
         async with self.async_engine.begin() as conn:
+            await conn.execute(text(SCHEMA_LOCK_SQL))
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警
             # 便于运维凭据失效时回溯；DELETE 之后无法再查询这些 Key。
             try:

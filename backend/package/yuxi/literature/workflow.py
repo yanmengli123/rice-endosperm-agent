@@ -216,9 +216,7 @@ async def is_cancel_requested(run_id: str) -> bool:
     """步骤边界的取消探针（读权威状态，不依赖 Redis 信号）。"""
     async with pg_manager.get_async_session_context() as session:
         status = (
-            await session.execute(
-                select(LiteratureWorkflowRun.status).where(LiteratureWorkflowRun.run_id == run_id)
-            )
+            await session.execute(select(LiteratureWorkflowRun.status).where(LiteratureWorkflowRun.run_id == run_id))
         ).scalar_one_or_none()
     return status == "CANCEL_REQUESTED"
 

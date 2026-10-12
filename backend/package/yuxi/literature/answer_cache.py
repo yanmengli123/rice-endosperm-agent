@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+
 from redis.exceptions import RedisError
+
 from yuxi.literature.access import current_access
 
 _CACHE_PREFIX = "yuxi:lit:answer:"
@@ -191,12 +193,13 @@ async def model_cache_identity(request):
     credential/policy references. No API key or internal reasoning is cached.
     """
     from sqlalchemy import select
+
+    from yuxi.literature.access import access_scope
+    from yuxi.literature.search_runtime import search_identity
     from yuxi.services.principal import resolve_tenant_id
     from yuxi.storage.postgres.manager import pg_manager
     from yuxi.storage.postgres.models_business import AgentRun, User, UserModelCredential
-    from yuxi.storage.postgres.models_knowledge import LiteraturePaper, LiteratureAttachment
-    from yuxi.literature.access import access_scope
-    from yuxi.literature.search_runtime import search_identity
+    from yuxi.storage.postgres.models_knowledge import LiteratureAttachment, LiteraturePaper
 
     context = request.runtime.context
     plan = getattr(context, "_turn_execution_plan", None)

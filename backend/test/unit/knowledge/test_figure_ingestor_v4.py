@@ -20,6 +20,7 @@ from yuxi.knowledge.vision.figure_ingestor import (
     _panel_letter_count,
     group_visual_blocks,
     persist_figure_index,
+    prepare_figure_assets,
 )
 from yuxi.storage.postgres.models_knowledge import (
     EvidenceAnchorRecord,
@@ -31,6 +32,38 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 
 pytestmark = [pytest.mark.unit]
+
+
+@pytest.mark.parametrize(
+    "detected,expected",
+    [([[], []], ["", ""]), ([["A"], ["B"]], ["A", "B"]), ([["A"], ["A"]], ["", ""])],
+)
+async def test_panel_verification_requires_unique_observed_labels(v4_session, detected, expected):
+    session, _ = v4_session
+    revision = (await session.execute(select(KnowledgeParseRevision))).scalar_one()
+    assets = [
+        {
+            "kind": "figure",
+            "block_id": f"block-{index}",
+            "img_path": f"images/{index}.png",
+            "page": 5,
+            "page_index": 4,
+            "bbox": [72 + index * 238, 72, 300 + index * 238, 280],
+            "caption": "Figure 2 (a) Grain length. (b) Grain width." if index == 0 else "",
+            "panel_label": "AB"[index],
+            "locator_metadata": {"detected_panel_labels": labels, "precision": "PANEL"},
+        }
+        for index, labels in enumerate(detected)
+    ]
+    article = {"assets": assets, "anchors": [], "evidence_units": [], "regions": []}
+    await prepare_figure_assets(revision, article, [], _tiny_pdf())
+    assert [asset["panel_label"] for asset in assets] == expected
+    for asset, letter in zip(assets, expected, strict=True):
+        assert asset["locator_metadata"]["panel_association"] == (
+            "VERIFIED_CAPTION_AND_OCR" if letter else "UNRESOLVED"
+        )
+        assert asset["locator_metadata"]["precision"] == ("PANEL" if letter else "REGION")
+
 
 _CAPTION = (
     "Figure 2 Grain phenotypes of ZH11 and cr-myb73. (a) Grain length. (b) Grain width. "

@@ -21,7 +21,14 @@ async def session():
     async with factory() as db:
         dept = Department(name="默认部门", tenant_id=1)
         user = User(username="u", uid="u", password_hash="$argon2id$x", role="user", department=dept)
-        db.add_all([Tenant(id=1, name="t", status="active"), dept, user, TenantMembership(tenant_id=1, uid="u", role="member", status="active")])
+        db.add_all(
+            [
+                Tenant(id=1, name="t", status="active"),
+                dept,
+                user,
+                TenantMembership(tenant_id=1, uid="u", role="member", status="active"),
+            ]
+        )
         await db.commit()
         yield db
     await engine.dispose()

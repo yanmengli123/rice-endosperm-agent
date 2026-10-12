@@ -88,8 +88,13 @@ def test_discovery_call_is_audited_but_never_adopted_as_answer_evidence() -> Non
     )
     manifest = _initial_source_manifest(plan)
     audit = SimpleNamespace(
-        id=42, server_slug="data-aggregator", capability_name="search", status="success",
-        arguments_digest="sha256:request", result_digest="sha256:result", provenance={},
+        id=42,
+        server_slug="data-aggregator",
+        capability_name="search",
+        status="success",
+        arguments_digest="sha256:request",
+        result_digest="sha256:result",
+        provenance={},
     )
     _append_mcp_source_uses(manifest, audits=[audit], matched_ids={42})
 
@@ -108,12 +113,22 @@ async def test_not_found_and_discovery_cannot_satisfy_dataset_authority() -> Non
     manifest = _initial_source_manifest(plan)
     audits = [
         SimpleNamespace(
-            id=1, server_slug="data-aggregator", capability_name="search", status="success",
-            arguments_digest="q1", result_digest="r1", provenance={},
+            id=1,
+            server_slug="data-aggregator",
+            capability_name="search",
+            status="success",
+            arguments_digest="q1",
+            result_digest="r1",
+            provenance={},
         ),
         SimpleNamespace(
-            id=2, server_slug="gene-authority", capability_name="pride_project_rest", status="success",
-            arguments_digest="q2", result_digest="r2", provenance={"provider_status": "NOT_FOUND"},
+            id=2,
+            server_slug="gene-authority",
+            capability_name="pride_project_rest",
+            status="success",
+            arguments_digest="q2",
+            result_digest="r2",
+            provenance={"provider_status": "NOT_FOUND"},
         ),
     ]
 
@@ -122,7 +137,10 @@ async def test_not_found_and_discovery_cannot_satisfy_dataset_authority() -> Non
             return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: audits))
 
     satisfied = await _finalize_mcp_manifest(
-        _Db(), run_id="run-test", plan=plan, manifest=manifest,
+        _Db(),
+        run_id="run-test",
+        plan=plan,
+        manifest=manifest,
     )
     assert satisfied is False
     assert manifest.successful_mcp_call_count == 0

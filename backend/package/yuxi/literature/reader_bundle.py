@@ -8,23 +8,22 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 from typing import Any
 from urllib.parse import quote
 
-from yuxi.literature.access import paper_visibility
-
 from sqlalchemy import select
 
+from yuxi.literature.access import paper_visibility
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.literature.review import RESOLVED_MD_NAME
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
-    KnowledgeParseRevision,
     KnowledgeParseArtifact,
+    KnowledgeParseRevision,
     LiteraturePaper,
     LiteratureReaderRender,
     LiteratureVariant,
@@ -134,7 +133,7 @@ async def _scientific_reading_fallback(tenant_id: int, paper: LiteraturePaper) -
     if not paper.source_revision_id:
         return None
     from yuxi.knowledge.utils import parse_minio_url
-    from yuxi.literature.access import current_access, build_access
+    from yuxi.literature.access import build_access, current_access
 
     async with pg_manager.get_async_session_context() as db:
         revision = (

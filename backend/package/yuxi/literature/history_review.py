@@ -11,8 +11,8 @@ from sqlalchemy import select
 
 from yuxi.literature.history_import import find_paper
 from yuxi.literature.reading.service import RENDER_BUCKET
-from yuxi.literature.review import _render_identity, _letter_for
-from yuxi.literature.review_contract import normalize_review_items, normalize_choice
+from yuxi.literature.review import _letter_for, _render_identity
+from yuxi.literature.review_contract import normalize_choice, normalize_review_items
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.models_knowledge import (
     LiteratureArtifactRevision,

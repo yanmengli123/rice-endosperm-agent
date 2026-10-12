@@ -55,7 +55,9 @@ async def _seed(session, *, attached: list[str]):
     )
     session.add(agent)
     for catalog_id, slug in ((101, "ricekb"), (102, "gramene")):
-        session.add(MCPCatalog(id=catalog_id, slug=slug, name=slug, source_type="builtin", content_digest=f"sha256:{slug}"))
+        session.add(
+            MCPCatalog(id=catalog_id, slug=slug, name=slug, source_type="builtin", content_digest=f"sha256:{slug}")
+        )
         session.add(
             TenantMCPInstallation(
                 id=catalog_id,

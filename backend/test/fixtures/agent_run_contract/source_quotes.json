@@ -1,0 +1,38 @@
+{
+  "status": "citation_ready",
+  "source_quotes": [
+    {
+      "evidence_id": "ev-source-1",
+      "quote": "  Original prose (Figure 2A-2C) and [Tables 1 and 2].\n",
+      "quote_hash": "2d8087462d0bad2a3a36f1e18410e6009056022344e9695e7e12698bebd19d45",
+      "page_number": 3,
+      "source": {
+        "kb_id": "kb-0001",
+        "file_id": "file-0001",
+        "parse_revision_id": "rev-0012",
+        "anchor_id": "ea-source-1",
+        "source_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "locator": {
+        "precision": "REGION",
+        "fragments": [
+          {
+            "page_index": 2,
+            "bbox": [
+              10,
+              20,
+              200,
+              100
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "label": "Table 1",
+          "status": "MISSING"
+        }
+      ]
+    }
+  ]
+}

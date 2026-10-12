@@ -10,7 +10,7 @@ COPY --from=node:24-slim /usr/local/share /usr/local/share
 # 运行期零 npm 拉取（冷启动快、不受包镜像网络抖动影响）。--ignore-scripts
 # 跳过 keytar 的 node-gyp 原生编译（slim 镜像无编译链且无 libsecret）——应用
 # 身份（tenant_access_token）不依赖它，运行时自动降级内存 token store（已实测）。
-RUN npm i -g @larksuiteoapi/lark-mcp@0.5.1 --ignore-scripts --omit=optional --no-audit --no-fund \
+RUN npm i -g @larksuiteoapi/lark-mcp@0.5.1 --registry=https://registry.npmmirror.com --ignore-scripts --omit=optional --no-audit --no-fund \
     && lark-mcp --version
 
 # 设置工作目录
@@ -65,6 +65,12 @@ COPY backend/package /app/package
 # 构建必然失败；缓存挂在重试间保留已完成下载，镜像内容不受影响（缓存只用于下载，不进层）。
 RUN --mount=type=cache,target=/root/.cache/uv \
     UV_HTTP_TIMEOUT=180 uv sync --group test --no-dev --locked
+
+# PDF evidence ingestion is offline at runtime. Pin and verify all three weights
+# in the shared API/Worker image; missing/corrupt models fail the build.
+COPY backend/scripts/provision_pdf_ocr.py /app/scripts/provision_pdf_ocr.py
+ENV PDF_OCR_MODEL_DIR="/opt/yuxi/pdf-ocr"
+RUN python /app/scripts/provision_pdf_ocr.py
 
 # 依赖装配自检：走 ragas_adapter 的真实导入路径（含 langchain v1 兼容垫片），
 # 装了 ragas 但导不进来（如 langchain 升级破坏垫片）同样在构建期暴露，而不是留到用户点击 RAG 评估。

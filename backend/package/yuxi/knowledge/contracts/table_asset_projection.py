@@ -41,6 +41,9 @@ from yuxi.storage.postgres.models_knowledge import (
     EvidenceAnchorRecord,
     KnowledgeChunk,
     KnowledgeFile,
+    PdfTableRecord,
+    PdfTableCellRecord,
+    KnowledgeParseRevision,
 )
 from yuxi.utils import logger
 
@@ -93,6 +96,7 @@ class TableCell(BaseModel):
     metric: str = ""
     condition: str = ""
     row_key: str = ""
+    source_selector: dict[str, Any] | None = None
 
 
 class PublishableTable(BaseModel):
@@ -506,6 +510,61 @@ async def project_publishable_table(
                 span += cell.colspan
             col_count = max(col_count, span)
         _tbl_conditions, _tbl_metrics = extract_table_conditions(rows)
+        # New physical revisions can attach cell navigation without changing
+        # this derived display projection into a source of evidence facts.
+        region_ids = {f.get("region_id") for f in anchor.fragments or [] if f.get("region_id")}
+        if region_ids:
+            physical_tables = (
+                (await db.execute(select(PdfTableRecord).where(PdfTableRecord.parse_revision_id == revision_id)))
+                .scalars()
+                .all()
+            )
+            physical_tables = [t for t in physical_tables if region_ids.intersection(t.region_ids or [])]
+            if len(physical_tables) == 1:
+                physical_table = physical_tables[0]
+                cells = (
+                    (
+                        await db.execute(
+                            select(PdfTableCellRecord)
+                            .where(PdfTableCellRecord.table_record_id == physical_table.id)
+                            .order_by(PdfTableCellRecord.row_index, PdfTableCellRecord.column_index)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                source_hash = (
+                    await db.execute(
+                        select(KnowledgeParseRevision.source_sha256).where(
+                            KnowledgeParseRevision.revision_id == revision_id
+                        )
+                    )
+                ).scalar_one()
+                physical_rows = {}
+                for cell in cells:
+                    physical_rows.setdefault(cell.row_index, []).append(cell)
+
+                def normalized(value):
+                    return _WHITESPACE_PATTERN.sub(" ", str(value)).strip()
+
+                for display_row in rows:
+                    matches = [
+                        r
+                        for r in physical_rows.values()
+                        if [(normalized(c.raw_value), c.row_span, c.column_span) for c in r]
+                        == [(normalized(c.text), c.rowspan, c.colspan) for c in display_row]
+                    ]
+                    if len(matches) == 1:
+                        for display_cell, source_cell in zip(display_row, matches[0], strict=True):
+                            display_cell.source_selector = {
+                                "kb_id": kb_id,
+                                "file_id": file_id,
+                                "parse_revision_id": revision_id,
+                                "source_sha256": source_hash,
+                                "table_id": physical_table.table_id,
+                                "row_index": source_cell.row_index,
+                                "column_index": source_cell.column_index,
+                            }
         table = PublishableTable(
             table_id=_table_id(revision_id, anchor_id),
             kb_id=kb_id,

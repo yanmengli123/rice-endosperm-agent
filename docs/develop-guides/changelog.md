@@ -1,14 +1,32 @@
 # 版本变更记录
 
+- `/literature` 本文阅读助手交互增强：原文/译文/笔记选区解释、翻译、总结，以及导读/方法/结果/局限指令自动进入原生本文会话；提问/图表/截图保留草稿待确认。鉴权 PDF.js 文本层、翻页缩放与框选/本页截图；回答引用经服务端定位接口回跳同屏 PDF。不覆盖用户编辑过的草稿；版本变化 409、非本文上下文 422、跨分页会话恢复及晚返回切换保护。截图/译文/笔记只作为用户输入，不授予证据资格；普通对话默认不启用阅读桥接。不宣称豆包私有行为完全等价。
+
+  前端加固：自动发送以服务端 run_id 确认接收，不以输入框清空冒充成功，且不等待 SSE 完整回答；保留拒绝后的草稿和普通问答原生发送路径。会话/卡片/工作流固定确认对象并隔离账号、租户、晚返回与卸载，分页清空明确仅已加载范围。通用弹窗程序性关闭能结束等待；ARIA 页签等待编辑确认、支持方向语义并跳过禁用项。运行诊断只保存分类元数据，不保留原始异常文本/堆栈，Promise 拒绝统一处理，提示限频且 HMR 回收监听器。新增 5 个离线 spec；全量 48 个 spec 脚本退出成功，其中 47 个执行断言、1 个可选真实 PDF 样本脚本跳过；定向 ESLint 与生产构建通过。当前 Chrome 未连接，浏览器登录态与真实供应商验收不计为通过；详见 docs/vibe/2026-10-12-literature-frontend-hardening.md（本地忽略的验收笔记）。
+
 本页用于记录各版本发布说明（新增、修复与破坏性变更）。
 
 同一版本的多次功能更新时，应以功能为单位进行更新，比如之前添加了 A 功能的更新，在后续的更新中修复了因 A 功能引入的 bug，那么这个修复说明应该和 A 功能描述放在一起，而不是新增一条修复记录，功能更新同理。
 
 ## 未发布
 
+- `/literature` 文献清单多格式导入与文献计量分析（零新依赖、不动 `/papers/import/bib`、不动 `make_rid`）：新增 `POST /api/literature/papers/import/references`（202）接收四家官网导出清单——PubMed `.nbib`（FAU/JT 优先、AID 剥 `[doi]`、MeSH 取主词、4 空格续行）、WoS Tab-delimited `.txt`（FN/VR 头、AF 续行多作者、C1 机构剥方括号、WC/SC 落库、CR 引用边）、RIS、知网/万方 EndNote tagged（重复标签累积、全角分号关键词、`%U` filename 提取 CNKI 稳定键、`%R` DOI）。编码显式探测（BOM 4 字节优先 → UTF-8 严格 → GB18030 严格，拒绝即 422，杜绝 `errors="replace"` 静默乱码）；格式嗅探按内容特征 + `format` 参数覆盖；身份三查链（DOI→`doi-*` 与 bib 字节一致 / PMID 列级查重 / `nd-md5(title|year)` 指纹跨格式命中同条 / CNKI 键走 `make_rid` 现成能力），去重预取批量执行，导入报告含 format_detected/encoding/no_identity。迁移 0110：`literature_papers` 新增 `pmid`/`language`/`affiliations_json` 三列与 tenant+pmid 索引。计量只读端点 `GET /metrics/bibliometrics`（总览/年度趋势补零/期刊 TopN 复用期刊名归一/机构与国家）与 `GET /metrics/networks?type=keyword|author`（共现网络，节点频次 TopN、边 min_pair 过滤、2000 边上限），快照口径对齐 topics：`paper_visibility` + 排除 `is_reference` 参考条目 + 20000 篇安全预算失败关闭。前端：ImportPanel bib tab 扩为「文献清单」（格式下拉/扩展 accept/官网导出路径指引/报告卡）、顶栏新增「计量分析」视图（ECharts：趋势堆叠柱/期刊机构条形/类型语言环形/共现力导向网络，option 构建抽至 `utils/literature/bibliometricCharts.js` 纯函数并裸 node spec 锁定）。单测 21+21 例（四格式真实样本 fixtures 兼作字段映射回归锁）、RID 兼容回归 27 例全绿、web 生产构建通过。需求与验收见 docs/vibe/2026-10-12-literature-reference-import.md（万方/知网真实样本校准为遗留项）。
+
+  补齐真正的 WoS Tab-delimited（引号/多行单元格/方括号作者名单）并保留 Plain Text、BibTeX 导入；修复 PubMed LID DOI、折行机构地址及 EndNote %W 数据库提供商误计机构。去重引用绑定实际 RID，同批重复不误报 ACL，别名冲突整笔回滚，同租户 references 事务锁防并发、批量 flush 减少数据库往返。国家识别失败显式计数、机构地址按篇去重；共现先 TopN 再组合，计算预算与边截断可见。计量面板支持 TopN/最少共现、晚返回隔离、账号/KeepAlive 生命周期、ResizeObserver 与非 HTML tooltip。原批次文献域/路由 576 passed、1 个可选样本 skipped；node/lint/build 通过，0110/ORM/PG 锁检查通过；详见 docs/vibe/2026-10-12-literature-reference-import.md。
+
+  计量工作台重设计并用用户实际导出校准：新增 PubMed 官方/合并 CSV、WoS 长表头 CSV、知网 HTML-XLS、万方双行表头 XLSX；64 MiB/50000 条导入与 50000 篇统计预算，CPU 解析离开事件循环。0111 新增私有上传批次与去重成员、复合租户 FK、RLS、内容 SHA256 幂等；清单/统计/网络统一批次、字面检索与年份范围，现默认全部可见文献（含历史题录），私有批次仍可显式筛选。直接上传后显示分页题录、可展开摘要与字段缺失提示，统计图和网络延后到分析视图。只补空字段、保护人工锁定、持久化新 DOI/PMID 别名；显式身份优先于弱题名指纹，单个身份命中也不得关联矛盾的已填 DOI/PMID，真身份冲突整笔回滚。Postgres ACL 单数组 ANY 规避大清单绑定参数上限，不放宽权限。四主导出 22549 条原始记录在隔离库去重为 19998 个成员，PubMed 两种 CSV 补充导入不新增；无生产题录灌入、无供应商调用。原批次文献域/路由 597 passed、1 个可选 PDF 样本 skipped；定向真实数据/新模块/运行库 schema 验收 44 passed；前端 48 个 spec 完整通过、1 个可选 PDF 检查跳过，定向 lint 与生产构建通过（manager.py 其他迁移 8 个既有 E501 未处理）。0111/ORM/RLS 配置只读检查通过，浏览器实操未复验。说明见 docs/vibe/2026-10-12-bibliometric-workbench.md（本地忽略的验收笔记）。
+
+  修复历史导入可达性与数据库切换：新增只读 `/metrics/sources` 与全部/PubMed/WoS/知网/万方/其他入口，来源数量与列表使用相同归类谓词；共享文献按私有批次成员归类，不受首次 source_main 限制，旧无批次已知格式仍可找到。来源及文件批次一点击即切换并清掉旧交叉筛选，历史批次可分页加载；刷新/新上传保留已加载旧回执，失败导入不重置已有范围。权限与晚返回隔离不变、零 Schema 改动/数据回填。文献域/路由最终 600 passed、1 skipped；真实导出来源对账 + live schema 2 passed；前端 48 个 spec 完整通过、1 可选 PDF 检查跳过，关键工作台/lifecycle 补强后复跑通过，定向 lint 与最终构建通过。现有生产数据只读检查未改，浏览器实操未计通过。
+
+- /agent 悬浮球快捷问答（零后端改动、零新依赖、零契约改动）：`AgentView` 挂载 `AgentFloatingBall`（Teleport to body + fixed，仅 /agent 路由可见，keep-alive 切走自动隐藏），球体支持 Pointer Events 拖拽、12px 吸边、位置经 pinia persistedstate 持久化、流式脉冲/失败角标；点击展开 `FloatingQuickChatPanel` 轻量面板（约 380×540，≤640px 降级底部抽屉，暗色全 token）。问答链路与主聊天完全同构：懒建独立持久线程（标题「快问·」前缀、出现在主界面会话列表）→ `POST /api/agent/runs`（幂等 `meta.request_id`，`meta.client=web-floating-ball` 观测标记）→ SSE `streamAgentRunEvents` + 复用 `useAgentRunStream` 导出的纯函数 `processRunSseResponse` 消费（不整复用深度耦合主组件的流式状态机），助手消息经 `MarkdownPreview` 既有 sanitize/katex 管线渲染，推理 `<think>` 段经 `ReasoningVisibilityBuffer` 过滤。停止/恢复语义与主聊天一致：流式中发送即 `cancelAgentRun`；收起面板/切走路由/刷新页面仅断开订阅，`active_run` localStorage 快照 + `getThreadActiveRun` 恢复续流；审批/追问等交互轮在球内提示「前往主界面」并支持一键转正（上下文无损）；快问线程被侧栏删除后 resume 404 自愈重置。IME 组合输入经 `MessageInputComponent` 原生处理，Enter 发送/Shift+Enter 换行，Esc 关闭、焦点自动入输入框。定位/吸边/拖拽阈值纯函数抽至 `utils/floatingBall.js`（裸 node spec 锁定），需求与验收见 docs/vibe/2026-10-11-agent-floating-ball.md。
+
+- 本文专属会话深读收口：最近历史按当前输入消息 ID 限定并排除失败运行，明确实体与多实体歧义不混入历史检索词；AgentRun 冻结增强开关、策略版本、重排模型及凭据引用，普通会话不增加配置。导航地图核验运行作用域/版本归属，读取预算与摘要校验、定界符转义，页码计数只表示锚点覆盖，检索不足不宣称论文未提供。重排通过服务层 scorer 接入既有配额、BYOK 与 append-only 用量账本，供应商失败可降级、文献权限/版本变化失败关闭；默认关闭重排，不新增 Schema 或公开跨端字段。
+
 - VOSviewer 原生接入：稻芯智析通过原生选择器校验分析包并启动本地 VOSviewer 1.6.21，业务实体与每条连线事实身份保持可追溯，源文件、派生结果和启动回执按账号保存。服务端打包移出事件循环，交付前再次核验权限；三端限制至少 3 个去重实体，修复原版无法打开小图的问题。图谱洞察的“刷新快照”联动重新加载查询。接入契约见 [VOSviewer 图谱分析接入](./vosviewer-export-contract)。
 
 ### 新增
+
+- PDF 回答原句与图表联动：支持括号内 Figure/Table、复数、并列及 Panel 范围，从已核验原句在同文件与版本内召回题注。原文保留括号与字符，提供复制及 PDF 查看；图像/表格分别发布，缺失、歧义、预算和 Panel 降级明确显示。同步 Web/桌面 SSE 与历史附件契约，保护 Markdown 代码和链接；修复桌面历史恢复的身份字段丢失。补齐已审计题注 span 的证据回放与唯一身份映射，恢复图卡“查看原文”；长题注/OCR 不再挤压 PDF，预览支持明确关闭与键盘操作。启动建表与幂等 DDL 共用迁移事务锁，修复 API/Worker 并发启动死锁。真实正文关联报告、回归与验收边界见 [PDF 多模态原件证据](./pdf-physical-evidence)。
 
 - PDF 多模态原件证据 v4：由 `pdf_evidence@1.0.0` 契约驱动持久化七阶段工作流。句子继承来源出现位置与字符区间，恢复经过验证的跨页片段；统一旋转、裁剪和印刷页标签，服务端输出字符/词四边形。新增物理区域、引用关联、表与 Cell 版本化模型及迁移，图资产使用原件裁图与 OCR，Panel 仅接受实际观察且题注一致的唯一字母。修复图卡混入父锚点和 Cell 选择器断链，前端固定原件哈希与解析版本；跨页续表验证原值和实际页归属。OCR 权重在构建期固定哈希预置，补齐中文扫描定位及自适应像素预算；损坏、加密和输入预算错误直接终态失败。发布后封存原件、产物、证据和图资产；完整模型/参数指纹校验缓存，影子索引消费自身产物，质量回归拒绝激活，失败预算与租约写入保护接通。RC-G3 已激活封存 `INDEXED_FULL`，OCR 73/73、正文精确覆盖 98.1081%，实际 HTTP 原文/图/Panel/历史原件验证通过；容器相关回归 1318 passed、1 skipped，真实 PG/OCR 集成 6 passed。运行契约及真实表格金标、浏览器点击验收边界见 [PDF 多模态原件证据](./pdf-physical-evidence)。
 

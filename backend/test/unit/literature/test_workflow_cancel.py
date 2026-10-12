@@ -1,8 +1,9 @@
-﻿"""文献工作流显式取消语义测试（P0-②）。
+"""文献工作流显式取消语义测试（P0-②）。
 
 覆盖边界：重复取消、终态不可取消、租约接替、mark_step 不得复活取消、
 _claim 自愈收敛、已终结产物不回滚、跨租户拒绝。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -130,6 +131,8 @@ async def test_claim_self_heals_cancel_request(env):
 async def test_claim_will_not_revive_cancelled_run(env):
     """已 CANCELLED 的运行不会被再次认领执行（取消不可被 tick 复活）。"""
     session = env
+
+
 async def test_mark_step_does_not_resurrect_cancel(env):
     """迟到的步骤报告不得把 CANCEL_REQUESTED 覆盖回 RUNNING。"""
     session = env

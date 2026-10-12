@@ -102,6 +102,9 @@ class UnifiedArticle:
     anchors: list[dict[str, Any]]
     parser_provenance: dict[str, Any]
     assets: list[dict[str, Any]] = field(default_factory=list)
+    regions: list[dict[str, Any]] = field(default_factory=list)
+    tables: list[dict[str, Any]] = field(default_factory=list)
+    evidence_units: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

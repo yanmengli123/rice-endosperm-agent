@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+import fitz
+
 MINERU_COORDINATE_EXTENT = 1000.0
 GEOMETRY_EPSILON = 1.0
 
@@ -40,17 +42,12 @@ def mineru_bbox_to_pdf_points(
         or bottom <= top
     ):
         return None
-    width = float(geometry["width"])
-    height = float(geometry["height"])
-    return tuple(
-        round(value, 2)
-        for value in (
-            left * width / MINERU_COORDINATE_EXTENT,
-            top * height / MINERU_COORDINATE_EXTENT,
-            right * width / MINERU_COORDINATE_EXTENT,
-            bottom * height / MINERU_COORDINATE_EXTENT,
-        )
-    )
+    width = float(geometry.get("render_width", geometry["width"]))
+    height = float(geometry.get("render_height", geometry["height"]))
+    rect = fitz.Rect(left * width / 1000, top * height / 1000, right * width / 1000, bottom * height / 1000)
+    if geometry.get("render_to_canonical"):
+        rect = rect * fitz.Matrix(*geometry["render_to_canonical"])
+    return tuple(round(value, 4) for value in rect)
 
 
 def bbox_is_on_page(bbox: tuple[float, float, float, float], geometry: dict[str, Any]) -> bool:

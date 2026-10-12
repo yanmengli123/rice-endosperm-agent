@@ -165,6 +165,241 @@ def test_token_usage_has_conservative_fallback():
     assert usage.estimated is True
 
 
+@pytest.mark.parametrize(
+    "failure", [None, "provider", "indices", "nonfinite", "revoked_before", "revoked_after", "quota"]
+)
+async def test_paper_rerank_governed_ledger_and_reauthorization(db, monkeypatch, failure, parent_chat_byok):
+    from functools import partial
+    from yuxi.literature import paper_enhancement
+    from yuxi.knowledge.rendering.evidence_rerank import rerank_literature_evidence
+    from yuxi.models.providers.cache import ModelInfo
+    from yuxi.models import rerank
+
+    calls, checks, closed = [], [], []
+    info = ModelInfo(
+        provider_id="provider",
+        model_id="ranker",
+        model_type="rerank",
+        display_name="Ranker",
+        api_key="fixture-platform",
+        base_url="https://fixture.invalid/rerank",
+        provider_type="openai",
+    )
+    monkeypatch.setattr(paper_enhancement.model_cache, "get_model_info", lambda spec: info)
+
+    async def entitlement(**kwargs):
+        if failure == "quota":
+            raise ValueError("quota exhausted")
+        return {"tenant_id": 7, "credential_policy": "platform_only", "policy_version": 99}
+
+    async def quota(**kwargs):
+        return None
+
+    async def custom(*args):
+        return []
+
+    async def authorize(**kwargs):
+        checks.append(kwargs)
+        if failure == "revoked_before" or (failure == "revoked_after" and len(checks) == 2):
+            raise PermissionError("paper source changed")
+
+    monkeypatch.setattr(agent_run_service, "_enforce_user_quota", entitlement)
+    monkeypatch.setattr(agent_run_service, "_enforce_platform_token_quota", quota)
+    monkeypatch.setattr("yuxi.services.user_credential_service.list_active_custom_model_specs", custom)
+    monkeypatch.setattr(paper_enhancement, "validate_frozen_paper_scope", authorize)
+
+    class Model:
+        def __init__(self, **kwargs):
+            assert kwargs["model_name"] == "ranker"
+            assert kwargs["api_key"] == "fixture-platform"
+
+        def _extract_results(self, payload):
+            return [
+                {"index": 0, "relevance_score": 0.1},
+                {
+                    "index": 0 if failure == "indices" else 1,
+                    "relevance_score": float("inf") if failure == "nonfinite" else 0.9,
+                },
+            ]
+
+        async def _batch_rerank(self, question, documents, max_length):
+            calls.append((question, documents))
+            assert len(documents[0]) == 4000
+            if failure == "provider":
+                raise TimeoutError("fixture timeout")
+            return [row["relevance_score"] for row in self._extract_results({})]
+
+        async def aclose(self):
+            closed.append(True)
+
+    monkeypatch.setattr(rerank, "OpenAIReranker", Model)
+    scope = {
+        "literature_binding": {"rid": "r", "kb_id": "kb", "file_id": "f", "parse_revision_id": "rev"},
+        "effective_kb_ids": ["kb"],
+        "document_scope_ceiling": {"file_ids": ["f"]},
+        "literature_enhancement": {
+            "rerank_enabled": True,
+            "rerank_model": "provider:ranker",
+            "rerank_credentials": {
+                "credential_source": "platform",
+                "credential_id": None,
+                "provider_id": "provider",
+                "credential_policy": "platform_only",
+                "policy_version": 3,
+            },
+        },
+    }
+    rows = [
+        {
+            "evidence_id": f"e{i}",
+            "content": "x" * 6000,
+            "kb_id": "kb",
+            "file_id": "f",
+            "source_provenance": {"parse_revision_id": "rev"},
+        }
+        for i in range(2)
+    ]
+    result = {"evidence": rows}
+    scorer = partial(
+        paper_enhancement.score_paper_evidence,
+        user=SimpleNamespace(uid="user-1"),
+        tenant_id=7,
+        snapshot=scope,
+        run_id="parent",
+    )
+    if failure in {"revoked_before", "revoked_after"}:
+        with pytest.raises(PermissionError):
+            await rerank_literature_evidence(result, question="q", scope_snapshot=scope, scorer=scorer)
+    else:
+        meta = await rerank_literature_evidence(result, question="q", scope_snapshot=scope, scorer=scorer)
+        assert meta["applied"] is (failure is None)
+    assert len(calls) == (0 if failure in {"revoked_before", "quota"} else 1)
+    assert len(closed) == len(calls)
+    assert len(checks) == (1 if failure == "revoked_before" else 2)
+    if failure is None:
+        assert [item["evidence_id"] for item in result["evidence"]] == ["e1", "e0"]
+    else:
+        assert result["evidence"] is rows
+    ledger = list((await db.execute(select(UsageLedger))).scalars())
+    assert len(ledger) == len(calls)
+    if ledger:
+        row = ledger[0]
+        assert row.estimated and row.credential_source == "platform" and row.policy_version == 3
+        assert row.total_tokens > 0
+        run = await db.get(AgentRun, row.run_id)
+        assert run.input_payload["operation"] == "paper_evidence_rerank"
+        assert run.input_payload["user_credential"] is None
+    assert llm_gateway._usage_context.get() is None
+    from yuxi.agents.models import apply_credential_override
+
+    assert apply_credential_override(info).api_key == (
+        "fixture-parent-chat" if parent_chat_byok else "fixture-platform"
+    )
+
+
+@pytest.fixture(params=[False, True])
+def parent_chat_byok(request):
+    from yuxi.agents.models import reset_user_credential_override, set_user_credential_override
+
+    token = set_user_credential_override("provider", "fixture-parent-chat") if request.param else None
+    try:
+        yield request.param
+    finally:
+        reset_user_credential_override(token)
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_paper_rerank_uses_frozen_byok_id_and_never_reselects_platform_key(db, monkeypatch, revoked):
+    from yuxi.literature import paper_enhancement
+    from yuxi.models import rerank
+    from yuxi.models.providers.cache import ModelInfo
+    from yuxi.services import user_credential_service
+
+    info = ModelInfo(
+        provider_id="provider",
+        model_id="ranker",
+        model_type="rerank",
+        display_name="Ranker",
+        api_key="fixture-platform",
+        base_url="https://fixture.invalid/rerank",
+        provider_type="openai",
+    )
+    monkeypatch.setattr(paper_enhancement.model_cache, "get_model_info", lambda spec: info)
+
+    async def entitlement(**kwargs):
+        return {"tenant_id": 7, "credential_policy": "byok_required", "policy_version": 99}
+
+    async def custom(*args):
+        return []
+
+    async def authorize(**kwargs):
+        return None
+
+    async def open_credential(db, uid, credential_id, *, expected_provider_id):
+        assert uid == "user-1" and credential_id == 17 and expected_provider_id == "provider"
+        return None if revoked else {"api_key": "fixture-byok"}
+
+    async def forbidden_active(*args, **kwargs):
+        raise AssertionError("do not reselect a different active credential for a frozen run")
+
+    monkeypatch.setattr(agent_run_service, "_enforce_user_quota", entitlement)
+    monkeypatch.setattr(user_credential_service, "list_active_custom_model_specs", custom)
+    monkeypatch.setattr(user_credential_service, "get_active_user_credential", forbidden_active)
+    monkeypatch.setattr(user_credential_service, "open_user_credential_runtime", open_credential)
+    monkeypatch.setattr(paper_enhancement, "validate_frozen_paper_scope", authorize)
+    calls = []
+
+    class Model:
+        def __init__(self, **kwargs):
+            assert kwargs["api_key"] == "fixture-byok"
+
+        def _extract_results(self, payload):
+            return [{"index": 0, "relevance_score": 0.1}, {"index": 1, "relevance_score": 0.9}]
+
+        async def _batch_rerank(self, *args, **kwargs):
+            calls.append(True)
+            return [item["relevance_score"] for item in self._extract_results({})]
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(rerank, "OpenAIReranker", Model)
+    snapshot = {
+        "effective_kb_ids": ["kb"],
+        "document_scope_ceiling": {"file_ids": ["f"]},
+        "literature_binding": {"rid": "r", "kb_id": "kb", "file_id": "f", "parse_revision_id": "rev"},
+        "literature_enhancement": {
+            "rerank_model": "provider:ranker",
+            "rerank_credentials": {
+                "credential_source": "user_byok",
+                "credential_id": 17,
+                "provider_id": "provider",
+                "credential_policy": "byok_required",
+                "policy_version": 3,
+            },
+        },
+    }
+    rows = [
+        {"evidence_id": f"e{i}", "content": "source text", "kb_id": "kb", "file_id": "f", "parse_revision_id": "rev"}
+        for i in range(2)
+    ]
+    if revoked:
+        with pytest.raises(RuntimeError, match="凭据已不可用"):
+            await paper_enhancement.score_paper_evidence(
+                "q", rows, user=SimpleNamespace(uid="user-1"), tenant_id=7, snapshot=snapshot, run_id="parent"
+            )
+    else:
+        assert await paper_enhancement.score_paper_evidence(
+            "q", rows, user=SimpleNamespace(uid="user-1"), tenant_id=7, snapshot=snapshot, run_id="parent"
+        ) == [0.1, 0.9]
+    assert calls == ([] if revoked else [True])
+    ledger = list((await db.execute(select(UsageLedger))).scalars())
+    assert len(ledger) == len(calls)
+    if ledger:
+        assert ledger[0].credential_id == 17 and ledger[0].credential_source == "user_byok"
+        assert ledger[0].policy_version == 3
+
+
 @pytest.mark.parametrize("failure", [None, "provider", "revoked"])
 async def test_custom_byok_native_sdk_and_append_only_usage_roundtrip(db, monkeypatch, failure):
     """Real encryption, policy, SDK and ledger; only HTTP is replaced."""

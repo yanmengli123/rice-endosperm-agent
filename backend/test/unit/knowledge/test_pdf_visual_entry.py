@@ -78,7 +78,7 @@ def _artifacts(rows: list[dict]) -> list[ParserArtifact]:
 
 def test_real_chart_block_produces_physical_anchor_with_caption():
     """验收：MinerU type=chart 且题注只在 chart_caption → 必须产生第 10 页物理锚点。"""
-    assert MINERU_LAYOUT_ADAPTER_VERSION == "mineru_layout_v3"
+    assert MINERU_LAYOUT_ADAPTER_VERSION == "mineru_layout_v5"
     blocks = extract_mineru_blocks(_artifacts(_chart_content_list()))
     chart_blocks = [block for block in blocks if block["block_type"] == "chart"]
     assert len(chart_blocks) == 1

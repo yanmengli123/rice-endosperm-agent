@@ -35,12 +35,12 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeBase,
     KnowledgeFile,
     KnowledgeParseRevision,
+    LiteratureArtifactRevision,
     LiteratureCitation,
     LiteratureCompileJob,
     LiteraturePaper,
     LiteratureReaderRender,
     LiteratureVariant,
-    LiteratureArtifactRevision,
 )
 from yuxi.utils.datetime_utils import utc_now
 
@@ -130,8 +130,9 @@ def knowledge_directories(root: Path) -> dict[str, Path]:
     Match upstream's timestamp suffix exactly, never follow archive DB paths.
     Active directories take priority. A duplicate is not silently selected.
     """
-    from yuxi.literature.history_import import read_tables
     import re
+
+    from yuxi.literature.history_import import read_tables
 
     kb = root / "knowledge_base"
     directories = {}
@@ -341,6 +342,7 @@ async def _import_library_renders(
         await session.commit()
     # Refresh the request's visibility after creating a source-linked record.
     from contextlib import asynccontextmanager
+
     from yuxi.literature.access import access_scope, current_access
     from yuxi.literature.artifacts import ArtifactKind, ArtifactSource, store_revision
 

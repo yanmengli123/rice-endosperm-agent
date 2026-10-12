@@ -295,6 +295,24 @@ def validate_table_claims(
     source = str(text or "")
     facts = table_facts(tables)
     query_metrics = _metric_names(question)
+    # Figure/body claims require their own grounding, not a fabricated empty
+    # table. A missing table remains fail-closed for explicit table questions,
+    # table-authored claims, and quantitative heat-stress comparisons.
+    table_requested = bool(re.search(r"表格|表中|表内|(?:Table|表)\s*S?\d+|\btables?\b", question, re.IGNORECASE))
+    if (
+        not tables
+        and not table_requested
+        and not _TABLE_LABEL.search(source)
+        and not (_HEAT.search(question) and query_metrics)
+    ):
+        return source, {
+            "version": TABLE_CLAIM_VALIDATOR_VERSION,
+            "status": "NOT_APPLICABLE",
+            "facts_available": 0,
+            "checked_claim_count": 0,
+            "removed_sentence_count": 0,
+            "supporting_table_labels": [],
+        }
     high_risk_ranking = bool(_RANKING.search(question) and _HEAT.search(question) and query_metrics)
     missing_pair_metrics = [metric for metric in sorted(query_metrics) if _paired_coverage(metric, facts)[0] == 0]
     if high_risk_ranking and missing_pair_metrics:
@@ -355,10 +373,12 @@ def validate_table_claims(
     )
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if removed and missing_pair_metrics:
-        cleaned += (
-            "\n\n> 证据边界：现有表格未提供相关理化指标在对照与热胁迫条件下的配对值；"
-            "已移除无法映射到明确行、列和实验条件的数值结论。"
+        boundary = (
+            "现有表格未提供相关指标在对照与热胁迫条件下的配对值；"
+            if _HEAT.search(question)
+            else "现有表格未能支持相关指标的行、列与实验条件对应关系；"
         )
+        cleaned += "\n\n> 证据边界：" + boundary + "已移除无法核验的表格结论。"
     return cleaned, {
         "version": TABLE_CLAIM_VALIDATOR_VERSION,
         "status": "DEGRADED" if removed else "PASS",

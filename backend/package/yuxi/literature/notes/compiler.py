@@ -81,7 +81,7 @@ async def complete_json(system: str, user: str) -> tuple[dict, str]:
         corrective = (
             f"{user}\n\n---\n你上一次的输出不是合法 JSON（解析错误：{exc}）。\n"
             "请重新输出修正后的完整 JSON：只输出 JSON 本身，不要解释、不要代码围栏，"
-            '字符串内部的双引号必须转义（写成反斜杠加双引号），不要在字符串里保留未转义的换行。'
+            "字符串内部的双引号必须转义（写成反斜杠加双引号），不要在字符串里保留未转义的换行。"
         )
         retry_raw = await _complete(system, corrective)
         return prompts.parse_compile_json(retry_raw), retry_raw

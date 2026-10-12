@@ -7,10 +7,10 @@ Chinese bigrams are indexed as lexemes; no PostgreSQL language plugin required.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
-import asyncio
 import time
 from datetime import timedelta
 
@@ -152,8 +152,8 @@ async def sync_note(job_id: int) -> bool:
         if job is None:
             return False
         uri, tenant_id = job.note_uri, job.tenant_id
-    from yuxi.storage.minio import get_minio_client
     from yuxi.literature.reading.service import RENDER_BUCKET
+    from yuxi.storage.minio import get_minio_client
 
     data = await get_minio_client().adownload_file(RENDER_BUCKET, uri.removeprefix("kbasset://"))
     if len(data) > MAX_NOTE_BYTES:
