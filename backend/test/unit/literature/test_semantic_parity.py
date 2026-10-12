@@ -26,7 +26,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureAttachment,
 )
 
-pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
+pytestmark = [pytest.mark.unit]
 
 
 async def test_multiple_note_levels_do_not_multiply_a_papers_rrf_weight(env, monkeypatch):

@@ -11,7 +11,7 @@ from yuxi.literature import attachments
 from yuxi.literature.attachments import AttachmentClearError, assert_safe_to_clear
 from yuxi.storage.postgres.models_knowledge import LiteratureAttachment, LiteraturePaper
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 
 class _AsyncSessionContext:

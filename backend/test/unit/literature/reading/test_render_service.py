@@ -27,7 +27,7 @@ from yuxi.storage.postgres.models_knowledge import (
     WikiPublication,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 REVISION_ID = "sir_lit_test_0001"
 SOURCE_SHA = "a" * 64

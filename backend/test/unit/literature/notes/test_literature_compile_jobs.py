@@ -23,7 +23,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureArtifactRevision,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 REVISION_ID = "sir_compile_test_0001"
 SOURCE_SHA = "c" * 64

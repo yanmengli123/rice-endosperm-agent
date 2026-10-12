@@ -19,7 +19,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureCompileJob,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 TENANT = 3
 

@@ -22,7 +22,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureWorkflowRun,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio

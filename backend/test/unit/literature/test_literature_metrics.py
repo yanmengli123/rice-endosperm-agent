@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.literature import metrics
 from yuxi.storage.postgres.models_knowledge import LiteratureCitation, LiteraturePaper
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 
 class _AsyncSessionContext:

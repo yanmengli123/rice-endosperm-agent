@@ -21,7 +21,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureArtifactRevision,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 TENANT = 9
 REVISION = "sir_p8_0001"

@@ -20,7 +20,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureNavigationIndex,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 TENANT = 15
 RID_A = "doi-acl-a"

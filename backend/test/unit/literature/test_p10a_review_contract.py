@@ -31,7 +31,7 @@ from yuxi.storage.postgres.models_knowledge import (
     WikiSourceBinding,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = [pytest.mark.unit]
 
 TENANT = 11
 REVISION = "sir_p10a_0001"

@@ -51,7 +51,7 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureCard,
 )
 
-pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
+pytestmark = [pytest.mark.unit]
 TENANT = 7
 USER = SimpleNamespace(uid="reader", role="user", department_id=12, is_disabled=False)
 
