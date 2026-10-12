@@ -1,5 +1,5 @@
 ﻿<template>
-  <div class="reader-tabs" :style="{ fontSize: `${fontSize}px` }">
+  <div ref="selectionRoot" class="reader-tabs" :style="{ fontSize: `${fontSize}px` }">
     <div class="sub-tabs">
       <button
         v-for="tab in visibleTabs"
@@ -32,6 +32,25 @@
       >
     </div>
     <p v-if="editorNotice" role="status">{{ editorNotice }}</p>
+    <div class="reader-tools" aria-label="本文阅读助手">
+      <span>本文助手</span>
+      <button
+        v-for="(label, action) in quickActions"
+        :key="action"
+        class="btn"
+        :disabled="loading || editing || productEditing || assistantBusy"
+        @click="sendAssistantAction({ action, surface: 'paper' })"
+      >
+        {{ label }}
+      </button>
+    </div>
+    <p v-if="assistantNotice" role="status">{{ assistantNotice }}</p>
+    <ReaderSelectionToolbar
+      :root="selectionRoot"
+      :disabled="loading || editing || productEditing || assistantBusy || current === 'pdf'"
+      :reset-key="`${rid}:${versionToken}:${current}`"
+      @action="sendAssistantAction"
+    />
     <section v-if="manageTabs" class="tab-manager" aria-label="阅读标签管理">
       <label
         ><input
@@ -80,7 +99,7 @@
     <div v-if="loading" class="reader-loading">加载中…</div>
 
     <template v-else>
-      <div v-if="current === 'original'" class="pane">
+      <div v-if="current === 'original'" class="pane" data-reader-surface="original">
         <div v-if="!bundle?.ready" class="pane-empty">
           {{ bundle?.reason || '阅读视图尚未生成（请先触发渲染）' }}
         </div>
@@ -119,7 +138,7 @@
         </template>
       </div>
 
-      <div v-else-if="current === 'translation'" class="pane">
+      <div v-else-if="current === 'translation'" class="pane" data-reader-surface="translation">
         <label
           >译文类型<select v-model="variantKind" :disabled="productEditing">
             <option value="zh">中文全文</option>
@@ -156,7 +175,7 @@
         </template>
       </div>
 
-      <div v-else-if="current === 'parallel'" class="pane">
+      <div v-else-if="current === 'parallel'" class="pane" data-reader-surface="parallel">
         <p v-if="navigationTarget?.anchor && !parallelAnchor" role="status">
           当前对照原文未找到唯一章节或块锚点；未自动跳转。
         </p>
@@ -199,23 +218,28 @@
             <button class="image-open" @click="openImage(src)">
               <img :src="src" loading="lazy" alt="文献图片" />
             </button>
+            <button class="btn" :disabled="assistantBusy" @click="explainImage(src)">
+              讲解此图
+            </button>
           </figure>
         </div>
       </div>
 
       <div v-else-if="current === 'pdf'" class="pane">
         <div v-if="!pdfUrl" class="pane-empty">源 PDF 不可用</div>
-        <template v-else>
-          <div class="pdf-controls">
-            <button class="btn" @click="changeZoom(-0.25)">缩小</button>
-            <span>{{ Math.round(pdfScale * 100) }}%</span>
-            <button class="btn" @click="changeZoom(0.25)">放大</button>
-            <button class="btn" @click="pdfFitWidth = true">适合宽度</button>
-          </div>
-          <iframe :src="scaledPdfUrl" class="pdf-frame" title="源 PDF"></iframe>
-        </template>
+        <LiteraturePdfReader
+          v-else
+          :url="pdfUrl"
+          :source="paper.source || {}"
+          :evidence-target="evidenceTarget"
+          :initial-page="pdfPage"
+          v-model:scale="pdfScale"
+          v-model:fit-width="pdfFitWidth"
+          @page-changed="pdfPage = $event"
+          @assistant-action="sendAssistantAction"
+        />
       </div>
-      <div v-else-if="current.startsWith('noteL')" class="pane">
+      <div v-else-if="current.startsWith('noteL')" class="pane" data-reader-surface="note">
         <ProductEditor
           :rid="rid"
           :kind="`note_${current.slice(4)}`"
@@ -259,6 +283,9 @@
           <button class="btn" @click="zoomImage(0.25)">放大</button
           ><button class="btn" @click="imageScale = 1">复位</button>
           <button class="btn" :disabled="images.length < 2" @click="stepImage(1)">下一张</button>
+          <button class="btn" :disabled="assistantBusy" @click="explainImage(previewSrc)">
+            讲解此图
+          </button>
           <button class="btn" @click="closeImage">关闭（Esc）</button>
         </div>
         <div class="lightbox-image">
@@ -271,8 +298,12 @@
 <script>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiGet, apiPut } from '@/apis/base'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 import LiteratureMarkdown from './LiteratureMarkdown.vue'
 import ProductEditor from './ProductEditor.vue'
+import ReaderSelectionToolbar from './ReaderSelectionToolbar.vue'
+import LiteraturePdfReader from './LiteraturePdfReader.vue'
+import { readerCapture, isAutoSendAction } from '@/utils/literature_assistant'
 import { useUserStore } from '@/stores/user'
 import {
   locateParallelAnchor,
@@ -290,16 +321,70 @@ const splitParas = (text) =>
 
 export default {
   name: 'ReaderTabs',
-  components: { LiteratureMarkdown, ProductEditor },
+  components: { LiteratureMarkdown, ProductEditor, ReaderSelectionToolbar, LiteraturePdfReader },
   props: {
     rid: { type: String, required: true },
     paper: { type: Object, default: () => ({}) },
     versionToken: { type: String, default: '' },
-    readerTarget: { type: Object, default: null }
+    readerTarget: { type: Object, default: null },
+    evidenceTarget: { type: Object, default: null }
   },
-  emits: ['document-saved', 'open-link', 'editing-change'],
+  emits: ['document-saved', 'open-link', 'editing-change', 'assistant-action'],
   setup(props, { emit }) {
     const userStore = useUserStore()
+    const selectionRoot = ref(null),
+      assistantNotice = ref(''),
+      assistantBusy = ref(false)
+    const quickActions = {
+      overview: '论文导读',
+      methods: '研究方法',
+      findings: '主要发现',
+      limitations: '局限与启发'
+    }
+    const captureAction = (value) =>
+      readerCapture({
+        ...value,
+        rid: props.rid,
+        source_revision_id: props.paper.source_revision_id,
+        reading_version: props.paper.reading_version
+      })
+    const sendAssistantAction = (value) => {
+      if (loading.value || editing.value || productEditing.value) return
+      try {
+        const capture = captureAction(value)
+        emit('assistant-action', { ...capture, imageFile: value.imageFile || null })
+        assistantNotice.value = isAutoSendAction(value.action)
+          ? '正在发送到本文会话，回答将进入对话历史。'
+          : '正在交给本文会话；内容仅进入草稿，需确认发送。'
+      } catch (error) {
+        assistantNotice.value = error.message
+      }
+    }
+    const explainImage = async (src) => {
+      if (assistantBusy.value || !images.value.includes(src)) return
+      const ticket = loadGeneration
+      assistantBusy.value = true
+      try {
+        const capture = captureAction({ action: 'figure', surface: 'image' })
+        // Only authenticated assets owned by this loaded reader may be attached.
+        if (!src.startsWith('blob:')) throw new Error('图片尚未通过鉴权载入，不能发送')
+        const response = await fetch(src),
+          blob = await response.blob()
+        if (!response.ok || !blob.type.startsWith('image/') || blob.size > 10 * 1024 * 1024)
+          throw new Error('图片不可用或超过 10MB')
+        if (disposed || ticket !== loadGeneration) return
+        emit('assistant-action', {
+          ...capture,
+          imageFile: new File([blob], 'paper-figure', { type: blob.type })
+        })
+        assistantNotice.value = '图表已交给本文会话草稿，请确认发送。'
+        closeImage()
+      } catch (error) {
+        if (!disposed && ticket === loadGeneration) assistantNotice.value = error.message
+      } finally {
+        if (!disposed && ticket === loadGeneration) assistantBusy.value = false
+      }
+    }
     const readerStorage = {
       getItem: (key) => window.localStorage.getItem(key),
       setItem: (key, value) => window.localStorage.setItem(key, value)
@@ -326,6 +411,7 @@ export default {
     const displayMarkdown = ref('')
     const imageSources = ref([])
     const pdfUrl = ref('')
+    const pdfPage = ref(1)
     const previewSrc = ref('')
     const imageScale = ref(1),
       lightbox = ref(null)
@@ -379,13 +465,12 @@ export default {
             (!autoHideMissing.value || availableTabs.value[tab.key]))
       )
     )
-    const selectTab = (tab) => {
+    const selectTab = async (tab) => {
       if (tab === current.value) return
-      if (
-        (editing.value || productEditing.value) &&
-        !window.confirm('切换阅读标签会放弃未保存编辑，继续？')
-      )
-        return
+      if (editing.value || productEditing.value) {
+        if (!(await confirmAction('切换阅读标签会放弃未保存编辑，继续？'))) return
+      }
+      if (tab === current.value) return
       editing.value = productEditing.value = false
       current.value = tab
     }
@@ -604,6 +689,8 @@ export default {
     }
 
     const load = async () => {
+      assistantBusy.value = false
+      assistantNotice.value = ''
       const generation = ++loadGeneration
       const rid = props.rid
       const isCurrent = () => !disposed && generation === loadGeneration && rid === props.rid
@@ -814,15 +901,13 @@ export default {
     })
     watch(
       () => props.readerTarget,
-      (target) => {
+      async (target) => {
         if (target?.rid !== props.rid) return
         const tab = target.tab || current.value
         if (!subTabs.some((item) => item.key === tab)) return
-        if (
-          (editing.value || productEditing.value) &&
-          !window.confirm('打开双链会放弃未保存编辑，继续？')
-        )
-          return
+        if (editing.value || productEditing.value) {
+          if (!(await confirmAction('打开双链会放弃未保存编辑，继续？'))) return
+        }
         editing.value = productEditing.value = false
         navigationTarget.value = target
         selectTab(tab)
@@ -833,8 +918,28 @@ export default {
       },
       { immediate: true }
     )
+    watch(
+      () => props.evidenceTarget,
+      (target) => {
+        if (target?.rid === props.rid) selectTab('pdf')
+      },
+      { immediate: true }
+    )
+    watch(
+      () => [props.rid, props.paper.source_revision_id],
+      () => {
+        pdfPage.value = 1
+      }
+    )
 
     return {
+      selectionRoot,
+      assistantNotice,
+      assistantBusy,
+      quickActions,
+      sendAssistantAction,
+      explainImage,
+      pdfPage,
       navigationTarget,
       current,
       visibleTabs,

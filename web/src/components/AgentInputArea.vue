@@ -109,7 +109,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import MessageInputComponent from '@/components/MessageInputComponent.vue'
 import ImagePreviewComponent from '@/components/ImagePreviewComponent.vue'
@@ -128,6 +128,7 @@ const props = defineProps({
   mention: { type: Object, default: () => null },
   threadId: { type: String, default: '' },
   supportsFileUpload: { type: Boolean, default: false },
+  paperReaderEnabled: { type: Boolean, default: false },
   attachments: {
     type: Array,
     default: () => []
@@ -144,6 +145,49 @@ const emit = defineEmits([
 
 const inputRef = ref(null)
 const currentImage = ref(null)
+let readerImage = null
+// Additive paper-reader entry point. Other image upload/paste paths are unchanged.
+const stageReaderImage = async (file, expectedThread, stillCurrent) => {
+  if (
+    !props.paperReaderEnabled ||
+    !props.supportsFileUpload ||
+    !expectedThread ||
+    props.threadId !== expectedThread ||
+    currentImage.value
+  )
+    throw new Error('请先处理现有图片，或检查当前模型是否支持图片输入')
+  const data = await uploadMultimodalImage(file)
+  if (!data?.success) throw new Error('阅读图片上传失败，请重试')
+  if (
+    !props.paperReaderEnabled ||
+    !props.supportsFileUpload ||
+    props.threadId !== expectedThread ||
+    currentImage.value ||
+    !stillCurrent()
+  )
+    throw new Error('会话或草稿已改变，未附加阅读图片')
+  currentImage.value = data
+  readerImage = currentImage.value
+}
+watch(
+  () => props.threadId,
+  () => {
+    if (readerImage && currentImage.value === readerImage) currentImage.value = null
+    readerImage = null
+  }
+)
+const restoreReaderImage = (data, expectedThread) => {
+  if (
+    !props.paperReaderEnabled ||
+    props.threadId !== expectedThread ||
+    currentImage.value ||
+    !data?.success
+  )
+    return false
+  currentImage.value = data
+  readerImage = currentImage.value
+  return true
+}
 const placeholder = '问点什么？使用 @ 可以提及哦~'
 
 // 本机浏览器开关：默认关闭；在线状态持续刷新，run 创建时冻结用户选择。
@@ -314,9 +358,18 @@ const handleKeyDown = (e) => {
 }
 
 defineExpose({
+  stageReaderImage,
+  restoreReaderImage,
+  hasImage: () => Boolean(currentImage.value),
   focus: () => inputRef.value?.focus(),
   closeOptions: () => inputRef.value?.closeOptions(),
-  prependText: (text) => inputRef.value?.prependText(text)
+  prependText: (text) => inputRef.value?.prependText(text),
+  // 阅读动作可取得原生发送函数的确认结果；Vue emit 本身不返回异步处理结果。
+  // 自动指令不消费图片；图片动作仍由用户点击发送、走既有事件路径。
+  submit: (send) =>
+    props.paperReaderEnabled && typeof send === 'function'
+      ? send({ image: currentImage.value, browserEnabled: browserEnabled.value })
+      : handleSend()
 })
 </script>
 

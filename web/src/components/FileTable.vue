@@ -292,6 +292,16 @@
               批量入库
             </a-button>
             <a-button
+              v-if="store.database?.contract_key === 'pdf_evidence'"
+              type="link"
+              :loading="pdfUpgradeLoading"
+              :disabled="!selectedPdfFileIds.length"
+              :icon="h(RotateCw, { size: 16 })"
+              @click="handlePdfEvidenceUpgrade"
+            >
+              升级证据版本
+            </a-button>
+            <a-button
               type="link"
               @click="showMoveModal(selectedRowsForAction)"
               :disabled="!canBatchMove"
@@ -742,6 +752,7 @@ const contractManagedLifecycle = computed(() =>
 const batchDeleting = computed(() => store.state.batchDeleting)
 const batchParsing = computed(() => store.state.chunkLoading)
 const batchIndexing = computed(() => store.state.chunkLoading)
+const pdfUpgradeLoading = ref(false)
 const selectedRowKeys = computed({
   get: () => store.selectedRowKeys,
   set: (keys) => (store.selectedRowKeys = keys)
@@ -874,6 +885,11 @@ const moveTreeData = computed(() => {
 
 const selectedRowsForAction = computed(() =>
   selectedRowKeys.value.map((key) => files.value.find((file) => file.file_id === key)).filter(Boolean)
+)
+const selectedPdfFileIds = computed(() =>
+  selectedRowsForAction.value
+    .filter((file) => !file?.is_folder && String(file?.file_type || '').toLowerCase() === 'pdf')
+    .map((file) => file.file_id)
 )
 const canBatchMove = computed(() => selectedRowsForAction.value.length > 0 && !lock.value)
 
@@ -1105,6 +1121,49 @@ const handleBatchParse = async () => {
 
   await store.parseFiles(validKeys)
   selectedRowKeys.value = []
+}
+
+const handlePdfEvidenceUpgrade = async () => {
+  if (!selectedPdfFileIds.value.length || pdfUpgradeLoading.value) return
+  pdfUpgradeLoading.value = true
+  try {
+    const plan = await documentApi.schedulePdfEvidenceUpgrades(store.kbId, selectedPdfFileIds.value, {
+      dryRun: true
+    })
+    if (!plan.upgrade_required) {
+      message.info('所选 PDF 已是当前证据版本，无需升级')
+      return
+    }
+    const reasons = new Set(
+      (plan.items || []).flatMap((item) => (item.upgrade_required ? item.reasons || [] : []))
+    )
+    Modal.confirm({
+      title: `升级 ${plan.upgrade_required} 个 PDF 证据版本`,
+      content: `将创建新的不可变解析版本，旧版本继续保留。原因：${[...reasons].join('、')}`,
+      okText: '确认升级',
+      cancelText: '取消',
+      onOk: async () => {
+        pdfUpgradeLoading.value = true
+        try {
+          const result = await documentApi.schedulePdfEvidenceUpgrades(
+            store.kbId,
+            selectedPdfFileIds.value,
+            { dryRun: false }
+          )
+          if (result.failed) message.warning(`已提交 ${result.queued} 个，失败 ${result.failed} 个`)
+          else message.success(`已提交 ${result.queued} 个 PDF 升级任务`)
+          selectedRowKeys.value = []
+          await store.loadDocumentFiles()
+        } finally {
+          pdfUpgradeLoading.value = false
+        }
+      }
+    })
+  } catch (error) {
+    message.error(error?.message || 'PDF 证据版本盘点失败')
+  } finally {
+    pdfUpgradeLoading.value = false
+  }
 }
 
 const handleBatchIndex = async () => {

@@ -29,6 +29,8 @@
               v-for="(cell, cellIndex) in row"
               :key="`h${rowIndex}-${cellIndex}`"
               :cell="cell"
+              :can-locate="canOpenSource"
+              @locate="openCell"
               tag="th"
             />
           </tr>
@@ -39,6 +41,8 @@
               v-for="(cell, cellIndex) in row"
               :key="`b${rowIndex}-${cellIndex}`"
               :cell="cell"
+              :can-locate="canOpenSource"
+              @locate="openCell"
               tag="td"
             />
           </tr>
@@ -79,6 +83,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['open-source'])
+const openCell = (selector) =>
+  emit('open-source', { evidence_id: props.table.evidence_id, source_selector: selector })
 
 const expanded = ref(false)
 const cardRoot = ref(null)

@@ -9,6 +9,7 @@ import * as preferences from '../literature_reader.js'
 import * as calendar from '../literature_calendar.js'
 import * as graph from '../literature_graph.js'
 import * as chromeUtils from '../literature_chrome.js'
+import * as assistantUtils from '../literature_assistant.js'
 import { ref, computed } from 'vue'
 
 const { code: sessionsModelCode } = await transform(
@@ -67,7 +68,10 @@ async function mount(
   const { descriptor } = parse(source)
   const script =
     descriptor.script?.content || compileScript(descriptor, { id: 'hermetic-unit' }).content
-  const { code } = await transform(script, { format: 'cjs' })
+  const { code } = await transform(script, {
+    format: 'cjs',
+    define: { 'import.meta.url': '"file:///app/src/components/literature/Reader.vue"' }
+  })
   const exports = {}
   const module = { exports }
   const require = (id) => {
@@ -86,12 +90,34 @@ async function mount(
         })
       }
     if (id === '@/utils/literature_chrome') return chromeUtils
+    if (id === '@/utils/literature_assistant') return assistantUtils
     if (id === '@/composables/useLiteratureTaskFeed')
-      return { useLiteratureTaskFeed: () => ({ tasks: ref([]), feedError: ref(''), refresh: async () => {} }) }
+      return {
+        useLiteratureTaskFeed: () => ({
+          tasks: ref([]),
+          feedError: ref(''),
+          refresh: async () => {}
+        })
+      }
     if (id === '@/composables/useLiteraturePollingScope')
       return { useLiteraturePollingScope: () => ref(true) }
+    // useLiteratureSessions 以相对路径再导出的通用确认原语（VM 内 require 按原始 id 匹配）。
+    // 与下方 ant-design-vue mock 的 Modal.confirm 同构：委托 window.confirm，
+    // 保持既有测试用 window.confirm 开关控制确认结果的链路不变。
+    if (id === './useConfirmAction' || id === '@/composables/useConfirmAction')
+      return {
+        confirmAction: () =>
+          new Promise((resolve) => {
+            resolve(Boolean(window.confirm?.()))
+          })
+      }
     if (id === 'ant-design-vue')
-      return { message: { info() {}, success() {}, error() {}, warning() {} } }
+      return {
+        message: { info() {}, success() {}, error() {}, warning() {} },
+        Modal: {
+          confirm: (options) => (window.confirm?.() ? options.onOk?.() : options.onCancel?.())
+        }
+      }
     if (id === '@/stores/chatUI') {
       return { useChatUIStore: () => chatUIStore }
     }
@@ -112,6 +138,11 @@ async function mount(
     }
     if (id === '@lucide/vue') return new Proxy({}, { get: () => ({ render: () => null }) })
     if (modules[id]) return modules[id]
+    if (id === '@/stores/user') return { useUserStore: () => ({}) }
+    // 真实 useLiteratureSessions 源码在 VM 里会 import literature_api；
+    // 组件挂载未提供专项 mock 时的安全兜底（任何方法都返回空结果，不发起请求）。
+    if (id === '@/apis/literature_api')
+      return { literatureWorkspaceApi: new Proxy({}, { get: () => async () => ({}) }) }
     if (id.endsWith('.vue')) return { default: { render: () => null } }
     throw Error(`Unmocked dependency: ${id}`)
   }
@@ -405,28 +436,28 @@ try {
     },
     window
   )
-  workspace.openPaper({ rid: 'main' })
+  await workspace.openPaper({ rid: 'main' })
   for (let i = 1; i <= 5; i++) {
     workspace.comparisonChoice = `compare-${i}`
     workspace.addComparison()
   }
   assert.equal(workspace.comparisonRids.length, 4, 'Five-pane budget includes primary')
   workspace.setEditing('main', true)
-  workspace.switchWorkspace('diary')
+  await workspace.switchWorkspace('diary')
   assert.equal(workspace.viewMode, 'reader', 'Declined workspace switch preserves reader')
-  workspace.openPaper({ rid: 'other' })
+  await workspace.openPaper({ rid: 'other' })
   assert.equal(workspace.selectedRid, 'main', 'Declined replacement preserves edited paper')
   workspace.setEditing('main', false)
   workspace.closeReader()
   assert.equal(workspace.selectedRid, 'compare-1', 'Close promotes existing comparison')
   assert.equal(workspace.comparisonRids.length, 3)
-  workspace.switchWorkspace('concepts')
+  await workspace.switchWorkspace('concepts')
   await settle()
   assert.ok(
     workspaceReads.includes('/api/literature/concepts'),
     'Concept toolbar must load actual concept data'
   )
-  workspace.switchWorkspace('reports')
+  await workspace.switchWorkspace('reports')
   await settle()
   assert.ok(
     workspaceReads.includes('/api/literature/reports'),
@@ -730,11 +761,15 @@ try {
   assert.equal(managed.selectedIds.length, 3)
   assert.equal(managed.allSelected, true)
   managed.toggleOne('drop', false)
-  assert.deepEqual(managed.selectedIds, ['keep', 'active'], 'Deselecting one row narrows the batch')
+  assert.deepEqual(
+    Array.from(managed.selectedIds),
+    ['keep', 'active'],
+    'Deselecting one row narrows the batch'
+  )
   assert.equal(managed.allSelected, false)
   await managed.removeOne('drop')
   assert.deepEqual(deleted, ['drop'], 'Row delete issues exactly one request')
-  assert.deepEqual(managed.selectedIds, ['keep', 'active'])
+  assert.deepEqual(Array.from(managed.selectedIds), ['keep', 'active'])
   managed.selectedId = 'active'
   await managed.removeOne('active')
   assert.equal(managed.selectedId, '', 'Deleting the active session clears the send target')
@@ -888,7 +923,7 @@ try {
     },
     window
   )
-  sharedSessions.selectSession('shared')
+  await sharedSessions.selectSession('shared')
   assert.equal(
     desk.sessionState.selectedId.value,
     'shared',
@@ -896,14 +931,14 @@ try {
   )
   sharedSessions.toggleAll(true)
   assert.deepEqual(
-    desk.sessionState.selectedIds.value,
+    Array.from(desk.sessionState.selectedIds.value),
     ['shared'],
     'Batch selection is shared, not duplicated'
   )
   confirm = false
   workspace.setEditing('unsaved', true)
   const previousThread = workspace.activeThreadId
-  workspace.selectSessionFromSidebar('declined-thread')
+  await workspace.selectSessionFromSidebar('declined-thread')
   assert.equal(
     workspace.activeThreadId,
     previousThread,
@@ -915,8 +950,321 @@ try {
     'Declined navigation cannot pre-select a session'
   )
 
+  // Reader handoff uses the server's idempotent paper-session response, not
+  // a route-derived thread. Old threads outside page one remain activatable.
+  const capture = {
+    rid: 'reader-paper',
+    source_revision_id: 'rev-reader',
+    reading_version: 2,
+    action: 'explain',
+    surface: 'original',
+    text: 'Selected methods paragraph'
+  }
+  let createResult = {
+    thread: { id: 'reader-thread', title: 'Reader' },
+    session: { kind: 'paper', rid: capture.rid },
+    context: {
+      source_revision_id: capture.source_revision_id,
+      reading_version: capture.reading_version
+    }
+  }
+  let waitingCreate = null
+  const { instance: assistantDesk } = await mount(
+    '../../views/LiteratureView.vue',
+    {},
+    {
+      'vue-router': { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} },
+      '@/stores/user': { useUserStore: () => ({ uid: 'owner' }) },
+      '@/apis/base': { apiGet: async () => ({}), apiPost: async () => ({}) },
+      '@/apis/literature_api': {
+        listLiteraturePapers: async () => ({ items: [], total: 0 }),
+        listLiteratureTasks: async () => ({ items: [] }),
+        literatureWorkspaceApi: {
+          sessions: async () => ({ items: [] }),
+          createSession: async () => (waitingCreate ? waitingCreate.promise : createResult)
+        }
+      }
+    },
+    { confirm: () => true, localStorage: storage, addEventListener() {}, removeEventListener() {} }
+  )
+  assistantDesk.selectedRid = capture.rid
+  assistantDesk.viewMode = 'reader'
+  await assistantDesk.handleReaderAction(capture)
+  assert.equal(assistantDesk.viewMode, 'sessions')
+  assert.equal(assistantDesk.activeThreadId, 'reader-thread')
+  assert.equal(assistantDesk.pendingReaderRequest.text, capture.text)
+  assert.equal(assistantDesk.pendingReaderRequest.threadRecord.session.rid, capture.rid)
+  const stagedIntent = assistantDesk.pendingReaderRequest
+  assistantDesk.readerStaged({ id: stagedIntent.id, success: true })
+  assert.equal(assistantDesk.pendingReaderRequest, null)
+  createResult.context.reading_version = 3
+  await assistantDesk.handleReaderAction(capture)
+  assert.equal(assistantDesk.pendingReaderRequest, null)
+  assert.match(assistantDesk.searchNotice, /版本已更新/)
+  waitingCreate = deferred()
+  const lateAction = assistantDesk.handleReaderAction(capture)
+  await settle()
+  assistantDesk.selectedRid = 'user-selected-other-paper'
+  waitingCreate.resolve(createResult)
+  await lateAction
+  assert.equal(
+    assistantDesk.selectedRid,
+    'user-selected-other-paper',
+    'A late create response must not hijack navigation'
+  )
+  assert.equal(assistantDesk.pendingReaderRequest, null)
+
+  const requestsStaged = [],
+    acknowledgments = []
+  const boundRequest = {
+    ...capture,
+    thread_id: 'reader-thread',
+    id: 'reader-intent-1',
+    threadRecord: createResult.thread
+  }
+  boundRequest.threadRecord = { ...createResult.thread, session: createResult.session }
+  const readerSessions = await mount(
+    '../../components/literature/LiteratureSessions.vue',
+    {
+      threadId: 'reader-thread',
+      readerRequest: boundRequest,
+      onReaderStaged: (result) => acknowledgments.push(result)
+    },
+    {
+      '@/apis/literature_api': { literatureWorkspaceApi: { sessions: async () => ({ items: [] }) } }
+    },
+    { confirm: () => true },
+    {},
+    (setup) => {
+      setup.chat = {
+        selectThreadFromRoute: async () => true,
+        stagePaperReaderDraft: async (request) => requestsStaged.push(request.id)
+      }
+    }
+  )
+  await settle()
+  assert.equal(readerSessions.instance.selectedPaperRid, capture.rid)
+  assert.equal(readerSessions.instance.ready, true)
+  assert.deepEqual(requestsStaged, ['reader-intent-1'])
+  assert.equal(acknowledgments[0].success, true)
+  readerSessions.setProps({ readerRequest: { ...boundRequest } })
+  await settle()
+  assert.equal(requestsStaged.length, 1, 'An acknowledged intent cannot stage twice')
+  readerSessions.setProps({
+    readerRequest: { ...boundRequest, id: 'reader-intent-wrong', rid: 'wrong-paper' }
+  })
+  await settle()
+  assert.equal(requestsStaged.length, 1, 'Wrong-paper capture never reaches native input')
+  assert.equal(acknowledgments.at(-1).success, false)
+  readerSessions.instance.chat.stagePaperReaderDraft = async () => {
+    throw Error('已有草稿')
+  }
+  readerSessions.setProps({ readerRequest: { ...boundRequest, id: 'reader-intent-draft' } })
+  await settle()
+  assert.match(readerSessions.instance.notice, /已有草稿/)
+  assert.equal(acknowledgments.at(-1).success, false)
+
+  // PDF.js is mocked here: verify lifecycle/crop/version behavior, not visual fidelity.
+  const pdfActions = [],
+    pageChanges = [],
+    locatorCalls = [],
+    rasterCalls = []
+  let blobCallback = null,
+    deferBlob = false,
+    pdfDimension = { width: 600, height: 800 }
+  const pdfSource = { kb_id: 'kb-reader', file_id: 'file-reader', parse_revision_id: 'rev-reader' }
+  const fragment = { page_number: 2, page_index: 1, bbox: [20, 30, 120, 70], origin: 'top_left' }
+  const pdfApi = {
+    resolveWorkspacePdfEvidence: async (request) => {
+      locatorCalls.push(request)
+      return { source: pdfSource, locator: { fragments: [fragment], precision: 'REGION' } }
+    }
+  }
+  const canvasElement = { style: {}, getContext: () => ({}) }
+  const pdfReader = await mount(
+    '../../components/literature/LiteraturePdfReader.vue',
+    {
+      url: 'blob:authorized-pdf',
+      source: pdfSource,
+      initialPage: 2,
+      onAssistantAction: (action) => pdfActions.push(action),
+      onPageChanged: (value) => pageChanges.push(value)
+    },
+    {
+      'pdfjs-dist': {
+        PDFWorker: class {
+          destroy() {}
+        },
+        getDocument: () => ({
+          destroy: async () => {},
+          promise: Promise.resolve({
+            numPages: 3,
+            getPage: async () => ({
+              getViewport: ({ scale }) => ({
+                width: pdfDimension.width * scale,
+                height: pdfDimension.height * scale,
+                scale,
+                viewBox: [0, 0, pdfDimension.width, pdfDimension.height],
+                rotation: 0
+              }),
+              render: () => ({ cancel() {}, promise: Promise.resolve() }),
+              getTextContent: async () => ({ items: [] })
+            })
+          })
+        }),
+        TextLayer: class {
+          cancel() {}
+          async render() {}
+        }
+      },
+      '@/apis/workspace_api': pdfApi,
+      '@/utils/pdfLocator': await import('../pdfLocator.js'),
+      '@/utils/pdfHighlight': await import('../pdfHighlight.js')
+    },
+    { devicePixelRatio: 2 },
+    {
+      File,
+      Blob,
+      Worker: class {
+        terminate() {}
+      },
+      ResizeObserver: class {
+        observe() {}
+        disconnect() {}
+      },
+      document: {
+        createElement: () => ({
+          getContext: () => ({ drawImage: (...args) => rasterCalls.push(args) }),
+          toBlob: (done) => {
+            if (deferBlob) blobCallback = done
+            else done(new Blob(['png'], { type: 'image/png' }))
+          }
+        })
+      }
+    },
+    (setup) => {
+      setup.canvas = canvasElement
+      setup.scroll = { clientWidth: 720, scrollTo() {} }
+      setup.stage = { getBoundingClientRect: () => ({ left: 0, top: 0 }) }
+      setup.textRoot = { replaceChildren() {} }
+    }
+  )
+  await pdfReader.instance.load()
+  assert.equal(pdfReader.instance.page, 2, 'Switching back to PDF restores the observed page')
+  assert.equal(pdfReader.instance.rendered, true)
+  await pdfReader.instance.capturePage()
+  assert.equal(pdfActions[0].page_hint, 2)
+  assert.equal(pdfActions[0].imageFile.type, 'image/png')
+  assert.equal(pdfActions[0].action, 'screenshot')
+  assert.equal(rasterCalls.length, 1)
+  deferBlob = true
+  const lateCapture = pdfReader.instance.capturePage()
+  await pdfReader.instance.go(3)
+  blobCallback(new Blob(['late'], { type: 'image/png' }))
+  await lateCapture
+  assert.equal(
+    pdfActions.length,
+    1,
+    'A crop finished after navigation must not enter a new page context'
+  )
+  pdfReader.setProps({
+    evidenceTarget: {
+      rid: capture.rid,
+      evidence: { source: { ...pdfSource, file_id: 'other-file' } }
+    }
+  })
+  await settle()
+  assert.equal(
+    locatorCalls.length,
+    0,
+    'Different-source evidence is rejected before a locator request'
+  )
+  assert.match(pdfReader.instance.locatorNotice, /不一致/)
+  pdfReader.setProps({ evidenceTarget: { rid: capture.rid, evidence: { source: pdfSource } } })
+  await settle()
+  await pdfReader.instance.render()
+  assert.equal(locatorCalls.length, 1)
+  assert.equal(pdfReader.instance.page, 2)
+  assert.equal(pdfReader.instance.boxes.length, 1)
+  await Promise.all([pdfReader.instance.go(1), pdfReader.instance.go(3)])
+  assert.equal(pdfReader.instance.page, 3, 'Rapid page changes retain the newest render')
+  assert.equal(pageChanges.at(-1), 3)
+  pdfDimension = { width: 20000, height: 20000 }
+  pdfReader.setProps({ fitWidth: false, scale: 3 })
+  await settle()
+  await pdfReader.instance.render()
+  assert.ok(canvasElement.width * canvasElement.height <= 16000000)
+  assert.match(pdfReader.instance.renderNotice, /安全像素预算/)
+  pdfReader.setProps({ url: 'https://untrusted.example/paper.pdf' })
+  await settle()
+  await pdfReader.instance.load()
+  assert.match(pdfReader.instance.error, /鉴权/)
+
+  // Native image staging has its own thread fence and cannot affect ordinary input.
+  let upload = null
+  const imageInput = await mount(
+    '../../components/AgentInputArea.vue',
+    {
+      threadId: 'thread-image',
+      supportsFileUpload: true,
+      paperReaderEnabled: true
+    },
+    {
+      '@/utils/file_utils': { normalizeAttachmentPreviews: () => [] },
+      '@/utils/multimodal_image_upload': { uploadMultimodalImage: async () => upload.promise },
+      '@/apis/browser_api': {
+        browserApi: { getBrowserStatus: async () => ({ paired: false, online: false }) }
+      }
+    },
+    { localStorage: storage },
+    { document: { addEventListener() {}, removeEventListener() {} } }
+  )
+  upload = deferred()
+  const firstImage = imageInput.instance.stageReaderImage({}, 'thread-image', () => true)
+  imageInput.setProps({ threadId: 'other-thread' })
+  upload.resolve({ success: true, imageContent: 'data:image/png;base64,fixture' })
+  await assert.rejects(firstImage, /会话或草稿已改变/)
+  assert.equal(imageInput.instance.currentImage, null)
+  imageInput.setProps({ threadId: 'thread-image' })
+  await settle()
+  upload = deferred()
+  const secondImage = imageInput.instance.stageReaderImage({}, 'thread-image', () => true)
+  upload.resolve({ success: true, imageContent: 'data:image/png;base64,fixture' })
+  await secondImage
+  assert.equal(imageInput.instance.currentImage.success, true)
+  imageInput.setProps({ threadId: 'another-thread' })
+  await settle()
+  assert.equal(imageInput.instance.currentImage, null, 'Staged reader image cannot cross threads')
+  imageInput.setProps({ paperReaderEnabled: false })
+  await assert.rejects(
+    imageInput.instance.stageReaderImage({}, 'another-thread', () => true),
+    /模型是否支持/
+  )
+  assert.equal(
+    imageInput.instance.restoreReaderImage({ success: true }, 'another-thread'),
+    false,
+    'Ordinary input cannot restore a paper reader image'
+  )
+  imageInput.setProps({ paperReaderEnabled: true })
+  assert.equal(
+    imageInput.instance.restoreReaderImage(
+      { success: true, imageContent: 'failed-create-image' },
+      'another-thread'
+    ),
+    true
+  )
+  assert.equal(imageInput.instance.currentImage.imageContent, 'failed-create-image')
+  assert.equal(
+    imageInput.instance.restoreReaderImage(
+      { success: true, imageContent: 'replacement' },
+      'another-thread'
+    ),
+    false,
+    'Failed-create restoration cannot overwrite a newer image'
+  )
+
   console.log(
-    'Literature component lifecycle tests passed: five readers, edit guards, diary races, safe refresh, review identity, session delete, card ask and workbench chrome'
+    'Literature component lifecycle tests passed: readers, edit guards, session/workbench state, reader handoff, version/navigation fences, draft protection and native image races'
   )
 } finally {
   mounts.forEach((app) => app.unmount())

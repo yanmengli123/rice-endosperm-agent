@@ -112,12 +112,15 @@
                     :figures="inlineFigures(displayItem.message, row.conv)"
                     :figure-refs="inlineFigureRefs(displayItem.message, row.conv)"
                     :tables="inlineTables(displayItem.message, row.conv)"
+                    :source-quotes="inlineSourceQuotes(displayItem.message, row.conv)"
+                    @open-evidence-source="openEvidenceSource"
                     :graph-snapshot="inlineGraph(displayItem.message, row.conv)"
                     :evidence-id-set="displayedEvidenceIdSet"
                     @openStatus="handleOpenMessageStatus"
                     @openFigureSource="openFigureSource"
                     @locate-evidence="handleLocateEvidence"
                     @retry="retryMessage(displayItem.message)"
+                    @retryStoppedMessage="retryStoppedMessage"
                   >
                   </AgentMessageComponent>
                   <ToolCallsGroupComponent
@@ -262,7 +265,8 @@
                 ref="agentInputAreaRef"
                 v-model="userInput"
                 :is-loading="isProcessing"
-                :disabled="!currentAgent"
+                :disabled="!currentAgent || readerStaging"
+                :paper-reader-enabled="!!paperReaderRid && lockThreadCreation"
                 :send-button-disabled="isSendButtonDisabled"
                 :mention="mentionConfigWithDocuments"
                 :thread-id="currentChatId"
@@ -1183,11 +1187,17 @@ import { useAgentStore } from '@/stores/agent'
 import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useConfigStore } from '@/stores/config'
+import { useUserStore } from '@/stores/user'
 import { storeToRefs } from 'pinia'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import { agentApi, threadApi, apiGet } from '@/apis'
 import { downloadViewerFile } from '@/apis/viewer_filesystem'
 import { downloadWorkspaceKnowledgeFile } from '@/apis/workspace_api'
+import {
+  evidenceSourceIds,
+  evidenceWithAssetSelector,
+  findSourceEvidence
+} from '@/utils/pdfLocator'
 import HumanApprovalModal from '@/components/HumanApprovalModal.vue'
 import { useApproval } from '@/composables/useApproval'
 import { useAgentThreadState } from '@/composables/useAgentThreadState'
@@ -1213,8 +1223,11 @@ import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import {
   extractCitationReadyFromHistory,
   figureRefsForMessage,
+  figureSourceSelector,
+  tableSourceSelector,
   inlineFiguresForMessage,
-  tablesForMessage
+  tablesForMessage,
+  sourceQuotesForMessage
 } from '@/utils/figureCard'
 import { followupSuggestionsForMessage } from '@/utils/followupSuggestions'
 import {
@@ -1251,20 +1264,32 @@ import {
   validateCatalogTitle
 } from '@/utils/threadTitle'
 import RiceEndospermWelcome from '@/components/rice-endosperm/RiceEndospermWelcome.vue'
+import {
+  readerCapture,
+  readerContext,
+  readerDraft,
+  isAutoSendAction
+} from '@/utils/literature_assistant'
 
 // ==================== PROPS & EMITS ====================
 const props = defineProps({
   agentId: { type: String, default: '' },
   singleMode: { type: Boolean, default: true },
-  sendDisabled: { type: Boolean, default: false }
+  sendDisabled: { type: Boolean, default: false },
+  // 锁定线程归属（文献工作台等嵌入场景）：禁止在组件内隐式新建未绑定会话的普通线程
+  lockThreadCreation: { type: Boolean, default: false },
+  paperReaderRid: { type: String, default: '' }
 })
-const emit = defineEmits(['thread-change'])
+const emit = defineEmits(['thread-change', 'paper-evidence'])
 
 // ==================== STORE MANAGEMENT ====================
 const agentStore = useAgentStore()
 const chatThreadsStore = useChatThreadsStore()
 const chatUIStore = useChatUIStore()
 const configStore = useConfigStore()
+const readerUser = useUserStore()
+const readerOwnerKey = () =>
+  JSON.stringify([readerUser.uid, readerUser.departmentId, readerUser.isLoggedIn])
 const { agents, selectedAgentId, agentConfig, configurableItems, availableKnowledgeBases } =
   storeToRefs(agentStore)
 const { threads, currentThreadId, currentThread } = storeToRefs(chatThreadsStore)
@@ -1273,6 +1298,9 @@ const { selectedModelSpec } = storeToRefs(chatUIStore)
 // ==================== LOCAL CHAT & UI STATE ====================
 const draftQuestion = sessionStorage.getItem('rice-endosperm-draft-question') || ''
 const userInput = ref(draftQuestion)
+const readerStaging = ref(false),
+  stagedReader = ref(null)
+let readerDisposed = false
 if (draftQuestion) {
   sessionStorage.removeItem('rice-endosperm-draft-question')
 }
@@ -1283,6 +1311,70 @@ const handleWelcomeQuestionSelect = (question) => {
 }
 
 const agentInputAreaRef = ref(null)
+const stagePaperReaderDraft = async (request) => {
+  const capture = readerCapture(request)
+  const thread = request.thread_id
+  const owner = readerOwnerKey()
+  let draft
+  // 输入框空闲 = 无文本，或文本仍是上一条「未修改的暂存阅读草稿」（机器生成、
+  // 用户未编辑）——此时允许新阅读动作直接顶替，避免一次「提问」留下的草稿
+  // 永久阻塞后续所有解释/翻译/总结动作（用户侧表现为点击无反应）。
+  const inputFree = () => !userInput.value.trim() || userInput.value === stagedReader.value?.draft
+  const valid = () =>
+    !readerDisposed &&
+    readerOwnerKey() === owner &&
+    props.lockThreadCreation &&
+    props.paperReaderRid === capture.rid &&
+    currentChatId.value === thread &&
+    !!currentAgent.value &&
+    !props.sendDisabled &&
+    !isProcessing.value &&
+    inputFree()
+  if (!valid() || readerStaging.value || agentInputAreaRef.value?.hasImage()) {
+    // 分原因报错：让用户知道下一步该做什么，而不是笼统的「未就绪」。
+    if (agentInputAreaRef.value?.hasImage())
+      throw new Error('上一条阅读图片尚待确认发送，请先处理输入框')
+    if (isProcessing.value) throw new Error('左侧会话正在生成回答，完成后再次点击即可')
+    if (props.sendDisabled) throw new Error('会话尚未载入完成，请稍后重试')
+    if (userInput.value.trim()) throw new Error('输入框已有你正在编辑的内容，请先发送或清空')
+    throw new Error('会话已切换或已失效，请重新发起阅读动作')
+  }
+  const input = agentInputAreaRef.value
+  if (!input) throw new Error('输入区尚未载入')
+  readerStaging.value = true
+  try {
+    // The input is temporarily disabled while staging; upload checks identity again.
+    if (request.imageFile) await input.stageReaderImage(request.imageFile, thread, valid)
+    if (!valid()) throw new Error('会话已改变，未写入阅读草稿')
+    draft = readerDraft(capture)
+    stagedReader.value = { context: readerContext(capture), thread, draft, owner }
+    userInput.value = draft
+    await nextTick()
+    if (!valid()) throw new Error('会话已改变，未发送阅读草稿')
+    input.focus()
+  } finally {
+    readerStaging.value = false
+  }
+  // 完整指令型阅读动作（解释/翻译/总结等）暂存成功后立即走原生发送链路，
+  // 回答直接进入本文会话历史；「提问」等不完整指令保留草稿待用户确认。
+  if (isAutoSendAction(capture.action)) {
+    if (!valid() || stagedReader.value?.draft !== draft)
+      throw new Error('会话或草稿已改变，未发送阅读动作')
+    if (!input.submit) throw new Error('输入区发送能力尚未载入')
+    // Acknowledgment is creation of a server run, not clearing the local draft.
+    // Keep streaming on the native path without awaiting the complete SSE response.
+    return new Promise((resolve, reject) => {
+      const completion = input.submit((payload) =>
+        handleSendMessage(payload, {
+          readerIntent: { thread, rid: capture.rid, draft, owner },
+          onRunCreated: (runId) => resolve({ sent: true, runId })
+        })
+      )
+      Promise.resolve(completion).then(() => resolve({ sent: false }), reject)
+    })
+  }
+  return { sent: false }
+}
 // 划词追问：选中文本规范成引用块插入草稿开头，编辑器自动聚焦且光标落在引用块之后
 const handleSelectionFollowUp = (selectedText) => {
   const quote = buildFollowUpQuote(selectedText)
@@ -1718,6 +1810,7 @@ const resetRunEvidence = (threadId, runId = null) => {
   ts.verifiedFigures = []
   ts.verifiedFigureRefs = []
   ts.verifiedTables = []
+  ts.verifiedSourceQuotes = []
   ts.verifiedGraphSnapshot = null
   ts.locatorCandidates = []
 }
@@ -1764,6 +1857,8 @@ const inlineFigureRefs = (message, conv) =>
   figureRefsForMessage(message, conv, currentThreadState.value?.figureRefsByRun)
 const inlineTables = (message, conv) =>
   tablesForMessage(message, conv, currentThreadState.value?.tablesByRun)
+const inlineSourceQuotes = (message, conv) =>
+  sourceQuotesForMessage(message, conv, currentThreadState.value?.sourceQuotesByRun)
 // 答案气泡内关系图：落库载荷优先，其次使用当前会话按 run 暂存的 SSE 快照
 const inlineGraph = (message, conv) =>
   inlineGraphForMessage(message, conv, currentThreadState.value?.graphsByRun)
@@ -1964,10 +2059,9 @@ const displayedEvidence = computed(() => {
   const evidence = focusedArchiveEntry.value?.evidence
   return Array.isArray(evidence) ? evidence : []
 })
-// 图卡「查看原文」门控：只有证据集里能找到同 evidence_id 的证据才允许跳转（复用证据守卫）
+// 只使用权威证据端点发出的物理 id / span 别名，不从图卡猜定位。
 const displayedEvidenceIdSet = computed(
-  () =>
-    new Set(displayedEvidence.value.map((item) => String(item?.evidence_id || '')).filter(Boolean))
+  () => new Set(displayedEvidence.value.flatMap(evidenceSourceIds))
 )
 const displayedEvidenceSummary = computed(() =>
   focusedRunId.value ? focusedArchiveEntry.value?.evidenceSummary : currentEvidenceSummary.value
@@ -2058,7 +2152,7 @@ const openEvidenceSourceFallback = async (evidence) => {
   const fragment = evidence?.locator?.fragments?.[0]
   if (!kbId || !fileId || !fragment) return
   try {
-    const response = await downloadWorkspaceKnowledgeFile(kbId, fileId)
+    const response = await downloadWorkspaceKnowledgeFile(kbId, fileId, 'original', evidence.source)
     const objectUrl = URL.createObjectURL(await response.blob())
     const page = Math.max(Number(fragment.page_number) || Number(fragment.page_index) + 1 || 1, 1)
     const link = document.createElement('a')
@@ -2094,6 +2188,10 @@ const openEvidenceSource = (evidence) => {
       .recordEvidenceSourceView(runId, evidence.evidence_id)
       .catch((error) => console.warn('Failed to record evidence view:', error))
   }
+  if (props.paperReaderRid && props.lockThreadCreation) {
+    emit('paper-evidence', { rid: props.paperReaderRid, evidence })
+    return
+  }
   evidenceViewer.visible = true
   evidenceViewer.error = ''
   evidenceViewer.evidence = evidence
@@ -2105,11 +2203,11 @@ const openEvidenceSource = (evidence) => {
 }
 const openFigureSource = (figure) => {
   const evidenceId = String(figure?.evidence_id || '')
-  const evidence = displayedEvidence.value.find(
-    (item) => String(item?.evidence_id || '') === evidenceId
-  )
+  const evidence = findSourceEvidence(displayedEvidence.value, evidenceId)
   if (!evidence) return
-  openEvidenceSource(evidence)
+  const selector = tableSourceSelector(figure) || figureSourceSelector(figure)
+  const selected = evidenceWithAssetSelector(evidence, selector)
+  if (selected) openEvidenceSource(selected)
 }
 const tokenUsageSegments = computed(() => {
   const usage = currentTokenUsage.value
@@ -3029,6 +3127,7 @@ const replyLoadingText = computed(() =>
 )
 const isSendButtonDisabled = computed(() => {
   return (
+    readerStaging.value ||
     sendCooldownActive.value ||
     (props.sendDisabled && !isProcessing.value) ||
     ((!userInput.value || !currentAgent.value) && !isProcessing.value)
@@ -3332,6 +3431,7 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
+  readerDisposed = true
   if (typeof document !== 'undefined') {
     document.removeEventListener('visibilitychange', handlePageVisibilityChange)
   }
@@ -3385,6 +3485,7 @@ const restoreCitationReadyFromHistory = (threadId, history) => {
   ts.verifiedFigures = restored?.figures || []
   ts.verifiedFigureRefs = restored?.figureRefs || []
   ts.verifiedTables = restored?.tables || []
+  ts.verifiedSourceQuotes = restored?.sourceQuotes || []
   ts.verifiedGraphSnapshot = extractGraphSnapshotFromHistory(history)
 }
 
@@ -3462,11 +3563,6 @@ const handleArtifactSaved = async () => {
 const savingArtifactPaths = ref({})
 
 // ---------------------------------------------------------------------------
-// 关系图快照导出（状态面板产物区行级入口）：服务端回放发布载荷，确定性字节；
-// 前端只做触发与文件名解析——与 AgentArtifactsCard.downloadFile 同款模式。
-// ---------------------------------------------------------------------------
-const getConvGraphExport = (conv) => graphExportSourceForConversation(conv)
-
 const downloadGraphSnapshot = async (source, format) => {
   if (!source?.runId) return
   try {
@@ -3567,6 +3663,10 @@ const fetchAgentState = async (agentId, threadId) => {
 
 const ensureActiveThread = async (title = '新的对话') => {
   if (currentChatId.value) return currentChatId.value
+  if (props.lockThreadCreation) {
+    message.warning('当前已锁定会话归属，请先在文献会话列表中选择或新建会话')
+    return null
+  }
   try {
     const newThread = await createThread(currentAgentId.value, title || '新的对话')
     if (newThread) {
@@ -3953,7 +4053,38 @@ const selectThreadFromRoute = async (threadId) => {
   return true
 }
 
-const handleSendMessage = async ({ image, browserEnabled } = {}) => {
+// 外部会话列表（如文献会话）持有权威记录、但线程可能不在 threads 首页时，
+// 先补最小记录保持 store 一致，再统一走 selectChat 激活。
+const selectExternalThread = async (thread) => {
+  if (!thread?.id) return false
+  if (chatState.currentThreadId === thread.id) return true
+  if (!threads.value.find((item) => item.id === thread.id)) {
+    chatThreadsStore.upsertThread({
+      id: thread.id,
+      title: thread.title || '文献会话',
+      agent_id: thread.agent_id || null,
+      is_pinned: false
+    })
+  }
+  await selectChat(thread.id)
+  return true
+}
+
+const handleSendMessage = async (
+  { image, browserEnabled } = {},
+  { readerIntent = null, onRunCreated = null } = {}
+) => {
+  // Reader auto-send is send-only: never cancel a different in-flight run.
+  if (
+    readerIntent &&
+    (readerDisposed ||
+      !props.lockThreadCreation ||
+      currentChatId.value !== readerIntent.thread ||
+      props.paperReaderRid !== readerIntent.rid ||
+      readerOwnerKey() !== readerIntent.owner ||
+      userInput.value !== readerIntent.draft)
+  )
+    return
   const text = userInput.value.trim()
   const imageContent = image?.imageContent || null
   if (
@@ -3964,12 +4095,23 @@ const handleSendMessage = async ({ image, browserEnabled } = {}) => {
     props.sendDisabled
   )
     return
+  if (readerStaging.value) return
+  if (stagedReader.value && stagedReader.value.owner !== readerOwnerKey()) return
+  const readingContext =
+    stagedReader.value?.thread === currentChatId.value &&
+    stagedReader.value?.context.rid === props.paperReaderRid
+      ? stagedReader.value.context
+      : null
 
   // 发送后进入短暂冷却，防止连续触发停止
   startSendCooldown()
 
   let threadId = currentChatId.value
   if (!threadId) {
+    if (props.lockThreadCreation) {
+      message.warning('当前已锁定会话归属，请先在文献会话列表中选择或新建会话')
+      return
+    }
     // 新线程用默认标题创建；首条消息的确定性命名由 scheduleThreadNaming 统一写入
     threadId = await ensureActiveThread()
     if (!threadId) {
@@ -3979,6 +4121,9 @@ const handleSendMessage = async ({ image, browserEnabled } = {}) => {
   }
   // 仅在用户手动选择过模型时覆盖后端配置；否则由后端使用智能体默认模型。
   const modelSpec = selectedModelSpec.value || null
+  const readerAgentId = readingContext ? currentAgentId.value : null
+  const readerOwner = readingContext ? readerOwnerKey() : null
+  const readerAttachments = readingContext ? [...currentPendingThreadAttachments.value] : null
 
   // mention.v2：从最终文本的 token 构造结构化提及（只派生自 token，保证与文本一致），
   // 服务端解析鉴权后冻结；无提及时不发送该字段（后端走文本 token 兼容层）。
@@ -3987,6 +4132,15 @@ const handleSendMessage = async ({ image, browserEnabled } = {}) => {
   userInput.value = ''
 
   await nextTick()
+  if (
+    readingContext &&
+    (readerDisposed ||
+      currentChatId.value !== threadId ||
+      props.paperReaderRid !== readingContext.rid ||
+      readerOwnerKey() !== readerOwner ||
+      currentAgentId.value !== readerAgentId)
+  )
+    return
   scrollController.scrollToBottom(true)
 
   const threadState = getThreadState(threadId)
@@ -3996,7 +4150,7 @@ const handleSendMessage = async ({ image, browserEnabled } = {}) => {
     hideApprovalState()
   }
 
-  const pendingAttachments = [...currentPendingThreadAttachments.value]
+  const pendingAttachments = readerAttachments || [...currentPendingThreadAttachments.value]
   const pendingAttachmentFileIds = pendingAttachments
     .map((attachment) => attachment.file_id)
     .filter(Boolean)
@@ -4018,15 +4172,16 @@ const handleSendMessage = async ({ image, browserEnabled } = {}) => {
     }))
   })
   threadState.isStreaming = true
-
+  let readerRunCreated = false
   try {
     const runResp = await agentApi.createAgentRun({
       query: text,
-      agent_slug: currentAgentId.value,
+      agent_slug: readerAgentId || currentAgentId.value,
       thread_id: threadId,
       meta: {
         request_id: requestId,
-        attachment_file_ids: pendingAttachmentFileIds
+        attachment_file_ids: pendingAttachmentFileIds,
+        ...(readingContext ? { literature_reader_context: readingContext } : {})
       },
       image_content: imageContent,
       model_spec: modelSpec,
@@ -4038,6 +4193,11 @@ const handleSendMessage = async ({ image, browserEnabled } = {}) => {
     if (!runId) {
       throw new Error('创建 run 失败：缺少 run_id')
     }
+    readerRunCreated = true
+    onRunCreated?.(runId)
+    // Accepted work stays on the server: do not subscribe with a new actor,
+    // cancel or replay it just because this paper panel disappeared.
+    if (readingContext && (readerDisposed || readerOwnerKey() !== readerOwner)) return
     // run_context 携带冻结知识范围（创建时已解析）；终态后由 result 端点刷新
     threadState.runContext = runResp?.run_context || null
     resetRunTrace(threadId, runId)
@@ -4051,7 +4211,28 @@ const handleSendMessage = async ({ image, browserEnabled } = {}) => {
     threadState.pendingRequestId = null
     rollbackAttachments(threadId, previousAttachments)
     resetOnGoingConv(threadId)
-    handleChatError(error, 'send')
+    // A rejected reader-originated create (e.g. stale version 409) preserves the
+    // local draft. Never replay an already-created run or overwrite newer input.
+    if (
+      readingContext &&
+      !readerRunCreated &&
+      !readerDisposed &&
+      currentChatId.value === threadId &&
+      props.paperReaderRid === readingContext.rid &&
+      readerOwnerKey() === readerOwner &&
+      !userInput.value.trim()
+    ) {
+      stagedReader.value = {
+        context: readingContext,
+        thread: threadId,
+        draft: text,
+        owner: readerOwner
+      }
+      userInput.value = text
+      if (image) agentInputAreaRef.value?.restoreReaderImage(image, threadId)
+    }
+    if (!readingContext || (!readerDisposed && readerOwnerKey() === readerOwner))
+      handleChatError(error, 'send')
   }
 }
 
@@ -4061,6 +4242,36 @@ const handleFollowupQuestionSelect = async (question) => {
   if (!question || isProcessing.value || sendCooldownActive.value || props.sendDisabled) return
   userInput.value = question
   await handleSendMessage()
+}
+
+// ==================== 重试 / 重新编辑 ====================
+// displayItem.message 与 conv.messages 内的对象同引用，可直接按引用定位所属轮次。
+const findConversationOfMessage = (predicate) =>
+  conversations.value.find((conv) => Array.isArray(conv?.messages) && conv.messages.some(predicate))
+
+const getConversationQuestionText = (conv) => {
+  const human = conv?.messages?.find((item) => item.type === 'human')
+  return typeof human?.content === 'string' ? human.content.trim() : ''
+}
+
+// 重新生成：把该回答所属轮次的提问原样重发（复用唯一发送路径，配额/审计与手打一致）
+const retryMessage = async (msg) => {
+  if (isProcessing.value || sendCooldownActive.value || props.sendDisabled) return
+  const text = getConversationQuestionText(findConversationOfMessage((item) => item === msg))
+  if (!text) {
+    message.warning('未找到该回答对应的提问原文，无法重新生成')
+    return
+  }
+  userInput.value = text
+  await handleSendMessage()
+}
+
+// 停止生成后的「重新编辑问题」：把该轮提问放回输入框供修改，不立即发送
+const retryStoppedMessage = (msgId) => {
+  const conv = findConversationOfMessage((item) => item.id === msgId && item.isStoppedByUser)
+  const text = getConversationQuestionText(conv)
+  if (!text) return
+  userInput.value = text
 }
 
 const handleSendOrStop = async (payload) => {
@@ -4177,8 +4388,18 @@ const buildExportPayload = () => {
 }
 
 defineExpose({
+  stagePaperReaderDraft,
   getExportPayload: buildExportPayload,
-  selectThreadFromRoute
+  selectThreadFromRoute,
+  selectExternalThread,
+  isProcessing
+})
+watch(currentChatId, () => {
+  if (stagedReader.value && userInput.value === stagedReader.value.draft) userInput.value = ''
+  stagedReader.value = null
+})
+watch(userInput, (value) => {
+  if (!value.trim()) stagedReader.value = null
 })
 
 const handleAgentStateRefresh = async (threadId = null) => {

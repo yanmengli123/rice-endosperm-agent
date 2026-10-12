@@ -95,8 +95,13 @@
             class="tab"
             role="tab"
             :class="{ active: currentTab === tab.key }"
+            :data-tab-key="tab.key"
+            :id="`detail-tab-${tab.key}`"
             :aria-selected="currentTab === tab.key"
+            :aria-controls="`detail-panel-${tab.key}`"
+            :tabindex="currentTab === tab.key ? 0 : -1"
             @click="selectTab(tab.key)"
+            @keydown="onTabKeydown"
           >
             {{ tab.label }}
           </button>
@@ -104,37 +109,71 @@
 
         <ReaderTabs
           v-if="currentTab === 'reader'"
+          role="tabpanel"
+          :id="'detail-panel-reader'"
+          :aria-labelledby="'detail-tab-reader'"
           :reader-target="readerTarget"
+          :evidence-target="evidenceTarget"
           :rid="rid"
           :paper="paper"
           :version-token="readerVersion"
           @editing-change="editingChanged"
           @document-saved="load"
           @open-link="$emit('open-link', $event)"
+          @assistant-action="$emit('assistant-action', $event)"
         />
         <NotePanel
           v-else-if="currentTab === 'notes'"
+          role="tabpanel"
+          id="detail-panel-notes"
+          aria-labelledby="detail-tab-notes"
           :rid="rid"
           :compile-jobs="paper.compile_jobs"
           @editing-change="editingChanged"
           @saved="load"
           @open-link="$emit('open-link', $event)"
         />
-        <AttachmentPanel v-else-if="currentTab === 'attachments'" :rid="rid" />
+        <AttachmentPanel
+          v-else-if="currentTab === 'attachments'"
+          role="tabpanel"
+          id="detail-panel-attachments"
+          aria-labelledby="detail-tab-attachments"
+          :rid="rid"
+        />
         <CardsPanel
           v-else-if="currentTab === 'cards'"
+          role="tabpanel"
+          id="detail-panel-cards"
+          aria-labelledby="detail-tab-cards"
           :rid="rid"
           @editing-change="editingChanged"
           @saved="load"
         />
         <ReviewPanel
           v-else-if="currentTab === 'review'"
+          role="tabpanel"
+          id="detail-panel-review"
+          aria-labelledby="detail-tab-review"
           :rid="rid"
           :version-token="readerVersion"
           @changed="load"
         />
-        <WorkflowPanel v-else-if="currentTab === 'workflow'" :rid="rid" />
-        <MetadataPanel v-else :rid="rid" @saved="load" @editing-change="editingChanged" />
+        <WorkflowPanel
+          v-else-if="currentTab === 'workflow'"
+          role="tabpanel"
+          id="detail-panel-workflow"
+          aria-labelledby="detail-tab-workflow"
+          :rid="rid"
+        />
+        <MetadataPanel
+          v-else
+          role="tabpanel"
+          id="detail-panel-overview"
+          aria-labelledby="detail-tab-overview"
+          :rid="rid"
+          @saved="load"
+          @editing-change="editingChanged"
+        />
       </template>
     </div>
   </div>
@@ -142,7 +181,6 @@
 
 <script>
 import { computed, ref, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { apiPost } from '@/apis/base'
 import {
@@ -154,6 +192,7 @@ import {
   triggerLiteratureTranslation
 } from '@/apis/literature_api'
 import { litConfirm, litPrompt } from '@/utils/litDialogs'
+import { useTablistKeyboard } from '@/composables/useTablistKeyboard'
 import NotePanel from '@/components/literature/NotePanel.vue'
 import AttachmentPanel from '@/components/literature/AttachmentPanel.vue'
 import CardsPanel from '@/components/literature/CardsPanel.vue'
@@ -189,16 +228,16 @@ export default {
   props: {
     rid: { type: String, required: true },
     embedded: { type: Boolean, default: false },
-    readerTarget: { type: Object, default: null }
+    readerTarget: { type: Object, default: null },
+    evidenceTarget: { type: Object, default: null }
   },
-  emits: ['close', 'session', 'open-link', 'editing-change'],
+  emits: ['close', 'session', 'open-link', 'editing-change', 'assistant-action'],
   setup(props, { emit }) {
-    const router = useRouter()
     const sessionLoading = ref(false)
-    // embedded 时派发给宿主切换会话区；独立页则跳转原生聊天路由。
+    // 文献会话永远留在文献工作台内由宿主切换（左右分栏问答），不再提供
+    // 跳转 /agent 原生聊天页的出口——问答历史与阅读上下文必须同屏可见。
     const openSession = (threadId) => {
-      if (props.embedded) emit('session', threadId)
-      else router.push(`/agent/${encodeURIComponent(threadId)}`)
+      emit('session', threadId)
     }
     const startSession = async () => {
       if (sessionLoading.value) return
@@ -243,20 +282,43 @@ export default {
       editing.value = value
       emit('editing-change', value)
     }
+    // tablist 键盘导航（roving tabindex + 方向键/Home/End），与点击同走 selectTab
+    const { onTabKeydown } = useTablistKeyboard(
+      (key) => selectTab(key),
+      () => tabs.map((tab) => tab.key)
+    )
+    let tabChangePending = false
     const selectTab = async (key) => {
-      if (key === currentTab.value) return
-      if (
-        editing.value &&
-        !(await litConfirm({
-          title: '放弃未保存编辑？',
-          content: '切换详情页会放弃未保存编辑。',
-          okText: '放弃并切换',
-          danger: true
-        }))
-      )
-        return
-      editingChanged(false)
-      currentTab.value = key
+      if (disposed || tabChangePending || !tabs.some((tab) => tab.key === key)) return false
+      if (key === currentTab.value) return true
+      const rid = props.rid
+      const previous = currentTab.value
+      const owner = JSON.stringify([userStore.uid, userStore.departmentId, userStore.isLoggedIn])
+      tabChangePending = true
+      try {
+        if (
+          editing.value &&
+          !(await litConfirm({
+            title: '放弃未保存编辑？',
+            content: '切换详情页会放弃未保存编辑。',
+            okText: '放弃并切换',
+            danger: true
+          }))
+        )
+          return false
+        if (
+          disposed ||
+          props.rid !== rid ||
+          currentTab.value !== previous ||
+          owner !== JSON.stringify([userStore.uid, userStore.departmentId, userStore.isLoggedIn])
+        )
+          return false
+        editingChanged(false)
+        currentTab.value = key
+        return true
+      } finally {
+        tabChangePending = false
+      }
     }
     watch(
       () => props.readerTarget,
@@ -265,6 +327,7 @@ export default {
       }
     )
     const close = async () => {
+      const rid = props.rid
       if (
         editing.value &&
         !(await litConfirm({
@@ -275,6 +338,7 @@ export default {
         }))
       )
         return
+      if (disposed || props.rid !== rid) return
       forceClose()
     }
     // 回收等终态动作后的关闭：内容已被处置，无需再确认未保存编辑
@@ -396,8 +460,15 @@ export default {
       try {
         const result = await triggerLiteratureRender(props.rid)
         if (result?.reused)
-          message.info(result.status === 'SUCCEEDED' ? '已复用现有阅读产物' : '阅读渲染正在处理中，已复用现有任务')
-        else message.success(result?.enqueue_deferred ? '阅读任务已保存，等待队列恢复调度' : '阅读任务已入队')
+          message.info(
+            result.status === 'SUCCEEDED'
+              ? '已复用现有阅读产物'
+              : '阅读渲染正在处理中，已复用现有任务'
+          )
+        else
+          message.success(
+            result?.enqueue_deferred ? '阅读任务已保存，等待队列恢复调度' : '阅读任务已入队'
+          )
         await load()
         startPollingIfBusy()
       } catch (error) {
@@ -412,8 +483,15 @@ export default {
       try {
         const result = await triggerLiteratureTranslation(props.rid, translationKind.value)
         if (result?.reused) {
-          message.info(result.status === 'SUCCEEDED' ? '已复用现有译文/总结' : '译文/总结正在生成，已复用现有任务')
-        } else message.success(result?.enqueue_deferred ? '翻译任务已保存，等待队列恢复调度' : '翻译任务已入队')
+          message.info(
+            result.status === 'SUCCEEDED'
+              ? '已复用现有译文/总结'
+              : '译文/总结正在生成，已复用现有任务'
+          )
+        } else
+          message.success(
+            result?.enqueue_deferred ? '翻译任务已保存，等待队列恢复调度' : '翻译任务已入队'
+          )
         await load()
         startPollingIfBusy()
       } catch (error) {
@@ -428,8 +506,17 @@ export default {
       try {
         const result = await triggerLiteratureCompile(props.rid, level)
         if (result?.reused) {
-          message.info(result.status === 'SUCCEEDED' ? `已复用 ${level} 笔记` : `${level} 正在编译，已复用现有任务`)
-        } else message.success(result?.enqueue_deferred ? `${level} 任务已保存，等待队列恢复调度` : `${level} 任务已入队`)
+          message.info(
+            result.status === 'SUCCEEDED'
+              ? `已复用 ${level} 笔记`
+              : `${level} 正在编译，已复用现有任务`
+          )
+        } else
+          message.success(
+            result?.enqueue_deferred
+              ? `${level} 任务已保存，等待队列恢复调度`
+              : `${level} 任务已入队`
+          )
         await load()
         startPollingIfBusy()
       } catch (error) {
@@ -453,7 +540,12 @@ export default {
           )
         } else if (result && Array.isArray(result.filled) && result.filled.length) {
           message.success(`已从外部源补全：${result.filled.join('、')}`)
-        } else message.info(result?.reason === 'meta_locked' ? '元数据已人工锁定，未自动改写' : '未发现需要补全的空字段')
+        } else
+          message.info(
+            result?.reason === 'meta_locked'
+              ? '元数据已人工锁定，未自动改写'
+              : '未发现需要补全的空字段'
+          )
         await load()
       } catch (error) {
         message.error(error?.message || '元数据补全失败')
@@ -549,6 +641,7 @@ export default {
       enrichHint,
       currentTab,
       selectTab,
+      onTabKeydown,
       close,
       readerVersion,
       editingChanged,

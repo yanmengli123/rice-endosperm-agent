@@ -42,8 +42,10 @@
 </template>
 
 <script>
-import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
+import { confirmAction } from '@/composables/useLiteratureSessions'
+import { useUserStore } from '@/stores/user'
 
 export default {
   name: 'CardsPanel',
@@ -59,16 +61,33 @@ export default {
     const saving = ref(false)
     const editing = ref(null)
     const error = ref('')
+    const user = useUserStore()
+    const owner = computed(() =>
+      JSON.stringify([props.rid, user.uid, user.departmentId, user.isLoggedIn])
+    )
+    let disposed = false
+    let loadGeneration = 0
+    let editConfirmation = null
     watch([title, content, editing, saving], () =>
       emit('editing-change', saving.value || !!title.value || !!content.value || !!editing.value)
     )
-    const edit = (card) => {
-      if ((title.value || content.value) && !window.confirm('切换卡片会放弃未保存编辑，继续？'))
-        return
-      editing.value = card
-      cardType.value = card.card_type
-      title.value = card.title
-      content.value = card.content
+    const edit = async (card) => {
+      if (disposed || saving.value || editConfirmation) return
+      const key = owner.value
+      const token = {}
+      editConfirmation = token
+      try {
+        if (title.value || content.value) {
+          if (!(await confirmAction('切换卡片会放弃未保存编辑，继续？'))) return
+        }
+        if (disposed || owner.value !== key || saving.value) return
+        editing.value = card
+        cardType.value = card.card_type
+        title.value = card.title
+        content.value = card.content
+      } finally {
+        if (editConfirmation === token) editConfirmation = null
+      }
     }
     const cancelEdit = () => {
       editing.value = null
@@ -77,50 +96,89 @@ export default {
     }
 
     const enc = (v) => encodeURIComponent(v)
-    const endpoint = () =>
-      props.rid ? `/api/literature/papers/${enc(props.rid)}/cards` : '/api/literature/cards'
+    const endpoint = (rid = props.rid) =>
+      rid ? `/api/literature/papers/${enc(rid)}/cards` : '/api/literature/cards'
     const load = async () => {
-      const data = await apiGet(endpoint())
-      cards.value = data?.cards || []
+      const key = owner.value
+      const ticket = ++loadGeneration
+      try {
+        const data = await apiGet(endpoint())
+        if (!disposed && key === owner.value && ticket === loadGeneration)
+          cards.value = data?.cards || []
+      } catch (err) {
+        if (!disposed && key === owner.value && ticket === loadGeneration)
+          error.value = err?.message || '卡片载入失败'
+      }
     }
     const save = async () => {
-      if (saving.value || !content.value.trim()) return
-      if (
-        editing.value &&
-        !window.confirm('确认覆盖这张卡片？期间若有其他修改，服务端会拒绝保存。')
-      )
-        return
+      if (disposed || saving.value || editConfirmation || !content.value.trim()) return
+      const key = owner.value
+      const rid = props.rid
+      const card = editing.value
+      const payload = {
+        card_type: cardType.value,
+        content: content.value,
+        title: title.value,
+        ...(card
+          ? {
+              slug: card.slug,
+              overwrite: true,
+              expected_digest: card.digest,
+              para_ids: card.para_ids,
+              tags: card.tags
+            }
+          : {})
+      }
       saving.value = true
       error.value = ''
       try {
-        await apiPost(endpoint(), {
-          card_type: cardType.value,
-          content: content.value,
-          title: title.value,
-          ...(editing.value
-            ? {
-                slug: editing.value.slug,
-                overwrite: true,
-                expected_digest: editing.value.digest,
-                para_ids: editing.value.para_ids,
-                tags: editing.value.tags
-              }
-            : {})
-        })
+        if (
+          card &&
+          !(await confirmAction('确认覆盖这张卡片？期间若有其他修改，服务端会拒绝保存。'))
+        )
+          return
+        if (
+          disposed ||
+          owner.value !== key ||
+          editing.value !== card ||
+          content.value !== payload.content ||
+          title.value !== payload.title ||
+          cardType.value !== payload.card_type
+        )
+          return
+        await apiPost(endpoint(rid), payload)
+        if (disposed || owner.value !== key) return
         content.value = ''
         title.value = ''
         editing.value = null
         emit('saved')
         await load()
       } catch (err) {
-        error.value = err?.message || '卡片保存失败'
+        if (!disposed && owner.value === key) error.value = err?.message || '卡片保存失败'
       } finally {
-        saving.value = false
+        if (!disposed && owner.value === key) saving.value = false
       }
     }
 
+    watch(
+      owner,
+      () => {
+        loadGeneration++
+        cards.value = []
+        saving.value = false
+        editConfirmation = null
+        error.value = ''
+        cancelEdit()
+        if (user.isLoggedIn !== false) load()
+      },
+      { flush: 'sync' }
+    )
     onMounted(load)
-    onBeforeUnmount(() => emit('editing-change', false))
+    onBeforeUnmount(() => {
+      disposed = true
+      loadGeneration++
+      emit('editing-change', false)
+    })
 
     return { cards, cardType, title, content, saving, save, editing, error, edit, cancelEdit }
   }

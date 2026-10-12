@@ -15,12 +15,14 @@
     </p>
     <p v-if="truncated" class="semantic-note">本次仅导出已加载子集，截断信息会保存在清单中。</p>
     <p v-if="!snapshotToken" class="semantic-note">请刷新图谱以获取可导出的快照。</p>
+    <p v-if="entityIdentityMissing" class="semantic-note">当前图谱缺少稳定 entity_id，请重建图谱后再导出。</p>
+    <p v-else-if="entityCount < 3" class="semantic-note">VOSviewer 至少需要 3 个实体，请扩大图谱范围后再导出。</p>
     <div class="actions">
       <a-button
         type="primary"
         size="small"
         :loading="busy"
-        :disabled="pending || !snapshotToken || !data?.nodes?.length || (candidateScope && !allowCandidates)"
+        :disabled="pending || !snapshotToken || entityIdentityMissing || entityCount < 3 || (candidateScope && !allowCandidates)"
         @click="download"
       >导出 VOSviewer 分析包</a-button>
       <a-button size="small" :disabled="busy || pending" @click="emit('refresh')">刷新快照</a-button>
@@ -31,6 +33,7 @@
       <li>解压后双击 open-with-vosviewer.cmd，或命令行 VOSviewer.exe -json vosviewer.json：打开即显示地图（包内已含确定性种子坐标）。</li>
       <li>种子坐标与连通分量仅作初始视图；如需 VOSviewer 官方布局与聚类，在查看器内重排后另存。</li>
       <li>方向、谓词、审核状态与证据定位以 facts.jsonl 为准；孤立实体与自环见 manifest.json。</li>
+      <li>使用稻芯智析客户端时，可在设置的“应用与更新”中选择 VOSviewer 程序，再打开分析包的 manifest.json，由客户端校验并启动。</li>
     </ol>
     <p class="semantic-note">私有图谱保持本地或企业内网使用。VOSviewer 的 Share 会上传并公开分享地图。</p>
   </div>
@@ -55,6 +58,12 @@ const errorText = ref('')
 const successText = ref('')
 const allowCandidates = ref(false)
 const snapshotToken = computed(() => props.data?.meta?.vosviewer_snapshot?.token || '')
+const entities = computed(() => (props.data?.nodes || [])
+  .filter((node) => node.node_kind !== 'chunk' && !(node.labels || []).includes('Chunk')))
+const entityIdentityMissing = computed(() => entities.value.some((node) => !node.entity_id && !node.properties?.entity_id))
+const entityCount = computed(() => new Set(entities.value
+  .map((node) => node.entity_id || node.properties?.entity_id)
+  .filter(Boolean)).size)
 const candidateScope = computed(() => props.data?.meta?.review_policy !== 'approved_only')
 let requestSeq = 0
 
@@ -68,7 +77,7 @@ watch([() => props.kbId, snapshotToken, () => userStore.token], () => {
 onUnmounted(() => { requestSeq += 1 })
 
 async function download() {
-  if (busy.value || props.pending || !snapshotToken.value) return
+  if (busy.value || props.pending || !snapshotToken.value || entityIdentityMissing.value || entityCount.value < 3) return
   const seq = ++requestSeq
   busy.value = true
   errorText.value = ''

@@ -34,6 +34,7 @@
 <script>
 import { ref, watch, onUnmounted } from 'vue'
 import { getLiteratureNote, fetchLiteratureAssetText } from '@/apis/literature_api'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 import LiteratureMarkdown from './LiteratureMarkdown.vue'
 import ProductEditor from './ProductEditor.vue'
 
@@ -97,9 +98,12 @@ export default {
         if (ticket === generation) loadingNote.value = false
       }
     }
-    const selectLevel = (level) => {
+    const selectLevel = async (level) => {
       if (level === currentLevel.value) return
-      if (editing.value && !window.confirm('切换笔记会放弃未保存编辑，继续？')) return
+      if (editing.value) {
+        if (!(await confirmAction('切换笔记会放弃未保存编辑，继续？'))) return
+      }
+      if (level === currentLevel.value) return
       editingChanged(false)
       currentLevel.value = level
       loadNote()

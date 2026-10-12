@@ -43,6 +43,7 @@
 import { onMounted, ref } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 const items = ref([]),
   archives = ref([]),
   busy = ref(false),
@@ -70,7 +71,9 @@ const exportBusiness = async () => {
 }
 const retryMapping = async (item) => {
   if (busy.value) return
-  if (!window.confirm('重新验证并尝试映射这个历史原件？原回执不变，已有内容不覆盖。')) return
+  if (!(await confirmAction('重新验证并尝试映射这个历史原件？原回执不变，已有内容不覆盖。')))
+    return
+  if (busy.value) return
   busy.value = true
   const requestId = mappingRequests.get(item.id) || crypto.randomUUID()
   mappingRequests.set(item.id, requestId)

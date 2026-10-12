@@ -35,6 +35,14 @@
         </button>
         <button
           class="btn"
+          :class="{ active: viewMode === 'bibmetrics' }"
+          title="文献计量：年度趋势/期刊/机构分布与共现网络"
+          @click="switchWorkspace('bibmetrics')"
+        >
+          <BarChart3 :size="13" aria-hidden="true" /> 计量分析
+        </button>
+        <button
+          class="btn"
           :class="{ active: viewMode === 'settings' }"
           @click="switchWorkspace('settings')"
         >
@@ -66,6 +74,15 @@
           @click="toggleSidebar"
         >
           <PanelLeft :size="13" aria-hidden="true" /> {{ sidebarVisible ? '隐藏侧栏' : '显示侧栏' }}
+        </button>
+        <button
+          class="btn"
+          :class="{ active: splitSwapped }"
+          :aria-pressed="splitSwapped"
+          title="一键互换分栏：会话面板与文献页左右对调（偏好随账号记忆）"
+          @click="toggleSplitSwap"
+        >
+          <Network :size="13" aria-hidden="true" /> {{ splitSwapped ? '会话在右' : '会话在左' }}
         </button>
       </nav>
     </header>
@@ -169,6 +186,11 @@
           @editing-change="setEditing('global-cards', $event)"
         />
         <ImportPanel v-if="viewMode === 'import'" @imported="load" @track="trackTicket" />
+        <BibliometricsPanel
+          v-if="viewMode === 'bibmetrics'"
+          @imported="load"
+          @open-paper="openPaper"
+        />
         <DiaryView v-if="viewMode === 'diary'" @editing-change="setEditing('diary', $event)" />
         <LiteratureGraphView v-if="viewMode === 'graph'" @open-paper="openPaper" />
         <section v-if="viewMode === 'settings'" class="workspace-settings">
@@ -177,6 +199,8 @@
             模型与密钥使用 Yuxi 统一配置，不复制 PaperAgent
             明文配置文件。插件使用受治理的工具、Skills 与 MCP。
           </p>
+          <LiteratureSettingsPanel />
+          <TranslationSettings />
           <div class="settings-links">
             <button class="btn" @click="settingsOpen = true">个人模型、凭据与外观设置</button>
             <router-link to="/model-manage">智能体与模型管理</router-link>
@@ -193,13 +217,24 @@
           </p>
         </section>
         <SettingsModal v-model:visible="settingsOpen" />
+        <FloatingReaderWindow
+          v-for="(win, index) in floatingReaders"
+          :key="win.rid"
+          :title="`阅读 · ${win.title}`"
+          :initial="win.initial"
+          :z-index="300 + index"
+          @close="closeFloatingReader(win.rid)"
+        >
+          <ReaderTabs :rid="win.rid" :paper="win.paper" @assistant-action="handleReaderAction" />
+        </FloatingReaderWindow>
         <div
           v-if="viewMode === 'reader' || viewMode === 'sessions'"
           class="reading-workspace"
           :class="{
             split:
               (viewMode === 'sessions' && selectedRid) ||
-              (viewMode === 'reader' && comparisonRids.length)
+              (viewMode === 'reader' && comparisonRids.length),
+            swapped: splitSwapped
           }"
         >
           <LiteratureSessions
@@ -208,7 +243,11 @@
             :rid="selectedRid"
             :thread-id="activeThreadId"
             :can-change-thread="confirmLeave"
+            :reader-request="pendingReaderRequest"
             @thread-selected="onSessionSelected"
+            @reader-evidence="openReaderEvidence"
+            @reader-staged="readerStaged"
+            @close="closeSessionsPanel"
           />
           <PaperDetail
             v-for="rid in (viewMode === 'reader'
@@ -222,6 +261,8 @@
             @session="openSession"
             @open-link="openReaderLink($event, rid)"
             :reader-target="readerTargets[rid] || null"
+            :evidence-target="evidenceTargets[rid] || null"
+            @assistant-action="handleReaderAction"
             @editing-change="setEditing(rid, $event)"
           />
           <p v-if="viewMode === 'reader' && !selectedRid">从文献列表选择一篇文献开始阅读。</p>
@@ -278,6 +319,18 @@
         <div v-if="viewMode === 'tasks'" class="concepts-panel">
           <button class="btn" @click="onRefreshTasks">刷新任务与运行历史</button>
           <p v-if="tasksNotice" class="task-notice" role="status">{{ tasksNotice }}</p>
+          <div v-if="qualityMetrics" class="task-hint" role="status" aria-label="质量指标">
+            质量指标（{{ qualityMetrics.window_days }} 天）· 答案门禁通过
+            {{ qualityMetrics.source_guard?.passed ?? 0 }}/{{
+              qualityMetrics.source_guard?.total ?? 0
+            }}
+            · 拒绝率 {{ formatRate(qualityMetrics.source_guard?.refusal_rate) }} · 降级率
+            {{ formatRate(qualityMetrics.source_guard?.degradation_rate) }} · 修复成功率
+            {{ formatRate(qualityMetrics.source_guard?.repair_success_rate) }}
+            <template v-if="qualityMetrics.ingest?.attempt_budget_exhausted">
+              · 重试预算耗尽 {{ qualityMetrics.ingest.attempt_budget_exhausted }} 篇</template
+            >
+          </div>
           <h3>我的持久运行历史</h3>
           <ul class="concept-list">
             <li v-for="run in runs" :key="run.id" class="concept-card">
@@ -292,10 +345,16 @@
               >
                 查看运行详情
               </button>
-              <p v-if="run.error">{{ run.error }}</p>
+              <p v-if="run.error" :title="run.error" class="run-error">
+                {{ describeRunError(run.error) }}
+              </p>
             </li>
           </ul>
-          <pre v-if="runDetail">{{ JSON.stringify(runDetail, null, 2) }}</pre>
+          <!-- 诊断视图默认折叠：原始 JSON 只在排查时展开，不直接糊在用户界面上 -->
+          <details v-if="runDetail" class="run-detail">
+            <summary>运行详情（诊断视图，展开查看原始数据）</summary>
+            <pre>{{ JSON.stringify(runDetail, null, 2) }}</pre>
+          </details>
           <h3>入库中（PDF 契约处理）</h3>
           <div v-if="!ingestTasks.length" class="lit-empty">暂无入库任务</div>
           <ul v-else class="concept-list">
@@ -321,19 +380,23 @@
                 <template v-if="task.paper_rid">· 已登记文献</template>
               </div>
               <div v-if="task.error" class="task-error">{{ task.error }}</div>
-              <!-- 失败分类给下一步动作：REJECTED 不可重试（说明原因）；FAILED 可重导（sha 复用同一单号） -->
+              <!-- 失败分类给下一步动作：REJECTED 提示内容检查（管理员可改配置后重试）；FAILED 瞬时故障可直接重试 -->
               <p v-if="task.status === 'REJECTED'" class="task-hint">
-                质量门禁拒绝：不可重试，请检查文件内容（空白 / 乱码 / 非论文 PDF）。
+                质量门禁拒绝：请检查文件内容（空白 / 乱码 / 非论文 PDF）；调整解析配置后可重试。
               </p>
               <p v-else-if="task.status === 'FAILED'" class="task-hint">
-                供应商解析失败：可重新导入同一文件（内容指纹复用，不产生重复任务）。
+                供应商解析失败：可直接重试（瞬时故障自愈），或重新导入同一文件（内容指纹复用）。
               </p>
-              <button
-                v-if="task.paper_rid"
-                class="btn"
-                @click="openPaper({ rid: task.paper_rid })"
-              >
+              <button v-if="task.paper_rid" class="btn" @click="openPaper({ rid: task.paper_rid })">
                 打开文献
+              </button>
+              <button
+                v-if="task.is_failure"
+                class="btn"
+                :disabled="retryingIngest === task.ref"
+                @click="retryIngest(task)"
+              >
+                {{ retryingIngest === task.ref ? '重试中…' : '重试入库' }}
               </button>
             </li>
           </ul>
@@ -350,13 +413,16 @@
                 <strong>{{ task.type }} · {{ task.ref }}</strong>
                 <span class="concept-count">{{ task.stage || task.status }}</span>
               </div>
-              <div v-if="task.attempt > 0" class="concept-meta">已尝试 {{ task.attempt + 1 }} 次</div>
+              <div v-if="task.attempt > 0" class="concept-meta">
+                已尝试 {{ task.attempt + 1 }} 次
+              </div>
               <div v-if="task.error" class="task-error">{{ task.error }}</div>
             </li>
           </ul>
         </div>
 
         <div v-if="viewMode === 'concepts'" class="concepts-panel">
+          <TopicsPanel />
           <div v-if="!concepts.length" class="lit-empty">
             暂无概念页（≥2 篇文献共享同一概念时聚合；先编译 L1）
           </div>
@@ -444,7 +510,14 @@
           <p v-if="batchNotice" role="status">{{ batchNotice }}</p>
         </div>
 
-        <div v-if="viewMode === 'list' && loading" class="lit-loading">加载中…</div>
+        <div
+          v-if="viewMode === 'list' && loading"
+          class="lit-loading"
+          role="status"
+          aria-live="polite"
+        >
+          加载中…
+        </div>
         <div v-else-if="viewMode === 'list' && !papers.length" class="lit-empty">
           暂无可访问文献。可在知识库中上传 PDF，完成证据处理后自动进入文献库；也可导入 Bib 或迁移
           PaperAgent。
@@ -469,7 +542,15 @@
               @click.stop
               @change="togglePaper(paper.rid, $event.target.checked)"
             />
-            <div class="paper-title">
+            <div
+              class="paper-title"
+              role="button"
+              tabindex="0"
+              :aria-label="`打开文献 ${paper.title || paper.rid}`"
+              @click="openPaper(paper)"
+              @keydown.enter.prevent="openPaper(paper)"
+              @keydown.space.prevent="openPaper(paper)"
+            >
               <span class="kind-badge" :data-kind="paper.kind">{{ kindLabel(paper.kind) }}</span>
               {{ paper.title || paper.rid }}
               <!-- 快速预览（对标 PaperAgent §5.3 悬停行预览）：只展示列表已返回的字段，
@@ -509,26 +590,57 @@
         </div>
       </div>
     </div>
-    <p v-if="sessionState.notice.value" class="workspace-notice" role="status">
-      {{ sessionState.notice.value }}
-    </p>
+    <!-- 会话面板挂载时其头部已显示同一条提示；此处仅在面板不可见（其他视图残留
+         的会话提示）时兜底渲染，避免同一条提示双渲染且全宽条压住聊天输入区。 -->
+    <div
+      v-if="sessionState.notice.value && viewMode !== 'sessions'"
+      class="workspace-notice"
+      role="status"
+    >
+      <span class="notice-text">{{ sessionState.notice.value }}</span>
+      <button class="notice-close" aria-label="关闭提示" @click="sessionState.notice.value = ''">
+        ×
+      </button>
+    </div>
     <LiteratureStatusBar />
   </div>
 </template>
 
 <script>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { BookOpen, List, Network, FileText, Settings, Expand, PanelLeft, Eye } from '@lucide/vue'
+import { matchesReaderVersion, readerCapture } from '@/utils/literature_assistant'
+import { message } from 'ant-design-vue'
+import {
+  BookOpen,
+  List,
+  Network,
+  FileText,
+  Settings,
+  Expand,
+  PanelLeft,
+  Eye,
+  BarChart3
+} from '@lucide/vue'
 import { useRoute, onBeforeRouteLeave } from 'vue-router'
 import { apiGet, apiPost } from '@/apis/base'
-import { listLiteraturePapers, literatureWorkspaceApi } from '@/apis/literature_api'
+import {
+  listLiteraturePapers,
+  getLiteraturePaper,
+  literatureWorkspaceApi
+} from '@/apis/literature_api'
 import PaperDetail from '@/components/literature/PaperDetail.vue'
 import LibraryWorkbench from '@/components/literature/LibraryWorkbench.vue'
 import LiteratureStatusBar from '@/components/literature/LiteratureStatusBar.vue'
 import ImportPanel from '@/components/literature/ImportPanel.vue'
+import BibliometricsPanel from '@/components/literature/BibliometricsPanel.vue'
 import LiteratureSessions from '@/components/literature/LiteratureSessions.vue'
+import TopicsPanel from '@/components/literature/TopicsPanel.vue'
+import LiteratureSettingsPanel from '@/components/literature/LiteratureSettingsPanel.vue'
+import TranslationSettings from '@/components/literature/TranslationSettings.vue'
+import FloatingReaderWindow from '@/components/literature/FloatingReaderWindow.vue'
+import ReaderTabs from '@/components/literature/ReaderTabs.vue'
 import { useColumnResize } from '@/composables/useColumnResize'
-import { useLiteratureSessions } from '@/composables/useLiteratureSessions'
+import { confirmAction, useLiteratureSessions } from '@/composables/useLiteratureSessions'
 import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
 import {
   LIT_SIDEBAR_WIDTH_DEFAULT,
@@ -575,8 +687,15 @@ export default {
     DiaryView,
     LiteratureGraphView,
     SettingsModal,
+    TopicsPanel,
+    LiteratureSettingsPanel,
+    TranslationSettings,
+    FloatingReaderWindow,
+    ReaderTabs,
     LiteratureSidebar,
     Eye,
+    BarChart3,
+    BibliometricsPanel,
     LiteratureStatusBar
   },
   setup() {
@@ -646,6 +765,12 @@ export default {
       if (readMode.value) chrome.value.readMode = false
       persistChrome()
     }
+    // 分栏互换：会话面板与文献页左右对调（chrome 持久化，跨会话记忆）
+    const splitSwapped = computed(() => chrome.value.splitSwapped === true)
+    const toggleSplitSwap = () => {
+      chrome.value = { ...chrome.value, splitSwapped: !splitSwapped.value }
+      persistChrome()
+    }
     const toggleReadMode = () => {
       chrome.value = { ...chrome.value, readMode: !readMode.value }
       persistChrome()
@@ -684,8 +809,8 @@ export default {
       event.preventDefault()
       action()
     }
-    const newSession = (kind) => {
-      if (!confirmLeave()) return
+    const newSession = async (kind) => {
+      if (!(await confirmLeave())) return
       return sessionState.perform(async () => {
         const data = await literatureWorkspaceApi.createSession(
           kind,
@@ -696,9 +821,7 @@ export default {
         openSession(data.thread.id, true)
       })
     }
-    const selectSessionFromSidebar = (id) => {
-      openSession(id)
-    }
+    const selectSessionFromSidebar = (id) => openSession(id)
     const selectedRid = ref('')
     const comparisonRids = ref([])
     const comparisonChoice = ref('')
@@ -707,8 +830,8 @@ export default {
       editingKeys.value = editingKeys.value.filter((item) => item !== key)
       if (value) editingKeys.value.push(key)
     }
-    const confirmLeave = () =>
-      !editingKeys.value.length || window.confirm('离开当前工作区会放弃未保存编辑，继续？')
+    const confirmLeave = async () =>
+      !editingKeys.value.length || (await confirmAction('离开当前工作区会放弃未保存编辑，继续？'))
     const beforeUnload = (event) => {
       if (!editingKeys.value.length) return
       event.preventDefault()
@@ -720,7 +843,7 @@ export default {
      * 建立本文专属会话并切到会话区。已存在本文会话时直接复用，避免重复创建。
      */
     const askPaper = async (paper) => {
-      if (askLoading.value || !confirmLeave()) return
+      if (askLoading.value || !(await confirmLeave())) return
       askLoading.value = paper.rid
       try {
         const existing = await literatureWorkspaceApi.sessions(false)
@@ -764,20 +887,79 @@ export default {
     }
     const readerLinkNotice = ref('')
     const readerTargets = ref({})
+    const evidenceTargets = ref({}),
+      pendingReaderRequest = ref(null)
+    let readerActionGeneration = 0
+    const handleReaderAction = async (input) => {
+      if (askLoading.value || !(await confirmLeave())) return
+      // 阅读动作进入分栏问答：默认收起文献侧栏，把桌面宽度让给问答与原文
+      //（用户可随时点「显示侧栏」恢复，阅读模式本就无侧栏不受影响）
+      if (sidebarPinned.value && !readMode.value) {
+        chrome.value = { ...chrome.value, pinned: false }
+        persistChrome()
+      }
+      const ticket = ++readerActionGeneration
+      const origin = { rid: selectedRid.value, thread: activeThreadId.value, mode: viewMode.value }
+      const stillHere = () =>
+        ticket === readerActionGeneration &&
+        origin.rid === selectedRid.value &&
+        origin.thread === activeThreadId.value &&
+        origin.mode === viewMode.value
+      askLoading.value = input.rid
+      try {
+        const capture = readerCapture(input)
+        const created = await literatureWorkspaceApi.createSession('paper', capture.rid)
+        if (!stillHere()) return
+        if (
+          !created?.thread?.id ||
+          created.session?.kind !== 'paper' ||
+          created.session.rid !== capture.rid
+        )
+          throw new Error('服务端未返回匹配的本文会话')
+        if (!matchesReaderVersion(capture, created.context))
+          throw new Error('文献版本已更新，请刷新阅读器后重新选择')
+        sessionState.archived.value = false
+        sessionState.searchText.value = ''
+        await sessionState.refresh()
+        if (!stillHere()) return
+        const threadRecord = { ...created.thread, session: created.session }
+        if (!sessionState.sessions.value.some((item) => item.id === threadRecord.id))
+          sessionState.sessions.value = [threadRecord, ...sessionState.sessions.value]
+        selectedRid.value = capture.rid
+        await openSession(created.thread.id, true)
+        pendingReaderRequest.value = {
+          ...capture,
+          imageFile: input.imageFile || null,
+          thread_id: created.thread.id,
+          threadRecord,
+          id: `reader-${ticket}-${Date.now()}`
+        }
+      } catch (error) {
+        if (ticket === readerActionGeneration)
+          searchNotice.value = error.message || '阅读动作交接失败'
+      } finally {
+        if (ticket === readerActionGeneration) askLoading.value = ''
+      }
+    }
+    const readerStaged = (result) => {
+      if (pendingReaderRequest.value?.id !== result.id) return
+      pendingReaderRequest.value = null
+      if (!result.success) searchNotice.value = result.error || '阅读动作未写入，请重试'
+    }
+    const openReaderEvidence = async (target) => {
+      if (!target?.rid || target.rid !== selectedRid.value || !(await confirmLeave())) return
+      evidenceTargets.value = {
+        ...evidenceTargets.value,
+        [target.rid]: { ...target, requestId: `evidence-${Date.now()}` }
+      }
+      readerTargets.value = {
+        ...readerTargets.value,
+        [target.rid]: { rid: target.rid, tab: 'pdf', requestId: `evidence-${Date.now()}` }
+      }
+    }
     let linkGeneration = 0
     const route = useRoute()
     const viewMode = ref('list')
-    const workspaceTabs = [
-      { key: 'import', label: '导入' },
-      { key: 'sessions', label: '会话 / AI 检索' },
-      { key: 'list', label: '文献目录' },
-      { key: 'reader', label: '阅读工作区' },
-      { key: 'workbench', label: '知识库管理' },
-      { key: 'graph', label: '2D / 3D 图谱' },
-      { key: 'diary', label: '阅读日记' },
-      { key: 'tasks', label: '任务与历史' },
-      { key: 'settings', label: '设置' }
-    ]
     const activeThreadId = ref('')
     const settingsOpen = ref(false)
     const runs = ref([])
@@ -809,9 +991,9 @@ export default {
     const selectPage = (checked) => papers.value.forEach((paper) => togglePaper(paper.rid, checked))
     const compileBatch = async (level) => {
       if (
-        !window.confirm(
+        !(await confirmAction(
           `提交 ${selectedPapers.value.length} 篇 ${level} 编译？执行会调用模型并按实际用量计费；冻结内容不覆盖。`
-        )
+        ))
       )
         return
       batchBusy.value = true
@@ -834,34 +1016,40 @@ export default {
       searchMode.value = 'list'
       runSearch()
     }
-    const openSession = (id, alreadyConfirmed = false) => {
-      if (!alreadyConfirmed && !confirmLeave()) return
+    const openSession = async (id, alreadyConfirmed = false) => {
+      if (!alreadyConfirmed && !(await confirmLeave())) return
       const binding = sessionState.sessions.value.find((item) => item.id === id)?.session
       if (binding?.kind === 'paper' && binding.rid) selectedRid.value = binding.rid
       sessionState.selectedId.value = id
       activeThreadId.value = id
       viewMode.value = 'sessions'
     }
-    const onSessionSelected = ({ id, rid }) => {
+    const onSessionSelected = async ({ id, rid }) => {
       activeThreadId.value = id
-      if (rid && rid !== selectedRid.value && confirmLeave()) selectedRid.value = rid
+      if (rid && rid !== selectedRid.value && (await confirmLeave())) selectedRid.value = rid
+    }
+    // 面板级 ×：收起会话分栏。有选中文献时切回全宽阅读工作区（会话记录保留，
+    // 顶栏「会话 / AI 检索」或文献页「文献专属会话」随时唤回）；无文献则回目录。
+    const closeSessionsPanel = async () => {
+      if (!(await confirmLeave())) return
+      viewMode.value = selectedRid.value ? 'reader' : 'list'
     }
     const closeReader = () => {
       setEditing(selectedRid.value, false)
       selectedRid.value = comparisonRids.value.shift() || ''
       if (viewMode.value === 'reader' && !selectedRid.value) viewMode.value = 'list'
     }
-    const switchWorkspace = (key) => {
-      if (key === 'tasks') loadTasks()
-      else if (key === 'concepts') loadConcepts()
-      else if (key === 'reports') loadReports()
+    const switchWorkspace = async (key) => {
+      if (key === 'tasks') await loadTasks()
+      else if (key === 'concepts') await loadConcepts()
+      else if (key === 'reports') await loadReports()
       else {
-        if (key !== viewMode.value && !confirmLeave()) return
+        if (key !== viewMode.value && !(await confirmLeave())) return
         viewMode.value = key
       }
     }
     const resumeRun = async (run) => {
-      if (!confirmLeave()) return
+      if (!(await confirmLeave())) return
       workbenchRun.value = run
       viewMode.value = 'workbench'
     }
@@ -875,7 +1063,7 @@ export default {
       try {
         selectedReport.value = await apiGet('/api/literature/reports/' + id)
       } catch (error) {
-        alert(error?.message || '报告读取失败')
+        message.error(error?.message || '报告读取失败')
       }
     }
     // 任务数据来自共享轮询源（状态栏/导入面板同源），任务视图常驻实时
@@ -888,7 +1076,7 @@ export default {
     const importing = ref(false)
 
     const loadConcepts = async () => {
-      if (viewMode.value !== 'concepts' && !confirmLeave()) return
+      if (viewMode.value !== 'concepts' && !(await confirmLeave())) return
       viewMode.value = 'concepts'
       try {
         const data = await apiGet('/api/literature/concepts')
@@ -905,15 +1093,15 @@ export default {
           topic: mocTopic.value.trim()
         })
         mocTopic.value = ''
-        alert(`主题导读已生成（${result.sources} 篇来源），见「综述报告」列表`)
+        message.success(`主题导读已生成（${result.sources} 篇来源），见「综述报告」列表`)
       } catch (err) {
-        alert(`生成失败：${err?.message || err}`)
+        message.error(`生成失败：${err?.message || err}`)
       } finally {
         mocLoading.value = false
       }
     }
     const loadReports = async () => {
-      if (viewMode.value !== 'reports' && !confirmLeave()) return
+      if (viewMode.value !== 'reports' && !(await confirmLeave())) return
       viewMode.value = 'reports'
       try {
         const data = await apiGet('/api/literature/reports')
@@ -923,7 +1111,7 @@ export default {
       }
     }
     const loadTasks = async () => {
-      if (viewMode.value !== 'tasks' && !confirmLeave()) return
+      if (viewMode.value !== 'tasks' && !(await confirmLeave())) return
       viewMode.value = 'tasks'
       // 任务列表由共享轮询源（useLiteratureTaskFeed）常驻供给；这里只补运行历史。
       // runs 与任务进度互不相干，失败降级为行内提示，绝不连坐清空任务列表。
@@ -935,6 +1123,41 @@ export default {
         runs.value = []
         tasksNotice.value = `运行历史读取失败：${error?.message || error}（任务进度不受影响）`
       }
+      loadQualityMetrics()
+    }
+    const qualityMetrics = ref(null)
+    const loadQualityMetrics = async () => {
+      try {
+        qualityMetrics.value = await literatureWorkspaceApi.qualityMetrics()
+      } catch {
+        qualityMetrics.value = null // 指标是辅助面板，失败不打断任务页
+      }
+    }
+    const retryingIngest = ref('')
+    const retryIngest = async (task) => {
+      if (retryingIngest.value) return
+      retryingIngest.value = task.ref
+      try {
+        await literatureWorkspaceApi.retryIngest(task.ref)
+        tasksNotice.value = `已提交重试（单号 ${String(task.ref).slice(0, 16)}…），入库任务回到队列`
+        taskFeed.refresh()
+      } catch (error) {
+        tasksNotice.value = error?.message || '重试提交失败'
+      } finally {
+        retryingIngest.value = ''
+      }
+    }
+    const formatRate = (value) => (value == null ? '—' : `${Math.round(value * 100)}%`)
+    // 运行错误人话化：只展示首行与有限长度（完整原文保留在 title 悬停）。
+    // 原始错误串常带堆栈与内部字段名，直接渲染会泄露调试视图给终端用户。
+    const describeRunError = (error) => {
+      const text = String(error || '').trim()
+      if (!text) return ''
+      const firstLine = text.split(/\r?\n/)[0].trim()
+      const cleaned = firstLine.replace(/^(Error|Exception|HTTPError)\s*[:：]\s*/i, '')
+      return cleaned.length > 160
+        ? `${cleaned.slice(0, 160)}…`
+        : cleaned || '运行失败；悬停查看完整原因'
     }
     const onRefreshTasks = () => {
       taskFeed.refresh()
@@ -962,10 +1185,10 @@ export default {
         const written = result.papers_written ?? result.inserted ?? 0
         const skipped = result.papers_skipped ?? result.skipped ?? 0
         const citations = result.citations_written ?? 0
-        alert(`Bib 导入完成：新增 ${written}，已存在 ${skipped}，引用边 ${citations}`)
+        message.success(`Bib 导入完成：新增 ${written}，已存在 ${skipped}，引用边 ${citations}`)
         await load()
       } catch (error) {
-        alert(error?.message || 'Bib 导入失败')
+        message.error(error?.message || 'Bib 导入失败')
       }
     }
     const importPaperAgent = async (event) => {
@@ -982,9 +1205,9 @@ export default {
         )
         const summary = `将迁移 ${report.papers?.source || 0} 篇文献、${report.variants?.source || 0} 个变体；冲突 ${report.conflicts?.length || 0} 项。历史资产：${JSON.stringify(report.history?.source_counts || {})}`
         if (
-          !window.confirm(
-            `${summary}\n${report.warning || ''}\n尚不迁移：${(report.unsupported || []).join('、')}\n确认执行正式导入？`
-          )
+          !(await confirmAction(
+            `${summary} ${report.warning || ''} 尚不迁移：${(report.unsupported || []).join('、')} 确认执行正式导入？`
+          ))
         )
           return
         const importForm = new FormData()
@@ -994,12 +1217,12 @@ export default {
             encodeURIComponent(report.archive_sha256),
           importForm
         )
-        alert(
+        message.success(
           `迁移完成：历史映射 ${completed.history?.applied || 0}，只读保留 ${completed.history?.preserved || 0}，冲突 ${completed.history?.conflicts?.length || 0}。在导入页查看逐项回执；请保留原始归档。`
         )
         await load()
       } catch (error) {
-        alert(error?.message || 'PaperAgent 数据迁移失败')
+        message.error(error?.message || 'PaperAgent 数据迁移失败')
       } finally {
         importing.value = false
       }
@@ -1075,8 +1298,8 @@ export default {
       }
     }
 
-    const runSearch = () => {
-      if (viewMode.value !== 'list' && !confirmLeave()) return
+    const runSearch = async () => {
+      if (viewMode.value !== 'list' && !(await confirmLeave())) return
       viewMode.value = 'list'
       page.value = 1
       load()
@@ -1089,16 +1312,38 @@ export default {
       page.value = target
       load()
     }
-    const openPaper = (paper) => {
-      if ((selectedRid.value !== paper.rid || viewMode.value !== 'reader') && !confirmLeave())
+    const openPaper = async (paper, stillCurrent = () => true) => {
+      if (
+        (selectedRid.value !== paper.rid || viewMode.value !== 'reader') &&
+        !(await confirmLeave())
+      )
         return false
+      if (!stillCurrent()) return false
       comparisonRids.value = comparisonRids.value.filter((rid) => rid !== paper.rid)
       selectedRid.value = paper.rid
       viewMode.value = 'reader'
       return true
     }
-    const popoutReader = (rid) => {
-      window.open(`/literature?rid=${encodeURIComponent(rid)}`, '_blank', 'noopener,noreferrer')
+    // 浮动阅读窗：替代 window.open 新页签（同页可拖拽/停靠/缩放的多窗并读）
+    const floatingReaders = ref([])
+    const popoutReader = async (rid) => {
+      if (!rid || floatingReaders.value.some((win) => win.rid === rid)) return
+      try {
+        const paper = await getLiteraturePaper(rid)
+        const offset = floatingReaders.value.length
+        floatingReaders.value.push({
+          rid,
+          title: paper?.title || rid,
+          paper: paper || {},
+          initial: { x: 90 + offset * 28, y: 80 + offset * 28, w: 760, h: 640 }
+        })
+      } catch {
+        // 数据不可得时保留旧行为兜底，不静默吞错
+        window.open(`/literature?rid=${encodeURIComponent(rid)}`, '_blank', 'noopener,noreferrer')
+      }
+    }
+    const closeFloatingReader = (rid) => {
+      floatingReaders.value = floatingReaders.value.filter((win) => win.rid !== rid)
     }
     const openReaderLink = async (target, sourceRid) => {
       const ticket = ++linkGeneration
@@ -1113,7 +1358,7 @@ export default {
         if (ticket !== linkGeneration) return
         if (selectedRid.value !== sourceRid && !comparisonRids.value.includes(sourceRid)) return
         if (data.rid) {
-          if (!openPaper({ rid: data.rid })) return
+          if (!(await openPaper({ rid: data.rid }, () => ticket === linkGeneration))) return
           readerTargets.value = {
             ...readerTargets.value,
             [data.rid]: { ...data, requestId: ticket }
@@ -1140,19 +1385,25 @@ export default {
     })
     onBeforeUnmount(() => {
       loadGeneration++
+      readerActionGeneration++
       window.removeEventListener('beforeunload', beforeUnload)
       sessionState.dispose()
     })
 
     return {
+      evidenceTargets,
+      pendingReaderRequest,
+      handleReaderAction,
+      openReaderEvidence,
+      readerStaged,
       userStore,
-      workspaceTabs,
       switchWorkspace,
       confirmLeave,
       activeThreadId,
       settingsOpen,
       openSession,
       onSessionSelected,
+      closeSessionsPanel,
       closeReader,
       runs,
       workbenchRun,
@@ -1192,6 +1443,8 @@ export default {
       readerTargets,
       openReaderLink,
       popoutReader,
+      floatingReaders,
+      closeFloatingReader,
       kindChips: KIND_CHIPS,
       runSearch,
       selectKind,
@@ -1212,6 +1465,11 @@ export default {
       highlightRef,
       trackTicket,
       onRefreshTasks,
+      qualityMetrics,
+      retryingIngest,
+      retryIngest,
+      formatRate,
+      describeRunError,
       importing,
       loadConcepts,
       generateMoc,
@@ -1234,6 +1492,8 @@ export default {
       selectDrawer,
       togglePin,
       toggleSidebar,
+      splitSwapped,
+      toggleSplitSwap,
       toggleReadMode,
       startSidebarDrag,
       isSidebarResizing,
@@ -1325,12 +1585,36 @@ export default {
   padding: 12px 16px;
 }
 .workspace-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 0;
   padding: 6px 16px;
   font-size: 12px;
   color: var(--color-text-secondary);
   border-top: 1px solid var(--gray-150);
   flex-shrink: 0;
+}
+.notice-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notice-close {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+  line-height: 1;
+  &:hover {
+    background: var(--color-bg-elevated);
+    color: var(--color-text-primary);
+  }
 }
 .directory-filters,
 .settings-links {
@@ -1362,6 +1646,10 @@ export default {
   grid-auto-flow: column;
   grid-auto-columns: minmax(360px, 1fr);
   gap: 16px;
+}
+/* 一键互换：会话面板排到文献页之后（右侧），文献页（含并排对比）保持原相对顺序 */
+.reading-workspace.split.swapped :deep(.sessions-workspace) {
+  order: 2;
 }
 @media (max-width: 1100px) {
   .reading-workspace.split {
@@ -1433,6 +1721,13 @@ export default {
 }
 .paper-title {
   font-weight: 600;
+  cursor: pointer;
+  /* 键盘可达的整卡打开入口（role=button）：焦点圈清晰可见 */
+  &:focus-visible {
+    outline: 2px solid var(--main-color);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
 }
 .kind-badge {
   font-size: 12px;
@@ -1535,6 +1830,30 @@ export default {
   margin: 6px 0;
   color: var(--color-text-secondary, #888);
   font-size: 12px;
+}
+.run-error {
+  margin: 4px 0 0;
+  color: var(--color-error-700);
+  font-size: 12px;
+  cursor: help;
+}
+.run-detail {
+  margin: 8px 0;
+  font-size: 12px;
+  summary {
+    cursor: pointer;
+    color: var(--color-text-secondary);
+    user-select: none;
+  }
+  pre {
+    margin: 6px 0 0;
+    padding: 8px;
+    background: var(--color-bg-container);
+    border: 1px solid var(--gray-150);
+    border-radius: 6px;
+    overflow: auto;
+    max-height: 40vh;
+  }
 }
 .task-hint {
   margin: 4px 0 0;

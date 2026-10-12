@@ -61,6 +61,19 @@
         以下图表仅完成题注与原文定位，当前解析版本没有可展示的图像/表格卡片：
         {{ captionOnlyRefs.map((item) => item.label).join('、') }}。
       </div>
+      <div v-if="panelFallbackRefs.length" class="figure-caption-only-notice" role="status">
+        {{
+          panelFallbackRefs.map((item) => item.label).join('、')
+        }}
+        的子图未完成几何核验，请通过整图或题注查看来源。
+      </div>
+
+      <SourceQuoteCard
+        v-for="sourceQuote in sourceQuotes"
+        :key="`${sourceQuote.source.parse_revision_id}:${sourceQuote.source.anchor_id}`"
+        :source-quote="sourceQuote"
+        @open-source="emit('openEvidenceSource', $event)"
+      />
 
       <!-- 已验证定位的论文原图：消息级附件，与状态面板同源（citation_ready.figures），不进 Markdown 正文 -->
       <FigureCardGroup
@@ -197,6 +210,7 @@ import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import GraphSnapshotCard from '@/components/evidence/GraphSnapshotCard.vue'
 import TableCard from '@/components/evidence/TableCard.vue'
+import SourceQuoteCard from '@/components/evidence/SourceQuoteCard.vue'
 import { figureRefClickAction } from '@/utils/figureCard'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 
@@ -250,6 +264,7 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  sourceQuotes: { type: Array, default: () => [] },
   // 已审核知识关系的确定性子图（消息级附件；禁止从 Markdown/模型文本反向解析）
   graphSnapshot: {
     type: Object,
@@ -273,6 +288,7 @@ const emit = defineEmits([
   'openRefs',
   'openStatus',
   'openFigureSource',
+  'openEvidenceSource',
   'locateEvidence'
 ])
 
@@ -294,6 +310,11 @@ const captionOnlyRefs = computed(() =>
     // Backward-compatible history rows created before visual_status existed.
     return Boolean(item.suppressed_reason && item.figure_index == null && item.table_index == null)
   })
+)
+const panelFallbackRefs = computed(() =>
+  props.figureRefs.filter((item) =>
+    ['WHOLE_FIGURE_FALLBACK', 'CAPTION_FALLBACK'].includes(item.panel_status)
+  )
 )
 
 // 图表锚点芯片点击（ADR-0008）：有卡片 → 滚动联动 + 闪烁高亮；

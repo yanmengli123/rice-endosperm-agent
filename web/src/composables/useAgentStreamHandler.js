@@ -6,7 +6,8 @@ import { ReasoningVisibilityBuffer } from '@/utils/reasoningVisibility'
 import {
   normalizeFigureRefs,
   normalizeVerifiedFigures,
-  normalizeVerifiedTables
+  normalizeVerifiedTables,
+  normalizeSourceQuotes
 } from '@/utils/figureCard'
 import { normalizeGraphSnapshot } from '@/utils/graphSnapshot'
 import { artifactPathsFromChunk } from '@/utils/runArtifacts'
@@ -301,9 +302,17 @@ export function useAgentStreamHandler({
         // 表格卡片（P2）：tables 字段缺席 ⟺ 未发布，此时清空
         const tables = normalizeVerifiedTables(chunk.tables)
         threadState.verifiedTables = tables
+        const sourceQuotes = normalizeSourceQuotes(chunk.source_quotes)
+        threadState.verifiedSourceQuotes = sourceQuotes
         // 答案气泡内图卡/锚点：按 run 暂存（新一轮 resetRunEvidence 不清），让上一条答案的
         // 图卡与锚点绑定在历史回读前不消失
         const runId = String(chunk.run_id || threadState.activeRunId || '')
+        if (runId) {
+          threadState.sourceQuotesByRun = {
+            ...(threadState.sourceQuotesByRun || {}),
+            [runId]: sourceQuotes
+          }
+        }
         if (runId && figures.length) {
           threadState.figuresByRun = { ...(threadState.figuresByRun || {}), [runId]: figures }
         }

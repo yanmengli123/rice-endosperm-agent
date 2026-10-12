@@ -45,6 +45,56 @@ export const normalizeVerifiedFigures = (figures) => {
 }
 
 /**
+ * 原文跳转选择器（figure_projection_v2 的 source_selector）守卫：
+ * 身份三键（kb_id/file_id/parse_revision_id）+ figure_label 齐全才可跳转；
+ * panel_label 仅在后端双确认（题注+OCR）时由投影携带，此处不裁决只透传。
+ * 返回归一化选择器或 null（null = 回退到证据锚点跳转，绝不猜）。
+ */
+export const figureSourceSelector = (figure) => {
+  const selector = figure?.source_selector
+  if (!selector || typeof selector !== 'object') return null
+  const kbId = String(selector.kb_id || '').trim()
+  const fileId = String(selector.file_id || '').trim()
+  const revisionId = String(selector.parse_revision_id || '').trim()
+  const figureLabel = String(selector.figure_label || '').trim()
+  if (!kbId || !fileId || !revisionId || !figureLabel) return null
+  const panelLabel = String(selector.panel_label || '').trim()
+  const normalized = {
+    kb_id: kbId,
+    file_id: fileId,
+    parse_revision_id: revisionId,
+    figure_label: figureLabel
+  }
+  if (panelLabel) normalized.panel_label = panelLabel
+  if (selector.source_sha256) normalized.source_sha256 = selector.source_sha256
+  return normalized
+}
+
+/** Table and cell cards use the same source event as figures. Preserve their selector. */
+export const tableSourceSelector = (table) => {
+  const selector = table?.source_selector
+  if (!selector || typeof selector !== 'object') return null
+  const normalized = {}
+  for (const key of ['kb_id', 'file_id', 'parse_revision_id', 'table_id']) {
+    normalized[key] = String(selector[key] || '').trim()
+    if (!normalized[key]) return null
+  }
+  if (selector.row_index != null || selector.column_index != null) {
+    if (
+      !Number.isInteger(selector.row_index) ||
+      selector.row_index < 0 ||
+      !Number.isInteger(selector.column_index) ||
+      selector.column_index < 0
+    )
+      return null
+    normalized.row_index = selector.row_index
+    normalized.column_index = selector.column_index
+  }
+  if (selector.source_sha256) normalized.source_sha256 = selector.source_sha256
+  return normalized
+}
+
+/**
  * 图表锚点（ADR-0008 figure_refs[]）归一化：只接受后端签发条目
  * （ref + label 必填）；evidence_id / figure_index / suppressed_reason 为
  * 可选降级信息。前端不从芯片文本推断身份——身份只来自这份结构化载荷。
@@ -90,6 +140,41 @@ export const normalizeVerifiedTables = (tables) => {
       String(table.kb_id || '').trim() &&
       Array.isArray(table.rows)
   )
+}
+
+/** Frozen server source carriers; render/copy quote as plain text without trimming. */
+export const normalizeSourceQuotes = (quotes) => {
+  if (!Array.isArray(quotes)) return []
+  return quotes.filter((item) => {
+    const source = item?.source
+    return (
+      typeof item?.quote === 'string' &&
+      item.quote.length > 0 &&
+      /^[a-f0-9]{64}$/i.test(item.quote_hash || '') &&
+      Number.isInteger(item.page_number) &&
+      item.page_number >= 1 &&
+      ['kb_id', 'file_id', 'parse_revision_id', 'anchor_id'].every(
+        (key) => typeof source?.[key] === 'string' && source[key].trim()
+      ) &&
+      /^[a-f0-9]{64}$/i.test(source.source_sha256 || '') &&
+      Array.isArray(item.locator?.fragments) &&
+      item.locator.fragments.length > 0 &&
+      item.locator.fragments.every(
+        (fragment) => Number.isInteger(fragment.page_index) && fragment.page_index >= 0
+      )
+    )
+  })
+}
+
+export const sourceQuotesForMessage = (message, conv, sourceQuotesByRun) => {
+  if (!isAssistantMessage(message)) return []
+  const last = lastAssistantMessage(conv)
+  if (!last || (last !== message && !(last.id && last.id === message.id))) return []
+  const published = message?.extra_metadata?.citation_ready
+  if (published && typeof published === 'object')
+    return normalizeSourceQuotes(published.source_quotes)
+  const runId = String(message.run_id || message?.extra_metadata?.run_id || '')
+  return normalizeSourceQuotes(sourceQuotesByRun?.[runId])
 }
 
 /**
@@ -203,7 +288,8 @@ export const extractCitationReadyFromHistory = (history) => {
       citation,
       figures: normalizeVerifiedFigures(payload.figures),
       figureRefs: normalizeFigureRefs(payload.figure_refs),
-      tables: normalizeVerifiedTables(payload.tables)
+      tables: normalizeVerifiedTables(payload.tables),
+      sourceQuotes: normalizeSourceQuotes(payload.source_quotes)
     }
   }
   return null

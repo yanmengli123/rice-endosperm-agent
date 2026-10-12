@@ -42,6 +42,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { literatureWorkspaceApi as api } from '@/apis/literature_api'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 const props = defineProps({ rid: { type: String, required: true } })
 const emit = defineEmits(['saved', 'editing-change'])
 const kinds = {
@@ -85,8 +86,8 @@ const load = async () => {
     if (ticket === generation) notice.value = error.message || '元数据载入失败'
   }
 }
-const reload = () => {
-  if (window.confirm('重新载入会丢弃尚未保存的编辑，继续？')) load()
+const reload = async () => {
+  if (await confirmAction('重新载入会丢弃尚未保存的编辑，继续？')) load()
 }
 const save = async () => {
   if (busy.value || !draft.value) return

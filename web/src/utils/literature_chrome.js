@@ -34,7 +34,9 @@ export const normalizeLitChrome = (raw) => ({
   sidebarWidth: clampLitSidebarWidth(raw?.sidebarWidth),
   pinned: raw?.pinned !== false,
   readMode: raw?.readMode === true,
-  eyeCare: raw?.eyeCare === true
+  eyeCare: raw?.eyeCare === true,
+  // 分栏问答的会话/文献左右位置互换偏好（true = 会话在右、文献在左）
+  splitSwapped: raw?.splitSwapped === true
 })
 
 export const readLitChrome = (storage, uid) => {

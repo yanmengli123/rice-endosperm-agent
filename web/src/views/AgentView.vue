@@ -86,6 +86,7 @@
       :backend-options="agentBackendOptions"
       @saved="handleAgentSaved"
     />
+    <AgentFloatingBall />
   </div>
 </template>
 
@@ -97,6 +98,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
 import AgentChatComponent from '@/components/AgentChatComponent.vue'
 import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
+import AgentFloatingBall from '@/components/floating/AgentFloatingBall.vue'
 import { isBuiltinAgent, useAgentStore } from '@/stores/agent'
 import { handleChatError } from '@/utils/errorHandler'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -194,6 +196,10 @@ watch(chatComponentRef, (instance) => {
 
 const handleThreadChange = (threadId) => {
   if (syncingRouteThread.value) return
+  // keepAlive 失活守卫：本视图被缓存后在 /literature 等其他页面仍然存活，
+  // 共享 chatThreadsStore 的线程变化会触发这里的 thread-change——失活期间
+  // 绝不劫持全局路由（否则文献专属会话/阅读动作会被带到 /agent/{id}）。
+  if (!route.path.startsWith('/agent')) return
   const currentRouteThreadId = getRouteThreadId()
   const nextThreadId = threadId || ''
   if (currentRouteThreadId === nextThreadId) return

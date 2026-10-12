@@ -5,6 +5,7 @@
     :aria-label="`论文原图：${title}`"
   >
     <button
+      ref="mediaButton"
       type="button"
       class="figure-card__media"
       :disabled="mediaStatus !== 'ready'"
@@ -46,6 +47,15 @@
         :aria-label="title"
         @click="closePreview"
       >
+        <button
+          ref="previewClose"
+          type="button"
+          class="figure-preview-close"
+          aria-label="关闭原图预览"
+          @click.stop="closePreview"
+        >
+          ×
+        </button>
         <img :src="state.url" :alt="title" @click.stop />
       </div>
     </Teleport>
@@ -60,7 +70,7 @@
  * 页码原样显示（页码权威在后端 Binding）。「查看原文」只在父级证据集中能找到
  * 同 evidence_id 的证据时出现——不绕开证据守卫自拼 fragments。
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import { figureCardTitle } from '@/utils/figureCard'
 
@@ -78,18 +88,27 @@ const mediaStatus = computed(() => {
   return status === 'ready' || status === 'loading' ? status : 'error'
 })
 const previewVisible = ref(false)
+const mediaButton = ref(null)
+const previewClose = ref(null)
 
 const onKeydown = (event) => {
   if (event.key === 'Escape') closePreview()
+  if (event.key === 'Tab') {
+    event.preventDefault()
+    previewClose.value?.focus()
+  }
 }
 const openPreview = () => {
   if (mediaStatus.value !== 'ready') return
   previewVisible.value = true
+  nextTick(() => previewClose.value?.focus())
   window.addEventListener('keydown', onKeydown)
 }
 const closePreview = () => {
+  const wasVisible = previewVisible.value
   previewVisible.value = false
   window.removeEventListener('keydown', onKeydown)
+  if (wasVisible) mediaButton.value?.focus()
 }
 // blob 被撤销 / 图集切换时同步关闭放大层，避免展示已 revoke 的 URL
 watch(mediaStatus, (status) => {
@@ -218,6 +237,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   padding: 32px;
   background: rgba(0, 0, 0, 0.72);
   cursor: zoom-out;
+
+  .figure-preview-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--gray-250);
+    border-radius: 6px;
+    background: var(--gray-0);
+    color: var(--gray-800);
+    font-size: 24px;
+    cursor: pointer;
+  }
 
   img {
     max-width: 100%;

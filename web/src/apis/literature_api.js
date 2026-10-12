@@ -1,5 +1,15 @@
 import { apiGet, apiPost, apiPut, apiDelete } from './base'
 
+function bibliometricQuery(filters) {
+  const query = new URLSearchParams()
+  for (const key of ['only_imports', 'database', 'query', 'year_from', 'year_to']) {
+    if (filters[key] !== undefined && filters[key] !== null && filters[key] !== '')
+      query.set(key, String(filters[key]))
+  }
+  for (const id of filters.batch_ids || []) query.append('batch_ids', id)
+  return query
+}
+
 /**
  * 文献域 API（P6c，ADR-0010）
  * 后端：/api/literature/*（server/routers/literature_router.py，薄层）
@@ -141,7 +151,19 @@ export const literatureWorkspaceApi = {
     apiPut(`/api/literature/papers/${encodeURIComponent(rid)}/metadata`, payload),
   compileBatch: (payload) => apiPost('/api/literature/library/compile', payload),
   runs: () => apiGet('/api/literature/runs'),
-  sessions: (archived = false) => apiGet(`/api/literature/sessions?archived=${archived}`),
+  /** 质量指标（拒绝率/降级率/修复成功率 + 任务/入库健康）。 */
+  qualityMetrics: (days = 7) =>
+    apiGet(`/api/literature/metrics/quality?days=${encodeURIComponent(String(days))}`),
+  /** 死信人工恢复：FAILED/REJECTED 入库任务复位重跑（管理员）。 */
+  retryIngest: (revisionId) =>
+    apiPost(`/api/literature/ingest/${encodeURIComponent(revisionId)}/retry`),
+  sessions: (archived = false, offset = 0, limit = 50) =>
+    apiGet(`/api/literature/sessions?archived=${archived}&offset=${offset}&limit=${limit}`),
+  /** 会话历史检索（标题 + 已完成消息全文；命中为导航，不进证据通道） */
+  searchSessions: (query, { archived = false, offset = 0, limit = 20 } = {}) =>
+    apiGet(
+      `/api/literature/sessions/search?query=${encodeURIComponent(query)}&archived=${archived}&offset=${offset}&limit=${limit}`
+    ),
   createSession: (kind, rid = '') => apiPost('/api/literature/sessions', { kind, rid }),
   qnaPreview: (id) => apiGet(`/api/literature/sessions/${encodeURIComponent(id)}/qna-preview`),
   qnaWriteback: (id, payload) =>
@@ -155,6 +177,65 @@ export const literatureWorkspaceApi = {
    */
   deleteSession: (id) => apiDelete(`/api/chat/thread/${encodeURIComponent(id)}`),
   importMarkdown: (payload) => apiPost('/api/literature/papers/import/markdown', payload),
+  /**
+   * 文献清单导入（PubMed .nbib / WoS Tab-delimited / RIS / EndNote）。
+   * 后端按内容嗅探格式，format='auto' 默认；202 + 导入报告。
+   */
+  importReferences: (file, format = 'auto') => {
+    const form = new FormData()
+    form.append('file', file)
+    return apiPost(
+      `/api/literature/papers/import/references?format=${encodeURIComponent(format)}`,
+      form
+    )
+  },
+  referenceBatches: (offset = 0) => apiGet(`/api/literature/reference-batches?offset=${offset}`),
+  metricSources: () => apiGet('/api/literature/metrics/sources'),
+  topicCapabilities: () => apiGet('/api/literature/metrics/topic-runs/capabilities'),
+  previewTopics: (options, filters) =>
+    apiPost('/api/literature/metrics/topic-runs/preview', { options, filters }),
+  startTopics: (options, filters) =>
+    apiPost('/api/literature/metrics/topic-runs', { options, filters }),
+  topicRuns: (offset = 0) => apiGet(`/api/literature/metrics/topic-runs?offset=${offset}`),
+  topicRun: (id) => apiGet(`/api/literature/metrics/topic-runs/${encodeURIComponent(id)}`),
+  cancelTopics: (id) =>
+    apiPost(`/api/literature/metrics/topic-runs/${encodeURIComponent(id)}/cancel`),
+  rerunTopics: (id, options = {}) =>
+    apiPost(`/api/literature/metrics/topic-runs/${encodeURIComponent(id)}/rerun`, options),
+  topicData: (id, model, { topic, offset = 0, view = 'documents' } = {}) => {
+    const query = new URLSearchParams({ model, offset, view })
+    if (topic !== undefined && topic !== null) query.set('topic', String(topic))
+    return apiGet(`/api/literature/metrics/topic-runs/${encodeURIComponent(id)}/data?${query}`)
+  },
+  importTopics: (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    return apiPost('/api/literature/metrics/topic-runs/import', form)
+  },
+  exportTopics: (id, model) =>
+    apiGet(
+      `/api/literature/metrics/topic-runs/${encodeURIComponent(id)}/export?model=${encodeURIComponent(model)}`,
+      {},
+      true,
+      'blob'
+    ),
+  metricRecords: (filters = {}, offset = 0, limit = 25) =>
+    apiGet(
+      `/api/literature/metrics/records?${bibliometricQuery(filters)}&offset=${offset}&limit=${limit}`
+    ),
+  /** 清单、统计和网络使用同一范围，排除参考条目/回收站，50000 篇预算。 */
+  bibliometrics: (journalsTop = 20, filters = {}) =>
+    apiGet(
+      `/api/literature/metrics/bibliometrics?journals_top=${encodeURIComponent(String(journalsTop))}&${bibliometricQuery(filters)}`
+    ),
+  /** 共现网络（type=keyword|author；节点=频次 TopN，边=同篇共现）。 */
+  metricNetwork: (type = 'keyword', top = 50, minPair = 2, filters = {}) => {
+    const query = bibliometricQuery(filters)
+    query.set('type', type)
+    query.set('top', String(top))
+    query.set('min_pair', String(minPair))
+    return apiGet(`/api/literature/metrics/networks?${query}`)
+  },
   // 期刊指标（JCR/中科院）：预览只回摘要；导入是管理员写入；关联写回 IF/分区
   journalsStatus: () => apiGet('/api/literature/journals/status'),
   previewJournals: (file) => {
@@ -169,5 +250,52 @@ export const literatureWorkspaceApi = {
   },
   attachJournalMetrics: () => apiPost('/api/literature/library/journal-metrics'),
   exportDiary: (month) =>
-    apiGet(`/api/literature/diary/export?month=${encodeURIComponent(month)}`, {}, true, 'blob')
+    apiGet(`/api/literature/diary/export?month=${encodeURIComponent(month)}`, {}, true, 'blob'),
+  /**
+   * 启动文献处理工作流（三模式；后端 workflow.MODE_STEPS）。
+   * @param {string} rid 文献 RID
+   * @param {'parse_only'|'parse_compile'|'full'} mode
+   * @param {{review_policy?: string}} [payload]
+   */
+  startWorkflow: (rid, mode, payload = {}) =>
+    apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/workflow`, { mode, ...payload }),
+  // 主题目录（TopicsPanel；编译为纯聚合，不调用模型）
+  topics: (field = 'wos_categories', offset = 0) => {
+    const query = new URLSearchParams({ field, offset: String(offset) })
+    return apiGet(`/api/literature/topics?${query}`)
+  },
+  compileTopics: (field = 'wos_categories', minPapers = 2) =>
+    apiPost('/api/literature/topics/compile', { field, min_papers: minPapers }),
+  topic: (slug, field = 'wos_categories') =>
+    apiGet(`/api/literature/topics/${encodeURIComponent(slug)}?field=${encodeURIComponent(field)}`)
+}
+
+/**
+ * 译文工作台 API（TranslationSettings / DraftReader）。
+ * 后端：translation_workspace.py + translate/settings.py；任务轮询与计费
+ * 确认在组件层完成，封装只保持与端点一一对应。
+ */
+export const literatureTranslationApi = {
+  settings: (signal = null) => apiGet('/api/literature/translation-settings', { signal }),
+  saveSettings: (payload) => apiPut('/api/literature/translation-settings', payload),
+  probeSources: (signal = null) => apiGet('/api/literature/translation-probe/sources', { signal }),
+  probe: (payload) => apiPost('/api/literature/translation-probe', payload),
+  task: (taskId, content = false, signal = null) =>
+    apiGet(
+      `/api/literature/translation-tasks/${encodeURIComponent(taskId)}?content=${content ? 'true' : 'false'}`,
+      {
+        signal
+      }
+    ),
+  draftTask: (revisionId, signal = null) =>
+    apiGet(`/api/literature/drafts/${encodeURIComponent(revisionId)}/translation`, { signal }),
+  translateDraft: (revisionId) =>
+    apiPost(`/api/literature/drafts/${encodeURIComponent(revisionId)}/translation`),
+  draftPdf: (revisionId, signal = null) =>
+    apiGet(
+      `/api/literature/drafts/${encodeURIComponent(revisionId)}/source-pdf`,
+      { signal },
+      true,
+      'blob'
+    )
 }

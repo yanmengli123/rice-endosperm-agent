@@ -39,8 +39,22 @@ export const getWorkspaceKnowledgeFileContent = (kbId, fileId) => {
   return apiGet(`/api/workspace/knowledge/file?${query}`, {}, true, 'blob')
 }
 
-export const downloadWorkspaceKnowledgeFile = (kbId, fileId, variant = 'original') => {
-  const query = buildQuery({ kb_id: kbId, file_id: fileId, variant })
+export const resolveWorkspacePdfEvidence = (params) =>
+  apiGet(`/api/workspace/knowledge/locator?${buildQuery(params)}`)
+
+export const downloadWorkspaceKnowledgeFile = (
+  kbId,
+  fileId,
+  variant = 'original',
+  identity = {}
+) => {
+  const query = buildQuery({
+    kb_id: kbId,
+    file_id: fileId,
+    variant,
+    parse_revision_id: identity.parse_revision_id,
+    source_sha256: identity.source_sha256
+  })
   return apiGet(`/api/workspace/knowledge/download?${query}`, {}, true, 'blob')
 }
 
@@ -55,9 +69,15 @@ export const downloadWorkspaceKnowledgeFile = (kbId, fileId, variant = 'original
 export const downloadWorkspaceKnowledgeFileWithProgress = async (
   kbId,
   fileId,
-  { variant = 'original', onProgress, signal } = {}
+  { variant = 'original', parseRevisionId, sourceSha256, onProgress, signal } = {}
 ) => {
-  const query = buildQuery({ kb_id: kbId, file_id: fileId, variant })
+  const query = buildQuery({
+    kb_id: kbId,
+    file_id: fileId,
+    variant,
+    parse_revision_id: parseRevisionId,
+    source_sha256: sourceSha256
+  })
   const userStore = useUserStore()
   if (!userStore.isLoggedIn) throw new Error('用户未登录')
   const response = await fetch(`/api/workspace/knowledge/download?${query}`, {

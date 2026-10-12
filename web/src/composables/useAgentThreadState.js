@@ -60,6 +60,8 @@ export function useAgentThreadState({
         verifiedTables: [],
         // 表格卡片的会话级暂存：run_id → tables（桥接语义同 figuresByRun）
         tablesByRun: {},
+        verifiedSourceQuotes: [],
+        sourceQuotesByRun: {},
         verifiedGraphSnapshot: null,
         // run_id → graph_snapshot_v1，桥接流末事件与历史消息回读。
         graphsByRun: {},

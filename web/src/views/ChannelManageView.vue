@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { channelApi } from '@/apis/channel_api'
+import { confirmAction } from '@/composables/useConfirmAction'
 
 const loading = ref(false)
 const error = ref('')
@@ -255,7 +256,7 @@ const copyWebhook = async () => {
 }
 
 const regenerate = async (app) => {
-  if (!window.confirm('重置后旧回调地址立即失效，平台侧需同步改配。继续？')) return
+  if (!(await confirmAction('重置后旧回调地址立即失效，平台侧需同步改配。继续？'))) return
   try {
     const result = await channelApi.regeneratePathToken(app.id)
     createdReveal.value = {
@@ -270,7 +271,11 @@ const regenerate = async (app) => {
 }
 
 const removeApp = async (app) => {
-  if (!window.confirm(`删除渠道应用「${app.name}」？关联消息流水将一并删除（run 审计保留）。`))
+  if (
+    !(await confirmAction(
+      `删除渠道应用「${app.name}」？关联消息流水将一并删除（run 审计保留）。`
+    ))
+  )
     return
   try {
     await channelApi.deleteApp(app.id)

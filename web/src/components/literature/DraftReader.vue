@@ -49,6 +49,7 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { literatureTranslationApi as api } from '@/apis/literature_api'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 
 const props = defineProps({ document: { type: Object, required: true } })
 const tabs = [
@@ -98,7 +99,9 @@ const refresh = async () => {
   }
 }
 const translate = async () => {
-  if (!window.confirm('草稿翻译会向当前模型供应商发送论文内容并可能计费，允许本次翻译？')) return
+  if (!(await confirmAction('草稿翻译会向当前模型供应商发送论文内容并可能计费，允许本次翻译？')))
+    return
+  if (disposed || !polling.value) return
   const ticket = generation
   busy.value = true
   try {

@@ -13,6 +13,7 @@
 <script setup>
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { apiGet, apiPut } from '@/apis/base'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 const props = defineProps({
   rid: { type: String, required: true },
   kind: { type: String, required: true }
@@ -52,9 +53,10 @@ const save = async () => {
   if (busy.value || !snapshot) return
   if (
     notice.value.startsWith('来源已更新') &&
-    !window.confirm('已核对当前正文，确认将这份人工草稿用于当前来源版本？')
+    !(await confirmAction('已核对当前正文，确认将这份人工草稿用于当前来源版本？'))
   )
     return
+  if (busy.value || !snapshot) return
   const ticket = generation,
     rid = props.rid,
     kind = props.kind
@@ -74,8 +76,8 @@ const save = async () => {
     if (ticket === generation) busy.value = false
   }
 }
-const cancel = () => {
-  if (window.confirm('放弃尚未保存的编辑？')) editing.value = false
+const cancel = async () => {
+  if (await confirmAction('放弃尚未保存的编辑？')) editing.value = false
 }
 watch(
   () => [props.rid, props.kind],

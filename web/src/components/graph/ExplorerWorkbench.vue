@@ -345,6 +345,7 @@
       @type-select="onInsightTypeSelect"
       @edge-select="onInsightEdgeSelect"
       @access-denied="clearGraphAccessState"
+      @refresh="loadGraph"
     />
     <!-- 托管图谱导入弹窗：挂载曾误摘导致工具栏导入按钮点击无响应 -->
     <GraphImportModal

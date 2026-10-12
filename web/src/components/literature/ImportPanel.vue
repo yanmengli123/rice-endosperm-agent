@@ -6,15 +6,20 @@
         v-for="(label, key) in tabs"
         :key="key"
         class="btn"
-        :aria-selected="mode === key"
         role="tab"
+        :data-tab-key="key"
+        :id="`import-tab-${key}`"
+        :aria-selected="mode === key"
+        :aria-controls="`import-panel-${key}`"
+        :tabindex="mode === key ? 0 : -1"
         @click="mode = key"
+        @keydown="onTabKeydown"
       >
         {{ label }}
       </button>
     </div>
     <template v-if="mode === 'pdf'">
-      <p>
+      <p role="tabpanel" :id="`import-panel-pdf`" :aria-labelledby="`import-tab-pdf`" tabindex="0">
         PDF 进入所选知识源的 pdf_evidence
         契约：共用解析和质量门禁。默认索引激活后进入文献库；仅解析留在个人草稿，不纳入证据检索。
       </p>
@@ -28,7 +33,8 @@
         <button class="btn" :disabled="busy" @click="loadDatabases">刷新知识源</button>
         <label
           >处理模式<select v-model="processingMode" :disabled="busy">
-            <option value="activate">解析并激活（进入文献库）</option>
+            <option value="parse_compile">解析并激活 + 自动编译（渲染 → L1/L2）</option>
+            <option value="full">完整流程（渲染 → 复核 → 编译 → 翻译/总结，含计费）</option>
             <option value="parse_only">仅解析（草稿阅读，不索引、不激活）</option>
           </select></label
         >
@@ -41,7 +47,7 @@
             @change="importPdf"
         /></label>
         <p>
-          同名文件需确认；不会覆盖旧证据版本。此入口只提交知识源处理，编译/完整流程在文献出现后明确启动。
+          同名文件需确认；不会覆盖旧证据版本。选择编译/完整流程时，解析入库完成后自动继续对应工作流。
         </p>
       </template>
       <p v-else>
@@ -59,15 +65,18 @@
         >
           {{ draft.title }} · {{ draft.status }}
         </button>
-        <MarkdownPreview
-          v-if="draftDocument"
-          :content="draftDocument.markdown"
-          :knowledge-base-id="draftDocument.kb_id"
-        />
+        <DraftReader v-if="draftDocument" :document="draftDocument" @close="draftDocument = null" />
       </section>
     </template>
     <template v-else-if="mode === 'markdown'">
-      <p>Markdown 免 OCR 导入为阅读产物，不自动赋予原文证据资格。</p>
+      <p
+        role="tabpanel"
+        id="import-panel-markdown"
+        aria-labelledby="import-tab-markdown"
+        tabindex="0"
+      >
+        Markdown 免 OCR 导入为阅读产物，不自动赋予原文证据资格。
+      </p>
       <label>标题<input v-model="title" maxlength="4096" /></label>
       <label>DOI（可选）<input v-model="doi" maxlength="255" /></label>
       <label
@@ -83,8 +92,59 @@
       </button>
     </template>
     <template v-else>
-      <p>BibTeX 保留身份与引用边；重复记录跳过，不覆盖人工元数据。</p>
-      <input type="file" accept=".bib,.txt" :disabled="busy" @change="importBib" />
+      <p role="tabpanel" id="import-panel-bib" aria-labelledby="import-tab-bib" tabindex="0">
+        文献清单保留身份与引用边；重复记录（DOI/PMID/指纹）自动跳过，不覆盖人工元数据。
+      </p>
+      <label
+        >格式<select v-model="referenceFormat" :disabled="busy" aria-label="清单格式">
+          <option value="auto">自动识别（推荐）</option>
+          <option value="bibtex">BibTeX（.bib）</option>
+          <option value="pubmed-nbib">PubMed（.nbib）</option>
+          <option value="pubmed-csv">PubMed（CSV / 合并题录 CSV）</option>
+          <option value="wos-txt">Web of Science（Plain Text / Tab-delimited .txt）</option>
+          <option value="wos-csv">Web of Science（CSV）</option>
+          <option value="cnki-xls">知网（官网 HTML-XLS）</option>
+          <option value="wanfang-xlsx">万方（Excel .xlsx）</option>
+          <option value="ris">RIS（.ris / 部分万方导出）</option>
+          <option value="endnote">EndNote（知网/万方导出 .txt）</option>
+        </select></label
+      >
+      <label
+        >清单文件<input
+          type="file"
+          accept=".bib,.txt,.ris,.nbib,.enw,.ciw,.csv,.xls,.xlsx"
+          :disabled="busy"
+          @change="importBib"
+      /></label>
+      <details class="format-guide">
+        <summary>各官网导出路径</summary>
+        <p>
+          单文件最多 64 MiB / 50000 条；导入后可在「计量分析」查看批次清单和同范围统计，上限 50000
+          篇。
+        </p>
+        <ul>
+          <li>PubMed：检索结果 → Send to → Citation manager（.nbib）</li>
+          <li>
+            Web of Science：检索结果 → Export → Plain Text 或 Tab-delimited（.txt）；建议选 Full
+            Record and Cited References，保留作者、关键词、机构及引用字段。
+          </li>
+          <li>万方：Excel（.xlsx，自动识别分组标题行）或 EndNote / RIS（.txt）</li>
+          <li>知网：官网 Excel（HTML .xls）或 EndNote（.txt）；保留原始编码</li>
+        </ul>
+        <p>
+          清单不含字段就无法统计对应维度；只包含 PMID、趋势统计或摘要展示的文本不是完整题录。PubMed
+          建议优先导入 MEDLINE（.txt/.nbib），字段更完整。
+        </p>
+      </details>
+      <p v-if="referenceReport" class="reference-report">
+        {{ referenceReport.source || '清单' }}：识别 {{ referenceReport.format_detected }}（{{
+          referenceReport.encoding
+        }}）， 共 {{ referenceReport.records }} 条 —— 新增 {{ referenceReport.papers_written }}、
+        跳过 {{ referenceReport.papers_skipped }}、 引用边 {{ referenceReport.citations_written
+        }}<template v-if="referenceReport.no_identity">
+          、无身份 {{ referenceReport.no_identity }} 条</template
+        >
+      </p>
     </template>
     <p v-if="notice" role="status">{{ notice }}</p>
     <HistoryPanel />
@@ -115,26 +175,65 @@ import { onMounted, ref, watch } from 'vue'
 import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
 import { databaseApi, documentApi, fileApi } from '@/apis/knowledge_api'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
-import { apiGet, apiPost } from '@/apis/base'
-import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
+import { apiGet } from '@/apis/base'
+import DraftReader from '@/components/literature/DraftReader.vue'
 import HistoryPanel from '@/components/literature/HistoryPanel.vue'
 import { useUserStore } from '@/stores/user'
 import { parseOptionsPayload } from '@/composables/useLiteratureSettings'
 import { resolveDefaultOcrEngine } from '@/utils/ocr_engine'
+import { confirmAction } from '@/composables/useLiteratureSessions'
+import { useTablistKeyboard } from '@/composables/useTablistKeyboard'
 const emit = defineEmits(['imported', 'track'])
 const userStore = useUserStore()
 // 就地进度吃全局共享轮询源（与状态栏/任务视图同源同频）
 const taskFeed = useLiteratureTaskFeed()
 const ticketTask = (ticket) =>
   taskFeed.tasks.value.find((task) => task.type === 'ingest' && task.ref === ticket)
-const tabs = { pdf: 'PDF 契约处理', markdown: 'Markdown 直导', bib: 'BibTeX 目录' }
+const tabs = {
+  pdf: 'PDF 契约处理',
+  markdown: 'Markdown 直导',
+  bib: '文献清单（BibTeX/PubMed/WoS/万方/知网）'
+}
 const mode = ref('pdf')
+// tablist 键盘导航（roving tabindex + 方向键/Home/End）
+const { onTabKeydown } = useTablistKeyboard(
+  (key) => {
+    mode.value = key
+  },
+  () => Object.keys(tabs)
+)
 const busy = ref(false)
 const databases = ref([])
 const kbId = ref('')
-const processingMode = ref('activate')
+const processingMode = ref('parse_compile')
 const drafts = ref([])
 const draftDocument = ref(null)
+// 已自动推进过的工作流单据（ticket → paper_rid），防重复触发与计费
+const advancedTickets = new Set()
+
+// 三模式向导的自动推进：解析入库终态（共享任务源口径）且已登记文献后，
+// 按上传时选择的模式自动启动对应工作流；失败/拒绝不推进，用户可手动重试。
+watch(
+  () => taskFeed.tasks.value,
+  () => {
+    if (processingMode.value === 'parse_only') return
+    for (const result of results.value) {
+      if (!result.ticket || advancedTickets.has(result.ticket)) continue
+      const task = ticketTask(result.ticket)
+      if (!task?.paper_rid || !task.is_terminal || task.is_failure) continue
+      advancedTickets.add(result.ticket)
+      literatureWorkspaceApi
+        .startWorkflow(task.paper_rid, processingMode.value)
+        .then(() => {
+          result.message = `入库完成，已自动启动${processingMode.value === 'full' ? '完整' : '编译'}工作流；进度见「任务与历史」`
+        })
+        .catch((error) => {
+          result.message = `入库完成，但自动${processingMode.value === 'full' ? '完整流程' : '编译'}启动失败：${error.message || '请手动触发'}`
+        })
+    }
+  },
+  { deep: true }
+)
 const loadDrafts = () =>
   perform(async () => {
     drafts.value = (await apiGet('/api/literature/drafts')).items || []
@@ -211,16 +310,23 @@ const importPdf = (event) => {
       throw new Error('仅接受 PDF，单文件上限 100 MiB')
     const target = kbId.value
     results.value = []
+    // 同名文件批量裁决：整批只问一次（原来逐文件弹原生框，20 个同名要点 20 次）。
+    // "确认"= 全部同名作为新来源提交；"取消"= 全部跳过。
+    let duplicateSubmit = null
     for (const file of files) {
       notice.value = `正在提交 ${file.name}（${results.value.length + 1}/${files.length}）`
       try {
         const upload = await fileApi.uploadFile(file, target)
-        if (
-          upload.has_same_name &&
-          !window.confirm(`${file.name} 已有同名记录。确认作为新来源提交？`)
-        ) {
-          results.value.push({ name: file.name, message: '已跳过；未提交解析' })
-          continue
+        if (upload.has_same_name) {
+          if (duplicateSubmit === null) {
+            duplicateSubmit = await confirmAction(
+              `检测到同名文件（如 ${file.name}）。确认将本批全部同名文件作为新来源提交？选择取消将跳过全部同名文件。`
+            )
+          }
+          if (!duplicateSubmit) {
+            results.value.push({ name: file.name, message: '已跳过（同名，未提交解析）' })
+            continue
+          }
         }
         const result = await documentApi.addDocuments(target, [upload.file_path], {
           ...parseOptionsPayload(),
@@ -228,8 +334,11 @@ const importPdf = (event) => {
           format_template: 'pdf_literature',
           pdf_evidence_pipeline: true,
           ocr_engine: resolveDefaultOcrEngine({ contractKey: 'pdf_evidence' }),
-          scientific_processing_mode: processingMode.value,
-          auto_index: processingMode.value === 'activate',
+          // 上传层只有"解析+激活 / 仅解析"两种物理路径；编译/完整流程由
+          // 入库终态后的自动推进（watchWorkflowTickets）衔接 workflow 三模式。
+          scientific_processing_mode:
+            processingMode.value === 'parse_only' ? 'parse_only' : 'activate',
+          auto_index: processingMode.value !== 'parse_only',
           content_hashes: { [upload.file_path]: upload.content_hash },
           file_sizes: { [upload.file_path]: upload.size ?? file.size },
           source_paths: { [upload.file_path]: file.name }
@@ -237,8 +346,9 @@ const importPdf = (event) => {
         const failed = (result.result?.items || []).find((item) => item.status === 'failed')
         // add_documents 响应带 parse_revision_id——把它作为"处理单号"交给用户，
         // 进度与终态在工作台「任务与历史 → 入库中」实时可见（不再指向知识源任务页）。
-        const ticket = (result.result?.items || []).find((item) => item.parse_revision_id)
-          ?.parse_revision_id
+        const ticket = (result.result?.items || []).find(
+          (item) => item.parse_revision_id
+        )?.parse_revision_id
         const ticketText = ticket ? `（单号 ${String(ticket).slice(0, 16)}…）` : ''
         results.value.push({
           name: file.name,
@@ -282,15 +392,18 @@ const importMarkdown = () =>
     notice.value = `Markdown 已导入：${result.rid || ''}`
     emit('imported')
   })
+const referenceFormat = ref('auto')
+const referenceReport = ref(null)
 const importBib = (event) => {
   const file = event.target.files?.[0]
   event.target.value = ''
   return perform(async () => {
     if (!file) return
-    if (file.size > 10 * 1024 * 1024) throw new Error('Bib 文件不得超过 10 MiB')
-    const form = new FormData()
-    form.append('file', file)
-    const result = await apiPost('/api/literature/papers/import/bib', form)
+    referenceReport.value = null
+    if (file.size > 64 * 1024 * 1024) throw new Error('清单文件不得超过 64 MiB')
+    // .bib/.txt 之外的扩展名也交给后端：嗅探按内容特征判定，扩展名不可信
+    const result = await literatureWorkspaceApi.importReferences(file, referenceFormat.value)
+    referenceReport.value = result
     notice.value = `新增 ${result.papers_written || 0}，跳过 ${result.papers_skipped || 0}，引用边 ${result.citations_written || 0}`
     emit('imported')
   })
@@ -328,6 +441,20 @@ onMounted(() => {
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 14px;
+}
+.format-guide {
+  margin: 10px 0;
+  font-size: 13px;
+  color: var(--color-text-secondary, #666);
+}
+.format-guide ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+.reference-report {
+  padding: 8px 10px;
+  border-left: 3px solid var(--main-color, #2f6b4f);
+  background: var(--color-bg-container, #fafafa);
 }
 label {
   display: flex;

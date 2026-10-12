@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { authApi } from '@/apis/auth_api'
 import { useUserStore } from '@/stores/user'
+import { confirmAction } from '@/composables/useConfirmAction'
 import PageHeader from '@/components/shared/PageHeader.vue'
 
 const loading = ref(false)
@@ -67,9 +68,9 @@ async function toggleUser(user) {
   const action = user.is_disabled ? 'enable' : 'disable'
   const verb = user.is_disabled ? '启用' : '停用'
   if (
-    !window.confirm(
+    !(await confirmAction(
       `确定${verb}用户 ${user.username}（${user.uid}）吗？停用会立即冻结其全部 API Key。`
-    )
+    ))
   )
     return
   try {

@@ -6,6 +6,7 @@ import {
   figureCardTitle,
   figureRefClickAction,
   figureRefsForMessage,
+  figureSourceSelector,
   inlineFiguresForMessage,
   normalizeFigureRefs,
   normalizeVerifiedFigures,
@@ -70,7 +71,8 @@ const run = () => {
     citation,
     figures: [figure],
     figureRefs: [],
-    tables: []
+    tables: [],
+    sourceQuotes: []
   })
 
   const darkLaunch = [
@@ -87,7 +89,8 @@ const run = () => {
     citation,
     figures: [],
     figureRefs: [],
-    tables: []
+    tables: [],
+    sourceQuotes: []
   })
 
   const noPayload = [
@@ -268,6 +271,59 @@ const run = () => {
   assert.deepEqual(tablesForMessage(finalAi, conv, { 'run-1': [tableCard] }), [tableCard])
   assert.deepEqual(tablesForMessage(toolAi, conv, { 'run-1': [tableCard] }), [])
   assert.deepEqual(tablesForMessage(finalAi, conv, {}), [])
+
+  // 原文跳转选择器守卫：身份三键 + figure_label 齐全才可跳，panel 只透传不裁决
+  const withPanel = {
+    ...figure,
+    source_selector: {
+      kb_id: 'kb-a',
+      file_id: 'file-a',
+      parse_revision_id: 'pr_1',
+      figure_label: 'Figure 1',
+      panel_label: 'A'
+    }
+  }
+  assert.deepEqual(figureSourceSelector(withPanel), {
+    kb_id: 'kb-a',
+    file_id: 'file-a',
+    parse_revision_id: 'pr_1',
+    figure_label: 'Figure 1',
+    panel_label: 'A'
+  })
+  assert.deepEqual(
+    figureSourceSelector({
+      ...figure,
+      source_selector: {
+        kb_id: 'kb-a',
+        file_id: 'file-a',
+        parse_revision_id: 'pr_1',
+        figure_label: 'Figure 1'
+      }
+    }),
+    { kb_id: 'kb-a', file_id: 'file-a', parse_revision_id: 'pr_1', figure_label: 'Figure 1' }
+  )
+  // 缺任一身份键 / 缺 figure_label / 无选择器 → null（回退证据锚点，绝不猜）
+  assert.equal(
+    figureSourceSelector({
+      ...figure,
+      source_selector: {
+        kb_id: 'kb-a',
+        file_id: '',
+        parse_revision_id: 'pr_1',
+        figure_label: 'Figure 1'
+      }
+    }),
+    null
+  )
+  assert.equal(
+    figureSourceSelector({
+      ...figure,
+      source_selector: { kb_id: 'kb-a', file_id: 'file-a', parse_revision_id: 'pr_1' }
+    }),
+    null
+  )
+  assert.equal(figureSourceSelector({ ...figure }), null)
+  assert.equal(figureSourceSelector(null), null)
 
   console.log('figureCard: all assertions passed')
 }

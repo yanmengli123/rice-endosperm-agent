@@ -51,9 +51,7 @@
             @click="toggleGroup(group.key)"
           >
             {{
-              isGroupExpanded(group.key)
-                ? '收起'
-                : `+${group.panels.length - PANEL_PREVIEW_LIMIT}`
+              isGroupExpanded(group.key) ? '收起' : `+${group.panels.length - PANEL_PREVIEW_LIMIT}`
             }}
           </button>
         </div>
@@ -68,6 +66,15 @@
         :aria-label="panelPreview.title"
         @click="closePanelPreview"
       >
+        <button
+          ref="panelPreviewClose"
+          type="button"
+          class="figure-preview-close"
+          aria-label="关闭分图预览"
+          @click.stop="closePanelPreview"
+        >
+          ×
+        </button>
         <img :src="panelPreview.url" :alt="panelPreview.title" @click.stop />
       </div>
     </Teleport>
@@ -84,7 +91,7 @@
  * 或 URI 非法的条目直接进入错误占位（buildKnowledgeAssetUrl 的 TypeError 由解析会话
  * 内部按条目吞掉，不会让卡组崩溃）。
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import FigureCard from './FigureCard.vue'
 import { createAssetResolverSession } from '@/utils/asset_resolver'
@@ -172,18 +179,28 @@ const panelTitle = (panel) => {
 }
 
 const panelPreview = ref({ visible: false, url: '', title: '' })
+const panelPreviewClose = ref(null)
+let previewTrigger = null
 const onKeydown = (event) => {
   if (event.key === 'Escape') closePanelPreview()
+  if (event.key === 'Tab') {
+    event.preventDefault()
+    panelPreviewClose.value?.focus()
+  }
 }
 const openPanelPreview = (panel) => {
   const state = stateFor(panel)
   if (state.status !== 'ready') return
+  previewTrigger = document.activeElement
   panelPreview.value = { visible: true, url: state.url, title: panelTitle(panel) }
+  nextTick(() => panelPreviewClose.value?.focus())
   window.addEventListener('keydown', onKeydown)
 }
 const closePanelPreview = () => {
   panelPreview.value = { visible: false, url: '', title: '' }
   window.removeEventListener('keydown', onKeydown)
+  previewTrigger?.focus()
+  previewTrigger = null
 }
 
 const resolveAll = async (figures) => {
@@ -355,6 +372,20 @@ onBeforeUnmount(() => {
   padding: 32px;
   background: rgba(0, 0, 0, 0.72);
   cursor: zoom-out;
+
+  .figure-preview-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--gray-250);
+    border-radius: 6px;
+    background: var(--gray-0);
+    color: var(--gray-800);
+    font-size: 24px;
+    cursor: pointer;
+  }
 
   img {
     max-width: 100%;

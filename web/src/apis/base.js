@@ -1,10 +1,25 @@
 import { useUserStore, checkAdminPermission, checkSuperAdminPermission } from '@/stores/user'
 import { message } from 'ant-design-vue'
+import { normalizeTimeoutError } from '@/utils/apiError'
 
 /**
  * 基础API请求封装
  * 提供统一的请求方法，自动处理认证头和错误
  */
+
+// 非流式请求统一超时：网络挂起时及时失败，避免 UI 无限等待。
+// SSE 流式请求走独立 fetch（agent_api），不经过这里。上传与大文件下载放宽到 120s。
+const DEFAULT_TIMEOUT_MS = 30000
+const SLOW_TIMEOUT_MS = 120000
+
+function requestTimeoutController(isFormData, responseType) {
+  const controller = new AbortController()
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('请求超时', 'TimeoutError')),
+    isFormData || responseType === 'blob' ? SLOW_TIMEOUT_MS : DEFAULT_TIMEOUT_MS
+  )
+  return { signal: controller.signal, clear: () => clearTimeout(timer) }
+}
 
 /**
  * 发送API请求的基础函数
@@ -15,11 +30,15 @@ import { message } from 'ant-design-vue'
  * @returns {Promise} - 请求结果
  */
 export async function apiRequest(url, options = {}, requiresAuth = true, responseType = 'json') {
+  const isFormData = options?.body instanceof FormData
+  // 调用方自带 signal（检索竞态等场景）时自管中止，不叠加超时
+  const timeout = options?.signal ? null : requestTimeoutController(isFormData, responseType)
+  let response
   try {
-    const isFormData = options?.body instanceof FormData
     // 默认请求配置
     const requestOptions = {
       ...options,
+      signal: options?.signal || timeout?.signal,
       headers: {
         ...(!isFormData ? { 'Content-Type': 'application/json' } : {}),
         ...options.headers
@@ -37,7 +56,7 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
     }
 
     // 发送请求
-    const response = await fetch(url, requestOptions)
+    response = await fetch(url, requestOptions)
 
     // 处理API返回的错误
     if (!response.ok) {
@@ -121,7 +140,11 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       return response
     }
   } catch (error) {
-    if (error.name !== 'AbortError') {
+    if (error?.name === 'TimeoutError') {
+      // DOMException.message is read-only in browsers. Mutating it masks the
+      // timeout with a TypeError and prevents the drawer from explaining it.
+      throw normalizeTimeoutError(error)
+    } else if (error?.name !== 'AbortError') {
       console.error('API请求错误:', {
         method: options.method || 'GET',
         status: error.response?.status || null,
@@ -129,6 +152,8 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       })
     }
     throw error
+  } finally {
+    timeout?.clear()
   }
 }
 

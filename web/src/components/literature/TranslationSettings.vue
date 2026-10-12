@@ -116,6 +116,7 @@ const key = 'yuxi:literature:translation-probe:'
 // Task IDs are harmless references; API always revalidates owner and source ACL.
 import { useUserStore } from '@/stores/user'
 import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 const user = useUserStore()
 const storageKey = () => key + user.userId
 const load = async () => {
@@ -202,9 +203,12 @@ const poll = async (id, ticket) => {
 const probe = async () => {
   if (busy.value || running.value || disposed) return
   if (
-    !window.confirm('探测会向已配置的模型传输真实论文正文，最多调用 5 次并可能收费。允许这次探测？')
+    !(await confirmAction(
+      '探测会向已配置的模型传输真实论文正文，最多调用 5 次并可能收费。允许这次探测？'
+    ))
   )
     return
+  if (busy.value || running.value || disposed) return
   // Persist edits without changing active selection, so the targeted nonactive
   // profile is the exact one the actor is currently inspecting.
   if (!(await save())) return

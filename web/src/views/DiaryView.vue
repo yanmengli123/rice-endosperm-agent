@@ -70,6 +70,7 @@ import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { apiGet, apiPut } from '@/apis/base'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
 import { monthDays, adjacentMonth } from '@/utils/literature_calendar'
+import { confirmAction } from '@/composables/useConfirmAction'
 
 export default {
   name: 'DiaryView',
@@ -118,11 +119,10 @@ export default {
         saving.value
       )
         return
-      if (
-        content.value !== savedContent.value &&
-        !window.confirm('切换日期会丢弃未保存的心得，继续？')
-      )
-        return
+      if (content.value !== savedContent.value) {
+        if (!(await confirmAction('切换日期会丢弃未保存的心得，继续？'))) return
+      }
+      if (saving.value || day === selectedDate.value) return
       const ticket = ++generation
       const previousDate = selectedDate.value
       loading.value = true

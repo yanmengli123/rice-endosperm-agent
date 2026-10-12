@@ -9,6 +9,7 @@ import { normalizeCodeLanguage } from '@/utils/file_preview'
 import { renderSvgBlocks } from './svgRenderer'
 import { renderHtmlPreviewBlocks } from './htmlPreviewRenderer'
 import { normalizeMarkdownTables } from './markdown_tables'
+import { authorityLinks } from './authorityLinks'
 
 const markdownKatexPlugin = markdownItKatex.default || markdownItKatex
 const FRONTMATTER_MARKER = '---'
@@ -36,33 +37,6 @@ const normalizeHtmlTagQuotes = (content) => {
 
 export const normalizeLegacyMinioPublicUrls = (content) =>
   String(content || '').replace(LEGACY_MINIO_PUBLIC_URL_RE, '/minio/public/')
-
-// 已验证引用芯片（citation_channel 发布形态）：〔证据E3｜…〕/〔引文定位｜…〕。
-// 锚化只包一层 <a>，不改写芯片文本；DOMPurify 默认保留 data-* 属性。
-const EVIDENCE_CHIP_RE = /〔[^〕]*?(证据\s*(E\d{1,3})|引文定位)[^〕]*?〕/g
-
-export const linkifyEvidenceChips = (content) => {
-  const source = String(content || '')
-  if (!source.includes('〔')) return source
-  return source.replace(EVIDENCE_CHIP_RE, (chip) => {
-    const refMatch = chip.match(/E\d{1,3}/)
-    const ref = refMatch ? refMatch[0] : ''
-    return `<a class="evidence-chip-anchor"${ref ? ` data-evidence="${ref}"` : ''}>${chip}</a>`
-  })
-}
-
-// 图表锚点芯片（ADR-0008 后端签发形态）：〔图表F1｜Figure 2〕。
-// 锚化语义与 evidence 芯片一致：只包一层 <a> 并挂 data-ref，不改写芯片文本；
-// 身份/联动数据来自 citation_ready.figure_refs（宿主组件裁决），此处绝不解析身份。
-const FIGURE_REF_CHIP_RE = /〔图表(F\d{1,3})｜[^〕]+〕/g
-
-export const linkifyFigureRefChips = (content) => {
-  const source = String(content || '')
-  if (!source.includes('〔图表')) return source
-  return source.replace(FIGURE_REF_CHIP_RE, (chip, ref) => {
-    return `<a class="figure-ref-chip-anchor" data-ref="${ref}">${chip}</a>`
-  })
-}
 
 const renderFrontmatterValue = (value) => {
   if (Array.isArray(value)) {
@@ -215,6 +189,7 @@ const createRenderer = ({ themeName, highlighter }) =>
     .use(markdownKatexPlugin, { throwOnError: false, errorColor: '#cc0000', trust: false })
     .use(taskLists, { enabled: false, label: false, labelAfter: false })
     .use(markdownItFrontmatterCard)
+    .use(authorityLinks)
 
 const getRenderer = async (theme, needsHighlight) => {
   const themeName = normalizeTheme(theme)
@@ -237,7 +212,10 @@ const setCachedHtml = (cacheKey, html) => {
   renderedHtmlCache.set(cacheKey, html)
 }
 
-export const renderMarkdown = async (content, { theme = 'github-light' } = {}) => {
+export const renderMarkdown = async (
+  content,
+  { theme = 'github-light', evidenceLinks = false, figureRefLinks = false } = {}
+) => {
   try {
     const normalizedContent = normalizeMarkdownTables(
       normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content))
@@ -248,7 +226,7 @@ export const renderMarkdown = async (content, { theme = 'github-light' } = {}) =
     const svgContent = renderSvgBlocks(htmlPreviewContent)
     const themeName = normalizeTheme(theme)
     const needsHighlight = hasCodeFence(svgContent)
-    const cacheKey = `${needsHighlight ? themeName : 'plain'}\u0000${svgContent}`
+    const cacheKey = `${needsHighlight ? themeName : 'plain'}\u0000${Boolean(evidenceLinks)}:${Boolean(figureRefLinks)}\u0000${svgContent}`
     const cachedHtml = getCachedHtml(cacheKey)
     if (cachedHtml !== undefined) return cachedHtml
 
@@ -258,25 +236,30 @@ export const renderMarkdown = async (content, { theme = 'github-light' } = {}) =
     }
 
     const md = await getRenderer(themeName, needsHighlight)
-    const html = DOMPurify.sanitize(md.render(svgContent), {
-      ADD_TAGS: ['input'],
-      ADD_ATTR: [
-        'class',
-        'style',
-        'target',
-        'rel',
-        'type',
-        'checked',
-        'disabled',
-        'source',
-        'colspan',
-        'rowspan'
-      ],
-      // 默认 URI 白名单不含 blob:（科研图片 Blob URL）与 kbasset://（渲染前
-      // 未成功解析时的占位，渲染层已收紧为受控来源）；保持默认 scheme 语义不变。
-      ALLOWED_URI_REGEXP:
-        /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix|blob|kbasset):|[^a-z]|[a-z+.-]+(?:[^a-z+.:-]|$))/i
-    })
+    const html = DOMPurify.sanitize(
+      md.render(svgContent, {
+        authorityLinks: { evidence: evidenceLinks, figures: figureRefLinks }
+      }),
+      {
+        ADD_TAGS: ['input'],
+        ADD_ATTR: [
+          'class',
+          'style',
+          'target',
+          'rel',
+          'type',
+          'checked',
+          'disabled',
+          'source',
+          'colspan',
+          'rowspan'
+        ],
+        // 默认 URI 白名单不含 blob:（科研图片 Blob URL）与 kbasset://（渲染前
+        // 未成功解析时的占位，渲染层已收紧为受控来源）；保持默认 scheme 语义不变。
+        ALLOWED_URI_REGEXP:
+          /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix|blob|kbasset):|[^a-z]|[a-z+.-]+(?:[^a-z+.:-]|$))/i
+      }
+    )
     setCachedHtml(cacheKey, html)
     return html
   } catch (error) {

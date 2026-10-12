@@ -6,6 +6,23 @@ import { transform } from 'esbuild'
 
 const source = await readFile(new URL('../../apis/base.js', import.meta.url), 'utf8')
 const { code } = await transform(source, { format: 'cjs' })
+// base.js 引入的超时错误归一化（WIP 新增依赖）：预加载真实实现，registry 同步取用
+const apiErrorModule = { exports: {} }
+vm.runInNewContext(
+  (
+    await transform(
+      await readFile(new URL('../../utils/apiError.js', import.meta.url), 'utf8'),
+      { format: 'cjs' }
+    )
+  ).code,
+  {
+    module: apiErrorModule,
+    exports: apiErrorModule.exports,
+    require: () => {
+      throw new Error('apiError.js should stay dependency-free')
+    }
+  }
+)
 const logs = []
 const requests = []
 let response
@@ -14,6 +31,10 @@ vm.runInNewContext(code, {
   module: apiModule,
   exports: apiModule.exports,
   FormData,
+  AbortController,
+  AbortSignal,
+  setTimeout,
+  clearTimeout,
   console: Object.fromEntries(
     ['log', 'warn', 'error'].map((kind) => [kind, (...args) => logs.push(args)])
   ),
@@ -30,6 +51,7 @@ vm.runInNewContext(code, {
         })
       }
     if (id === 'ant-design-vue') return { message: { error() {} } }
+    if (id === '@/utils/apiError') return apiErrorModule.exports
     throw new Error(`Unexpected import: ${id}`)
   }
 })

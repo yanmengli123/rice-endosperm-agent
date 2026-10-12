@@ -72,13 +72,19 @@ const modules = {
       }
     }
   },
-  '@/apis/literature_api': { literatureWorkspaceApi: {} },
+  '@/apis/literature_api': {
+    literatureWorkspaceApi: { startWorkflow: async () => ({}) }
+  },
   '@/composables/useLiteratureSettings': { parseOptionsPayload: () => ({ language: 'auto' }) },
   '@/composables/useLiteratureTaskFeed': {
     useLiteratureTaskFeed: () => ({ tasks, refresh: async () => {} })
   },
   '@/apis/base': { apiGet: async () => ({ items: [] }) },
-  '@/stores/user': { useUserStore: () => ({ isAdmin: true }) }
+  '@/stores/user': { useUserStore: () => ({ isAdmin: true }) },
+  '@/composables/useLiteratureSessions': { confirmAction: async () => true },
+  '@/composables/useTablistKeyboard': {
+    useTablistKeyboard: () => ({ onTabKeydown: () => {} })
+  }
 }
 const componentModule = { exports: {} }
 vm.runInNewContext(code, {
@@ -127,7 +133,13 @@ tasks.value = [
   { type: 'ingest', ref: 'rev1', is_terminal: true, is_failure: false, paper_rid: 'paper1' }
 ]
 await Vue.nextTick()
-assert.match(state.results.value[0].message, /入库成功/)
+await Promise.resolve()
+// 非仅解析模式下终态自动推进编译工作流（WIP 行为）：消息被 startWorkflow.then 覆写
+assert.match(
+  state.results.value[0].message,
+  /入库完成，已自动启动编译工作流/,
+  '终态后自动启动工作流并覆写结果消息'
+)
 assert.ok(refreshes > beforeCompletion, '终态刷新文献目录')
 await state.importPdf(event())
 tasks.value = [

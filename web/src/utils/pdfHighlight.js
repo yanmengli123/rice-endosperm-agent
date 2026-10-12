@@ -114,6 +114,57 @@ export const evidenceHighlight = (evidence) => {
   }
 }
 
+/** Project verified server glyphs/cells through the frozen PDF coordinate frame. */
+export const physicalFragmentRects = (fragment, viewport) => {
+  const matrix = fragment?.canonical_to_pdf
+  if (!Array.isArray(matrix) || matrix.length !== 6 || matrix.some((v) => !Number.isFinite(v)))
+    return []
+  if (
+    !Array.isArray(viewport?.transform) ||
+    viewport.transform.length !== 6 ||
+    viewport.transform.some((v) => !Number.isFinite(v))
+  )
+    return []
+  if (!fragment.quads?.length && (!Array.isArray(fragment.bbox) || fragment.bbox.length !== 4))
+    return []
+  const quads = fragment.quads?.length
+    ? fragment.quads
+    : [
+        [
+          fragment.bbox[0],
+          fragment.bbox[1],
+          fragment.bbox[2],
+          fragment.bbox[1],
+          fragment.bbox[0],
+          fragment.bbox[3],
+          fragment.bbox[2],
+          fragment.bbox[3]
+        ]
+      ]
+  return quads.flatMap((quad) => {
+    if (!Array.isArray(quad) || quad.length !== 8 || quad.some((v) => !Number.isFinite(v)))
+      return []
+    const points = [0, 2, 6, 4].map((index) => {
+      const pdfPoint = applyTransform(matrix, quad[index], quad[index + 1])
+      return applyTransform(viewport.transform, pdfPoint.x, pdfPoint.y)
+    })
+    const left = Math.min(...points.map((p) => p.x))
+    const top = Math.min(...points.map((p) => p.y))
+    const width = Math.max(...points.map((p) => p.x)) - left
+    const height = Math.max(...points.map((p) => p.y)) - top
+    if (width <= 0 || height <= 0) return []
+    return [
+      {
+        left,
+        top,
+        width,
+        height,
+        clipPath: `polygon(${points.map((p) => `${((p.x - left) / width) * 100}% ${((p.y - top) / height) * 100}%`).join(',')})`
+      }
+    ]
+  })
+}
+
 // ---------------------------------------------------------------------------
 // 文本层句子级定位：服务端只给出"哪一句"（locator.highlight.quote），几何由
 // pdf.js getTextContent() 的 items 在客户端确定性推导；任何一步失败返回 null，

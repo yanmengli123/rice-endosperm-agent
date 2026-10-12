@@ -6,10 +6,14 @@
         :key="item.key"
         class="side-tab"
         role="tab"
-        :class="{ active: drawer === item.key }"
+        :data-tab-key="item.key"
+        :id="`side-tab-${item.key}`"
         :aria-selected="drawer === item.key"
+        :aria-controls="`side-panel-${item.key}`"
+        :tabindex="drawer === item.key ? 0 : -1"
         :title="item.label"
         @click="$emit('select-drawer', item.key)"
+        @keydown="onTabKeydown"
       >
         {{ item.label }}
       </button>
@@ -25,7 +29,7 @@
     </div>
     <div class="side-panel">
       <!-- 会话抽屉：常驻可见，含全选/批量删除/清空归档（对标 PaperAgent §6.4） -->
-      <div v-show="drawer === 'sessions'" class="side-body">
+      <div v-show="drawer === 'sessions'" class="side-body" role="tabpanel" id="side-panel-sessions" aria-labelledby="side-tab-sessions">
         <p class="side-hint">四类会话共用 Yuxi 原生聊天与审批；文献来源 ACL 每次运行前复验。</p>
         <div class="side-actions">
           <button class="btn" :disabled="busy" @click="$emit('new-session', 'global-qa')">
@@ -114,7 +118,7 @@
       </div>
 
       <!-- 文献库抽屉：类型芯片 + 检索 + 列表 -->
-      <div v-show="drawer === 'papers'" class="side-body">
+      <div v-show="drawer === 'papers'" class="side-body" role="tabpanel" id="side-panel-papers" aria-labelledby="side-tab-papers">
         <div class="kind-chips">
           <button
             v-for="chip in kindChips"
@@ -151,7 +155,7 @@
       </div>
 
       <!-- 知识库抽屉：建库与导出 -->
-      <div v-show="drawer === 'workbench'" class="side-body">
+      <div v-show="drawer === 'workbench'" class="side-body" role="tabpanel" id="side-panel-workbench" aria-labelledby="side-tab-workbench">
         <p class="side-hint">六步建库与期刊指标复用知识源权限；笔记与向量为派生导航。</p>
         <div class="side-actions">
           <button class="btn" @click="$emit('open-workbench')">建库与导出</button>
@@ -159,11 +163,10 @@
           <button class="btn" @click="$emit('open-tasks')">任务与历史</button>
           <button class="btn" @click="$emit('open-graph')">2D / 3D 图谱</button>
         </div>
-        <p v-if="libraryState" class="side-status">建库运行：{{ libraryState.status }}</p>
       </div>
 
       <!-- 日记抽屉 -->
-      <div v-show="drawer === 'diary'" class="side-body">
+      <div v-show="drawer === 'diary'" class="side-body" role="tabpanel" id="side-panel-diary" aria-labelledby="side-tab-diary">
         <p class="side-hint">阅读日记按日保存；清空并保存即删除该天记录。</p>
         <div class="side-actions">
           <button class="btn" @click="$emit('open-diary')">打开日记工作区</button>
@@ -174,6 +177,7 @@
 </template>
 <script setup>
 import { Pin } from '@lucide/vue'
+import { useTablistKeyboard } from '@/composables/useTablistKeyboard'
 defineProps({
   drawer: { type: String, default: 'papers' },
   pinned: { type: Boolean, default: true },
@@ -188,10 +192,9 @@ defineProps({
   currentKind: { type: String, default: '' },
   searchQuery: { type: String, default: '' },
   kindChips: { type: Array, default: () => [] },
-  selectedRid: { type: String, default: '' },
-  libraryState: { type: Object, default: null }
+  selectedRid: { type: String, default: '' }
 })
-defineEmits([
+const emit = defineEmits([
   'select-drawer',
   'toggle-pin',
   'new-session',
@@ -219,6 +222,13 @@ const drawers = [
   { key: 'workbench', label: '知识库' },
   { key: 'diary', label: '日记' }
 ]
+// tablist 键盘导航（roving tabindex + 方向键/Home/End）；pin 按钮不参与 roving
+const { onTabKeydown } = useTablistKeyboard(
+  (key) => {
+    emit('select-drawer', key)
+  },
+  () => drawers.map((item) => item.key)
+)
 const labels = { paper: '本文', 'global-qa': '全库问答', manage: '管理', lit: '目录检索' }
 const kindLabel = (kind) => (kind ? String(kind) : '文献')
 </script>

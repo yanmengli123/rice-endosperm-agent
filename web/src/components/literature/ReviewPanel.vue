@@ -121,6 +121,7 @@
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
 import { buildLiteratureAssetUrl } from '@/apis/literature_api'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 
 export default {
   name: 'ReviewPanel',
@@ -283,11 +284,12 @@ export default {
       const legacyAck = item.stale_decision?.contract_version === 'legacy_v1'
       if (
         legacyAck &&
-        !window.confirm(
+        !(await confirmAction(
           '此项有旧契约裁决。确认按当前 A/B/C/D 语义重新裁决？历史文本不会被当作删除/合并指令。'
-        )
+        ))
       )
         return
+      if (busyItem.value !== null || applying.value) return
       // 兼容语义（review_item_v2）：仅 B 携带替换文本（AI 建议优先，缺省 Paddle 文本）；A/C/D 不改写
       const resolvedText = choice === 'B' ? item.suggestion || item.paddleocr_text || '' : null
       busyItem.value = item.report_idx

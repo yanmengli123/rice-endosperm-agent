@@ -55,6 +55,10 @@ async function evaluate(file, modules, globals = {}, sfc = false) {
         }
       if (id === '@/utils/litDialogs')
         return { litConfirm: async () => false, litPrompt: async () => null }
+      if (id === '@/composables/useLiteratureSessions')
+        return { confirmAction: async () => false }
+      if (id === '@/composables/useTablistKeyboard')
+        return { useTablistKeyboard: () => ({ onTabKeydown: () => {} }) }
       if (id === '@/utils/literature_catalog') return { duplicateCounts: () => new Map() }
       if (modules[id]) return modules[id]
       if (id.endsWith('.vue')) return { default: { render: () => null } }

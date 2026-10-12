@@ -375,6 +375,19 @@ export const documentApi = {
     return apiAdminPost(`/api/knowledge/databases/${kbId}/documents/parse`, fileIds)
   },
 
+  getPdfEvidenceUpgradeInventory: async (kbId, { limit = 100, afterFileId = '' } = {}) => {
+    const params = { limit }
+    if (afterFileId) params.after_file_id = afterFileId
+    return apiAdminGet(`/api/knowledge/databases/${kbId}/pdf-evidence-upgrades`, params)
+  },
+
+  schedulePdfEvidenceUpgrades: async (kbId, fileIds, { dryRun = true } = {}) => {
+    return apiAdminPost(`/api/knowledge/databases/${kbId}/pdf-evidence-upgrades`, {
+      file_ids: fileIds,
+      dry_run: dryRun
+    })
+  },
+
   /**
    * 手动触发全部待解析文档解析
    * @param {string} kbId - 知识库ID

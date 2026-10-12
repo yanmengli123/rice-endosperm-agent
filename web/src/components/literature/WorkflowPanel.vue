@@ -19,7 +19,9 @@
       <div v-if="awaitingReview">
         <p>请在“识别复核”中完成裁决；完成后后台自动推进。</p>
         <input v-model="skipReason" placeholder="显式跳过复核的原因（必填）" />
-        <button class="btn" :disabled="!skipReason.trim() || busy" @click="skipReview">记录原因并跳过</button>
+        <button class="btn" :disabled="!skipReason.trim() || busy" @click="skipReview">
+          记录原因并跳过
+        </button>
       </div>
       <div v-if="cancellable" class="cancel-block">
         <input v-model="cancelReason" placeholder="取消原因（可选）" />
@@ -36,9 +38,11 @@
 </template>
 
 <script setup>
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
 import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
+import { confirmAction } from '@/composables/useLiteratureSessions'
+import { useUserStore } from '@/stores/user'
 const props = defineProps({ rid: { type: String, required: true } })
 const mode = ref('parse_compile')
 const busy = ref(false)
@@ -47,12 +51,22 @@ const state = ref(null)
 const notice = ref('')
 const skipReason = ref('')
 const cancelReason = ref('')
+const user = useUserStore()
+const owner = computed(() =>
+  JSON.stringify([props.rid, user.uid, user.departmentId, user.isLoggedIn])
+)
+const captureTarget = () => {
+  const key = owner.value
+  const id = runId.value
+  return () => !disposed && owner.value === key && runId.value === id
+}
 // 取消是显式动作且不可回滚，用 confirm 兜住误点。
 const cancellable = computed(
   () => Boolean(state.value?.cancellable) && !state.value?.cancel_requested
 )
 let timer = null
 let disposed = false
+let cancelDialog = null
 // 迟到响应代次隔离：暂停/恢复与切换运行都会推进代次，旧响应一律丢弃
 let refreshGeneration = 0
 let controller = new AbortController()
@@ -90,52 +104,73 @@ const refresh = async () => {
   }
 }
 const start = async () => {
+  if (busy.value || disposed) return
+  const key = owner.value
   busy.value = true
   try {
     const result = await apiPost(
       `/api/literature/papers/${encodeURIComponent(props.rid)}/workflow`,
       { mode: mode.value }
     )
+    if (disposed || owner.value !== key) return
     runId.value = result.run_id
     notice.value = result.enqueue_deferred
       ? '运行已持久化，等待后台补偿。'
       : '流程已提交；入队不代表处理完成。'
     await refresh()
   } catch (err) {
-    notice.value = `启动失败：${err?.message || err}`
+    if (!disposed && owner.value === key) notice.value = `启动失败：${err?.message || err}`
   } finally {
-    busy.value = false
+    if (!disposed && owner.value === key) busy.value = false
   }
 }
 const skipReview = async () => {
+  if (busy.value || disposed || !runId.value || !skipReason.value.trim()) return
+  const stillCurrent = captureTarget()
   busy.value = true
   try {
     await apiPost(`/api/literature/workflow/${encodeURIComponent(runId.value)}/skip-review`, {
       reason: skipReason.value.trim()
     })
+    if (!stillCurrent()) return
     await refresh()
   } catch (err) {
-    notice.value = `跳过失败：${err?.message || err}`
+    if (stillCurrent()) notice.value = `跳过失败：${err?.message || err}`
   } finally {
-    busy.value = false
+    if (stillCurrent()) busy.value = false
   }
 }
 const cancel = async () => {
-  if (!window.confirm('取消后当前步骤会中断，且已生成的产物与已计费用量不会回滚。确认取消？'))
-    return
+  if (busy.value || disposed || cancelDialog || !runId.value || !cancellable.value) return
+  const id = runId.value
+  const reason = cancelReason.value.trim()
+  const stillCurrent = captureTarget()
+  const dialog = {}
+  cancelDialog = dialog
+  let confirmed
+  try {
+    confirmed = await confirmAction(
+      '取消后当前步骤会中断，且已生成的产物与已计费用量不会回滚。确认取消？'
+    )
+  } finally {
+    if (cancelDialog === dialog) cancelDialog = null
+  }
+  if (!confirmed) return
+  if (busy.value || !stillCurrent() || !cancellable.value) return
   busy.value = true
   try {
-    const result = await apiPost(`/api/literature/workflow/${encodeURIComponent(runId.value)}/cancel`, {
-      reason: cancelReason.value.trim()
+    const result = await apiPost(`/api/literature/workflow/${encodeURIComponent(id)}/cancel`, {
+      reason
     })
+    if (!stillCurrent()) return
     notice.value = result.already_requested
       ? '取消已在处理中，等待当前步骤收尾。'
       : '已请求取消，等待当前步骤收尾。'
     await refresh()
   } catch (err) {
-    notice.value = `取消失败：${err?.message || err}`
+    if (stillCurrent()) notice.value = `取消失败：${err?.message || err}`
   } finally {
-    busy.value = false
+    if (stillCurrent()) busy.value = false
   }
 }
 const pause = () => {
@@ -145,13 +180,26 @@ const pause = () => {
   stop()
 }
 const polling = useLiteraturePollingScope(pause, refresh)
+watch(
+  owner,
+  () => {
+    pause()
+    runId.value = ''
+    state.value = null
+    busy.value = false
+    cancelDialog = null
+    notice.value = ''
+    skipReason.value = cancelReason.value = ''
+  },
+  { flush: 'sync' }
+)
 onUnmounted(() => {
   disposed = true
   pause()
 })
 </script>
 
-<style scoped>
+<style lang="less" scoped>
 .cancel-block {
   display: flex;
   gap: 8px;
@@ -160,12 +208,12 @@ onUnmounted(() => {
   margin-top: 8px;
 }
 .btn.danger {
-  color: var(--el-color-danger, #f56c6c);
-  border-color: var(--el-color-danger, #f56c6c);
+  color: var(--color-error-700);
+  border-color: var(--color-error-700);
   background: transparent;
 }
 .cancel-pending {
-  color: var(--el-color-warning, #e6a23c);
+  color: var(--color-warning-900);
 }
 section {
   line-height: 1.7;

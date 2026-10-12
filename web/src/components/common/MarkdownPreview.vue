@@ -13,11 +13,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
-import {
-  linkifyEvidenceChips,
-  linkifyFigureRefChips,
-  renderMarkdown
-} from '@/utils/markdown_preview'
+import { renderMarkdown } from '@/utils/markdown_preview'
 import { collectAssetUris, createAssetResolverSession } from '@/utils/asset_resolver'
 import { HTML_PREVIEW_MAX_HEIGHT, HTML_PREVIEW_MIN_HEIGHT } from '@/utils/htmlPreviewRenderer'
 import 'katex/dist/katex.min.css'
@@ -397,11 +393,11 @@ watch(
     const resolvedContent = await resolveKbassetUris(content, () => expired)
     if (resolvedContent === null) return
 
-    let linkified = props.evidenceLinks ? linkifyEvidenceChips(resolvedContent) : resolvedContent
-    if (props.figureRefLinks) {
-      linkified = linkifyFigureRefChips(linkified)
-    }
-    const html = await renderMarkdown(linkified, { theme })
+    const html = await renderMarkdown(resolvedContent, {
+      theme,
+      evidenceLinks: props.evidenceLinks,
+      figureRefLinks: props.figureRefLinks
+    })
     if (!expired) {
       replaceHtmlPreservingPreviews(html)
       cleanupHtmlPreviewFrames()

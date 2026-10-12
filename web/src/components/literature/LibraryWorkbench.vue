@@ -146,6 +146,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
 import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
+import { confirmAction } from '@/composables/useLiteratureSessions'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
 import CardsPanel from './CardsPanel.vue'
 
@@ -362,7 +363,13 @@ const previewCleaning = () =>
 const confirmCleaning = () =>
   perform(async () => {
     const plan = cleanPreview.value
-    if (!window.confirm('确认将预览中 ' + plan.to_remove + ' 篇文献移入可恢复回收站？')) return
+    if (
+      !(await confirmAction(
+        '确认将预览中 ' + plan.to_remove + ' 篇文献移入可恢复回收站？'
+      ))
+    )
+      return
+    if (!cleanPreview.value) return
     const result = await apiPost('/api/literature/library/cleaning/' + plan.plan_id + '/confirm', {
       plan_hash: plan.plan_hash
     })

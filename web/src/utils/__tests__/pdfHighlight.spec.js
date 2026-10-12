@@ -5,12 +5,30 @@ import {
   evidenceHighlight,
   foldTextForMatch,
   pageViewportSize,
-  pdfRectToScreen
+  pdfRectToScreen,
+  physicalFragmentRects
 } from '../pdfHighlight.js'
 
 // 标准 Letter 页面 view box（pt），view 高 792、宽 612
 const VIEW = { x0: 0, y0: 0, x1: 612, y1: 792 }
 const SCALE = 2
+
+// Frozen cropped page coordinates project identically to PDF.js, including rotation.
+{
+  const fragment = { bbox: [40, 60, 200, 160], canonical_to_pdf: [1, 0, 0, -1, 50, 700] }
+  const normal = physicalFragmentRects(fragment, { transform: [2, 0, 0, -2, -100, 1400] })[0]
+  assert.equal(normal.left, 80)
+  assert.equal(normal.top, 120)
+  assert.equal(normal.width, 320)
+  assert.equal(normal.height, 200)
+  const rotated = physicalFragmentRects(fragment, { transform: [0, 2, 2, 0, -200, -100] })[0]
+  assert.equal(rotated.left, 880)
+  assert.equal(rotated.top, 80)
+  assert.equal(rotated.width, 200)
+  assert.equal(rotated.height, 320)
+  assert.match(rotated.clipPath, /^polygon/)
+  assert.deepEqual(physicalFragmentRects({}, {}), [])
+}
 
 // 1a. 默认 origin=top_left（MinerU/PyMuPDF 约定）：y 是到页顶的距离，不翻转。
 //     真实锚点 [40.48, 586.55, 281.57, 752.85] 位于第 3 页左栏底部（与文本层一致）

@@ -24,7 +24,8 @@ export function litConfirm({
       cancelText,
       okButtonProps: danger ? { danger: true } : undefined,
       onOk: () => resolve(true),
-      onCancel: () => resolve(false)
+      onCancel: () => resolve(false),
+      afterClose: () => resolve(false)
     })
   })
 }
@@ -66,7 +67,8 @@ export function litPrompt({
         }
         resolve(trimmed)
       },
-      onCancel: () => resolve(null)
+      onCancel: () => resolve(null),
+      afterClose: () => resolve(null)
     })
   })
 }

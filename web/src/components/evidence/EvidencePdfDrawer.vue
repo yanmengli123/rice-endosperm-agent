@@ -21,7 +21,11 @@
         >
           <span class="rail-page">
             {{ pageNumber(item) }}
-            <em v-if="item.locator?.highlight?.quote" class="rail-precise">句级</em>
+            <em
+              v-if="item.locator?.precision && item.locator.precision !== 'REGION'"
+              class="rail-precise"
+              >{{ precisionLabel(item.locator.precision) }}</em
+            >
           </span>
           <span class="rail-quote">{{ shortQuote(item) }}</span>
         </button>
@@ -46,6 +50,20 @@
           <div v-if="progress.received" class="pdf-progress-text">{{ progressText }}</div>
         </div>
         <template v-else>
+          <div v-if="cellContext" class="pdf-cell-context">
+            第 {{ cellContext.row_index + 1 }} 行，第 {{ cellContext.column_index + 1 }} 列 ·
+            {{ cellContext.column_headers?.join(' / ') }} · {{ cellContext.row_header }}
+            <span v-if="cellContext.raw_value"> · {{ cellContext.raw_value }}</span>
+            <span v-if="cellContext.locator_status !== 'VERIFIED'"
+              >（单元格位置尚未验证，显示所属区域）</span
+            >
+          </div>
+          <div v-if="figureContext" class="pdf-cell-context">
+            {{ figureContext.figure_label
+            }}<span v-if="figureContext.panel_label"> · Panel {{ figureContext.panel_label }}</span
+            ><span v-if="figureContext.caption"> · {{ figureContext.caption }}</span>
+            <span v-if="figureContext.ocr_text"> · 图内文字：{{ figureContext.ocr_text }}</span>
+          </div>
           <div class="pdf-toolbar">
             <a-button size="small" :disabled="page <= 1" @click="goPage(page - 1)">上一页</a-button>
             <span class="pdf-page-indicator">
@@ -77,7 +95,8 @@
                   left: box.left + 'px',
                   top: box.top + 'px',
                   width: box.width + 'px',
-                  height: box.height + 'px'
+                  height: box.height + 'px',
+                  clipPath: box.clipPath
                 }"
               />
             </div>
@@ -89,10 +108,14 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import * as pdfjsLib from 'pdfjs-dist'
-import { downloadWorkspaceKnowledgeFileWithProgress } from '@/apis/workspace_api'
-import { evidenceHighlight, pdfRectToScreen, computeTextLayerHighlight } from '@/utils/pdfHighlight'
+import {
+  downloadWorkspaceKnowledgeFileWithProgress,
+  resolveWorkspacePdfEvidence
+} from '@/apis/workspace_api'
+import { evidenceHighlight, pdfRectToScreen, physicalFragmentRects } from '@/utils/pdfHighlight'
+import { pdfLocatorRequest } from '@/utils/pdfLocator'
 
 // Vite 官方 worker 方式:显式 Worker 实例交给 workerPort。
 // 经实测 dev/生产下 `?url` + workerSrc 的 ESM worker 会静默失联
@@ -126,13 +149,30 @@ const progress = ref({ received: 0, total: 0 })
 const highlightBoxes = ref([])
 // 句子级定位结果：none（服务端未给精化句）| exact | partial | unmatched
 const preciseState = ref('none')
+const resolvedEvidence = ref(null)
+const effectiveEvidence = computed(() => resolvedEvidence.value || props.evidence)
+const cellContext = computed(() =>
+  effectiveEvidence.value?.semantic_location?.table_id
+    ? effectiveEvidence.value.semantic_location
+    : null
+)
+// 图/Panel 语义定位（figure 通道 resolve 返回的 semantic_location）
+const figureContext = computed(() =>
+  effectiveEvidence.value?.semantic_location?.figure_label
+    ? effectiveEvidence.value.semantic_location
+    : null
+)
+const precisionLabel = (value) =>
+  ({ CHAR: '字符级', WORD: '词级', CELL: '单元格', PANEL: '子图', REGION: '区域级' })[value] ||
+  '区域级'
 let downloadAbort = null
 let pdfDoc = null
 let currentLoadKey = ''
 let renderTask = null
-const textContentCache = new Map()
+let loadGeneration = 0
+let renderGeneration = 0
 
-const highlight = computed(() => evidenceHighlight(props.evidence))
+const highlight = computed(() => evidenceHighlight(effectiveEvidence.value))
 const progressPercent = computed(() => {
   const { received, total } = progress.value
   if (!total || received > total) return received ? 100 : 0
@@ -152,11 +192,12 @@ const highlightNote = computed(() => {
   if (!highlight.value) return ''
   if (highlight.value.page !== page.value) return `引用原文在第 ${highlight.value.page} 页`
   const notes = {
+    server: `已验证${precisionLabel(effectiveEvidence.value?.locator?.precision)}位置`,
     exact: '实心高亮为回应问题的句子，虚线框为所属段落',
     outside: '实心高亮为回应问题的句子（在段落框外续接，如图注或跨栏续行）',
     partial: '实心高亮为回应句起始位置，虚线框为所属段落',
     unmatched: '本页含引用段落（黄色高亮）；句子级定位未在文本层匹配到',
-    none: '本页含引用原文（黄色高亮）'
+    none: '已定位到原文区域'
   }
   return notes[preciseState.value] || notes.none
 })
@@ -172,63 +213,54 @@ const shortQuote = (item) => {
   return quote.length > 46 ? `${quote.slice(0, 46)}…` : quote || '（无原文摘录）'
 }
 
-const getTextContent = async (pdfPage, target) => {
-  if (!textContentCache.has(target)) {
-    textContentCache.set(target, await pdfPage.getTextContent())
-  }
-  return textContentCache.get(target)
-}
-
 const fragmentPage = (fragment) => Number(fragment.page_number) || Number(fragment.page_index) + 1
 
-/**
- * 块级 bbox 始终可画；有服务端精化句时再在文本层里定位那一句。
- * 精化命中 → 句子实心 + 段落虚线；未命中 → 退回块级实心（与旧行为一致）。
- */
-const refreshHighlightBoxes = async (pdfPage, viewport, target) => {
-  const fragments = props.evidence?.locator?.fragments || []
+// 高亮完全使用服务器验证的坐标，前端只负责 PDF.js 视口变换。
+const refreshHighlightBoxes = (viewport, target) => {
+  const fragments = effectiveEvidence.value?.locator?.fragments || []
+  const serverRects = fragments
+    .filter((fragment) => fragmentPage(fragment) === target)
+    .flatMap((fragment) => physicalFragmentRects(fragment, viewport))
+  if (serverRects.length) {
+    const precise = ['CHAR', 'WORD', 'CELL', 'PANEL'].includes(
+      effectiveEvidence.value?.locator?.precision
+    )
+    highlightBoxes.value = serverRects.map((rect) => ({
+      ...rect,
+      kind: precise ? 'precise' : 'block'
+    }))
+    preciseState.value = precise ? 'server' : 'none'
+    scrollHighlightIntoView()
+    return
+  }
   const blockRects = fragments
     .filter((fragment) => fragmentPage(fragment) === target)
     .map((fragment) => pdfRectToScreen(fragment.bbox, { ...renderMeta, origin: fragment.origin }))
     .filter(Boolean)
-  const refinedQuote = props.evidence?.locator?.highlight?.quote
-  let precise = null
-  if (refinedQuote && blockRects.length) {
-    try {
-      const textContent = await getTextContent(pdfPage, target)
-      precise = computeTextLayerHighlight({
-        textContent,
-        viewport,
-        query: refinedQuote,
-        constraintRect: blockRects[0]
-      })
-    } catch (textError) {
-      console.warn('Failed to read PDF text layer:', textError)
-    }
-  }
   // 翻页/切证据竞态：文本层异步返回时页面已切换则丢弃本次结果
   if (page.value !== target) return
-  if (precise) {
-    highlightBoxes.value = [
-      ...blockRects.map((rect) => ({ ...rect, kind: 'context' })),
-      ...precise.rects.map((rect) => ({ ...rect, kind: 'precise' }))
-    ]
-    preciseState.value = precise.partial
-      ? 'partial'
-      : precise.withinConstraint
-        ? 'exact'
-        : 'outside'
-  } else {
-    highlightBoxes.value = blockRects.map((rect) => ({ ...rect, kind: 'block' }))
-    preciseState.value = refinedQuote ? 'unmatched' : 'none'
-  }
+  highlightBoxes.value = blockRects.map((rect) => ({ ...rect, kind: 'block' }))
+  preciseState.value = 'none'
   scrollHighlightIntoView()
 }
 
 const renderPage = async (pageNumber) => {
   if (!pdfDoc) return
+  const generation = ++renderGeneration
+  const document = pdfDoc
   const target = Math.min(Math.max(1, pageNumber), totalPages.value)
   const pdfPage = await pdfDoc.getPage(target)
+  if (generation !== renderGeneration || document !== pdfDoc || !canvasRef.value) return
+  const previous = renderTask
+  if (previous) {
+    previous.cancel()
+    try {
+      await previous.promise
+    } catch (cancelError) {
+      if (cancelError?.name !== 'RenderingCancelledException') throw cancelError
+    }
+  }
+  if (generation !== renderGeneration || document !== pdfDoc || !canvasRef.value) return
   const containerWidth = (scrollContainer.value?.clientWidth || 720) - 32
   const base = pdfPage.getViewport({ scale: 1 })
   const scale = Math.min(Math.max(containerWidth / base.width, 0.4), 2.5)
@@ -247,14 +279,6 @@ const renderPage = async (pageNumber) => {
   const outputScale = Math.min(window.devicePixelRatio || 1, 2)
   canvasRef.value.width = Math.floor(viewport.width * outputScale)
   canvasRef.value.height = Math.floor(viewport.height * outputScale)
-  // 竞态防护：快速翻页/切换证据时取消上一帧渲染，避免同一 canvas 并发 render 抛错
-  if (renderTask) {
-    try {
-      renderTask.cancel()
-    } catch (cancelError) {
-      console.warn('Failed to cancel previous render:', cancelError)
-    }
-  }
   const task = pdfPage.render({
     canvasContext: canvasRef.value.getContext('2d'),
     viewport,
@@ -266,7 +290,8 @@ const renderPage = async (pageNumber) => {
   } finally {
     if (renderTask === task) renderTask = null
   }
-  await refreshHighlightBoxes(pdfPage, viewport, target)
+  if (generation === renderGeneration && document === pdfDoc)
+    refreshHighlightBoxes(viewport, target)
 }
 
 const goPage = async (target) => {
@@ -286,8 +311,34 @@ const onPageInputChange = (value) => {
 
 const loadDocument = async () => {
   if (!props.visible || !props.kbId || !props.fileId) return
-  const loadKey = `${props.kbId}:${props.fileId}`
+  const generation = ++loadGeneration
+  const kbId = props.kbId
+  const fileId = props.fileId
+  let source = props.evidence?.source || {}
+  downloadAbort?.abort()
+  loading.value = true
+  highlightBoxes.value = []
+  error.value = ''
+  resolvedEvidence.value = null
+  if (props.evidence) {
+    try {
+      const resolved = await resolveWorkspacePdfEvidence(
+        pdfLocatorRequest(props.evidence, kbId, fileId)
+      )
+      if (generation !== loadGeneration || !props.visible) return
+      resolvedEvidence.value = resolved
+      source = resolved.source
+    } catch (locatorError) {
+      if (generation !== loadGeneration) return
+      loading.value = false
+      error.value = locatorError?.message || '证据位置无法验证'
+      return
+    }
+  }
+  const loadKey = `${kbId}:${fileId}:${source.parse_revision_id || ''}:${source.source_sha256 || ''}`
   if (currentLoadKey === loadKey && pdfDoc) {
+    loading.value = false
+    await nextTick()
     await goPage(highlight.value?.page || 1)
     return
   }
@@ -298,20 +349,30 @@ const loadDocument = async () => {
   loading.value = true
   error.value = ''
   progress.value = { received: 0, total: 0 }
-  currentLoadKey = loadKey
   try {
-    const buffered = await downloadWorkspaceKnowledgeFileWithProgress(props.kbId, props.fileId, {
+    const buffered = await downloadWorkspaceKnowledgeFileWithProgress(kbId, fileId, {
+      parseRevisionId: source.parse_revision_id,
+      sourceSha256: source.source_sha256,
       signal: abortSignal,
       onProgress: (received, total) => {
-        if (currentLoadKey === loadKey) progress.value = { received, total }
+        if (generation === loadGeneration) progress.value = { received, total }
       }
     })
-    pdfDoc = await pdfjsLib.getDocument({ data: buffered }).promise
-    textContentCache.clear()
+    if (generation !== loadGeneration || abortSignal.aborted) return
+    const loaded = await pdfjsLib.getDocument({ data: buffered }).promise
+    if (generation !== loadGeneration || abortSignal.aborted) {
+      await loaded.destroy()
+      return
+    }
+    if (pdfDoc) await pdfDoc.destroy()
+    pdfDoc = loaded
+    currentLoadKey = loadKey
     totalPages.value = pdfDoc.numPages
     loading.value = false
+    await nextTick()
     await renderPage(highlight.value?.page || 1)
   } catch (loadError) {
+    if (generation !== loadGeneration) return
     if (abortSignal.aborted) {
       // 用户主动关闭/切换触发的中断不是错误；保持 loading 复位即可
       loading.value = false
@@ -346,7 +407,22 @@ const scrollHighlightIntoView = () => {
 }
 
 watch(
-  () => [props.visible, props.fileId],
+  () => [
+    props.visible,
+    props.kbId,
+    props.fileId,
+    props.evidence?.evidence_id,
+    props.evidence?.source?.parse_revision_id,
+    props.evidence?.source?.source_sha256,
+    props.evidence?.source?.figure_label,
+    props.evidence?.source?.panel_label,
+    props.evidence?.source?.span_id,
+    props.evidence?.source?.region_id,
+    props.evidence?.source?.table_id,
+    props.evidence?.source?.row_index,
+    props.evidence?.source?.column_index,
+    props.evidence?.locator?.highlight?.quote
+  ],
   () => {
     if (props.visible) void loadDocument()
   },
@@ -354,16 +430,11 @@ watch(
 )
 
 watch(
-  () => props.evidence?.evidence_id,
-  () => {
-    if (props.visible && pdfDoc && highlight.value) void goPage(highlight.value.page)
-  }
-)
-
-watch(
   () => props.visible,
   (visible) => {
     if (!visible) {
+      loadGeneration++
+      renderGeneration++
       downloadAbort?.abort()
       downloadAbort = null
       if (pdfDoc) {
@@ -378,7 +449,6 @@ watch(
         pdfDoc.destroy()
         pdfDoc = null
         currentLoadKey = ''
-        textContentCache.clear()
         highlightBoxes.value = []
         preciseState.value = 'none'
       }
@@ -388,6 +458,15 @@ watch(
 </script>
 
 <style scoped lang="less">
+.pdf-cell-context {
+  padding: 8px 16px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-color);
+  max-height: min(24vh, 160px);
+  flex-shrink: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
 .pdf-drawer-body {
   display: flex;
   height: 100%;
@@ -447,6 +526,7 @@ watch(
 .pdf-viewer-pane {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -454,6 +534,7 @@ watch(
 .pdf-toolbar {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 10px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
@@ -479,6 +560,7 @@ watch(
 
 .pdf-scroll {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   background: var(--bg-secondary, #20232a);
   padding: 16px;
