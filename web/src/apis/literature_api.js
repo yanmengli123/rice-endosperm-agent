@@ -1,5 +1,14 @@
 import { apiGet, apiPost, apiPut, apiDelete } from './base'
 
+export const literaturePdfApi = {
+  capabilities: () => apiGet('/api/literature/pdf-translation/capabilities'),
+  bundle: (rid, signal) =>
+    apiGet(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation`, { signal }),
+  cancel: (rid, jobId) =>
+    apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation/${jobId}/cancel`),
+  source: () => apiGet('/api/literature/pdf-translation/source', {}, true, 'blob')
+}
+
 function bibliometricQuery(filters) {
   const query = new URLSearchParams()
   for (const key of ['only_imports', 'database', 'query', 'year_from', 'year_to']) {
@@ -76,9 +85,9 @@ export function triggerLiteratureRender(rid) {
 }
 
 /** 触发翻译（202 异步任务） */
-export function triggerLiteratureTranslation(rid, variantKind = 'zh') {
+export function triggerLiteratureTranslation(rid, variantKind = 'zh', force = false) {
   return apiPost(
-    `/api/literature/papers/${encodeURIComponent(rid)}/translation?variant_kind=${encodeURIComponent(variantKind)}`
+    `/api/literature/papers/${encodeURIComponent(rid)}/translation?variant_kind=${encodeURIComponent(variantKind)}${force ? '&force=true' : ''}`
   )
 }
 

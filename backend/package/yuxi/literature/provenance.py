@@ -14,7 +14,8 @@ def current_job(job_model, paper=LiteraturePaper):
         job_model.card_revision == paper.card_revision if version == COMPILE_VERSION else True,
         job_model.source_revision_id == func.coalesce(paper.source_revision_id, ""),
         job_model.reading_version == paper.reading_version,
-        job_model.generator_version.in_((version, "paperagent-import-v4")),
+        job_model.generator_version.in_((version, "paperagent-import-v4", "supertranslate-native-v1"))
+        if version == TRANSLATE_VERSION else job_model.generator_version.in_((version, "paperagent-import-v4")),
     )
 
 

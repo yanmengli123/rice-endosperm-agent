@@ -218,7 +218,7 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
         )
         latest_translations = {}
         for job in sorted(translation_jobs, key=lambda item: item.id, reverse=True):
-            if source_matches(job, paper) and job.generator_version == "literature-translate-v1":
+            if source_matches(job, paper) and job.generator_version in {"literature-translate-v1", "supertranslate-native-v1"}:
                 latest_translations.setdefault(job.variant_kind, job)
         attachments = (
             (await session.execute(select(LiteratureAttachment).where(LiteratureAttachment.paper_id == paper.id)))
@@ -274,7 +274,7 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
             for v in variants
             if v.parse_revision_id == paper.source_revision_id
             and v.reading_version == paper.reading_version
-            and v.generator_version in {"literature-translate-v1", "paperagent-import-v4"}
+            and v.generator_version in {"literature-translate-v1", "paperagent-import-v4", "supertranslate-native-v1"}
         ],
         "translation_jobs": [
             {
@@ -283,6 +283,9 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
                 "status": job.status,
                 "variant_uri": job.variant_uri,
                 "error": job.error,
+                "progress": job.progress,
+                "stage": (job.execution_json or {}).get("stage"),
+                "cancel_requested": job.cancel_requested,
                 "options": {
                     key: value
                     for key, value in (job.options_json or {}).items()
@@ -567,6 +570,8 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
             "type": "translation",
             "ref": f"{row.paper_id}:{row.variant_kind}",
             "status": row.status,
+            "progress": row.progress if row.variant_kind == "pdf_zh" else None,
+            "stage": (row.execution_json or {}).get("stage"),
             **_domain_task_flags(row.status),
             "attempt": row.attempt,
             "error": row.error,
@@ -652,14 +657,14 @@ async def list_literature_pipeline_tasks(*, status: str | None = None, limit: in
                 "name": name,
                 "type": f"literature_{task_type}",
                 "status": mapped_status,
-                "progress": 100.0 if mapped_status == "success" else 50.0 if mapped_status == "running" else 0.0,
+                "progress": float(row.progress or 0) * 100 if getattr(row, "variant_kind", None) == "pdf_zh" else 100.0 if mapped_status == "success" else 50.0 if mapped_status == "running" else 0.0,
                 "message": str(row.error or "") if mapped_status == "failed" else None,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
                 "started_at": None,
                 "completed_at": row.updated_at.isoformat() if mapped_status in {"success", "failed"} else None,
                 "error": row.error if mapped_status == "failed" else None,
-                "cancel_requested": False,
+                "cancel_requested": bool(getattr(row, "cancel_requested", False)),
                 "cancelable": False,
                 "deletable": False,
                 "tenant_id": int(row.tenant_id),

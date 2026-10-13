@@ -1,12 +1,14 @@
 """离线 BERTopic 结果 ZIP → import_archive 全链常绿回归锁（不依赖真实样本目录）。
 
-覆盖（验收清单第 4 项 + 边界早拒）：
+覆盖（验收清单第 4 项 + 边界早拒 + 导入幂等）：
 - 入口魔数早拒：非 ZIP（无 PK 头）在读任何条目前被拒；
 - ZIP→read_archive 白名单→_validate_files→逐篇映射（pmid 路径）→validate_result→入库；
 - 中文对照模型：仅收录 zh 子集、记录顺序对齐、主题编号与联合模型独立不可比（warnings 明示）；
-- 稳定性诊断透传：stability.json 原样进入 models[joint].stability；
+- 稳定性/参数比较诊断透传：stability.json 与 parameter_comparison.json 原样进入模型详情与图表视图；
 - 历史命名生效：topic_names.json 优先于 summary 默认 label；
-- representatives ⊆ 主题成员（契约层保证）+ 导出带 BOM。
+- representatives ⊆ 主题成员（契约层保证）+ 导出带 BOM 与快照溯源列；
+- 同包重导幂等：同指纹返回已有 SUCCEEDED run（reused=True），内容不同仍新建；
+- 上传预算失败关闭：加密条目、条目数上限、展开大小上限、HTTP 边界 1 GiB 上限。
 
 真实四库样本的隔离验收仍由 e2e（LITERATURE_TOPIC_SAMPLES）承担，二者互补。
 """
@@ -39,7 +41,12 @@ from yuxi.storage.postgres.models_knowledge import (
 )
 from yuxi.utils.datetime_utils import utc_now
 
-pytestmark = pytest.mark.unit
+pytestmark = [
+    pytest.mark.unit,
+    # 路由导入链带出的第三方弃用提示（待办 #4 langchain-community 迁移），与本文件断言无关，
+    # 定向忽略以维持门禁 warning 基线（2 条，见 docs/vibe/2026-10-12-bertopic-integration.md）。
+    pytest.mark.filterwarnings("ignore:.*langchain-community.*:DeprecationWarning"),
+]
 
 
 def test_import_rejects_non_zip_magic_early():
@@ -113,6 +120,7 @@ async def environment(monkeypatch):
     monkeypatch.setattr(topic_analysis.pg_manager, "get_async_session_context", transaction)
     monkeypatch.setattr(topic_analysis.pg_manager, "async_engine", engine)
     monkeypatch.setattr(topic_analysis, "get_minio_client", lambda: store)
+
     async def store_source(*args):
         return "fixture/source"
 
@@ -129,8 +137,10 @@ def _nbib_corpus() -> str:
         for i in range(8)
     ]
     rows += [
-        "PMID- 20001\nTI  - 水稻胚乳淀粉合成相关基因研究\nAB  - 摘要：本研究分析水稻胚乳发育与淀粉积累的分子机制。\nDP  - 2022\n",
-        "PMID- 20002\nTI  - 稻米垩白性状与灌浆期温度关系\nAB  - 摘要：探讨灌浆期高温对稻米垩白与品质的影响。\nDP  - 2022\n",
+        "PMID- 20001\nTI  - 水稻胚乳淀粉合成相关基因研究\n"
+        "AB  - 摘要：本研究分析水稻胚乳发育与淀粉积累的分子机制。\nDP  - 2022\n",
+        "PMID- 20002\nTI  - 稻米垩白性状与灌浆期温度关系\n"
+        "AB  - 摘要：探讨灌浆期高温对稻米垩白与品质的影响。\nDP  - 2022\n",
     ]
     return "\n".join(rows)
 
@@ -156,7 +166,7 @@ def _assignments_for(documents, topic_of, nearest=0):
     ]
 
 
-def _mini_zip(documents) -> bytes:
+def _mini_zip(documents, *, joint_label="淀粉合成与胚乳发育") -> bytes:
     joint_rows = _assignments_for(documents, lambda d: -1 if d["document_key"].endswith("0") else 0)
     zh = [d for d in documents if d["language_of_text"] == "zh"]
     chinese_rows = _assignments_for(zh, lambda d: 7, nearest=7)
@@ -175,8 +185,8 @@ def _mini_zip(documents) -> bytes:
             [{"topic": 0, "count": sum(1 for r in joint_rows if r["topic"] == 0), "label": "starch"}],
         )
         put("joint_bge_m3/topic_keywords.json", [{"topic": 0, "keyword": "starch", "ctfidf_weight": 0.42}])
-        # 相似度矩阵必须覆盖全部主题对（0 与 -1 两主题 → 1 对）
-        put("joint_bge_m3/topic_similarity.json", [{"topic_a": 0, "topic_b": -1, "cosine_similarity": 0.21}])
+        # -1 is noise, not a topic centroid: a one-topic model has no similarity pairs.
+        put("joint_bge_m3/topic_similarity.json", [])
         # 代表文献必须属于对应主题（契约校验）：取该主题第一条成员
         put(
             "joint_bge_m3/representative_documents.json",
@@ -193,13 +203,31 @@ def _mini_zip(documents) -> bytes:
         )
         zf.writestr(
             f"{out}/topic_names.json",
-            json.dumps({"joint_bge_m3": {"0": "淀粉合成与胚乳发育"}, "chinese_bge_zh": {"7": "中文胚乳研究"}}, ensure_ascii=False),
+            json.dumps(
+                {"joint_bge_m3": {"0": joint_label}, "chinese_bge_zh": {"7": "中文胚乳研究"}}, ensure_ascii=False
+            ),
         )
         # 稳定性诊断透传：双种子敏感性结果原样进入模型详情
         put("joint_bge_m3/stability.json", {"seed_pair": [42, 43], "topic_jaccard": 0.71})
+        # 参数比较透传：候选 min_cluster_size 指标表原样进入模型详情与图表视图
+        put(
+            "joint_bge_m3/parameter_comparison.json",
+            [{"min_cluster_size": 30, "selection_score": 0.61}, {"min_cluster_size": 60, "selection_score": 0.58}],
+        )
         put("data_manifest.json", {"source_sha256": {}, "analysis_date": "2026-05-01"})
         put("runtime_versions.json", {"bertopic": "0.17.4"})
     return buffer.getvalue()
+
+
+def _mark_entries_encrypted(data: bytes) -> bytes:
+    """置位 ZIP 条目标志位 bit0（加密位）：本地头 offset 6、中央目录 offset 8。"""
+    buffer = bytearray(data)
+    for signature, flag_offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        start = 0
+        while (index := buffer.find(signature, start)) != -1:
+            buffer[index + flag_offset] |= 1
+            start = index + 4
+    return bytes(buffer)
 
 
 async def _prepared_documents(scope):
@@ -210,14 +238,20 @@ async def _prepared_documents(scope):
         papers = (
             (
                 await db.execute(
-                    select(LiteraturePaper).where(LiteraturePaper.tenant_id == 1, LiteraturePaper.is_reference.is_(False))
+                    select(LiteraturePaper).where(
+                        LiteraturePaper.tenant_id == 1, LiteraturePaper.is_reference.is_(False)
+                    )
                 )
             )
             .scalars()
             .all()
         )
     prepared = [
-        prepare_document(f"FIX_{index:06d}", paper.rid, {"title": paper.title, "abstract": paper.abstract, "year": paper.pub_year, "pmid": paper.pmid})
+        prepare_document(
+            f"FIX_{index:06d}",
+            paper.rid,
+            {"title": paper.title, "abstract": paper.abstract, "year": paper.pub_year, "pmid": paper.pmid},
+        )
         for index, paper in enumerate(sorted(papers, key=lambda p: p.pmid or ""))
     ]
     for item, paper in zip(prepared, sorted(papers, key=lambda p: p.pmid or ""), strict=True):
@@ -247,6 +281,8 @@ async def test_legacy_zip_import_full_chain_with_chinese_comparison_and_stabilit
     assert joint_topics[0]["keywords"] == [{"term": "starch", "weight": 0.42}]
     # 稳定性诊断原样透传（双种子敏感性，页面措辞为敏感性而非置信区间）
     assert models["joint_bge_m3"]["stability"] == {"seed_pair": [42, 43], "topic_jaccard": 0.71}
+    # 参数比较诊断原样透传（候选指标表；启发式选择分无通用阈值，仅供诊断）
+    assert [row["min_cluster_size"] for row in models["joint_bge_m3"]["candidates"]] == [30, 60]
     # 中文对照仅收录 zh 子集；主题编号空间与联合模型独立，不可跨模型比较由 warnings 明示
     assert models["chinese_bge_zh"]["topics"][0]["topic"] == 7
     assert models["chinese_bge_zh"]["topics"][0]["count"] == 2
@@ -259,6 +295,113 @@ async def test_legacy_zip_import_full_chain_with_chinese_comparison_and_stabilit
         assert page["total"] == 2
         joint_page = await topic_analysis.result_view(1, run_id, model="joint_bge_m3", topic=0)
         assert joint_page["total"] >= 8  # topic0 成员 9 条（10 条语料，1 条离群）
+        # 图表视图必须携带诊断区数据：稳定性/参数比较/警告随 charts 视图下发
+        charts = await topic_analysis.result_view(1, run_id, model="joint_bge_m3", view="charts")
+        assert charts["stability"] == {"seed_pair": [42, 43], "topic_jaccard": 0.71}
+        assert [row["min_cluster_size"] for row in charts["candidates"]] == [30, 60]
+        assert any("主题编号不能跨模型比较" in w for w in charts["warnings"])
         exported = await topic_analysis.export_run(1, run_id, model="joint_bge_m3")
     assert exported.startswith(b"\xef\xbb\xbf")  # BOM + CSV
     assert b"\xe6\xb7\x80\xe7\xb2\x89" in exported or b"starch" in exported
+    # 导出快照溯源列：语料 digest 锁身份、analysis_date 锁时点（脱离系统后可对账）
+    rows = exported.decode("utf-8-sig").splitlines()
+    assert rows[0].endswith("input_digest,corpus_cutoff")
+    assert imported["input_digest"] in rows[1]
+    assert "2026-05-01" in rows[1]
+
+
+async def test_reimport_same_archive_reuses_succeeded_run(environment):
+    """导入幂等：同包重导返回已有 run（reused=True），不静默新建第二条 SUCCEEDED；
+    内容不同（主题命名修改）指纹不同 → 新建；再次重导原包仍复用原 run。"""
+    documents = await _prepared_documents(environment.scope)
+    payload = _mini_zip(documents)
+    async with environment.scope():
+        first = await topic_legacy.import_archive(1, io.BytesIO(payload))
+        assert first["reused"] is False
+        again = await topic_legacy.import_archive(1, io.BytesIO(payload))
+        assert again["reused"] is True
+        assert again["run_id"] == first["run_id"]
+        relabeled = await topic_legacy.import_archive(
+            1, io.BytesIO(_mini_zip(documents, joint_label="人工修订后的主题命名")), name="修订命名"
+        )
+        assert relabeled["reused"] is False
+        assert relabeled["run_id"] != first["run_id"]
+        original_again = await topic_legacy.import_archive(1, io.BytesIO(payload))
+    assert original_again["reused"] is True
+    assert original_again["run_id"] == first["run_id"]
+    async with environment.scope():
+        runs = (await topic_analysis.list_runs(1))["items"]
+    assert len(runs) == 2  # 不因重复上传产生冗余 run
+
+
+def test_encrypted_zip_entries_are_rejected():
+    """加密条目失败关闭：置位 flag_bits bit0 即拒，绝不尝试解密或跳过该条目。"""
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as zf:
+        zf.writestr("outputs/data_manifest.json", "{}")
+    with pytest.raises(ValueError, match="加密"):
+        topic_legacy.read_archive(io.BytesIO(_mark_entries_encrypted(buffer.getvalue())))
+
+
+def test_zip_entry_count_budget_rejects(monkeypatch):
+    monkeypatch.setattr(topic_legacy, "MAX_ZIP_ENTRIES", 3)
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as zf:
+        for index in range(4):
+            zf.writestr(f"junk/entry-{index}.txt", "x")
+    with pytest.raises(ValueError, match="文件数"):
+        topic_legacy.read_archive(buffer)
+
+
+def test_expanded_size_budget_rejects(monkeypatch):
+    monkeypatch.setattr(topic_legacy, "MAX_SELECTED_BYTES", 64)
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as zf:
+        zf.writestr("outputs/data_manifest.json", "x" * 100)
+    with pytest.raises(ValueError, match="展开大小"):
+        topic_legacy.read_archive(buffer)
+
+
+async def test_import_endpoint_rejects_oversized_upload(monkeypatch):
+    """HTTP 边界 1 GiB 上限失败关闭（413）：阈值注入小值验证判定机制本身。"""
+    from fastapi import HTTPException, UploadFile
+    from server.routers import literature_topic_router as router_module
+
+    monkeypatch.setattr(router_module, "MAX_IMPORT_BYTES", 16)
+    upload = UploadFile(file=io.BytesIO(b"PK\x03\x04" + b"x" * 40), filename="results.zip")
+    with pytest.raises(HTTPException) as exc:
+        await router_module.import_result(file=upload, name="超限包", current_user=object())
+    assert exc.value.status_code == 413
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+async def test_offline_import_is_published_only_after_object_verification(environment, monkeypatch, corrupt):
+    documents = await _prepared_documents(environment.scope)
+    download = environment.store.adownload_file
+    observed = []
+
+    async def verified_download(bucket, name):
+        if name.endswith("result.json"):
+            async with environment.sessions() as db:
+                statuses = list((await db.execute(select(LiteratureTopicRun.status))).scalars())
+                observed.extend(statuses)
+                if not statuses:
+                    assert (await db.execute(select(LiteratureTopicDocument.run_id))).first() is None
+            if corrupt:
+                return b"corrupt-object"
+        return await download(bucket, name)
+
+    monkeypatch.setattr(environment.store, "adownload_file", verified_download)
+    async with environment.scope():
+        if corrupt:
+            with pytest.raises(ValueError, match="落盘校验"):
+                await topic_legacy.import_archive(1, io.BytesIO(_mini_zip(documents)))
+        else:
+            result = await topic_legacy.import_archive(1, io.BytesIO(_mini_zip(documents)))
+            assert result["status"] == "SUCCEEDED"
+    # No transient run is observable while the result is being staged.
+    # The later detail read may see SUCCEEDED, but must never see PENDING/RUNNING.
+    assert not set(observed) & {"PENDING", "RUNNING"}
+    async with environment.sessions() as db:
+        statuses = list((await db.execute(select(LiteratureTopicRun.status))).scalars())
+    assert statuses == ([] if corrupt else ["SUCCEEDED"])

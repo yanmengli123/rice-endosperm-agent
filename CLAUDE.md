@@ -112,6 +112,13 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 - `uv run` 偶发清华镜像 403 时加 `--no-sync` 跳过环境同步（如 `uv run --no-sync --group test pytest ...`）。
 - 全量 `pytest test/unit/` 单次执行容易超时（每个目录约 10s 的 exec+收集开销叠加，并非挂起）；按目录分块跑（services、routers、knowledge…各一次）既快又能定位问题。
 
+### topic-worker（BERTopic 计量分析独立运行时）
+
+- 主题建模引擎（`topic_engine.py`）跑在独立 **topic-worker 容器**（compose profile `analytics`，2CPU/6g），建模依赖锁定在 `docker/topic-runtime/`（bertopic/umap-learn/hdbscan/jieba **不进** backend 的 uv.lock）——宿主机与 api 容器 import 不了这些依赖是设计使然（依赖隔离），不是缺陷。
+- e2e `test_topic_engine_acceptance.py` 在非 topic-worker 容器内会 **skip：skip ≠ 通过**；引擎验收必须在 topic-worker 容器内执行（`docker compose --profile analytics up -d topic-worker` 后进容器跑 pytest）。
+- topic-worker 用专属 arq 队列（`arq:literature-topics`）与专属 `WorkerSettings`（`literature/topic_worker.py`），**不在主 run_worker 的 functions 里**——主 worker 不会兜底执行主题任务；topic-worker 缺位时任务停在 PENDING，由其每分钟 reconciler 重派。前端可用性探测走 capabilities 端点（独立 ARQ 健康键 `literature:topic-worker:arq-health`，不依赖可能被长任务占槽的 cron 心跳）。
+- 改 topic 引擎/worker 代码后必须重启 topic-worker 容器（arq 进程不热重载）；api 侧路由/服务改动照常热重载。
+
 **核心原则**:
 
 1. 由于 Compose 服务 `api` / `web`（容器名 `api-dev` / `web-dev`）均配置了热重载 (hot-reloading)，本地修改代码后无需重启容器，服务会自动更新。应该先检查项目是否已经在后台启动（`docker ps`），查看日志（`docker logs api-dev --tail 100`）具体的可以阅读 [docker-compose.yml](docker-compose.yml).

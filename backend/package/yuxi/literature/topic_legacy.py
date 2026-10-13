@@ -34,6 +34,7 @@ from yuxi.storage.postgres.models_knowledge import (
 from yuxi.utils.datetime_utils import utc_now
 
 MAX_SELECTED_BYTES = 512 * 1024 * 1024
+MAX_ZIP_ENTRIES = 10000
 
 
 def looks_like_zip(stream) -> bool:
@@ -58,7 +59,7 @@ def read_archive(stream) -> dict:
     try:
         with ZipFile(stream) as archive:
             entries = archive.infolist()
-            if len(entries) > 10000:
+            if len(entries) > MAX_ZIP_ENTRIES:
                 raise ValueError("离线结果 ZIP 文件数超过安全预算")
             selected = {}
             total = 0
@@ -121,15 +122,18 @@ def read_archive(stream) -> dict:
 
 async def import_archive(tenant_id: int, stream, *, name: str = "四库 BERTopic 历史分析") -> dict:
     import asyncio
+    from yuxi.literature import topic_db
 
     uid = service._owner(tenant_id)
+    if topic_db.production_required() and not (await topic_db.readiness())["ready"]:
+        raise RuntimeError("生产主题数据库准入未通过，未解析离线结果包")
     files = await asyncio.to_thread(read_archive, stream)
     await asyncio.to_thread(_validate_files, files)
     rows = _json(files, "joint_bge_m3/document_topics.json")
     if not isinstance(rows, list) or not 1 <= len(rows) <= 50000:
         raise ValueError("历史语料数量无效")
     source_hashes = _json(files, "data_manifest.json", {}).get("source_sha256", {})
-    async with service.pg_manager.get_async_session_context() as db:
+    async with service.topic_session() as db:
         papers = (
             (
                 await db.execute(
@@ -322,6 +326,15 @@ async def import_archive(tenant_id: int, stream, *, name: str = "四库 BERTopic
             )[:100]
         result["models"][model]["hierarchy"] = _hierarchy(topics, result["models"][model]["similarity"])
     validate_result(result, documents)
+    digest = corpus_digest(documents)
+    fingerprint = _archive_fingerprint(files)
+    # 同一份结果包重复导入是确定性数据重放：返回已有 SUCCEEDED run 而非静默新建
+    # 第二条（冗余且违背导入幂等）。语料相同但内容不同（如主题命名修改）指纹不同，
+    # 仍走新建——复用键是包内容，不是语料 digest。
+    async with service.topic_session() as db:
+        prior = await _prior_archive(db, tenant_id, uid, digest, fingerprint)
+    if prior:
+        return {**await service.get_run(tenant_id, prior), "reused": True}
     run_id = uuid.uuid4().hex
     config = {
         "schema_version": VERSION,
@@ -330,6 +343,7 @@ async def import_archive(tenant_id: int, stream, *, name: str = "四库 BERTopic
         "chinese_comparison": "chinese_bge_zh" in result["models"],
         "embedding_objects": {},
         "analysis_year": result["models"]["joint_bge_m3"]["analysis_year"],
+        "archive_fingerprint": fingerprint,
     }
     for model in ("joint_bge_m3", "chinese_bge_zh"):
         key = f"{model}_embeddings.npy"
@@ -339,10 +353,13 @@ async def import_archive(tenant_id: int, stream, *, name: str = "四库 BERTopic
         if meta.get("model") != ("BAAI/bge-m3" if model == "joint_bge_m3" else "BAAI/bge-large-zh-v1.5"):
             raise ValueError("历史嵌入模型与向量空间契约不一致")
         expected = [d for d in documents if model == "joint_bge_m3" or d["language_of_text"] == "zh"]
-        fingerprint = hashlib.sha256(
+        vector_fingerprint = hashlib.sha256(
             (meta.get("model", "") + "\0" + "\n".join(d["text_sha256"] for d in expected)).encode()
         ).hexdigest()
-        if meta.get("record_ids") != [d["document_key"] for d in expected] or meta.get("fingerprint") != fingerprint:
+        if (
+            meta.get("record_ids") != [d["document_key"] for d in expected]
+            or meta.get("fingerprint") != vector_fingerprint
+        ):
             raise ValueError("历史嵌入指纹或记录顺序不匹配")
         await asyncio.to_thread(load_matrix, files[key], len(expected))
         obj = f"tenants/{tenant_id}/literature/topic-runs/{run_id}/vectors/{model}.npy"
@@ -353,23 +370,60 @@ async def import_archive(tenant_id: int, stream, *, name: str = "四库 BERTopic
         tenant_id=tenant_id,
         created_by=uid,
         name=name,
-        status="PENDING",
+        status="SUCCEEDED",
         mode="records",
-        input_digest=corpus_digest(documents),
+        input_digest=digest,
         config_json=config,
-        progress_json=corpus_summary(documents),
+        progress_json={**corpus_summary(documents), "stage": "complete", "completed": len(documents)},
         attempts=0,
         cancel_requested=False,
         created_at=utc_now(),
         updated_at=utc_now(),
     )
-    async with service.pg_manager.get_async_session_context() as db:
-        db.add(run)
-        await db.flush()
-        await service._save_documents(db, run, documents)
+    # Offline imports are already computed: never expose a PENDING row to the worker.
+    # Verify object storage first, then publish run + documents in one transaction.
+    run.result_object = await service.store_result(run, documents, result)
+    async with service.topic_session() as db:
+        if db.get_bind().dialect.name == "postgresql":
+            from sqlalchemy import text
+
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"topic-import:{tenant_id}:{uid}:{fingerprint}"},
+            )
+        prior = await _prior_archive(db, tenant_id, uid, digest, fingerprint)
+        if prior is None:
+            db.add(run)
+            await db.flush()
+            await service._save_documents(db, run, documents)
         await db.commit()
-    await service.publish_result(run, documents, result)
-    return await service.get_run(tenant_id, run_id)
+    return {**await service.get_run(tenant_id, prior or run_id), "reused": prior is not None}
+
+
+async def _prior_archive(db, tenant_id, uid, digest, fingerprint):
+    return await db.scalar(
+        select(LiteratureTopicRun.run_id)
+        .where(
+            LiteratureTopicRun.tenant_id == tenant_id,
+            LiteratureTopicRun.created_by == uid,
+            LiteratureTopicRun.status == "SUCCEEDED",
+            LiteratureTopicRun.input_digest == digest,
+            LiteratureTopicRun.config_json["origin"].as_string() == "legacy_offline",
+            LiteratureTopicRun.config_json["archive_fingerprint"].as_string() == fingerprint,
+        )
+        .order_by(LiteratureTopicRun.created_at.desc())
+        .limit(1)
+    )
+
+
+def _archive_fingerprint(files: dict[str, bytes]) -> str:
+    """白名单文件内容指纹：同包重导可判定，改一个字节的标签即视为不同结果。"""
+    hasher = hashlib.sha256()
+    for name in sorted(files):
+        hasher.update(name.encode())
+        hasher.update(b"\0")
+        hasher.update(hashlib.sha256(files[name]).digest())
+    return hasher.hexdigest()
 
 
 def load_matrix(data: bytes, rows: int):
@@ -399,10 +453,10 @@ def _hierarchy(topics, pairs):
     from scipy.spatial.distance import squareform
 
     ids = sorted(t["topic"] for t in topics)
-    if len(ids) < 2:
-        return []
     if len(pairs) != len(ids) * (len(ids) - 1) // 2:
         raise ValueError("历史主题相似度矩阵不完整")
+    if len(ids) < 2:
+        return []
     index = {topic: i for i, topic in enumerate(ids)}
     distance = np.zeros((len(ids), len(ids)))
     seen = set()
@@ -413,6 +467,7 @@ def _hierarchy(topics, pairs):
             or key[0] == key[1]
             or any(topic not in index for topic in key)
             or not np.isfinite(pair["cosine"])
+            or not -1.00001 <= pair["cosine"] <= 1.00001
         ):
             raise ValueError("历史主题相似度索引或数值无效")
         seen.add(key)

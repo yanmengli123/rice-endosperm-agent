@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from server.utils.auth_middleware import get_required_user
+from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from yuxi.literature import topic_analysis, topic_legacy
+from yuxi.literature import topic_db
 from yuxi.storage.postgres.models_business import User
 
 router = APIRouter(prefix="/metrics/topic-runs", tags=["literature"])
+
+MAX_IMPORT_BYTES = 1024 * 1024 * 1024
 
 
 class AnalysisScope(BaseModel):
@@ -67,6 +71,8 @@ async def _call(operation):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="主题分析基础设施未通过准入，请联系管理员") from None
 
 
 @router.get("/capabilities")
@@ -76,14 +82,35 @@ async def capabilities(current_user: User = Depends(get_required_user)):
 
     queue = await get_async_redis_client()
     return {
-        "worker_available": bool(await queue.get("literature:topic-worker:heartbeat")),
+        "worker_available": bool(await queue.get(topic_analysis.WORKER_HEALTH_KEY)),
         "schema_version": topic_analysis.VERSION,
+        "database_security": await topic_db.readiness(),
         "models": [
             {"spec": info.spec, "name": info.display_name, "model": info.model_id}
             for info in model_cache.get_all_specs("embedding")
             if info.model_id in {"BAAI/bge-m3", "BAAI/bge-large-zh-v1.5"}
         ],
     }
+
+
+@router.get("/readiness")
+async def readiness(current_user: User = Depends(get_required_user)):
+    from yuxi.literature.topic_ops import health
+
+    result = await health()
+    public = {key: result[key] for key in ("database", "worker_available", "storage_private", "ready")}
+    return Response(
+        json.dumps(public, ensure_ascii=False),
+        status_code=200 if result["ready"] else 503,
+        media_type="application/json",
+    )
+
+
+@router.get("/prometheus")
+async def metrics(current_user: User = Depends(get_superadmin_user)):
+    from yuxi.literature.topic_ops import health, prometheus
+
+    return Response(prometheus(await health()), media_type="text/plain; version=0.0.4")
 
 
 @router.post("/preview")
@@ -119,7 +146,7 @@ async def import_result(
     if not topic_legacy.looks_like_zip(file.file):
         raise HTTPException(status_code=422, detail="请上传 ZIP 格式的 BERTopic 离线结果包")
     size = await asyncio.to_thread(file.file.seek, 0, 2)
-    if size > 1024 * 1024 * 1024:
+    if size > MAX_IMPORT_BYTES:
         raise HTTPException(status_code=413, detail="离线结果包超过 1 GiB 安全预算")
     await file.seek(0)
     return await _call(topic_legacy.import_archive(await _tenant(current_user), file.file, name=name))

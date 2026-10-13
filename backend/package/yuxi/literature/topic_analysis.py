@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from yuxi.literature.access import current_access
 from yuxi.literature.reference_batches import _DATABASE_FORMATS, record_conditions
+from yuxi.literature.topic_db import session as topic_session
 from yuxi.literature.topic_contract import (
     MAX_DOCUMENTS,
     MODES,
@@ -23,7 +24,8 @@ from yuxi.literature.topic_contract import (
     validate_result,
 )
 from yuxi.storage.minio import get_minio_client
-from yuxi.storage.postgres.manager import pg_manager
+# Retain the established fixture seam; development fallback uses this singleton.
+from yuxi.storage.postgres.manager import pg_manager as pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     LiteraturePaper,
     LiteratureReferenceBatch,
@@ -35,8 +37,10 @@ from yuxi.storage.postgres.models_knowledge import (
 from yuxi.utils.datetime_utils import utc_now
 
 QUEUE = "arq:literature-topics"
+WORKER_HEALTH_KEY = "literature:topic-worker:arq-health"
 BUCKET = "knowledgebases"
 ACTIVE = ("PENDING", "RUNNING")
+MAX_RESULT_BYTES = 64 * 1024 * 1024
 
 
 async def preview(tenant_id: int, *, mode: str = "papers", **filters) -> dict:
@@ -53,7 +57,7 @@ async def snapshot(tenant_id: int, *, mode: str = "papers", **filters) -> list[d
     uid = _owner(tenant_id)
     if mode not in MODES:
         raise ValueError("分析口径需为 papers 或 records")
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_session() as db:
         condition = await record_conditions(db, tenant_id, **filters)
         papers = select(LiteraturePaper).where(condition)
         if mode == "papers":
@@ -143,7 +147,13 @@ async def start_run(tenant_id: int, options: dict, filters: dict, *, reuse_run_i
     if reuse_run_id:
         base, documents = await authorized_run(tenant_id, reuse_run_id, full=True)
         mode = base.mode
-        config = {**base.config_json, **options, "allow_remote": False}
+        config = {
+            **base.config_json,
+            **options,
+            "allow_remote": False,
+            "origin": "cached_refit",
+            "source_run_id": base.run_id,
+        }
         if not config.get("embedding_objects"):
             raise ValueError("该历史结果不含嵌入矩阵，不能离线重新拟合")
     else:
@@ -179,7 +189,7 @@ async def start_run(tenant_id: int, options: dict, filters: dict, *, reuse_run_i
     if config.get("chinese_comparison") and sum(d["language_of_text"] == "zh" for d in documents) < 10:
         raise ValueError("中文子集少于 10 条，请关闭中文对照或增加语料；未调用供应商")
     run_id = uuid.uuid4().hex
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_session() as db:
         if db.get_bind().dialect.name == "postgresql":
             from sqlalchemy import text
 
@@ -231,7 +241,7 @@ async def start_run(tenant_id: int, options: dict, filters: dict, *, reuse_run_i
 
 async def list_runs(tenant_id: int, *, offset: int = 0, limit: int = 25) -> dict:
     uid = _owner(tenant_id)
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_session() as db:
         rows = (
             (
                 await db.execute(
@@ -261,7 +271,7 @@ async def list_runs(tenant_id: int, *, offset: int = 0, limit: int = 25) -> dict
 
 async def authorized_run(tenant_id: int, run_id: str, *, full: bool = False) -> tuple[LiteratureTopicRun, list[dict]]:
     uid = _owner(tenant_id)
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_session() as db:
         run = await db.get(LiteratureTopicRun, run_id)
     if run is None or run.tenant_id != tenant_id or run.created_by != uid:
         raise PermissionError("分析不存在或无权访问")
@@ -328,7 +338,8 @@ async def result_view(
                     "kind": d.get("kind", "paper"),
                     "affiliations": d.get("affiliations") or [],
                     "countries": _countries(d.get("affiliations") or []),
-                    "clc": (d.get("source_fields") or {}).get("clc-中图分类号") or (d.get("source_fields") or {}).get("中图分类号"),
+                    "clc": (d.get("source_fields") or {}).get("clc-中图分类号")
+                    or (d.get("source_fields") or {}).get("中图分类号"),
                 }
                 for d in metadata_documents
             },
@@ -341,7 +352,7 @@ async def result_view(
 
 async def cancel_run(tenant_id: int, run_id: str) -> dict:
     await authorized_run(tenant_id, run_id)
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_session() as db:
         run = await db.get(LiteratureTopicRun, run_id, with_for_update=True)
         if run.status in ACTIVE:
             run.cancel_requested = True
@@ -372,7 +383,16 @@ async def export_run(tenant_id: int, run_id: str, *, model: str) -> bytes:
             "topic",
             "membership",
             "centroid_cosine",
+            "input_digest",
+            "corpus_cutoff",
         ]
+    )
+    # 导出脱离系统后的快照溯源：digest 锁语料身份，cutoff 锁语料时点。
+    method = result.get("method", {})
+    cutoff = (
+        (method.get("source_manifest") or {}).get("analysis_date")
+        or method.get("analysis_year")
+        or run.created_at.isoformat()
     )
     lookup = {
         d["document_key"]: d
@@ -392,6 +412,8 @@ async def export_run(tenant_id: int, run_id: str, *, model: str) -> bytes:
             a["topic"],
             a["membership"],
             a["centroid_cosine"],
+            run.input_digest,
+            cutoff,
         ]
         # Spreadsheet consumers must not execute titles as formulas.
         writer.writerow(
@@ -421,7 +443,7 @@ async def load_documents(run_id: str, *, fields: tuple | None = None, keys: list
             else LiteratureTopicDocument.payload_json[name].as_json()
             for name in fields
         ]
-        async with pg_manager.get_async_session_context() as db:
+        async with topic_session() as db:
             values = (
                 await db.execute(
                     select(*columns)
@@ -430,7 +452,7 @@ async def load_documents(run_id: str, *, fields: tuple | None = None, keys: list
                 )
             ).all()
         return [dict(zip(fields, value, strict=True)) for value in values]
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_session() as db:
         rows = (
             (
                 await db.execute(
@@ -453,25 +475,39 @@ async def read_result(run: LiteratureTopicRun, documents: list[dict]) -> dict:
     if not run.result_object.startswith(expected):
         raise ValueError("分析产物路径与运行归属不一致")
     raw = await get_minio_client().adownload_file(BUCKET, run.result_object)
-    if len(raw) > 64 * 1024 * 1024:
+    if len(raw) > MAX_RESULT_BYTES:
         raise ValueError("主题结果超过安全预算")
     return await asyncio.to_thread(lambda: validate_result(json.loads(raw), documents))
+
+
+async def store_result(run: LiteratureTopicRun, documents: list[dict], result: dict) -> str:
+    """Stage a verified immutable object; this alone never publishes a run."""
+    await asyncio.to_thread(validate_result, result, documents)
+    name = f"tenants/{run.tenant_id}/literature/topic-runs/{run.run_id}/{uuid.uuid4().hex}/result.json"
+    raw = json.dumps(result, ensure_ascii=False, allow_nan=False).encode()
+    if len(raw) > MAX_RESULT_BYTES:
+        raise ValueError("主题结果超过安全预算，请缩小语料或减少主题数")
+    await get_minio_client().aupload_file(BUCKET, name, raw, "application/json")
+    if await get_minio_client().adownload_file(BUCKET, name) != raw:
+        raise ValueError("主题结果落盘校验失败")
+    return name
 
 
 async def publish_result(
     run: LiteratureTopicRun, documents: list[dict], result: dict, *, lease_token: str | None = None
 ) -> None:
-    validate_result(result, documents)
-    name = f"tenants/{run.tenant_id}/literature/topic-runs/{run.run_id}/{uuid.uuid4().hex}/result.json"
-    raw = json.dumps(result, ensure_ascii=False, allow_nan=False).encode()
-    await get_minio_client().aupload_file(BUCKET, name, raw, "application/json")
-    if await get_minio_client().adownload_file(BUCKET, name) != raw:
-        raise ValueError("主题结果落盘校验失败")
-    async with pg_manager.get_async_session_context() as db:
+    name = await store_result(run, documents, result)
+    async with topic_session() as db:
         current = await db.get(LiteratureTopicRun, run.run_id, with_for_update=True)
-        if current.cancel_requested or (lease_token and current.lease_token != lease_token):
+        if (
+            current is None
+            or current.cancel_requested
+            or current.status not in ACTIVE
+            or (lease_token and (current.lease_token != lease_token or current.status != "RUNNING"))
+        ):
             raise asyncio.CancelledError("主题任务已取消或租约失效")
         current.result_object, current.status = name, "SUCCEEDED"
+        current.error, current.lease_token = None, None
         current.progress_json = {**current.progress_json, "stage": "complete", "completed": len(documents)}
         current.updated_at = utc_now()
         await db.commit()
@@ -513,7 +549,8 @@ def _countries(affiliations):
 
 def _run_dto(run: LiteratureTopicRun) -> dict:
     config = {
-        k: v for k, v in run.config_json.items()
+        k: v
+        for k, v in run.config_json.items()
         if k not in {"credential_snapshot", "embedding_objects", "tokenizer_objects"}
     }
     return {

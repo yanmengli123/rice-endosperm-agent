@@ -4,6 +4,17 @@
     <p class="hint">
       基于标题与摘要进行探索性聚类，不替代原文证据或人工主题审阅。历史分析保留各自的语料快照，切换数据库不会自动重新训练。
     </p>
+    <p
+      v-if="capabilities.database_security && !capabilities.database_security.ready"
+      class="hint"
+      role="status"
+    >
+      {{
+        capabilities.database_security.required
+          ? '生产准入未通过，主题数据操作已被服务端阻断；请联系管理员检查受限数据库连接。'
+          : '当前为开发/验收配置，数据库最小权限尚未通过生产准入；不能将离线测试通过视为生产上线完成。'
+      }}
+    </p>
     <form class="controls" @submit.prevent="preview">
       <label
         >分析口径<select v-model="options.mode">
@@ -147,19 +158,23 @@
           {{ currentModel.topics.length }} 个非离群主题，{{
             currentModel.documents - currentModel.outliers
           }}
-          条已归类，{{
-            currentModel.outliers
-          }}
+          条已归类，{{ currentModel.outliers }}
           条离群。成员强度不是判断正确率，离群记录不会被自动分配为最近主题。
         </p>
         <p v-for="warning in currentModel.warnings || []" :key="warning" class="hint">
           {{ warning }}
         </p>
-        <p v-for="[language, value] in Object.entries(currentModel.language_concentration || {})" :key="language" class="hint">
+        <p
+          v-for="[language, value] in Object.entries(currentModel.language_concentration || {})"
+          :key="language"
+          class="hint"
+        >
           {{ language === 'zh' ? '中文' : '其他文本' }} {{ value.documents }} 条，最大集中组
           {{ value.largest_topic === -1 ? '离群' : `T${value.largest_topic}` }} 占
           {{ (value.largest_topic_share * 100).toFixed(1) }}%。
-          <span v-if="value.largest_topic_share >= 0.8">集中度较高，请人工检查语言效应与主题内容。</span>
+          <span v-if="value.largest_topic_share >= 0.8"
+            >集中度较高，请人工检查语言效应与主题内容。</span
+          >
         </p>
         <details>
           <summary>质量、参数与时间演化诊断</summary>
@@ -218,22 +233,38 @@
           role="tabpanel"
           :aria-labelledby="`topic-chart-${chartKind}`"
         >
-          <label v-if="chartKind === 'groups'">分组维度<select v-model="chartSettings.groupBy">
-            <option value="source">数据库</option><option value="journal">期刊</option>
-            <option value="kind">文献类型</option><option value="language">实际文本语言</option>
-            <option value="country">明确识别的国家</option><option value="affiliation">机构地址（原字段）</option>
-            <option value="clc">中图分类号（原字段）</option>
-          </select></label>
-          <label v-if="chartKind === 'cloud'">词云口径<select v-model="chartSettings.wordWeight">
-            <option value="ctfidf">c-TF-IDF 权重</option><option value="frequency">原始分词频数</option>
-          </select></label>
+          <label v-if="chartKind === 'groups'"
+            >分组维度<select v-model="chartSettings.groupBy">
+              <option value="source">数据库</option>
+              <option value="journal">期刊</option>
+              <option value="kind">文献类型</option>
+              <option value="language">实际文本语言</option>
+              <option value="country">明确识别的国家</option>
+              <option value="affiliation">机构地址（原字段）</option>
+              <option value="clc">中图分类号（原字段）</option>
+            </select></label
+          >
+          <label v-if="chartKind === 'cloud'"
+            >词云口径<select v-model="chartSettings.wordWeight">
+              <option value="ctfidf">c-TF-IDF 权重</option>
+              <option value="frequency">原始分词频数</option>
+            </select></label
+          >
           <p v-if="chartLoading" role="status">载入图表数据…</p>
           <div ref="chartEl" class="topic-chart" :aria-busy="chartLoading"></div>
           <p class="hint">
             投影距离仅供探索；气泡和节点大小经过显示缩放。权重词云与原始词频不同。年度分母包含离群记录，超出分析年份的记录只保留在语料中，当前年份可能不完整。数据库到主题的桑基图表示构成，不代表文献迁移。
           </p>
-          <p v-if="chartKind === 'groups'" class="hint">显示频数前 20 组，其余归入“其他”。多机构、多国记录按组内整计数；缺失值保留为 unknown，各组不一定互斥，不猜测城市所属国家。</p>
-          <p v-if="selectedTopic === -1 && ['keywords', 'cloud', 'ranks'].includes(chartKind)" class="hint">离群记录没有主题关键词，未用其他主题替代。</p>
+          <p v-if="chartKind === 'groups'" class="hint">
+            显示频数前 20 组，其余归入“其他”。多机构、多国记录按组内整计数；缺失值保留为
+            unknown，各组不一定互斥，不猜测城市所属国家。
+          </p>
+          <p
+            v-if="selectedTopic === -1 && ['keywords', 'cloud', 'ranks'].includes(chartKind)"
+            class="hint"
+          >
+            离群记录没有主题关键词，未用其他主题替代。
+          </p>
           <button class="btn" :disabled="!chartData" @click="downloadChart">下载当前图 SVG</button>
         </section>
         <h4>主题关联文献</h4>
@@ -274,7 +305,10 @@
         <div class="controls">
           <button class="btn" :disabled="offset === 0 || documentsLoading" @click="offset -= 25">
             上一页</button
-          ><span>{{ total }} 条，当前 {{ total ? offset + 1 : 0 }}–{{ Math.min(offset + 25, total) }}</span
+          ><span
+            >{{ total }} 条，当前 {{ total ? offset + 1 : 0 }}–{{
+              Math.min(offset + 25, total)
+            }}</span
           ><button
             class="btn"
             :disabled="offset + 25 >= total || documentsLoading"

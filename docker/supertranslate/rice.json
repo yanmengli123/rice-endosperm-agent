@@ -1,0 +1,13 @@
+{
+  "_metadata": {"version": "rice-endosperm-v1", "description": "水稻胚乳阅读术语；基因符号、数值和位点编号保留原文"},
+  "rice_endosperm": {
+    "rice endosperm": "水稻胚乳", "endosperm development": "胚乳发育", "starch biosynthesis": "淀粉生物合成",
+    "amylose content": "直链淀粉含量", "amylopectin": "支链淀粉", "chalkiness": "垩白度",
+    "grain filling": "籽粒灌浆", "grain quality": "稻米品质", "aleurone layer": "糊粉层",
+    "starchy endosperm": "淀粉胚乳", "amyloplast": "淀粉体", "sucrose transporter": "蔗糖转运蛋白",
+    "starch branching enzyme": "淀粉分支酶", "granule-bound starch synthase": "颗粒结合型淀粉合成酶",
+    "programmed cell death": "程序性细胞死亡", "quantitative trait locus": "数量性状位点",
+    "loss-of-function": "功能缺失", "gain-of-function": "功能获得", "biological replicate": "生物学重复",
+    "technical replicate": "技术重复", "statistically significant": "具有统计学显著性"
+  }
+}

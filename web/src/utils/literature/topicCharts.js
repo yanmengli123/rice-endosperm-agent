@@ -24,7 +24,8 @@ export function buildTopicChart(kind, data, theme, selectedTopic, settings = {})
   const names = new Map(topics.map((t) => [t.topic, `T${t.topic} ${t.label}`]))
   names.set(-1, '离群记录')
   const label = (id) => names.get(id) || `T${id}`
-  const chosen = selectedTopic === -1 ? null : topics.find((t) => t.topic === selectedTopic) || topics[0]
+  const chosen =
+    selectedTopic === -1 ? null : topics.find((t) => t.topic === selectedTopic) || topics[0]
   const colors = theme.colors
   const base = {
     color: colors,
@@ -112,7 +113,10 @@ export function buildTopicChart(kind, data, theme, selectedTopic, settings = {})
     }
   }
   if (kind === 'hierarchy') {
-    const tree = topics.map((t) => ({ name: label(t.topic), topic: t.topic, value: t.count }))
+    // Linkage leaf indices follow sorted topic IDs, not the file's summary order.
+    const tree = [...topics]
+      .sort((a, b) => a.topic - b.topic)
+      .map((t) => ({ name: label(t.topic), topic: t.topic, value: t.count }))
     for (const row of data.hierarchy || [])
       tree.push({
         name: `距离 ${Number(row[2]).toFixed(3)}`,
@@ -172,7 +176,9 @@ export function buildTopicChart(kind, data, theme, selectedTopic, settings = {})
     }
   }
   if (kind === 'trends') {
-    const eligible = (data.yearly || []).filter((r) => !data.analysis_year || r.year <= data.analysis_year)
+    const eligible = (data.yearly || []).filter(
+      (r) => !data.analysis_year || r.year <= data.analysis_year
+    )
     const years = [...new Set(eligible.map((r) => r.year))].sort((a, b) => a - b)
     const rows = new Map((data.yearly || []).map((r) => [`${r.year}:${r.topic}`, r]))
     return {
@@ -279,17 +285,31 @@ export function buildTopicChart(kind, data, theme, selectedTopic, settings = {})
   const dimension = kind === 'sankey' ? 'source' : settings.groupBy || 'source'
   const groupValues = (a) => {
     const d = metadata[a.document_key] || {}
-    const value = dimension === 'country' ? d.countries : dimension === 'affiliation' ? d.affiliations : d[dimension]
+    const value =
+      dimension === 'country'
+        ? d.countries
+        : dimension === 'affiliation'
+          ? d.affiliations
+          : d[dimension]
     const values = Array.isArray(value) ? value : [value]
-    const names = [...new Set(values.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()))]
+    const names = [
+      ...new Set(values.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()))
+    ]
     return names.length ? names : ['unknown']
   }
   const frequency = new Map()
   for (const a of assignments)
     for (const value of groupValues(a)) frequency.set(value, (frequency.get(value) || 0) + 1)
-  const top = new Set([...frequency].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 20).map(([value]) => value))
+  const top = new Set(
+    [...frequency]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 20)
+      .map(([value]) => value)
+  )
   for (const a of assignments) {
-    for (const source of new Set(groupValues(a).map((value) => top.has(value) ? value : '其他（Top20 之外）'))) {
+    for (const source of new Set(
+      groupValues(a).map((value) => (top.has(value) ? value : '其他（Top20 之外）'))
+    )) {
       if (!groups.has(source)) groups.set(source, new Map())
       const values = groups.get(source)
       values.set(a.topic, (values.get(a.topic) || 0) + 1)

@@ -2498,6 +2498,10 @@ class LiteratureTranslationJob(Base):
     reading_version = Column(Integer, nullable=False, default=1)
     generator_version = Column(String(64), nullable=False, default="literature-translate-v1")
     options_json = Column(JSON_VALUE)
+    execution_json = Column(JSON_VALUE, nullable=False, default=dict)
+    result_json = Column(JSON_VALUE, nullable=False, default=dict)
+    progress = Column(Float, nullable=False, default=0.0)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
     config_digest = Column(String(64), nullable=False, default="")
     generation = Column(Integer, nullable=False, default=0)
     status = Column(String(32), nullable=False, default="PENDING")
@@ -2513,6 +2517,30 @@ class LiteratureTranslationJob(Base):
     policy_version = Column(Integer)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LiteraturePdfModelCall(Base):
+    """Durable idempotent PDF model requests; prompt bodies never enter the journal."""
+
+    __tablename__ = "literature_pdf_model_calls"
+    id = Column(String(64), primary_key=True)
+    job_id = Column(
+        BigInteger, ForeignKey("literature_translation_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)
+    attempt = Column(Integer, nullable=False)
+    request_digest = Column(String(64), nullable=False)
+    status = Column(String(24), nullable=False, default="reserved")
+    reserved_tokens = Column(BigInteger, nullable=False)
+    input_tokens = Column(BigInteger, nullable=False, default=0)
+    output_tokens = Column(BigInteger, nullable=False, default=0)
+    estimated = Column(Boolean, nullable=False, default=False)
+    response_json = Column(JSON_VALUE)
+    error_type = Column(String(64))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    finished_at = Column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("job_id", "attempt", "request_digest", name="uq_literature_pdf_call"),)
 
 
 class LiteratureTranslationSettings(Base):

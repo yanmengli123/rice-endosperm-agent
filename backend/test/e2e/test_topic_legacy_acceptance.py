@@ -104,6 +104,10 @@ async def test_four_database_history_maps_to_canonical_papers_without_losing_occ
         run_id = imported["run_id"]
         assert imported["status"] == "SUCCEEDED" and imported["has_embeddings"]
         assert imported["progress"]["documents"] == 22549
+        with (root / "four_database_bertopic_results.zip").open("rb") as stream:
+            repeated = await topic_legacy.import_archive(1, stream)
+        assert repeated["reused"] is True and repeated["run_id"] == run_id
+        assert repeated["has_embeddings"]  # Multi-matrix archives must share the archive, not vector fingerprint.
         joint = imported["models"]["joint_bge_m3"]
         assert len(joint["topics"]) == 42 and joint["outliers"] == 8562
         assert joint["language_concentration"]["zh"]["documents"] == 715

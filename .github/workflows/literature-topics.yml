@@ -1,0 +1,88 @@
+name: Literature Topic Production Gates
+
+'on':
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'backend/package/yuxi/literature/**'
+      - 'backend/package/yuxi/storage/postgres/**'
+      - 'backend/server/routers/literature*'
+      - 'backend/test/**/literature/**'
+      - 'backend/test/e2e/test_topic*'
+      - 'web/src/components/literature/**'
+      - 'web/src/utils/literature/**'
+      - 'web/src/apis/literature_api.js'
+      - 'web/src/views/LiteratureView.vue'
+      - '.env.template'
+      - 'docker/topic*'
+      - 'docker/topic-runtime/**'
+      - 'docker-compose.yml'
+      - '.github/workflows/literature-topics.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/package/yuxi/literature/**'
+      - 'docker/topic-runtime/**'
+      - '.github/workflows/literature-topics.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: literature-topics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build locked Vue dependencies in Docker
+        run: docker build --target development -f docker/web.Dockerfile -t yuxi-web:topic-ci .
+      - name: Offline frontend contracts and production build
+        run: |
+          docker run --rm --network none yuxi-web:topic-ci sh -c 'pnpm exec eslint src/components/literature/TopicModelingPanel.vue && for spec in $(find src -name "*.spec.js" -type f | sort); do node "$spec" || exit 1; done && pnpm run build'
+  offline-production-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the exact locked application and separate CPU runtime
+        run: |
+          docker build -f docker/api.Dockerfile -t yuxi-api:topic-ci .
+          docker build -f docker/topic-worker.Dockerfile --build-arg YUXI_BASE_IMAGE=yuxi-api:topic-ci -t yuxi-topic-worker:topic-ci .
+      - name: Unit contracts and actual three-model CPU execution (no provider/network)
+        run: |
+          mkdir -p "$RUNNER_TEMP/topic-reports"
+          docker run --rm --network none -v "$PWD/backend/test:/app/test:ro" -v "$RUNNER_TEMP/topic-reports:/reports" --entrypoint sh yuxi-topic-worker:topic-ci -c 'test -x /opt/topic-runtime/.venv/bin/python && uv run --no-sync --group test pytest test/unit/literature/ test/unit/storage/test_postgres_manager_schema.py test/unit/knowledge/test_product_authority_gate.py test/e2e/test_topic_engine_acceptance.py -q --junitxml=/reports/offline.xml'
+      - name: Start only an isolated PostgreSQL fixture
+        run: |
+          docker network create --internal --label yuxi.topic-fixture=true topic-prod-fixture-ci-net
+          docker run -d --name topic-prod-fixture-ci-pg --label yuxi.topic-fixture=true --network topic-prod-fixture-ci-net --network-alias topic-postgres -e POSTGRES_USER=fixture -e POSTGRES_DB=topic_fixture -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17-alpine
+          for attempt in $(seq 1 40); do
+            if docker exec topic-prod-fixture-ci-pg pg_isready -h 127.0.0.1 -U fixture; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Real RLS, concurrent idempotency, 22549-row recovery and dump/restore
+        run: |
+          docker run --rm --network topic-prod-fixture-ci-net -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/backend/test:/app/test:ro" -v "$RUNNER_TEMP/topic-reports:/reports" -e YUXI_TOPIC_SECURITY_FIXTURE=1 -e YUXI_TOPIC_SECURITY_DATABASE_URL=postgresql+asyncpg://fixture@topic-postgres:5432/topic_fixture -e YUXI_TOPIC_FIXTURE_CONTAINER=topic-prod-fixture-ci-pg --entrypoint uv yuxi-api:topic-ci run --no-sync --group test pytest --confcutdir=test/integration/literature test/integration/literature/test_topic_security_fixture.py -q --junitxml=/reports/postgres.xml
+      - name: Preserve reproducible gate reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: literature-topic-gates
+          path: ${{ runner.temp }}/topic-reports/*.xml
+          retention-days: 14
+      - name: Cleanup only named, labelled fixtures
+        if: always()
+        run: |
+          if docker inspect topic-prod-fixture-ci-pg >/dev/null 2>&1; then
+            test "$(docker inspect -f '{{index .Config.Labels "yuxi.topic-fixture"}}' topic-prod-fixture-ci-pg)" = true
+            docker rm -f -v topic-prod-fixture-ci-pg
+          fi
+          if docker network inspect topic-prod-fixture-ci-net >/dev/null 2>&1; then
+            test "$(docker network inspect -f '{{index .Labels "yuxi.topic-fixture"}}' topic-prod-fixture-ci-net)" = true
+            docker network rm topic-prod-fixture-ci-net
+          fi

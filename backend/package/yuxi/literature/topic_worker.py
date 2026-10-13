@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from yuxi.literature import topic_analysis as service
 from yuxi.literature.access import access_scope
+from yuxi.literature import topic_db
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.postgres.models_knowledge import LiteratureTopicRun
@@ -29,7 +30,7 @@ from yuxi.utils.datetime_utils import utc_now
 
 async def process_topic_run(ctx, run_id: str):
     token = uuid.uuid4().hex
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_db.session(scheduler=True) as db:
         run = await db.get(LiteratureTopicRun, run_id, with_for_update=True)
         if run is None or run.status != "PENDING" or run.cancel_requested:
             return
@@ -37,10 +38,17 @@ async def process_topic_run(ctx, run_id: str):
         run.attempts += 1
         run.heartbeat_at, run.updated_at = utc_now(), utc_now()
         await db.commit()
+    with topic_db.actor(run.tenant_id, run.created_by):
+        return await _run_claimed(run, token)
+
+
+async def _run_claimed(run, token):
+    run_id = run.run_id
     work = asyncio.create_task(_execute(run, token))
     monitor = asyncio.create_task(_monitor(run_id, token))
     error = None
     status = "FAILED"
+    interrupted = False
     try:
         done, _ = await asyncio.wait((work, monitor), return_when=asyncio.FIRST_COMPLETED)
         if monitor in done:
@@ -48,7 +56,9 @@ async def process_topic_run(ctx, run_id: str):
         await work
         status = "SUCCEEDED"
     except asyncio.CancelledError:
-        status, error = "CANCELLED", "分析已取消或执行租约失效"
+        # ARQ shutdown/timeout also cancels asyncio tasks. Only a persisted user
+        # request is CANCELLED; infrastructure interruption uses the PG retry budget.
+        interrupted = True
     except Exception as exc:
         # Do not persist provider response bodies, input text, URLs or secrets.
         error = f"主题分析失败（{type(exc).__name__}）：请检查语料、模型配置与专用 worker 日志"
@@ -58,12 +68,21 @@ async def process_topic_run(ctx, run_id: str):
         work.cancel()
         monitor.cancel()
         await asyncio.gather(work, monitor, return_exceptions=True)
-        async with pg_manager.get_async_session_context() as db:
+        async with topic_db.session() as db:
             current = await db.get(LiteratureTopicRun, run_id, with_for_update=True)
             if current and current.lease_token == token and current.status == "RUNNING":
+                if current.cancel_requested:
+                    status, error = "CANCELLED", "分析已由用户取消"
+                elif interrupted:
+                    status = "FAILED" if current.attempts >= 3 else "PENDING"
+                    error = "执行被中断，重试预算已耗尽" if status == "FAILED" else None
+                current.lease_token = None
                 current.status, current.error = status, error
                 current.updated_at = utc_now()
                 await db.commit()
+            elif current:
+                # Publication or another lease may have won the race; PG is authoritative.
+                status = current.status
     return {"run_id": run_id, "status": status}
 
 
@@ -161,7 +180,7 @@ async def _embed(run, token, documents, spec, name):
     expected = "BAAI/bge-m3" if name == "joint_bge_m3" else "BAAI/bge-large-zh-v1.5"
     if info is None or info.model_type != "embedding" or info.model_id != expected or int(info.dimension or 0) != 1024:
         raise ValueError("Embedding 模型配置与分析向量空间不匹配")
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_db.session() as db:
         current = await db.get(LiteratureTopicRun, run.run_id)
         frozen_tokenizer = current.config_json.get("tokenizer_objects", {}).get(name)
     store = service.get_minio_client()
@@ -182,7 +201,8 @@ async def _embed(run, token, documents, spec, name):
         await store.aupload_file(service.BUCKET, tokenizer_object, tokenizer_bytes, "application/json")
         frozen_tokenizer = {"object": tokenizer_object, "sha256": hashlib.sha256(tokenizer_bytes).hexdigest()}
         await _update(
-            run.run_id, token,
+            run.run_id,
+            token,
             config={"tokenizer_objects": {**current.config_json.get("tokenizer_objects", {}), name: frozen_tokenizer}},
         )
     tokenizer = Tokenizer.from_str(tokenizer_bytes.decode())
@@ -230,7 +250,7 @@ async def _embed(run, token, documents, spec, name):
     for start in range(0, len(missing), 32):
         await _authorize_actor(run, documents)
         batch = missing[start : start + 32]
-        async with pg_manager.get_async_session_context() as db:
+        async with topic_db.session() as db:
             current = await db.get(LiteratureTopicRun, run.run_id, with_for_update=True)
             frozen = current.config_json.get("credential_snapshot", {}).get(name)
             policy = await freeze_literature_policy(
@@ -340,7 +360,7 @@ async def _authorize_actor(run, documents):
 
 
 async def _update(run_id, token, *, progress=None, config=None):
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_db.session() as db:
         run = await db.get(LiteratureTopicRun, run_id, with_for_update=True)
         if run is None or run.lease_token != token or run.cancel_requested or run.status != "RUNNING":
             raise asyncio.CancelledError()
@@ -361,7 +381,7 @@ async def _monitor(run_id, token):
 async def reconcile(ctx):
     await ctx["redis"].set("literature:topic-worker:heartbeat", str(utc_now().timestamp()), ex=180)
     pending = []
-    async with pg_manager.get_async_session_context() as db:
+    async with topic_db.session(scheduler=True) as db:
         rows = (
             (
                 await db.execute(
@@ -374,13 +394,18 @@ async def reconcile(ctx):
             .all()
         )
         for run in rows:
-            heartbeat = run.heartbeat_at
+            if run.cancel_requested:
+                run.status, run.lease_token = "CANCELLED", None
+                run.updated_at = utc_now()
+                continue
+            heartbeat = run.heartbeat_at or run.updated_at
             if heartbeat and heartbeat.tzinfo is None and db.get_bind().dialect.name == "sqlite":
                 heartbeat = heartbeat.replace(tzinfo=UTC)  # SQLite drops offsets from aware test fixtures.
             if run.status == "RUNNING" and heartbeat and heartbeat < utc_now() - timedelta(seconds=120):
                 run.lease_token = None
-                run.status = "CANCELLED" if run.cancel_requested else "FAILED" if run.attempts >= 3 else "PENDING"
+                run.status = "FAILED" if run.attempts >= 3 else "PENDING"
                 run.error = "执行租约过期，重试预算已耗尽" if run.status == "FAILED" else None
+                run.updated_at = utc_now()
             if run.status == "PENDING":
                 pending.append((run.run_id, run.attempts))
         await db.commit()
@@ -390,7 +415,14 @@ async def reconcile(ctx):
 
 async def startup(ctx):
     pg_manager.initialize()
+    readiness = await topic_db.readiness()
+    if readiness["required"] and not readiness["ready"]:
+        raise RuntimeError("生产 BERTopic 数据库准入未通过，拒绝启动 worker")
     await reconcile(ctx)
+
+
+async def shutdown(ctx):
+    await topic_db.close()
 
 
 class WorkerSettings:
@@ -402,7 +434,8 @@ class WorkerSettings:
     job_timeout = 4000
     keep_result = 60
     health_check_interval = 30
-    health_check_key = "literature:topic-worker:arq-health"
+    health_check_key = service.WORKER_HEALTH_KEY
     redis_settings = get_arq_redis_settings()
     cron_jobs = [cron(reconcile, minute=set(range(60)))]
     on_startup = startup
+    on_shutdown = shutdown

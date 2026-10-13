@@ -227,9 +227,11 @@
 
       <div v-else-if="current === 'pdf'" class="pane">
         <div v-if="!pdfUrl" class="pane-empty">源 PDF 不可用</div>
-        <LiteraturePdfReader
+        <LiteraturePdfWorkspace
           v-else
-          :url="pdfUrl"
+          :original-url="pdfUrl"
+          :rid="rid"
+          :version-token="versionToken"
           :source="paper.source || {}"
           :evidence-target="evidenceTarget"
           :initial-page="pdfPage"
@@ -302,7 +304,7 @@ import { confirmAction } from '@/composables/useLiteratureSessions'
 import LiteratureMarkdown from './LiteratureMarkdown.vue'
 import ProductEditor from './ProductEditor.vue'
 import ReaderSelectionToolbar from './ReaderSelectionToolbar.vue'
-import LiteraturePdfReader from './LiteraturePdfReader.vue'
+import LiteraturePdfWorkspace from './LiteraturePdfWorkspace.vue'
 import { readerCapture, isAutoSendAction } from '@/utils/literature_assistant'
 import { useUserStore } from '@/stores/user'
 import {
@@ -321,7 +323,7 @@ const splitParas = (text) =>
 
 export default {
   name: 'ReaderTabs',
-  components: { LiteratureMarkdown, ProductEditor, ReaderSelectionToolbar, LiteraturePdfReader },
+  components: { LiteratureMarkdown, ProductEditor, ReaderSelectionToolbar, LiteraturePdfWorkspace },
   props: {
     rid: { type: String, required: true },
     paper: { type: Object, default: () => ({}) },
@@ -425,7 +427,7 @@ export default {
     let disposed = false
     const subTabs = [
       { key: 'original', label: '原文' },
-      { key: 'pdf', label: 'PDF' },
+      { key: 'pdf', label: 'PDF 阅读' },
       { key: 'parallel', label: '双语对照' },
       { key: 'translation', label: '译文 / 总结' },
       { key: 'images', label: '图片' },

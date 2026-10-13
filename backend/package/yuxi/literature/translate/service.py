@@ -212,6 +212,10 @@ async def enqueue_literature_translation(
     *, paper_id: int, variant_kind: str = "zh", force: bool = False, requested_by: str = ""
 ) -> dict:
     """排一个翻译任务，且不以 ``force`` 抢占仍持有有效租约的 worker。"""
+    if variant_kind == "pdf_zh":
+        from yuxi.literature.pdf_translation import enqueue_pdf_translation
+
+        return await enqueue_pdf_translation(paper_id=paper_id, requested_by=requested_by, force=force)
     if variant_kind not in VALID_VARIANT_KINDS:
         raise ValueError(f"非法变体类型: {variant_kind}")
     from yuxi.literature.translate.settings import options_digest, translation_options
@@ -736,6 +740,7 @@ async def reconcile_stale_literature_translations(ctx: dict | None = None) -> in
                 await session.execute(
                     select(LiteratureTranslationJob)
                     .where(
+                        LiteratureTranslationJob.variant_kind != "pdf_zh",
                         or_(
                             and_(
                                 LiteratureTranslationJob.status == "RUNNING",

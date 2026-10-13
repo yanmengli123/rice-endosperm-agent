@@ -1134,7 +1134,31 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0111_literature_reference_batches", "_migration_0111_literature_reference_batches"),
         ("0112_literature_topic_analysis", "_migration_0112_literature_topic_analysis"),
         ("0113_dsh_model_calls", "_migration_0113_dsh_model_calls"),
+        ("0114_topic_least_privilege", "_migration_0114_topic_least_privilege"),
+        ("0115_literature_pdf_translation", "_migration_0115_literature_pdf_translation"),
     ]
+
+    async def _migration_0115_literature_pdf_translation(self, conn) -> None:
+        from yuxi.storage.postgres.models_knowledge import LiteraturePdfModelCall
+
+        for ddl in (
+            "ADD COLUMN IF NOT EXISTS execution_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ADD COLUMN IF NOT EXISTS result_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ADD COLUMN IF NOT EXISTS progress DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
+        ):
+            await conn.execute(text(f"ALTER TABLE literature_translation_jobs {ddl}"))
+        await conn.run_sync(lambda sync_conn: LiteraturePdfModelCall.__table__.create(sync_conn, checkfirst=True))
+        await conn.execute(text("ALTER TABLE literature_pdf_model_calls ENABLE ROW LEVEL SECURITY"))
+        await conn.execute(text(
+            "CREATE POLICY p_literature_pdf_calls_tenant ON literature_pdf_model_calls "
+            "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::bigint)"
+        ))
+
+    async def _migration_0114_topic_least_privilege(self, conn) -> None:
+        from yuxi.literature.topic_security import migrate
+
+        await migrate(conn)
 
     async def _migration_0113_dsh_model_calls(self, conn) -> None:
         from yuxi.storage.postgres.models_business import DshModelCall

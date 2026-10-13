@@ -1,7 +1,8 @@
 """Topic snapshots, immutable runs, ACL revocation and offline format safety."""
 
+import asyncio
 import io
-import json
+from datetime import timedelta
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from zipfile import ZipFile
@@ -12,7 +13,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from yuxi.literature import reference_import, topic_analysis, topic_legacy
+from yuxi.literature import reference_import, topic_analysis, topic_legacy, topic_worker
 from yuxi.literature.access import _access
 from yuxi.literature.topic_contract import prepare_document, validate_result
 from yuxi.literature.topic_worker import _validate_vectors
@@ -252,3 +253,215 @@ def test_semantic_text_preserves_entities_and_representation_language_is_actual_
     )
     assert "RISBZ1" in doc["text"] and "OsbZIP58" in doc["text"] and "<正>" not in doc["text"]
     assert doc["language_of_text"] == "zh"
+
+
+async def test_record_database_filter_does_not_pull_cross_database_duplicate_occurrences(environment):
+    await populate(environment)
+    async with environment.scope():
+        await reference_import.import_references(
+            1,
+            b"Publication Type,Authors,Article Title,Abstract,Publication Year,Pubmed Id\n"
+            b"J,Alice,Rice topic 0,Abstract on grain and stress 0,2020,10000\n",
+            source_name="cross-database.csv",
+            fmt="wos-csv",
+        )
+    async with environment.scope():
+        pubmed = await topic_analysis.snapshot(1, mode="records", database="pubmed")
+        wos = await topic_analysis.snapshot(1, mode="records", database="wos")
+    assert len(pubmed) == 20 and all(d["source"] == "pubmed-nbib" for d in pubmed)
+    assert len(wos) == 1 and wos[0]["source"] == "wos-csv"
+    assert pubmed[0]["rid"] == wos[0]["rid"]  # Same paper, independently scoped occurrences.
+
+
+@pytest.mark.parametrize(
+    "attempts,user_cancel,expected", [(0, False, "PENDING"), (2, False, "FAILED"), (0, True, "CANCELLED")]
+)
+async def test_worker_interruption_is_not_a_user_cancel(environment, monkeypatch, attempts, user_cancel, expected):
+    await populate(environment)
+    async with environment.scope():
+        dto = await topic_analysis.start_run(1, {"allow_remote": True, "embedding_spec": "fixture:bge"}, {})
+    async with environment.sessions() as db:
+        run = await db.get(LiteratureTopicRun, dto["run_id"])
+        run.attempts = attempts
+        await db.commit()
+
+    async def interrupted(run, token):
+        if user_cancel:
+            async with environment.sessions() as db:
+                current = await db.get(LiteratureTopicRun, run.run_id)
+                current.cancel_requested = True
+                await db.commit()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(topic_worker, "_execute", interrupted)
+    result = await topic_worker.process_topic_run({}, dto["run_id"])
+    async with environment.sessions() as db:
+        run = await db.get(LiteratureTopicRun, dto["run_id"])
+    assert result["status"] == run.status == expected
+    assert run.lease_token is None and run.attempts == attempts + 1
+    assert run.error is None if expected == "PENDING" else run.error
+
+
+async def test_reconciler_handles_missing_heartbeat_cancellation_and_retry_budget(environment, monkeypatch):
+    old = utc_now() - timedelta(minutes=5)
+    async with environment.sessions() as db:
+        for run_id, attempts, cancelled, heartbeat in (
+            ("recover", 1, False, old),
+            ("exhausted", 3, False, old),
+            ("no-heartbeat", 1, False, None),
+            ("cancelled", 1, True, utc_now()),
+        ):
+            db.add(
+                LiteratureTopicRun(
+                    run_id=run_id,
+                    tenant_id=1,
+                    created_by="alice",
+                    name=run_id,
+                    status="RUNNING",
+                    mode="papers",
+                    input_digest="0" * 64,
+                    config_json={},
+                    progress_json={},
+                    attempts=attempts,
+                    cancel_requested=cancelled,
+                    lease_token="old",
+                    heartbeat_at=heartbeat,
+                    created_at=old,
+                    updated_at=old,
+                )
+            )
+        await db.commit()
+    scheduled = []
+
+    async def dispatch(run_id, *, attempt):
+        scheduled.append((run_id, attempt))
+
+    async def redis_set(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(topic_analysis, "dispatch", dispatch)
+    await topic_worker.reconcile({"redis": SimpleNamespace(set=redis_set)})
+    async with environment.sessions() as db:
+        runs = {r.run_id: r for r in (await db.execute(select(LiteratureTopicRun))).scalars()}
+    assert runs["recover"].status == runs["no-heartbeat"].status == "PENDING"
+    assert runs["exhausted"].status == "FAILED" and runs["cancelled"].status == "CANCELLED"
+    assert sorted(scheduled) == [("no-heartbeat", 1), ("recover", 1)]
+    assert all(run.lease_token is None for run in runs.values())
+
+
+async def test_stale_worker_cannot_switch_verified_result_pointer(environment):
+    await populate(environment)
+    async with environment.scope():
+        dto = await topic_analysis.start_run(1, {"allow_remote": True, "embedding_spec": "fixture:bge"}, {})
+        run, docs = await topic_analysis.authorized_run(1, dto["run_id"], full=True)
+    async with environment.sessions() as db:
+        current = await db.get(LiteratureTopicRun, run.run_id)
+        current.status, current.lease_token = "RUNNING", "new-lease"
+        await db.commit()
+    with pytest.raises(asyncio.CancelledError):
+        await topic_analysis.publish_result(run, docs, result_for(docs), lease_token="expired-lease")
+    async with environment.sessions() as db:
+        current = await db.get(LiteratureTopicRun, run.run_id)
+        assert current.status == "RUNNING" and current.result_object is None
+    await topic_analysis.publish_result(run, docs, result_for(docs), lease_token="new-lease")
+    async with environment.sessions() as db:
+        pointer = (await db.get(LiteratureTopicRun, run.run_id)).result_object
+    with pytest.raises(asyncio.CancelledError):
+        await topic_analysis.publish_result(run, docs, result_for(docs), lease_token="new-lease")
+    async with environment.sessions() as db:
+        assert (await db.get(LiteratureTopicRun, run.run_id)).result_object == pointer
+
+
+async def test_dispatch_uses_bounded_stable_attempt_ids(monkeypatch):
+    from yuxi.services import run_queue_service
+
+    calls = []
+
+    async def enqueue(*args, **kwargs):
+        calls.append(kwargs["_job_id"])
+
+    async def pool():
+        return SimpleNamespace(enqueue_job=enqueue)
+
+    monkeypatch.setattr(run_queue_service, "get_arq_pool", pool)
+    for attempt in (0, 0, 1):
+        assert await topic_analysis.dispatch("fixture", attempt=attempt)
+    assert calls == ["topic:fixture:0", "topic:fixture:0", "topic:fixture:1"]
+
+
+def test_malformed_embedding_payload_does_not_echo_provider_content():
+    private = "private-provider-body-credential"
+    with pytest.raises(ValueError) as failure:
+        _validate_vectors({"data": [{"index": 0, "embedding": [private]}]}, 1, "model")
+    assert private not in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda m: m.update(similarity=[{"a": 0, "b": -1, "cosine": 0.7}]),
+        lambda m: m.update(hierarchy=[[0, 1, 0.2, 2]]),
+        lambda m: m["yearly"].pop(),
+        lambda m: m["yearly"][0].update(denominator=1),
+        lambda m: m["yearly"].append(dict(m["yearly"][0])),
+        lambda m: [r.update(year=2021) for r in m["yearly"]],
+        lambda m: m["topics"][0].update(word_frequencies=[["grain", 0.3]]),
+        lambda m: m["topics"][0].update(word_frequencies=[["grain", True]]),
+        lambda m: m["topics"][0].update(word_frequencies=[["grain", 2], ["grain", 1]]),
+        lambda m: m.update(analysis_year=True),
+    ],
+)
+def test_chart_contract_rejects_misleading_analytics(change):
+    docs = [prepare_document(k, k, {"title": "Rice", "year": 2020}) for k in ("a", "b")]
+    result = result_for(docs)
+    model = result["models"]["joint_bge_m3"]
+    model.update(
+        similarity=[],
+        hierarchy=[],
+        analysis_year=2026,
+        yearly=[
+            {"year": 2020, "topic": -1, "count": 1, "denominator": 2},
+            {"year": 2020, "topic": 0, "count": 1, "denominator": 2},
+        ],
+    )
+    model["topics"][0]["word_frequencies"] = [["grain", 2]]
+    validate_result(result, docs)
+    change(model)
+    with pytest.raises(ValueError):
+        validate_result(result, docs)
+
+
+async def test_cached_refit_has_distinct_origin_and_keeps_source_run(environment):
+    await populate(environment)
+    async with environment.scope():
+        dto = await topic_analysis.start_run(1, {"allow_remote": True, "embedding_spec": "fixture:bge"}, {})
+        run, docs = await topic_analysis.authorized_run(1, dto["run_id"], full=True)
+        await topic_analysis.publish_result(run, docs, result_for(docs))
+        async with environment.sessions() as db:
+            original = await db.get(LiteratureTopicRun, run.run_id)
+            original.config_json = {
+                **original.config_json,
+                "origin": "legacy_offline",
+                "archive_fingerprint": "0" * 64,
+                "embedding_objects": {"joint_bge_m3": {"object": "fixture/matrix", "sha256": "0" * 64}},
+            }
+            await db.commit()
+        refit = await topic_analysis.start_run(1, {"seed": 7}, {}, reuse_run_id=run.run_id)
+        original_dto = await topic_analysis.get_run(1, run.run_id)
+    assert refit["config"]["origin"] == "cached_refit" and not refit["config"]["allow_remote"]
+    assert refit["config"]["source_run_id"] == run.run_id and refit["run_id"] != run.run_id
+    assert original_dto["status"] == "SUCCEEDED" and original_dto["config"]["origin"] == "legacy_offline"
+
+
+async def test_publication_budget_matches_reader_budget(environment, monkeypatch):
+    await populate(environment)
+    async with environment.scope():
+        dto = await topic_analysis.start_run(1, {"allow_remote": True, "embedding_spec": "fixture:bge"}, {})
+        run, docs = await topic_analysis.authorized_run(1, dto["run_id"], full=True)
+    monkeypatch.setattr(topic_analysis, "MAX_RESULT_BYTES", 32)
+    with pytest.raises(ValueError, match="安全预算"):
+        await topic_analysis.publish_result(run, docs, result_for(docs))
+    async with environment.sessions() as db:
+        current = await db.get(LiteratureTopicRun, run.run_id)
+        assert current.status == "PENDING" and current.result_object is None
+    assert not environment.store.values  # Never mark an unreadable object as a successful result.

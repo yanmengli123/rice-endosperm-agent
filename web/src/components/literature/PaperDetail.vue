@@ -57,10 +57,29 @@
             <option value="zh">中文全文</option>
             <option value="en_zh">双语全文</option>
             <option value="summary">总结</option>
+            <option value="pdf_zh" :disabled="!pdfCapability.enabled || !paper.source_revision_id">
+              保版式中文 PDF
+            </option>
           </select>
-          <button class="btn" :disabled="translating" @click="doTranslate">
+          <button class="btn" :disabled="translating" @click="doTranslate()">
             生成所选译文 / 总结
           </button>
+          <button
+            v-if="
+              translationKind === 'pdf_zh' &&
+              paper.translation_jobs?.some(
+                (job) => job.variant_kind === 'pdf_zh' && job.status === 'SUCCEEDED'
+              )
+            "
+            class="btn"
+            :disabled="translating"
+            @click="doTranslate(true)"
+          >
+            重新生成 PDF（再次调用模型）
+          </button>
+          <span v-if="translationKind === 'pdf_zh'" class="pdf-translation-hint"
+            >基于原始 PDF · 采用当前翻译模型 · 含质量检查与双语下载</span
+          >
           <button
             v-for="level in ['L1', 'L2', 'L3']"
             :key="level"
@@ -186,6 +205,7 @@ import { apiPost } from '@/apis/base'
 import {
   getLiteraturePaper,
   literatureWorkspaceApi,
+  literaturePdfApi,
   triggerLiteratureCompile,
   triggerLiteratureEnrich,
   triggerLiteratureRender,
@@ -267,6 +287,7 @@ export default {
     const rendering = ref(false)
     const translating = ref(false)
     const translationKind = ref('zh')
+    const pdfCapability = ref({ enabled: false, reason: '正在检查保版式服务' })
     const compiling = ref('')
     const enriching = ref(false)
     // Legacy PDF papers can backfill their own DOI from the authorized body.
@@ -397,6 +418,16 @@ export default {
         if (ticket !== loadGeneration || disposed || !polling.value || controller.signal.aborted)
           return
         paper.value = result
+        if (pdfCapability.value.reason === '正在检查保版式服务')
+          literaturePdfApi
+            .capabilities()
+            .then((value) => {
+              if (!disposed) pdfCapability.value = value
+            })
+            .catch(() => {
+              if (!disposed)
+                pdfCapability.value = { enabled: false, reason: '保版式翻译服务未启用' }
+            })
         startPollingIfBusy()
       } catch (error) {
         if (!disposed && polling.value && !controller.signal.aborted && ticket === loadGeneration)
@@ -477,11 +508,11 @@ export default {
         rendering.value = false
       }
     }
-    const doTranslate = async () => {
+    const doTranslate = async (force = false) => {
       if (translating.value) return
       translating.value = true
       try {
-        const result = await triggerLiteratureTranslation(props.rid, translationKind.value)
+        const result = await triggerLiteratureTranslation(props.rid, translationKind.value, force)
         if (result?.reused) {
           message.info(
             result.status === 'SUCCEEDED'
@@ -635,6 +666,7 @@ export default {
       rendering,
       translating,
       translationKind,
+      pdfCapability,
       compiling,
       enriching,
       canEnrich,

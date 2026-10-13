@@ -35,7 +35,7 @@
         <div
           ref="textRoot"
           class="textLayer"
-          data-reader-surface="pdf"
+          :data-reader-surface="surface"
           :style="{ '--scale-factor': viewportScale }"
         ></div>
         <div
@@ -81,6 +81,9 @@ const props = defineProps({
   evidenceTarget: { type: Object, default: null },
   scale: { type: Number, default: 1 },
   initialPage: { type: Number, default: 1 },
+  pageNumber: { type: Number, default: null },
+  surface: { type: String, default: 'pdf' },
+  allowEvidence: { type: Boolean, default: true },
   fitWidth: { type: Boolean, default: true }
 })
 const emit = defineEmits(['assistant-action', 'update:scale', 'update:fitWidth', 'page-changed'])
@@ -245,7 +248,7 @@ const resolveTarget = async () => {
   resolved = null
   boxes.value = []
   locatorNotice.value = ''
-  if (!target?.evidence || !pdf) return
+  if (!props.allowEvidence || !target?.evidence || !pdf) return
   const source = target.evidence.source || {}
   if (
     !props.source.parse_revision_id ||
@@ -381,7 +384,7 @@ const capture = async (rect) => {
     if (!blob || disposed || ticket !== renderGeneration) return
     emit('assistant-action', {
       action: 'screenshot',
-      surface: 'pdf',
+      surface: props.surface,
       page_hint: number,
       imageFile: new File([blob], `paper-page-${number}.png`, { type: 'image/png' })
     })
@@ -403,6 +406,12 @@ const cropEnd = (event) => {
 }
 const capturePage = () => capture({ left: 0, top: 0, width: width.value, height: height.value })
 watch(() => props.url, load)
+watch(
+  () => props.pageNumber,
+  (value) => {
+    if (Number.isSafeInteger(value) && value !== page.value && pdf) go(value)
+  }
+)
 watch(
   () => [props.scale, props.fitWidth],
   () => render()

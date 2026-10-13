@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import httpx
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -447,6 +448,7 @@ async def trigger_compile(
 async def trigger_translation(
     rid: str,
     variant_kind: str = Query(default="zh"),
+    force: bool = Query(default=False),
     current_user: User = Depends(get_required_user),
 ):
     tenant_id = await _current_tenant(current_user)
@@ -458,6 +460,7 @@ async def trigger_translation(
         result = await enqueue_literature_translation(
             paper_id=paper_id,
             variant_kind=variant_kind,
+            force=force,
             requested_by=current_user.uid,
         )
     except ValueError as exc:
@@ -1200,6 +1203,53 @@ async def get_reader_bundle_endpoint(rid: str, current_user: User = Depends(get_
     if bundle is None:
         raise HTTPException(status_code=404, detail="文献不存在或未关联解析版本")
     return JSONResponse(bundle, headers={"Cache-Control": "private, no-store"})
+
+
+@literature.get("/pdf-translation/capabilities")
+async def pdf_translation_capabilities(current_user: User = Depends(get_required_user)):
+    from yuxi.literature.pdf_translation import capabilities
+
+    return await capabilities()
+
+
+@literature.get("/pdf-translation/source")
+async def pdf_translation_source(current_user: User = Depends(get_required_user)):
+    from yuxi.literature.pdf_translation import PdfClient
+
+    try:
+        async with PdfClient() as client:
+            response = await client.http.get("/source")
+            response.raise_for_status()
+        return Response(response.content, media_type="application/gzip",
+            headers={"Content-Disposition": 'attachment; filename="supertranslate-corresponding-source.tar.gz"'})
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(503, detail="翻译引擎源码服务不可用") from exc
+
+
+@literature.get("/papers/{rid}/pdf-translation")
+async def pdf_translation_bundle(rid: str, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.pdf_translation import get_pdf_bundle
+
+    tenant_id = await _current_tenant(current_user)
+    result = await get_pdf_bundle(tenant_id, rid, current_user.uid)
+    if result is None:
+        raise HTTPException(404, detail="文献不存在或无权访问")
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+
+
+@literature.post("/papers/{rid}/pdf-translation/{job_id}/cancel")
+async def cancel_pdf_translation(rid: str, job_id: int, current_user: User = Depends(get_required_user)):
+    from yuxi.literature.pdf_translation import cancel_pdf_translation as request_cancel
+
+    tenant_id = await _current_tenant(current_user)
+    if await readops.get_paper_detail(tenant_id, rid) is None:
+        raise HTTPException(404, detail="文献不存在或无权访问")
+    try:
+        return await request_cancel(tenant_id, rid, current_user.uid, job_id)
+    except PermissionError as exc:
+        raise HTTPException(403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
 
 
 @literature.get("/papers/{rid}/variants/{variant_kind}")
