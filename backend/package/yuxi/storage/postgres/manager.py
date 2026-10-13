@@ -1133,7 +1133,19 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0110_literature_reference_import", "_migration_0110_literature_reference_import"),
         ("0111_literature_reference_batches", "_migration_0111_literature_reference_batches"),
         ("0112_literature_topic_analysis", "_migration_0112_literature_topic_analysis"),
+        ("0113_dsh_model_calls", "_migration_0113_dsh_model_calls"),
     ]
+
+    async def _migration_0113_dsh_model_calls(self, conn) -> None:
+        from yuxi.storage.postgres.models_business import DshModelCall
+
+        await conn.run_sync(lambda sync_conn: DshModelCall.__table__.create(sync_conn, checkfirst=True))
+        await conn.execute(text("ALTER TABLE dsh_model_calls ENABLE ROW LEVEL SECURITY"))
+        await conn.execute(text(
+            "CREATE POLICY p_dsh_model_calls_own_uid ON dsh_model_calls "
+            "USING (EXISTS (SELECT 1 FROM agent_runs r WHERE r.id = run_id "
+            "AND r.uid = NULLIF(current_setting('yuxi.uid', true), '')))"
+        ))
 
     async def _migration_0112_literature_topic_analysis(self, conn) -> None:
         """原始行/不可变语料/私有分析运行。旧批次无行数据时不猜测补齐。"""

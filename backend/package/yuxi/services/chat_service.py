@@ -2691,6 +2691,8 @@ def _extract_total_tokens(state) -> int | None:
     if not isinstance(model_usage, dict) or not model_usage:
         model_usage = usage.get("model_usage") if isinstance(usage, dict) else None
     if isinstance(model_usage, dict) and model_usage:
+        if model_usage.get("accounting_status") == "pending":
+            return None
         total_tokens = model_usage.get("total_tokens")
         if isinstance(total_tokens, int | float) and not isinstance(total_tokens, bool):
             return int(total_tokens)
@@ -2719,6 +2721,8 @@ def _token_usage_delta(total_tokens: int | None, baseline_tokens: int | None) ->
 
 async def _checkpoint_total_tokens(agent, config_dict: dict, *, context) -> int | None:
     """Read cumulative token usage before a run starts."""
+    if getattr(agent, "token_usage_is_per_run", False):
+        return 0
     try:
         graph = await agent.get_graph(context=context)
         state = await graph.aget_state(config_dict)
@@ -2751,6 +2755,21 @@ async def _persist_run_total_tokens(
     if uid is not None and str(run.uid) != str(uid):
         raise ValueError(f"AgentRun 用量归属不匹配: run_id={run_id}")
 
+    dsh_usage = None
+    if (run.input_payload or {}).get("agent_runtime") == "dsh":
+        from yuxi.agents.buildin.dsh.execution import usage_summary
+
+        dsh_usage = await usage_summary(db, str(run_id))
+        if dsh_usage["estimated"]:
+            run.total_tokens = None
+            await db.flush()
+            return
+        estimated = bool(estimated or dsh_usage["estimated"])
+        frozen_payload = run.input_payload or {}
+        credential_ref = credential_ref or frozen_payload.get("user_credential")
+        model_spec = model_spec or frozen_payload.get("model_spec")
+        policy_version = policy_version or frozen_payload.get("policy_version")
+
     # uid/tenant_id 只取 AgentRun 的服务端冻结值，调用方参数仅用于一致性校验。
     run.total_tokens = int(total_tokens)
     existing = (
@@ -2765,6 +2784,10 @@ async def _persist_run_total_tokens(
                 tenant_id=run.tenant_id,
                 model_spec=model_spec,
                 total_tokens=int(total_tokens),
+                input_tokens=dsh_usage["input_tokens"] if dsh_usage else 0,
+                output_tokens=(
+                    dsh_usage["output_tokens"] + max(0, int(total_tokens) - dsh_usage["total_tokens"])
+                ) if dsh_usage else 0,
                 estimated=bool(estimated),
                 credential_source="user_byok" if credential_ref else "platform",
                 credential_id=credential_ref.get("credential_id"),
@@ -3047,6 +3070,8 @@ async def _resolve_agent_runtime(
     requested_agent_slug: str | None,
     thread_id: str | None,
     agent_kind: Literal["main", "subagent"] = "main",
+    frozen_runtime: str | None = None,
+    runtime_snapshot: dict | None = None,
 ) -> tuple[Agent, Any, dict]:
     """解析智能体运行时，返回 (Agent, backend, agent_config)"""
     agent_repo = AgentRepository(db)
@@ -3073,6 +3098,16 @@ async def _resolve_agent_runtime(
     backend = agent_manager.get_agent(agent_item.backend_id)
     if not backend:
         raise ValueError(f"智能体后端 {agent_item.backend_id} 不存在")
+
+    # 聊天基座选择点（ADR-dsh-chat-runtime）：显式 backend 或影子名单命中时换用
+    # DshAgent；编排层（turn plan/知识契约/守卫/落库/计费）对两种运行时同构。
+    from yuxi.agents.buildin.dsh.agent import resolve_runtime_backend
+
+    backend = resolve_runtime_backend(agent_item, backend, frozen_runtime=frozen_runtime)
+    if frozen_runtime == "dsh":
+        from yuxi.agents.buildin.dsh.runtime import validate_snapshot
+
+        validate_snapshot(runtime_snapshot or {})
 
     agent_config = await normalize_agent_context_config(
         (agent_item.config_json or {}).get("context", {}),
@@ -3248,6 +3283,8 @@ async def stream_agent_chat(
             requested_agent_slug=agent_slug,
             thread_id=thread_id,
             agent_kind="subagent" if meta.get("run_type") == "subagent" else "main",
+            frozen_runtime=meta.get("agent_runtime"),
+            runtime_snapshot=meta.get("agent_runtime_snapshot"),
         )
     except ValueError as e:
         # 该分支发生在主流式 try/finally 之前，必须在返回前显式清理。
@@ -4802,6 +4839,8 @@ async def stream_agent_resume(
             user=current_user,
             requested_agent_slug=None,
             thread_id=thread_id,
+            frozen_runtime=meta.get("agent_runtime"),
+            runtime_snapshot=meta.get("agent_runtime_snapshot"),
         )
     except ValueError as e:
         # 该分支同样尚未进入下方主 try/finally。
@@ -4836,6 +4875,10 @@ async def stream_agent_resume(
     _apply_model_override(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）；
+    if meta.get("agent_runtime") == "dsh":
+        from yuxi.agents.buildin.dsh.execution import resume_governance
+
+        input_context.update(await resume_governance(str(meta["run_id"]), str(uid), str(thread_id)))
     # 以实际布尔写入，防止配置面持久化的 browser_enabled=true 绕过 run 冻结语义。
     input_context["browser_enabled"] = bool(meta.get("browser_enabled"))
     if not meta.get("browser_enabled"):

@@ -129,6 +129,8 @@ def _assert_run_input_payload(payload: dict, *, clean_question: str) -> None:
         "policy_version": 1,
         "credential_policy": "byok_optional",
         "credential_source": "platform",
+        # 聊天基座标记（ADR-dsh-chat-runtime）：默认运行时为 langgraph。
+        "agent_runtime": "langgraph",
     }
     assert {key: payload[key] for key in stable} == stable
     assert set(payload) == {*stable, "mention_resolution"}

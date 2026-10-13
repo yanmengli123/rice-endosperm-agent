@@ -976,7 +976,17 @@ async def create_agent_run_view(
         "policy_version": entitlement_snapshot.get("policy_version"),
         "credential_policy": effective_policy,
         "credential_source": credential_source,
+        # This frozen choice drives worker behavior, including resume.
+        "agent_runtime": _resolve_frozen_agent_runtime(scope),
     }
+    if input_payload["agent_runtime"] == "dsh":
+        from yuxi.agents.buildin.dsh.runtime import runtime_snapshot, validate_snapshot
+
+        snapshot = (parent_payload or {}).get("agent_runtime_snapshot") if run_type == "resume" else runtime_snapshot()
+        if not isinstance(snapshot, dict):
+            raise HTTPException(status_code=409, detail="父运行缺少 DSH 运行时快照，请重新提问")
+        validate_snapshot(snapshot)
+        input_payload["agent_runtime_snapshot"] = dict(snapshot)
     if user_credential_ref:
         input_payload["user_credential"] = user_credential_ref
     if reader_context is not None:
@@ -1022,6 +1032,21 @@ class AgentRunCreationScope:
     current_user: Any
     existing_run: Any | None
     parent_run: Any | None = None
+
+
+def _resolve_frozen_agent_runtime(scope: AgentRunCreationScope) -> str:
+    """冻结本次 run 的聊天基座（dsh/langgraph），判定与 worker 选择点一致。"""
+    from yuxi.agents.buildin.dsh.agent import DSH_BACKEND_ID, dsh_shadow_agent_slugs
+
+    if scope.parent_run is not None:
+        return (scope.parent_run.input_payload or {}).get("agent_runtime", "langgraph")
+
+    agent_item = scope.agent_item
+    if getattr(agent_item, "backend_id", None) == DSH_BACKEND_ID:
+        return "dsh"
+    if str(getattr(agent_item, "slug", "") or "") in dsh_shadow_agent_slugs():
+        return "dsh"
+    return "langgraph"
 
 
 def _prepare_run_input_message(

@@ -67,6 +67,7 @@ from yuxi.services.channel_service import (
     relay_channel_outbox_now,
 )
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
+from yuxi.agents.buildin.dsh.execution import reconcile_dsh_usage
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.mcp_canary_service import run_mcp_live_canary
 from yuxi.services.run_queue_service import (
@@ -768,6 +769,8 @@ async def process_agent_run(ctx, run_id: str):
         "has_image": bool(image_content),
         "attachment_file_ids": input_metadata.get("attachment_file_ids") or [],
         "model_spec": payload.get("model_spec"),
+        "agent_runtime": payload.get("agent_runtime", "langgraph"),
+        "agent_runtime_snapshot": payload.get("agent_runtime_snapshot"),
         "knowledge_scope_snapshot": payload.get("knowledge_scope_snapshot"),
         "mention_resolution": payload.get("mention_resolution"),
         "user_credential": payload.get("user_credential"),
@@ -1141,6 +1144,13 @@ async def process_agent_run(ctx, run_id: str):
         return
     finally:
         # 浏览器任务会话回收：在 worker Task 边界执行（工具继承的同一实例）；
+        if payload.get("agent_runtime") == "dsh":
+            from yuxi.agents.buildin.dsh.execution import settle_run_usage
+
+            try:
+                await settle_run_usage(run_id)
+            except Exception:
+                logger.exception(f"DSH usage settlement failed; reconciliation required: {run_id}")
         # ended 标志与 chat_service 生成器内的 best-effort 清理幂等互斥。
         if browser_execution_token is not None:
             await end_browser_task_best_effort()
@@ -1251,6 +1261,7 @@ class WorkerSettings:
         # ARQ 循环心跳（compose 健康检查锚定 /tmp/yuxi_worker_heartbeat，200s 容忍）
         cron(worker_heartbeat, minute=set(range(0, 60))),
         cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5))),
+        cron(reconcile_dsh_usage, minute=set(range(0, 60))),
         cron(dispatch_pending_agent_runs, minute=set(range(0, 60))),
         cron(recover_stale_scientific_pdf_ingests, minute=set(range(0, 60, 5))),
         # 文献域阅读渲染：孤儿 RUNNING 回收 + 滞留 PENDING 补偿入列（ADR-0010 决议 7）

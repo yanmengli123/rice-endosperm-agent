@@ -255,6 +255,27 @@ class UsageLedger(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
 
 
+class DshModelCall(Base):
+    """Durable per-attempt reservations and provider usage, linked to a frozen run."""
+
+    __tablename__ = "dsh_model_calls"
+    id = Column(String(64), primary_key=True)
+    run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)
+    execution_id = Column(String(64), nullable=False)
+    status = Column(String(24), nullable=False, default="reserved")
+    reserved_tokens = Column(BigInteger, nullable=False)
+    input_tokens = Column(BigInteger, nullable=False, default=0)
+    output_tokens = Column(BigInteger, nullable=False, default=0)
+    cache_read_tokens = Column(BigInteger, nullable=False, default=0)
+    total_tokens = Column(BigInteger, nullable=True)
+    estimated = Column(Boolean, nullable=False, default=False)
+    request_payload = Column(JSON, nullable=False)
+    error_type = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class User(Base):
     """用户模型"""
 

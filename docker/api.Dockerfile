@@ -6,6 +6,15 @@ COPY --from=node:24-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=node:24-slim /usr/local/include /usr/local/include
 COPY --from=node:24-slim /usr/local/share /usr/local/share
 
+# DSH is installed once at build time; npm ci verifies the committed integrity lock.
+# The Yuxi profile does not mount any optional native database/shell plugins.
+COPY docker/dsh-runtime/package*.json /opt/yuxi-dsh/
+RUN cd /opt/yuxi-dsh && npm ci --ignore-scripts --no-audit --no-fund \
+    && node -e "require('node-addon-require-builtin')" \
+    && test "$(node_modules/.bin/dsh --version)" = "0.2.1-alpha.2" \
+    && npm sbom --sbom-format=cyclonedx > runtime.sbom.cdx.json
+ENV PATH="/opt/yuxi-dsh/node_modules/.bin:${PATH}"
+
 # Feishu/Lark 官方 OpenAPI MCP（内置 "feishu"）：版本钉死 + 全局安装进镜像，
 # 运行期零 npm 拉取（冷启动快、不受包镜像网络抖动影响）。--ignore-scripts
 # 跳过 keytar 的 node-gyp 原生编译（slim 镜像无编译链且无 libsecret）——应用

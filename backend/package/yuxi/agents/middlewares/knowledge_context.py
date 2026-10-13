@@ -419,40 +419,45 @@ def _sanitize_messages(messages, *, contract: dict | None = None):
     return sanitized if changed else messages
 
 
+def prepare_governed_input(context, system_message, messages, tools):
+    """Shared authoritative context preparation for LangGraph and DSH."""
+    raw_scope = getattr(context, "_effective_knowledge_scope", None)
+    scope = raw_scope if isinstance(raw_scope, dict) else {}
+    contract = getattr(context, "_knowledge_contract", None)
+    raw_plan = getattr(context, "_turn_execution_plan", None)
+    plan = TurnExecutionPlan.model_validate(raw_plan) if isinstance(raw_plan, dict) else None
+    if plan is not None:
+        system_message = append_to_system_message(system_message, _turn_plan_prompt(plan))
+    mention_directive = _mention_directive_prompt(context)
+    if mention_directive:
+        system_message = append_to_system_message(system_message, mention_directive)
+    if isinstance(raw_scope, dict) and (
+        plan is None
+        or any(
+            source in plan.source.allowed_sources
+            for source in (SourceClass.CANONICAL_RECORD, SourceClass.LOCAL_DOCUMENT, SourceClass.KNOWLEDGE_GRAPH)
+        )
+    ):
+        system_message = append_to_system_message(system_message, _authoritative_scope_prompt(scope))
+    if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
+        limit = int((scope.get("retrieval_policy") or {}).get("narrative_evidence_limit") or 10)
+        system_message = append_to_system_message(
+            system_message, build_answer_context(contract, narrative_evidence_limit=limit)
+        )
+    messages = _sanitize_messages(messages, contract=contract)
+    tools = filter_tools_by_turn_plan(list(tools or []), plan) if plan is not None else list(tools or [])
+    if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
+        tools = [tool for tool in tools if getattr(tool, "name", "") not in _KNOWLEDGE_SOURCE_TOOLS]
+    return system_message, messages, tools
+
+
 class KnowledgeContextMiddleware(AgentMiddleware):
     """注入本 Run 权威 Scope/Contract，并隔离历史运行状态污染。"""
 
     def _prepare_request(self, request: ModelRequest) -> ModelRequest:
-        context = request.runtime.context
-        scope = getattr(context, "_effective_knowledge_scope", None)
-        contract = getattr(context, "_knowledge_contract", None)
-        raw_plan = getattr(context, "_turn_execution_plan", None)
-        plan = TurnExecutionPlan.model_validate(raw_plan) if isinstance(raw_plan, dict) else None
-        system_message = request.system_message
-        if plan is not None:
-            system_message = append_to_system_message(system_message, _turn_plan_prompt(plan))
-        mention_directive = _mention_directive_prompt(context)
-        if mention_directive:
-            system_message = append_to_system_message(system_message, mention_directive)
-        if isinstance(scope, dict) and (
-            plan is None
-            or SourceClass.CANONICAL_RECORD in plan.source.allowed_sources
-            or SourceClass.LOCAL_DOCUMENT in plan.source.allowed_sources
-            or SourceClass.KNOWLEDGE_GRAPH in plan.source.allowed_sources
-        ):
-            system_message = append_to_system_message(system_message, _authoritative_scope_prompt(scope))
-        if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
-            limit = int((scope.get("retrieval_policy") or {}).get("narrative_evidence_limit") or 10)
-            system_message = append_to_system_message(
-                system_message,
-                build_answer_context(contract, narrative_evidence_limit=limit),
-            )
-        messages = _sanitize_messages(request.messages, contract=contract)
-        tools = list(request.tools or [])
-        if plan is not None:
-            tools = filter_tools_by_turn_plan(tools, plan)
-        if isinstance(contract, dict) and contract.get("status") != "SKIPPED":
-            tools = [tool for tool in tools if getattr(tool, "name", "") not in _KNOWLEDGE_SOURCE_TOOLS]
+        system_message, messages, tools = prepare_governed_input(
+            request.runtime.context, request.system_message, request.messages, request.tools
+        )
         return request.override(system_message=system_message, messages=messages, tools=tools)
 
     def wrap_model_call(

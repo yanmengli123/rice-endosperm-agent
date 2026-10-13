@@ -1,0 +1,6 @@
+{
+  "name": "yuxi-dsh-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {"@deepseek-ai/dsh": "0.2.1-alpha.2"}
+}

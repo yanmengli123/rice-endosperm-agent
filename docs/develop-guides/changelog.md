@@ -1,5 +1,6 @@
 # 版本变更记录
 
+
 - `/literature` 本文阅读助手交互增强：原文/译文/笔记选区解释、翻译、总结，以及导读/方法/结果/局限指令自动进入原生本文会话；提问/图表/截图保留草稿待确认。鉴权 PDF.js 文本层、翻页缩放与框选/本页截图；回答引用经服务端定位接口回跳同屏 PDF。不覆盖用户编辑过的草稿；版本变化 409、非本文上下文 422、跨分页会话恢复及晚返回切换保护。截图/译文/笔记只作为用户输入，不授予证据资格；普通对话默认不启用阅读桥接。不宣称豆包私有行为完全等价。
 
   前端加固：自动发送以服务端 run_id 确认接收，不以输入框清空冒充成功，且不等待 SSE 完整回答；保留拒绝后的草稿和普通问答原生发送路径。会话/卡片/工作流固定确认对象并隔离账号、租户、晚返回与卸载，分页清空明确仅已加载范围。通用弹窗程序性关闭能结束等待；ARIA 页签等待编辑确认、支持方向语义并跳过禁用项。运行诊断只保存分类元数据，不保留原始异常文本/堆栈，Promise 拒绝统一处理，提示限频且 HMR 回收监听器。新增 5 个离线 spec；全量 48 个 spec 脚本退出成功，其中 47 个执行断言、1 个可选真实 PDF 样本脚本跳过；定向 ESLint 与生产构建通过。当前 Chrome 未连接，浏览器登录态与真实供应商验收不计为通过；详见 docs/vibe/2026-10-12-literature-frontend-hardening.md（本地忽略的验收笔记）。
@@ -9,6 +10,10 @@
 同一版本的多次功能更新时，应以功能为单位进行更新，比如之前添加了 A 功能的更新，在后续的更新中修复了因 A 功能引入的 bug，那么这个修复说明应该和 A 功能描述放在一起，而不是新增一条修复记录，功能更新同理。
 
 ## 未发布
+
+
+
+- 聊天基座 DSH（ADR-0011）企业化加固，默认关闭切流：创建时冻结 runtime/版本/profile/预算，resume 继承；每次执行独立会话及哈希目录，白名单环境与进程组回收。采用空 bundles 上的完整工具白名单，MCP 成功结果才产生中断，按官方 toolCallId 配对并强制 completed 终态。共享知识上下文准备，PG 正式历史保留角色/图片，续接带回原问题与问题 ID 校验。内部网关保留 reasoning、工具 index、真实输入/输出/缓存 usage 与模型参数；PG 行锁原子预算预留、活动执行租约、调用记录（迁移 0113）、失败/取消幂等结算和孤儿对账；超预算或缺失 usage 不报告成功。公共镜像固定 npm integrity 锁与 DSH 版本并生成 SBOM，新增无付费真实运行时 CI 门禁。专项 48 项、既有编排回归 100 项及实际 DSH/PG 链路验收通过；生产 BYOK、真实供应商取消与签名安装仍需部署验收。桌面 Conversation/AgentRun wire 契约保持兼容。
 
 - `/literature` 文献清单多格式导入与文献计量分析（零新依赖、不动 `/papers/import/bib`、不动 `make_rid`）：新增 `POST /api/literature/papers/import/references`（202）接收四家官网导出清单——PubMed `.nbib`（FAU/JT 优先、AID 剥 `[doi]`、MeSH 取主词、4 空格续行）、WoS Tab-delimited `.txt`（FN/VR 头、AF 续行多作者、C1 机构剥方括号、WC/SC 落库、CR 引用边）、RIS、知网/万方 EndNote tagged（重复标签累积、全角分号关键词、`%U` filename 提取 CNKI 稳定键、`%R` DOI）。编码显式探测（BOM 4 字节优先 → UTF-8 严格 → GB18030 严格，拒绝即 422，杜绝 `errors="replace"` 静默乱码）；格式嗅探按内容特征 + `format` 参数覆盖；身份三查链（DOI→`doi-*` 与 bib 字节一致 / PMID 列级查重 / `nd-md5(title|year)` 指纹跨格式命中同条 / CNKI 键走 `make_rid` 现成能力），去重预取批量执行，导入报告含 format_detected/encoding/no_identity。迁移 0110：`literature_papers` 新增 `pmid`/`language`/`affiliations_json` 三列与 tenant+pmid 索引。计量只读端点 `GET /metrics/bibliometrics`（总览/年度趋势补零/期刊 TopN 复用期刊名归一/机构与国家）与 `GET /metrics/networks?type=keyword|author`（共现网络，节点频次 TopN、边 min_pair 过滤、2000 边上限），快照口径对齐 topics：`paper_visibility` + 排除 `is_reference` 参考条目 + 20000 篇安全预算失败关闭。前端：ImportPanel bib tab 扩为「文献清单」（格式下拉/扩展 accept/官网导出路径指引/报告卡）、顶栏新增「计量分析」视图（ECharts：趋势堆叠柱/期刊机构条形/类型语言环形/共现力导向网络，option 构建抽至 `utils/literature/bibliometricCharts.js` 纯函数并裸 node spec 锁定）。单测 21+21 例（四格式真实样本 fixtures 兼作字段映射回归锁）、RID 兼容回归 27 例全绿、web 生产构建通过。需求与验收见 docs/vibe/2026-10-12-literature-reference-import.md（万方/知网真实样本校准为遗留项）。
 

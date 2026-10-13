@@ -1,0 +1,27 @@
+name: Pinned DSH runtime contract
+on:
+  pull_request:
+    paths: ['backend/package/yuxi/agents/buildin/dsh/**', 'backend/scripts/check_dsh_contract.py', 'docker/dsh-runtime/**', '.github/workflows/dsh-contract.yml']
+  push:
+    branches: [main]
+    paths: ['backend/package/yuxi/agents/buildin/dsh/**', 'backend/scripts/check_dsh_contract.py', 'docker/dsh-runtime/**', '.github/workflows/dsh-contract.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/dsh-runtime/contract.Dockerfile
+          tags: yuxi-dsh-contract:check
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify actual runtime without provider credentials
+        run: docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,mode=1777 --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 1g --cpus 2 yuxi-dsh-contract:check
