@@ -26,6 +26,7 @@ from yuxi.agents.context import BaseContext
 from .events import ASK_USER_TOOL_NAME, DshRunState, map_session_event
 from .gateway_tokens import DEFAULT_TOKEN_TTL_SECONDS, gateway_env_for_run
 from .rpc import DshProcessError, DshStdioClient, initialize_handshake
+from .stream import read_token_deltas, stop_token_stream, token_delta_event, token_stream_enabled
 from .execution import begin_execution, finish_execution
 from .runtime import DSH_VERSION, PROFILE_NAME, positive_setting
 
@@ -326,6 +327,7 @@ class DshAgent(BaseAgent):
         home = None
         client = None
         wait_task = None
+        delta_task = None
         completed = False
         try:
             home = execution_home(str(context.uid), str(context.thread_id), run_id, execution_id)
@@ -375,19 +377,29 @@ class DshAgent(BaseAgent):
                 max_tokens=runtime["max_output_tokens"],
             )
             await client.request("session/prompt", {"sessionId": state.session_id, "contentBlocks": blocks})
+            delta_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=4096)
+            if token_stream_enabled():
+                delta_task = asyncio.create_task(read_token_deltas(run_id, delta_queue))
             wait_task = asyncio.create_task(
                 client.request("session/wait", {"sessionId": state.session_id}, timeout=settings["turn_timeout"])
             )
-            while not wait_task.done() or not notifications.empty():
+            while not wait_task.done() or not notifications.empty() or not delta_queue.empty():
                 try:
                     method, params = await asyncio.wait_for(notifications.get(), timeout=0.2)
                 except TimeoutError:
-                    continue
-                if method == "session.event" and params.get("sessionId") == state.session_id:
-                    for item in map_session_event(params.get("event") or {}, state):
-                        yield item
-                elif method not in {"session.status"}:
-                    raise DshProcessError(f"Unsupported DSH notification: {method}")
+                    method = None
+                if method is not None:
+                    if method == "session.event" and params.get("sessionId") == state.session_id:
+                        for item in map_session_event(params.get("event") or {}, state):
+                            yield item
+                    elif method not in {"session.status"}:
+                        raise DshProcessError(f"Unsupported DSH notification: {method}")
+                while True:
+                    try:
+                        delta_text = delta_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    yield token_delta_event(delta_text, thread_id=str(context.thread_id))
             await wait_task
             if state.terminal_reason != "completed":
                 raise DshProcessError("DSH exited without a successful turn/end")
@@ -399,6 +411,7 @@ class DshAgent(BaseAgent):
                 if not wait_task.done():
                     wait_task.cancel()
                 await asyncio.gather(wait_task, return_exceptions=True)
+            await stop_token_stream(run_id, delta_task)
             try:
                 if client is not None:
                     await client.close()

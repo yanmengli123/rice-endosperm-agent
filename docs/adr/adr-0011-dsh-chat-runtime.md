@@ -107,3 +107,50 @@ uv run --no-sync --group test pytest test/e2e/test_dsh_runtime_acceptance.py tes
 真实进程验收使用本地模拟 provider，不调用收费模型；覆盖图片、工具清单、正常终态、
 三轮恢复、reasoning、PG 并发预算、租约撤销、失败结算及正式历史隔离。
 生产还需 BYOK 撤销、真实供应商 usage、真实网络取消和干净 Windows 安装/升级验收。
+
+## 附录（2026-10-13 评审补充）
+
+### A.1 `ask_user` 的语义替换：立即升级 + 平台接管中断
+
+`mcp_bridge.py` 的 `yuxi_ask_user` **不等待用户回答**：参数校验通过即返回
+`ESCALATION_*` 升级标记，DSH 侧本轮随即 `turn/end completed`；问题本体由
+`events.py` 从工具调用事件读取，worker 置 `pending_interrupt` 并抑制后续正文，
+chat_service 以 LangGraph 同形的 `__interrupt__` → `ask_user_question_required`
+下发，用户答复经 `stream_resume_with_state` 续跑。
+
+这是**有意的语义替换**：真正的长挂起交互工具会撞上 `toolCallTimeoutMs: 60000`，
+且把用户等待时间计入 DSH 进程生命周期与执行租约。替换后 dsh 视角该工具是
+"提交即受理"，交互状态机完全归平台。代价：澄清期间 DSH 会话已结束（而非暂停），
+resume 是新执行而非原会话续帧——执行目录、预算、租约均按新轮次管理。
+若未来 SDK 支持长挂起工具或进程保活，需重新评估是否回迁为真实交互工具。
+
+### A.2 引用守卫：结构性豁免与硬前置条件
+
+本版 DSH 路径**没有**运行 `citation_guard` / `validate_markdown_quality` /
+`source_guard` 的确定性等价物，这是结构性论证而非疏漏：
+
+- `yuxi-qa` profile 在空 bundles 上构建，**没有任何检索/文件/浏览器工具**；
+  知识由 `prepare_governed_input`（两运行时共用）从 PG 注入上下文，
+  模型在结构上无从编造"引用编号"——它只被允许复述平台给定的编号。
+- 人设后缀"严禁编造引用编号"是软约束，仅作纵深第二层，**不承担守卫职责**。
+
+**硬前置条件（红线级）**：任何为 `yuxi-qa` 增加检索/知识/文件类工具的改动，
+必须**先**在该工具出口接入与 LangGraph 路径同构的确定性引用守卫与质量门禁
+（复用 `validate_markdown_quality` 口径），再合并工具本身。否则 DSH 路径相对
+LangGraph 路径成为"无守卫旁路"。此条件应作为 profile patch 评审的固定检查项。
+
+### A.3 token 流式（PoC 决策）：网关旁路 tap，官方通道保持整段
+
+ADR 主体记录了"SDK 无 token 级通知，桌面按完整模型消息到达，不伪造流"。
+补充 PoC 决策：**观感层流式、治理层不动**——
+
+- 内部 LLM 网关（api 进程）在流式补全经过时，把正文 delta 写入按 run 隔离的
+  Redis Stream（`yuxi:dsh:tokens:{run_id}`，MAXLEN 8192 + TTL 900s）；
+  worker 轮次循环并发读取并映射为**既有** `stream_event(message_delta)` 接缝
+  （`dsh/stream.py`）。桌面 `yuxi.rs` 已按 message_id 累积 message_delta、
+  最终文本以 run 结果为准——**AgentRun wire 协议与桌面零改动**。
+- 边界：只转发正文（reasoning 不外发，工具参数流不展示）；`YUXI_DSH_TOKEN_STREAM`
+  关闭即整段模式；Redis 任何故障静默降级——观感通道**绝不允许**让受治轮次失败，
+  权威回答/用量仍只来自 PG 与 `assistant/message` 事件。
+- 不做的事：不给 DSH 进程接入伪造 token 流（SDK 契约不变）；不做跨 run 的
+  delta 持久化（run 结束即删 key）；不把 delta 计入任何账本。
