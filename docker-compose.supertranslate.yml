@@ -27,7 +27,7 @@ services:
     mem_limit: 2g
     networks: [app-network, pdf-network]
     healthcheck:
-      test: [CMD, arq, yuxi.literature.pdf_worker.WorkerSettings, --check]
+      test: [CMD, python, -c, "import os,redis; r=redis.Redis.from_url(os.environ['REDIS_URL'],socket_connect_timeout=3,socket_timeout=3); raise SystemExit(0 if r.exists('literature:pdf-worker:health') else 1)"]
       interval: 30s
       timeout: 10s
       start_period: 60s
@@ -39,9 +39,14 @@ services:
     build:
       context: .
       dockerfile: docker/supertranslate/Dockerfile
-      additional_contexts:
-        supertranslate: ${SUPER_TRANSLATE_SOURCE:-../super_translate-main}
-    image: yuxi-supertranslate:1.0.0
+      args:
+        # 源内容摘要必须与 docker/supertranslate/SOURCE.lock 一致；仅开发期置 1 绕过
+        SUPER_TRANSLATE_ALLOW_UNPINNED: ${SUPER_TRANSLATE_ALLOW_UNPINNED:-0}
+        # 弱网/国内可复现构建（默认官方源；uv.lock 带哈希，镜像源不降低完整性）
+        PIP_INDEX_URL: ${SUPER_TRANSLATE_PIP_INDEX_URL:-}
+        UV_INDEX_URL: ${SUPER_TRANSLATE_UV_INDEX_URL:-}
+        APT_MIRROR: ${SUPER_TRANSLATE_APT_MIRROR:-}
+    image: yuxi-supertranslate:${SUPER_TRANSLATE_IMAGE_TAG:-1.0.0}
     container_name: yuxi-supertranslate
     restart: unless-stopped
     environment:

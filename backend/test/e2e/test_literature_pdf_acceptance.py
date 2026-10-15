@@ -1,4 +1,4 @@
-"""Opt-in live acceptance. One synthetic page uses the actor's configured real model."""
+"""Opt-in live acceptance. Two synthetic pages use the actor's configured real model."""
 
 import asyncio
 import hashlib
@@ -52,6 +52,11 @@ async def test_live_pdf_translation_governed_and_authenticated():
         page.insert_text((72, 120), "Abstract", fontsize=12)
         page.insert_text((72, 150), "Rice endosperm stores starch.", fontsize=11)
         page.insert_text((72, 170), "Amylose content was measured in 3 biological replicates.", fontsize=11)
+        page = document.new_page()
+        page.insert_text((72, 80), "Synthetic quality fixture", fontsize=16)
+        page.insert_text((72, 120), "OsbZIP58 and LOC_Os07g00110 were retained as gene identifiers.", fontsize=10)
+        page.insert_text((72, 150), "The treatment did not significantly increase amylose content.", fontsize=10)
+        page.insert_text((72, 180), "The synthetic experiment used n=3 and p=0.08.", fontsize=10)
         source = document.tobytes()
     digest = hashlib.sha256(source).hexdigest()
     async with pg_manager.get_async_session_context() as db:
@@ -159,12 +164,16 @@ async def test_live_pdf_translation_governed_and_authenticated():
                 assert hashlib.sha256(response.content).hexdigest() == artifact["digest"]
                 outputs[kind] = response.content
             with fitz.open(stream=outputs["pdf_zh"], filetype="pdf") as translated:
-                assert translated.page_count == 1
-                text = translated[0].get_text()
+                assert translated.page_count == 2
+                text = "".join(p.get_text() for p in translated)
                 assert any("\u4e00" <= c <= "\u9fff" for c in text) and "3" in text
+                compact = "".join(text.split())
+                assert "OsbZIP58" in compact and "LOC_Os07g00110" in compact
+                assert any(word in translated[1].get_text() for word in ("不", "未", "没有"))
             with fitz.open(stream=outputs["pdf_dual"], filetype="pdf") as dual:
-                assert dual.page_count == 2
+                assert dual.page_count == 4
             assert json.loads(outputs["qa"])["status"] == "passed"
+            assert json.loads(outputs["qa"])["checks"]["critical_tokens"] == "passed"
             async with httpx.AsyncClient(base_url="http://127.0.0.1:5050", trust_env=False) as anonymous:
                 denied = await anonymous.get(
                     "/api/literature/assets", params={"uri": bundle["outputs"]["pdf_zh"]["uri"]}
@@ -187,11 +196,109 @@ async def test_live_pdf_translation_governed_and_authenticated():
                 await asyncio.sleep(1)
             assert job.execution_json.get("cleaned"), "Remote PDF/cache/QA cleanup did not complete"
     finally:
+        if "job_id" in locals():
+            from yuxi.literature.pdf_translation import cancel_pdf_translation
+
+            await cancel_pdf_translation(tenant, tag, user.uid, job_id)
         async with pg_manager.get_async_session_context() as db:
             key = (await db.execute(select(APIKey).where(APIKey.name == tag))).scalar_one()
             key.is_enabled = False
             paper = await db.get(LiteraturePaper, paper_id)
             paper.trashed_at = utc_now()
-            paper.trash_reason = "PDF 翻译验收合成样本；保留任务与用量审计"
+            paper.trashed_reason = "PDF 翻译验收合成样本；保留任务与用量审计"
             await db.commit()
         await pg_manager.async_engine.dispose()
+
+
+async def test_existing_paid_pdf_outputs_and_ledger_without_model_respending():
+    """Revalidate a completed synthetic fixture after interrupted test output."""
+    job_id = int(os.getenv("YUXI_PDF_E2E_EXISTING_JOB", "0"))
+    if not job_id:
+        pytest.skip("Existing paid synthetic fixture verification is opt-in")
+    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.storage.postgres.models_business import UsageLedger
+
+    pg_manager.initialize()
+    plaintext = "yxkey_" + secrets.token_hex(24)
+    name = "pdf-revalidation-" + secrets.token_hex(6)
+    async with pg_manager.get_async_session_context() as db:
+        user = (await db.execute(select(User).where(User.role == "superadmin").order_by(User.id))).scalars().first()
+        tenant = await resolve_tenant_id(db, user.uid)
+        job = await db.get(LiteratureTranslationJob, job_id)
+        assert job and job.status == "SUCCEEDED" and job.requested_by == user.uid
+        paper = await db.get(LiteraturePaper, job.paper_id)
+        assert paper.rid.startswith("pdf_acceptance_") and "合成样本" in paper.title
+        original_trash = (paper.trashed_at, paper.trashed_reason)
+        paper.trashed_at = None
+        db.add(
+            APIKey(
+                key_hash=hashlib.sha256(plaintext.encode()).hexdigest(),
+                key_prefix=plaintext[:12],
+                name=name,
+                user_id=user.id,
+                department_id=user.department_id,
+                purpose="external_agent",
+                scopes=["literature:read"],
+                created_by=name,
+                tenant_id=tenant,
+                is_enabled=True,
+                expires_at=utc_now_naive() + timedelta(minutes=15),
+            )
+        )
+        before_calls = (
+            (await db.execute(select(LiteraturePdfModelCall).where(LiteraturePdfModelCall.job_id == job_id)))
+            .scalars()
+            .all()
+        )
+        assert before_calls and all(call.status == "completed" for call in before_calls)
+        expected_tokens = sum(call.input_tokens + call.output_tokens for call in before_calls)
+        ledger = (await db.execute(select(UsageLedger).where(UsageLedger.run_id == job.llm_run_id))).scalar_one()
+        assert ledger.total_tokens == expected_tokens and not ledger.estimated
+        await db.commit()
+    try:
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:5050",
+            trust_env=False,
+            timeout=60,
+            headers={"Authorization": f"Bearer {plaintext}"},
+        ) as client:
+            response = await client.get(f"/api/literature/papers/{paper.rid}/pdf-translation")
+            assert response.status_code == 200, response.text
+            bundle = response.json()
+            assert bundle["ready"] and bundle["status"] == "SUCCEEDED"
+            outputs = {}
+            for kind, artifact in bundle["outputs"].items():
+                response = await client.get("/api/literature/assets", params={"uri": artifact["uri"]})
+                assert response.status_code == 200
+                assert hashlib.sha256(response.content).hexdigest() == artifact["digest"]
+                outputs[kind] = response.content
+            with fitz.open(stream=outputs["pdf_zh"], filetype="pdf") as document:
+                assert len(document) == 2
+                text = "".join(page.get_text() for page in document)
+                compact = "".join(text.split())
+                assert "OsbZIP58" in compact and "LOC_Os07g00110" in compact and "0.08" in compact
+                assert any(word in document[1].get_text() for word in ("不", "未", "没有"))
+            with fitz.open(stream=outputs["pdf_dual"], filetype="pdf") as document:
+                assert len(document) == 4
+            qa = json.loads(outputs["qa"])
+            assert qa["status"] == "passed" and qa["checks"]["critical_tokens"] == "passed"
+            assert qa["checks"]["scientific_semantics"] == "requires_human_review"
+            async with httpx.AsyncClient(base_url="http://127.0.0.1:5050", trust_env=False, timeout=60) as anonymous:
+                response = await anonymous.get(
+                    "/api/literature/assets", params={"uri": bundle["outputs"]["pdf_zh"]["uri"]}
+                )
+                assert response.status_code in (401, 403)
+        async with pg_manager.get_async_session_context() as db:
+            assert (await db.get(LiteratureTranslationJob, job_id)).execution_json["cleaned"]
+            after_calls = (
+                (await db.execute(select(LiteraturePdfModelCall).where(LiteraturePdfModelCall.job_id == job_id)))
+                .scalars()
+                .all()
+            )
+            assert len(after_calls) == len(before_calls)
+    finally:
+        async with pg_manager.get_async_session_context() as db:
+            (await db.execute(select(APIKey).where(APIKey.name == name))).scalar_one().is_enabled = False
+            paper = await db.get(LiteraturePaper, paper.id)
+            paper.trashed_at, paper.trashed_reason = original_trash
+            await db.commit()

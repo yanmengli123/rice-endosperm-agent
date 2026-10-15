@@ -1,6 +1,8 @@
+import os
+
 from dotenv import load_dotenv
 
-load_dotenv(".env", override=True)
+load_dotenv(os.getenv("YUXI_ENV_FILE", ".env"), override=False)
 
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 

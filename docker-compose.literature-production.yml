@@ -1,0 +1,64 @@
+# Apply after supertranslate; provisioning is a separate administrator command.
+services:
+  literature-migrate:
+    image: yuxi-api:${YUXI_VERSION:-0.7.1}
+    profiles: [operations]
+    working_dir: /app
+    env_file: [.env]
+    environment:
+      POSTGRES_URL: ${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yuxi}}
+      YUXI_DB_SKIP_MIGRATIONS: "false"
+    volumes:
+      - ./backend/package:/app/package:ro
+      - ./backend/scripts:/app/scripts:ro
+      - ./docker/volumes/yuxi:/app/saves
+      - ./.env:/app/.env:ro
+    networks: [app-network]
+    command: uv run --no-sync --no-dev python -m yuxi.storage.postgres.migrate
+  api:
+    command: uv run --no-sync --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
+    healthcheck:
+      test: [CMD, curl, --fail, --max-time, '8', http://localhost:5050/api/system/health]
+      timeout: 10s
+    env_file: !override [.env.api-runtime]
+    environment:
+      POSTGRES_URL: ${YUXI_API_RUNTIME_URL:?Provision restricted API login first}
+      YUXI_DB_SKIP_MIGRATIONS: "true"
+      YUXI_ENV_FILE: /app/.env
+    volumes:
+      - ./.env.api-runtime:/app/.env:ro
+  pdf-worker:
+    env_file: !override [.env.pdf-runtime]
+    environment:
+      POSTGRES_URL: ${YUXI_PDF_RUNTIME_URL:?Provision restricted PDF login first}
+      YUXI_DB_SKIP_MIGRATIONS: "true"
+      YUXI_ENV_FILE: /app/.env
+    volumes:
+      - ./.env.pdf-runtime:/app/.env:ro
+  pdf-maintenance:
+    image: yuxi-api:${YUXI_VERSION:-0.7.1}
+    container_name: literature-pdf-maintenance
+    restart: unless-stopped
+    working_dir: /app
+    env_file: [.env.pdf-runtime]
+    environment:
+      POSTGRES_URL: ${YUXI_PDF_RUNTIME_URL:?Provision restricted PDF login first}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MINIO_URI: ${MINIO_URI:-http://minio:9000}
+      SUPER_TRANSLATE_URL: http://supertranslate:8000
+      SUPER_TRANSLATE_TOKEN: ${SUPER_TRANSLATE_TOKEN:?Configure shared service identity}
+      YUXI_DB_SKIP_MIGRATIONS: "true"
+    volumes:
+      - ./backend/package:/app/package:ro
+      - ./docker/volumes/yuxi:/app/saves
+      - ./.env.pdf-runtime:/app/.env:ro
+    command: uv run --no-sync --no-dev arq yuxi.literature.pdf_worker.MaintenanceSettings
+    networks: [app-network, pdf-network]
+    mem_limit: 1g
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import os,redis; r=redis.Redis.from_url(os.environ['REDIS_URL'],socket_connect_timeout=3,socket_timeout=3); raise SystemExit(0 if r.exists('literature:pdf-maintenance:health') else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s

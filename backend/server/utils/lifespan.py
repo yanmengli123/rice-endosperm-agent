@@ -195,7 +195,8 @@ async def lifespan(app: FastAPI):
     # PG checkpoint 表，消除「lifespan 建 PG 表、runtime 用 sqlite」的配置分叉。
     if os.getenv("LANGGRAPH_CHECKPOINTER_BACKEND", "sqlite").strip().lower() == "postgres":
         checkpointer = AsyncPostgresSaver(pg_manager.langgraph_pool)
-        await checkpointer.setup()
+        if os.getenv("YUXI_DB_SKIP_MIGRATIONS", "").lower() != "true":
+            await checkpointer.setup()
         logger.info("LangGraph checkpointer backend=postgres：checkpoint 表已验证/创建")
     else:
         logger.info("LangGraph checkpointer backend=sqlite：跳过 Postgres checkpoint 表初始化")

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import signal
 import re
 import shutil
 import sys
@@ -19,6 +20,12 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+
+try:
+    import contract_check
+except ModuleNotFoundError:  # 以文件方式加载 bridge（镜像内测试）时补齐同目录搜索
+    sys.path.insert(0, str(Path(__file__).parent))
+    import contract_check
 
 ROOT = Path(os.getenv("PDF_DATA_DIR", "/data")).resolve()
 TOKEN = os.environ.get("SUPER_TRANSLATE_TOKEN", "")
@@ -72,17 +79,37 @@ def fingerprints():
     for path in sorted(engine.glob("*.py")):
         digest.update(path.name.encode())
         digest.update(path.read_bytes())
-    for path in [Path(__file__), Path(__file__).with_name("engine.py"), Path("/opt/source/upstream/app/services/layout_fix.py")]:
+    for path in [*sorted(Path(__file__).parent.glob("*.py")), Path("/opt/source/upstream/app/services/layout_fix.py")]:
         digest.update(path.read_bytes())
     corpus = hashlib.sha256()
     for path in sorted([*engine.glob("*.json"), *engine.glob("corpora/*.json")]):
         corpus.update(path.name.encode())
         corpus.update(path.read_bytes())
     fonts = hashlib.sha256()
-    for path in sorted(Path("/usr/share/fonts/opentype/noto").glob("*.ttc")):
+    for path in sorted([*Path("/usr/share/fonts/opentype/noto").glob("*.ttc"),
+                        *Path(os.getenv("PAPER_CHINA_FONT_CACHE_DIR", "/opt/yuxi-fonts")).glob("*.ttf")]):
         fonts.update(path.name.encode())
         fonts.update(path.read_bytes())
     return {"engine_revision": digest.hexdigest(), "corpus_digest": corpus.hexdigest(), "font_digest": fonts.hexdigest()}
+
+
+async def stop_engine(process):
+    # Every engine starts a new session; OCR helpers inherit this process group.
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        # Helpers may survive even after their parent has exited.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    await process.wait()
 
 
 async def execute(job_id):
@@ -102,7 +129,7 @@ async def execute(job_id):
                 sys.executable, "/opt/integration/engine.py", str(home),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True,
-                env={key: os.environ[key] for key in ("PATH", "PYTHONPATH", "PDF_GATEWAY_URL", "HOME", "LANG", "NO_PROXY", "no_proxy") if key in os.environ},
+                env={key: os.environ[key] for key in ("PATH", "PYTHONPATH", "PDF_GATEWAY_URL", "HOME", "LANG", "NO_PROXY", "no_proxy", "PAPER_CHINA_FONT_CACHE_DIR") if key in os.environ},
             )
             PROCESSES[job_id] = process
             process.stdin.write(CIPHER.decrypt(job["task_token"].encode()))
@@ -120,8 +147,7 @@ async def execute(job_id):
             write_job(job_id, current)
         except asyncio.TimeoutError:
             if job_id in PROCESSES and PROCESSES[job_id].returncode is None:
-                PROCESSES[job_id].kill()
-                await PROCESSES[job_id].wait()
+                await stop_engine(PROCESSES[job_id])
             current = read_job(job_id)
             if current["status"] != "cancelled":
                 current.update(status="failed", error_code="PDF_TOTAL_TIMEOUT", error="翻译和 QA 超过总时间预算")
@@ -143,6 +169,11 @@ def schedule(job_id):
 
 @asynccontextmanager
 async def lifespan(_app):
+    # 上游契约在启动期再核一次（构建期已挡一道）：镜像被篡改或漂移时拒绝服务
+    report = contract_check.verify()
+    if not report["ok"]:
+        broken = ", ".join(item["name"] for item in report["checks"] if not item["ok"])
+        raise RuntimeError(f"Upstream engine contract violated: {broken}")
     ROOT.mkdir(parents=True, exist_ok=True)
     for path in ROOT.glob("*/job.json"):
         job = json.loads(path.read_text())
@@ -152,10 +183,7 @@ async def lifespan(_app):
         elif job["status"] == "queued":
             schedule(path.parent.name)
     yield
-    for process in list(PROCESSES.values()):
-        if process.returncode is None:
-            process.terminate()
-    await asyncio.gather(*(p.wait() for p in list(PROCESSES.values())), return_exceptions=True)
+    await asyncio.gather(*(stop_engine(p) for p in list(PROCESSES.values())), return_exceptions=True)
     for task in list(TASKS.values()):
         task.cancel()
     await asyncio.gather(*list(TASKS.values()), return_exceptions=True)
@@ -174,7 +202,33 @@ async def authenticate(request: Request, call_next):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "contract": "yuxi-pdf-v1", **fingerprints()}
+    contract_ok = contract_check.verify()["ok"]
+    return {"status": "ok", "contract": "yuxi-pdf-v1", "contract_ok": contract_ok, **fingerprints()}
+
+
+def _source_lock() -> dict:
+    """源锁定态：优先用构建期核验写下的指纹；回落锁文件时用运行时摘要推导
+    pinned（镜像内上游源不可变，重算即验证），保证 /contract 恒有 pinned 字段。"""
+    for path in (Path("/opt/source/SOURCE.fingerprint"), Path("/opt/integration/SOURCE.lock")):
+        if path.is_file():
+            try:
+                lock = json.loads(path.read_text())
+            except ValueError:
+                continue
+            if lock.get("pinned") is not None:
+                return lock
+            actual = contract_check.source_digest(Path("/opt/source/upstream"))
+            locked = lock.get("source_digest")
+            return {"source_digest": actual, "locked_digest": locked, "pinned": locked == actual}
+    return {}
+
+
+@app.get("/contract")
+async def contract():
+    """契约与源锁定报告：上游符号/签名检查 + 源内容摘要（构建期锁定结果）。"""
+    report = contract_check.verify()
+    payload = {"contract_ok": report["ok"], "checks": report["checks"], "source_lock": _source_lock()}
+    return {**payload, **fingerprints()}
 
 
 class Submission(BaseModel):
@@ -271,12 +325,7 @@ async def cancel(job_id: str):
         write_job(job_id, job)
         process = PROCESSES.get(job_id)
         if process and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            await stop_engine(process)
     return public_job(job_id)
 
 

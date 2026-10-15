@@ -1,6 +1,6 @@
 """Frozen input identity and current-output predicates for derived literature."""
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, select, text, update
 
 from yuxi.storage.postgres.models_knowledge import LiteraturePaper
 
@@ -15,7 +15,8 @@ def current_job(job_model, paper=LiteraturePaper):
         job_model.source_revision_id == func.coalesce(paper.source_revision_id, ""),
         job_model.reading_version == paper.reading_version,
         job_model.generator_version.in_((version, "paperagent-import-v4", "supertranslate-native-v1"))
-        if version == TRANSLATE_VERSION else job_model.generator_version.in_((version, "paperagent-import-v4")),
+        if version == TRANSLATE_VERSION
+        else job_model.generator_version.in_((version, "paperagent-import-v4")),
     )
 
 
@@ -29,14 +30,25 @@ def source_matches(job, paper) -> bool:
 
 
 async def require_current_input(session, job):
-    paper = (
-        await session.execute(select(LiteraturePaper).where(LiteraturePaper.id == job.paper_id).with_for_update())
-    ).scalar_one()
+    query = select(LiteraturePaper).where(LiteraturePaper.id == job.paper_id)
+    if getattr(job, "variant_kind", None) == "pdf_zh" and session.get_bind().dialect.name == "postgresql":
+        # SELECT FOR UPDATE needs UPDATE grants in PostgreSQL. The scoped definer
+        # function locks this actor's source without granting source mutation.
+        await session.execute(text("SELECT yuxi_pdf_lock_input(:job)"), {"job": job.id})
+    else:
+        query = query.with_for_update()
+    paper = (await session.execute(query)).scalar_one()
     if job.requested_by and not job.requested_by.startswith("system:"):
         from yuxi.literature.access import build_access
         from yuxi.storage.postgres.models_business import User
 
-        user = (await session.execute(select(User).where(User.uid == job.requested_by))).scalar_one_or_none()
+        user = (
+            await session.execute(
+                select(User.uid, User.role, User.department_id, User.is_disabled, User.is_deleted).where(
+                    User.uid == job.requested_by
+                )
+            )
+        ).first()
         allowed = user is not None and not user.is_disabled and not user.is_deleted
         if allowed:
             from yuxi.services.principal import PrincipalResolutionError, resolve_tenant_id

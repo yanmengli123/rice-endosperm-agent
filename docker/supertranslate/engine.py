@@ -13,6 +13,7 @@ from app.services.layout_fix import fix_translated_layout
 from pdf_zh_translator.ocr import is_scanned_pdf, ocr_pdf_to_searchable
 from pdf_zh_translator.pdf_layout import create_dual_pdf, translate_pdf, verify_translation_issues
 from pdf_zh_translator.translators import CachedTranslator, VendorTranslator
+from scientific_qa import critical_issues
 
 
 class IdempotentVendor(VendorTranslator):
@@ -30,6 +31,7 @@ class ProgressCache(CachedTranslator):
     def __init__(self, vendor, home):
         super().__init__(vendor, home / "translation-cache.jsonl")
         self.home, self.completed = home, 0
+        self.critical_issues = []
 
     def translate_batch(self, texts):
         texts, output, types = list(texts), [], self.block_types
@@ -38,8 +40,10 @@ class ProgressCache(CachedTranslator):
                 if types:
                     self.block_types = types[offset:offset + 8]
                 result = super().translate_batch(texts[offset:offset + 8])
+                for original, translation in zip(texts[offset:offset + 8], result, strict=True):
+                    self.critical_issues.extend(critical_issues(original, translation, self.completed + 1))
+                    self.completed += 1
                 output.extend(result)
-                self.completed += len(result)
                 progress(self.home, f"翻译与排版：已处理 {self.completed} 个文本块", 0.1)
         finally:
             self.block_types = types
@@ -97,14 +101,23 @@ def execute(home, token):
     with fitz.open(translated) as document:
         if document.page_count != count or [[*p.mediabox, p.rotation] for p in document] != geometry:
             raise ValueError("PDF_GEOMETRY_CHANGED")
+    critical = translator.critical_issues
+    # The native engine protects formulas with placeholders before model calls.
+    # Check the final PDF too, after restoration and font/layout processing.
+    with fitz.open(input_pdf) as original, fitz.open(translated) as rendered:
+        for index in range(count):
+            page_issues = critical_issues(original[index].get_text(), rendered[index].get_text(), 0)
+            critical.extend({**issue, "page": index + 1} for issue in page_issues)
     qa = {
-        "status": "passed" if not issues else "failed", "page_count": count,
-        "error_count": sum(i.severity == "error" for i in issues), "warning_count": sum(i.severity != "error" for i in issues),
+        "status": "passed" if not issues and not critical else "failed", "page_count": count,
+        "checks": {"layout": "passed" if not issues else "failed", "critical_tokens": "passed" if not critical else "failed", "scientific_semantics": "requires_human_review"},
+        "error_count": sum(i.severity == "error" for i in issues) + len(critical), "warning_count": sum(i.severity != "error" for i in issues),
+        "engine_warning_count": len(report.warnings),
         "pass_history": history, "warnings": report.warnings,
-        "issues": [{"page": i.page, "code": i.code, "severity": i.severity, "message": i.message} for i in issues],
+        "issues": [{"page": i.page, "code": i.code, "severity": i.severity, "message": i.message} for i in issues] + critical,
     }
     (home / "qa.json").write_text(json.dumps(qa, ensure_ascii=False))
-    if issues:
+    if issues or critical:
         return {"status": "failed", "stage": "质量检查未通过", "error_code": "PDF_QA_FAILED", "error": "译后检查发现问题，候选译文未发布", "qa_available": True, "page_count": count}
     progress(home, "生成双语 PDF", 0.95)
     create_dual_pdf(source, translated, home / "dual.pdf")

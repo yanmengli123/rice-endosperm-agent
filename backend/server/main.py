@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, BRAND_NAME
+from yuxi.storage.postgres.runtime_security import RuntimeIdentityMiddleware
 
 from server.routers import router
 from server.utils.lifespan import lifespan
@@ -141,6 +142,7 @@ app.add_middleware(AccessLogMiddleware)
 
 # 添加登录限流中间件
 app.add_middleware(LoginRateLimitMiddleware)
+app.add_middleware(RuntimeIdentityMiddleware)
 
 if __name__ == "__main__":
     # uvicorn.run(app, host="0.0.0.0", port=5050, threads=10, workers=10, reload=True)

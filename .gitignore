@@ -29,6 +29,9 @@ logs
 *.db
 *.lock
 !uv.lock
+!docker/supertranslate/SOURCE.lock
+# 字体 deb 预取件（56MB 二进制不入库；SOP 见 .env.template）
+docker/supertranslate/fonts/*.deb
 tmp
 cache
 .cache
@@ -85,3 +88,7 @@ docs/vibe
 
 # RAGAS 中文 prompt 适配缓存（运行时生成）
 backend/package/yuxi/knowledge/eval/.ragas_prompt_cache/
+# Private administrator-provisioned runtime configuration.
+/.env.api-runtime
+/.env.pdf-runtime
+/.env.enterprise

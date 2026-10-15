@@ -13,6 +13,7 @@ from yuxi.storage.postgres.models_business import Base as BusinessBase
 from yuxi.storage.postgres.models_knowledge import Base as KnowledgeBase
 from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
+from yuxi.storage.postgres.runtime_security import RuntimeAsyncSession
 
 # 合并两个 Base
 CombinedBase = declarative_base()
@@ -68,7 +69,7 @@ class PostgresManager(metaclass=SingletonMeta):
             # 创建异步会话工厂
             self.AsyncSession = async_sessionmaker(
                 bind=self.async_engine,
-                class_=AsyncSession,
+                class_=RuntimeAsyncSession,
                 expire_on_commit=False,
             )
 
@@ -101,6 +102,8 @@ class PostgresManager(metaclass=SingletonMeta):
     async def create_tables(self):
         """创建所有表（知识库和业务表）"""
         self._check_initialized()
+        if await self._runtime_schema_ready():
+            return
         async with self.async_engine.begin() as conn:
             await conn.execute(text(SCHEMA_LOCK_SQL))
             await conn.run_sync(KnowledgeBase.metadata.create_all)
@@ -126,6 +129,8 @@ class PostgresManager(metaclass=SingletonMeta):
     async def ensure_knowledge_schema(self):
         """确保知识库 schema 包含所有必要字段"""
         self._check_initialized()
+        if await self._runtime_schema_ready():
+            return
         stmts = [
             (
                 "ALTER TABLE IF EXISTS agent_knowledge_scope_configs "
@@ -1136,6 +1141,10 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0113_dsh_model_calls", "_migration_0113_dsh_model_calls"),
         ("0114_topic_least_privilege", "_migration_0114_topic_least_privilege"),
         ("0115_literature_pdf_translation", "_migration_0115_literature_pdf_translation"),
+        ("0116_literature_production_security", "_migration_0116_literature_production_security"),
+        ("0117_pdf_usage_resolution", "_migration_0117_pdf_usage_resolution"),
+        ("0118_pdf_worker_minimal_reads", "_migration_0118_pdf_worker_minimal_reads"),
+        ("0119_pdf_source_lock", "_migration_0119_pdf_source_lock"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:
@@ -1154,6 +1163,70 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE POLICY p_literature_pdf_calls_tenant ON literature_pdf_model_calls "
             "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::bigint)"
         ))
+
+    async def _migration_0116_literature_production_security(self, conn) -> None:
+        from yuxi.literature.production_security import migrate
+
+        await migrate(conn)
+
+    async def _migration_0117_pdf_usage_resolution(self, conn) -> None:
+        await conn.execute(text("ALTER TABLE literature_pdf_model_calls ADD COLUMN IF NOT EXISTS "
+                                "resolution_json JSONB NOT NULL DEFAULT '{}'::jsonb"))
+        await conn.execute(text("""
+            CREATE OR REPLACE FUNCTION yuxi_pdf_resolution_immutable() RETURNS trigger
+            LANGUAGE plpgsql SET search_path=pg_catalog,public AS $fn$ BEGIN
+              IF OLD.resolution_json <> '{}'::jsonb AND
+                 (TG_OP='DELETE' OR NEW.resolution_json IS DISTINCT FROM OLD.resolution_json) THEN
+                RAISE EXCEPTION 'PDF usage resolution is immutable';
+              END IF;
+              IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+              RETURN NEW;
+            END $fn$
+        """))
+        await conn.execute(text("DROP TRIGGER IF EXISTS pdf_resolution_immutable ON literature_pdf_model_calls"))
+        await conn.execute(text(
+            "CREATE TRIGGER pdf_resolution_immutable BEFORE UPDATE OR DELETE "
+            "ON literature_pdf_model_calls FOR EACH ROW EXECUTE FUNCTION yuxi_pdf_resolution_immutable()"
+        ))
+        await conn.execute(text("REVOKE DELETE ON literature_pdf_model_calls FROM yuxi_api_runtime"))
+
+    async def _migration_0118_pdf_worker_minimal_reads(self, conn) -> None:
+        from yuxi.literature.production_security import migrate
+
+        await migrate(conn)
+        await conn.execute(text("REVOKE DELETE ON literature_pdf_model_calls FROM yuxi_api_runtime"))
+
+    async def _migration_0119_pdf_source_lock(self, conn) -> None:
+        await self._migration_0118_pdf_worker_minimal_reads(conn)
+
+    async def _runtime_schema_ready(self):
+        if os.getenv("YUXI_DB_SKIP_MIGRATIONS", "").lower() != "true":
+            return False
+        async with self.async_engine.connect() as conn:
+            unsafe = await conn.scalar(text(
+                "SELECT rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication "
+                "FROM pg_roles WHERE rolname=current_user"
+            ))
+            unsafe = unsafe or await conn.scalar(text(
+                "SELECT has_schema_privilege(current_user,'public','CREATE') OR NOT "
+                "(pg_has_role(current_user,'yuxi_api_runtime','USAGE') OR "
+                "pg_has_role(current_user,'yuxi_pdf_runtime','USAGE')) OR EXISTS "
+                "(SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'MEMBER') AND "
+                "(r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR "
+                "r.oid IN (SELECT relowner FROM pg_class WHERE relname LIKE 'literature_%')))"
+            ))
+            boundaries = await conn.scalar(text(
+                "SELECT count(*) FROM pg_policies WHERE schemaname='public' "
+                "AND policyname='runtime_tenant_boundary' AND tablename IN "
+                "('literature_papers','literature_translation_jobs','literature_pdf_model_calls',"
+                "'literature_variants','agent_runs','usage_ledger')"
+            ))
+            ready = await conn.scalar(text(
+                "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version=:version)"
+            ), {"version": self._VERSIONED_MIGRATIONS[-1][0]})
+            if unsafe or not ready or boundaries != 6:
+                raise RuntimeError("Runtime database role/schema failed production admission")
+        return True
 
     async def _migration_0114_topic_least_privilege(self, conn) -> None:
         from yuxi.literature.topic_security import migrate
@@ -5256,6 +5329,8 @@ class PostgresManager(metaclass=SingletonMeta):
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""
         self._check_initialized()
+        if await self._runtime_schema_ready():
+            return
         await self._apply_versioned_migrations()
         stmts = [
             "ALTER TABLE IF EXISTS departments ALTER COLUMN created_at SET DEFAULT NOW()",

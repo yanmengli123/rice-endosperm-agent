@@ -1,5 +1,7 @@
 # 版本变更记录
 
+- `/literature` PDF 企业运行加固：API/PDF 独立受限数据库账号、每事务可信身份、租户 RLS 和独立迁移；来源锁定函数保持 PDF 对来源表只读。修复部分结算掩盖未知用量预留的问题；管理员按供应商回执核对，数据库阻止覆盖，账本追加修正事件。独立维护队列、跨用户容量准入、告警诊断、失败调度恢复及孤立文件清理；健康探针直接检查 Redis 有效心跳。原生 QA 检查最终 PDF 的数字/基因符号，明确科研语义仍需人工审核；字体在构建时预处理，取消/超时终止 OCR 进程组。公开上游源码归档纳入构建锁和 CI，增加双栏/旋转页/离线 OCR、实际 PostgreSQL 权限及加密隔离恢复门禁。最终文献/HTTP/schema 回归 690 passed、1 skipped，原生 11 passed，80 并发提交保持 64 个准入上限；真实两页翻译 1 个模型请求、847 tokens，下载鉴权/QA/账本/清理复验通过。实施与验证见 `docs/vibe/2026-10-14-literature-production-hardening.md`。
+
 - `/literature` 保版式 PDF 翻译：独立 SuperTranslate native 运行时与专属 ARQ 队列；任务级模型网关复用冻结模型/BYOK/平台配额，持久化幂等模型请求和 append-only 用量结算。网络响应丢失接回原任务，取消/来源权限/执行代次阻止继续调用与发布；质量未通过保留候选和 QA，远端全部工作文件可清理。PDF 阅读支持中文切换、左右页码同步、双语导出与 QA；译文选区为派生输入，引用仍定位原文。运行时锁定依赖、包含中文字体、OCR 语言数据和水稻术语扩展，并提供 AGPL 对应源码下载。验收与部署见 `docs/vibe/2026-10-13-literature-pdf-translation.md`。
 
 - `/literature` 本文阅读助手交互增强：原文/译文/笔记选区解释、翻译、总结，以及导读/方法/结果/局限指令自动进入原生本文会话；提问/图表/截图保留草稿待确认。鉴权 PDF.js 文本层、翻页缩放与框选/本页截图；回答引用经服务端定位接口回跳同屏 PDF。不覆盖用户编辑过的草稿；版本变化 409、非本文上下文 422、跨分页会话恢复及晚返回切换保护。截图/译文/笔记只作为用户输入，不授予证据资格；普通对话默认不启用阅读桥接。不宣称豆包私有行为完全等价。
@@ -11,6 +13,8 @@
 同一版本的多次功能更新时，应以功能为单位进行更新，比如之前添加了 A 功能的更新，在后续的更新中修复了因 A 功能引入的 bug，那么这个修复说明应该和 A 功能描述放在一起，而不是新增一条修复记录，功能更新同理。
 
 ## 未发布
+
+- 保版式 PDF 翻译上游契约冒烟与源版本锁定：上游 super_translate（pre-1.0 高频迭代、非 git 仓库）被 bridge 头less 化只作引擎库用，但其符号重构曾只能在首个翻译任务暴露。新增 `docker/supertranslate/contract_check.py`（22 项检查：engine.py 依赖的 8 个上游符号导入面、6 个函数调用面签名兼容、TranslationReport/TranslationIssue 返回类型字段、rice.json 术语表结构），执行于镜像构建期（fail-fast）、bridge 启动期（lifespan 拒绝服务）与运行态 `/contract` 鉴权端点；`/health` 增 `contract_ok`。源锁定 `SOURCE.lock`：对构建 COPY 的上游子集算内容摘要（排除 Yuxi 注入的 rice.json 与 `__pycache__`），构建期强校验、不一致即构建失败，`SUPER_TRANSLATE_ALLOW_UNPINNED=1` 仅开发期绕过且 `/contract` 披露 `pinned:false`；升级上游后 `--write-lock` 重生成，engine_revision/corpus_digest 指纹变化使旧任务 409 不复活。收口两处：`.gitignore` 加 `!docker/supertranslate/SOURCE.lock` 例外（`*.lock` 曾把锁文件挡在版本库外，新克隆/CI 构建会因 COPY 缺源硬失败）；`/contract` 的 source_lock 回落到锁文件时按运行时摘要推导 `pinned`（镜像内源不可变，重算即验证），恒有 pinned 字段。api 侧活体集成测试 3 例（未配置环境跳过）。实测：宿主/镜像摘要逐字节一致（899004ea…）、严格构建通过、摘要不一致时构建确实失败、容器 `/contract` 22 项全绿 pinned:true（指纹在位与回落两条路径均验证）。详见 docs/vibe/2026-10-13-literature-pdf-translation.md 续修章节。
 
 - BERTopic 生产准入补齐：0114 独立受限数据库角色与事务级主体绑定，生产配置禁止回退管理员池；调度仅任务头/状态列，不能读冻结正文或切换结果指针。新增私有存储/数据库/worker readiness 与脱敏 Prometheus、告警规则及自动化 CI 门禁；真实 PostgreSQL 验证跨用户/租户隔离、并发幂等、22549 行租约恢复及 pg_dump/pg_restore。未切换全站数据库连接、未调用供应商，现有本机需部署激活才能通过生产准入；详见 docs/vibe/2026-10-13-topic-production-readiness.md。
 

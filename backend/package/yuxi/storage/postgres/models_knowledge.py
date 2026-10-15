@@ -2537,6 +2537,7 @@ class LiteraturePdfModelCall(Base):
     output_tokens = Column(BigInteger, nullable=False, default=0)
     estimated = Column(Boolean, nullable=False, default=False)
     response_json = Column(JSON_VALUE)
+    resolution_json = Column(JSON_VALUE, nullable=False, default=dict)
     error_type = Column(String(64))
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     finished_at = Column(DateTime(timezone=True))

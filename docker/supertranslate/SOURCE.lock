@@ -1,0 +1,13 @@
+{
+  "source_digest": "899004ea6711ef0c0fc8c553e275fb6936b1b560a97077da6139139ac5dec921",
+  "roots": [
+    "pdf_zh_translator",
+    "app",
+    "LICENSE",
+    "README.md",
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "archive": "upstream.tar.gz",
+  "archive_sha256": "b49b575bff2216ffd01552551c1ed2224a5837554d4e225fee181ebf45580ced"
+}

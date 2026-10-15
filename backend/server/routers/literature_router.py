@@ -51,10 +51,11 @@ from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
 
-from server.utils.auth_middleware import get_admin_user, get_required_user, get_superadmin_user
+from server.utils.auth_middleware import get_admin_user, get_required_user, get_superadmin_user, require_scope
 
 
 async def authorize_literature_request(request: Request, current_user: User = Depends(get_required_user)):
+    await require_scope("literature:read" if request.method in ("GET", "HEAD") else "literature:write")(request)
     tenant_id = await _current_tenant(current_user)
     async with access_scope(current_user, tenant_id) as scope:
         rid = request.path_params.get("rid")
@@ -1220,10 +1221,70 @@ async def pdf_translation_source(current_user: User = Depends(get_required_user)
         async with PdfClient() as client:
             response = await client.http.get("/source")
             response.raise_for_status()
-        return Response(response.content, media_type="application/gzip",
-            headers={"Content-Disposition": 'attachment; filename="supertranslate-corresponding-source.tar.gz"'})
+        return Response(
+            response.content,
+            media_type="application/gzip",
+            headers={"Content-Disposition": 'attachment; filename="supertranslate-corresponding-source.tar.gz"'},
+        )
     except (ValueError, httpx.HTTPError) as exc:
         raise HTTPException(503, detail="翻译引擎源码服务不可用") from exc
+
+
+@literature.get("/pdf-translation/operations")
+async def pdf_operations(current_user: User = Depends(get_admin_user)):
+    from yuxi.literature.pdf_operations import operations
+
+    return JSONResponse(await operations(await _current_tenant(current_user)), headers={"Cache-Control": "no-store"})
+
+
+@literature.get("/pdf-translation/usage-unresolved")
+async def pdf_unresolved_usage(current_user: User = Depends(get_admin_user)):
+    from sqlalchemy import select
+    from yuxi.storage.postgres.models_knowledge import LiteraturePdfModelCall
+
+    tenant_id = await _current_tenant(current_user)
+    async with pg_manager.get_async_session_context() as db:
+        records = (
+            (
+                await db.execute(
+                    select(
+                        LiteraturePdfModelCall.id,
+                        LiteraturePdfModelCall.job_id,
+                        LiteraturePdfModelCall.request_digest,
+                        LiteraturePdfModelCall.reserved_tokens,
+                    )
+                    .where(LiteraturePdfModelCall.tenant_id == tenant_id, LiteraturePdfModelCall.status == "uncertain")
+                    .order_by(LiteraturePdfModelCall.created_at)
+                    .limit(200)
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return {"items": [dict(row) for row in records]}
+
+
+class PdfUsageReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_tokens: int = Field(ge=0, le=10_000_000)
+    output_tokens: int = Field(ge=0, le=10_000_000)
+    receipt_ref: str = Field(min_length=8, max_length=256)
+    reason: str = Field(min_length=8, max_length=2048)
+
+
+@literature.post(
+    "/pdf-translation/usage-unresolved/{call_id}/resolve", dependencies=[Depends(require_scope("literature:billing"))]
+)
+async def resolve_pdf_usage(call_id: str, receipt: PdfUsageReceipt, current_user: User = Depends(get_admin_user)):
+    from yuxi.literature.pdf_operations import resolve_usage
+
+    try:
+        return await resolve_usage(
+            await _current_tenant(current_user), call_id, current_user.uid, **receipt.model_dump()
+        )
+    except ValueError as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
 
 
 @literature.get("/papers/{rid}/pdf-translation")

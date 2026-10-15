@@ -14,6 +14,8 @@ from datetime import timedelta
 
 import httpx
 from sqlalchemy import and_, or_, select
+from sqlalchemy import text
+from yuxi.storage.postgres.runtime_security import actor, pdf_identity
 
 from yuxi.literature.provenance import StaleLiteratureInput, require_current_input
 from yuxi.literature.reading.service import RENDER_BUCKET
@@ -115,7 +117,9 @@ async def capabilities() -> dict:
         from yuxi.services.run_queue_service import get_arq_pool
 
         pool = await get_arq_pool()
-        ready = bool(await pool.get("literature:pdf-worker:health"))
+        ready = bool(
+            await pool.get("literature:pdf-worker:health") and await pool.get("literature:pdf-maintenance:health")
+        )
         return {"enabled": ready, "reason": "" if ready else "保版式翻译 worker 未启动", "runtime": health}
     except (ValueError, httpx.HTTPError):
         return {"enabled": False, "reason": "保版式翻译服务未启用或不可达", "runtime": {}}
@@ -193,6 +197,11 @@ async def enqueue_pdf_translation(*, paper_id: int, requested_by: str, force=Fal
     )
     digest = options_digest(options)
     async with pg_manager.get_async_session_context() as db:
+        if db.get_bind().dialect.name == "postgresql":
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:payer, 0))"),
+                {"payer": f"pdf-submission:{tenant_id}"},
+            )
         paper = await db.get(LiteraturePaper, paper_id, with_for_update=True)
         if paper.source_revision_id != revision or paper.reading_version != reading or paper.trashed_at:
             raise ValueError("来源版本已变更，请刷新后重新提交")
@@ -218,6 +227,29 @@ async def enqueue_pdf_translation(*, paper_id: int, requested_by: str, force=Fal
             return {"job_id": latest.id, "status": latest.status, "reused": True}
         if latest and latest.status == "SUCCEEDED" and latest.config_digest == digest and not force:
             return {"job_id": latest.id, "status": latest.status, "reused": True}
+        from sqlalchemy import func
+
+        active_for_owner = await db.scalar(
+            select(func.count())
+            .select_from(LiteratureTranslationJob)
+            .where(
+                LiteratureTranslationJob.tenant_id == tenant_id,
+                LiteratureTranslationJob.requested_by == requested_by,
+                LiteratureTranslationJob.variant_kind == "pdf_zh",
+                LiteratureTranslationJob.status.in_(ACTIVE),
+            )
+        )
+        active_for_tenant = await db.scalar(
+            select(func.count())
+            .select_from(LiteratureTranslationJob)
+            .where(
+                LiteratureTranslationJob.tenant_id == tenant_id,
+                LiteratureTranslationJob.variant_kind == "pdf_zh",
+                LiteratureTranslationJob.status.in_(ACTIVE),
+            )
+        )
+        if active_for_owner >= 2 or active_for_tenant >= 64:
+            raise ValueError("保版式翻译队列已达用户或租户容量上限，请等待已有任务完成")
         generation = int(latest.generation or 0) + 1 if latest else 0
         policy = await freeze_literature_policy(
             db,
@@ -449,7 +481,45 @@ async def archive_output(job, rid, kind, data):
     return {"uri": f"kbasset://{name}", "digest": digest, "size": len(data), "media_type": media_type}
 
 
+async def cleanup_unpublished(job_id):
+    async with pg_manager.get_async_session_context() as db:
+        job = await db.get(LiteratureTranslationJob, job_id, with_for_update=True)
+        items = (job.execution_json or {}).get("orphan_outputs", {})
+        if not items or job.status in ACTIVE or job.status == "SUCCEEDED":
+            return
+        paper = await db.get(LiteraturePaper, job.paper_id)
+        base = f"kbasset://tenants/{job.tenant_id}/literature/variants/{paper.rid}/r{job.reading_version}/{VERSION}/j{job.id}/"
+        for artifact in items.values():
+            uri = artifact.get("uri", "")
+            if not uri.startswith(base) or ".." in uri:
+                raise ValueError("Unpublished cleanup target does not belong to this job")
+            referenced = (await db.execute(select(LiteratureVariant.id).where(LiteratureVariant.uri == uri))).first()
+            if referenced:
+                raise ValueError("Refuse deleting a published PDF artifact")
+            await get_minio_client().adelete_file(RENDER_BUCKET, uri.removeprefix("kbasset://"))
+        job.execution_json = {**job.execution_json, "orphan_outputs": {}, "artifact_cleanup_pending": False}
+        await db.commit()
+
+
 async def process_pdf_translation(_ctx, job_id):
+    async with pg_manager.get_async_session_context() as db:
+        tenant, uid = await pdf_identity(db, job_id)
+    with actor(tenant, uid):
+        try:
+            return await _process_pdf_translation(_ctx, job_id)
+        except StaleLiteratureInput:
+            # Revocation may terminate admission before a remote lease exists.
+            async with pg_manager.get_async_session_context() as db:
+                job = await db.get(LiteratureTranslationJob, job_id)
+                run = await db.get(AgentRun, job.llm_run_id, with_for_update=True)
+                if run and run.status in ("pending", "running"):
+                    run.status, run.error_type, run.finished_at = "failed", "STALE", utc_now_naive()
+                    await db.commit()
+            await settle_usage(job.llm_run_id)
+            return {"job_id": job_id, "status": "STALE"}
+
+
+async def _process_pdf_translation(_ctx, job_id):
     owner = uuid.uuid4().hex
     async with pg_manager.get_async_session_context() as db:
         job = await db.get(LiteratureTranslationJob, job_id, with_for_update=True)
@@ -477,6 +547,7 @@ async def process_pdf_translation(_ctx, job_id):
         run.status, run.started_at = "running", run.started_at or utc_now_naive()
         await db.commit()
     remote_id, published, heartbeat = execution["remote_id"], False, None
+    outputs = {}
     terminal, error = "FAILED", None
 
     async def monitor():
@@ -544,7 +615,8 @@ async def process_pdf_translation(_ctx, job_id):
                 kind: await client.download(remote_id, kind) for kind in ("pdf_zh", "pdf_dual", "qa", "manifest")
             }
             page_count = validate_outputs(source[0], artifacts, job.options_json["source_sha256"])
-            outputs = {kind: await archive_output(job, paper.rid, kind, data) for kind, data in artifacts.items()}
+            for kind, data in artifacts.items():
+                outputs[kind] = await archive_output(job, paper.rid, kind, data)
             async with pg_manager.get_async_session_context() as db:
                 fresh = await db.get(LiteratureTranslationJob, job_id, with_for_update=True)
                 await require_current_input(db, fresh)
@@ -639,12 +711,22 @@ async def process_pdf_translation(_ctx, job_id):
             owns = current and (current.execution_json or {}).get("owner") == owner
             if owns and (published or error):
                 current.status, current.error, current.updated_at = terminal, error, utc_now()
+                if outputs and not published:
+                    current.execution_json = {
+                        **current.execution_json,
+                        "orphan_outputs": outputs,
+                        "artifact_cleanup_pending": True,
+                    }
                 run = await db.get(AgentRun, job.llm_run_id, with_for_update=True)
                 run.status = "completed" if published else "cancelled" if terminal == "CANCELLED" else "failed"
                 run.error_type, run.finished_at = None if published else terminal, utc_now_naive()
                 await db.commit()
         if owns and (published or error):
             await settle_usage(job.llm_run_id)
+            try:
+                await cleanup_unpublished(job_id)
+            except Exception:
+                pass  # Durable job-scoped cleanup is retried by maintenance.
             try:
                 async with PdfClient() as client:
                     if not published:
@@ -660,6 +742,27 @@ async def process_pdf_translation(_ctx, job_id):
 
 
 async def reconcile_pdf_translations(ctx):
+    async with pg_manager.get_async_session_context() as db:
+        protected = db.get_bind().dialect.name == "postgresql"
+        identities = (await db.execute(text("SELECT * FROM yuxi_pdf_queue_candidates()"))).all() if protected else []
+    if not protected:
+        return await _reconcile_pdf_translations(ctx)
+    await ctx["redis"].set("literature:pdf-worker:heartbeat", "1", ex=180)
+    for job_id, tenant_id, uid in identities:
+        with actor(int(tenant_id), uid):
+            await _reconcile_pdf_translations(ctx, only_job=job_id)
+    from yuxi.literature.pdf_operations import operations
+    from yuxi.utils import logger
+
+    for tenant_id, uid in {(int(row[1]), row[2]) for row in identities}:
+        with actor(tenant_id, uid):
+            snapshot = await operations(tenant_id)
+        for alert in snapshot["alerts"]:
+            if await ctx["redis"].set(f"pdf-alert:{tenant_id}:{alert['code']}", "1", nx=True, ex=300):
+                logger.warning("PDF operations alert: tenant={} code={}", tenant_id, alert["code"])
+
+
+async def _reconcile_pdf_translations(ctx, only_job=None):
     await ctx["redis"].set("literature:pdf-worker:heartbeat", "1", ex=180)
     async with pg_manager.get_async_session_context() as db:
         abandoned = (
@@ -668,6 +771,7 @@ async def reconcile_pdf_translations(ctx):
                     select(LiteraturePdfModelCall)
                     .where(
                         LiteraturePdfModelCall.status == "reserved",
+                        LiteraturePdfModelCall.job_id == only_job if only_job is not None else True,
                         LiteraturePdfModelCall.created_at < utc_now() - timedelta(seconds=660),
                     )
                     .with_for_update()
@@ -690,7 +794,9 @@ async def reconcile_pdf_translations(ctx):
                     select(LiteratureTranslationJob)
                     .where(
                         LiteratureTranslationJob.variant_kind == "pdf_zh",
+                        LiteratureTranslationJob.id == only_job if only_job is not None else True,
                         or_(
+                            LiteratureTranslationJob.execution_json["artifact_cleanup_pending"].as_boolean().is_(True),
                             LiteratureTranslationJob.status.in_(ACTIVE),
                             and_(
                                 LiteratureTranslationJob.execution_json["remote_id"].as_string().is_not(None),
@@ -716,6 +822,11 @@ async def reconcile_pdf_translations(ctx):
             .all()
         )
     for job in rows:
+        if job.status not in ACTIVE and job.execution_json.get("artifact_cleanup_pending"):
+            try:
+                await cleanup_unpublished(job.id)
+            except Exception:
+                pass
         if job.cancel_requested and job.status in ACTIVE:
             async with pg_manager.get_async_session_context() as db:
                 fresh = await db.get(LiteratureTranslationJob, job.id, with_for_update=True)
@@ -732,7 +843,9 @@ async def reconcile_pdf_translations(ctx):
                 "process_pdf_translation",
                 job.id,
                 _queue_name=QUEUE,
-                _job_id=f"pdf:{job.id}:resume:{int(updated.timestamp())}",
+                # A failed ARQ result retains its ID for hours. A new bounded
+                # dispatch window can adopt the same durable remote/model IDs.
+                _job_id=f"pdf:{job.id}:resume:{int(updated.timestamp())}:{int(time.time()) // 120}",
             )
         elif job.status not in ACTIVE and job.execution_json.get("remote_id") and not job.execution_json.get("cleaned"):
             try:

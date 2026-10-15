@@ -369,8 +369,11 @@ async def chat_completions(request: _ChatCompletionRequest, authorization: str |
         return _error(502, "model_binding_failed", "Model parameters are unsupported")
     completion_id, created = f"chatcmpl-yuxi-{uuid.uuid4().hex}", int(time.time())
     if request.stream:
+        from yuxi.agents.buildin.dsh.stream import publish_token_delta, token_stream_enabled
+
+        tap_run_id = str(run.id) if token_stream_enabled() else None
         return StreamingResponse(
-            _stream_completion(model, messages, call.id, completion_id, created, request.model),
+            _stream_completion(model, messages, call.id, completion_id, created, request.model, tap_run_id, publish_token_delta),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -420,6 +423,8 @@ async def _stream_completion(model, messages, call_id, completion_id, created, r
             text = _content_text(chunk.content)
             if text:
                 delta["content"] = text
+                if tap_run_id is not None and publish is not None:
+                    await publish(tap_run_id, text)
             reasoning = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning_content")
             if reasoning is not None:
                 delta["reasoning_content"] = reasoning

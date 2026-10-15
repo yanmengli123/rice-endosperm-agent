@@ -41,15 +41,19 @@
     <p v-if="notice || bundle?.reason" role="status">{{ notice || bundle.reason }}</p>
     <div v-if="showQa && qa" class="qa-report">
       <p>
-        质量检查：{{ qa.status === 'passed' ? '通过' : '未通过' }} · {{ qa.error_count }} 个错误 ·
-        {{ qa.warning_count }} 个提示
+        自动质量检查：{{ qa.status === 'passed' ? '通过' : '未通过' }} · {{ qa.error_count }} 个错误
+        · {{ qa.warning_count }} 个提示
       </p>
       <ul v-if="qa.issues?.length">
         <li v-for="(issue, index) in qa.issues" :key="index">
-          第 {{ issue.page }} 页 · {{ issue.message }}
+          {{ issue.page ? `第 ${issue.page} 页` : '文本块检查' }} · {{ issue.message }}
         </li>
       </ul>
       <p v-else>自动检查未发现问题；学术语义仍需结合原文核验。</p>
+      <p>检查范围：版式与内容完整性；新版引擎增加数字和基因符号一致性。学术语义需要人工核验。</p>
+      <p v-if="qa.engine_warning_count">
+        引擎另外报告 {{ qa.engine_warning_count }} 个提示，请查看完整 QA。
+      </p>
       <button class="btn" @click="download('qa')">下载完整 QA</button>
     </div>
     <div class="pdf-panes" :class="{ split: mode === 'split' }">

@@ -161,6 +161,10 @@ async def resolve_tenant_id(db: AsyncSession, uid: str | None) -> int:
     else:
         tenant_id = int((await _resolve_active_membership(db, str(uid))).tenant_id)
     await apply_tenant_rls_context(db, tenant_id, uid=uid)
+    if uid and str(uid) != "system":
+        from yuxi.storage.postgres.runtime_security import bind_identity
+
+        bind_identity(tenant_id, str(uid))
     return tenant_id
 
 
@@ -168,6 +172,9 @@ async def resolve_principal(db: AsyncSession, user: User) -> PrincipalContext:
     """由已认证 User 构造服务端权威身份上下文。"""
     membership = await _resolve_active_membership(db, str(user.uid))
     await apply_tenant_rls_context(db, int(membership.tenant_id), uid=str(user.uid))
+    from yuxi.storage.postgres.runtime_security import bind_identity
+
+    bind_identity(int(membership.tenant_id), str(user.uid))
     return PrincipalContext(
         tenant_id=int(membership.tenant_id),
         uid=str(user.uid),

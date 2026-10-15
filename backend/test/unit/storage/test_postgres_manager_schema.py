@@ -65,6 +65,17 @@ class _RecordingEngine:
         return _RecordingBegin(self.connection)
 
 
+@pytest.fixture(autouse=True)
+def _migrator_mode(monkeypatch):
+    """DDL 记录类测试按迁移器语义运行。
+
+    生产化改造后容器带 YUXI_DB_SKIP_MIGRATIONS=true（运行时账号跳过迁移，
+    启动改走 _runtime_schema_ready 就绪检查），该路径下 create/ensure 会直接
+    return 或抛错、不产生可断言的 DDL 语句——与本组测试目的相悖，故清除开关。
+    """
+    monkeypatch.delenv("YUXI_DB_SKIP_MIGRATIONS", raising=False)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "operation", ["create_tables", "create_business_tables", "ensure_knowledge_schema", "ensure_business_schema"]

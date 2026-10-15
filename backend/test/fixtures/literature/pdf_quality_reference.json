@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "human_reviewed": false,
+  "purpose": "Deterministic layout and token regression; not a certified scientific translation benchmark",
+  "cases": [
+    {"source": "Rice endosperm", "translation": "水稻胚乳"},
+    {"source": "OsbZIP58 was measured in 3 replicates.", "translation": "在3个重复中测定了OsbZIP58。"},
+    {"source": "The treatment did not significantly increase amylose content.", "translation": "该处理未显著提高直链淀粉含量。"},
+    {"source": "The synthetic experiment used n=3 and p=0.08.", "translation": "合成实验使用n=3和p=0.08。"},
+    {"source": "LOC_Os07g00110 is a synthetic identifier example.", "translation": "LOC_Os07g00110是合成标识符示例。"},
+    {"source": "Figure 1. Rice starch granules.", "translation": "图1.水稻淀粉颗粒。"}
+  ]
+}

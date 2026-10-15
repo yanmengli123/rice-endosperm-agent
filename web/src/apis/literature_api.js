@@ -6,7 +6,11 @@ export const literaturePdfApi = {
     apiGet(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation`, { signal }),
   cancel: (rid, jobId) =>
     apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation/${jobId}/cancel`),
-  source: () => apiGet('/api/literature/pdf-translation/source', {}, true, 'blob')
+  source: () => apiGet('/api/literature/pdf-translation/source', {}, true, 'blob'),
+  operations: (signal) => apiGet('/api/literature/pdf-translation/operations', { signal }),
+  unresolvedUsage: (signal) => apiGet('/api/literature/pdf-translation/usage-unresolved', { signal }),
+  resolveUsage: (callId, receipt) =>
+    apiPost(`/api/literature/pdf-translation/usage-unresolved/${encodeURIComponent(callId)}/resolve`, receipt)
 }
 
 function bibliometricQuery(filters) {

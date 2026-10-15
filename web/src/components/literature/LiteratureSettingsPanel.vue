@@ -60,8 +60,8 @@
       auto 对标 PaperAgent「跳过审核翻译」；识别复核面板仍可独立使用，事后裁决照常回放。
     </p>
 
+    <LiteraturePdfOperations />
     <h4>界面与护眼</h4>
-    <TranslationSettings />
     <div class="settings-grid">
       <label
         >主题
@@ -98,7 +98,7 @@
 </template>
 
 <script setup>
-import TranslationSettings from '@/components/literature/TranslationSettings.vue'
+import LiteraturePdfOperations from '@/components/literature/LiteraturePdfOperations.vue'
 import {
   LITERATURE_THEMES,
   resetLiteratureSettings,

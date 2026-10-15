@@ -197,7 +197,8 @@ async def test_budget_and_tampered_token_rejected_before_supplier(database):
 
 
 @pytest.mark.asyncio
-async def test_unresolved_other_pdf_task_still_reserves_monthly_budget(database):
+@pytest.mark.parametrize("partially_settled", [False, True])
+async def test_unresolved_other_pdf_task_still_reserves_monthly_budget(database, partially_settled):
     factory, client, token = database
     async with factory() as db:
         run = await db.get(AgentRun, "run1")
@@ -242,8 +243,86 @@ async def test_unresolved_other_pdf_task_still_reserves_monthly_budget(database)
                 estimated=True,
             )
         )
+        if partially_settled:
+            db.add(
+                LiteraturePdfModelCall(
+                    id="known-call",
+                    job_id=0,
+                    run_id="older-run",
+                    tenant_id=7,
+                    attempt=0,
+                    request_digest="1" * 64,
+                    status="completed",
+                    input_tokens=10,
+                    output_tokens=10,
+                    reserved_tokens=20,
+                )
+            )
         await db.commit()
+    if partially_settled:
+        await service.settle_usage("older-run")
     assert (await send(client, token)).status_code == 429
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_ledger", [False, True])
+async def test_supplier_reconciliation_is_idempotent_and_preserves_original_ledger(database, has_ledger):
+    from yuxi.literature.pdf_operations import resolve_usage
+
+    factory, _client, _token = database
+    async with factory() as db:
+        run = await db.get(AgentRun, "run1")
+        run.status = "failed"
+        job = await db.get(LiteratureTranslationJob, 1)
+        job.status = "FAILED"
+        db.add_all(
+            [
+                LiteraturePdfModelCall(
+                    id="paid-known",
+                    job_id=1,
+                    run_id="run1",
+                    tenant_id=7,
+                    attempt=0,
+                    request_digest="0" * 64,
+                    status="completed",
+                    reserved_tokens=20,
+                    input_tokens=10,
+                    output_tokens=10,
+                ),
+                LiteraturePdfModelCall(
+                    id="paid-unknown",
+                    job_id=1,
+                    run_id="run1",
+                    tenant_id=7,
+                    attempt=0,
+                    request_digest="1" * 64,
+                    status="uncertain",
+                    reserved_tokens=1000,
+                    estimated=True,
+                ),
+            ]
+        )
+        await db.commit()
+    if has_ledger:
+        await service.settle_usage("run1")
+    args = dict(
+        expected_digest="1" * 64,
+        input_tokens=30,
+        output_tokens=40,
+        receipt_ref="supplier-record-123",
+        reason="Reviewed supplier billing export",
+    )
+    first = await resolve_usage(7, "paid-unknown", "admin", **args)
+    assert await resolve_usage(7, "paid-unknown", "admin", **args) == first
+    with pytest.raises(ValueError, match="不可覆盖"):
+        await resolve_usage(7, "paid-unknown", "admin", **{**args, "input_tokens": 31})
+    async with factory() as db:
+        rows = (await db.execute(select(UsageLedger))).scalars().all()
+        assert sum(row.total_tokens for row in rows) == 90
+        assert len(rows) == (2 if has_ledger else 1)
+        if has_ledger:
+            assert next(row for row in rows if row.run_id == "run1").total_tokens == 20
+        assert (await db.get(AgentRun, "run1")).total_tokens == 90
 
 
 @pytest.mark.asyncio
@@ -302,10 +381,11 @@ def test_pdf_publication_checks_source_digest_geometry_and_dual_page_count():
 
 
 @pytest.mark.asyncio
-async def test_worker_adopts_completed_remote_task_and_publishes_without_model_reexecution(database, monkeypatch):
+@pytest.mark.parametrize("failure", [None, "source_changed", "partial_upload"])
+async def test_worker_adopts_remote_result_and_cleans_failed_publication(database, monkeypatch, failure):
     factory, _client, _token = database
     source, artifacts, digest = pdf_artifacts()
-    requests, stored = [], {}
+    requests, stored, deleted = [], {}, []
     async with factory() as db:
         job = await db.get(LiteratureTranslationJob, 1)
         job.updated_at = utc_now() - timedelta(seconds=130)
@@ -329,21 +409,41 @@ async def test_worker_adopts_completed_remote_task_and_publishes_without_model_r
 
     class Storage:
         async def aupload_file(self, *, object_name, data, **_kwargs):
+            if failure == "partial_upload" and len(stored) == 2:
+                raise ValueError("Fixture object upload failure")
             stored[object_name] = data
+            if failure == "source_changed" and len(stored) == 4:
+                async with factory() as db:
+                    (await db.get(LiteraturePaper, 1)).reading_version = 2
+                    await db.commit()
+
+        async def adelete_file(self, _bucket, object_name):
+            deleted.append(object_name)
+
+    async def current(db, job):
+        paper = await db.get(LiteraturePaper, job.paper_id)
+        if paper.reading_version != job.reading_version:
+            raise service.StaleLiteratureInput("Fixture source changed before publication")
+        return paper
 
     async def original(*_args):
         return source, "source/original.pdf"
 
     monkeypatch.setattr(service, "PdfClient", Client)
+    monkeypatch.setattr(service, "require_current_input", current)
     monkeypatch.setattr(service, "get_minio_client", lambda: Storage())
     monkeypatch.setattr("yuxi.literature.reader_bundle.get_source_pdf", original)
     result = await service.process_pdf_translation({}, 1)
-    assert result["status"] == "SUCCEEDED" and len(stored) == 4
+    assert result["status"] == {None: "SUCCEEDED", "source_changed": "STALE", "partial_upload": "FAILED"}[failure]
+    assert len(stored) == (2 if failure == "partial_upload" else 4)
+    assert set(deleted) == (set(stored) if failure else set())
+    assert all("/j1/" in name for name in deleted)
     assert all("existing-remote-task" in path for _method, path in requests)
     async with factory() as db:
         job = await db.get(LiteratureTranslationJob, 1)
         assert job.execution_json["cleaned"] and job.execution_json["lease"] == "lease1"
-        assert len((await db.execute(select(LiteratureVariant))).scalars().all()) == 2
+        assert len((await db.execute(select(LiteratureVariant))).scalars().all()) == (0 if failure else 2)
+        assert not job.execution_json.get("artifact_cleanup_pending")
         assert not (await db.execute(select(LiteraturePdfModelCall))).first()
 
 
@@ -380,3 +480,33 @@ async def test_lost_remote_response_preserves_identity_for_reconciliation(databa
         assert job.status == "RUNNING" and job.execution_json["remote_id"]
         assert job.execution_json["stage"] == "连接中断，等待恢复"
         assert (await db.get(AgentRun, "run1")).status == "running"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_dispatch_recovers_from_retained_failed_queue_result(database, monkeypatch):
+    factory, _client, _token = database
+    async with factory() as db:
+        job = await db.get(LiteratureTranslationJob, 1)
+        job.status, job.updated_at = "PENDING", utc_now() - timedelta(minutes=10)
+        await db.commit()
+
+    class Redis:
+        identities = []
+
+        async def set(self, *_args, **_kwargs):
+            return True
+
+        async def enqueue_job(self, _function, job_id, **options):
+            assert job_id == 1
+            self.identities.append(options["_job_id"])
+            return None  # ARQ retains the previous failed result under its ID.
+
+    redis = Redis()
+    for timestamp in (240, 241, 360):
+        monkeypatch.setattr(service.time, "time", lambda: timestamp)
+        await service.reconcile_pdf_translations({"redis": redis})
+    assert redis.identities[0] == redis.identities[1]
+    assert redis.identities[2] != redis.identities[1]
+    async with factory() as db:
+        assert (await db.get(LiteratureTranslationJob, 1)).execution_json["lease"] == "lease1"
+        assert not (await db.execute(select(LiteraturePdfModelCall))).first()

@@ -184,6 +184,9 @@ const detail = (
       '@/stores/user': { useUserStore: () => paperUser },
       '@/apis/base': { apiPost: async () => ({}) },
       '@/apis/literature_api': {
+        literaturePdfApi: {
+          capabilities: async () => ({ enabled: false, reason: 'Test runtime disabled' })
+        },
         getLiteraturePaper: (rid, signal) =>
           new Promise((resolve) => paperReads.push({ rid, signal, resolve }))
       }
@@ -458,4 +461,65 @@ assert.equal(
   '真实非 PDF 契约优先于历史模板，不能污染普通库行为'
 )
 uploadApp.unmount()
+
+// The operations panel must pass pause/resume callbacks to the real shared scope.
+document.hidden = false
+const operationsUser = Vue.reactive({ uid: 'admin-a', departmentId: 1, userRole: 'superadmin', isAdmin: true })
+const diagnostics = [], operationErrors = []
+const operations = (await evaluate(
+  '../../components/literature/LiteraturePdfOperations.vue',
+  {
+    '@/stores/user': { useUserStore: () => operationsUser },
+    '@/composables/useLiteraturePollingScope': pollingScope,
+    '@/apis/literature_api': { literaturePdfApi: {
+      operations: (signal) => new Promise((resolve) => diagnostics.push({ signal, resolve })),
+      unresolvedUsage: async () => ({ items: [] })
+    } }
+  }, {}, true
+)).default
+let operationsState
+const operationsSetup = operations.setup
+operations.setup = (props, context) => {
+  operationsState = operationsSetup(props, context)
+  return operationsState
+}
+operations.render = () => null
+const operationsShown = Vue.ref(true)
+const operationsApp = renderer.createApp({
+  setup: () => () => Vue.h(Vue.KeepAlive, null, {
+    default: () => operationsShown.value ? Vue.h(operations) : Vue.h('div')
+  })
+})
+operationsApp.config.errorHandler = (error) => operationErrors.push(error)
+operationsApp.mount({})
+await settle()
+assert.equal(diagnostics.length, 1)
+operationsShown.value = false
+await settle()
+assert.equal(diagnostics[0].signal.aborted, true)
+assert.equal(operationsState.busy.value, false)
+diagnostics[0].resolve({ owner: 'late-admin-a' })
+await settle()
+assert.equal(operationsState.snapshot.value, null)
+operationsShown.value = true
+await settle()
+assert.equal(diagnostics.length, 2)
+operationsUser.uid = 'admin-b'
+await settle()
+assert.equal(diagnostics[1].signal.aborted, true)
+diagnostics[1].resolve({ owner: 'late-admin-a' })
+diagnostics[2].resolve({ owner: 'admin-b' })
+await settle()
+assert.equal(operationsState.snapshot.value.owner, 'admin-b')
+document.hidden = true
+for (const callback of visibility) callback()
+await settle()
+assert.equal(operationsState.busy.value, false)
+document.hidden = false
+for (const callback of visibility) callback()
+await settle()
+assert.equal(diagnostics.length, 4)
+operationsApp.unmount()
+assert.equal(diagnostics[3].signal.aborted, true)
+assert.equal(operationErrors.length, 0, '诊断面板的停用/可见性/恢复不得抛出回调异常')
 console.log('KeepAlive, owner/visibility/late-response fencing and PDF intake modes passed')

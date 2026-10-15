@@ -7,7 +7,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, Header, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, text
 
 from yuxi.literature import llm_gateway
 from yuxi.literature.pdf_translation import settle_usage, verify_execution_token
@@ -16,6 +16,7 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import AgentRun, UsageLedger
 from yuxi.storage.postgres.models_knowledge import LiteraturePdfModelCall, LiteratureTranslationJob
 from yuxi.utils.datetime_utils import utc_now
+from yuxi.storage.postgres.runtime_security import actor, pdf_identity
 
 router = APIRouter(prefix="/internal/literature-pdf/v1", tags=["literature-pdf-gateway"])
 
@@ -112,6 +113,17 @@ async def record_outcome(call_id, response, usage, error):
 @router.post("/chat/completions")
 async def completion(body: dict, authorization: str = Header(default="")):
     try:
+        claims = verify_execution_token(authorization.removeprefix("Bearer "))
+        async with pg_manager.get_async_session_context() as db:
+            tenant_id, uid = await pdf_identity(db, claims["job"])
+    except (PermissionError, ValueError, KeyError) as exc:
+        raise HTTPException(401, detail="Invalid PDF execution identity") from exc
+    with actor(tenant_id, uid):
+        return await _completion(body, authorization)
+
+
+async def _completion(body, authorization):
+    try:
         if not authorization.startswith("Bearer "):
             raise PermissionError("Missing execution token")
         claims = verify_execution_token(authorization[7:])
@@ -152,7 +164,8 @@ async def completion(body: dict, authorization: str = Header(default="")):
                 .all()
             )
             spent = sum(
-                c.input_tokens + c.output_tokens if c.status == "completed" else c.reserved_tokens for c in calls
+                c.input_tokens + c.output_tokens if c.status in ("completed", "resolved") else c.reserved_tokens
+                for c in calls
             )
             if any(c.status in ("reserved", "uncertain") for c in calls):
                 raise HTTPException(
@@ -162,6 +175,12 @@ async def completion(body: dict, authorization: str = Header(default="")):
                 raise HTTPException(429, detail="PDF model request budget exhausted")
             limit = (run.input_payload or {}).get("monthly_platform_token_limit")
             if job.credential_source == "platform" and limit is not None:
+                if db.get_bind().dialect.name == "postgresql":
+                    # Serialize admissions for this payer across PDF jobs.
+                    await db.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:payer, 0))"),
+                        {"payer": f"pdf-budget:{job.tenant_id}:{job.requested_by}"},
+                    )
                 month = utc_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
                 used = await db.scalar(
                     select(func.coalesce(func.sum(UsageLedger.total_tokens), 0)).where(
@@ -183,7 +202,10 @@ async def completion(body: dict, authorization: str = Header(default="")):
                                 AgentRun.input_payload["credential_source"].as_string() == "platform",
                                 LiteraturePdfModelCall.run_id != run.id,
                                 LiteraturePdfModelCall.created_at >= month,
-                                UsageLedger.id.is_(None),
+                                or_(
+                                    UsageLedger.id.is_(None),
+                                    LiteraturePdfModelCall.status.in_(("reserved", "uncertain")),
+                                ),
                             )
                         )
                     )
@@ -191,7 +213,7 @@ async def completion(body: dict, authorization: str = Header(default="")):
                     .all()
                 )
                 outstanding = sum(
-                    c.input_tokens + c.output_tokens if c.status == "completed" else c.reserved_tokens
+                    c.input_tokens + c.output_tokens if c.status in ("completed", "resolved") else c.reserved_tokens
                     for c in other_calls
                 )
                 if int(used) + outstanding + spent + reservation > int(limit):
