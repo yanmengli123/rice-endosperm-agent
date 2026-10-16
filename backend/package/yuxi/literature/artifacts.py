@@ -96,7 +96,7 @@ async def store_revision(
         from yuxi.literature.access import build_access, current_access
 
         scope = current_access()
-        if scope is not None and paper_rid not in (await build_access(scope.user, tenant_id)).rids:
+        if scope is not None and paper_rid not in (await build_access(scope.user, tenant_id, rids=(paper_rid,))).rids:
             raise PermissionError("来源权限已撤销，未切换人工版本")
         paper = (
             await session.execute(

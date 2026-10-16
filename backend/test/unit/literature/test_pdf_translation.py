@@ -105,6 +105,113 @@ async def database(monkeypatch):
     await engine.dispose()
 
 
+async def test_operational_failure_rate_cannot_be_diluted_by_cancellation(database):
+    from yuxi.literature.pdf_operations import operations, prometheus
+
+    factory, _client, _token = database
+    async with factory() as db:
+        db.add_all([
+            LiteratureTranslationJob(
+                paper_id=1, tenant_id=7, variant_kind="pdf_zh", status=status,
+                generator_version=service.VERSION, generation=index + 1,
+            )
+            for index, status in enumerate(["SUCCEEDED"] * 18 + ["FAILED"] * 2 + ["CANCELLED"] * 80)
+        ])
+        await db.commit()
+    result = await operations(7)
+    assert result["terminal_samples"] == 20 and result["all_terminal_samples"] == 100
+    assert result["excluded_terminal_samples"] == 80 and result["failure_rate"] == 0.1
+    assert result["slo_evidence"] == "available"
+    assert "PDF_FAILURE_RATE" in {alert["code"] for alert in result["alerts"]}
+    metrics = prometheus({"ready": False, "storage_private": False}, result)
+    assert "yuxi_pdf_ready 0" in metrics and "yuxi_pdf_failure_rate 0.1" in metrics
+    assert "u1" not in metrics and "pdf-test" not in metrics and "run1" not in metrics
+
+
+@pytest.mark.parametrize("socket,capabilities,no_new_privileges,expected", [
+    (False, "00000000", "1", True), (True, "00000000", "1", False),
+    (False, "00000001", "1", False), (False, "00000000", "0", False),
+])
+async def test_runtime_gate_refuses_docker_socket_or_process_privileges(
+    monkeypatch, socket, capabilities, no_new_privileges, expected
+):
+    from yuxi.literature import pdf_operations
+
+    monkeypatch.setattr(pdf_operations, "Path", lambda path: SimpleNamespace(
+        read_text=lambda: f"CapEff:\t{capabilities}\nNoNewPrivs:\t{no_new_privileges}\n",
+        exists=lambda: socket,
+    ))
+    assert await pdf_operations.runtime_isolated() is expected
+
+
+async def test_readiness_checks_engine_contract_private_storage_and_fails_closed(database, monkeypatch):
+    from minio.error import S3Error
+    from yuxi.literature import pdf_operations
+    from yuxi.literature.pdf_operations import readiness
+
+    class Redis:
+        async def mget(self, *_keys):
+            return [b"alive", b"alive"]
+
+    async def redis():
+        return Redis()
+
+    async def database_ready():
+        return True
+
+    async def contract(self, *_args):
+        return {"contract_ok": True, "source_lock": {"pinned": True}}
+
+    class Storage:
+        public = False
+
+        def bucket_exists(self, _bucket):
+            return True
+
+        def get_bucket_policy(self, _bucket):
+            if self.public:
+                return json.dumps({"Statement": [{"Effect": "Allow", "Principal": {"AWS": ["*"]}}]})
+            raise S3Error(None, "NoSuchBucketPolicy", "fixture", None, None, None)
+
+    storage = Storage()
+    monkeypatch.setattr(service.pg_manager, "_runtime_schema_ready", database_ready)
+    monkeypatch.setattr(pdf_operations, "runtime_isolated", database_ready)
+    monkeypatch.setenv("YUXI_SECRET_MASTER_KEY", "fixture-managed-master-" + "a" * 32)
+    monkeypatch.delenv("YUXI_SECRET_MASTER_KEY_FILE", raising=False)
+    monkeypatch.setattr(service.PdfClient, "request", contract)
+    monkeypatch.setattr("yuxi.storage.redis.get_async_redis_client", redis)
+    monkeypatch.setattr("yuxi.storage.minio.get_minio_client", lambda: SimpleNamespace(client=storage))
+    assert (await readiness())["ready"]
+    storage.public = True
+    result = await readiness()
+    assert not result["ready"] and not result["storage_private"]
+
+    async def broken():
+        raise RuntimeError("secret-connection-must-not-escape")
+
+    monkeypatch.setattr(service.pg_manager, "_runtime_schema_ready", broken)
+    result = await readiness()
+    assert not result["database_ready"] and "secret-connection" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("pinned,contract_ok", [(False, True), (True, False)])
+async def test_capabilities_refuse_unpinned_or_broken_engine(database, monkeypatch, pinned, contract_ok):
+    async def contract(self, *_args):
+        return {"contract_ok": contract_ok, "source_lock": {"pinned": pinned}}
+
+    class Redis:
+        async def get(self, _key):
+            return b"alive"
+
+    async def pool():
+        return Redis()
+
+    monkeypatch.setattr(service.PdfClient, "request", contract)
+    monkeypatch.setattr("yuxi.services.run_queue_service.get_arq_pool", pool)
+    result = await service.capabilities()
+    assert not result["enabled"] and not result["runtime"]
+
+
 def request_body(**changes):
     body = {
         "model": "provider:model",

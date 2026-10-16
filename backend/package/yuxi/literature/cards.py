@@ -46,7 +46,7 @@ async def verify_report_sources(session, tenant_id: int, versions: list[dict]) -
 
     scope = current_access()
     if scope is not None:
-        fresh = await build_access(scope.user, tenant_id)
+        fresh = await build_access(scope.user, tenant_id, rids=tuple(v["rid"] for v in versions))
         if not {v["rid"] for v in versions} <= fresh.rids:
             raise ValueError("报告来源已更新或不可访问，请重新生成")
     rows = (

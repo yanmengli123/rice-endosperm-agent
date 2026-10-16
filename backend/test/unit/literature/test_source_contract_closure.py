@@ -230,6 +230,118 @@ async def env(monkeypatch):
     await engine.dispose()
 
 
+async def test_bounded_acl_and_sql_catalog_preserve_revocation_and_totals(env):
+    sessions, _assets, _queue = env
+    async with access.access_scope(USER, TENANT, rids=("doi-public", "doi-private")) as scope:
+        assert scope.rids == {"doi-public"}
+        assert set(scope.sources) == {"doi-public"}
+    async with access.access_scope(USER, TENANT, rids=()) as scope:
+        assert not scope.rids
+        assert (await readops.list_papers(TENANT))["total"] == 0
+    async with access.access_scope(USER, TENANT, catalog_only=True) as scope:
+        assert not scope.rids and not scope.sources
+        result = await readops.list_papers(TENANT, page_size=1)
+        assert result["total"] == 4 and len(result["items"]) == 1
+        assert (await readops.list_papers(99))["total"] == 0
+    async with sessions() as db:
+        kb = await db.scalar(select(KnowledgeBase).where(KnowledgeBase.kb_id == "kb-public"))
+        kb.share_config = {"access_level": "private"}
+    async with access.access_scope(USER, TENANT, catalog_only=True):
+        result = await readops.list_papers(TENANT)
+        assert result["total"] == 3 and "doi-public" not in {r["rid"] for r in result["items"]}
+    async with sessions() as db:
+        file = await db.scalar(select(KnowledgeFile).where(KnowledgeFile.file_id == "file-user"))
+        file.active_parse_revision_id = None
+    async with access.access_scope(USER, TENANT, catalog_only=True):
+        assert (await readops.list_papers(TENANT))["total"] == 2
+    async with access.asset_access_scope(USER, TENANT, "tenants/7/literature/notes/doi-public/L1.md") as scope:
+        assert not scope.rids
+
+
+async def test_http_download_rechecks_acl_after_storage_and_never_caches(env, monkeypatch):
+    import server.routers.literature_router as router
+
+    sessions, _assets, _queue = env
+    app = FastAPI()
+    app.include_router(router.literature, prefix="/api")
+    app.dependency_overrides[router.get_required_user] = lambda: USER
+
+    async def tenant(_user):
+        return TENANT
+
+    monkeypatch.setattr(router, "_current_tenant", tenant)
+    revoke = False
+
+    class Assets:
+        async def adownload_file(self, *_args):
+            assert access.current_access().rids == {"doi-public"}
+            if revoke:
+                async with sessions() as db:
+                    kb = await db.scalar(select(KnowledgeBase).where(KnowledgeBase.kb_id == "kb-public"))
+                    kb.share_config = {"access_level": "private"}
+            return b"private-pdf-bytes"
+
+    monkeypatch.setattr(router, "get_minio_client", Assets)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+        params = {"uri": "kbasset://tenants/7/literature/variants/doi-public/result.pdf"}
+        response = await client.get("/api/literature/assets", params=params)
+        assert response.status_code == 200 and response.content == b"private-pdf-bytes"
+        assert response.headers["cache-control"] == "private, no-store"
+        revoke = True
+        response = await client.get("/api/literature/assets", params=params)
+        assert response.status_code == 404 and b"private-pdf-bytes" not in response.content
+
+
+async def test_ingest_progress_enforces_source_acl_before_limit_and_revocation(env):
+    sessions, _assets, _queue = env
+    async with sessions() as db:
+        for kb in (await db.execute(select(KnowledgeBase))).scalars():
+            kb.contract_key = "pdf_evidence"
+        private = await db.scalar(select(KnowledgeParseRevision).where(
+            KnowledgeParseRevision.revision_id == "rev-private"
+        ))
+        private.error_message = "private-source-diagnostics"
+    async with access.access_scope(USER, TENANT, catalog_only=True):
+        items = await readops.list_paper_tasks(TENANT, limit=100)
+        assert {item["ref"] for item in items} == {"rev-public", "rev-department", "rev-user"}
+        assert "private-source-diagnostics" not in json.dumps(items)
+        assert len(await readops.list_paper_tasks(TENANT, limit=1)) == 1
+        assert await readops.list_paper_tasks(99) == []
+    async with sessions() as db:
+        kb = await db.scalar(select(KnowledgeBase).where(KnowledgeBase.kb_id == "kb-public"))
+        kb.share_config = {"access_level": "private"}
+    async with access.access_scope(USER, TENANT, catalog_only=True):
+        assert {item["ref"] for item in await readops.list_paper_tasks(TENANT)} == {"rev-department", "rev-user"}
+
+
+async def test_http_single_paper_scope_does_not_load_the_library(env, monkeypatch):
+    import server.routers.literature_router as router
+
+    app = FastAPI()
+    app.include_router(router.literature, prefix="/api")
+    app.dependency_overrides[router.get_required_user] = lambda: USER
+
+    async def tenant(_user):
+        return TENANT
+
+    async def detail(tenant_id, rid):
+        assert access.current_access().rids == {rid}
+        return {"rid": rid}
+
+    async def tasks(tenant_id, *, limit):
+        scope = access.current_access()
+        assert scope.catalog_only and not scope.rids and scope.allowed_kbs
+        return []
+
+    monkeypatch.setattr(router, "_current_tenant", tenant)
+    monkeypatch.setattr(router.readops, "get_paper_detail", detail)
+    monkeypatch.setattr(router.readops, "list_paper_tasks", tasks)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+        assert (await client.get("/api/literature/papers/doi-public")).status_code == 200
+        assert (await client.get("/api/literature/papers/doi-private")).status_code == 404
+        assert (await client.get("/api/literature/tasks")).json() == {"tasks": []}
+
+
 async def test_source_acls_apply_before_pagination_and_assets_graph_reports(env):
     async with access.access_scope(USER, TENANT) as scope:
         assert scope.rids == {"doi-public", "doi-department", "doi-user", "bib"}

@@ -344,7 +344,7 @@ async def _source(tenant_id: int, kind: str, ref: str) -> tuple[dict, str]:
         from yuxi.literature.reader_bundle import get_reader_bundle
 
         scope = current_access()
-        if scope is None or ref not in (await build_access(scope.user, tenant_id)).rids:
+        if scope is None or ref not in (await build_access(scope.user, tenant_id, rids=(ref,))).rids:
             raise PermissionError("探测来源无权访问")
         source = await get_reader_bundle(tenant_id, ref)
         if not source or not source.get("ready"):

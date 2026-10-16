@@ -209,13 +209,15 @@ async def _can_reuse_translation(session, job, *, force: bool) -> bool:
 
 
 async def enqueue_literature_translation(
-    *, paper_id: int, variant_kind: str = "zh", force: bool = False, requested_by: str = ""
+    *, paper_id: int, variant_kind: str = "zh", force: bool = False, requested_by: str = "",
+    model_spec: str | None = None,
 ) -> dict:
     """排一个翻译任务，且不以 ``force`` 抢占仍持有有效租约的 worker。"""
     if variant_kind == "pdf_zh":
         from yuxi.literature.pdf_translation import enqueue_pdf_translation
 
-        return await enqueue_pdf_translation(paper_id=paper_id, requested_by=requested_by, force=force)
+        selection = {"model_spec": model_spec} if model_spec is not None else {}
+        return await enqueue_pdf_translation(paper_id=paper_id, requested_by=requested_by, force=force, **selection)
     if variant_kind not in VALID_VARIANT_KINDS:
         raise ValueError(f"非法变体类型: {variant_kind}")
     from yuxi.literature.translate.settings import options_digest, translation_options
@@ -228,7 +230,8 @@ async def enqueue_literature_translation(
         ).scalar_one_or_none()
         if paper is None:
             raise ValueError(f"文献不存在: {paper_id}")
-        options = await translation_options(int(paper.tenant_id), requested_by) if requested_by else {}
+        selection = {"model_spec": model_spec} if model_spec is not None else {}
+        options = await translation_options(int(paper.tenant_id), requested_by, **selection) if requested_by else {}
         config_digest = options_digest(options) if options else ""
         job = await _find_translation_submission(session, paper, variant_kind, config_digest)
         if await _can_reuse_translation(session, job, force=force):

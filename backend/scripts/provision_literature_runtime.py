@@ -51,6 +51,7 @@ async def provision():
                     k: v
                     for k, v in source.items()
                     if not k.startswith("POSTGRES_")
+                    and k != "YUXI_SECRET_MASTER_KEY"
                     and not k.endswith("MIGRATION_URL")
                     and not k.endswith("SCHEDULER_DATABASE_URL")
                 }

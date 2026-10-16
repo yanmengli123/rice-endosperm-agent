@@ -166,7 +166,7 @@ async def _scientific_reading_fallback(tenant_id: int, paper: LiteraturePaper) -
     if hashlib.sha256(content).hexdigest() != artifact.sha256:
         raise ValueError("科学解析正文完整性校验失败")
     scope = current_access()
-    if scope is not None and paper.rid not in (await build_access(scope.user, tenant_id)).rids:
+    if scope is not None and paper.rid not in (await build_access(scope.user, tenant_id, rids=(paper.rid,))).rids:
         raise PermissionError("读取期间来源权限已撤销")
     async with pg_manager.get_async_session_context() as db:
         now = (

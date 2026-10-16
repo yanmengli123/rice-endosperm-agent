@@ -246,6 +246,14 @@ async def test_draft_owner_activation_digest_and_revocation_fail_closed(env):
 
 async def test_settings_are_owner_only_and_task_snapshot_never_changes(env):
     db, _, _, _, _ = env
+    before = await settings.get_settings(7, "u1")
+    one_off = await settings.translation_options(7, "u1", model_spec="fixture:chat")
+    assert one_off["model_spec"] == "fixture:chat"
+    assert await settings.get_settings(7, "u1") == before
+    with pytest.raises(ValueError, match="已登记模型"):
+        await settings.translation_options(7, "u1", model_spec="unknown:private")
+    with pytest.raises(ValueError):
+        await settings.translation_options(7, "u1", profile_id="one", model_spec="fixture:chat")
     job = await workspace.enqueue_task(7, "u1", source_kind="draft", source_ref="draft")
     await settings.save_settings(
         7, "u1", [{"id": "one", "model_spec": "fixture:chat", "batch_chars": 12000, "reasoning_effort": "high"}], "one"

@@ -143,10 +143,14 @@ async def test_live_pdf_translation_governed_and_authenticated():
         ) as client:
             caps = await client.get("/api/literature/pdf-translation/capabilities")
             assert caps.status_code == 200 and caps.json()["enabled"], caps.text
-            submitted = await client.post(f"/api/literature/papers/{tag}/translation?variant_kind=pdf_zh")
+            parameters = {"variant_kind": "pdf_zh"}
+            model_spec = os.getenv("YUXI_PDF_E2E_MODEL_SPEC")
+            if model_spec:
+                parameters["model_spec"] = model_spec
+            submitted = await client.post(f"/api/literature/papers/{tag}/translation", params=parameters)
             assert submitted.status_code == 202, submitted.text
             job_id = submitted.json()["job_id"]
-            replay = await client.post(f"/api/literature/papers/{tag}/translation?variant_kind=pdf_zh")
+            replay = await client.post(f"/api/literature/papers/{tag}/translation", params=parameters)
             assert replay.status_code == 202 and replay.json()["job_id"] == job_id
             until = time.monotonic() + 900
             while time.monotonic() < until:
@@ -181,6 +185,9 @@ async def test_live_pdf_translation_governed_and_authenticated():
                 assert denied.status_code in {401, 403}
             async with pg_manager.get_async_session_context() as db:
                 job = await db.get(LiteratureTranslationJob, job_id)
+                if model_spec:
+                    assert job.model_spec == model_spec
+                print(f"PDF acceptance job={job_id} model={job.model_spec}")
                 calls = (
                     (await db.execute(select(LiteraturePdfModelCall).where(LiteraturePdfModelCall.job_id == job_id)))
                     .scalars()
@@ -188,6 +195,8 @@ async def test_live_pdf_translation_governed_and_authenticated():
                 )
                 assert calls and all(call.status == "completed" for call in calls)
                 assert sum(call.input_tokens + call.output_tokens for call in calls) > 0
+                tokens = sum(c.input_tokens + c.output_tokens for c in calls)
+                print(f"PDF acceptance calls={len(calls)} tokens={tokens}")
             for _ in range(20):
                 async with pg_manager.get_async_session_context() as db:
                     job = await db.get(LiteratureTranslationJob, job_id)
@@ -266,10 +275,17 @@ async def test_existing_paid_pdf_outputs_and_ledger_without_model_respending():
             assert response.status_code == 200, response.text
             bundle = response.json()
             assert bundle["ready"] and bundle["status"] == "SUCCEEDED"
+            admission = await client.get("/api/literature/pdf-translation/readiness")
+            assert admission.status_code == 200 and admission.json()["ready"], admission.text
+            assert admission.json()["credentials_managed"]
+            metrics = await client.get("/api/literature/pdf-translation/prometheus")
+            assert metrics.status_code == 200 and "yuxi_pdf_ready 1" in metrics.text
+            assert "yuxi_pdf_unknown_calls" in metrics.text
             outputs = {}
             for kind, artifact in bundle["outputs"].items():
                 response = await client.get("/api/literature/assets", params={"uri": artifact["uri"]})
                 assert response.status_code == 200
+                assert response.headers["cache-control"] == "private, no-store"
                 assert hashlib.sha256(response.content).hexdigest() == artifact["digest"]
                 outputs[kind] = response.content
             with fitz.open(stream=outputs["pdf_zh"], filetype="pdf") as document:
@@ -288,6 +304,12 @@ async def test_existing_paid_pdf_outputs_and_ledger_without_model_respending():
                     "/api/literature/assets", params={"uri": bundle["outputs"]["pdf_zh"]["uri"]}
                 )
                 assert response.status_code in (401, 403)
+            async with pg_manager.get_async_session_context() as db:
+                key = await db.scalar(select(APIKey).where(APIKey.name == name))
+                key.scopes = []
+                await db.commit()
+            denied = await client.get("/api/literature/pdf-translation/readiness")
+            assert denied.status_code == 403, "Chat-only key must not inherit literature capabilities"
         async with pg_manager.get_async_session_context() as db:
             assert (await db.get(LiteratureTranslationJob, job_id)).execution_json["cleaned"]
             after_calls = (

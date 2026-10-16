@@ -34,6 +34,9 @@ class LiteratureAccess:
     user: object
     # Internal version authority also covers bibliography without a PDF source.
     reading_versions: dict[str, int] = field(default_factory=dict)
+    # Explicitly selected list/poll routes filter in SQL before count/limit.
+    catalog_only: bool = False
+    allowed_kbs: frozenset[str] = field(default_factory=frozenset)
 
 
 _access: ContextVar[LiteratureAccess | None] = ContextVar("literature_access", default=None)
@@ -44,6 +47,25 @@ def paper_visibility(tenant_id: int):
     condition = and_(LiteraturePaper.tenant_id == tenant_id, LiteraturePaper.trashed_at.is_(None))
     if scope is None:  # trusted background use, never an unauthenticated HTTP entry
         return condition
+    if scope.tenant_id != tenant_id:
+        return and_(condition, False)
+    if getattr(scope, "catalog_only", False):
+        source = (
+            select(KnowledgeParseRevision.revision_id)
+            .join(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
+            .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeParseRevision.kb_id)
+            .where(
+                KnowledgeParseRevision.revision_id == LiteraturePaper.source_revision_id,
+                KnowledgeParseRevision.tenant_id == tenant_id,
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.kb_id.in_(scope.allowed_kbs),
+                KnowledgeBase.governance_status.notin_(("ARCHIVED", "DELETED")),
+                KnowledgeFile.kb_id == KnowledgeBase.kb_id,
+                KnowledgeFile.active_parse_revision_id == KnowledgeParseRevision.revision_id,
+            )
+            .correlate(LiteraturePaper)
+        )
+        return and_(condition, or_(LiteraturePaper.source_revision_id.is_(None), source.exists()))
     rids = list(scope.rids if scope.tenant_id == tenant_id else ())
     # Large export corpora exceed asyncpg's 32767 expanded-bind limit. One typed
     # array retains exactly the same ACL predicate without loosening visibility.
@@ -57,7 +79,10 @@ def current_access() -> LiteratureAccess | None:
     return _access.get()
 
 
-async def build_access(user, tenant_id: int, *, include_trashed: bool = False) -> LiteratureAccess:
+async def build_access(
+    user, tenant_id: int, *, include_trashed: bool = False, rids=None, paper_ids=None, revision_ids=None,
+    catalog_only: bool = False,
+) -> LiteratureAccess:
     from yuxi.knowledge.manager import KnowledgeBaseManager
 
     principal = {
@@ -83,6 +108,18 @@ async def build_access(user, tenant_id: int, *, include_trashed: bool = False) -
                 principal, {"tenant_id": tenant_id, "created_by": created_by, "share_config": share_config}
             )
         ]
+        if catalog_only:
+            return LiteratureAccess(
+                tenant_id, frozenset(), frozenset(), {}, {}, user,
+                catalog_only=True, allowed_kbs=frozenset(allowed_kbs),
+            )
+        selections = []
+        for values, column in (
+            (rids, LiteraturePaper.rid), (paper_ids, LiteraturePaper.id),
+            (revision_ids, LiteraturePaper.source_revision_id),
+        ):
+            if values is not None:
+                selections.append(column.in_(values))
         rows = (
             await session.execute(
                 select(
@@ -106,6 +143,7 @@ async def build_access(user, tenant_id: int, *, include_trashed: bool = False) -
                 .outerjoin(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeParseRevision.kb_id)
                 .outerjoin(KnowledgeFile, KnowledgeFile.file_id == KnowledgeParseRevision.file_id)
                 .where(LiteraturePaper.tenant_id == tenant_id)
+                .where(*selections)
                 .where(True if include_trashed else LiteraturePaper.trashed_at.is_(None))
                 .where(
                     or_(
@@ -146,17 +184,43 @@ async def build_access(user, tenant_id: int, *, include_trashed: bool = False) -
         sources,
         user,
         {row.rid: row.reading_version for row in rows},
+        allowed_kbs=frozenset(allowed_kbs),
     )
 
 
 @asynccontextmanager
-async def access_scope(user, tenant_id: int):
-    scope = await build_access(user, tenant_id)
+async def access_scope(user, tenant_id: int, **selection):
+    scope = await build_access(user, tenant_id, **selection)
     token = _access.set(scope)
     try:
         yield scope
     finally:
         _access.reset(token)
+
+
+@asynccontextmanager
+async def asset_access_scope(user, tenant_id: int, object_name: str):
+    """Only load this object's source closure; unrecognized paths get no papers."""
+    parts = object_name.split("/")
+    selection = {"rids": ()}
+    if len(parts) >= 5 and parts[:2] == ["tenants", str(tenant_id)]:
+        if parts[2] == "documents" and len(parts) >= 7 and parts[4] == "reader_render":
+            selection = {"revision_ids": (parts[5],)}
+        elif parts[2] == "literature":
+            namespace, owner = parts[3:5]
+            if namespace in {"notes", "variants", "artifacts"}:
+                selection = {"rids": (owner, f"doi-{owner}")}
+            elif namespace == "attachments" and owner.isdigit():
+                selection = {"paper_ids": (int(owner),)}
+            elif namespace == "reports" and owner.removesuffix(".md").isdigit():
+                async with pg_manager.get_async_session_context() as db:
+                    report = await db.scalar(select(LiteratureReport).where(
+                        LiteratureReport.id == int(owner.removesuffix(".md")),
+                        LiteratureReport.tenant_id == tenant_id,
+                    ))
+                    selection = {"rids": tuple(report.source_rids_json or ()) if report else ()}
+    async with access_scope(user, tenant_id, **selection) as scope:
+        yield scope
 
 
 def report_visible(report: LiteratureReport) -> bool:

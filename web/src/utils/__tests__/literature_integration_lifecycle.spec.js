@@ -522,4 +522,100 @@ assert.equal(diagnostics.length, 4)
 operationsApp.unmount()
 assert.equal(diagnostics[3].signal.aborted, true)
 assert.equal(operationErrors.length, 0, '诊断面板的停用/可见性/恢复不得抛出回调异常')
-console.log('KeepAlive, owner/visibility/late-response fencing and PDF intake modes passed')
+// Actual PDF component: hidden pages, owner changes, blob/download completion and cancellation.
+document.hidden = false
+const pdfUser = Vue.reactive({ uid: 'reader-a', departmentId: 1, userRole: 'user' })
+const pdfRequests = [], blobRequests = [], cancelRequests = [], pdfTimers = new Map()
+const revoked = [], created = [], saved = [], pdfErrors = []
+let timerSequence = 0
+const pdfDocument = {
+  ...document,
+  createElement: () => ({ click: () => saved.push(true) })
+}
+const pdf = (await evaluate(
+  '../../components/literature/LiteraturePdfWorkspace.vue',
+  {
+    '@/stores/user': { useUserStore: () => pdfUser },
+    '@/composables/useLiteraturePollingScope': pollingScope,
+    '@/apis/literature_api': {
+      literaturePdfApi: {
+        bundle: (rid, signal) => new Promise((resolve) => pdfRequests.push({ rid, signal, resolve })),
+        cancel: (rid, jobId, signal) => new Promise((resolve) => cancelRequests.push({ rid, jobId, signal, resolve }))
+      },
+      fetchLiteratureAssetBlob: (uri, signal) => new Promise((resolve) => blobRequests.push({ uri, signal, resolve }))
+    }
+  }, {
+    document: pdfDocument,
+    URL: {
+      createObjectURL: () => { const url = `blob:fixture-${created.length}`; created.push(url); return url },
+      revokeObjectURL: (url) => revoked.push(url)
+    },
+    setTimeout: (callback) => { const id = ++timerSequence; pdfTimers.set(id, callback); return id },
+    clearTimeout: (id) => pdfTimers.delete(id)
+  }, true
+)).default
+let pdfState
+const pdfSetup = pdf.setup
+pdf.setup = (props, context) => {
+  pdfState = pdfSetup(props, context)
+  return pdfState
+}
+pdf.render = () => null
+const pdfShown = Vue.ref(true)
+const pdfApp = renderer.createApp({ setup: () => () => Vue.h(Vue.KeepAlive, null, {
+  default: () => pdfShown.value ? Vue.h(pdf, { rid: 'paper-a', originalUrl: 'blob:original' }) : Vue.h('div')
+}) })
+pdfApp.config.errorHandler = (error) => pdfErrors.push(error)
+pdfApp.mount({})
+await settle()
+assert.equal(pdfRequests.length, 1)
+pdfShown.value = false
+await settle()
+assert.equal(pdfRequests[0].signal.aborted, true)
+pdfRequests[0].resolve({ ready: false, owner: 'late-reader-a' })
+await settle()
+assert.equal(pdfState.bundle.value, null)
+pdfShown.value = true
+await settle()
+const completed = { ready: true, status: 'SUCCEEDED', job_id: 32, outputs: { pdf_zh: { uri: 'kbasset://fixture' } } }
+pdfRequests[1].resolve(completed)
+await settle()
+assert.equal(blobRequests.length, 1)
+pdfUser.uid = 'reader-b'
+await settle()
+assert.equal(blobRequests[0].signal.aborted, true)
+blobRequests[0].resolve({})
+await settle()
+assert.equal(created.length, 0, '上个账号的 PDF 不得进入 Blob URL')
+pdfRequests[2].resolve(completed)
+await settle()
+blobRequests[1].resolve({})
+await settle()
+assert.equal(created.length, 1)
+const pendingDownload = pdfState.download('pdf_zh')
+const pendingCancel = pdfState.cancel()
+await settle()
+pdfUser.uid = 'reader-c'
+await settle()
+assert.equal(pdfState.bundle.value, null)
+assert.equal(pdfState.translatedUrl.value, '')
+assert.equal(revoked[0], created[0])
+assert.equal(blobRequests[2].signal.aborted, true)
+assert.equal(cancelRequests[0].signal.aborted, true)
+blobRequests[2].resolve({})
+cancelRequests[0].resolve({})
+await pendingDownload
+await pendingCancel
+await settle()
+assert.equal(saved.length, 0, '账号切换后的旧下载不得触发保存')
+assert.equal(pdfRequests.length, 4, '旧取消请求不得刷新新账号')
+pdfRequests[3].resolve({ ready: false, status: 'RUNNING', job_id: 32 })
+await settle()
+assert.equal(pdfTimers.size, 1)
+document.hidden = true
+for (const callback of visibility) callback()
+await settle()
+assert.equal(pdfTimers.size, 0)
+pdfApp.unmount()
+assert.equal(pdfErrors.length, 0)
+console.log('KeepAlive, owner/visibility/late-response fencing, PDF download cleanup and intake modes passed')

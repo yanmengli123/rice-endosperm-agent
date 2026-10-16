@@ -263,7 +263,7 @@ def test_large_postgres_acl_uses_one_array_without_widening_visibility(monkeypat
         assert len(compiled.params) == 2
         assert len(next(value for value in compiled.params.values() if isinstance(value, list))) == 50000
         forbidden = paper_visibility(2).compile(dialect=postgresql.dialect())
-        assert next(value for value in forbidden.params.values() if isinstance(value, list)) == []
+        assert str(forbidden) == "false" and not forbidden.params
     finally:
         _access.reset(token)
 

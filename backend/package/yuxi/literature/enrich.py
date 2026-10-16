@@ -187,7 +187,7 @@ async def _backfill_doi_from_document(tenant_id: int, paper: LiteraturePaper) ->
     from yuxi.literature.access import build_access, current_access
 
     scope = current_access()
-    if scope is not None and paper.rid not in (await build_access(scope.user, tenant_id)).rids:
+    if scope is not None and paper.rid not in (await build_access(scope.user, tenant_id, rids=(paper.rid,))).rids:
         raise PermissionError("DOI 回填期间来源访问权已撤销")
     async with pg_manager.get_async_session_context() as session:
         current = (
@@ -247,7 +247,7 @@ async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
     from yuxi.literature.access import build_access, current_access
 
     scope = current_access()
-    if scope is not None and rid not in (await build_access(scope.user, tenant_id)).rids:
+    if scope is not None and rid not in (await build_access(scope.user, tenant_id, rids=(rid,))).rids:
         return {"rid": rid, "ok": False, "reason": "source_access_revoked"}
     async with pg_manager.get_async_session_context() as session:
         current = (

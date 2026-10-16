@@ -88,9 +88,18 @@ async def save_settings(tenant_id: int, uid: str, profiles: list[dict], active_p
     return await get_settings(tenant_id, uid)
 
 
-async def translation_options(tenant_id: int, uid: str, *, profile_id: str | None = None) -> dict:
+async def translation_options(
+    tenant_id: int, uid: str, *, profile_id: str | None = None, model_spec: str | None = None
+) -> dict:
     """Freeze effective model and batch options before durable-job reuse checks."""
     settings = await get_settings(tenant_id, uid)
+    if model_spec is not None:
+        if profile_id is not None or model_spec not in {item["spec"] for item in settings["models"]}:
+            raise ValueError("单次翻译模型必须是本人可用的已登记模型，且不能同时指定配置")
+        return {
+            "uid": uid, "schema": "translation-profile-v1", "model_spec": model_spec,
+            "batch_chars": 12000, "reasoning_effort": "default",
+        }
     selected = profile_id if profile_id is not None else settings["active_profile_id"]
     if selected:
         profile = next((item for item in settings["profiles"] if item["id"] == selected), None)

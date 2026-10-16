@@ -1,0 +1,45 @@
+groups:
+  - name: yuxi-literature-pdf
+    rules:
+      - alert: LiteraturePdfNotReady
+        expr: yuxi_pdf_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PDF 数据库、源码契约、心跳、存储、主密钥或容器隔离准入未通过"
+      - alert: LiteraturePdfUsageUnresolved
+        expr: yuxi_pdf_unknown_calls > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "供应商用量未知，保留预算预留并核对回执；禁止自动重试"
+      - alert: LiteraturePdfCleanupOverdue
+        expr: yuxi_pdf_cleanup_overdue > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PDF 临时产物清理积压超过五分钟"
+      - alert: LiteraturePdfQueueDelayed
+        expr: yuxi_pdf_oldest_queue_seconds > 300
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PDF 最旧排队任务超过五分钟"
+      - alert: LiteraturePdfFailureRate
+        expr: yuxi_pdf_failure_rate > 0.05 and yuxi_pdf_execution_samples >= 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "最近一天 PDF 实际执行失败率超过 5%，取消/来源失效不计分母"
+      - alert: LiteraturePdfMonitoringUnavailable
+        expr: up{job="yuxi-pdf"} == 0 or absent(yuxi_pdf_ready)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PDF 监控端点不可用或未采集"

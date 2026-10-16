@@ -120,7 +120,7 @@ async def read_product(tenant_id, rid, kind):
         }
     data = await get_minio_client().adownload_file(RENDER_BUCKET, uri.removeprefix("kbasset://"))
     scope = current_access()
-    if scope is not None and rid not in (await build_access(scope.user, tenant_id)).rids:
+    if scope is not None and rid not in (await build_access(scope.user, tenant_id, rids=(rid,))).rids:
         raise PermissionError("来源访问权已撤销")
     async with pg_manager.get_async_session_context() as db:
         now = (

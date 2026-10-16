@@ -6,10 +6,16 @@ name: Literature PDF Production Gates
     paths:
       - 'docker/supertranslate/**'
       - 'docker-compose*literature*'
+      - 'docker-compose.yml'
       - 'docker-compose.supertranslate.yml'
       - 'backend/package/yuxi/literature/**'
       - 'backend/package/yuxi/storage/postgres/**'
       - 'backend/server/routers/literature*'
+      - 'backend/server/utils/auth_middleware.py'
+      - 'backend/test/unit/server/test_api_key_scopes.py'
+      - 'backend/test/unit/server/test_managed_secret_key.py'
+      - 'backend/package/yuxi/utils/secret_crypto.py'
+      - 'backend/scripts/*literature*'
       - 'backend/test/**/literature/**'
       - 'backend/test/e2e/test_literature_pdf_acceptance.py'
       - 'backend/test/integration/test_native*'
@@ -44,7 +50,7 @@ jobs:
           docker build -f docker/supertranslate/Dockerfile -t yuxi-supertranslate:pdf-ci .
       - name: Governed calls, immutable settlement, critical tokens and subprocess lifecycle
         run: |
-          docker run --rm --network none -v "$PWD/backend/test:/app/test:ro" --entrypoint uv yuxi-api:pdf-ci run --no-sync --group test pytest test/unit/literature/ test/unit/storage/test_postgres_manager_schema.py -q
+          docker run --rm --network none -v "$PWD/backend/test:/app/test:ro" --entrypoint uv yuxi-api:pdf-ci run --no-sync --group test pytest test/unit/literature/ test/unit/routers/test_literature_router.py test/unit/server/test_api_key_scopes.py test/unit/server/test_managed_secret_key.py test/unit/storage/test_postgres_manager_schema.py -q
           docker run --rm --user 0 -v "$PWD/backend/test:/tests:ro" -e PYTHONPATH=/opt/integration:/opt/source/upstream --entrypoint sh yuxi-supertranslate:pdf-ci -c 'uv sync --locked --group test --no-install-project && .venv/bin/pytest --confcutdir=/tests/integration/literature -c /opt/integration/pyproject.toml /tests/integration/literature/test_pdf_runtime.py -q'
       - name: Encrypted isolated recovery without production access
         run: |

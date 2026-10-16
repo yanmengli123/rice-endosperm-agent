@@ -111,21 +111,30 @@ class PdfClient:
 
 
 async def capabilities() -> dict:
-    try:
-        async with PdfClient() as client:
-            health = await client.request("GET", "/health")
-        from yuxi.services.run_queue_service import get_arq_pool
+    from redis.exceptions import RedisError
 
-        pool = await get_arq_pool()
-        ready = bool(
-            await pool.get("literature:pdf-worker:health") and await pool.get("literature:pdf-maintenance:health")
-        )
+    try:
+        async with asyncio.timeout(5):
+            async with PdfClient() as client:
+                health = await client.request("GET", "/contract")
+            from yuxi.services.run_queue_service import get_arq_pool
+
+            pool = await get_arq_pool()
+            ready = bool(
+                await pool.get("literature:pdf-worker:health") and await pool.get("literature:pdf-maintenance:health")
+            )
+        if not isinstance(health, dict) or (
+            health.get("contract_ok") is not True or health.get("source_lock", {}).get("pinned") is not True
+        ):
+            return {"enabled": False, "reason": "翻译引擎契约或源码锁校验未通过", "runtime": {}}
         return {"enabled": ready, "reason": "" if ready else "保版式翻译 worker 未启动", "runtime": health}
-    except (ValueError, httpx.HTTPError):
+    except (ValueError, httpx.HTTPError, RedisError, TimeoutError):
         return {"enabled": False, "reason": "保版式翻译服务未启用或不可达", "runtime": {}}
 
 
-async def enqueue_pdf_translation(*, paper_id: int, requested_by: str, force=False) -> dict:
+async def enqueue_pdf_translation(
+    *, paper_id: int, requested_by: str, force=False, model_spec: str | None = None
+) -> dict:
     from yuxi.literature.translate.settings import options_digest, translation_options
     from yuxi.literature.translate.service import _precheck_translation_model
     from yuxi.literature.llm_gateway import freeze_literature_policy
@@ -135,7 +144,8 @@ async def enqueue_pdf_translation(*, paper_id: int, requested_by: str, force=Fal
         paper = await db.get(LiteraturePaper, paper_id)
         if paper is None:
             raise ValueError("文献不存在")
-        options = await translation_options(int(paper.tenant_id), requested_by)
+        selection = {"model_spec": model_spec} if model_spec is not None else {}
+        options = await translation_options(int(paper.tenant_id), requested_by, **selection)
         # A source PDF is mandatory; catalog-only entries cannot be translated.
         source = await get_source_pdf(int(paper.tenant_id), paper.rid)
         if source is None or not source[0] or len(source[0]) > MAX_INPUT:

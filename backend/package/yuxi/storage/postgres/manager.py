@@ -1145,6 +1145,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0117_pdf_usage_resolution", "_migration_0117_pdf_usage_resolution"),
         ("0118_pdf_worker_minimal_reads", "_migration_0118_pdf_worker_minimal_reads"),
         ("0119_pdf_source_lock", "_migration_0119_pdf_source_lock"),
+        ("0120_literature_report_jobs", "_migration_0120_literature_report_jobs"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:
@@ -1199,6 +1200,29 @@ class PostgresManager(metaclass=SingletonMeta):
     async def _migration_0119_pdf_source_lock(self, conn) -> None:
         await self._migration_0118_pdf_worker_minimal_reads(conn)
 
+    async def _migration_0120_literature_report_jobs(self, conn) -> None:
+        from yuxi.storage.postgres.models_knowledge import LiteratureReportJob
+
+        await conn.run_sync(lambda sync_conn: LiteratureReportJob.__table__.create(sync_conn, checkfirst=True))
+        await conn.execute(text("ALTER TABLE literature_report_jobs ENABLE ROW LEVEL SECURITY"))
+        await conn.execute(text(
+            "CREATE POLICY p_literature_report_jobs_tenant ON literature_report_jobs "
+            "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::bigint)"
+        ))
+        # production_security 的 GRANT ON ALL TABLES 只覆盖其执行时已存在的表；
+        # 新表必须显式补上受限运行角色的表/序列权限（角色幂等创建，非受限库同样安全）。
+        await conn.execute(text(
+            "DO $role$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='yuxi_api_runtime') THEN "
+            "CREATE ROLE yuxi_api_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; "
+            "END IF; END $role$"
+        ))
+        await conn.execute(text(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON literature_report_jobs TO yuxi_api_runtime"
+        ))
+        await conn.execute(text(
+            "GRANT USAGE, SELECT ON SEQUENCE literature_report_jobs_id_seq TO yuxi_api_runtime"
+        ))
+
     async def _runtime_schema_ready(self):
         if os.getenv("YUXI_DB_SKIP_MIGRATIONS", "").lower() != "true":
             return False
@@ -1216,8 +1240,10 @@ class PostgresManager(metaclass=SingletonMeta):
                 "r.oid IN (SELECT relowner FROM pg_class WHERE relname LIKE 'literature_%')))"
             ))
             boundaries = await conn.scalar(text(
-                "SELECT count(*) FROM pg_policies WHERE schemaname='public' "
-                "AND policyname='runtime_tenant_boundary' AND tablename IN "
+                "SELECT count(*) FROM pg_policies p JOIN pg_class c ON c.relname=p.tablename "
+                "JOIN pg_namespace n ON n.oid=c.relnamespace AND n.nspname=p.schemaname "
+                "WHERE p.schemaname='public' AND c.relrowsecurity AND p.permissive='RESTRICTIVE' "
+                "AND p.cmd='ALL' AND p.policyname='runtime_tenant_boundary' AND p.tablename IN "
                 "('literature_papers','literature_translation_jobs','literature_pdf_model_calls',"
                 "'literature_variants','agent_runs','usage_ledger')"
             ))

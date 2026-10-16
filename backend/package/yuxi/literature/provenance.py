@@ -58,7 +58,7 @@ async def require_current_input(session, job):
             except PrincipalResolutionError:
                 allowed = False
         if allowed:
-            scope = await build_access(user, int(paper.tenant_id))
+            scope = await build_access(user, int(paper.tenant_id), rids=(paper.rid,))
             allowed = paper.rid in scope.rids
         if not allowed:
             await session.execute(

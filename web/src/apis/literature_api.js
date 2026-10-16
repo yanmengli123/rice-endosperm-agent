@@ -4,9 +4,9 @@ export const literaturePdfApi = {
   capabilities: () => apiGet('/api/literature/pdf-translation/capabilities'),
   bundle: (rid, signal) =>
     apiGet(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation`, { signal }),
-  cancel: (rid, jobId) =>
-    apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation/${jobId}/cancel`),
-  source: () => apiGet('/api/literature/pdf-translation/source', {}, true, 'blob'),
+  cancel: (rid, jobId, signal) =>
+    apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation/${jobId}/cancel`, {}, { signal }),
+  source: (signal) => apiGet('/api/literature/pdf-translation/source', { signal }, true, 'blob'),
   operations: (signal) => apiGet('/api/literature/pdf-translation/operations', { signal }),
   unresolvedUsage: (signal) => apiGet('/api/literature/pdf-translation/usage-unresolved', { signal }),
   resolveUsage: (callId, receipt) =>

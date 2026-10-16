@@ -36,7 +36,7 @@ from yuxi.literature import (
 )
 from yuxi.literature import enrich as enrich_module
 from yuxi.literature import session as lit_session
-from yuxi.literature.access import access_scope, authorize_asset, paper_visibility
+from yuxi.literature.access import access_scope, asset_access_scope, authorize_asset, paper_visibility
 from yuxi.literature.attachments import register_attachment
 from yuxi.literature.import_archive import import_paperagent_archive
 from yuxi.literature.notes.service import (
@@ -54,11 +54,30 @@ from yuxi.storage.postgres.models_business import User
 from server.utils.auth_middleware import get_admin_user, get_required_user, get_superadmin_user, require_scope
 
 
-async def authorize_literature_request(request: Request, current_user: User = Depends(get_required_user)):
+async def authorize_literature_request(
+    request: Request, response: Response, current_user: User = Depends(get_required_user)
+):
+    response.headers["Cache-Control"] = "private, no-store"
     await require_scope("literature:read" if request.method in ("GET", "HEAD") else "literature:write")(request)
     tenant_id = await _current_tenant(current_user)
-    async with access_scope(current_user, tenant_id) as scope:
-        rid = request.path_params.get("rid")
+    rid = request.path_params.get("rid")
+    route = request.scope.get("route")
+    selection = {}
+    if route and route.name in {"list_papers", "list_tasks"}:
+        selection = {"catalog_only": True}
+    elif route and "/literature/papers/{rid}" in route.path:
+        selection = {"rids": (rid,)}
+    elif route and (
+        "/literature/pdf-translation/" in route.path
+        or route.name in {"get_translation_settings", "save_translation_settings", "list_output_templates"}
+    ):
+        selection = {"rids": ()}
+    manager = access_scope(current_user, tenant_id, **selection)
+    if route and route.name == "get_asset":
+        manager = asset_access_scope(
+            current_user, tenant_id, request.query_params.get("uri", "").removeprefix("kbasset://")
+        )
+    async with manager as scope:
         if request.scope.get("route") and request.scope["route"].name in {
             "restore_library_paper",
             "trash_library_paper",
@@ -450,6 +469,7 @@ async def trigger_translation(
     rid: str,
     variant_kind: str = Query(default="zh"),
     force: bool = Query(default=False),
+    model_spec: str | None = Query(default=None, min_length=1, max_length=512),
     current_user: User = Depends(get_required_user),
 ):
     tenant_id = await _current_tenant(current_user)
@@ -463,6 +483,7 @@ async def trigger_translation(
             variant_kind=variant_kind,
             force=force,
             requested_by=current_user.uid,
+            **({"model_spec": model_spec} if model_spec is not None else {}),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -530,11 +551,14 @@ async def get_asset(
         data = await get_minio_client().adownload_file(RENDER_BUCKET, object_name)
     except Exception as exc:  # noqa: BLE001 - 对象不存在/存储不可用统一 404
         raise HTTPException(status_code=404, detail="资产不存在") from exc
+    async with asset_access_scope(current_user, tenant_id, object_name):
+        if not await authorize_asset(object_name):
+            raise HTTPException(status_code=404, detail="资产来源已变更或无权访问")
     suffix = "." + object_name.rsplit(".", 1)[-1].lower() if "." in object_name else ""
     return Response(
         content=data,
         media_type=_ASSET_CONTENT_TYPES.get(suffix, "application/octet-stream"),
-        headers={"Cache-Control": "private, max-age=60"},
+        headers={"Cache-Control": "private, no-store"},
     )
 
 
@@ -1232,9 +1256,27 @@ async def pdf_translation_source(current_user: User = Depends(get_required_user)
 
 @literature.get("/pdf-translation/operations")
 async def pdf_operations(current_user: User = Depends(get_admin_user)):
-    from yuxi.literature.pdf_operations import operations
+    from yuxi.literature.pdf_operations import operations, readiness
 
-    return JSONResponse(await operations(await _current_tenant(current_user)), headers={"Cache-Control": "no-store"})
+    result = await operations(await _current_tenant(current_user))
+    result["readiness"] = await readiness()
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@literature.get("/pdf-translation/readiness")
+async def pdf_readiness(current_user: User = Depends(get_admin_user)):
+    from yuxi.literature.pdf_operations import readiness
+
+    result = await readiness()
+    return JSONResponse(result, status_code=200 if result["ready"] else 503, headers={"Cache-Control": "no-store"})
+
+
+@literature.get("/pdf-translation/prometheus")
+async def pdf_metrics(current_user: User = Depends(get_admin_user)):
+    from yuxi.literature.pdf_operations import operations, prometheus, readiness
+
+    result = prometheus(await readiness(), await operations(await _current_tenant(current_user)))
+    return Response(result, media_type="text/plain; version=0.0.4", headers={"Cache-Control": "no-store"})
 
 
 @literature.get("/pdf-translation/usage-unresolved")
@@ -1383,17 +1425,33 @@ async def list_concepts_endpoint(current_user: User = Depends(get_required_user)
     return {"concepts": await concepts.aggregate_concepts(tenant_id)}
 
 
+class TopicMocRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    topic: str = Field(min_length=1, max_length=256)
+
+
 @literature.post("/reports/topic-moc", status_code=202)
-async def generate_topic_moc_endpoint(payload: dict, current_user: User = Depends(get_required_user)):
-    """主题 MOC 生成（概念/标题匹配 → L1 聚合 → LLM 导读；落 reports）。"""
+async def generate_topic_moc_endpoint(payload: TopicMocRequest, current_user: User = Depends(get_required_user)):
+    """主题 MOC 异步入队（概念/标题匹配 → L1 聚合 → LLM 导读；ARQ worker 执行，防 30s 超时）。"""
     tenant_id = await _current_tenant(current_user)
     try:
-        result = await concepts.generate_topic_moc(
-            tenant_id, topic=str(payload.get("topic") or ""), created_by=getattr(current_user, "uid", "")
+        result = await concepts.enqueue_topic_moc(
+            tenant_id, topic=payload.topic, created_by=getattr(current_user, "uid", "")
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": 202, **result}
+
+
+@literature.get("/reports/topic-moc/{job_id}")
+async def get_topic_moc_endpoint(job_id: str, current_user: User = Depends(get_required_user)):
+    """主题 MOC 任务状态查询（仅任务提交者本人可见）。"""
+    tenant_id = await _current_tenant(current_user)
+    job = await concepts.get_topic_moc_job(tenant_id, job_id)
+    if job is None or job.get("requested_by") != getattr(current_user, "uid", ""):
+        raise HTTPException(status_code=404, detail="任务不存在")
+    job.pop("requested_by", None)
+    return job
 
 
 class TopicCompile(BaseModel):

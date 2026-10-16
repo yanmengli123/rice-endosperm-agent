@@ -214,8 +214,6 @@ def require_scope(scope: str):
         if purpose is None or purpose == "desktop_legacy":
             return
         scopes = getattr(request.state, "api_key_scopes", None)
-        if not scopes:
-            return
         if isinstance(scopes, list) and (scope in scopes or "*" in scopes):
             return
         raise HTTPException(

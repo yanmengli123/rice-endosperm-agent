@@ -40,7 +40,7 @@ async def read_current_note(tenant_id: int, rid: str, level: str, *, max_chars: 
         raise ValueError("当前版本笔记不存在")
     data = await get_minio_client().adownload_file(RENDER_BUCKET, uri.removeprefix("kbasset://"))
     scope = current_access()
-    if scope is not None and rid not in (await build_access(scope.user, tenant_id)).rids:
+    if scope is not None and rid not in (await build_access(scope.user, tenant_id, rids=(rid,))).rids:
         raise PermissionError("笔记来源权限已撤销")
     if await get_note_uri(tenant_id, rid, level) != uri:
         raise ValueError("笔记版本已变更，请重新读取")
@@ -429,6 +429,10 @@ async def _project_ingest_tasks(session, tenant_id: int, limit: int) -> list[dic
     任务中心的口径，spans tenants）。尚未登记为文献的 revision 通过
     ``source_revision_id`` 反查 rid，登记完成即原地可点击。
     """
+    scope = current_access()
+    acl = True if scope is None else (
+        KnowledgeBase.kb_id.in_(getattr(scope, "allowed_kbs", ())) if scope.tenant_id == tenant_id else False
+    )
     rows = (
         await session.execute(
             select(KnowledgeParseRevision, KnowledgeFile.original_filename, KnowledgeFile.filename)
@@ -436,7 +440,11 @@ async def _project_ingest_tasks(session, tenant_id: int, limit: int) -> list[dic
             .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeParseRevision.kb_id)
             .where(
                 KnowledgeParseRevision.tenant_id == tenant_id,
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.governance_status.notin_(("ARCHIVED", "DELETED")),
                 KnowledgeBase.contract_key == "pdf_evidence",
+                KnowledgeFile.kb_id == KnowledgeBase.kb_id,
+                acl,
             )
             .order_by(KnowledgeParseRevision.updated_at.desc())
             .limit(limit)

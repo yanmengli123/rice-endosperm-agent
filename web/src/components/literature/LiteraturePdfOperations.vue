@@ -4,18 +4,30 @@
     <button class="btn" :disabled="busy" @click="load">刷新诊断</button>
     <p v-if="error" role="alert">{{ error }}</p>
     <template v-if="snapshot">
+      <p v-if="snapshot.readiness" role="status">
+        生产依赖：{{ snapshot.readiness.ready ? '全部就绪' : '准入未通过' }} ·
+        数据库 {{ snapshot.readiness.database_ready ? '通过' : '未通过' }} ·
+        引擎与源码 {{ snapshot.readiness.engine_ready ? '通过' : '未通过' }} ·
+        执行与维护 {{ snapshot.readiness.workers_ready ? '在线' : '缺失' }} ·
+        私有存储 {{ snapshot.readiness.storage_private ? '通过' : '未通过' }} ·
+        凭据密钥 {{ snapshot.readiness.credentials_managed ? '已托管' : '未托管' }} ·
+        容器隔离 {{ snapshot.readiness.runtime_isolated ? '通过' : '未通过' }}
+      </p>
       <p>
         排队 {{ snapshot.status_counts.PENDING || 0 }} · 执行中
         {{ snapshot.status_counts.RUNNING || 0 }} · 用量待核对 {{ snapshot.unknown_calls }} ·
         清理积压 {{ snapshot.cleanup_overdue }}
       </p>
       <p>
-        最近 24 小时：{{ snapshot.terminal_samples }} 个终态任务；失败率
+        最近 24 小时：{{ snapshot.terminal_samples }} 个成功或失败的执行；失败率
         {{
           snapshot.failure_rate === null
             ? '暂无数据'
             : `${(snapshot.failure_rate * 100).toFixed(1)}%`
         }}。
+      </p>
+      <p v-if="snapshot.excluded_terminal_samples" class="muted">
+        另有 {{ snapshot.excluded_terminal_samples }} 个取消或来源失效等终态，不计入执行失败率。
       </p>
       <p class="muted" v-if="snapshot.slo_evidence === 'insufficient_samples'">
         样本不足 20 个，尚不足以评估稳定性目标。

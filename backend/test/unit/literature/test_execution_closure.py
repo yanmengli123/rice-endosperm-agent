@@ -1102,7 +1102,7 @@ async def test_canonical_parse_reading_fallback_is_verified_and_not_reviewed(env
     monkeypatch.setattr(storage, "adownload_file", downloaded)
     if failure == "revoked":
 
-        async def revoked(*args):
+        async def revoked(*args, **kwargs):
             return replace(scope, rids=frozenset())
 
         monkeypatch.setattr("yuxi.literature.access.build_access", revoked)
@@ -1287,13 +1287,15 @@ async def env(monkeypatch):
         scope = LiteratureAccess(TENANT, frozenset({RID}), frozenset({1}), {}, {}, SimpleNamespace(uid="u1"))
         token = _access.set(scope)
 
-        async def fresh_access(_user, _tenant, *, include_trashed=False):
+        async def fresh_access(_user, _tenant, *, include_trashed=False, rids=None):
             from dataclasses import replace
 
             papers = list(
                 (await db.execute(select(LiteraturePaper).where(LiteraturePaper.rid.in_(scope.rids)))).scalars()
             )
             visible = frozenset(p.rid for p in papers if include_trashed or p.trashed_at is None)
+            if rids is not None:
+                visible &= frozenset(rids)
             return replace(scope, rids=visible, paper_ids=frozenset(p.id for p in papers if p.rid in visible))
 
         monkeypatch.setattr("yuxi.literature.access.build_access", fresh_access)

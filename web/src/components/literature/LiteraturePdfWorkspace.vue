@@ -97,6 +97,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { literaturePdfApi, fetchLiteratureAssetBlob } from '@/apis/literature_api'
 import LiteraturePdfReader from './LiteraturePdfReader.vue'
+import { useUserStore } from '@/stores/user'
+import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
 
 const props = defineProps({
   rid: { type: String, required: true },
@@ -127,6 +129,28 @@ let controller = null,
   generation = 0,
   disposed = false,
   translatedUri = ''
+const user = useUserStore(),
+  actions = new Set(),
+  owner = () => JSON.stringify([user.uid, user.departmentId, user.userRole]),
+  identity = () => JSON.stringify([owner(), props.rid, props.versionToken])
+const pause = () => {
+  ++generation
+  clearTimeout(timer)
+  controller?.abort()
+  for (const request of actions) request.abort()
+  actions.clear()
+  cancelling.value = false
+  release()
+}
+const polling = useLiteraturePollingScope(pause, () => load())
+const action = () => {
+  const request = new AbortController(), key = identity()
+  actions.add(request)
+  return {
+    request,
+    current: () => !disposed && polling.value && !request.signal.aborted && key === identity()
+  }
+}
 const statusLabel = computed(() =>
   bundle.value?.cancel_requested ? '取消处理中' : bundle.value?.stage || bundle.value?.status || ''
 )
@@ -141,15 +165,16 @@ const release = () => {
   translatedUri = ''
 }
 const load = async () => {
-  if (disposed) return
+  if (disposed || !polling.value || !user.uid) return
   clearTimeout(timer)
   controller?.abort()
   controller = new AbortController()
   const request = controller,
     ticket = ++generation,
-    rid = props.rid
+    rid = props.rid,
+    key = identity()
   const current = () =>
-    !disposed && ticket === generation && rid === props.rid && !request.signal.aborted
+    !disposed && polling.value && ticket === generation && key === identity() && !request.signal.aborted
   try {
     const result = await literaturePdfApi.bundle(rid, request.signal)
     if (!current()) return
@@ -178,14 +203,17 @@ const load = async () => {
   }
 }
 const cancel = async () => {
+  if (cancelling.value || !bundle.value?.job_id || !polling.value) return
+  const { request, current } = action(), rid = props.rid, jobId = bundle.value.job_id
   cancelling.value = true
   try {
-    await literaturePdfApi.cancel(props.rid, bundle.value.job_id)
-    await load()
+    await literaturePdfApi.cancel(rid, jobId, request.signal)
+    if (current()) await load()
   } catch (error) {
-    notice.value = error.message || '取消请求失败'
+    if (current()) notice.value = error.message || '取消请求失败'
   } finally {
-    cancelling.value = false
+    actions.delete(request)
+    if (current()) cancelling.value = false
   }
 }
 const saveBlob = (blob, filename) => {
@@ -197,22 +225,38 @@ const saveBlob = (blob, filename) => {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 const download = async (kind) => {
+  const uri = bundle.value?.outputs?.[kind]?.uri
+  if (!uri || !polling.value) return
+  const { request, current } = action(), rid = props.rid
   try {
-    const blob = await fetchLiteratureAssetBlob(bundle.value.outputs[kind].uri)
-    saveBlob(blob, `${props.rid}-${kind}.${kind === 'qa' ? 'json' : 'pdf'}`)
+    const blob = await fetchLiteratureAssetBlob(uri, request.signal)
+    if (current()) saveBlob(blob, `${rid}-${kind}.${kind === 'qa' ? 'json' : 'pdf'}`)
   } catch (error) {
-    notice.value = error.message || '下载失败'
+    if (current()) notice.value = error.message || '下载失败'
+  } finally {
+    actions.delete(request)
   }
 }
 const downloadSource = async () => {
+  const { request, current } = action()
   try {
-    const response = await literaturePdfApi.source()
-    saveBlob(await response.blob(), 'supertranslate-corresponding-source.tar.gz')
+    const response = await literaturePdfApi.source(request.signal)
+    const blob = await response.blob()
+    if (current()) saveBlob(blob, 'supertranslate-corresponding-source.tar.gz')
   } catch (error) {
-    notice.value = error.message || '引擎源码暂不可用'
+    if (current()) notice.value = error.message || '引擎源码暂不可用'
+  } finally {
+    actions.delete(request)
   }
 }
-watch(() => [props.rid, props.versionToken], load)
+watch(identity, () => {
+  pause()
+  bundle.value = null
+  qa.value = null
+  notice.value = ''
+  mode.value = 'original'
+  load()
+}, { flush: 'sync' })
 watch(
   () => props.evidenceTarget,
   () => {
@@ -222,10 +266,7 @@ watch(
 onMounted(load)
 onBeforeUnmount(() => {
   disposed = true
-  generation++
-  clearTimeout(timer)
-  controller?.abort()
-  release()
+  pause()
 })
 </script>
 

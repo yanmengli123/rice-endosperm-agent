@@ -113,6 +113,24 @@ async def protected_database():
     await admin.dispose()
 
 
+async def test_readiness_rejects_disabled_rls_even_when_policy_still_exists(protected_database, monkeypatch):
+    admin, pools = protected_database
+    monkeypatch.setenv("YUXI_DB_SKIP_MIGRATIONS", "true")
+    monkeypatch.setattr(pg_manager, "async_engine", pools["pdf_fixture_api"])
+    async with admin.begin() as conn:
+        await conn.execute(text("INSERT INTO schema_migrations(version) VALUES (:version)"),
+                           {"version": pg_manager._VERSIONED_MIGRATIONS[-1][0]})
+    assert await pg_manager._runtime_schema_ready()
+    try:
+        async with admin.begin() as conn:
+            await conn.execute(text("ALTER TABLE literature_papers DISABLE ROW LEVEL SECURITY"))
+        with pytest.raises(RuntimeError, match="production admission"):
+            await pg_manager._runtime_schema_ready()
+    finally:
+        async with admin.begin() as conn:
+            await conn.execute(text("ALTER TABLE literature_papers ENABLE ROW LEVEL SECURITY"))
+
+
 async def test_real_runtime_rls_survives_commit_rollback_and_pool_reuse(protected_database):
     _admin, pools = protected_database
     factory = async_sessionmaker(pools["pdf_fixture_api"], class_=RuntimeAsyncSession)

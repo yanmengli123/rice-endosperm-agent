@@ -56,7 +56,7 @@ async def get_metadata(tenant_id: int, rid: str) -> dict:
 
 async def update_metadata(tenant_id: int, rid: str, *, expected_token: str, changes: dict) -> dict:
     scope = current_access()
-    if scope is None or rid not in (await build_access(scope.user, tenant_id)).rids:
+    if scope is None or rid not in (await build_access(scope.user, tenant_id, rids=(rid,))).rids:
         raise PermissionError("文献来源访问权已撤销")
     if not changes or set(changes) - set(METADATA_FIELDS):
         raise ValueError("仅可修改书目信息；身份、来源与计量字段由服务端维护")

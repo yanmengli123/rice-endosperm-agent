@@ -5,7 +5,8 @@
 
 密文格式: ``enc.v1:<base64(nonce | ciphertext | tag)>``
 
-- 主密钥来自环境变量 ``YUXI_SECRET_MASTER_KEY``（至少 32 字符）；生产环境必须显式
+- 主密钥来自环境变量 ``YUXI_SECRET_MASTER_KEY`` 或只读 ``YUXI_SECRET_MASTER_KEY_FILE``（至少 32 字符）；
+  生产/受限运行环境必须显式
   配置，开发环境首次使用时自动生成并写入本地 gitignore 文件以保证跨重启稳定。
 - AAD 绑定资源上下文（如 ``model-provider:{provider_id}``），防止密文被挪用到其他
   资源名下；解密时上下文不匹配会直接失败。
@@ -28,6 +29,7 @@ CIPHER_PREFIX = "enc.v1:"
 SECRET_UNCHANGED_MARKER = "__YUXI_SECRET_UNCHANGED__"
 _NONCE_BYTES = 12
 _MASTER_KEY_ENV = "YUXI_SECRET_MASTER_KEY"
+_MASTER_KEY_FILE_ENV = "YUXI_SECRET_MASTER_KEY_FILE"
 _DEV_KEY_FILE_ENV = "YUXI_DEV_SECRET_KEY_FILE"
 _DEFAULT_DEV_KEY_FILE = Path("saves/.yuxi-dev-secret-master-key")
 
@@ -79,6 +81,16 @@ def _master_key() -> bytes:
     import hashlib
 
     raw = os.getenv(_MASTER_KEY_ENV, "").strip()
+    key_file = os.getenv(_MASTER_KEY_FILE_ENV, "").strip()
+    if key_file:
+        if raw:
+            raise SecretCryptoError("主密钥环境变量与文件只能配置一个")
+        try:
+            raw = Path(key_file).read_text(encoding="utf-8").strip()
+        except OSError:
+            raise SecretCryptoError("无法读取受管主密钥文件") from None
+        if not raw:
+            raise SecretCryptoError("受管主密钥文件为空")
     if raw:
         if len(raw) < 32:
             raise SecretCryptoError(f"{_MASTER_KEY_ENV} 至少需要 32 个字符")
@@ -86,8 +98,8 @@ def _master_key() -> bytes:
 
     # 与 auth_utils 的生产判定保持同一环境变量口径
     is_production = os.environ.get("YUXI_ENV", "development").strip().lower() in {"prod", "production"}
-    if is_production:
-        raise SecretCryptoError(f"生产环境必须显式配置 {_MASTER_KEY_ENV}（openssl rand -hex 32）以启用凭据静态加密")
+    if is_production or os.getenv("YUXI_DB_SKIP_MIGRATIONS", "").lower() == "true":
+        raise SecretCryptoError(f"受限运行环境必须配置 {_MASTER_KEY_ENV} 或 {_MASTER_KEY_FILE_ENV}")
 
     # 开发环境：使用 API/Worker 共同挂载的 saves 卷，保证跨进程和重启稳定。
     dev_key_file = _dev_key_file()

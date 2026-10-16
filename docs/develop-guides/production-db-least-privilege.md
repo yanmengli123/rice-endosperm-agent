@@ -1,5 +1,25 @@
 # 生产数据库最小权限与 RLS 验收
 
+## 当前文献 PDF 部署（2026-10-15）
+
+当前实际方案使用 `docker-compose.literature-production.yml`，覆盖原开发连接。API 使用 `yuxi_api_login` / `yuxi_api_runtime`，PDF 执行与维护使用 `yuxi_pdf_login` / `yuxi_pdf_runtime`。迁移由独立 `literature-migrate` 运维服务持有管理员连接执行，运行连接禁止 DDL。下文早期 `yuxi_app` 三角色脚本仅保留为历史方案，不能作为当前 PDF 部署命令。
+
+每个数据库事务从已验证主体设置 `yuxi.tenant_id` 和 `yuxi.uid`，无主体时设空；commit、rollback、连接复用均重新绑定。启动和 `/api/literature/pdf-translation/readiness` 检查六个关键表的 RLS **已启用**且边界策略为 restrictive / ALL，不能仅凭策略名称判为通过。
+
+API 主密钥使用仓库外文件只读挂载。`.env.enterprise` 配置 `YUXI_SECRET_MASTER_KEY_PATH`，容器内为 `/run/secrets/yuxi-secret-master-key`，禁止缺文件时自动创建空目录。切换现有系统必须保留原值，不能生成新值导致供应商密文失效。管理员可在无网络临时容器运行 `backend/scripts/pin_literature_master_key.py --source-env /source.env --target /keys/yuxi-credential-master.key`，挂载现有私有环境文件、只读 saves 和独立密钥目录；目标已存在而值不同则拒绝。工具不打印密钥、不轮换；受限运行模式缺显式主密钥直接失败。API 环境变量与文件两种来源只能配置一个。密钥需独立备份，旧平台 worker 仍使用原密钥时应保留原文件。
+
+文献接口拒绝空 scopes 的普通 API Key；交互 JWT 与已声明的 desktop_legacy 兼容策略保持原行为。监控使用当前租户管理员的专用 `literature:read` Key，仅在密钥库配置采集凭证，访问 `/api/literature/pdf-translation/prometheus`。指标不含用户/任务 ID、正文、凭据标签。告警规则位于 `docker/monitoring/literature-pdf-rules.yml`；规则交付不等于已接入外部通知。本地维护进程的去重日志告警继续生效。
+
+只读发布检查（不创建模型调用）：
+
+```bash
+docker exec api-dev uv run --no-sync python scripts/literature_release_check.py --uid <管理员UID>
+```
+
+退出非零表示基础依赖或运行告警未通过；检查输出另外列明 SLO 样本是否充分。`ready=true` 只表示六项基础依赖可用，不表示无未知用量、科研语义已审阅、全站最小权限或整机灾备已通过。API 不挂载 Docker socket，代码/测试/脚本只读，API/PDF 进程丢弃所有 capabilities 并设置 no-new-privileges；诊断核对当前进程隔离状态，原生灾备需独立管理员容器挂载 socket。真实权限及关闭 RLS 的拒绝回归由隔离 PostgreSQL 集成测试验证；不得把测试里的 DROP SCHEMA 对生产执行。大库性能可用 `YUXI_LITERATURE_BENCHMARK_UID` 显式开启只读测试，报告不输出文献内容或用户标识。
+
+## 早期全站角色方案（尚未全站切换）
+
 > 对应 2026-10 投产评估缺口 ⑤：当前开发栈以 superuser 直连，文献域 24 张表
 > 的 RLS 策略被 `SUPERUSER`/`BYPASSRLS` 绕过。**"RLS 已创建"不是数据库层
 > 隔离的验收结论**（PostgreSQL 明确行为：超级用户绕过 RLS，
