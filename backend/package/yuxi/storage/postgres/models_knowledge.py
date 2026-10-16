@@ -2770,6 +2770,27 @@ class LiteratureReport(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
+class LiteratureReportJob(Base):
+    """主题导读（MOC）异步任务：HTTP 只入队，ARQ worker 执行，租约 + 对账兜底。"""
+
+    __tablename__ = "literature_report_jobs"
+
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    job_id = Column(String(64), nullable=False, unique=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    requested_by = Column(String(64), nullable=False, default="")
+    report_kind = Column(String(32), nullable=False, default="topic_moc")
+    topic = Column(String(256), nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING")
+    attempt = Column(Integer, nullable=False, default=0)
+    lease_token = Column(String(64))
+    lease_expires_at = Column(DateTime(timezone=True))
+    error = Column(Text)
+    result_json = Column(JSON_VALUE)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
 class LiteratureReviewDecision(Base):
     """识别复核裁决（G4，上游 review 四选一：A/B/C/D 持久化）。"""
 

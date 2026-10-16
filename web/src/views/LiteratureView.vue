@@ -1085,17 +1085,64 @@ export default {
         searchNotice.value = error?.message || '概念页读取失败'
       }
     }
+    // 主题导读异步轮询：generation 防竞态，15 分钟上限后停止并提示。
+    let mocPollTimer = null
+    let mocPollGeneration = 0
+    const MOC_POLL_MAX_TICKS = 300
+
+    const stopMocPolling = () => {
+      mocPollGeneration++
+      if (mocPollTimer) {
+        clearTimeout(mocPollTimer)
+        mocPollTimer = null
+      }
+    }
+
+    const pollMocJob = (jobId, generation, ticks = 0) => {
+      if (generation !== mocPollGeneration) return
+      if (ticks >= MOC_POLL_MAX_TICKS) {
+        message.warning('主题导读仍在执行，请稍后在「综述报告」列表查看结果')
+        return
+      }
+      mocPollTimer = setTimeout(async () => {
+        if (generation !== mocPollGeneration) return
+        try {
+          const job = await apiGet(`/api/literature/reports/topic-moc/${encodeURIComponent(jobId)}`)
+          if (generation !== mocPollGeneration) return
+          if (job?.status === 'SUCCEEDED') {
+            const sources = job?.result?.sources ?? '?'
+            message.success(`主题导读已生成（${sources} 篇来源），见「综述报告」列表`)
+            return
+          }
+          if (job?.status === 'FAILED' || job?.status === 'DEAD') {
+            message.error(`主题导读生成失败：${job?.error || job?.status}`)
+            return
+          }
+          pollMocJob(jobId, generation, ticks + 1)
+        } catch (err) {
+          if (generation !== mocPollGeneration) return
+          message.error(`主题导读状态查询失败：${err?.message || err}`)
+        }
+      }, 3000)
+    }
+
     const generateMoc = async () => {
-      if (!mocTopic.value.trim()) return
+      const topic = mocTopic.value.trim()
+      if (!topic || mocLoading.value) return
       mocLoading.value = true
       try {
-        const result = await apiPost('/api/literature/reports/topic-moc', {
-          topic: mocTopic.value.trim()
-        })
+        const result = await apiPost('/api/literature/reports/topic-moc', { topic })
         mocTopic.value = ''
-        message.success(`主题导读已生成（${result.sources} 篇来源），见「综述报告」列表`)
+        stopMocPolling()
+        const generation = mocPollGeneration
+        if (result?.status === 'SUCCEEDED' && result?.result) {
+          message.success(`主题导读已生成（${result.result.sources ?? '?'} 篇来源），见「综述报告」列表`)
+          return
+        }
+        message.success('主题导读任务已提交，完成后将在此提示')
+        pollMocJob(result?.job_id, generation)
       } catch (err) {
-        message.error(`生成失败：${err?.message || err}`)
+        message.error(`提交失败：${err?.message || err}`)
       } finally {
         mocLoading.value = false
       }
@@ -1386,6 +1433,7 @@ export default {
     onBeforeUnmount(() => {
       loadGeneration++
       readerActionGeneration++
+      stopMocPolling()
       window.removeEventListener('beforeunload', beforeUnload)
       sessionState.dispose()
     })

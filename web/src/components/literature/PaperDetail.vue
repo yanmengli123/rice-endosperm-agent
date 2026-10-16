@@ -61,7 +61,7 @@
               保版式中文 PDF
             </option>
           </select>
-          <button class="btn" :disabled="translating" @click="doTranslate()">
+          <button class="btn" :disabled="translating || !hasParseSource" :title="noContentHint" @click="doTranslate()">
             生成所选译文 / 总结
           </button>
           <button
@@ -84,7 +84,8 @@
             v-for="level in ['L1', 'L2', 'L3']"
             :key="level"
             class="btn"
-            :disabled="Boolean(compiling)"
+            :disabled="Boolean(compiling) || !hasParseSource"
+            :title="noContentHint"
             @click="doCompile(level)"
           >
             {{ compiling === level ? `${level} 入队中…` : `编译 ${level}` }}
@@ -292,6 +293,13 @@ export default {
     const enriching = ref(false)
     // Legacy PDF papers can backfill their own DOI from the authorized body.
     const canEnrich = computed(() => Boolean(paper.value?.doi || paper.value?.source_revision_id))
+    // 仅元数据（无解析正文）的文献编译/翻译必然死信，前置禁用对齐「生成阅读视图」的防呆口径。
+    const hasParseSource = computed(() => Boolean(paper.value?.source_revision_id))
+    const noContentHint = computed(() =>
+      hasParseSource.value
+        ? ''
+        : '该文献仅有元数据（无 PDF 解析正文），无法编译或翻译；请先关联原文并生成阅读视图'
+    )
     const enrichHint = computed(() =>
       canEnrich.value
         ? '按 DOI 从 Crossref / OpenAlex / S2 补全空字段'
@@ -671,6 +679,8 @@ export default {
       enriching,
       canEnrich,
       enrichHint,
+      hasParseSource,
+      noContentHint,
       currentTab,
       selectTab,
       onTabKeydown,

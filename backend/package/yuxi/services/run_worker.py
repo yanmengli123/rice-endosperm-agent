@@ -42,6 +42,7 @@ from yuxi.literature.translate.service import (
     reconcile_stale_literature_translations,
 )
 from yuxi.literature.workflow import process_literature_workflow, reconcile_stale_workflows
+from yuxi.literature.concepts import process_literature_topic_moc, reconcile_literature_topic_mocs
 from yuxi.literature.library_pipeline import process_literature_library, reconcile_literature_libraries
 from yuxi.literature.navigation_index import (
     process_literature_navigation_index,
@@ -1251,6 +1252,7 @@ class WorkerSettings:
         process_literature_workflow,
         process_literature_navigation_index,
         process_literature_library,
+        process_literature_topic_moc,
         process_dynamic_wiki_build,
         prewarm_doclex_for_kb,
         process_channel_message,
@@ -1278,6 +1280,8 @@ class WorkerSettings:
         cron(reconcile_literature_translation_tasks, minute=set(range(60))),
         cron(reconcile_original_search, minute=set(range(60))),
         cron(reconcile_literature_libraries, minute=set(range(60))),
+        # 主题导读（MOC）任务：PENDING 补派 + 超时租约置 DEAD（不自动重跑防重复成文）
+        cron(reconcile_literature_topic_mocs, minute=set(range(60))),
         cron(reconcile_scientific_literature_papers, minute=set(range(2, 60, 5))),
         cron(reconcile_literature_note_wikis, minute={4, 14, 24, 34, 44, 54}),
         cron(reconcile_dynamic_wikis, minute=set(range(0, 60))),
