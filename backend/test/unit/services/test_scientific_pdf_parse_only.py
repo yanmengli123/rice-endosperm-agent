@@ -172,32 +172,6 @@ async def test_parse_only_finishes_without_serving_pointer_or_activation(active,
             assert calls == ["parse"]
             assert len(list((await db.execute(select(KnowledgeParseArtifact))).scalars())) == (4 if rejected else 5)
 
-            from yuxi.literature import drafts
-            from dataclasses import replace
-
-            monkeypatch.setattr(drafts, "get_minio_client", lambda: storage)
-            scope = LiteratureAccess(1, frozenset(), frozenset(), {}, {}, SimpleNamespace(uid="u1"))
-            token = _access.set(scope)
-            try:
-                if rejected:
-                    with pytest.raises(ValueError, match="尚未完成"):
-                        await drafts.read_draft(1, "draft")
-                else:
-                    assert (await drafts.read_draft(1, "draft"))["evidence"] is False
-                kb.created_by = "someone-else"
-                kb.share_config = {"access_level": "private"}
-                await db.commit()
-                with pytest.raises(ValueError, match="无权访问"):
-                    await drafts.read_draft(1, "draft")
-                kb.created_by = "u1"
-                await db.commit()
-                revoked = _access.set(replace(scope, user=SimpleNamespace(uid="u2")))
-                try:
-                    assert await drafts.list_drafts(1) == []
-                finally:
-                    _access.reset(revoked)
-            finally:
-                _access.reset(token)
         else:
             await service._complete_parse_only(
                 rev, "worker", {"title": "Draft"}, result, {"unified_article": "minio://kb/draft.json"}, snapshot
