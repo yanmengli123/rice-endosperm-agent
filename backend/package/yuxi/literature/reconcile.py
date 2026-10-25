@@ -11,7 +11,7 @@ import logging
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from yuxi.literature.notes.service import register_literature_paper
+from yuxi.literature.registration import register_literature_paper
 from yuxi.literature.reading.service import enqueue_reader_render
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
