@@ -27,16 +27,6 @@
           <span v-if="paper.doi">DOI: {{ paper.doi }}</span>
           <span v-if="paper.quartile">JCR {{ paper.quartile }}</span>
           <span>渲染: {{ paper.render?.status || '未渲染' }}</span>
-          <span v-for="job in paper.compile_jobs" :key="job.level"
-            >{{ job.level }}: {{ job.status }}</span
-          >
-          <span v-for="job in paper.translation_jobs" :key="`translation-${job.variant_kind}`">
-            {{ job.variant_kind }}: {{ job.status }}
-          </span>
-        </div>
-        <div v-if="paper.historical_compile_jobs?.length" class="detail-meta">
-          来源已更新，{{ paper.historical_compile_jobs.length }}
-          个历史笔记任务保留记录；当前笔记需重新编译。
         </div>
 
         <!-- 进行中任务进度条（任务中心同款阶段口径；数据来自本组件的 3s 轮询） -->
@@ -52,43 +42,6 @@
           <button class="btn" :disabled="sessionLoading" @click="startSession">文献专属会话</button>
           <button class="btn" :disabled="rendering" @click="doRender">
             {{ rendering ? '渲染入队中…' : '生成阅读视图' }}
-          </button>
-          <select v-model="translationKind" :disabled="translating" aria-label="请求译文类型">
-            <option value="zh">中文全文</option>
-            <option value="en_zh">双语全文</option>
-            <option value="summary">总结</option>
-            <option value="pdf_zh" :disabled="!pdfCapability.enabled || !paper.source_revision_id">
-              保版式中文 PDF
-            </option>
-          </select>
-          <button class="btn" :disabled="translating || !hasParseSource" :title="noContentHint" @click="doTranslate()">
-            生成所选译文 / 总结
-          </button>
-          <button
-            v-if="
-              translationKind === 'pdf_zh' &&
-              paper.translation_jobs?.some(
-                (job) => job.variant_kind === 'pdf_zh' && job.status === 'SUCCEEDED'
-              )
-            "
-            class="btn"
-            :disabled="translating"
-            @click="doTranslate(true)"
-          >
-            重新生成 PDF（再次调用模型）
-          </button>
-          <span v-if="translationKind === 'pdf_zh'" class="pdf-translation-hint"
-            >基于原始 PDF · 采用当前翻译模型 · 含质量检查与双语下载</span
-          >
-          <button
-            v-for="level in ['L1', 'L2', 'L3']"
-            :key="level"
-            class="btn"
-            :disabled="Boolean(compiling) || !hasParseSource"
-            :title="noContentHint"
-            @click="doCompile(level)"
-          >
-            {{ compiling === level ? `${level} 入队中…` : `编译 ${level}` }}
           </button>
           <button
             class="btn"
@@ -142,17 +95,6 @@
           @open-link="$emit('open-link', $event)"
           @assistant-action="$emit('assistant-action', $event)"
         />
-        <NotePanel
-          v-else-if="currentTab === 'notes'"
-          role="tabpanel"
-          id="detail-panel-notes"
-          aria-labelledby="detail-tab-notes"
-          :rid="rid"
-          :compile-jobs="paper.compile_jobs"
-          @editing-change="editingChanged"
-          @saved="load"
-          @open-link="$emit('open-link', $event)"
-        />
         <AttachmentPanel
           v-else-if="currentTab === 'attachments'"
           role="tabpanel"
@@ -178,13 +120,6 @@
           :version-token="readerVersion"
           @changed="load"
         />
-        <WorkflowPanel
-          v-else-if="currentTab === 'workflow'"
-          role="tabpanel"
-          id="detail-panel-workflow"
-          aria-labelledby="detail-tab-workflow"
-          :rid="rid"
-        />
         <MetadataPanel
           v-else
           role="tabpanel"
@@ -206,20 +141,15 @@ import { apiPost } from '@/apis/base'
 import {
   getLiteraturePaper,
   literatureWorkspaceApi,
-  literaturePdfApi,
-  triggerLiteratureCompile,
   triggerLiteratureEnrich,
-  triggerLiteratureRender,
-  triggerLiteratureTranslation
+  triggerLiteratureRender
 } from '@/apis/literature_api'
 import { litConfirm, litPrompt } from '@/utils/litDialogs'
 import { useTablistKeyboard } from '@/composables/useTablistKeyboard'
-import NotePanel from '@/components/literature/NotePanel.vue'
 import AttachmentPanel from '@/components/literature/AttachmentPanel.vue'
 import CardsPanel from '@/components/literature/CardsPanel.vue'
 import ReaderTabs from '@/components/literature/ReaderTabs.vue'
 import ReviewPanel from '@/components/literature/ReviewPanel.vue'
-import WorkflowPanel from '@/components/literature/WorkflowPanel.vue'
 import MetadataPanel from '@/components/literature/MetadataPanel.vue'
 import { useUserStore } from '@/stores/user'
 import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
@@ -238,12 +168,10 @@ const reuseSession = async (targetRid) => {
 export default {
   name: 'PaperDetail',
   components: {
-    NotePanel,
     AttachmentPanel,
     CardsPanel,
     ReviewPanel,
     ReaderTabs,
-    WorkflowPanel,
     MetadataPanel
   },
   props: {
@@ -286,20 +214,9 @@ export default {
     const paper = ref(null)
     const loading = ref(true)
     const rendering = ref(false)
-    const translating = ref(false)
-    const translationKind = ref('zh')
-    const pdfCapability = ref({ enabled: false, reason: '正在检查保版式服务' })
-    const compiling = ref('')
     const enriching = ref(false)
     // Legacy PDF papers can backfill their own DOI from the authorized body.
     const canEnrich = computed(() => Boolean(paper.value?.doi || paper.value?.source_revision_id))
-    // 仅元数据（无解析正文）的文献编译/翻译必然死信，前置禁用对齐「生成阅读视图」的防呆口径。
-    const hasParseSource = computed(() => Boolean(paper.value?.source_revision_id))
-    const noContentHint = computed(() =>
-      hasParseSource.value
-        ? ''
-        : '该文献仅有元数据（无 PDF 解析正文），无法编译或翻译；请先关联原文并生成阅读视图'
-    )
     const enrichHint = computed(() =>
       canEnrich.value
         ? '按 DOI 从 Crossref / OpenAlex / S2 补全空字段'
@@ -385,29 +302,14 @@ export default {
           paper.value?.render?.status,
           paper.value?.render?.markdown_uri,
           paper.value?.render?.render_version
-        ],
-        notes: paper.value?.compile_jobs?.map((job) => [
-          job.id,
-          job.level,
-          job.status,
-          job.note_uri
-        ]),
-        variants: paper.value?.variants?.map((item) => [item.variant_kind, item.uri]),
-        translations: paper.value?.translation_jobs?.map((job) => [
-          job.id,
-          job.variant_kind,
-          job.status,
-          job.variant_uri
-        ])
+        ]
       })
     )
     const tabs = [
       { key: 'reader', label: '阅读' },
-      { key: 'notes', label: '笔记 (L1·L2·L3)' },
       { key: 'attachments', label: '依附资料' },
       { key: 'cards', label: '卡片' },
       { key: 'review', label: '识别复核' },
-      { key: 'workflow', label: '处理流程' },
       { key: 'overview', label: '元数据' }
     ]
     let pollTimer = null
@@ -426,16 +328,6 @@ export default {
         if (ticket !== loadGeneration || disposed || !polling.value || controller.signal.aborted)
           return
         paper.value = result
-        if (pdfCapability.value.reason === '正在检查保版式服务')
-          literaturePdfApi
-            .capabilities()
-            .then((value) => {
-              if (!disposed) pdfCapability.value = value
-            })
-            .catch(() => {
-              if (!disposed)
-                pdfCapability.value = { enabled: false, reason: '保版式翻译服务未启用' }
-            })
         startPollingIfBusy()
       } catch (error) {
         if (!disposed && polling.value && !controller.signal.aborted && ticket === loadGeneration)
@@ -453,36 +345,14 @@ export default {
       const render = paper.value?.render
       if (render && ['PENDING', 'RUNNING'].includes(render.status || ''))
         out.push({ key: 'render', label: `阅读渲染 · ${stageOf(render.status)}` })
-      for (const job of paper.value?.compile_jobs || [])
-        if (['PENDING', 'RUNNING'].includes(job.status))
-          out.push({
-            key: `compile-${job.id ?? job.level}`,
-            label: `编译 ${job.level} · ${stageOf(job.status)}`
-          })
-      for (const job of paper.value?.translation_jobs || [])
-        if (['PENDING', 'RUNNING'].includes(job.status))
-          out.push({
-            key: `translation-${job.id ?? job.variant_kind}`,
-            label: `翻译（${job.variant_kind}）· ${stageOf(job.status)}`
-          })
       return out
     })
 
-    /** 渲染/编译任务进行中时轮询刷新（组件卸载必须清理） */
+    /** 渲染任务进行中时轮询刷新（组件卸载必须清理） */
     const startPollingIfBusy = () => {
       stopPolling()
       if (disposed || !polling.value) return
-      const busy = (paper.value?.compile_jobs || []).some((job) =>
-        ['PENDING', 'RUNNING'].includes(job.status)
-      )
-      const translationBusy = (paper.value?.translation_jobs || []).some((job) =>
-        ['PENDING', 'RUNNING'].includes(job.status)
-      )
-      if (
-        busy ||
-        translationBusy ||
-        ['PENDING', 'RUNNING'].includes(paper.value?.render?.status || '')
-      ) {
+      if (['PENDING', 'RUNNING'].includes(paper.value?.render?.status || '')) {
         pollTimer = setTimeout(load, POLL_INTERVAL_MS)
       }
     }
@@ -514,54 +384,6 @@ export default {
         message.error(error?.message || '阅读渲染入队失败')
       } finally {
         rendering.value = false
-      }
-    }
-    const doTranslate = async (force = false) => {
-      if (translating.value) return
-      translating.value = true
-      try {
-        const result = await triggerLiteratureTranslation(props.rid, translationKind.value, force)
-        if (result?.reused) {
-          message.info(
-            result.status === 'SUCCEEDED'
-              ? '已复用现有译文/总结'
-              : '译文/总结正在生成，已复用现有任务'
-          )
-        } else
-          message.success(
-            result?.enqueue_deferred ? '翻译任务已保存，等待队列恢复调度' : '翻译任务已入队'
-          )
-        await load()
-        startPollingIfBusy()
-      } catch (error) {
-        message.error(error?.message || '译文或总结入队失败')
-      } finally {
-        translating.value = false
-      }
-    }
-    const doCompile = async (level) => {
-      if (compiling.value) return
-      compiling.value = level
-      try {
-        const result = await triggerLiteratureCompile(props.rid, level)
-        if (result?.reused) {
-          message.info(
-            result.status === 'SUCCEEDED'
-              ? `已复用 ${level} 笔记`
-              : `${level} 正在编译，已复用现有任务`
-          )
-        } else
-          message.success(
-            result?.enqueue_deferred
-              ? `${level} 任务已保存，等待队列恢复调度`
-              : `${level} 任务已入队`
-          )
-        await load()
-        startPollingIfBusy()
-      } catch (error) {
-        message.error(error?.message || `${level} 编译入队失败`)
-      } finally {
-        compiling.value = ''
       }
     }
     const doEnrich = async () => {
@@ -609,7 +431,7 @@ export default {
       const confirmed = await litConfirm({
         title: '确认移入回收站？',
         content:
-          '文献将从目录/检索/图谱隐藏，可在知识库工作台「回收站」恢复；进行中的编译/翻译会按过期输入终止。',
+          '文献将从目录/检索/图谱隐藏，可在知识库工作台「回收站」恢复。',
         okText: '移入回收站',
         danger: true
       })
@@ -672,15 +494,9 @@ export default {
       userStore,
       loading,
       rendering,
-      translating,
-      translationKind,
-      pdfCapability,
-      compiling,
       enriching,
       canEnrich,
       enrichHint,
-      hasParseSource,
-      noContentHint,
       currentTab,
       selectTab,
       onTabKeydown,
@@ -689,8 +505,6 @@ export default {
       editingChanged,
       tabs,
       doRender,
-      doTranslate,
-      doCompile,
       doEnrich,
       trashing,
       doTrash,

@@ -20,8 +20,7 @@
     </div>
     <template v-if="mode === 'pdf'">
       <p role="tabpanel" :id="`import-panel-pdf`" :aria-labelledby="`import-tab-pdf`" tabindex="0">
-        PDF 进入所选知识源的 pdf_evidence
-        契约：共用解析和质量门禁。默认索引激活后进入文献库；仅解析留在个人草稿，不纳入证据检索。
+        PDF 进入所选知识源的 pdf_evidence 契约：共用解析和质量门禁，索引激活后进入文献库。
       </p>
       <template v-if="userStore.isAdmin">
         <label
@@ -32,13 +31,6 @@
         >
         <button class="btn" :disabled="busy" @click="loadDatabases">刷新知识源</button>
         <label
-          >处理模式<select v-model="processingMode" :disabled="busy">
-            <option value="parse_compile">解析并激活 + 自动编译（渲染 → L1/L2）</option>
-            <option value="full">完整流程（渲染 → 复核 → 编译 → 翻译/总结，含计费）</option>
-            <option value="parse_only">仅解析（草稿阅读，不索引、不激活）</option>
-          </select></label
-        >
-        <label
           >批量 PDF<input
             :disabled="busy || !kbId"
             type="file"
@@ -46,27 +38,11 @@
             multiple
             @change="importPdf"
         /></label>
-        <p>
-          同名文件需确认；不会覆盖旧证据版本。选择编译/完整流程时，解析入库完成后自动继续对应工作流。
-        </p>
+        <p>同名文件需确认；不会覆盖旧证据版本。</p>
       </template>
       <p v-else>
         PDF 写入沿用知识库管理员权限；请联系管理员上传或授权，不能以文献导入绕过来源治理。
       </p>
-      <section>
-        <h4>仅解析草稿（不属于文献库或证据库）</h4>
-        <button class="btn" :disabled="busy" @click="loadDrafts">刷新草稿</button>
-        <button
-          v-for="draft in drafts"
-          :key="draft.revision_id"
-          class="btn"
-          :disabled="!draft.ready || busy"
-          @click="openDraft(draft)"
-        >
-          {{ draft.title }} · {{ draft.status }}
-        </button>
-        <DraftReader v-if="draftDocument" :document="draftDocument" @close="draftDocument = null" />
-      </section>
     </template>
     <template v-else-if="mode === 'markdown'">
       <p
@@ -147,7 +123,6 @@
       </p>
     </template>
     <p v-if="notice" role="status">{{ notice }}</p>
-    <HistoryPanel />
     <ol v-if="results.length">
       <li v-for="(result, index) in results" :key="index">
         {{ result.name }}：{{ result.message }}
@@ -175,9 +150,6 @@ import { onMounted, ref, watch } from 'vue'
 import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
 import { databaseApi, documentApi, fileApi } from '@/apis/knowledge_api'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
-import { apiGet } from '@/apis/base'
-import DraftReader from '@/components/literature/DraftReader.vue'
-import HistoryPanel from '@/components/literature/HistoryPanel.vue'
 import { useUserStore } from '@/stores/user'
 import { parseOptionsPayload } from '@/composables/useLiteratureSettings'
 import { resolveDefaultOcrEngine } from '@/utils/ocr_engine'
@@ -205,47 +177,6 @@ const { onTabKeydown } = useTablistKeyboard(
 const busy = ref(false)
 const databases = ref([])
 const kbId = ref('')
-const processingMode = ref('parse_compile')
-const drafts = ref([])
-const draftDocument = ref(null)
-// 已自动推进过的工作流单据（ticket → paper_rid），防重复触发与计费
-const advancedTickets = new Set()
-
-// 三模式向导的自动推进：解析入库终态（共享任务源口径）且已登记文献后，
-// 按上传时选择的模式自动启动对应工作流；失败/拒绝不推进，用户可手动重试。
-watch(
-  () => taskFeed.tasks.value,
-  () => {
-    if (processingMode.value === 'parse_only') return
-    for (const result of results.value) {
-      if (!result.ticket || advancedTickets.has(result.ticket)) continue
-      const task = ticketTask(result.ticket)
-      if (!task?.paper_rid || !task.is_terminal || task.is_failure) continue
-      advancedTickets.add(result.ticket)
-      literatureWorkspaceApi
-        .startWorkflow(task.paper_rid, processingMode.value)
-        .then(() => {
-          result.message = `入库完成，已自动启动${processingMode.value === 'full' ? '完整' : '编译'}工作流；进度见「任务与历史」`
-        })
-        .catch((error) => {
-          result.message = `入库完成，但自动${processingMode.value === 'full' ? '完整流程' : '编译'}启动失败：${error.message || '请手动触发'}`
-        })
-    }
-  },
-  { deep: true }
-)
-const loadDrafts = () =>
-  perform(async () => {
-    drafts.value = (await apiGet('/api/literature/drafts')).items || []
-    draftDocument.value = null
-  })
-const openDraft = (draft) =>
-  perform(async () => {
-    draftDocument.value = null
-    draftDocument.value = await apiGet(
-      `/api/literature/drafts/${encodeURIComponent(draft.revision_id)}/document`
-    )
-  })
 const title = ref('')
 const doi = ref('')
 const markdown = ref('')
@@ -334,11 +265,8 @@ const importPdf = (event) => {
           format_template: 'pdf_literature',
           pdf_evidence_pipeline: true,
           ocr_engine: resolveDefaultOcrEngine({ contractKey: 'pdf_evidence' }),
-          // 上传层只有"解析+激活 / 仅解析"两种物理路径；编译/完整流程由
-          // 入库终态后的自动推进（watchWorkflowTickets）衔接 workflow 三模式。
-          scientific_processing_mode:
-            processingMode.value === 'parse_only' ? 'parse_only' : 'activate',
-          auto_index: processingMode.value !== 'parse_only',
+          scientific_processing_mode: 'activate',
+          auto_index: true,
           content_hashes: { [upload.file_path]: upload.content_hash },
           file_sizes: { [upload.file_path]: upload.size ?? file.size },
           source_paths: { [upload.file_path]: file.name }

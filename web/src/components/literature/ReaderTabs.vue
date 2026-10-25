@@ -18,7 +18,7 @@
       </button>
       <button
         class="btn"
-        :disabled="loading || saving || editing || productEditing"
+        :disabled="loading || saving || editing"
         @click="refreshReader"
       >
         刷新阅读产物
@@ -38,7 +38,7 @@
         v-for="(label, action) in quickActions"
         :key="action"
         class="btn"
-        :disabled="loading || editing || productEditing || assistantBusy"
+        :disabled="loading || editing || assistantBusy"
         @click="sendAssistantAction({ action, surface: 'paper' })"
       >
         {{ label }}
@@ -47,7 +47,7 @@
     <p v-if="assistantNotice" role="status">{{ assistantNotice }}</p>
     <ReaderSelectionToolbar
       :root="selectionRoot"
-      :disabled="loading || editing || productEditing || assistantBusy || current === 'pdf'"
+      :disabled="loading || editing || assistantBusy || current === 'pdf'"
       :reset-key="`${rid}:${versionToken}:${current}`"
       @action="sendAssistantAction"
     />
@@ -56,7 +56,7 @@
         ><input
           v-model="autoHideMissing"
           type="checkbox"
-          :disabled="editing || productEditing"
+          :disabled="editing"
         />自动隐藏缺失产物</label
       >
       <p>拖拽排序，也可使用上移/下移按钮。原文状态入口始终保留；偏好按当前用户保存。</p>
@@ -64,7 +64,7 @@
         v-for="(tab, index) in orderedTabs"
         :key="tab.key"
         class="tab-option"
-        :draggable="!editing && !productEditing"
+        :draggable="!editing"
         @dragstart="draggedTab = tab.key"
         @dragover.prevent
         @drop.prevent="reorderTab(draggedTab, tab.key)"
@@ -74,21 +74,21 @@
           ><input
             type="checkbox"
             :checked="!hiddenTabs.includes(tab.key)"
-            :disabled="tab.key === 'original' || editing || productEditing"
+            :disabled="tab.key === 'original' || editing"
             @change="setTabVisible(tab.key, $event.target.checked)"
           />{{ tab.label }}</label
         >
         <span>{{ availableTabs[tab.key] ? '已就绪' : '尚未生成 / 不可用' }}</span>
         <button
           class="btn"
-          :disabled="index === 0 || editing || productEditing"
+          :disabled="index === 0 || editing"
           @click="reorderTab(tab.key, tabOrder[index - 1])"
         >
           上移
         </button>
         <button
           class="btn"
-          :disabled="index === orderedTabs.length - 1 || editing || productEditing"
+          :disabled="index === orderedTabs.length - 1 || editing"
           @click="reorderTab(tab.key, tabOrder[index + 1])"
         >
           下移
@@ -116,7 +116,7 @@
             编辑正文
           </button>
           <template v-if="editing">
-            <p>保存将冻结人工版本；自动渲染不会覆盖，旧编译及译文会失效。</p>
+            <p>保存将冻结人工版本；自动渲染不会覆盖。</p>
             <div v-for="paragraph in editDocument.paragraphs" :key="paragraph.para_id">
               <label>{{ paragraph.para_id }}</label>
               <textarea v-model="paragraph.text_en" rows="4" style="width: 100%"></textarea>
@@ -136,79 +136,6 @@
             @open-image="openImage"
           />
         </template>
-      </div>
-
-      <div v-else-if="current === 'translation'" class="pane" data-reader-surface="translation">
-        <label
-          >译文类型<select v-model="variantKind" :disabled="productEditing">
-            <option value="zh">中文全文</option>
-            <option value="en_zh">双语全文</option>
-            <option value="summary">总结</option>
-          </select></label
-        >
-        <!-- 输出模板：切换只重排既有译文，不重新翻译（零 token） -->
-        <label v-if="variantKind === 'en_zh'" class="template-picker"
-          >输出模板<select v-model="templateKey" :disabled="productEditing || templateBusy">
-            <option v-for="spec in templateOptions" :key="spec.key" :value="spec.key">
-              {{ spec.label }}
-            </option>
-          </select></label
-        >
-        <p v-if="templateNotice" class="template-notice" role="status">{{ templateNotice }}</p>
-        <ProductEditor
-          :rid="rid"
-          :kind="`variant_${variantKind}`"
-          @editing-change="productEditing = $event"
-          @saved="reloadVariant"
-        />
-        <div v-if="!selectedVariant?.ready" class="pane-empty">
-          {{ selectedVariant?.reason || '该译文或总结尚未生成' }}
-        </div>
-        <template v-else>
-          <LiteratureMarkdown
-            :content="selectedVariant.content"
-            :anchor="navigationTarget?.anchor || ''"
-            :navigation-token="navigationTarget?.requestId || ''"
-            @open-link="$emit('open-link', $event)"
-            @open-image="openImage"
-          />
-        </template>
-      </div>
-
-      <div v-else-if="current === 'parallel'" class="pane" data-reader-surface="parallel">
-        <p v-if="navigationTarget?.anchor && !parallelAnchor" role="status">
-          当前对照原文未找到唯一章节或块锚点；未自动跳转。
-        </p>
-        <div v-if="!parallel?.ready && (!bundle?.ready || !variant?.ready)" class="pane-empty">
-          {{ parallel?.reason || '对照阅读需要原文与译文均已生成' }}
-        </div>
-        <p v-if="parallel?.ready && parallel.alignment !== 'identity'" role="status">
-          {{
-            parallel.alignment === 'manual-positional'
-              ? '当前显示人工冻结译文，按段落位置对照；编辑后不保证一一对应。'
-              : '历史译文按段落位置对照，不保证一一对应。'
-          }}
-        </p>
-        <div v-if="parallel?.ready || (bundle?.ready && variant?.ready)" class="parallel-cols">
-          <template v-for="row in parallelRows" :key="row.index">
-            <div class="parallel-para en">
-              <LiteratureMarkdown
-                :content="row.original || '（该段无原文）'"
-                :anchor="parallelAnchor?.index === row.index ? parallelAnchor.anchor : ''"
-                :navigation-token="navigationTarget?.requestId || ''"
-                @open-link="$emit('open-link', $event)"
-                @open-image="openImage"
-              />
-            </div>
-            <div class="parallel-para zh">
-              <LiteratureMarkdown
-                :content="row.translated || '（该段未译）'"
-                @open-link="$emit('open-link', $event)"
-                @open-image="openImage"
-              />
-            </div>
-          </template>
-        </div>
       </div>
 
       <div v-else-if="current === 'images'" class="pane">
@@ -240,25 +167,6 @@
           @page-changed="pdfPage = $event"
           @assistant-action="sendAssistantAction"
         />
-      </div>
-      <div v-else-if="current.startsWith('noteL')" class="pane" data-reader-surface="note">
-        <ProductEditor
-          :rid="rid"
-          :kind="`note_${current.slice(4)}`"
-          @saved="loadNote(current.slice(4))"
-          @editing-change="productEditing = $event"
-        />
-        <div v-if="noteLoading" class="reader-loading">加载笔记中…</div>
-        <template v-else-if="noteMarkdown">
-          <LiteratureMarkdown
-            :content="noteMarkdown"
-            :anchor="navigationTarget?.anchor || ''"
-            :navigation-token="navigationTarget?.requestId || ''"
-            @open-link="$emit('open-link', $event)"
-            @open-image="openImage"
-          />
-        </template>
-        <div v-else class="pane-empty">{{ noteEmptyReason }}</div>
       </div>
     </template>
 
@@ -298,32 +206,24 @@
 </template>
 
 <script>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { apiGet, apiPut } from '@/apis/base'
 import { confirmAction } from '@/composables/useLiteratureSessions'
 import LiteratureMarkdown from './LiteratureMarkdown.vue'
-import ProductEditor from './ProductEditor.vue'
 import ReaderSelectionToolbar from './ReaderSelectionToolbar.vue'
 import LiteraturePdfWorkspace from './LiteraturePdfWorkspace.vue'
 import { readerCapture, isAutoSendAction } from '@/utils/literature_assistant'
 import { useUserStore } from '@/stores/user'
 import {
-  locateParallelAnchor,
   moveReaderTab,
   readReaderPreferences,
   writeReaderPreferences
 } from '@/utils/literature_reader'
 import { collectAssetUris, createAssetResolverSession } from '@/utils/asset_resolver'
 
-const splitParas = (text) =>
-  String(text || '')
-    .split(/\n\s*\n/)
-    .map((paragraph) => paragraph.trim())
-    .filter((paragraph) => paragraph && !paragraph.startsWith('#') && !paragraph.startsWith('---'))
-
 export default {
   name: 'ReaderTabs',
-  components: { LiteratureMarkdown, ProductEditor, ReaderSelectionToolbar, LiteraturePdfWorkspace },
+  components: { LiteratureMarkdown, ReaderSelectionToolbar, LiteraturePdfWorkspace },
   props: {
     rid: { type: String, required: true },
     paper: { type: Object, default: () => ({}) },
@@ -351,7 +251,7 @@ export default {
         reading_version: props.paper.reading_version
       })
     const sendAssistantAction = (value) => {
-      if (loading.value || editing.value || productEditing.value) return
+      if (loading.value || editing.value) return
       try {
         const capture = captureAction(value)
         emit('assistant-action', { ...capture, imageFile: value.imageFile || null })
@@ -392,24 +292,17 @@ export default {
       setItem: (key, value) => window.localStorage.setItem(key, value)
     }
     const preferences = readReaderPreferences(readerStorage, userStore.uid)
-    const current = ref(preferences.tab)
+    const subTabKeys = ['original', 'pdf', 'images']
+    const current = ref(subTabKeys.includes(preferences.tab) ? preferences.tab : 'original')
     const fontSize = ref(preferences.fontSize)
     const tabOrder = ref(preferences.tabOrder),
       hiddenTabs = ref(preferences.hiddenTabs)
     const autoHideMissing = ref(preferences.autoHideMissing),
       manageTabs = ref(false),
       draggedTab = ref('')
-    const productEditing = ref(false)
     const loading = ref(true)
     const bundle = ref(null)
-    const variant = ref(null)
-    const variantKind = ref('zh')
     const navigationTarget = ref(null)
-    const otherVariant = ref(null)
-    const selectedVariant = computed(() =>
-      variantKind.value === 'zh' ? variant.value : otherVariant.value
-    )
-    const parallel = ref(null)
     const displayMarkdown = ref('')
     const imageSources = ref([])
     const pdfUrl = ref('')
@@ -422,41 +315,23 @@ export default {
     let assetUrls = new Map()
     const nativeAssets = createAssetResolverSession()
     let loadGeneration = 0
-    let noteGeneration = 0
-    let variantGeneration = 0
     let disposed = false
     const subTabs = [
       { key: 'original', label: '原文' },
       { key: 'pdf', label: 'PDF 阅读' },
-      { key: 'parallel', label: '双语对照' },
-      { key: 'translation', label: '译文 / 总结' },
-      { key: 'images', label: '图片' },
-      { key: 'noteL1', label: '笔记(L1)' },
-      { key: 'noteL2', label: '深度(L2)' },
-      { key: 'noteL3', label: '概念关系(L3)' }
+      { key: 'images', label: '图片' }
     ]
     const availableTabs = computed(() => ({
       original: !!bundle.value?.ready,
       pdf: !!pdfUrl.value,
-      parallel: !!parallel.value?.ready || (!!bundle.value?.ready && !!variant.value?.ready),
-      translation:
-        !!variant.value?.ready ||
-        !!otherVariant.value?.ready ||
-        (props.paper.variants || []).some((item) =>
-          ['zh', 'en_zh', 'summary'].includes(item.variant_kind)
-        ),
-      images: imageSources.value.length > 0,
-      ...Object.fromEntries(
-        ['L1', 'L2', 'L3'].map((level) => [
-          `note${level}`,
-          (props.paper.compile_jobs || []).some(
-            (job) => job.level === level && job.status === 'SUCCEEDED'
-          )
-        ])
-      )
+      images: imageSources.value.length > 0
     }))
+    // 存量偏好里可能残留已下线标签（译文/对照/笔记）的 key；map 后过滤掉，
+    // 否则 find 返回 undefined 会在 visibleTabs 上直接崩溃。
     const orderedTabs = computed(() =>
-      tabOrder.value.map((key) => subTabs.find((tab) => tab.key === key))
+      tabOrder.value
+        .map((key) => subTabs.find((tab) => tab.key === key))
+        .filter(Boolean)
     )
     const visibleTabs = computed(() =>
       orderedTabs.value.filter(
@@ -469,11 +344,11 @@ export default {
     )
     const selectTab = async (tab) => {
       if (tab === current.value) return
-      if (editing.value || productEditing.value) {
+      if (editing.value) {
         if (!(await confirmAction('切换阅读标签会放弃未保存编辑，继续？'))) return
       }
       if (tab === current.value) return
-      editing.value = productEditing.value = false
+      editing.value = false
       current.value = tab
     }
     const setTabVisible = (key, visible) => {
@@ -481,8 +356,7 @@ export default {
       if (!visible && key !== 'original') hiddenTabs.value.push(key)
     }
     const reorderTab = (from, to) => {
-      if (!editing.value && !productEditing.value)
-        tabOrder.value = moveReaderTab(tabOrder.value, from, to)
+      if (!editing.value) tabOrder.value = moveReaderTab(tabOrder.value, from, to)
     }
 
     const enc = (value) => encodeURIComponent(value)
@@ -503,23 +377,17 @@ export default {
       pdfFitWidth.value = false
       pdfScale.value = Math.max(0.25, Math.min(4, pdfScale.value + amount))
     }
-    const noteMarkdown = ref('')
-    const noteLoading = ref(false)
-    const noteEmptyReason = ref('该级别尚未编译')
     const scaledPdfUrl = computed(() =>
       pdfUrl.value
         ? `${pdfUrl.value}#zoom=${pdfFitWidth.value ? 'page-width' : Math.round(pdfScale.value * 100)}`
         : ''
     )
     const editing = ref(false)
-    watch([editing, productEditing], () =>
-      emit('editing-change', editing.value || productEditing.value)
-    )
+    watch([editing], () => emit('editing-change', editing.value))
     watch([visibleTabs, loading], () => {
       if (
         !loading.value &&
         !editing.value &&
-        !productEditing.value &&
         !visibleTabs.value.some((tab) => tab.key === current.value)
       )
         current.value = 'original'
@@ -565,7 +433,7 @@ export default {
         editing.value = false
         emit('document-saved')
         await load()
-        editorNotice.value = '人工正文已冻结；请重新生成编译笔记及译文。'
+        editorNotice.value = '人工正文已冻结。'
       } catch (err) {
         if (disposed || rid !== props.rid) return
         editorNotice.value = `未保存：${err?.message || err}（版本冲突时请重新打开编辑）`
@@ -574,60 +442,7 @@ export default {
       }
     }
 
-    const loadNote = async (level) => {
-      const generation = ++noteGeneration
-      const rid = props.rid
-      const isCurrent = () => !disposed && generation === noteGeneration && rid === props.rid
-      noteLoading.value = true
-      noteMarkdown.value = ''
-      noteEmptyReason.value = '该级别尚未编译'
-      try {
-        const resp = await fetch(`/api/literature/papers/${enc(rid)}/notes/${level}`, {
-          headers: useUserStore().getAuthHeaders()
-        })
-        if (!isCurrent()) return
-        if (resp.ok) {
-          const data = await resp.json()
-          if (data.note_uri) {
-            const assetResp = await fetch(
-              `/api/literature/assets?uri=${encodeURIComponent(data.note_uri)}`,
-              { headers: useUserStore().getAuthHeaders() }
-            )
-            if (assetResp.ok) {
-              const text = await assetResp.text()
-              if (isCurrent()) noteMarkdown.value = text
-            } else if (isCurrent()) {
-              noteEmptyReason.value = '笔记资源不可用或无权访问'
-            }
-          }
-        } else if (resp.status === 404) {
-          noteEmptyReason.value = '笔记不存在或尚未编译'
-        } else {
-          noteEmptyReason.value = '笔记加载失败或无权访问'
-        }
-      } catch {
-        if (isCurrent()) noteEmptyReason.value = '加载失败'
-      } finally {
-        if (isCurrent()) noteLoading.value = false
-      }
-    }
-    const parallelRows = computed(() => {
-      if (parallel.value?.ready) {
-        return (parallel.value.paragraphs || []).map((row, index) => ({ index, ...row }))
-      }
-      const originals = splitParas(displayMarkdown.value)
-      const translations = splitParas(variant.value?.content)
-      const total = Math.max(originals.length, translations.length)
-      return Array.from({ length: total }, (_, index) => ({
-        index,
-        original: originals[index] || '',
-        translated: translations[index] || ''
-      }))
-    })
     const images = computed(() => imageSources.value)
-    const parallelAnchor = computed(() =>
-      locateParallelAnchor(parallelRows.value, navigationTarget.value?.anchor)
-    )
 
     const authenticatedObjectUrl = async (url, generation) => {
       const response = await apiGet(url, {}, true, 'blob')
@@ -698,28 +513,18 @@ export default {
       const isCurrent = () => !disposed && generation === loadGeneration && rid === props.rid
       loading.value = true
       releaseObjectUrls()
-      bundle.value = variant.value = parallel.value = null
+      bundle.value = null
       displayMarkdown.value = ''
       closeImage()
       try {
-        const [readerBundle, translatedVariant, parallelVariant] = await Promise.all([
-          apiGet(`/api/literature/papers/${enc(rid)}/reader`).catch((error) => ({
+        const readerBundle = await apiGet(`/api/literature/papers/${enc(rid)}/reader`).catch(
+          (error) => ({
             ready: false,
             reason: error.message || '阅读正文读取失败'
-          })),
-          apiGet(`/api/literature/papers/${enc(rid)}/variants/zh`).catch((error) => ({
-            ready: false,
-            reason: error.message || '译文读取失败'
-          })),
-          apiGet(`/api/literature/papers/${enc(rid)}/parallel`).catch((error) => ({
-            ready: false,
-            reason: error.message || '对照阅读读取失败'
-          }))
-        ])
+          })
+        )
         if (!isCurrent()) return
         bundle.value = readerBundle
-        variant.value = translatedVariant
-        parallel.value = parallelVariant
         const markdown = readerBundle?.ready
           ? await hydrateProtectedAssets(
               readerBundle.markdown,
@@ -729,27 +534,6 @@ export default {
           : ''
         if (!isCurrent()) return
         displayMarkdown.value = markdown
-        if (parallelVariant?.ready) {
-          const rows = []
-          for (const row of parallelVariant.paragraphs || []) {
-            if (!isCurrent()) return
-            rows.push({
-              ...row,
-              original: await hydrateProtectedAssets(
-                row.original,
-                generation,
-                readerBundle?.knowledge_base_id || ''
-              ),
-              translated: await hydrateProtectedAssets(
-                row.translated,
-                generation,
-                readerBundle?.knowledge_base_id || ''
-              )
-            })
-          }
-          if (!isCurrent()) return
-          parallel.value = { ...parallelVariant, paragraphs: rows }
-        }
         try {
           const url = await authenticatedObjectUrl(
             `/api/literature/papers/${enc(rid)}/source-pdf`,
@@ -798,13 +582,11 @@ export default {
       imageScale.value = 1
     }
     const refreshReader = async () => {
-      if (editing.value || productEditing.value) {
+      if (editing.value) {
         editorNotice.value = '产物版本已更新；未清除本地编辑，请先保存或取消，再刷新。'
         return
       }
       await load()
-      if (current.value.startsWith('noteL')) await loadNote(current.value.slice(4))
-      if (variantKind.value !== 'zh') await loadOtherVariant()
     }
     watch(
       () => props.versionToken,
@@ -812,92 +594,22 @@ export default {
         if (old && value !== old) refreshReader()
       }
     )
-    const loadOtherVariant = async () => {
-      const ticket = ++variantGeneration,
-        rid = props.rid,
-        kind = variantKind.value
-      otherVariant.value = null
-      if (kind === 'zh') return
-      try {
-        const result = await apiGet(`/api/literature/papers/${enc(rid)}/variants/${kind}`)
-        if (!disposed && ticket === variantGeneration && rid === props.rid)
-          otherVariant.value = result
-      } catch (error) {
-        if (!disposed && ticket === variantGeneration)
-          otherVariant.value = { ready: false, reason: error.message || '读取失败' }
-      }
-    }
-    const reloadVariant = () => (variantKind.value === 'zh' ? load() : loadOtherVariant())
-    watch(() => [props.rid, variantKind.value], loadOtherVariant)
 
-    // 输出模板（仅 en_zh 有意义）：切换走零成本重渲染，不重新翻译。
-    const templateOptions = ref([])
-    const templateKey = ref('obsidian_bilingual')
-    const templateBusy = ref(false)
-    const templateNotice = ref('')
-    const loadTemplates = async () => {
-      try {
-        const result = await apiGet('/api/literature/templates')
-        if (!disposed) templateOptions.value = result.templates || []
-      } catch {
-        // 模板清单不可用时保留默认项，不阻断阅读
-        if (!disposed) templateOptions.value = []
-      }
-    }
-    const applyTemplate = async (next) => {
-      const previous = templateKey.value
-      templateKey.value = previous
-      if (!next || next === previous || variantKind.value !== 'en_zh') return
-      templateBusy.value = true
-      templateNotice.value = ''
-      try {
-        const result = await apiGet(
-          `/api/literature/papers/${enc(props.rid)}/variants/en_zh/templated?template=${encodeURIComponent(next)}`
-        )
-        if (!result?.ready) {
-          templateNotice.value = result?.reason || '该模板暂不可用'
-          return
-        }
-        templateKey.value = next
-        otherVariant.value = result
-        templateNotice.value = '已按新模板重排（未重新翻译）'
-      } catch (error) {
-        templateNotice.value = `模板切换失败：${error?.message || error}`
-      } finally {
-        templateBusy.value = false
-      }
-    }
-    watch(templateKey, applyTemplate)
-    watch(
-      () => props.rid,
-      () => loadTemplates()
-    )
-    onMounted(loadTemplates)
-
-    watch(current, (tab) => {
-      ++noteGeneration
-      if (tab === 'noteL1') loadNote('L1')
-      else if (tab === 'noteL2') loadNote('L2')
-      else if (tab === 'noteL3') loadNote('L3')
-    })
     watch(
       () => props.rid,
       () => {
-        ++noteGeneration
         navigationTarget.value = null
-        current.value = readReaderPreferences(readerStorage, userStore.uid).tab
+        const stored = readReaderPreferences(readerStorage, userStore.uid).tab
+        current.value = subTabKeys.includes(stored) ? stored : 'original'
         editing.value = false
-        editRid.value = editorNotice.value = noteMarkdown.value = ''
+        editRid.value = editorNotice.value = ''
         load()
-        if (current.value.startsWith('noteL')) loadNote(current.value.slice(4))
       },
       { immediate: true }
     )
     onUnmounted(() => {
       disposed = true
       ++loadGeneration
-      ++noteGeneration
-      ++variantGeneration
       releaseObjectUrls()
       emit('editing-change', false)
     })
@@ -907,16 +619,12 @@ export default {
         if (target?.rid !== props.rid) return
         const tab = target.tab || current.value
         if (!subTabs.some((item) => item.key === tab)) return
-        if (editing.value || productEditing.value) {
+        if (editing.value) {
           if (!(await confirmAction('打开双链会放弃未保存编辑，继续？'))) return
         }
-        editing.value = productEditing.value = false
+        editing.value = false
         navigationTarget.value = target
         selectTab(tab)
-        if (current.value !== tab) return
-        if (target.variant && ['zh', 'summary', 'en_zh'].includes(target.variant))
-          variantKind.value = target.variant
-        if (tab.startsWith('noteL')) loadNote(tab.slice(4))
       },
       { immediate: true }
     )
@@ -956,7 +664,6 @@ export default {
       setTabVisible,
       reorderTab,
       refreshReader,
-      productEditing,
       imageScale,
       lightbox,
       closeImage,
@@ -975,24 +682,14 @@ export default {
       editorNotice,
       startEditing,
       saveDocument,
-      noteMarkdown,
-      noteLoading,
-      noteEmptyReason,
       bundle,
-      variant,
-      variantKind,
-      selectedVariant,
-      reloadVariant,
       displayMarkdown,
       previewSrc,
       subTabs,
       pdfUrl,
-      parallelRows,
-      parallelAnchor,
       images,
       openImage,
-      load,
-      loadNote
+      load
     }
   }
 }
@@ -1050,20 +747,6 @@ export default {
   margin-bottom: 8px;
   background: color-mix(in srgb, var(--color-success-500) 14%, transparent);
   color: var(--color-success-700);
-}
-.parallel-cols {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 0 16px;
-  font-size: 13px;
-  line-height: 1.7;
-}
-.parallel-para {
-  padding: 6px 0;
-  border-bottom: 1px dashed var(--gray-200);
-  &.zh {
-    opacity: 0.95;
-  }
 }
 .image-grid {
   display: grid;
@@ -1186,10 +869,5 @@ export default {
 }
 .lightbox-image img {
   transform-origin: center;
-}
-@media (max-width: 700px) {
-  .parallel-cols {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

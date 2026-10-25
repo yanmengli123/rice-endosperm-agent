@@ -47,20 +47,10 @@
     </p>
 
     <h4>处理流程</h4>
-    <div class="settings-grid">
-      <label
-        >复核门控（翻译时机）
-        <select v-model="settings.reviewPolicy">
-          <option value="wait">wait：复核裁决后再翻译</option>
-          <option value="auto">auto：渲染后自动跳过复核直接翻译</option>
-        </select>
-      </label>
-    </div>
     <p class="settings-hint">
-      auto 对标 PaperAgent「跳过审核翻译」；识别复核面板仍可独立使用，事后裁决照常回放。
+      识别复核面板可独立使用，事后裁决照常回放。
     </p>
 
-    <LiteraturePdfOperations />
     <h4>界面与护眼</h4>
     <div class="settings-grid">
       <label
@@ -98,7 +88,6 @@
 </template>
 
 <script setup>
-import LiteraturePdfOperations from '@/components/literature/LiteraturePdfOperations.vue'
 import {
   LITERATURE_THEMES,
   resetLiteratureSettings,

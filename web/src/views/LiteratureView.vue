@@ -21,20 +21,6 @@
         </button>
         <button
           class="btn"
-          :class="{ active: viewMode === 'concepts' }"
-          @click="switchWorkspace('concepts')"
-        >
-          <Network :size="13" aria-hidden="true" /> 概念页
-        </button>
-        <button
-          class="btn"
-          :class="{ active: viewMode === 'reports' }"
-          @click="switchWorkspace('reports')"
-        >
-          <FileText :size="13" aria-hidden="true" /> 综述报告
-        </button>
-        <button
-          class="btn"
           :class="{ active: viewMode === 'bibmetrics' }"
           title="文献计量：年度趋势/期刊/机构分布与共现网络"
           @click="switchWorkspace('bibmetrics')"
@@ -145,7 +131,6 @@
         <div class="lit-toolbar">
           <select v-model="searchMode" aria-label="检索通道" @change="runSearch">
             <option value="catalog">目录（关键词 + 语义）</option>
-            <option value="compiled">编译笔记（RRF 导航）</option>
             <option value="list">列表（分页）</option>
           </select>
           <label><input v-model="searchCache" type="checkbox" />检索缓存</label>
@@ -157,26 +142,7 @@
           />
           <span class="toolbar-spacer"></span>
           <button class="btn" @click="$refs.bibInput.click()">导入 Bib</button>
-          <button class="btn" :disabled="importing" @click="$refs.paperAgentInput.click()">
-            {{ importing ? '导入中…' : '迁移 PaperAgent' }}
-          </button>
           <input ref="bibInput" hidden type="file" accept=".bib,.txt" @change="importBib" />
-          <input
-            ref="paperAgentInput"
-            hidden
-            type="file"
-            accept=".zip"
-            @change="importPaperAgent"
-          />
-          <input
-            v-model="mocTopic"
-            class="moc-input"
-            placeholder="主题 MOC（如：淀粉合成）"
-            @keyup.enter="generateMoc"
-          />
-          <button class="btn" :disabled="mocLoading" @click="generateMoc">
-            {{ mocLoading ? '生成中…' : '生成主题导读' }}
-          </button>
         </div>
 
         <LibraryWorkbench
@@ -200,7 +166,6 @@
             明文配置文件。插件使用受治理的工具、Skills 与 MCP。
           </p>
           <LiteratureSettingsPanel />
-          <TranslationSettings />
           <div class="settings-links">
             <button class="btn" @click="settingsOpen = true">个人模型、凭据与外观设置</button>
             <router-link to="/model-manage">智能体与模型管理</router-link>
@@ -297,24 +262,6 @@
           <p v-if="readerLinkNotice" role="status">{{ readerLinkNotice }}</p>
         </div>
         <p v-if="searchNotice" role="status">{{ searchNotice }}</p>
-        <div v-if="viewMode === 'reports'" class="concepts-panel">
-          <div v-if="!reports.length" class="lit-empty">暂无综述或主题导读</div>
-          <ul v-else class="concept-list">
-            <li v-for="report in reports" :key="report.id" class="concept-card">
-              <div class="concept-head">
-                <strong>{{ report.title }}</strong>
-                <span class="concept-count">{{ report.report_kind }}</span>
-                <button class="btn" @click="openReport(report.id)">阅读全文</button>
-              </div>
-              <div class="concept-def">{{ report.created_at || '' }}</div>
-            </li>
-          </ul>
-          <article v-if="selectedReport">
-            <h3>{{ selectedReport.title }}</h3>
-            <p>{{ selectedReport.notice }}</p>
-            <MarkdownPreview :content="selectedReport.navigation_markdown" />
-          </article>
-        </div>
 
         <div v-if="viewMode === 'tasks'" class="concepts-panel">
           <button class="btn" @click="onRefreshTasks">刷新任务与运行历史</button>
@@ -421,39 +368,6 @@
           </ul>
         </div>
 
-        <div v-if="viewMode === 'concepts'" class="concepts-panel">
-          <TopicsPanel />
-          <div v-if="!concepts.length" class="lit-empty">
-            暂无概念页（≥2 篇文献共享同一概念时聚合；先编译 L1）
-          </div>
-          <ul v-else class="concept-list">
-            <li
-              v-for="concept in concepts"
-              :key="concept.concept"
-              class="concept-card"
-              :class="{ mature: concept.mature }"
-            >
-              <div class="concept-head">
-                <strong>{{ concept.concept }}</strong>
-                <span class="concept-count"
-                  >{{ concept.paper_count }} 篇{{ concept.mature ? ' · 成熟' : '' }}</span
-                >
-              </div>
-              <div class="concept-def">{{ concept.definition }}</div>
-              <div class="concept-papers">
-                <button
-                  v-for="rid in concept.papers"
-                  :key="rid"
-                  class="btn"
-                  @click="openPaper({ rid })"
-                >
-                  {{ rid }}
-                </button>
-              </div>
-            </li>
-          </ul>
-        </div>
-
         <div v-if="viewMode === 'list'" class="directory-filters">
           <label
             >期刊<input v-model="filters.journal" maxlength="512" @keyup.enter="runSearch"
@@ -462,14 +376,6 @@
             >年份从<input v-model="filters.year_min" type="number" min="1000" max="9999"
           /></label>
           <label>至<input v-model="filters.year_max" type="number" min="1000" max="9999" /></label>
-          <select v-model="filters.compiled_level" aria-label="编译状态">
-            <option value="">所有编译状态</option>
-            <option value="missing">尚未编译</option>
-            <option value="any">已编译</option>
-            <option v-for="level in ['L1', 'L2', 'L3']" :key="level" :value="level">
-              {{ level }} 完成
-            </option>
-          </select>
           <select v-model="filters.source" aria-label="文献来源">
             <option value="">所有来源</option>
             <option value="pdf">关联 PDF 知识源</option>
@@ -486,28 +392,9 @@
             <option value="year">年份</option>
             <option value="cited">外部被引</option>
             <option value="rank">PaperRank</option>
-            <option value="value">价值分</option>
             <option value="title">标题</option>
           </select>
           <button class="btn" @click="applyFilters">应用目录筛选</button>
-          <label
-            ><input
-              type="checkbox"
-              :checked="allSelected"
-              @change="selectPage($event.target.checked)"
-            />选择本页</label
-          >
-          <span>已选 {{ selectedPapers.length }} 篇（最多 50）</span>
-          <button
-            v-for="level in ['L1', 'L2', 'L3']"
-            :key="level"
-            class="btn"
-            :disabled="batchBusy || !selectedPapers.length"
-            @click="compileBatch(level)"
-          >
-            批量 {{ level }}
-          </button>
-          <p v-if="batchNotice" role="status">{{ batchNotice }}</p>
         </div>
 
         <div
@@ -519,8 +406,7 @@
           加载中…
         </div>
         <div v-else-if="viewMode === 'list' && !papers.length" class="lit-empty">
-          暂无可访问文献。可在知识库中上传 PDF，完成证据处理后自动进入文献库；也可导入 Bib 或迁移
-          PaperAgent。
+          暂无可访问文献。可在知识库中上传 PDF，完成证据处理后自动进入文献库；也可导入 Bib。
           <router-link v-if="userStore.isAdmin" to="/extensions?tab=knowledge"
             >前往知识库</router-link
           >
@@ -535,13 +421,6 @@
             @mouseenter="previewRid = paper.rid"
             @mouseleave="previewRid = ''"
           >
-            <input
-              type="checkbox"
-              :aria-label="`选择 ${paper.title || paper.rid}`"
-              :checked="selectedPapers.includes(paper.rid)"
-              @click.stop
-              @change="togglePaper(paper.rid, $event.target.checked)"
-            />
             <div
               class="paper-title"
               role="button"
@@ -558,10 +437,6 @@
               <div v-if="previewRid === paper.rid" class="paper-preview">
                 <span v-if="paper.journal">期刊：{{ paper.journal }}</span>
                 <span v-if="paper.pub_year">年份：{{ paper.pub_year }}</span>
-                <span v-if="paper.value_score"
-                  >价值分：{{ Number(paper.value_score).toFixed(1) }}</span
-                >
-                <span v-if="paper.note_excerpt">{{ paper.note_excerpt }}</span>
               </div>
             </div>
             <div class="paper-actions" @click.stop>
@@ -576,7 +451,6 @@
               <span v-if="paper.external_cited != null">被引 {{ paper.external_cited }}</span>
               <span v-if="paper.quartile">JCR {{ paper.quartile }}</span>
               <span v-if="paper.impact_factor">IF {{ paper.impact_factor }}</span>
-              <span v-if="paper.value_score">价值分 {{ paper.value_score.toFixed(1) }}</span>
             </div>
           </li>
         </ul>
@@ -614,7 +488,6 @@ import {
   BookOpen,
   List,
   Network,
-  FileText,
   Settings,
   Expand,
   PanelLeft,
@@ -634,9 +507,7 @@ import LiteratureStatusBar from '@/components/literature/LiteratureStatusBar.vue
 import ImportPanel from '@/components/literature/ImportPanel.vue'
 import BibliometricsPanel from '@/components/literature/BibliometricsPanel.vue'
 import LiteratureSessions from '@/components/literature/LiteratureSessions.vue'
-import TopicsPanel from '@/components/literature/TopicsPanel.vue'
 import LiteratureSettingsPanel from '@/components/literature/LiteratureSettingsPanel.vue'
-import TranslationSettings from '@/components/literature/TranslationSettings.vue'
 import FloatingReaderWindow from '@/components/literature/FloatingReaderWindow.vue'
 import ReaderTabs from '@/components/literature/ReaderTabs.vue'
 import { useColumnResize } from '@/composables/useColumnResize'
@@ -654,7 +525,6 @@ import LiteratureSidebar from '@/components/literature/LiteratureSidebar.vue'
 import SettingsModal from '@/components/SettingsModal.vue'
 import DiaryView from '@/views/DiaryView.vue'
 import LiteratureGraphView from '@/views/LiteratureGraphView.vue'
-import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { useUserStore } from '@/stores/user'
 
 const KIND_CHIPS = [
@@ -675,21 +545,17 @@ export default {
     BookOpen,
     List,
     Network,
-    FileText,
     Settings,
     Expand,
     PanelLeft,
     PaperDetail,
     LibraryWorkbench,
-    MarkdownPreview,
     ImportPanel,
     LiteratureSessions,
     DiaryView,
     LiteratureGraphView,
     SettingsModal,
-    TopicsPanel,
     LiteratureSettingsPanel,
-    TranslationSettings,
     FloatingReaderWindow,
     ReaderTabs,
     LiteratureSidebar,
@@ -971,47 +837,9 @@ export default {
       min_if: '',
       year_min: '',
       year_max: '',
-      compiled_level: '',
       source: '',
       sort: 'updated'
     })
-    const selectedPapers = ref([])
-    const batchBusy = ref(false)
-    const batchNotice = ref('')
-    const allSelected = computed(
-      () =>
-        papers.value.length > 0 &&
-        papers.value.every((paper) => selectedPapers.value.includes(paper.rid))
-    )
-    const togglePaper = (rid, checked) => {
-      if (checked && !selectedPapers.value.includes(rid) && selectedPapers.value.length < 50)
-        selectedPapers.value.push(rid)
-      if (!checked) selectedPapers.value = selectedPapers.value.filter((value) => value !== rid)
-    }
-    const selectPage = (checked) => papers.value.forEach((paper) => togglePaper(paper.rid, checked))
-    const compileBatch = async (level) => {
-      if (
-        !(await confirmAction(
-          `提交 ${selectedPapers.value.length} 篇 ${level} 编译？执行会调用模型并按实际用量计费；冻结内容不覆盖。`
-        ))
-      )
-        return
-      batchBusy.value = true
-      try {
-        const result = await literatureWorkspaceApi.compileBatch({
-          rids: selectedPapers.value,
-          level
-        })
-        const rejected = result.items.filter((item) => !item.accepted)
-        batchNotice.value =
-          `已接收 ${result.accepted} 个任务（不表示完成）。` +
-          rejected.map((item) => `${item.rid}: ${item.error}`).join('；')
-      } catch (error) {
-        batchNotice.value = error.message || '批量入队失败'
-      } finally {
-        batchBusy.value = false
-      }
-    }
     const applyFilters = () => {
       searchMode.value = 'list'
       runSearch()
@@ -1041,8 +869,6 @@ export default {
     }
     const switchWorkspace = async (key) => {
       if (key === 'tasks') await loadTasks()
-      else if (key === 'concepts') await loadConcepts()
-      else if (key === 'reports') await loadReports()
       else {
         if (key !== viewMode.value && !(await confirmLeave())) return
         viewMode.value = key
@@ -1053,19 +879,6 @@ export default {
       workbenchRun.value = run
       viewMode.value = 'workbench'
     }
-    const concepts = ref([])
-    const mocTopic = ref('')
-    const mocLoading = ref(false)
-    const reports = ref([])
-    const selectedReport = ref(null)
-    const openReport = async (id) => {
-      selectedReport.value = null
-      try {
-        selectedReport.value = await apiGet('/api/literature/reports/' + id)
-      } catch (error) {
-        message.error(error?.message || '报告读取失败')
-      }
-    }
     // 任务数据来自共享轮询源（状态栏/导入面板同源），任务视图常驻实时
     const taskFeed = useLiteratureTaskFeed()
     const literatureTasks = computed(() => taskFeed.tasks.value)
@@ -1073,90 +886,7 @@ export default {
     // 入库段（type=ingest，来自知识域摄入投影）单列一节；其余为文献域任务
     const ingestTasks = computed(() => literatureTasks.value.filter((t) => t?.type === 'ingest'))
     const domainTasks = computed(() => literatureTasks.value.filter((t) => t?.type !== 'ingest'))
-    const importing = ref(false)
 
-    const loadConcepts = async () => {
-      if (viewMode.value !== 'concepts' && !(await confirmLeave())) return
-      viewMode.value = 'concepts'
-      try {
-        const data = await apiGet('/api/literature/concepts')
-        concepts.value = data?.concepts || []
-      } catch (error) {
-        searchNotice.value = error?.message || '概念页读取失败'
-      }
-    }
-    // 主题导读异步轮询：generation 防竞态，15 分钟上限后停止并提示。
-    let mocPollTimer = null
-    let mocPollGeneration = 0
-    const MOC_POLL_MAX_TICKS = 300
-
-    const stopMocPolling = () => {
-      mocPollGeneration++
-      if (mocPollTimer) {
-        clearTimeout(mocPollTimer)
-        mocPollTimer = null
-      }
-    }
-
-    const pollMocJob = (jobId, generation, ticks = 0) => {
-      if (generation !== mocPollGeneration) return
-      if (ticks >= MOC_POLL_MAX_TICKS) {
-        message.warning('主题导读仍在执行，请稍后在「综述报告」列表查看结果')
-        return
-      }
-      mocPollTimer = setTimeout(async () => {
-        if (generation !== mocPollGeneration) return
-        try {
-          const job = await apiGet(`/api/literature/reports/topic-moc/${encodeURIComponent(jobId)}`)
-          if (generation !== mocPollGeneration) return
-          if (job?.status === 'SUCCEEDED') {
-            const sources = job?.result?.sources ?? '?'
-            message.success(`主题导读已生成（${sources} 篇来源），见「综述报告」列表`)
-            return
-          }
-          if (job?.status === 'FAILED' || job?.status === 'DEAD') {
-            message.error(`主题导读生成失败：${job?.error || job?.status}`)
-            return
-          }
-          pollMocJob(jobId, generation, ticks + 1)
-        } catch (err) {
-          if (generation !== mocPollGeneration) return
-          message.error(`主题导读状态查询失败：${err?.message || err}`)
-        }
-      }, 3000)
-    }
-
-    const generateMoc = async () => {
-      const topic = mocTopic.value.trim()
-      if (!topic || mocLoading.value) return
-      mocLoading.value = true
-      try {
-        const result = await apiPost('/api/literature/reports/topic-moc', { topic })
-        mocTopic.value = ''
-        stopMocPolling()
-        const generation = mocPollGeneration
-        if (result?.status === 'SUCCEEDED' && result?.result) {
-          message.success(`主题导读已生成（${result.result.sources ?? '?'} 篇来源），见「综述报告」列表`)
-          return
-        }
-        message.success('主题导读任务已提交，完成后将在此提示')
-        pollMocJob(result?.job_id, generation)
-      } catch (err) {
-        message.error(`提交失败：${err?.message || err}`)
-      } finally {
-        mocLoading.value = false
-      }
-    }
-    const loadReports = async () => {
-      if (viewMode.value !== 'reports' && !(await confirmLeave())) return
-      viewMode.value = 'reports'
-      try {
-        const data = await apiGet('/api/literature/reports')
-        reports.value = data?.reports || []
-      } catch (error) {
-        searchNotice.value = error?.message || '报告列表读取失败'
-      }
-    }
     const loadTasks = async () => {
       if (viewMode.value !== 'tasks' && !(await confirmLeave())) return
       viewMode.value = 'tasks'
@@ -1238,42 +968,6 @@ export default {
         message.error(error?.message || 'Bib 导入失败')
       }
     }
-    const importPaperAgent = async (event) => {
-      const file = event.target.files?.[0]
-      event.target.value = ''
-      if (!file) return
-      importing.value = true
-      try {
-        const dryForm = new FormData()
-        dryForm.append('file', file)
-        const report = await apiPost(
-          '/api/literature/papers/import/paperagent?dry_run=true',
-          dryForm
-        )
-        const summary = `将迁移 ${report.papers?.source || 0} 篇文献、${report.variants?.source || 0} 个变体；冲突 ${report.conflicts?.length || 0} 项。历史资产：${JSON.stringify(report.history?.source_counts || {})}`
-        if (
-          !(await confirmAction(
-            `${summary} ${report.warning || ''} 尚不迁移：${(report.unsupported || []).join('、')} 确认执行正式导入？`
-          ))
-        )
-          return
-        const importForm = new FormData()
-        importForm.append('file', file)
-        const completed = await apiPost(
-          '/api/literature/papers/import/paperagent?dry_run=false&archive_sha256=' +
-            encodeURIComponent(report.archive_sha256),
-          importForm
-        )
-        message.success(
-          `迁移完成：历史映射 ${completed.history?.applied || 0}，只读保留 ${completed.history?.preserved || 0}，冲突 ${completed.history?.conflicts?.length || 0}。在导入页查看逐项回执；请保留原始归档。`
-        )
-        await load()
-      } catch (error) {
-        message.error(error?.message || 'PaperAgent 数据迁移失败')
-      } finally {
-        importing.value = false
-      }
-    }
 
     const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
@@ -1309,20 +1003,18 @@ export default {
         if (parsed.query && searchMode.value !== 'list') {
           const params = new URLSearchParams({
             query: parsed.query,
-            limit: searchMode.value === 'compiled' ? '50' : '100',
+            limit: '100',
             kind: parsed.kind,
             use_cache: String(searchCache.value),
             rerank_model: rerankModel.value.trim()
           })
           const data = await apiGet('/api/literature/search/' + searchMode.value + '?' + params)
           if (ticket !== loadGeneration) return
-          const hits = searchMode.value === 'compiled' ? data.hits : data.results
+          const hits = data.results
           papers.value = hits || []
           total.value = 0
           searchNotice.value =
             data.note || hits?.find((hit) => hit.navigation_note)?.navigation_note || ''
-          if (searchMode.value === 'compiled')
-            searchNotice.value = '笔记是派生导航，事实需核验原知识源。' + searchNotice.value
           return
         }
         const data = await listLiteraturePapers({
@@ -1433,7 +1125,6 @@ export default {
     onBeforeUnmount(() => {
       loadGeneration++
       readerActionGeneration++
-      stopMocPolling()
       window.removeEventListener('beforeunload', beforeUnload)
       sessionState.dispose()
     })
@@ -1459,13 +1150,6 @@ export default {
       resumeRun,
       filters,
       applyFilters,
-      selectedPapers,
-      allSelected,
-      togglePaper,
-      selectPage,
-      compileBatch,
-      batchBusy,
-      batchNotice,
       papers,
       total,
       page,
@@ -1500,12 +1184,6 @@ export default {
       openPaper,
       kindLabel,
       viewMode,
-      concepts,
-      mocTopic,
-      mocLoading,
-      reports,
-      selectedReport,
-      openReport,
       literatureTasks,
       ingestTasks,
       domainTasks,
@@ -1518,13 +1196,8 @@ export default {
       retryIngest,
       formatRate,
       describeRunError,
-      importing,
-      loadConcepts,
-      generateMoc,
-      loadReports,
       loadTasks,
       importBib,
-      importPaperAgent,
       // workspace chrome (PaperAgent reading-desk parity)
       drawer,
       readMode,

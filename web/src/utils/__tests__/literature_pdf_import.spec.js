@@ -73,7 +73,7 @@ const modules = {
     }
   },
   '@/apis/literature_api': {
-    literatureWorkspaceApi: { startWorkflow: async () => ({}) }
+    literatureWorkspaceApi: {}
   },
   '@/composables/useLiteratureSettings': { parseOptionsPayload: () => ({ language: 'auto' }) },
   '@/composables/useLiteratureTaskFeed': {
@@ -134,12 +134,7 @@ tasks.value = [
 ]
 await Vue.nextTick()
 await Promise.resolve()
-// 非仅解析模式下终态自动推进编译工作流（WIP 行为）：消息被 startWorkflow.then 覆写
-assert.match(
-  state.results.value[0].message,
-  /入库完成，已自动启动编译工作流/,
-  '终态后自动启动工作流并覆写结果消息'
-)
+assert.match(state.results.value[0].message, /入库成功/, '终态后更新结果消息')
 assert.ok(refreshes > beforeCompletion, '终态刷新文献目录')
 await state.importPdf(event())
 tasks.value = [
@@ -161,14 +156,5 @@ tasks.value = [
 ]
 await Vue.nextTick()
 assert.equal(state.results.value[0].message, '已取消')
-state.processingMode.value = 'parse_only'
-await state.importPdf(event())
-assert.equal(submittedParams.auto_index, false)
-assert.equal(submittedParams.scientific_processing_mode, 'parse_only')
-tasks.value = [
-  { type: 'ingest', ref: 'rev1', is_terminal: true, is_failure: false, status: 'PARSED_ONLY' }
-]
-await Vue.nextTick()
-assert.match(state.results.value[0].message, /草稿（未入库）/)
 app.unmount()
 console.log('PDF upload boundary, intake, completion, rejection and cancellation passed')

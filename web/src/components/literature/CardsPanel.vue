@@ -5,7 +5,6 @@
         <option value="card-qa">问答卡</option>
         <option value="card-summary">总结卡</option>
         <option value="card-note">笔记卡</option>
-        <option value="card-translate">翻译卡</option>
       </select>
       <input
         v-model="title"

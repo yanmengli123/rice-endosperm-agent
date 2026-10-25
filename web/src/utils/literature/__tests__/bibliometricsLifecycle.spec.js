@@ -56,7 +56,6 @@ vm.runInNewContext(code, {
     }
   },
   require(id) {
-    if (id === './TopicModelingPanel.vue') return {}
     if (id === 'vue') return Vue
     if (id === '@/stores/user') return { useUserStore: () => user }
     if (id === '@/composables/useLiteraturePollingScope') return { useLiteraturePollingScope }

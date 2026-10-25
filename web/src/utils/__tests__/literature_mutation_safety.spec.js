@@ -139,53 +139,8 @@ try {
   assert.equal(cards.state.saving, false)
   delayWrites = false
 
-  const workflow = await mount('../../components/literature/WorkflowPanel.vue', { rid: 'paper-a' })
-  workflow.state.runId = 'old-run'
-  workflow.state.state = { cancellable: true }
-  operation = workflow.state.cancel()
-  const cancelPrompt = confirmations.at(-1)
-  await workflow.state.cancel()
-  assert.equal(confirmations.at(-1), cancelPrompt)
-  workflow.state.runId = 'new-run'
-  cancelPrompt.resolve(true)
-  await operation
-  assert.equal(
-    writes.filter((item) => item.path.endsWith('/cancel')).length,
-    0,
-    'Cancel confirmation cannot follow a newly selected run'
-  )
-  workflow.state.state = { cancellable: true }
-  workflow.state.cancelReason = 'Operator reason'
-  operation = workflow.state.cancel()
-  confirmations.at(-1).resolve(true)
-  await operation
-  assert.equal(writes.at(-1).path, '/api/literature/workflow/new-run/cancel')
-  assert.equal(writes.at(-1).body.reason, 'Operator reason')
-  workflow.state.runId = 'run-before-switch'
-  workflow.state.state = { cancellable: true }
-  operation = workflow.state.cancel()
-  owner.departmentId = 3
-  confirmations.at(-1).resolve(true)
-  await operation
-  assert.equal(writes.filter((item) => item.path.endsWith('/cancel')).length, 1)
-  assert.equal(workflow.state.runId, '', 'Tenant changes clear previous workflow details')
-  delayWrites = true
-  operation = workflow.state.start()
-  const oldStart = waitingWrites.at(-1)
-  await workflow.state.start()
-  assert.equal(waitingWrites.at(-1), oldStart, 'Start is single-flight')
-  workflow.props.rid = 'paper-b'
-  await settle()
-  const newStart = workflow.state.start()
-  oldStart.resolve({ run_id: 'wrong-paper-run' })
-  await operation
-  assert.equal(workflow.state.runId, '')
-  assert.equal(workflow.state.busy, true, 'Old finally cannot release the new paper operation')
-  waitingWrites.at(-1).resolve({ run_id: 'correct-paper-run' })
-  await newStart
-  assert.equal(workflow.state.runId, 'correct-paper-run')
   console.log(
-    'Mutation safety passed: fixed paper/card/run targets, owner fencing, digest preservation, single-flight operations, late result isolation'
+    'Mutation safety passed: fixed paper/card targets, owner fencing, digest preservation, single-flight operations, late result isolation'
   )
 } finally {
   mounts.forEach((app) => app.unmount())

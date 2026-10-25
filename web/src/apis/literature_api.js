@@ -1,18 +1,5 @@
 import { apiGet, apiPost, apiPut, apiDelete } from './base'
 
-export const literaturePdfApi = {
-  capabilities: () => apiGet('/api/literature/pdf-translation/capabilities'),
-  bundle: (rid, signal) =>
-    apiGet(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation`, { signal }),
-  cancel: (rid, jobId, signal) =>
-    apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/pdf-translation/${jobId}/cancel`, {}, { signal }),
-  source: (signal) => apiGet('/api/literature/pdf-translation/source', { signal }, true, 'blob'),
-  operations: (signal) => apiGet('/api/literature/pdf-translation/operations', { signal }),
-  unresolvedUsage: (signal) => apiGet('/api/literature/pdf-translation/usage-unresolved', { signal }),
-  resolveUsage: (callId, receipt) =>
-    apiPost(`/api/literature/pdf-translation/usage-unresolved/${encodeURIComponent(callId)}/resolve`, receipt)
-}
-
 function bibliometricQuery(filters) {
   const query = new URLSearchParams()
   for (const key of ['only_imports', 'database', 'query', 'year_from', 'year_to']) {
@@ -52,53 +39,21 @@ export function listLiteraturePapers(params = {}, signal = null) {
   if (params.kind) qs.set('kind', params.kind)
   if (params.page) qs.set('page', String(params.page))
   if (params.page_size) qs.set('page_size', String(params.page_size))
-  for (const key of [
-    'journal',
-    'quartile',
-    'min_if',
-    'year_min',
-    'year_max',
-    'compiled_level',
-    'source',
-    'sort'
-  ]) {
+  for (const key of ['journal', 'quartile', 'min_if', 'year_min', 'year_max', 'source', 'sort']) {
     if (params[key] !== '' && params[key] != null) qs.set(key, String(params[key]))
   }
   const suffix = qs.toString() ? `?${qs.toString()}` : ''
   return apiGet(`/api/literature/papers${suffix}`, { signal })
 }
 
-/** 文献详情（元数据 + 渲染/编译/翻译/附件状态聚合） */
+/** 文献详情（元数据 + 渲染/附件状态聚合） */
 export function getLiteraturePaper(rid, signal = null) {
   return apiGet(`/api/literature/papers/${encodeURIComponent(rid)}`, { signal })
-}
-
-/** 读笔记级别（返回 kbasset URI，不返回正文） */
-export function getLiteratureNote(rid, level, signal = null) {
-  return apiGet(
-    `/api/literature/papers/${encodeURIComponent(rid)}/notes/${encodeURIComponent(level)}`,
-    {
-      signal
-    }
-  )
 }
 
 /** 触发阅读渲染（202 异步任务） */
 export function triggerLiteratureRender(rid) {
   return apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/render`)
-}
-
-/** 触发翻译（202 异步任务） */
-export function triggerLiteratureTranslation(rid, variantKind = 'zh', force = false) {
-  return apiPost(
-    `/api/literature/papers/${encodeURIComponent(rid)}/translation?variant_kind=${encodeURIComponent(variantKind)}${force ? '&force=true' : ''}`
-  )
-}
-
-/** Start an asynchronous L1/L2/L3 note compilation. */
-export function triggerLiteratureCompile(rid, level = 'L1', force = false) {
-  const query = new URLSearchParams({ level, force: String(force) })
-  return apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/compile?${query}`)
 }
 
 /** Enrich DOI and bibliographic metadata from the configured providers. */
@@ -121,7 +76,7 @@ export function uploadLiteratureAttachment(rid, file, kind = 'si') {
   )
 }
 
-/** 文献域任务投影（渲染/编译/翻译；前端 3s 轮询） */
+/** 文献域任务投影（渲染/导入；前端 3s 轮询） */
 export function listLiteratureTasks(limit = 100, signal = null) {
   return apiGet(`/api/literature/tasks?limit=${encodeURIComponent(String(limit))}`, { signal })
 }
@@ -143,14 +98,6 @@ export async function fetchLiteratureAssetBlob(uri, signal = null) {
 
 export const literatureWorkspaceApi = {
   exportBusinessBackup: () => apiGet('/api/literature/export/business-backup', {}, true, 'blob'),
-  historyArchives: () => apiGet('/api/literature/history/archives'),
-  exportHistoryArchive: (sha256) =>
-    apiGet(
-      `/api/literature/history/archives/${encodeURIComponent(sha256)}/download`,
-      {},
-      true,
-      'blob'
-    ),
   graphNetwork: (filters = {}) => {
     const query = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) {
@@ -162,7 +109,6 @@ export const literatureWorkspaceApi = {
   metadata: (rid) => apiGet(`/api/literature/papers/${encodeURIComponent(rid)}/metadata`),
   saveMetadata: (rid, payload) =>
     apiPut(`/api/literature/papers/${encodeURIComponent(rid)}/metadata`, payload),
-  compileBatch: (payload) => apiPost('/api/literature/library/compile', payload),
   runs: () => apiGet('/api/literature/runs'),
   /** 质量指标（拒绝率/降级率/修复成功率 + 任务/入库健康）。 */
   qualityMetrics: (days = 7) =>
@@ -204,34 +150,6 @@ export const literatureWorkspaceApi = {
   },
   referenceBatches: (offset = 0) => apiGet(`/api/literature/reference-batches?offset=${offset}`),
   metricSources: () => apiGet('/api/literature/metrics/sources'),
-  topicCapabilities: () => apiGet('/api/literature/metrics/topic-runs/capabilities'),
-  previewTopics: (options, filters) =>
-    apiPost('/api/literature/metrics/topic-runs/preview', { options, filters }),
-  startTopics: (options, filters) =>
-    apiPost('/api/literature/metrics/topic-runs', { options, filters }),
-  topicRuns: (offset = 0) => apiGet(`/api/literature/metrics/topic-runs?offset=${offset}`),
-  topicRun: (id) => apiGet(`/api/literature/metrics/topic-runs/${encodeURIComponent(id)}`),
-  cancelTopics: (id) =>
-    apiPost(`/api/literature/metrics/topic-runs/${encodeURIComponent(id)}/cancel`),
-  rerunTopics: (id, options = {}) =>
-    apiPost(`/api/literature/metrics/topic-runs/${encodeURIComponent(id)}/rerun`, options),
-  topicData: (id, model, { topic, offset = 0, view = 'documents' } = {}) => {
-    const query = new URLSearchParams({ model, offset, view })
-    if (topic !== undefined && topic !== null) query.set('topic', String(topic))
-    return apiGet(`/api/literature/metrics/topic-runs/${encodeURIComponent(id)}/data?${query}`)
-  },
-  importTopics: (file) => {
-    const form = new FormData()
-    form.append('file', file)
-    return apiPost('/api/literature/metrics/topic-runs/import', form)
-  },
-  exportTopics: (id, model) =>
-    apiGet(
-      `/api/literature/metrics/topic-runs/${encodeURIComponent(id)}/export?model=${encodeURIComponent(model)}`,
-      {},
-      true,
-      'blob'
-    ),
   metricRecords: (filters = {}, offset = 0, limit = 25) =>
     apiGet(
       `/api/literature/metrics/records?${bibliometricQuery(filters)}&offset=${offset}&limit=${limit}`
@@ -263,52 +181,5 @@ export const literatureWorkspaceApi = {
   },
   attachJournalMetrics: () => apiPost('/api/literature/library/journal-metrics'),
   exportDiary: (month) =>
-    apiGet(`/api/literature/diary/export?month=${encodeURIComponent(month)}`, {}, true, 'blob'),
-  /**
-   * 启动文献处理工作流（三模式；后端 workflow.MODE_STEPS）。
-   * @param {string} rid 文献 RID
-   * @param {'parse_only'|'parse_compile'|'full'} mode
-   * @param {{review_policy?: string}} [payload]
-   */
-  startWorkflow: (rid, mode, payload = {}) =>
-    apiPost(`/api/literature/papers/${encodeURIComponent(rid)}/workflow`, { mode, ...payload }),
-  // 主题目录（TopicsPanel；编译为纯聚合，不调用模型）
-  topics: (field = 'wos_categories', offset = 0) => {
-    const query = new URLSearchParams({ field, offset: String(offset) })
-    return apiGet(`/api/literature/topics?${query}`)
-  },
-  compileTopics: (field = 'wos_categories', minPapers = 2) =>
-    apiPost('/api/literature/topics/compile', { field, min_papers: minPapers }),
-  topic: (slug, field = 'wos_categories') =>
-    apiGet(`/api/literature/topics/${encodeURIComponent(slug)}?field=${encodeURIComponent(field)}`)
-}
-
-/**
- * 译文工作台 API（TranslationSettings / DraftReader）。
- * 后端：translation_workspace.py + translate/settings.py；任务轮询与计费
- * 确认在组件层完成，封装只保持与端点一一对应。
- */
-export const literatureTranslationApi = {
-  settings: (signal = null) => apiGet('/api/literature/translation-settings', { signal }),
-  saveSettings: (payload) => apiPut('/api/literature/translation-settings', payload),
-  probeSources: (signal = null) => apiGet('/api/literature/translation-probe/sources', { signal }),
-  probe: (payload) => apiPost('/api/literature/translation-probe', payload),
-  task: (taskId, content = false, signal = null) =>
-    apiGet(
-      `/api/literature/translation-tasks/${encodeURIComponent(taskId)}?content=${content ? 'true' : 'false'}`,
-      {
-        signal
-      }
-    ),
-  draftTask: (revisionId, signal = null) =>
-    apiGet(`/api/literature/drafts/${encodeURIComponent(revisionId)}/translation`, { signal }),
-  translateDraft: (revisionId) =>
-    apiPost(`/api/literature/drafts/${encodeURIComponent(revisionId)}/translation`),
-  draftPdf: (revisionId, signal = null) =>
-    apiGet(
-      `/api/literature/drafts/${encodeURIComponent(revisionId)}/source-pdf`,
-      { signal },
-      true,
-      'blob'
-    )
+    apiGet(`/api/literature/diary/export?month=${encodeURIComponent(month)}`, {}, true, 'blob')
 }

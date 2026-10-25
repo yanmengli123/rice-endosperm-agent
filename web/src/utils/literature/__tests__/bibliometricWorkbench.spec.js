@@ -74,7 +74,6 @@ vm.runInNewContext(
       disconnect() {}
     },
     require: (id) => {
-      if (id === './TopicModelingPanel.vue') return {}
       if (id === 'vue') return Vue
       if (id === '@/apis/literature_api') return { literatureWorkspaceApi: api }
       if (id === '@/stores/user') return { useUserStore: () => user }

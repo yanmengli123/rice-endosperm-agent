@@ -366,52 +366,6 @@ try {
   mounts.splice(mounts.indexOf(view3d.app), 1)
   assert.equal(gpuDisposed, true)
 
-  const archiveSha = 'a'.repeat(64)
-  let requestedSha, downloadName, revokedUrl
-  const history = await mount(
-    '../../components/literature/HistoryPanel.vue',
-    {},
-    {
-      '@/apis/base': { apiGet: async () => ({ items: [{ id: 1 }], has_more: false }) },
-      '@/apis/literature_api': {
-        literatureWorkspaceApi: {
-          historyArchives: async () => ({ items: [{ archive_sha256: archiveSha }] }),
-          exportHistoryArchive: async (sha) => {
-            requestedSha = sha
-            return { blob: async () => new Blob(['verified-zip']) }
-          }
-        }
-      }
-    },
-    {},
-    {
-      URL: {
-        createObjectURL: () => 'blob:unit-archive',
-        revokeObjectURL: (url) => {
-          revokedUrl = url
-        }
-      },
-      document: {
-        createElement: () => ({
-          click() {
-            downloadName = this.download
-          }
-        })
-      },
-      setTimeout: (fn) => fn()
-    }
-  )
-  assert.equal(history.instance.items.length, 1, 'Migration panel loads receipts on entry')
-  assert.equal(history.instance.archives[0].archive_sha256, archiveSha)
-  await history.instance.exportArchive(history.instance.archives[0])
-  assert.equal(
-    requestedSha,
-    archiveSha,
-    'Export uses the selected sealed archive, not current workspace state'
-  )
-  assert.equal(downloadName, `paperagent-history-${archiveSha.slice(0, 12)}.zip`)
-  assert.equal(revokedUrl, 'blob:unit-archive')
-
   let confirm = false
   const workspaceReads = []
   const window = { confirm: () => confirm, addEventListener() {}, removeEventListener() {} }
@@ -451,18 +405,6 @@ try {
   workspace.closeReader()
   assert.equal(workspace.selectedRid, 'compare-1', 'Close promotes existing comparison')
   assert.equal(workspace.comparisonRids.length, 3)
-  await workspace.switchWorkspace('concepts')
-  await settle()
-  assert.ok(
-    workspaceReads.includes('/api/literature/concepts'),
-    'Concept toolbar must load actual concept data'
-  )
-  await workspace.switchWorkspace('reports')
-  await settle()
-  assert.ok(
-    workspaceReads.includes('/api/literature/reports'),
-    'Report toolbar must load the report list'
-  )
 
   const requests = new Map()
   const { instance: diary } = await mount(
@@ -553,7 +495,7 @@ try {
     {
       rid: 'paper',
       paper: {},
-      readerTarget: { rid: 'paper', tab: 'noteL2', anchor: '核心概念', requestId: 1 }
+      readerTarget: { rid: 'paper', tab: 'pdf', anchor: '', requestId: 1 }
     },
     {
       '@/stores/user': { useUserStore: () => ({ uid: '', getAuthHeaders: () => ({}) }) },
@@ -565,30 +507,25 @@ try {
     },
     window
   )
-  assert.equal(navigation.instance.current, 'noteL2', 'A product link selects its real reader tab')
-  assert.ok(
-    navigation.instance.visibleTabs.some((tab) => tab.key === 'noteL2'),
-    'Explicit linked product remains visible even when not generated'
-  )
-  navigation.instance.productEditing = true
+  assert.equal(navigation.instance.current, 'pdf', 'A reader link selects its real reader tab')
+  navigation.instance.editing = true
   confirm = false
   navigation.setProps({
-    readerTarget: { rid: 'paper', tab: 'translation', variant: 'summary', requestId: 2 }
+    readerTarget: { rid: 'paper', tab: 'original', requestId: 2 }
   })
   await settle()
   assert.equal(
     navigation.instance.current,
-    'noteL2',
-    'A declined link preserves unsaved product edits'
+    'pdf',
+    'A declined link preserves unsaved edits'
   )
   assert.equal(navigation.instance.navigationTarget.requestId, 1)
   confirm = true
   navigation.setProps({
-    readerTarget: { rid: 'paper', tab: 'translation', variant: 'summary', requestId: 3 }
+    readerTarget: { rid: 'paper', tab: 'original', requestId: 3 }
   })
   await settle()
-  assert.equal(navigation.instance.current, 'translation')
-  assert.equal(navigation.instance.variantKind, 'summary')
+  assert.equal(navigation.instance.current, 'original')
   assert.equal(navigation.instance.navigationTarget.requestId, 3)
   confirm = false
 

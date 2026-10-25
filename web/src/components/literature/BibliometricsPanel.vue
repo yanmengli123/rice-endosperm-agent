@@ -106,8 +106,7 @@
       <button
         v-for="(label, key) in {
           records: '文献清单',
-          analysis: '统计与网络',
-          topics: 'BERTopic 主题建模'
+          analysis: '统计与网络'
         }"
         :key="key"
         class="btn"
@@ -123,15 +122,7 @@
         {{ label }}
       </button>
     </div>
-    <section
-      v-if="view === 'topics'"
-      id="bibliometric-panel-topics"
-      role="tabpanel"
-      aria-labelledby="bibliometric-tab-topics"
-    >
-      <TopicModelingPanel :filters="filters" @open-paper="emit('open-paper', $event)" />
-    </section>
-    <header v-show="view !== 'topics'" class="panel-header">
+    <header class="panel-header">
       <h3>{{ view === 'records' ? '文献清单' : '文献计量分析' }}</h3>
       <span v-if="overview" class="hint">
         当前范围 {{ overview.papers }} 篇主文献（{{ overview.year_min || '—' }}–{{
@@ -329,7 +320,6 @@ import { getColorByIndex, initColorPalette } from '@/utils/chartColors'
 import { useLiteraturePollingScope } from '@/composables/useLiteraturePollingScope'
 import { useUserStore } from '@/stores/user'
 import { useTablistKeyboard } from '@/composables/useTablistKeyboard'
-import TopicModelingPanel from './TopicModelingPanel.vue'
 import {
   buildDistributionOption,
   buildNetworkOption,
@@ -363,7 +353,7 @@ const { onTabKeydown } = useTablistKeyboard(
   (key) => {
     view.value = key
   },
-  () => ['records', 'analysis', 'topics']
+  () => ['records', 'analysis']
 )
 const batches = ref([]),
   batchesHaveMore = ref(false),

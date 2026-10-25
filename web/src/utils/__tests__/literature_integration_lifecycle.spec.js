@@ -184,9 +184,6 @@ const detail = (
       '@/stores/user': { useUserStore: () => paperUser },
       '@/apis/base': { apiPost: async () => ({}) },
       '@/apis/literature_api': {
-        literaturePdfApi: {
-          capabilities: async () => ({ enabled: false, reason: 'Test runtime disabled' })
-        },
         getLiteraturePaper: (rid, signal) =>
           new Promise((resolve) => paperReads.push({ rid, signal, resolve }))
       }
@@ -256,13 +253,7 @@ detailApp.unmount()
 
 // Every remaining autonomous network poller must use the same visibility/KeepAlive boundary.
 const eventModel = await evaluate('../../composables/useLiteratureEvents.js', {})
-for (const name of [
-  'WorkflowPanel',
-  'LibraryWorkbench',
-  'DraftReader',
-  'TranslationSettings',
-  'LiteratureStatusBar'
-]) {
+for (const name of ['LibraryWorkbench', 'LiteratureStatusBar']) {
   const reads = []
   const read = (signal) => new Promise((resolve) => reads.push({ signal, resolve }))
   const usageOwner = Vue.ref('owner-a')
@@ -285,13 +276,7 @@ for (const name of [
         '@/stores/user': { useUserStore: () => ({ userId: 1 }) },
         '@/apis/base': { apiGet: (_url, opts) => read(opts.signal), apiPost: async () => ({}) },
         '@/apis/literature_api': {
-          literatureWorkspaceApi: { journalsStatus: async () => ({}) },
-          literatureTranslationApi: {
-            settings: async () => ({ profiles: [], models: [] }),
-            probeSources: async () => ({ items: [] }),
-            task: (_id, _content, signal) => read(signal),
-            draftTask: (_revision, signal) => read(signal)
-          }
+          literatureWorkspaceApi: { journalsStatus: async () => ({}) }
         }
       },
       {
@@ -326,8 +311,7 @@ for (const name of [
   }
   component.render = () => null
   const visible = Vue.ref(true)
-  const props =
-    name === 'DraftReader' ? { document: { revision_id: 'draft-a' } } : { rid: 'paper-a' }
+  const props = { rid: 'paper-a' }
   const pollApp = renderer.createApp({
     setup: () => () =>
       Vue.h(Vue.KeepAlive, null, {
@@ -336,10 +320,6 @@ for (const name of [
   })
   pollApp.mount({})
   await settle()
-  if (name === 'WorkflowPanel') {
-    state.runId.value = 'run-a'
-    void state.refresh()
-  }
   if (name === 'LibraryWorkbench') {
     state.runId.value = 'run-a'
     state.indexState.value = { index_id: 'index-a' }
@@ -462,160 +442,4 @@ assert.equal(
 )
 uploadApp.unmount()
 
-// The operations panel must pass pause/resume callbacks to the real shared scope.
-document.hidden = false
-const operationsUser = Vue.reactive({ uid: 'admin-a', departmentId: 1, userRole: 'superadmin', isAdmin: true })
-const diagnostics = [], operationErrors = []
-const operations = (await evaluate(
-  '../../components/literature/LiteraturePdfOperations.vue',
-  {
-    '@/stores/user': { useUserStore: () => operationsUser },
-    '@/composables/useLiteraturePollingScope': pollingScope,
-    '@/apis/literature_api': { literaturePdfApi: {
-      operations: (signal) => new Promise((resolve) => diagnostics.push({ signal, resolve })),
-      unresolvedUsage: async () => ({ items: [] })
-    } }
-  }, {}, true
-)).default
-let operationsState
-const operationsSetup = operations.setup
-operations.setup = (props, context) => {
-  operationsState = operationsSetup(props, context)
-  return operationsState
-}
-operations.render = () => null
-const operationsShown = Vue.ref(true)
-const operationsApp = renderer.createApp({
-  setup: () => () => Vue.h(Vue.KeepAlive, null, {
-    default: () => operationsShown.value ? Vue.h(operations) : Vue.h('div')
-  })
-})
-operationsApp.config.errorHandler = (error) => operationErrors.push(error)
-operationsApp.mount({})
-await settle()
-assert.equal(diagnostics.length, 1)
-operationsShown.value = false
-await settle()
-assert.equal(diagnostics[0].signal.aborted, true)
-assert.equal(operationsState.busy.value, false)
-diagnostics[0].resolve({ owner: 'late-admin-a' })
-await settle()
-assert.equal(operationsState.snapshot.value, null)
-operationsShown.value = true
-await settle()
-assert.equal(diagnostics.length, 2)
-operationsUser.uid = 'admin-b'
-await settle()
-assert.equal(diagnostics[1].signal.aborted, true)
-diagnostics[1].resolve({ owner: 'late-admin-a' })
-diagnostics[2].resolve({ owner: 'admin-b' })
-await settle()
-assert.equal(operationsState.snapshot.value.owner, 'admin-b')
-document.hidden = true
-for (const callback of visibility) callback()
-await settle()
-assert.equal(operationsState.busy.value, false)
-document.hidden = false
-for (const callback of visibility) callback()
-await settle()
-assert.equal(diagnostics.length, 4)
-operationsApp.unmount()
-assert.equal(diagnostics[3].signal.aborted, true)
-assert.equal(operationErrors.length, 0, '诊断面板的停用/可见性/恢复不得抛出回调异常')
-// Actual PDF component: hidden pages, owner changes, blob/download completion and cancellation.
-document.hidden = false
-const pdfUser = Vue.reactive({ uid: 'reader-a', departmentId: 1, userRole: 'user' })
-const pdfRequests = [], blobRequests = [], cancelRequests = [], pdfTimers = new Map()
-const revoked = [], created = [], saved = [], pdfErrors = []
-let timerSequence = 0
-const pdfDocument = {
-  ...document,
-  createElement: () => ({ click: () => saved.push(true) })
-}
-const pdf = (await evaluate(
-  '../../components/literature/LiteraturePdfWorkspace.vue',
-  {
-    '@/stores/user': { useUserStore: () => pdfUser },
-    '@/composables/useLiteraturePollingScope': pollingScope,
-    '@/apis/literature_api': {
-      literaturePdfApi: {
-        bundle: (rid, signal) => new Promise((resolve) => pdfRequests.push({ rid, signal, resolve })),
-        cancel: (rid, jobId, signal) => new Promise((resolve) => cancelRequests.push({ rid, jobId, signal, resolve }))
-      },
-      fetchLiteratureAssetBlob: (uri, signal) => new Promise((resolve) => blobRequests.push({ uri, signal, resolve }))
-    }
-  }, {
-    document: pdfDocument,
-    URL: {
-      createObjectURL: () => { const url = `blob:fixture-${created.length}`; created.push(url); return url },
-      revokeObjectURL: (url) => revoked.push(url)
-    },
-    setTimeout: (callback) => { const id = ++timerSequence; pdfTimers.set(id, callback); return id },
-    clearTimeout: (id) => pdfTimers.delete(id)
-  }, true
-)).default
-let pdfState
-const pdfSetup = pdf.setup
-pdf.setup = (props, context) => {
-  pdfState = pdfSetup(props, context)
-  return pdfState
-}
-pdf.render = () => null
-const pdfShown = Vue.ref(true)
-const pdfApp = renderer.createApp({ setup: () => () => Vue.h(Vue.KeepAlive, null, {
-  default: () => pdfShown.value ? Vue.h(pdf, { rid: 'paper-a', originalUrl: 'blob:original' }) : Vue.h('div')
-}) })
-pdfApp.config.errorHandler = (error) => pdfErrors.push(error)
-pdfApp.mount({})
-await settle()
-assert.equal(pdfRequests.length, 1)
-pdfShown.value = false
-await settle()
-assert.equal(pdfRequests[0].signal.aborted, true)
-pdfRequests[0].resolve({ ready: false, owner: 'late-reader-a' })
-await settle()
-assert.equal(pdfState.bundle.value, null)
-pdfShown.value = true
-await settle()
-const completed = { ready: true, status: 'SUCCEEDED', job_id: 32, outputs: { pdf_zh: { uri: 'kbasset://fixture' } } }
-pdfRequests[1].resolve(completed)
-await settle()
-assert.equal(blobRequests.length, 1)
-pdfUser.uid = 'reader-b'
-await settle()
-assert.equal(blobRequests[0].signal.aborted, true)
-blobRequests[0].resolve({})
-await settle()
-assert.equal(created.length, 0, '上个账号的 PDF 不得进入 Blob URL')
-pdfRequests[2].resolve(completed)
-await settle()
-blobRequests[1].resolve({})
-await settle()
-assert.equal(created.length, 1)
-const pendingDownload = pdfState.download('pdf_zh')
-const pendingCancel = pdfState.cancel()
-await settle()
-pdfUser.uid = 'reader-c'
-await settle()
-assert.equal(pdfState.bundle.value, null)
-assert.equal(pdfState.translatedUrl.value, '')
-assert.equal(revoked[0], created[0])
-assert.equal(blobRequests[2].signal.aborted, true)
-assert.equal(cancelRequests[0].signal.aborted, true)
-blobRequests[2].resolve({})
-cancelRequests[0].resolve({})
-await pendingDownload
-await pendingCancel
-await settle()
-assert.equal(saved.length, 0, '账号切换后的旧下载不得触发保存')
-assert.equal(pdfRequests.length, 4, '旧取消请求不得刷新新账号')
-pdfRequests[3].resolve({ ready: false, status: 'RUNNING', job_id: 32 })
-await settle()
-assert.equal(pdfTimers.size, 1)
-document.hidden = true
-for (const callback of visibility) callback()
-await settle()
-assert.equal(pdfTimers.size, 0)
-pdfApp.unmount()
-assert.equal(pdfErrors.length, 0)
-console.log('KeepAlive, owner/visibility/late-response fencing, PDF download cleanup and intake modes passed')
+console.log('KeepAlive, owner/visibility/late-response fencing and intake modes passed')
