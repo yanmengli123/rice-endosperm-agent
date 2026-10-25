@@ -8,11 +8,15 @@ This is a portable business backup, not a PostgreSQL/MinIO disaster-recovery dum
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
 import re
+import sqlite3
+import tempfile
 import zipfile
+from pathlib import Path
 from pathlib import PurePosixPath
 from urllib.parse import parse_qs, urlparse
 
@@ -21,7 +25,6 @@ from sqlalchemy import or_, select
 from yuxi.literature import access as literature_access
 from yuxi.literature.access import authorize_asset, current_access, paper_visibility, report_visible
 from yuxi.literature.export_vault import ExportLimitError, export_obsidian_vault
-from yuxi.literature.history_archive import MAX_ARCHIVE_BYTES, _build_archive
 from yuxi.literature.reading.service import RENDER_BUCKET
 from yuxi.literature.readops import validate_literature_asset_uri
 from yuxi.storage.minio import get_minio_client
@@ -36,6 +39,8 @@ from yuxi.storage.postgres.models_knowledge import (
     LiteratureReport,
     LiteratureReviewDecision,
 )
+
+_BACKUP_ARCHIVE_BYTES = 128 * 1024 * 1024  # 在线备份归档上限（历史迁移链下线后本地常量）
 
 MAX_ROWS = 20_000
 # Explicit business fields: new ORM columns never become an export surface by
@@ -75,6 +80,66 @@ def _directory(rid):
 def _markdown(meta, content):
     # JSON values are valid YAML scalars and do not permit injected frontmatter.
     return "---\n" + "\n".join(f"{key}: {_json(value)}" for key, value in meta.items()) + "\n---\n" + content
+
+
+def _build_business_archive(records, files, manifest_bytes, schemas, *, readme) -> bytes:
+    """在线业务备份归档构建（SQLite 数据成员 + 文件成员 + 清单）。
+
+    历史迁移链（history_archive）下线后的内联实现：schemas 由本模块自产，
+    表白名单校验随迁移链移除；保留字段防注入、防猜测导出与体积预算。
+    """
+    _NUL = chr(0)
+
+    def quoted(name):
+        if not isinstance(name, str) or not name or len(name) > 512 or _NUL in name:
+            raise ValueError("备份表字段非法")
+        return '"' + name.replace('"', '""') + '"'
+
+    def value(item):
+        if isinstance(item, dict) and set(item) == {"sqlite_blob_base64"}:
+            return base64.b64decode(item["sqlite_blob_base64"], validate=True)
+        if item is None or isinstance(item, (int, float, str, bytes)):
+            return item
+        raise ValueError("备份 SQLite 字段不可逆")
+
+    output = io.BytesIO()
+    database_digests = {}
+    with (
+        tempfile.TemporaryDirectory(prefix="yuxi-backup-export-") as temporary,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as archive,
+    ):
+        if "papers" not in schemas.get("data/biblio/biblio.db", {}):
+            raise ValueError("没有文献核心记录，未交付不可重新导入的归档")
+        for index, (logical, tables) in enumerate(schemas.items()):
+            path = Path(temporary) / f"{index}.db"
+            with sqlite3.connect(path) as db:
+                for table, columns in tables.items():
+                    rows = records.get(logical, {}).get(table, [])
+                    if not columns or len(columns) > 512:
+                        raise ValueError("备份表字段超限")
+                    if len(set(columns)) != len(columns) or any(set(row) != set(columns) for row in rows):
+                        raise ValueError("备份表字段不完整，拒绝猜测导出")
+                    db.execute(f"CREATE TABLE {quoted(table)} ({','.join(quoted(key) for key in columns)})")
+                    for row in rows:
+                        db.execute(
+                            f"INSERT INTO {quoted(table)} VALUES ({','.join('?' for _ in columns)})",
+                            [value(row.get(key)) for key in columns],
+                        )
+            data = path.read_bytes()
+            database_digests[logical] = hashlib.sha256(data).hexdigest()
+            archive.writestr(logical, data)
+        for name, content in files.items():
+            archive.writestr(name, content)
+        manifest = json.loads(manifest_bytes)
+        if manifest.get("schema") != "yuxi-literature-business-backup-v1":
+            raise ValueError("在线备份清单类型无效")
+        manifest["database_members"] = database_digests
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode()
+        archive.writestr("_yuxi_history_manifest.json", manifest_bytes)
+        archive.writestr("_README.txt", readme)
+    if len(output.getvalue()) > _BACKUP_ARCHIVE_BYTES:
+        raise ValueError("在线备份压缩体积超过安全预算")
+    return output.getvalue()
 
 
 async def _snapshot(tenant_id, uid):
@@ -195,7 +260,7 @@ async def export_business_backup(tenant_id: int, uid: str) -> bytes:
         if name.casefold() in names:
             raise ValueError("备份成员身份冲突")
         total += len(content)
-        if total > MAX_ARCHIVE_BYTES or len(files) >= 10_000:
+        if total > _BACKUP_ARCHIVE_BYTES or len(files) >= 10_000:
             raise ExportLimitError("在线业务备份超过 128 MiB / 10000 文件单批安全预算")
         names.add(name.casefold())
         files[name] = content
@@ -295,25 +360,6 @@ async def export_business_backup(tenant_id: int, uid: str) -> bytes:
         add(f"knowledge_base/{parent}/cards/{slug}.md", _markdown(meta, card["content"]))
     for entry in snapshot["diary"]:
         add(f"knowledge_base/_diary/{entry['entry_date'].isoformat()}.md", entry["content"])
-    for report in snapshot["reports"]:
-        add(
-            f"knowledge_base/_reports/report-{report['id']}.md",
-            _markdown({"title": report["title"], "type": report["report_kind"]}, report["content"]),
-        )
-    from yuxi.literature.concepts import aggregate_concepts
-
-    concepts = await aggregate_concepts(tenant_id)
-    add("knowledge_base/_concepts/pages.json", _json(concepts))
-    for concept in concepts:
-        key = hashlib.sha256(concept["concept"].encode()).hexdigest()[:24]
-        links = "\n".join(f"- [[{rid}/_note]]" for rid in concept["papers"])
-        add(
-            f"knowledge_base/_concepts/{key}.md",
-            _markdown(
-                {"type": "concept-page", "mature": concept["mature"], "paper_count": concept["paper_count"]},
-                f"# {concept['concept']}\n\n{concept['definition']}\n\n{links}\n",
-            ),
-        )
     for attachment in snapshot["attachments"]:
         filename = _directory(attachment["filename"])
         uri = attachment["uri"].removeprefix("kbasset://")
@@ -404,12 +450,11 @@ async def export_business_backup(tenant_id: int, uid: str) -> bytes:
         ],
         "restore": "preview+confirm; conflicts preserved; imported sources require revalidation",
     }
-    result_manifest["counts"]["concept_pages"] = len(concepts)
     manifest_bytes = _json(result_manifest).encode()
     if len(manifest_bytes) > 4 * 1024 * 1024 - 1024:
         raise ExportLimitError("业务备份成员清单超过可重新导入的安全上限")
     result = await asyncio.to_thread(
-        _build_archive,
+        _build_business_archive,
         rows,
         files,
         manifest_bytes,
@@ -417,13 +462,11 @@ async def export_business_backup(tenant_id: int, uid: str) -> bytes:
         readme="Current authorized literature business snapshot. Restore through PaperAgent ZIP preview/confirmation. "
         "Conflicts are preserved, sources require revalidation, historical answers remain unverified. "
         "Not a full-service disaster-recovery backup. See manifest exclusions and member digests.",
-        seal_database_digests=True,
     )
     fresh = await literature_access.build_access(scope.user, tenant_id)
     if (
         not {p["rid"] for p in papers} <= fresh.rids
         or _json(await _snapshot(tenant_id, uid)) != frozen
-        or _json(await aggregate_concepts(tenant_id)) != _json(concepts)
     ):
         raise ValueError("备份期间权限或业务数据变更，请重新导出")
     return result

@@ -17,6 +17,7 @@ from itertools import combinations
 
 from sqlalchemy import select
 
+from yuxi.storage.postgres.models_knowledge import LiteratureJournalMetric, LiteraturePaper
 from yuxi.literature.access import current_access, paper_visibility
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import LiteratureCitation, LiteraturePaper
@@ -136,3 +137,42 @@ async def recompute_metrics_for_tenant(tenant_id: int) -> dict:
         await session.commit()
     logger.info("计量重算完成: tenant=%s papers=%s edges=%s", tenant_id, updated, len(edges))
     return {"papers": updated, "edges": len(edges), "persisted": not scoped, "projections": projections}
+
+
+async def attach_journal_metrics(tenant_id: int) -> dict:
+    """Actually attach latest imported metrics; no fake 'normalized' count."""
+    from yuxi.literature.metrics import normalize_journal_name
+
+    async with pg_manager.get_async_session_context() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(LiteratureJournalMetric)
+                    .where(LiteratureJournalMetric.tenant_id == tenant_id)
+                    .order_by(LiteratureJournalMetric.year.desc(), LiteratureJournalMetric.id.desc())
+                )
+            ).scalars()
+        )
+        latest = {}
+        for row in rows:
+            latest.setdefault(normalize_journal_name(row.journal_key), row)
+        papers = list(
+            (
+                await session.execute(
+                    select(LiteraturePaper)
+                    .where(paper_visibility(tenant_id), LiteraturePaper.journal.isnot(None))
+                    .with_for_update()
+                )
+            ).scalars()
+        )
+        matched, protected = 0, 0
+        for paper in papers:
+            if paper.meta_locked:
+                protected += 1
+                continue
+            metric = latest.get(normalize_journal_name(paper.journal))
+            if metric is not None:
+                paper.impact_factor, paper.quartile = metric.jif, metric.quartile or ""
+                matched += 1
+        await session.commit()
+    return {"matched": matched, "unmatched": len(papers) - matched - protected, "protected": protected}

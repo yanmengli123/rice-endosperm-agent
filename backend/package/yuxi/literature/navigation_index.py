@@ -250,8 +250,21 @@ async def process_literature_navigation_index(ctx: dict, index_id: str):
         from yuxi.literature import embedding_gateway
         from yuxi.literature.llm_gateway import policy_for_job_attempt
         from yuxi.literature.reading.service import RENDER_BUCKET
-        from yuxi.literature.workflow import _request_user
         from yuxi.storage.minio import get_minio_client
+
+        async def _request_user(run):
+            from yuxi.services.principal import resolve_tenant_id
+            from yuxi.storage.postgres.models_business import User
+
+            async with pg_manager.get_async_session_context() as session:
+                user = (
+                    await session.execute(select(User).where(User.uid == run.requested_by))
+                ).scalar_one_or_none()
+                if user is None or user.is_disabled or user.is_deleted:
+                    raise ValueError("请求者不存在或已停用")
+                if await resolve_tenant_id(session, user.uid) != run.tenant_id:
+                    raise ValueError("请求者租户已变更")
+            return user
 
         user = await _request_user(row)
         async with access_scope(user, int(row.tenant_id)):

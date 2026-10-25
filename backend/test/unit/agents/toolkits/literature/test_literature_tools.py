@@ -15,11 +15,8 @@ import pytest
 from yuxi.agents.toolkits.literature import (
     get_citation_neighbors,
     list_paper_attachments,
-    read_compiled_note,
-    request_paper_translation,
     search_literature_papers,
 )
-from yuxi.agents.toolkits.literature.tools import _plan_allows_write
 from yuxi.literature.boundaries import find_forbidden_imports
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -49,22 +46,18 @@ class _Runtime:
 # --- 注册 ------------------------------------------------------------------------
 
 
-def test_five_tools_registered_with_literature_category():
+def test_three_tools_registered_with_literature_category():
     from yuxi.agents.toolkits.registry import get_all_extra_metadata
 
     meta = {name: m for name, m in get_all_extra_metadata().items() if m.category == "literature"}
     assert set(meta) == {
         "search_literature_papers",
-        "read_compiled_note",
         "list_paper_attachments",
-        "request_paper_translation",
         "get_citation_neighbors",
     }
     for tool_obj in (
         search_literature_papers,
-        read_compiled_note,
         list_paper_attachments,
-        request_paper_translation,
         get_citation_neighbors,
     ):
         assert getattr(tool_obj, "args_schema", None) is not None, f"{tool_obj.name} 缺 args_schema"
@@ -74,9 +67,7 @@ def test_tools_declare_no_scope_bypass_parameters():
     """B1：签名中禁止出现 kb_id / tenant_id（模型不得绕过隔离边界）。"""
     for tool_obj in (
         search_literature_papers,
-        read_compiled_note,
         list_paper_attachments,
-        request_paper_translation,
         get_citation_neighbors,
     ):
         func = tool_obj.coroutine if hasattr(tool_obj, "coroutine") else tool_obj.func
@@ -152,42 +143,6 @@ async def test_search_returns_navigation_metadata_not_evidence(monkeypatch):
         for forbidden in ("content", "text", "quote", "evidence_id", "markdown"):
             assert forbidden not in item, f"导航元数据不得携带证据字段: {forbidden}"
 
-
-# --- 写操作计划先行（B3）----------------------------------------------------------
-
-
-def test_write_tool_rejects_without_frozen_plan():
-    rejection = _plan_allows_write(_Context(plan=None))
-    assert rejection and "无已冻结的执行计划" in rejection
-
-
-def test_write_tool_rejects_disallowed_source_policy():
-    plan = {"source": {"policy": "LOCAL_ONLY", "allowed_sources": ["LOCAL_DOCUMENT"]}}
-    rejection = _plan_allows_write(_Context(plan=plan))
-    assert rejection and "不允许文献操作" in rejection
-
-
-def test_write_tool_allows_bibliography_source():
-    plan = {"source": {"policy": "HYBRID_EXPLICIT", "allowed_sources": ["BIBLIOGRAPHY"]}}
-    assert _plan_allows_write(_Context(plan=plan)) is None
-
-
-async def test_request_translation_fail_closed_without_plan(monkeypatch):
-    """端到端：无计划时写工具返回明确拒绝文案（不静默、不调用入队）。"""
-    calls = []
-
-    async def _never_enqueue(**kwargs):
-        calls.append(kwargs)
-        return {}
-
-    import yuxi.literature.translate.service as translate_service
-
-    monkeypatch.setattr(translate_service, "enqueue_literature_translation", _never_enqueue)
-    result = await _call(request_paper_translation, "doi-a", runtime=_Runtime(uid="u1", plan=None))
-    assert "被拒绝" in result and "无已冻结的执行计划" in result
-    assert calls == []
-
-
 # --- 依赖方向 ---------------------------------------------------------------------
 
 
@@ -203,12 +158,3 @@ def test_toolkit_depends_only_on_literature_domain():
     assert find_forbidden_imports(source, ("yuxi.knowledge.products.contracts",)) == []
 
 
-async def test_unknown_model_arguments_are_recoverable_tool_errors_before_authorization(monkeypatch):
-    async def unexpected_authorization(runtime):
-        raise AssertionError("invalid model arguments must not reach source authorization")
-
-    monkeypatch.setattr("yuxi.agents.toolkits.literature.tools._principal_tenant", unexpected_authorization)
-    result = await read_compiled_note.ainvoke({"rid": "doi-fixture", "max_level": "2", "runtime": _Runtime()})
-    assert "参数无效" in result
-    assert "rid, level" in result
-    assert read_compiled_note.args_schema.model_json_schema()["additionalProperties"] is False

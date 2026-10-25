@@ -22,7 +22,6 @@ from yuxi.literature import (
     diary,
     export_vault,
     graph_service,
-    library_pipeline,
     management,
     qna,
     reader_bundle,
@@ -31,6 +30,7 @@ from yuxi.literature import (
     review,
 )
 from yuxi.literature import enrich as enrich_module
+from yuxi.literature import metrics as metrics_module
 from yuxi.literature import session as lit_session
 from yuxi.literature.access import access_scope, asset_access_scope, authorize_asset, paper_visibility
 from yuxi.literature.attachments import register_attachment
@@ -993,7 +993,7 @@ async def attach_journal_metrics_endpoint(current_user: User = Depends(get_requi
     幂等：最新年份优先、只填空、人工锁定（meta_locked）文献受保护；不产生新的解析/证据。
     """
     tenant_id = await _current_tenant(current_user)
-    return await library_pipeline.attach_journal_metrics(tenant_id)
+    return await metrics_module.attach_journal_metrics(tenant_id)
 
 
 @literature.post("/library/cleaning/preview")

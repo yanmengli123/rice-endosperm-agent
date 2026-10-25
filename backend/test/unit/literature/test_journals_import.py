@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import server.routers.literature_router as router_module
 from server.routers.literature_router import literature
-from yuxi.literature import journals, library_pipeline, readops
+from yuxi.literature import journals, metrics, readops
 from yuxi.literature.access import LiteratureAccess, _access
 from yuxi.storage.postgres.models_knowledge import LiteratureJournalMetric, LiteraturePaper
 
@@ -152,7 +152,7 @@ async def test_import_is_idempotent_and_feeds_attach(env):
     )
     assert changed["updated"] == 1
 
-    attached = await library_pipeline.attach_journal_metrics(TENANT)
+    attached = await metrics.attach_journal_metrics(TENANT)
     assert attached["matched"] == 2
     paper = await db.get(LiteraturePaper, 1)
     assert (paper.impact_factor, paper.quartile) == (4.5, "Q2")
@@ -170,7 +170,7 @@ async def test_import_rejects_unbound_tenant_and_unrecognized_tables(env):
 
 async def test_list_papers_filters_by_quartile_and_min_if(env):
     assert (await journals.import_journals_table(TENANT, CSV.encode("utf-8")))["created"] == 2
-    await library_pipeline.attach_journal_metrics(TENANT)
+    await metrics.attach_journal_metrics(TENANT)
     cases = (("Q2", None), ("Q4", None), ("none", None), ("", 2.0))
     pages = [await readops.list_papers(TENANT, kind="paper", quartile=q, min_if=v) for q, v in cases]
     assert [len(page["items"]) for page in pages] == [1, 1, 0, 1]
@@ -244,6 +244,6 @@ def test_attach_metrics_endpoint_calls_pipeline(client, monkeypatch):
         seen["tenant"] = tenant_id
         return {"matched": 1, "unmatched": 0, "protected": 0}
 
-    monkeypatch.setattr(library_pipeline, "attach_journal_metrics", fake_attach)
+    monkeypatch.setattr(metrics, "attach_journal_metrics", fake_attach)
     response = client.post("/api/literature/library/journal-metrics")
     assert response.status_code == 200 and seen["tenant"] == TENANT

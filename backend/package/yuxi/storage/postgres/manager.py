@@ -1255,9 +1255,9 @@ class PostgresManager(metaclass=SingletonMeta):
         return True
 
     async def _migration_0114_topic_least_privilege(self, conn) -> None:
-        from yuxi.literature.topic_security import migrate
-
-        await migrate(conn)
+        # 主题建模（BERTopic）子系统已下线：新库不再创建主题专用受限角色；
+        # 已应用过 0114 的库存量角色/授权不受影响，注册表条目保留以维持迁移史。
+        return None
 
     async def _migration_0113_dsh_model_calls(self, conn) -> None:
         from yuxi.storage.postgres.models_business import DshModelCall

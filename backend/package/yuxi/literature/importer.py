@@ -124,6 +124,19 @@ def _document_markdown(document: dict) -> str:
     return (f"# {title}\n\n" if title else "") + body + "\n"
 
 
+def _read_named_table(db_path: Path, table: str) -> list[dict]:
+    """只读归档 SQLite 的单表（kb_trash 注册行；表缺失视为空）。"""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        try:
+            return [dict(r) for r in conn.execute(f"SELECT * FROM {table}")]
+        except sqlite3.OperationalError:
+            return []
+    finally:
+        conn.close()
+
+
 def knowledge_directories(root: Path) -> dict[str, Path]:
     """Registered trash only; ambiguous snapshots stay immutable history.
 
@@ -132,12 +145,10 @@ def knowledge_directories(root: Path) -> dict[str, Path]:
     """
     import re
 
-    from yuxi.literature.history_import import read_tables
-
     kb = root / "knowledge_base"
     directories = {}
     trash = kb / ".trash"
-    rows = read_tables(root / "data/biblio/biblio.db", ("kb_trash",)).get("kb_trash", [])
+    rows = _read_named_table(root / "data/biblio/biblio.db", "kb_trash")
     if trash.is_dir():
         for row in rows:
             name = str(row.get("dirname") or "")
@@ -739,12 +750,4 @@ async def import_paperagent_data(
             if (path / "document.json").is_file() and (name in expected_rids or f"doi-{name}" in expected_rids)
         )
         report.reader_renders_written = len(directories)
-    else:
-        if report.notes_written:
-            try:
-                from yuxi.literature.notes.wiki_publish import publish_literature_notes
-
-                await publish_literature_notes(tenant_id, actor_uid=actor_uid)
-            except Exception:  # noqa: BLE001 - imported notes stay valid; cron repairs publication
-                logger.exception("PaperAgent 笔记已导入，但 Wiki 发布失败，将由对账任务补偿")
     return report

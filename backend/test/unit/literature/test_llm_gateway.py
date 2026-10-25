@@ -519,46 +519,6 @@ def test_agent_runs_datetime_writes_match_legacy_naive_columns() -> None:
     assert "created_at=utc_now()," in source, "usage_ledger.created_at 是 timestamptz，必须保持 aware"
 
 
-def test_wiki_publish_flushes_snapshot_before_build() -> None:
-    """源码契约：publish 必须分阶段 flush（snapshot 先落库，build 后挂）。
-
-    单元工作曾在同一 flush 中跳过快照 INSERT、先发 wiki_build_runs，真实 PG 上
-    FK wiki_build_runs_snapshot_id_fkey 违例；SQLite 方言测不出该排序问题，故钉住源码形态。
-    """
-    from pathlib import Path
-
-    from yuxi.literature.notes import wiki_publish
-
-    source = Path(wiki_publish.__file__).read_text(encoding="utf-8")
-    assert "session.add_all([snapshot, build])" not in source, "快照与构建不得同一批 add+flush：FK 目标必须按构造先存在"
-    assert "session.add(snapshot)\n        await session.flush()\n        session.add(build)" in source
-
-
-def test_parse_compile_json_repairs_common_llm_malformations() -> None:
-    """编译输出 JSON 修复级联：尾逗号 / 成员间缺逗号 / 字符串内换行都要能救回。
-
-    依据 2026-10-04 真实事故：多模型长中文输出反复以此烧穿编译/翻译 attempt。
-    """
-    from yuxi.literature.notes.prompts import parse_compile_json
-
-    trailing = '{"summary": "淀粉合成综述",\n "tags": ["水稻", "淀粉",],}'
-    assert parse_compile_json(trailing) == {"summary": "淀粉合成综述", "tags": ["水稻", "淀粉"]}
-
-    missing = '{"summary": "UPR 调控"\n "tags": ["ER 胁迫"]}'
-    assert parse_compile_json(missing)["tags"] == ["ER 胁迫"]
-
-    control = '{"summary": "第一行\n第二行（字符串内换行）"}'
-    assert "第二行" in parse_compile_json(control)["summary"]
-
-    fenced = "```json\n" + trailing + "\n```"
-    assert parse_compile_json(fenced)["summary"] == "淀粉合成综述"
-
-    import pytest
-
-    with pytest.raises(ValueError):
-        parse_compile_json("完全不是 JSON")
-
-
 def test_tool_fingerprint_uses_model_view_schema_and_never_raises() -> None:
     """缓存指纹必须用模型视角 schema（剔除 ToolRuntime 等 injected 参数）。
 
