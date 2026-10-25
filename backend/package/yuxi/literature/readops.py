@@ -491,7 +491,7 @@ async def _project_ingest_tasks(session, tenant_id: int, limit: int) -> list[dic
 
 
 async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str, Any]]:
-    """任务投影（入库/渲染/编译/翻译合并；任务中心与前端轮询共用）。
+    """任务投影（入库/渲染合并；任务中心与前端轮询共用）。
 
     入库段来自知识域 ``KnowledgeParseRevision``（租户内 + pdf_evidence 契约），
     让"导入 PDF 后到文献登记前"的数分钟处理过程从第一秒起用户可见。
@@ -514,38 +514,6 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
             .scalars()
             .all()
         )
-        compiles = (
-            (
-                await session.execute(
-                    select(LiteratureCompileJob)
-                    .where(LiteratureCompileJob.tenant_id == tenant_id)
-                    .where(
-                        LiteratureCompileJob.paper_id.in_(select(LiteraturePaper.id).where(paper_visibility(tenant_id)))
-                    )
-                    .order_by(LiteratureCompileJob.updated_at.desc())
-                    .limit(limit)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        translations = (
-            (
-                await session.execute(
-                    select(LiteratureTranslationJob)
-                    .where(LiteratureTranslationJob.tenant_id == tenant_id)
-                    .where(
-                        LiteratureTranslationJob.paper_id.in_(
-                            select(LiteraturePaper.id).where(paper_visibility(tenant_id))
-                        )
-                    )
-                    .order_by(LiteratureTranslationJob.updated_at.desc())
-                    .limit(limit)
-                )
-            )
-            .scalars()
-            .all()
-        )
         ingest = await _project_ingest_tasks(session, tenant_id, limit)
     tasks: list[dict[str, Any]] = []
     tasks.extend(ingest)
@@ -560,32 +528,6 @@ async def list_paper_tasks(tenant_id: int, *, limit: int = 100) -> list[dict[str
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
         for row in renders
-    )
-    tasks.extend(
-        {
-            "type": "compile",
-            "ref": f"{row.paper_id}:{row.level}",
-            "status": row.status,
-            **_domain_task_flags(row.status),
-            "attempt": row.attempt,
-            "error": row.error,
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-        }
-        for row in compiles
-    )
-    tasks.extend(
-        {
-            "type": "translation",
-            "ref": f"{row.paper_id}:{row.variant_kind}",
-            "status": row.status,
-            "progress": row.progress if row.variant_kind == "pdf_zh" else None,
-            "stage": (row.execution_json or {}).get("stage"),
-            **_domain_task_flags(row.status),
-            "attempt": row.attempt,
-            "error": row.error,
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-        }
-        for row in translations
     )
     tasks.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     return tasks[:limit]
@@ -624,26 +566,6 @@ async def list_literature_pipeline_tasks(*, status: str | None = None, limit: in
             )
             .scalars()
             .all()
-        )
-        compiles = list(
-            (
-                await session.execute(
-                    select(LiteratureCompileJob, LiteraturePaper.rid, LiteraturePaper.title)
-                    .join(LiteraturePaper, LiteraturePaper.id == LiteratureCompileJob.paper_id)
-                    .order_by(LiteratureCompileJob.updated_at.desc())
-                    .limit(bounded_limit)
-                )
-            ).all()
-        )
-        translations = list(
-            (
-                await session.execute(
-                    select(LiteratureTranslationJob, LiteraturePaper.rid, LiteraturePaper.title)
-                    .join(LiteraturePaper, LiteraturePaper.id == LiteratureTranslationJob.paper_id)
-                    .order_by(LiteratureTranslationJob.updated_at.desc())
-                    .limit(bounded_limit)
-                )
-            ).all()
         )
 
     projected: list[dict[str, Any]] = []
@@ -687,22 +609,6 @@ async def list_literature_pipeline_tasks(*, status: str | None = None, limit: in
             name=f"文献阅读包渲染：{row.revision_id}",
             ref=row.revision_id,
             payload={"revision_id": row.revision_id},
-        )
-    for row, rid, title in compiles:
-        append_task(
-            row,
-            task_type="compile",
-            name=f"文献笔记 {row.level}：{title or rid}",
-            ref=f"{rid}:{row.level}",
-            payload={"rid": rid, "paper_id": row.paper_id, "level": row.level},
-        )
-    for row, rid, title in translations:
-        append_task(
-            row,
-            task_type="translation",
-            name=f"文献翻译 {row.variant_kind}：{title or rid}",
-            ref=f"{rid}:{row.variant_kind}",
-            payload={"rid": rid, "paper_id": row.paper_id, "variant_kind": row.variant_kind},
         )
 
     projected.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)

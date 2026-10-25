@@ -10,7 +10,6 @@ from server.routers.browser_router import router as browser_router
 from server.routers.channel_router import channel_router, webhook_router
 from server.routers.chat_router import chat
 from server.routers.literature_router import literature
-from server.routers.literature_pdf_gateway import router as literature_pdf_gateway_router
 from server.routers.dashboard_router import dashboard
 from server.routers.filesystem_router import filesystem_router
 from server.routers.llm_gateway_router import router as llm_gateway_router
@@ -56,7 +55,6 @@ router.include_router(channel_router)  # /api/channels/* 渠道应用管理（ad
 router.include_router(webhook_router)  # /api/channels/*/webhook/* 平台回调（匿名，验签即认证）
 router.include_router(browser_router)  # /api/browser/* 本机浏览器接入（配对/设备/扩展 WS/内部 dispatch）
 router.include_router(literature)  # /api/literature/* 文献域：库/笔记/翻译/依附资料/任务
-router.include_router(literature_pdf_gateway_router)
 router.include_router(llm_gateway_router)  # /api/internal/llm/* dsh 聊天基座内部 LLM 网关（run 级令牌，不对公网暴露）
 
 if not _LITE_MODE:

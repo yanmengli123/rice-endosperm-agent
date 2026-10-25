@@ -27,8 +27,6 @@ from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
 from yuxi.agents.toolkits.registry import tool
-from yuxi.literature.notes.service import VALID_LEVELS
-from yuxi.literature.translate.service import VALID_VARIANT_KINDS
 from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.postgres.manager import pg_manager
 
@@ -44,8 +42,6 @@ def _source_authorized(func):
             allowed = ", ".join(name for name in signature.parameters if name != "runtime")
             raise ToolException(f"{func.__name__} 参数无效；允许参数：{allowed}。请按工具 schema 重新调用。") from error
         context = getattr(runtime, "context", None)
-        if func.__name__ == "request_paper_translation" and _plan_allows_write(context):
-            return await func(*args, **kwargs)
         tenant_id = await _principal_tenant(runtime)
         uid = getattr(context, "uid", None)
         user = await UserRepository().get_by_uid(uid)
@@ -86,16 +82,6 @@ class SearchLiteraturePapersInput(BaseModel):
     )
 
 
-class ReadCompiledNoteInput(BaseModel):
-    # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
-    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
-
-    """读取已编译笔记的输入。"""
-
-    rid: str = Field(description="文献资源键（search_literature_papers 返回的 rid）")
-    level: str = Field(default="L1", description="笔记级别：L1/L2/L3")
-
-
 class ListPaperAttachmentsInput(BaseModel):
     # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
     model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
@@ -103,16 +89,6 @@ class ListPaperAttachmentsInput(BaseModel):
     """依附资料清单输入。"""
 
     rid: str = Field(description="文献资源键")
-
-
-class RequestPaperTranslationInput(BaseModel):
-    # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
-    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
-
-    """翻译请求输入（写操作，需计划许可）。"""
-
-    rid: str = Field(description="文献资源键")
-    variant_kind: str = Field(default="zh", description="变体类型：zh / en_zh / summary")
 
 
 class GetCitationNeighborsInput(BaseModel):
@@ -132,21 +108,6 @@ async def _principal_tenant(runtime: ToolRuntime) -> int:
         raise PermissionError("无法从运行上下文解析用户身份（fail-closed）")
     async with pg_manager.get_async_session_context() as session:
         return await resolve_tenant_id(session, uid)
-
-
-def _plan_allows_write(context: Any) -> str | None:
-    """B3：写操作的计划校验。返回 None 表示放行，否则返回拒绝原因。"""
-    binding = getattr(context, "_literature_session_context", None) or {}
-    if binding.get("session_kind") in {"global-qa", "lit"}:
-        return "当前文献会话为只读模式；请转到文献管理或文献专属会话提出写操作"
-    raw_plan = getattr(context, "_turn_execution_plan", None) if context is not None else None
-    if not isinstance(raw_plan, dict):
-        return "本轮无已冻结的执行计划：翻译属写操作，需先制定计划（ADR-0005 计划先行）"
-    source = raw_plan.get("source") or {}
-    allowed = {str(item) for item in (source.get("allowed_sources") or [])}
-    if allowed and not (allowed & {"BIBLIOGRAPHY", "DISCOVERY"}):
-        return f"本轮计划源策略不允许文献操作（allowed_sources={sorted(allowed)}）"
-    return None
 
 
 def _nav_item(row: Any) -> dict[str, Any]:
@@ -222,46 +183,6 @@ async def search_literature_papers(
 @tool(
     category="literature",
     tags=["文献"],
-    display_name="读取编译笔记",
-    config_guide="导航工具：读取 L1/L2/L3 笔记的逻辑 URI 与状态（正文经前端资产端点获取）",
-    args_schema=ReadCompiledNoteInput,
-)
-@_source_authorized
-async def read_compiled_note(rid: str, level: str = "L1", runtime: ToolRuntime = None) -> str:
-    """读取文献的已编译笔记（L1/L2/L3）导航信息：状态与 kbasset URI，不含笔记正文。
-
-    Args:
-        rid: 文献资源键
-        level: 笔记级别 L1/L2/L3
-        runtime: 运行时注入
-    """
-    from yuxi.literature import readops
-
-    if (level or "").strip().upper() not in VALID_LEVELS:
-        return f"非法笔记级别 {level!r}（允许 {VALID_LEVELS}）"
-    tenant_id = await _principal_tenant(runtime)
-    note_uri = await readops.get_note_uri(tenant_id, rid.strip(), level.strip().upper())
-    if not note_uri:
-        return f"文献 {rid} 尚无 {level} 笔记（可能未编译或编译未完成）。"
-    import json
-
-    data = await readops.read_current_note(tenant_id, rid, level.upper(), max_chars=12000)
-    return json.dumps(
-        {
-            "rid": rid,
-            "level": level.upper(),
-            "note_uri": note_uri,
-            "navigation_excerpt": data,
-            "product_kind": "literature_notes",
-            "notice": "派生笔记，仅用于导航与理解；不是 EvidenceEnvelope，事实需核验原知识源",
-        },
-        ensure_ascii=False,
-    )
-
-
-@tool(
-    category="literature",
-    tags=["文献"],
     display_name="列出依附资料",
     config_guide="Authority 工具：SI/审稿意见等用户原始资料清单（0 API 抽取文本可检索）",
     args_schema=ListPaperAttachmentsInput,
@@ -283,46 +204,6 @@ async def list_paper_attachments(rid: str, runtime: ToolRuntime = None) -> str:
     import json
 
     return json.dumps({"rid": rid, "attachments": detail.get("attachments") or []}, ensure_ascii=False)
-
-
-@tool(
-    category="literature",
-    tags=["文献"],
-    display_name="请求翻译",
-    config_guide="写操作：触发翻译入队（202 异步），需本轮计划允许文献操作",
-    args_schema=RequestPaperTranslationInput,
-)
-@_source_authorized
-async def request_paper_translation(rid: str, variant_kind: str = "zh", runtime: ToolRuntime = None) -> str:
-    """为文献请求翻译（异步任务；需本轮执行计划允许，写操作 fail-closed）。
-
-    Args:
-        rid: 文献资源键
-        variant_kind: 变体类型 zh / en_zh / summary
-        runtime: 运行时注入
-    """
-    from yuxi.literature import readops
-    from yuxi.literature.translate.service import enqueue_literature_translation
-
-    context = getattr(runtime, "context", None) if runtime is not None else None
-    rejection = _plan_allows_write(context)
-    if rejection:
-        return f"翻译请求被拒绝：{rejection}"
-    if (variant_kind or "").strip() not in VALID_VARIANT_KINDS:
-        return f"非法变体类型 {variant_kind!r}（允许 {VALID_VARIANT_KINDS}）"
-    tenant_id = await _principal_tenant(runtime)
-    detail = await readops.get_paper_detail(tenant_id, rid.strip())
-    if detail is None:
-        return f"文献 {rid} 不存在或无权访问。"
-    paper_id = await _paper_id_by_rid(tenant_id, rid.strip())
-    result = await enqueue_literature_translation(
-        paper_id=paper_id,
-        variant_kind=variant_kind.strip(),
-        requested_by=str(getattr(context, "uid", "") or ""),
-    )
-    import json
-
-    return json.dumps({"rid": rid, **result}, ensure_ascii=False)
 
 
 @tool(

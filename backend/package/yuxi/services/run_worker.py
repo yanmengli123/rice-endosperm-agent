@@ -27,33 +27,17 @@ from yuxi.agents.toolkits.browser.gateway_client import (
 )
 from yuxi.config import config as sys_config
 from yuxi.knowledge.graphs.doclex.service import prewarm_doclex_for_kb
-from yuxi.literature.notes.service import (
-    process_literature_compile,
-    reconcile_stale_literature_compiles,
-)
-from yuxi.literature.notes.wiki_publish import reconcile_literature_note_wikis
 from yuxi.literature.reading.service import (
     process_literature_reader_render,
     reconcile_stale_literature_renders,
 )
 from yuxi.literature.reconcile import reconcile_scientific_literature_papers
-from yuxi.literature.translate.service import (
-    process_literature_translation,
-    reconcile_stale_literature_translations,
-)
-from yuxi.literature.workflow import process_literature_workflow, reconcile_stale_workflows
-from yuxi.literature.concepts import process_literature_topic_moc, reconcile_literature_topic_mocs
-from yuxi.literature.library_pipeline import process_literature_library, reconcile_literature_libraries
 from yuxi.literature.navigation_index import (
     process_literature_navigation_index,
     reconcile_literature_navigation_indexes,
 )
 from yuxi.literature.fulltext import reconcile_literature_fulltext
 from yuxi.literature.attachment_search import reconcile_literature_attachments
-from yuxi.literature.translation_workspace import (
-    process_literature_translation_task,
-    reconcile_literature_translation_tasks,
-)
 from yuxi.literature.original_search import reconcile_original_search
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.services.agent_run_service import (
@@ -1246,13 +1230,7 @@ class WorkerSettings:
         worker_heartbeat,
         process_scientific_pdf_ingest,
         process_literature_reader_render,
-        process_literature_compile,
-        process_literature_translation,
-        process_literature_translation_task,
-        process_literature_workflow,
         process_literature_navigation_index,
-        process_literature_library,
-        process_literature_topic_moc,
         process_dynamic_wiki_build,
         prewarm_doclex_for_kb,
         process_channel_message,
@@ -1268,22 +1246,11 @@ class WorkerSettings:
         cron(recover_stale_scientific_pdf_ingests, minute=set(range(0, 60, 5))),
         # 文献域阅读渲染：孤儿 RUNNING 回收 + 滞留 PENDING 补偿入列（ADR-0010 决议 7）
         cron(reconcile_stale_literature_renders, minute=set(range(0, 60, 5))),
-        # 文献域编译（L1/L2/L3）：attempt 上限 DEAD + 对账回收（决议 11）
-        cron(reconcile_stale_literature_compiles, minute=set(range(0, 60, 5))),
-        # 文献域翻译（zh 变体，lang 进身份）：同构状态机（D2 决策）
-        cron(reconcile_stale_literature_translations, minute=set(range(0, 60, 5))),
-        # 文献域处理编排：滞留运行对账
-        cron(reconcile_stale_workflows, minute=set(range(0, 60))),
         cron(reconcile_literature_navigation_indexes, minute=set(range(1, 60, 5))),
         cron(reconcile_literature_fulltext, minute=set(range(60))),
         cron(reconcile_literature_attachments, minute=set(range(60))),
-        cron(reconcile_literature_translation_tasks, minute=set(range(60))),
         cron(reconcile_original_search, minute=set(range(60))),
-        cron(reconcile_literature_libraries, minute=set(range(60))),
-        # 主题导读（MOC）任务：PENDING 补派 + 超时租约置 DEAD（不自动重跑防重复成文）
-        cron(reconcile_literature_topic_mocs, minute=set(range(60))),
         cron(reconcile_scientific_literature_papers, minute=set(range(2, 60, 5))),
-        cron(reconcile_literature_note_wikis, minute={4, 14, 24, 34, 44, 54}),
         cron(reconcile_dynamic_wikis, minute=set(range(0, 60))),
         # 轨迹 Outbox relay：fast-path 直发失败/worker 崩溃遗留的 PENDING 补发
         cron(relay_trace_outbox, minute=set(range(0, 60))),

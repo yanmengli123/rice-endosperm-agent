@@ -3,15 +3,11 @@
 from yuxi.agents.toolkits.literature.tools import (
     get_citation_neighbors,
     list_paper_attachments,
-    read_compiled_note,
-    request_paper_translation,
     search_literature_papers,
 )
 
 __all__ = [
     "get_citation_neighbors",
     "list_paper_attachments",
-    "read_compiled_note",
-    "request_paper_translation",
     "search_literature_papers",
 ]
