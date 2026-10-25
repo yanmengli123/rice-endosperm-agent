@@ -63,7 +63,10 @@ export function litPrompt({
         const trimmed = value.value.trim()
         if (required && !trimmed) {
           message.warning(requiredHint)
-          return Promise.reject(new Error('lit-prompt-required'))
+          // antd 语义：onOk 返回 false 阻止关闭。不得返回 rejected promise——
+          // 该 promise 归 antd 消费，未捕获即成为 unhandled rejection，
+          // 触发全局「界面出现了一个错误」（必填拦截是预期交互流，不是错误）。
+          return false
         }
         resolve(trimmed)
       },

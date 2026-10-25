@@ -79,7 +79,7 @@ async def quality_metrics(tenant_id: int, *, days: int = 7) -> dict[str, Any]:
                 .where(
                     AgentRunTraceEvent.tenant_id == tenant_id,
                     AgentRunTraceEvent.event_type == _SOURCE_GUARD_EVENT,
-                    AgentRunTraceEvent.created_at >= window_start,
+                    AgentRunTraceEvent.occurred_at >= window_start,
                 )
             )
         ).one()
@@ -114,7 +114,7 @@ async def quality_metrics(tenant_id: int, *, days: int = 7) -> dict[str, Any]:
                 .where(
                     AgentRunTraceEvent.tenant_id == tenant_id,
                     AgentRunTraceEvent.event_type == _SOURCE_REFERENCE_EVENT,
-                    AgentRunTraceEvent.created_at >= window_start,
+                    AgentRunTraceEvent.occurred_at >= window_start,
                 )
             )
         ).one()
@@ -143,7 +143,7 @@ async def quality_metrics(tenant_id: int, *, days: int = 7) -> dict[str, Any]:
                 .where(
                     AgentRunTraceEvent.tenant_id == tenant_id,
                     AgentRunTraceEvent.event_type == _FIGURE_TABLE_PUBLICATION_EVENT,
-                    AgentRunTraceEvent.created_at >= window_start,
+                    AgentRunTraceEvent.occurred_at >= window_start,
                 )
             )
         ).one()
