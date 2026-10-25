@@ -201,3 +201,14 @@ def test_toolkit_depends_only_on_literature_domain():
     assert "from yuxi.literature" in source  # 正向依赖成立
     # B2：不构造 EvidenceEnvelope / 不触碰证据构造面
     assert find_forbidden_imports(source, ("yuxi.knowledge.products.contracts",)) == []
+
+
+async def test_unknown_model_arguments_are_recoverable_tool_errors_before_authorization(monkeypatch):
+    async def unexpected_authorization(runtime):
+        raise AssertionError("invalid model arguments must not reach source authorization")
+
+    monkeypatch.setattr("yuxi.agents.toolkits.literature.tools._principal_tenant", unexpected_authorization)
+    result = await read_compiled_note.ainvoke({"rid": "doi-fixture", "max_level": "2", "runtime": _Runtime()})
+    assert "参数无效" in result
+    assert "rid, level" in result
+    assert read_compiled_note.args_schema.model_json_schema()["additionalProperties"] is False

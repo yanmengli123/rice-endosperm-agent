@@ -23,6 +23,7 @@ from yuxi.literature.access import access_scope, paper_visibility
 from yuxi.repositories.user_repository import UserRepository
 
 from langgraph.prebuilt.tool_node import ToolRuntime
+from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
 from yuxi.agents.toolkits.registry import tool
@@ -33,9 +34,15 @@ from yuxi.storage.postgres.manager import pg_manager
 
 
 def _source_authorized(func):
+    signature = inspect.signature(func)
+
     @wraps(func)
     async def wrapped(*args, **kwargs):
-        runtime = inspect.signature(func).bind_partial(*args, **kwargs).arguments.get("runtime")
+        try:
+            runtime = signature.bind(*args, **kwargs).arguments.get("runtime")
+        except TypeError as error:
+            allowed = ", ".join(name for name in signature.parameters if name != "runtime")
+            raise ToolException(f"{func.__name__} 参数无效；允许参数：{allowed}。请按工具 schema 重新调用。") from error
         context = getattr(runtime, "context", None)
         if func.__name__ == "request_paper_translation" and _plan_allows_write(context):
             return await func(*args, **kwargs)
@@ -65,7 +72,7 @@ def _source_authorized(func):
 
 class SearchLiteraturePapersInput(BaseModel):
     # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
 
     """文献库检索输入（无 kb_id/tenant_id——B1）。"""
 
@@ -81,7 +88,7 @@ class SearchLiteraturePapersInput(BaseModel):
 
 class ReadCompiledNoteInput(BaseModel):
     # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
 
     """读取已编译笔记的输入。"""
 
@@ -91,7 +98,7 @@ class ReadCompiledNoteInput(BaseModel):
 
 class ListPaperAttachmentsInput(BaseModel):
     # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
 
     """依附资料清单输入。"""
 
@@ -100,7 +107,7 @@ class ListPaperAttachmentsInput(BaseModel):
 
 class RequestPaperTranslationInput(BaseModel):
     # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
 
     """翻译请求输入（写操作，需计划许可）。"""
 
@@ -110,7 +117,7 @@ class RequestPaperTranslationInput(BaseModel):
 
 class GetCitationNeighborsInput(BaseModel):
     # extra=allow: langgraph 注入的 runtime 参数需穿透 pydantic 校验（见类内注释）
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
 
     """引用邻居输入。"""
 

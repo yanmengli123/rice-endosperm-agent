@@ -16,6 +16,8 @@
 
 ## 未发布
 
+- 文献 Agent 工具参数校验：公开 schema 禁止任意额外参数，同时保留 LangGraph 的运行时注入；模型误传 `max_level` 等参数时返回可纠正的工具错误，不再因签名绑定 TypeError 中断整个知识库问答。身份和来源权限校验保持 fail-closed，新增真实 StructuredTool 调用回归。
+
 - 保版式 PDF 翻译上游契约冒烟与源版本锁定：上游 super_translate（pre-1.0 高频迭代、非 git 仓库）被 bridge 头less 化只作引擎库用，但其符号重构曾只能在首个翻译任务暴露。新增 `docker/supertranslate/contract_check.py`（22 项检查：engine.py 依赖的 8 个上游符号导入面、6 个函数调用面签名兼容、TranslationReport/TranslationIssue 返回类型字段、rice.json 术语表结构），执行于镜像构建期（fail-fast）、bridge 启动期（lifespan 拒绝服务）与运行态 `/contract` 鉴权端点；`/health` 增 `contract_ok`。源锁定 `SOURCE.lock`：对构建 COPY 的上游子集算内容摘要（排除 Yuxi 注入的 rice.json 与 `__pycache__`），构建期强校验、不一致即构建失败，`SUPER_TRANSLATE_ALLOW_UNPINNED=1` 仅开发期绕过且 `/contract` 披露 `pinned:false`；升级上游后 `--write-lock` 重生成，engine_revision/corpus_digest 指纹变化使旧任务 409 不复活。收口两处：`.gitignore` 加 `!docker/supertranslate/SOURCE.lock` 例外（`*.lock` 曾把锁文件挡在版本库外，新克隆/CI 构建会因 COPY 缺源硬失败）；`/contract` 的 source_lock 回落到锁文件时按运行时摘要推导 `pinned`（镜像内源不可变，重算即验证），恒有 pinned 字段。api 侧活体集成测试 3 例（未配置环境跳过）。实测：宿主/镜像摘要逐字节一致（899004ea…）、严格构建通过、摘要不一致时构建确实失败、容器 `/contract` 22 项全绿 pinned:true（指纹在位与回落两条路径均验证）。详见 docs/vibe/2026-10-13-literature-pdf-translation.md 续修章节。
 
 - BERTopic 生产准入补齐：0114 独立受限数据库角色与事务级主体绑定，生产配置禁止回退管理员池；调度仅任务头/状态列，不能读冻结正文或切换结果指针。新增私有存储/数据库/worker readiness 与脱敏 Prometheus、告警规则及自动化 CI 门禁；真实 PostgreSQL 验证跨用户/租户隔离、并发幂等、22549 行租约恢复及 pg_dump/pg_restore。未切换全站数据库连接、未调用供应商，现有本机需部署激活才能通过生产准入；详见 docs/vibe/2026-10-13-topic-production-readiness.md。
