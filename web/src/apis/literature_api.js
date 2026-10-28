@@ -135,17 +135,18 @@ export const literatureWorkspaceApi = {
    * 历史与用量记录保留，不做物理删除。
    */
   deleteSession: (id) => apiDelete(`/api/chat/thread/${encodeURIComponent(id)}`),
-  importMarkdown: (payload) => apiPost('/api/literature/papers/import/markdown', payload),
+  importMarkdown: (payload, options) => apiPost('/api/literature/papers/import/markdown', payload, options),
   /**
    * 文献清单导入（PubMed .nbib / WoS Tab-delimited / RIS / EndNote）。
    * 后端按内容嗅探格式，format='auto' 默认；202 + 导入报告。
    */
-  importReferences: (file, format = 'auto') => {
+  importReferences: (file, format = 'auto', options) => {
     const form = new FormData()
     form.append('file', file)
     return apiPost(
       `/api/literature/papers/import/references?format=${encodeURIComponent(format)}`,
-      form
+      form,
+      options
     )
   },
   referenceBatches: (offset = 0) => apiGet(`/api/literature/reference-batches?offset=${offset}`),

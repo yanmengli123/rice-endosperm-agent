@@ -7,7 +7,7 @@
         <option value="data">数据</option>
         <option value="note">笔记</option>
       </select>
-      <input type="file" @change="onFileChange" />
+      <input ref="fileInput" type="file" :disabled="uploading" @change="onFileChange" />
       <button class="btn" :disabled="!file || uploading" @click="doUpload">
         {{ uploading ? '上传中…' : '上传（0 API 抽文本）' }}
       </button>
@@ -17,17 +17,28 @@
       <li v-for="item in attachments" :key="item.uri" class="attachment-item">
         <span class="att-kind">{{ item.kind }}</span>
         <span class="att-name">{{ item.filename }}</span>
-        <a v-if="item.uri" :href="assetUrl(item.uri)" target="_blank" rel="noopener">原件</a>
-        <a v-if="item.text_uri" :href="assetUrl(item.text_uri)" target="_blank" rel="noopener">抽取文本</a>
+        <button v-if="item.uri" class="btn" :disabled="!!downloading" @click="downloadAttachment(item)">
+          {{ downloading === item.uri ? '下载中…' : '原件' }}
+        </button>
+        <button
+          v-if="item.text_uri"
+          class="btn"
+          :disabled="!!downloading"
+          @click="downloadAttachment(item, true)"
+        >
+          {{ downloading === item.text_uri ? '下载中…' : '抽取文本' }}
+        </button>
       </li>
     </ul>
     <div v-else class="attachment-empty">暂无依附资料</div>
+    <p v-if="notice" role="status">{{ notice }}</p>
   </div>
 </template>
 
 <script>
-import { ref, onMounted } from 'vue'
-import { listLiteratureAttachments, uploadLiteratureAttachment, buildLiteratureAssetUrl } from '@/apis/literature_api'
+import { ref, watch, onBeforeUnmount } from 'vue'
+import { listLiteratureAttachments, uploadLiteratureAttachment, fetchLiteratureAssetBlob } from '@/apis/literature_api'
+import { useUserStore } from '@/stores/user'
 
 export default {
   name: 'AttachmentPanel',
@@ -39,31 +50,111 @@ export default {
     const kind = ref('si')
     const file = ref(null)
     const uploading = ref(false)
-
-    const assetUrl = (uri) => buildLiteratureAssetUrl(uri)
+    const downloading = ref('')
+    const notice = ref('')
+    const fileInput = ref(null)
+    const userStore = useUserStore()
+    let generation = 0,
+      listGeneration = 0,
+      disposed = false,
+      loadController = null,
+      downloadController = null
+    const current = (ticket, rid) => !disposed && generation === ticket && props.rid === rid
 
     const load = async () => {
-      const data = await listLiteratureAttachments(props.rid)
-      attachments.value = data?.attachments || []
+      const ticket = generation,
+        rid = props.rid,
+        request = ++listGeneration
+      loadController?.abort()
+      const controller = new AbortController()
+      loadController = controller
+      try {
+        const data = await listLiteratureAttachments(rid, controller.signal)
+        if (current(ticket, rid) && request === listGeneration && !controller.signal.aborted)
+          attachments.value = data?.attachments || []
+      } catch (error) {
+        if (current(ticket, rid) && request === listGeneration && !controller.signal.aborted)
+          notice.value = error?.message || '附件清单载入失败'
+      } finally {
+        if (loadController === controller) loadController = null
+      }
+    }
+    const downloadAttachment = async (item, text = false) => {
+      const uri = text ? item.text_uri : item.uri
+      if (downloading.value || !uri || !attachments.value.some((entry) => entry.uri === item.uri)) return
+      const ticket = generation,
+        rid = props.rid,
+        controller = new AbortController()
+      downloadController = controller
+      downloading.value = uri
+      notice.value = ''
+      try {
+        const blob = await fetchLiteratureAssetBlob(uri, controller.signal)
+        if (!current(ticket, rid) || controller.signal.aborted) return
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        try {
+          link.href = url
+          link.download = `${item.filename || '文献附件'}${text ? '.txt' : ''}`
+          document.body.appendChild(link)
+          link.click()
+        } finally {
+          link.remove()
+          URL.revokeObjectURL(url)
+        }
+      } catch (error) {
+        if (current(ticket, rid) && !controller.signal.aborted)
+          notice.value = error?.message || '附件下载失败'
+      } finally {
+        if (downloadController === controller) downloadController = null
+        if (current(ticket, rid)) downloading.value = ''
+      }
     }
     const onFileChange = (event) => {
       file.value = event?.target?.files?.[0] || null
     }
     const doUpload = async () => {
-      if (!file.value) return
+      if (!file.value || uploading.value) return
+      const ticket = generation,
+        rid = props.rid,
+        selectedFile = file.value,
+        selectedKind = kind.value
       uploading.value = true
+      notice.value = ''
       try {
-        await uploadLiteratureAttachment(props.rid, file.value, kind.value)
+        await uploadLiteratureAttachment(rid, selectedFile, selectedKind)
+        if (!current(ticket, rid)) return
         file.value = null
+        if (fileInput.value) fileInput.value.value = ''
+        notice.value = '附件已上传'
         await load()
+      } catch (error) {
+        if (current(ticket, rid)) notice.value = error?.message || '附件上传失败'
       } finally {
-        uploading.value = false
+        if (current(ticket, rid)) uploading.value = false
       }
     }
 
-    onMounted(load)
+    const invalidate = () => {
+      generation++
+      listGeneration++
+      loadController?.abort()
+      downloadController?.abort()
+      attachments.value = []
+      file.value = null
+      uploading.value = false
+      downloading.value = ''
+      notice.value = ''
+      if (fileInput.value) fileInput.value.value = ''
+    }
+    watch(
+      () => [props.rid, userStore.uid, userStore.departmentId, userStore.userRole, userStore.isLoggedIn],
+      () => { invalidate(); load() },
+      { immediate: true, flush: 'sync' }
+    )
+    onBeforeUnmount(() => { disposed = true; invalidate() })
 
-    return { attachments, kind, file, uploading, assetUrl, onFileChange, doUpload }
+    return { attachments, kind, file, fileInput, uploading, downloading, notice, onFileChange, doUpload, downloadAttachment }
   }
 }
 </script>

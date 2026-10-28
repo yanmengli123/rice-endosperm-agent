@@ -152,6 +152,7 @@ async function mount(
       exports,
       module,
       require,
+      AbortController,
       Function,
       Float32Array,
       window,
@@ -407,6 +408,9 @@ try {
   assert.equal(workspace.comparisonRids.length, 3)
 
   const requests = new Map()
+  const diaryReads = []
+  const initialDiaryCalendar = deferred()
+  let firstDiaryCalendar = true
   const { instance: diary } = await mount(
     '../../views/DiaryView.vue',
     {},
@@ -414,15 +418,33 @@ try {
       '@/apis/literature_api': { literatureWorkspaceApi: {} },
       '@/apis/base': {
         apiGet: async (url) => {
-          if (url.includes('/days')) return { days: ['2024-02-29'] }
+          if (url.includes('/days')) {
+            if (firstDiaryCalendar) {
+              firstDiaryCalendar = false
+              return initialDiaryCalendar.promise
+            }
+            return { days: ['2024-02-29'] }
+          }
+          diaryReads.push(url)
           const date = url.split('/').at(-1)
-          return requests.has(date) ? requests.get(date).promise : { content: '' }
+          return requests.has(date)
+            ? requests.get(date).promise
+            : { content: 'Saved diary for ' + date }
         },
         apiPut: async () => ({})
       }
     },
     window
   )
+  assert.equal(diary.loading, true, 'Editor and save controls must remain disabled during initial calendar loading')
+  initialDiaryCalendar.resolve({ days: [] })
+  await settle()
+  assert.equal(diaryReads.length, 1, 'Mount must read today even though it is the default date')
+  assert.equal(diary.selectedDate, diary.today)
+  assert.equal(diary.content, 'Saved diary for ' + diary.today, 'Existing today entry must appear before editing')
+  assert.equal(diary.loading, false, 'The editor becomes available after the initial saved entry has loaded')
+  await diary.selectDay(diary.today)
+  assert.equal(diaryReads.length, 1, 'Reselecting the loaded day must preserve the draft without rereading')
   diary.content = 'unsaved local note'
   await diary.changeMonth('2024-02')
   assert.notEqual(diary.month, '2024-02', 'Declined date switch retains selected month')
@@ -442,6 +464,38 @@ try {
   assert.equal(diary.month, '2024-02')
   assert.equal(diary.content, 'newer response', 'Stale response cannot replace current draft')
   assert.equal(diary.calendar.filter(Boolean).length, 29)
+
+  let failInitialDiaryRead = true,
+    failedDiaryWrites = 0
+  const { instance: failedDiary } = await mount(
+    '../../views/DiaryView.vue',
+    {},
+    {
+      '@/apis/literature_api': { literatureWorkspaceApi: {} },
+      '@/apis/base': {
+        apiGet: async (url) => {
+          if (url.includes('/days')) return { days: [] }
+          if (failInitialDiaryRead) throw Error('Initial diary unavailable')
+          return { content: 'Existing today entry survives a failed initial read' }
+        },
+        apiPut: async () => { failedDiaryWrites++; return {} }
+      }
+    },
+    window
+  )
+  assert.equal(failedDiary.selectedDate, '')
+  assert.match(failedDiary.notice, /Initial diary unavailable/)
+  await failedDiary.save()
+  assert.equal(failedDiaryWrites, 0, 'Saving without a successful date read must not overwrite or delete today')
+  assert.equal(failedDiary.selectedDate, '')
+  assert.match(failedDiary.notice, /成功读取/)
+  failInitialDiaryRead = false
+  await failedDiary.selectDay(failedDiary.today)
+  assert.equal(failedDiary.selectedDate, failedDiary.today, 'The today action must retry the failed initial read')
+  assert.equal(failedDiary.content, 'Existing today entry survives a failed initial read')
+  assert.equal(failedDiary.loading, false)
+  await failedDiary.save()
+  assert.equal(failedDiaryWrites, 1, 'A successfully loaded date can be saved normally')
 
   let reads = 0
   const { instance: reader } = await mount(
@@ -539,7 +593,7 @@ try {
   }
   const { instance: review } = await mount(
     '../../components/literature/ReviewPanel.vue',
-    { rid: 'paper' },
+    { rid: 'paper', sourceRevisionId: 'review-revision' },
     {
       '@/apis/literature_api': { literatureWorkspaceApi: { sourcePdf: async () => new Blob([]) } },
       '@/apis/base': { apiGet: async () => structuredClone(reviewData), apiPost: async () => ({}) }
@@ -559,6 +613,14 @@ try {
     'Stale review suggestion cannot cross render identity'
   )
 
+  let graphFrame
+  const graphPositions = []
+  const graphContext = new Proxy({}, {
+    get: (_target, property) => property === 'arc'
+      ? (x, y) => { graphPositions.push([x, y]) }
+      : () => {},
+    set: () => true
+  })
   const { instance: graphView } = await mount(
     '../../views/LiteratureGraphView.vue',
     {},
@@ -567,7 +629,10 @@ try {
       '@/apis/literature_api': {
         literatureWorkspaceApi: {
           graphNetwork: async () => ({
-            nodes: [{ rid: 'click-node', title: 'Clickable paper' }],
+            nodes: [
+              { rid: 'click-node', title: 'Clickable paper' },
+              { rid: 'other-node', title: 'Other paper' }
+            ],
             edges: []
           })
         }
@@ -580,9 +645,11 @@ try {
         apiPost: async () => ({})
       }
     },
-    window
+    window,
+    { requestAnimationFrame: (callback) => { graphFrame = callback; return 1 } }
   )
   graphView.canvas = {
+    getContext: () => graphContext,
     getBoundingClientRect: () => ({ left: 20, top: 30, width: 450, height: 280 })
   }
   const click = { clientX: 245, clientY: 170, button: 0, shiftKey: false, type: 'mouseup' }
@@ -600,6 +667,26 @@ try {
     'click-node',
     'Count preview does not replace selection or canvas'
   )
+  graphView.layout = 'force'
+  await settle()
+  assert.equal(graphView.layoutBusy, true, 'D3 layout must enable the pause action while running')
+  const graphFramePositions = () => {
+    graphPositions.length = 0
+    graphFrame()
+    return JSON.stringify(graphPositions)
+  }
+  assert.notEqual(graphFramePositions(), graphFramePositions(), 'The real D3 simulation must advance')
+  graphView.pauseLayout()
+  assert.equal(graphView.layoutBusy, false)
+  assert.equal(graphFramePositions(), graphFramePositions(), 'Pause must stop D3 positions across animation frames')
+  graphView.applyLayout()
+  assert.equal(graphView.layoutBusy, true, 'Recalculate must restart the paused D3 layout')
+  assert.notEqual(graphFramePositions(), graphFramePositions())
+  for (let frame = 0; frame < 400; frame++) graphFramePositions()
+  assert.equal(graphView.layoutBusy, false, 'Settled D3 layout must disable pause')
+  graphView.layout = 'fa2'
+  await settle()
+  assert.equal(graphView.layoutBusy, false, 'Completed ForceAtlas2 worker retains its existing completion behavior')
 
   let allowSwitch = false,
     createCalls = 0

@@ -361,6 +361,7 @@ export default {
     )
     const pauseLayout = () => {
       layoutRunner.stop()
+      simulation?.alpha(0)
       layoutBusy.value = false
     }
 
@@ -449,7 +450,10 @@ export default {
 
     const step = () => {
       // Barnes-Hut charge/collision trees replace the unbounded O(N²) frame loop.
-      if (layout.value === 'force' && simulation?.alpha() > 0.005) simulation.tick()
+      if (layout.value === 'force' && layoutBusy.value) {
+        if (simulation?.alpha() > 0.005) simulation.tick()
+        else layoutBusy.value = false
+      }
     }
 
     const draw = () => {
@@ -694,6 +698,7 @@ export default {
       if (algorithm === 'force') {
         initSimulation()
         simulation?.alpha(1)
+        layoutBusy.value = true
       } else {
         simulation?.stop()
         const positions = new Map(

@@ -73,7 +73,7 @@
       </nav>
     </header>
 
-    <div class="lit-workspace" :style="workspaceStyle">
+    <div class="lit-workspace" :class="{ 'has-sidebar': sidebarVisible }" :style="workspaceStyle">
       <template v-if="sidebarVisible">
         <LiteratureSidebar
           :drawer="drawer"
@@ -189,8 +189,14 @@
           :initial="win.initial"
           :z-index="300 + index"
           @close="closeFloatingReader(win.rid)"
+          @dock="dockFloatingReader(win.rid)"
         >
-          <ReaderTabs :rid="win.rid" :paper="win.paper" @assistant-action="handleReaderAction" />
+          <ReaderTabs
+            :rid="win.rid"
+            :paper="win.paper"
+            @assistant-action="handleReaderAction"
+            @editing-change="setEditing(`floating:${win.rid}`, $event)"
+          />
         </FloatingReaderWindow>
         <div
           v-if="viewMode === 'reader' || viewMode === 'sessions'"
@@ -285,11 +291,7 @@
               <button v-if="run.rid" class="btn" @click="openPaper({ rid: run.rid })">
                 打开文献
               </button>
-              <button
-                v-if="run.type === 'library' || run.type === 'navigation'"
-                class="btn"
-                @click="resumeRun(run)"
-              >
+              <button v-if="run.type === 'navigation'" class="btn" @click="resumeRun(run)">
                 查看运行详情
               </button>
               <p v-if="run.error" :title="run.error" class="run-error">
@@ -484,16 +486,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { matchesReaderVersion, readerCapture } from '@/utils/literature_assistant'
 import { message } from 'ant-design-vue'
-import {
-  BookOpen,
-  List,
-  Network,
-  Settings,
-  Expand,
-  PanelLeft,
-  Eye,
-  BarChart3
-} from '@lucide/vue'
+import { BookOpen, List, Network, Settings, Expand, PanelLeft, Eye, BarChart3 } from '@lucide/vue'
 import { useRoute, onBeforeRouteLeave } from 'vue-router'
 import { apiGet, apiPost } from '@/apis/base'
 import {
@@ -1081,8 +1074,33 @@ export default {
         window.open(`/literature?rid=${encodeURIComponent(rid)}`, '_blank', 'noopener,noreferrer')
       }
     }
-    const closeFloatingReader = (rid) => {
+    const closeFloatingReader = async (rid) => {
+      const win = floatingReaders.value.find((item) => item.rid === rid)
+      if (!win) return
+      if (editingKeys.value.includes(`floating:${rid}`) && !(await confirmLeave())) return
+      if (!floatingReaders.value.includes(win)) return
       floatingReaders.value = floatingReaders.value.filter((win) => win.rid !== rid)
+      setEditing(`floating:${rid}`, false)
+    }
+    const dockFloatingReader = async (rid) => {
+      const win = floatingReaders.value.find((item) => item.rid === rid)
+      if (!win) return
+      if (
+        (editingKeys.value.includes(`floating:${rid}`) || viewMode.value !== 'reader') &&
+        !(await confirmLeave())
+      )
+        return
+      if (!floatingReaders.value.includes(win)) return
+      if (selectedRid.value && selectedRid.value !== rid && !comparisonRids.value.includes(rid)) {
+        if (comparisonRids.value.length >= 4) {
+          searchNotice.value = '并排阅读最多 5 篇，请先关闭一个阅读器再停靠。'
+          return
+        }
+        comparisonRids.value.push(rid)
+      } else if (!selectedRid.value) selectedRid.value = rid
+      viewMode.value = 'reader'
+      floatingReaders.value = floatingReaders.value.filter((item) => item !== win)
+      setEditing(`floating:${rid}`, false)
     }
     const openReaderLink = async (target, sourceRid) => {
       const ticket = ++linkGeneration
@@ -1177,6 +1195,7 @@ export default {
       popoutReader,
       floatingReaders,
       closeFloatingReader,
+      dockFloatingReader,
       kindChips: KIND_CHIPS,
       runSearch,
       selectKind,
@@ -1197,6 +1216,7 @@ export default {
       formatRate,
       describeRunError,
       loadTasks,
+      load,
       importBib,
       // workspace chrome (PaperAgent reading-desk parity)
       drawer,
@@ -1377,6 +1397,20 @@ export default {
     grid-auto-flow: row;
     grid-auto-columns: auto;
     grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 760px) {
+  // Keep both navigation and actions reachable in the embedded browser.
+  .lit-workspace.has-sidebar {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: 180px minmax(0, 1fr);
+  }
+  .sidebar-resizer {
+    display: none;
+  }
+  .lit-workspace.has-sidebar > :deep(.lit-sidebar) {
+    border-right: 0;
+    border-bottom: 1px solid var(--gray-150);
   }
 }
 .lit-header {

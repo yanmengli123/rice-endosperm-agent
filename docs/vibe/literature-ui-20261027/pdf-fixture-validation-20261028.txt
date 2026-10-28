@@ -1,0 +1,21 @@
+Real PDF fixture validation — 2026-10-28 (Asia/Shanghai)
+
+Existing source: nd-2a8f03d092ca (authorized literature source, fetched through existing actor and source ACL).
+Bytes: 7717787
+SHA256: 2a8f03d092ca7f0b29f0bd798cb3e1621f940ffcdb5a2eb1a29a4b19829ce13f
+Temporary fixture: web-dev:/tmp/literature-real-pdf-20261028.pdf
+Transfer integrity: original bytes and web container copy match the SHA256 above.
+
+Command:
+docker exec -e LITERATURE_PDF_FIXTURE=/tmp/literature-real-pdf-20261028.pdf -e LITERATURE_PDF_EXPECT_RISBZ1=1 -w /app web-dev node src/utils/__tests__/literature_pdf_fixture.spec.js
+
+Unmodified script output:
+Warning: Required "glyf" table is not found -- trying to recover.
+Local PDF.js smoke passed: 16 pages, 23728 text items, 76644 characters; no provider calls
+
+Exit code: 0
+Wall time reported by command runner: 1.6513479 seconds
+
+The optional PDF script was actually executed with the existing real source; it did not skip.
+No PDF contents are included in this report. No parser job or model/OCR provider was called.
+The existing font recovery warning remains a visual-fidelity limitation; this check validates PDF.js page/text-layer parsing and finite transforms, not pixel-perfect rendering or scientific semantics.

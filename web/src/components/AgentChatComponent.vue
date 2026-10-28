@@ -161,6 +161,14 @@
               </div>
             </template>
 
+            <div v-if="currentThreadState?.runFailure" class="chat-run-failure" role="alert">
+              <strong>本次回答未完成</strong>
+              <span>{{ currentThreadState.runFailure.message }}</span>
+              <small v-if="currentThreadState.runFailure.runId">
+                运行：{{ currentThreadState.runFailure.runId }}
+              </small>
+            </div>
+
             <!-- 生成中的加载状态 - 增强条件支持主聊天和resume流程 -->
             <div class="generating-status" v-if="isReplyLoading && conversations.length > 0">
               <div class="generating-indicator">
@@ -1255,6 +1263,7 @@ import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCalling
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
 import { makeChildThreadId } from '@/utils/subagentThread'
 import { findLatestTraceRunId } from '@/utils/traceProjection'
+import { describeRunFailure } from '@/utils/runFailure'
 import {
   MAX_TITLE_CHARS,
   TITLE_SOURCE_AUTO,
@@ -1950,15 +1959,24 @@ const displayedRunContext = computed(() => {
 
 const refreshRunContext = async (threadId, runId) => {
   if (!threadId || !runId) return
+  const threadState = chatState.threadStates[threadId]
+  if (!threadState) return
+  const requestVersion = (threadState.runContextRequestVersion || 0) + 1
+  threadState.runContextRequestVersion = requestVersion
   try {
     const result = await agentApi.getAgentRunResult(runId)
-    const threadState = chatState.threadStates[threadId]
-    // 迟到响应防串轮：仅当仍是该线程最新一次刷新时写入
-    if (threadState && result?.run_context) {
-      threadState.runContext = result.run_context
-    }
+    if (
+      chatState.threadStates[threadId] !== threadState ||
+      threadState.runContextRequestVersion !== requestVersion ||
+      (threadState.activeRunId && threadState.activeRunId !== runId) ||
+      (threadState.trace?.runId && threadState.trace.runId !== runId)
+    ) return
+    if (result?.run_context) threadState.runContext = result.run_context
+    threadState.runFailure = result?.status === 'failed'
+      ? { runId, message: describeRunFailure(result.error) }
+      : null
   } catch (error) {
-    console.warn(`refreshRunContext skipped for ${runId}:`, error?.message || error)
+    console.warn(`refreshRunContext skipped for ${runId}:`, error?.name || 'Error')
   }
 }
 
@@ -3507,10 +3525,12 @@ const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
       if (!trace || trace.runId !== latestRunId) resetRunTrace(threadId, latestRunId)
       await Promise.all([
         loadRunTraceSnapshot(threadId, latestRunId),
-        loadRunEvidence(threadId, latestRunId)
+        loadRunEvidence(threadId, latestRunId),
+        refreshRunContext(threadId, latestRunId)
       ])
     } else {
       resetRunEvidence(threadId)
+      getThreadState(threadId).runFailure = null
     }
     // 定位芯片/图卡的历史恢复：只还原实际发布过的 citation_ready（loadRunEvidence 会先重置）
     restoreCitationReadyFromHistory(threadId, history)
@@ -4200,6 +4220,7 @@ const handleSendMessage = async (
     if (readingContext && (readerDisposed || readerOwnerKey() !== readerOwner)) return
     // run_context 携带冻结知识范围（创建时已解析）；终态后由 result 端点刷新
     threadState.runContext = runResp?.run_context || null
+    threadState.runFailure = null
     resetRunTrace(threadId, runId)
     resetRunEvidence(threadId, runId)
     await loadRunTraceSnapshot(threadId, runId)
@@ -4342,6 +4363,7 @@ const handleApprovalWithStream = async (answer) => {
       throw new Error('创建 resume run 失败：缺少 run_id')
     }
     threadState.runContext = runResp?.run_context || null
+    threadState.runFailure = null
     resetRunTrace(threadId, runId)
     resetRunEvidence(threadId, runId)
     await loadRunTraceSnapshot(threadId, runId)
@@ -5091,6 +5113,20 @@ watch(currentChatId, (threadId, oldThreadId) => {
   font-size: 12px;
   line-height: 1.6;
   text-align: center;
+}
+
+.chat-run-failure {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--color-error-100);
+  border-radius: 8px;
+  background: var(--color-error-50);
+  color: var(--color-error-700);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .bottom {

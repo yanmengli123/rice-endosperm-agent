@@ -12,6 +12,7 @@
         :aria-selected="mode === key"
         :aria-controls="`import-panel-${key}`"
         :tabindex="mode === key ? 0 : -1"
+        :disabled="busy"
         @click="mode = key"
         @keydown="onTabKeydown"
       >
@@ -24,7 +25,7 @@
       </p>
       <template v-if="userStore.isAdmin">
         <label
-          >目标 PDF 知识源<select v-model="kbId" aria-label="目标 PDF 知识源">
+          >目标 PDF 知识源<select v-model="kbId" :disabled="busy" aria-label="目标 PDF 知识源">
             <option value="">请选择</option>
             <option v-for="kb in databases" :key="kb.kb_id" :value="kb.kb_id">{{ kb.name }}</option>
           </select></label
@@ -39,6 +40,7 @@
             @change="importPdf"
         /></label>
         <p>同名文件需确认；不会覆盖旧证据版本。</p>
+        <button v-if="busy && activeKind === 'pdf'" class="btn" type="button" @click="cancelImport">停止本批提交</button>
       </template>
       <p v-else>
         PDF 写入沿用知识库管理员权限；请联系管理员上传或授权，不能以文献导入绕过来源治理。
@@ -146,7 +148,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useLiteratureTaskFeed } from '@/composables/useLiteratureTaskFeed'
 import { databaseApi, documentApi, fileApi } from '@/apis/knowledge_api'
 import { literatureWorkspaceApi } from '@/apis/literature_api'
@@ -167,14 +169,12 @@ const tabs = {
   bib: '文献清单（BibTeX/PubMed/WoS/万方/知网）'
 }
 const mode = ref('pdf')
-// tablist 键盘导航（roving tabindex + 方向键/Home/End）
 const { onTabKeydown } = useTablistKeyboard(
-  (key) => {
-    mode.value = key
-  },
+  (key) => { if (!busy.value) mode.value = key },
   () => Object.keys(tabs)
 )
 const busy = ref(false)
+const activeKind = ref('')
 const databases = ref([])
 const kbId = ref('')
 const title = ref('')
@@ -182,6 +182,23 @@ const doi = ref('')
 const markdown = ref('')
 const notice = ref('')
 const results = ref([])
+const referenceFormat = ref('auto')
+const referenceReport = ref(null)
+let generation = 0, controller = null, disposed = false
+const owner = () => JSON.stringify([userStore.uid, userStore.departmentId, userStore.userRole, userStore.isLoggedIn])
+const stoppedNotice = '已停止后续提交；服务器已接收或正在处理的文件请在任务中核对。'
+const cancelPending = (message) => {
+  ++generation
+  controller?.abort()
+  controller = null
+  busy.value = false
+  activeKind.value = ''
+  if (message !== undefined) notice.value = message
+}
+const cancelImport = () => {
+  cancelPending(stoppedNotice)
+  if (results.value.some((result) => result.ticket)) emit('imported')
+}
 watch(
   () => taskFeed.tasks.value,
   () => {
@@ -208,21 +225,30 @@ watch(
   },
   { deep: true }
 )
-const perform = async (action) => {
-  if (busy.value) return
+const perform = async (action, kind = '') => {
+  if (busy.value || disposed || userStore.isLoggedIn === false) return
+  const ticket = ++generation, identity = owner(), request = new AbortController()
+  controller = request
+  const current = () => !disposed && ticket === generation && identity === owner() && !request.signal.aborted
   busy.value = true
+  activeKind.value = kind
   notice.value = ''
   try {
-    await action()
+    await action({ signal: request.signal, current })
   } catch (error) {
-    notice.value = error.message || '导入失败'
+    if (current()) notice.value = error.message || '导入失败'
   } finally {
-    busy.value = false
+    if (ticket === generation) {
+      controller = null
+      busy.value = false
+      activeKind.value = ''
+    }
   }
 }
 const loadDatabases = () =>
-  perform(async () => {
-    const data = await databaseApi.getDatabases()
+  perform(async ({ signal, current }) => {
+    const data = await databaseApi.getDatabases({ signal })
+    if (!current()) return
     databases.value = (data.databases || []).filter((kb) => kb.contract_key === 'pdf_evidence')
     if (!databases.value.some((kb) => kb.kb_id === kbId.value)) kbId.value = ''
     if (!databases.value.length)
@@ -231,114 +257,111 @@ const loadDatabases = () =>
 const importPdf = (event) => {
   const files = [...(event.target.files || [])]
   event.target.value = ''
-  return perform(async () => {
+  return perform(async ({ signal, current }) => {
     if (!kbId.value || files.length > 20) throw new Error('请选择 PDF 知识源；每批至多 20 个文件')
-    if (
-      files.some(
-        (file) => !file.name.toLowerCase().endsWith('.pdf') || file.size > 100 * 1024 * 1024
-      )
-    )
+    if (files.some((file) => !file.name.toLowerCase().endsWith('.pdf') || file.size > 100 * 1024 * 1024))
       throw new Error('仅接受 PDF，单文件上限 100 MiB')
-    const target = kbId.value
+    const target = kbId.value, options = parseOptionsPayload()
     results.value = []
-    // 同名文件批量裁决：整批只问一次（原来逐文件弹原生框，20 个同名要点 20 次）。
-    // "确认"= 全部同名作为新来源提交；"取消"= 全部跳过。
     let duplicateSubmit = null
     for (const file of files) {
+      if (!current()) return
       notice.value = `正在提交 ${file.name}（${results.value.length + 1}/${files.length}）`
       try {
-        const upload = await fileApi.uploadFile(file, target)
+        const upload = await fileApi.uploadFile(file, target, { signal })
+        if (!current()) return
         if (upload.has_same_name) {
           if (duplicateSubmit === null) {
             duplicateSubmit = await confirmAction(
               `检测到同名文件（如 ${file.name}）。确认将本批全部同名文件作为新来源提交？选择取消将跳过全部同名文件。`
             )
           }
+          if (!current()) return
           if (!duplicateSubmit) {
             results.value.push({ name: file.name, message: '已跳过（同名，未提交解析）' })
             continue
           }
         }
         const result = await documentApi.addDocuments(target, [upload.file_path], {
-          ...parseOptionsPayload(),
-          content_type: 'file',
-          format_template: 'pdf_literature',
-          pdf_evidence_pipeline: true,
+          ...options,
+          content_type: 'file', format_template: 'pdf_literature', pdf_evidence_pipeline: true,
           ocr_engine: resolveDefaultOcrEngine({ contractKey: 'pdf_evidence' }),
-          scientific_processing_mode: 'activate',
-          auto_index: true,
+          scientific_processing_mode: 'activate', auto_index: true,
           content_hashes: { [upload.file_path]: upload.content_hash },
           file_sizes: { [upload.file_path]: upload.size ?? file.size },
           source_paths: { [upload.file_path]: file.name }
-        })
+        }, { signal })
+        if (!current()) return
         const failed = (result.result?.items || []).find((item) => item.status === 'failed')
-        // add_documents 响应带 parse_revision_id——把它作为"处理单号"交给用户，
-        // 进度与终态在工作台「任务与历史 → 入库中」实时可见（不再指向知识源任务页）。
-        const ticket = (result.result?.items || []).find(
-          (item) => item.parse_revision_id
-        )?.parse_revision_id
+        const ticket = (result.result?.items || []).find((item) => item.parse_revision_id)?.parse_revision_id
         const ticketText = ticket ? `（单号 ${String(ticket).slice(0, 16)}…）` : ''
         results.value.push({
-          name: file.name,
-          ticket: failed ? null : ticket || null,
-          message: failed
-            ? failed.error || '处理接收失败'
+          name: file.name, ticket: failed ? null : ticket || null,
+          message: failed ? failed.error || '处理接收失败'
             : `上传成功，已提交处理${ticketText}，下方实时显示阶段；也可在工作台「任务与历史 → 入库中」查看`
         })
-        // 立即拉一次共享任务源，让就地芯片尽快从"等待快照"变为真实阶段
         if (ticket && !failed) taskFeed.refresh()
       } catch (error) {
+        if (!current()) return
         results.value.push({ name: file.name, ticket: null, message: error.message || '提交失败' })
       }
     }
+    if (!current()) return
     const submitted = results.value.filter((result) => result.ticket).length
     notice.value = submitted
       ? `${submitted} 个 PDF 已提交；尚不表示解析成功。质量门禁拒绝或任务失败不会登记为可读文献；终态见「任务与历史 → 入库中」。`
       : '没有 PDF 成功提交解析，请查看各文件的失败或跳过原因。'
     if (submitted) emit('imported')
-  })
+  }, 'pdf')
 }
 const readMarkdown = (event) => {
   const file = event.target.files?.[0]
   event.target.value = ''
-  return perform(async () => {
+  return perform(async ({ current }) => {
     if (!file) return
     if (file.size > 5 * 1024 * 1024) throw new Error('Markdown 不得超过 5 MiB')
-    markdown.value = await file.text()
+    const content = await file.text()
+    if (!current()) return
+    markdown.value = content
     if (!title.value) title.value = file.name.replace(/\.(md|markdown)$/i, '')
   })
 }
 const importMarkdown = () =>
-  perform(async () => {
-    if (new Blob([markdown.value]).size > 5 * 1024 * 1024)
-      throw new Error('Markdown 不得超过 5 MiB')
-    const result = await literatureWorkspaceApi.importMarkdown({
-      title: title.value,
-      doi: doi.value,
-      markdown: markdown.value
-    })
+  perform(async ({ signal, current }) => {
+    if (new Blob([markdown.value]).size > 5 * 1024 * 1024) throw new Error('Markdown 不得超过 5 MiB')
+    const result = await literatureWorkspaceApi.importMarkdown({ title: title.value, doi: doi.value, markdown: markdown.value }, { signal })
+    if (!current()) return
     notice.value = `Markdown 已导入：${result.rid || ''}`
     emit('imported')
   })
-const referenceFormat = ref('auto')
-const referenceReport = ref(null)
 const importBib = (event) => {
   const file = event.target.files?.[0]
   event.target.value = ''
-  return perform(async () => {
+  return perform(async ({ signal, current }) => {
     if (!file) return
     referenceReport.value = null
     if (file.size > 64 * 1024 * 1024) throw new Error('清单文件不得超过 64 MiB')
-    // .bib/.txt 之外的扩展名也交给后端：嗅探按内容特征判定，扩展名不可信
-    const result = await literatureWorkspaceApi.importReferences(file, referenceFormat.value)
+    const result = await literatureWorkspaceApi.importReferences(file, referenceFormat.value, { signal })
+    if (!current()) return
     referenceReport.value = result
     notice.value = `新增 ${result.papers_written || 0}，跳过 ${result.papers_skipped || 0}，引用边 ${result.citations_written || 0}`
     emit('imported')
   })
 }
-onMounted(() => {
-  if (userStore.isAdmin) loadDatabases()
-})
+watch(owner, () => {
+  cancelPending('')
+  databases.value = []
+  kbId.value = ''
+  title.value = ''
+  doi.value = ''
+  markdown.value = ''
+  results.value = []
+  referenceReport.value = null
+  if (userStore.isLoggedIn && userStore.isAdmin) loadDatabases()
+}, { flush: 'sync' })
+onDeactivated(() => cancelPending(busy.value ? stoppedNotice : undefined))
+onBeforeUnmount(() => { disposed = true; cancelPending() })
+onMounted(() => { if (userStore.isAdmin) loadDatabases() })
 </script>
 
 <style lang="less" scoped>

@@ -31,7 +31,7 @@ export async function refreshLiteratureTasks() {
     feedError.value = ''
   } catch (error) {
     if (request === current && !current.signal.aborted)
-      feedError.value = error?.message || String(error)
+      feedError.value = `任务状态已过期，更新失败：${error?.message || String(error)}；将自动重试`
   } finally {
     if (request === current) request = null
   }

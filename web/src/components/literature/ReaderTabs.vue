@@ -96,7 +96,9 @@
       </div>
     </section>
 
-    <div v-if="loading" class="reader-loading">加载中…</div>
+    <div v-if="loading" class="reader-loading" role="status">
+      {{ current === 'pdf' ? '源 PDF 载入中…' : '正文载入中…' }}
+    </div>
 
     <template v-else>
       <div v-if="current === 'original'" class="pane" data-reader-surface="original">
@@ -108,6 +110,7 @@
             {{ bundle.frozen ? '人工修订已冻结' : '已应用人工裁决（修正版）' }}
           </div>
           <p v-if="bundle.notice" role="status">{{ bundle.notice }}</p>
+          <p v-if="imagesLoading" role="status">正文已就绪，图片正在单独载入…</p>
           <button
             v-if="!editing && bundle.source !== 'scientific_parse'"
             class="sub-tab"
@@ -139,7 +142,11 @@
       </div>
 
       <div v-else-if="current === 'images'" class="pane">
-        <div v-if="!images.length" class="pane-empty">无图片（或渲染尚未完成）</div>
+        <p v-if="imagesLoading || galleryLoading" role="status">图片载入中，已完成的图片可先查看…</p>
+        <p v-if="imageError" role="status">{{ imageError }}</p>
+        <div v-if="!images.length && !imagesLoading && !galleryLoading" class="pane-empty">
+          无图片（或渲染尚未完成）
+        </div>
         <div v-else class="image-grid">
           <figure v-for="src in images" :key="src" class="image-item">
             <button class="image-open" @click="openImage(src)">
@@ -153,7 +160,7 @@
       </div>
 
       <div v-else-if="current === 'pdf'" class="pane">
-        <div v-if="!pdfUrl" class="pane-empty">源 PDF 不可用</div>
+        <div v-if="!pdfUrl" class="pane-empty">{{ pdfError || '源 PDF 不可用' }}</div>
         <LiteraturePdfWorkspace
           v-else
           :original-url="pdfUrl"
@@ -300,7 +307,14 @@ export default {
     const autoHideMissing = ref(preferences.autoHideMissing),
       manageTabs = ref(false),
       draggedTab = ref('')
-    const loading = ref(true)
+    const readerLoading = ref(true),
+      pdfLoading = ref(true),
+      imagesLoading = ref(false),
+      galleryLoading = ref(false),
+      pdfError = ref(''),
+      imageError = ref(''),
+      hasImages = ref(false)
+    const loading = computed(() => current.value === 'pdf' ? pdfLoading.value : readerLoading.value)
     const bundle = ref(null)
     const navigationTarget = ref(null)
     const displayMarkdown = ref('')
@@ -316,6 +330,8 @@ export default {
     const nativeAssets = createAssetResolverSession()
     let loadGeneration = 0
     let disposed = false
+    let loadController = null,
+      galleryGeneration = 0
     const subTabs = [
       { key: 'original', label: '原文' },
       { key: 'pdf', label: 'PDF 阅读' },
@@ -323,8 +339,8 @@ export default {
     ]
     const availableTabs = computed(() => ({
       original: !!bundle.value?.ready,
-      pdf: !!pdfUrl.value,
-      images: imageSources.value.length > 0
+      pdf: pdfLoading.value || !!pdfUrl.value,
+      images: readerLoading.value || hasImages.value
     }))
     // 存量偏好里可能残留已下线标签（译文/对照/笔记）的 key；map 后过滤掉，
     // 否则 find 返回 undefined 会在 visibleTabs 上直接崩溃。
@@ -339,7 +355,8 @@ export default {
           tab.key === 'original' ||
           (navigationTarget.value?.rid === props.rid && navigationTarget.value?.tab === tab.key) ||
           (!hiddenTabs.value.includes(tab.key) &&
-            (!autoHideMissing.value || availableTabs.value[tab.key]))
+            (!autoHideMissing.value || availableTabs.value[tab.key] ||
+              (tab.key === 'pdf' && current.value === 'pdf' && pdfError.value)))
       )
     )
     const selectTab = async (tab) => {
@@ -399,10 +416,11 @@ export default {
     const editInput = ref({})
     const editorNotice = ref('')
     const startEditing = async () => {
-      const rid = props.rid
+      const rid = props.rid,
+        generation = loadGeneration
       try {
-        const result = await apiGet(`/api/literature/papers/${enc(rid)}/document`)
-        if (disposed || rid !== props.rid) return
+        const result = await apiGet(`/api/literature/papers/${enc(rid)}/document`, { signal: loadController?.signal })
+        if (disposed || generation !== loadGeneration || rid !== props.rid) return
         editRid.value = rid
         editDocument.value = result.document
         for (const paragraph of editDocument.value.paragraphs) {
@@ -413,12 +431,13 @@ export default {
         editing.value = true
         editorNotice.value = ''
       } catch (err) {
-        if (disposed || rid !== props.rid) return
+        if (disposed || generation !== loadGeneration || rid !== props.rid) return
         editorNotice.value = `正文加载失败：${err?.message || err}`
       }
     }
     const saveDocument = async () => {
-      const rid = editRid.value
+      const rid = editRid.value,
+        generation = loadGeneration
       if (!rid || rid !== props.rid || saving.value) return
       saving.value = true
       try {
@@ -429,13 +448,15 @@ export default {
           expected_reading_version: editInput.value.version,
           freeze: true
         })
-        if (disposed || rid !== props.rid) return
+        if (disposed || generation !== loadGeneration || rid !== props.rid) return
         editing.value = false
         emit('document-saved')
+        const refreshGeneration = loadGeneration + 1
         await load()
+        if (disposed || refreshGeneration !== loadGeneration || rid !== props.rid) return
         editorNotice.value = '人工正文已冻结。'
       } catch (err) {
-        if (disposed || rid !== props.rid) return
+        if (disposed || generation !== loadGeneration || rid !== props.rid) return
         editorNotice.value = `未保存：${err?.message || err}（版本冲突时请重新打开编辑）`
       } finally {
         saving.value = false
@@ -445,17 +466,17 @@ export default {
     const images = computed(() => imageSources.value)
 
     const authenticatedObjectUrl = async (url, generation) => {
-      const response = await apiGet(url, {}, true, 'blob')
-      const objectUrl = URL.createObjectURL(await response.blob())
-      if (disposed || generation !== loadGeneration) {
-        URL.revokeObjectURL(objectUrl)
-        return null
-      }
+      if (disposed || generation !== loadGeneration) return null
+      const response = await apiGet(url, { signal: loadController?.signal }, true, 'blob')
+      const blob = await response.blob()
+      if (disposed || generation !== loadGeneration) return null
+      const objectUrl = URL.createObjectURL(blob)
       objectUrls.add(objectUrl)
       return objectUrl
     }
 
     const releaseObjectUrls = () => {
+      loadController?.abort()
       nativeAssets.abortAll()
       nativeAssets.revokeAll()
       objectUrls.forEach((url) => URL.revokeObjectURL(url))
@@ -465,87 +486,106 @@ export default {
       pdfUrl.value = ''
     }
 
-    const hydrateProtectedAssets = async (markdown, generation, kbId = '') => {
-      if (disposed || generation !== loadGeneration) return ''
+    // Legacy asset URLs need a Bearer proxy; resolve only four at a time and
+    // publish figures progressively without holding text or PDF readiness.
+    const hydrateProtectedAssets = async (markdown, generation) => {
       const source = String(markdown || '')
-      const assetPattern = /\/api\/literature\/assets\?uri=[^)\s]+/g
-      const protectedUrls = [...new Set(source.match(assetPattern) || [])]
-      const resolved = (
-        await Promise.all(
-          protectedUrls.map(async (url) => {
-            try {
-              if (!assetUrls.has(url))
-                assetUrls.set(
-                  url,
-                  authenticatedObjectUrl(url, generation).catch(() => null)
-                )
-              const objectUrl = await assetUrls.get(url)
-              return objectUrl ? [url, objectUrl] : null
-            } catch {
-              return null
-            }
-          })
-        )
-      ).filter(Boolean)
-      if (disposed || generation !== loadGeneration) return ''
-      const lookup = new Map(resolved)
-      const native = await nativeAssets.resolveAssets(collectAssetUris(source), { kbId })
-      if (disposed || generation !== loadGeneration) return ''
-      imageSources.value = [
-        ...new Set([
-          ...imageSources.value,
-          ...resolved.map(([, objectUrl]) => objectUrl),
-          ...[...native.values()].filter(Boolean)
-        ])
-      ]
-      const hydrated = protectedUrls.reduce(
-        (content, url) => content.split(url).join(lookup.get(url) || url),
-        source
-      )
-      return [...native].reduce((text, [uri, url]) => text.split(uri).join(url || ''), hydrated)
+      const urls = [...new Set(source.match(/\/api\/literature\/assets\?uri=[^)\s]+/g) || [])]
+      if (!urls.length) return
+      imagesLoading.value = true
+      const queue = [...urls],
+        resolved = new Map(),
+        isCurrent = () => !disposed && generation === loadGeneration
+      try {
+        await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+          while (queue.length && isCurrent()) {
+            const url = queue.shift()
+            if (!assetUrls.has(url))
+              assetUrls.set(url, authenticatedObjectUrl(url, generation).catch(() => null))
+            const objectUrl = await assetUrls.get(url)
+            if (!isCurrent()) return
+            if (objectUrl) {
+              resolved.set(url, objectUrl)
+              imageSources.value = [...new Set([...imageSources.value, objectUrl])]
+            } else imageError.value = '部分图片暂不可用，可刷新阅读产物后重试。'
+          }
+        }))
+        if (isCurrent())
+          displayMarkdown.value = [...resolved].reduce((text, [url, blob]) => text.split(url).join(blob), source)
+      } finally {
+        if (isCurrent()) imagesLoading.value = false
+      }
+    }
+
+    // MarkdownPreview already resolves native inline images with bounded
+    // concurrency. The separate image gallery only fetches its bytes on demand.
+    const loadNativeGallery = async () => {
+      const generation = loadGeneration
+      if (disposed || readerLoading.value || current.value !== 'images' || galleryGeneration === generation) return
+      const uris = collectAssetUris(bundle.value?.markdown || '')
+      if (!uris.length || !bundle.value?.knowledge_base_id) return
+      galleryGeneration = generation
+      galleryLoading.value = true
+      try {
+        const assets = await nativeAssets.resolveAssets(uris, { kbId: bundle.value.knowledge_base_id })
+        if (disposed || generation !== loadGeneration) return
+        imageSources.value = [...new Set([...imageSources.value, ...[...assets.values()].filter(Boolean)])]
+        if ([...assets.values()].some((url) => !url))
+          imageError.value = '部分图片暂不可用，可刷新阅读产物后重试。'
+      } catch (error) {
+        if (!disposed && generation === loadGeneration)
+          imageError.value = error.message || '图片读取失败'
+      } finally {
+        if (!disposed && generation === loadGeneration) galleryLoading.value = false
+      }
     }
 
     const load = async () => {
       assistantBusy.value = false
       assistantNotice.value = ''
-      const generation = ++loadGeneration
-      const rid = props.rid
-      const isCurrent = () => !disposed && generation === loadGeneration && rid === props.rid
-      loading.value = true
+      const generation = ++loadGeneration,
+        rid = props.rid,
+        isCurrent = () => !disposed && generation === loadGeneration && rid === props.rid
       releaseObjectUrls()
+      loadController = new AbortController()
+      const signal = loadController.signal
+      readerLoading.value = pdfLoading.value = true
+      imagesLoading.value = galleryLoading.value = hasImages.value = false
+      pdfError.value = imageError.value = ''
+      galleryGeneration = 0
       bundle.value = null
       displayMarkdown.value = ''
       closeImage()
-      try {
-        const readerBundle = await apiGet(`/api/literature/papers/${enc(rid)}/reader`).catch(
-          (error) => ({
-            ready: false,
-            reason: error.message || '阅读正文读取失败'
-          })
-        )
-        if (!isCurrent()) return
-        bundle.value = readerBundle
-        const markdown = readerBundle?.ready
-          ? await hydrateProtectedAssets(
-              readerBundle.markdown,
-              generation,
-              readerBundle.knowledge_base_id
-            )
-          : ''
-        if (!isCurrent()) return
-        displayMarkdown.value = markdown
+      const textReady = (async () => {
         try {
-          const url = await authenticatedObjectUrl(
-            `/api/literature/papers/${enc(rid)}/source-pdf`,
-            generation
-          )
-          if (isCurrent()) pdfUrl.value = url || ''
-        } catch {
-          if (isCurrent()) pdfUrl.value = ''
+          const result = await apiGet(`/api/literature/papers/${enc(rid)}/reader`, { signal })
+          if (!isCurrent()) return
+          bundle.value = result
+          displayMarkdown.value = result?.ready ? String(result.markdown || '') : ''
+          hasImages.value = /\/api\/literature\/assets\?uri=/.test(displayMarkdown.value) ||
+            collectAssetUris(displayMarkdown.value).length > 0
+          readerLoading.value = false
+          if (result?.ready) {
+            void hydrateProtectedAssets(displayMarkdown.value, generation)
+            void loadNativeGallery()
+          }
+        } catch (error) {
+          if (isCurrent()) bundle.value = { ready: false, reason: error.message || '阅读正文读取失败' }
+        } finally {
+          if (isCurrent()) readerLoading.value = false
         }
-      } finally {
-        if (isCurrent()) loading.value = false
-      }
+      })()
+      const pdfReady = (async () => {
+        try {
+          const url = await authenticatedObjectUrl(`/api/literature/papers/${enc(rid)}/source-pdf`, generation)
+          if (isCurrent()) pdfUrl.value = url || ''
+        } catch (error) {
+          if (isCurrent()) pdfError.value = error.message || '源 PDF 读取失败'
+        } finally {
+          if (isCurrent()) pdfLoading.value = false
+        }
+      })()
+      await Promise.all([textReady, pdfReady])
     }
 
     const openImage = async (src) => {
@@ -588,6 +628,7 @@ export default {
       }
       await load()
     }
+    watch(current, () => { void loadNativeGallery() })
     watch(
       () => props.versionToken,
       (value, old) => {
@@ -596,16 +637,17 @@ export default {
     )
 
     watch(
-      () => props.rid,
+      () => [props.rid, userStore.uid, userStore.departmentId, userStore.userRole],
       () => {
         navigationTarget.value = null
         const stored = readReaderPreferences(readerStorage, userStore.uid).tab
         current.value = subTabKeys.includes(stored) ? stored : 'original'
         editing.value = false
         editRid.value = editorNotice.value = ''
+        pdfPage.value = 1
         load()
       },
-      { immediate: true }
+      { immediate: true, flush: 'sync' }
     )
     onUnmounted(() => {
       disposed = true
@@ -672,6 +714,12 @@ export default {
       stepImage,
       fontSize,
       loading,
+      readerLoading,
+      pdfLoading,
+      imagesLoading,
+      galleryLoading,
+      pdfError,
+      imageError,
       pdfScale,
       pdfFitWidth,
       changeZoom,

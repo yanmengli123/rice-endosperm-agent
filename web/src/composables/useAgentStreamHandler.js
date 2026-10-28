@@ -11,6 +11,7 @@ import {
 } from '@/utils/figureCard'
 import { normalizeGraphSnapshot } from '@/utils/graphSnapshot'
 import { artifactPathsFromChunk } from '@/utils/runArtifacts'
+import { describeRunFailure } from '@/utils/runFailure'
 
 const reasoningVisibilityByMessage = new Map()
 
@@ -139,6 +140,7 @@ export function useAgentStreamHandler({
     switch (status) {
       case 'init':
         {
+          threadState.runFailure = null
           const resolvedRequestId = request_id || threadState.pendingRequestId
           if (resolvedRequestId) {
             threadState.pendingRequestId = resolvedRequestId
@@ -216,7 +218,11 @@ export function useAgentStreamHandler({
 
       case 'error':
         streamSmoother?.flushThread(threadId)
-        handleChatError({ message: chunkMessage }, 'stream')
+        threadState.runFailure = {
+          runId: chunk.run_id || threadState.activeRunId || '',
+          message: describeRunFailure(chunk)
+        }
+        handleChatError({ message: threadState.runFailure.message }, 'stream')
         // Stop the loading indicator
         if (threadState) {
           threadState.isStreaming = false

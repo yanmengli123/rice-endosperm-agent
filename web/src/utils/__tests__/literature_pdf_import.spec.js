@@ -91,6 +91,7 @@ vm.runInNewContext(code, {
   module: componentModule,
   exports: componentModule.exports,
   Blob,
+  AbortController,
   window: { confirm: () => true },
   require: (id) => modules[id] || (id.endsWith('.vue') ? { default: {} } : null)
 })

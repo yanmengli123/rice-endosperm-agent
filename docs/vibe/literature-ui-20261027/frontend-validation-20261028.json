@@ -1,0 +1,245 @@
+{
+  "results": [
+    {
+      "file": "src/utils/__tests__/apiError.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 481,
+      "skipped": false,
+      "output": "apiError: browser read-only timeout and user cancellation passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/api_error_redaction.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 542,
+      "skipped": false,
+      "output": "API error redaction, authenticated binary responses and multipart boundary tests passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_assistant.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 283,
+      "skipped": false,
+      "output": "Literature assistant: 56 assertions passed (capture fences, untrusted drafts, crop geometry, selection scope, auto-send actions)\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_calendar.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 207,
+      "skipped": false,
+      "output": "Literature calendar leap year, week alignment and month boundaries passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_components.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 4007,
+      "skipped": false,
+      "output": "Literature component lifecycle tests passed: readers, edit guards, session/workbench state, reader handoff, version/navigation fences, draft protection and native image races\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_dialogs.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 2251,
+      "skipped": false,
+      "output": "Required literature prompt: actual Ant Design validation, continued input, close and promise safety passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_diary_loading.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1588,
+      "skipped": false,
+      "output": "Diary real controls passed: loading, retry, selected-date navigation and activity-only dates without writes\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_events.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 248,
+      "skipped": false,
+      "output": "Literature statusbar events, usage stats and eye-care chrome passed\nDuplicate task rows collapse passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_floating_reader.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 2087,
+      "skipped": false,
+      "output": "Floating reader dock/close, comparison capacity and independent draft protection passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_graph.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 189,
+      "skipped": false,
+      "output": "Graph responsive coordinates, transformed picking and camera presets passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_import_boundary.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1441,
+      "skipped": false,
+      "output": "Import owner/unmount/cancel boundaries and finite task polling recovery passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_import_refresh.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1460,
+      "skipped": false,
+      "output": "In-memory pre-fix control fails; real import and bibliometrics completion refresh the rendered catalog\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_integration_lifecycle.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 2209,
+      "skipped": false,
+      "output": "KeepAlive, owner/visibility/late-response fencing and intake modes passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_journal_feedback.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1619,
+      "skipped": false,
+      "output": "Journal status refresh failure visibility, retry and recovery passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_layout.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 2330,
+      "skipped": false,
+      "output": "Actual ForceAtlas2/3D engines and module workers, proxy cloning and cancellation passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_mutation_safety.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 860,
+      "skipped": false,
+      "output": "Mutation safety passed: fixed paper/card targets, owner fencing, digest preservation, single-flight operations, late result isolation\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_pdf_fixture.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 531,
+      "skipped": true,
+      "output": "Real PDF parsing smoke skipped: set LITERATURE_PDF_FIXTURE to a local test PDF\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_pdf_import.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1191,
+      "skipped": false,
+      "output": "PDF upload boundary, intake, completion, rejection and cancellation passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_polish.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 261,
+      "skipped": false,
+      "output": "Literature enterprise polish (humanizer, event ts, duplicates) passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_reader.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 320,
+      "skipped": false,
+      "output": "Reader preferences and link boundary tests passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_reader_buttons.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1995,
+      "skipped": false,
+      "output": "Reader buttons passed: authenticated attachments/review images, stale replies/Blob cleanup and cancel crop\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_reader_responsiveness.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1197,
+      "skipped": false,
+      "output": "Reader responsiveness passed: parallel text/PDF, bounded progressive images, lazy gallery, independent errors and identity/unmount fences\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_run_failure.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 2848,
+      "skipped": false,
+      "output": "Run failures passed: worker error_message, history/reset/reopen, safe inline alert and stale-result fences\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_send_contract.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1620,
+      "skipped": false,
+      "output": "Reader/native send contracts passed: server acknowledgment, rejected creates, cooldown, draft/identity fences, no duplicate/cancel, normal QA isolation\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_session_safety.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 849,
+      "skipped": false,
+      "output": "Session safety passed: owner/tenant fences, late responses, dialog identity, orphan modals, preview scope, honest pagination\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_settings_modal.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 906,
+      "skipped": false,
+      "output": "Settings modal actual close button, reopen, cancel and legacy close compatibility passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_tab_dialog.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 401,
+      "skipped": false,
+      "output": "Tab/dialog contracts passed: async cancellation, focus, orientation, disabled tabs, duplicate keys, destroy settlement\n"
+    },
+    {
+      "file": "src/utils/literature/__tests__/bibliometricCharts.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 226,
+      "skipped": false,
+      "output": "bibliometricCharts.spec.js: all assertions passed\n"
+    },
+    {
+      "file": "src/utils/literature/__tests__/bibliometricWorkbench.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1270,
+      "skipped": false,
+      "output": "Bibliometric workbench passed: upload to list, partial failures, same-scope pagination/analysis, lazy charts, owner/filter fences, budgets\n"
+    },
+    {
+      "file": "src/utils/literature/__tests__/bibliometricsLifecycle.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1425,
+      "skipped": false,
+      "output": "bibliometricsLifecycle.spec.js: all assertions passed\n"
+    }
+  ],
+  "elapsedMs": 36839
+}

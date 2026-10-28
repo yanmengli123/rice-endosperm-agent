@@ -1,0 +1,54 @@
+{
+  "results": [
+    {
+      "file": "src/utils/__tests__/literature_floating_reader.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 3766,
+      "output": "Floating reader dock/close, draft guards, viewport fitting and resize/drag cleanup passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_reader.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 277,
+      "output": "Reader preferences and link boundary tests passed\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_reader_buttons.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 1571,
+      "output": "Reader buttons passed: authenticated attachments/review images, stale replies/Blob cleanup and cancel crop\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_reader_responsiveness.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 654,
+      "output": "Reader responsiveness passed: parallel text/PDF, bounded progressive images, lazy gallery, independent errors and identity/unmount fences\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_components.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 6257,
+      "output": "Literature component lifecycle tests passed: readers, edit guards, session/workbench state, reader handoff, version/navigation fences, draft protection and native image races\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_import_refresh.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 2067,
+      "output": "In-memory pre-fix control fails; real import and bibliometrics completion refresh the rendered catalog\n"
+    },
+    {
+      "file": "src/utils/__tests__/literature_integration_lifecycle.spec.js",
+      "exitCode": 0,
+      "error": null,
+      "elapsedMs": 2253,
+      "output": "KeepAlive, owner/visibility/late-response fencing and intake modes passed\n"
+    }
+  ],
+  "elapsedMs": 16846
+}

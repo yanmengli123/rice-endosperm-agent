@@ -59,16 +59,15 @@ export function litPrompt({
         }),
       okText,
       cancelText,
-      onOk: () => {
+      onOk: (close) => {
         const trimmed = value.value.trim()
         if (required && !trimmed) {
           message.warning(requiredHint)
-          // antd 语义：onOk 返回 false 阻止关闭。不得返回 rejected promise——
-          // 该 promise 归 antd 消费，未捕获即成为 unhandled rejection，
-          // 触发全局「界面出现了一个错误」（必填拦截是预期交互流，不是错误）。
-          return false
+          // 带 close 参数的回调由调用方控制关闭；校验失败既不关闭，也不拒绝 Promise。
+          return
         }
         resolve(trimmed)
+        close()
       },
       onCancel: () => resolve(null),
       afterClose: () => resolve(null)

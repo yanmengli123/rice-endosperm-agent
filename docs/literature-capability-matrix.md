@@ -1,5 +1,7 @@
 # PaperAgent ↔ Yuxi 能力矩阵（2026-10-03 代码核对）
 
+> **2026-10-25 更新**：整篇翻译（含保版式 PDF 翻译链）、L1/L2/L3 编译与笔记 Wiki、概念页、综述报告、BERTopic 主题分析已随文献工作台轻量化**下线**（下线清单与保留能力见 [docs/develop-guides/changelog.md](develop-guides/changelog.md) 未发布节）；下表状态列已按此更新。本文其余小节为历史批次验收记录，保留当时口径，不回写。
+
 上游基线：GitHub `hui-xu-ai/PaperAgent` main，提交 `540b044ffbf02887320208c5b477b7b5b69276a5`（本轮通过远端 ref 核对并另建只读源码快照；不改原始参考库）。
 
 依据：该提交的 `docs/USER-MANUAL.md`、`docs/DATA-LAYOUT.md`、上游 API/服务实现、
@@ -39,14 +41,14 @@ Yuxi 当前路由/前端/测试。**手册与代码冲突时在此登记裁决�
 | §5 阅读器 | 原文/译文/双语/图片/PDF/三级笔记 | 八视图排序/显隐、鉴权 blob、PDF 缩放、目录/简单双链、最多五阅读器/独立窗口、用户字号偏好；正文/笔记/三类变体冻结+CAS，版本刷新保护草稿；双语人工冻结优先，图片缩放/键盘/焦点管理；科学 PDF 解析兜底不修改证据/编译资格 | 详情/阅读工作区 | 有效指针+不可变产物 | 来源 ACL+交付前复验+digest | 🔧；复杂双链与完整浏览器交互未验收 |
 | §5 识别复核 | A/B/C/D 仲裁+回放 | 🔧本轮：嵌套归一+兼容语义+legacy_ack | 详情复核 Tab | review_decisions+resolved 产物 | 租户 | 🔧 |
 | §6 对话 | 四模式+会议式+FTS5 | 同页原生聊天/阅读、四模式绑定、列表/重命名/归档恢复；本文运行冻结 PDF 文档上限，创建/恢复/worker 复验，检索/定位/Open/Find 均不得扩大 | /literature 会话/阅读 | conversations+agent_runs | owner/租户/来源 ACL+计划门禁 | 🔧；会议模式/全文历史检索及全量迁移未等价 |
-| §7 翻译 | [[MATHn]] 保护整篇 | translate+latextap 逐字移植 | API/阅读译文 | literature_variants | 租户 | ✅ |
-| §8 三级编译 | L1 全做/合并 L2/分值 L3 | 合并 L1/L2、真实 L3 候选、零候选拒绝；原段落 ID+人工卡片回注；每次生成独立 URI | API/详情 | MinIO notes+compile_jobs | 治理网关+来源 ACL | 🔧；L3 召回仍为关键词路线 |
+| §7 翻译 | [[MATHn]] 保护整篇 | 曾 translate+latextap 逐字移植；已随轻量化下线（supertranslate 三容器与保版式 PDF 翻译链移除，历史计费审计表 append-only 保留） | — | literature_translation_jobs（历史审计） | — | ❌ 已下线 |
+| §8 三级编译 | L1 全做/合并 L2/分值 L3 | 曾合并 L1/L2、真实 L3 候选；已随轻量化下线（L1/L2/L3 编译与笔记 Wiki 移除，休眠数据行已清除） | — | —（历史行已清） | — | ❌ 已下线 |
 | §9 检索 | 目录检索+产物检索两套 | PG 元数据+全文投影/GIN（中文 bigram）+独立 Milvus 导航/RRF；Redis 300s 缓存绑定用户/权限/版本；可选治理 reranker，失败不冒充成功通道 | 列表/Agent/工作台 | PG note_search/manifest+Milvus+Redis | 前后 ACL+Embedding/rerank 凭据/配额/账本 | 🔧；GIN 万条验证通过，元数据/权限大库压力测试未完成 |
-| §9 主题/概念 | 概念页 3+聚合+主题 MOC | concepts.py（2+/3+ mature） | 概念页面板 | 聚合读 L1_data | 租户 | ✅ |
+| §9 主题/概念 | 概念页 3+聚合+主题 MOC | 曾 concepts.py（2+/3+ mature）；已随轻量化下线（概念页与 BERTopic 主题分析移除，0114 主题角色迁移 no-op 化） | — | —（休眠行已清） | — | ❌ 已下线 |
 | §10 图谱 | PageRank/共引/可视化 | ACL 子图过滤/预览/被引来源；真实 ForceAtlas2 + D3 三维力导向 Worker、缩放/重力/间距、暂停/重算；保留 D3/几何布局；Three.js 实际 XYZ、像素边宽/方向箭头/标签/四视角/定位、样式与相机状态分离、隐藏停止渲染；用户子图不覆盖租户权威指标 | /literature 图谱及独立路由 | PG canonical/权限投影 | 来源 ACL | 🔧算法/Worker/真实 Three.js 场景离线通过；真实浏览器 GPU 未验收 |
 | §11 日记 | 日历+心得 | 今日默认、完整月历/闰年/已写日期标记、月份与日期切换未保存确认/竞态保护、当月 Markdown 导出 | /literature 日记及独立路由 | diary_entries | uid/租户隔离 | 🔧；批量导入/阅读事件联动仍待补 |
 | §11 卡片 | 四类卡片+编译回注+全局卡片 | 显式覆盖+摘要 CAS；卡片使旧笔记失效；完成回答预览→显式 QA 写回、过滤内部推理/工具/失败回答、幂等重试及人工修改保护 | 详情卡片/工作台/会话 | literature_cards+card_revision | 来源 ACL/全局 owner | 🔧；写回是用户确认动作，非未经许可自动写入 |
-| §11 综述报告 | writing agent→_reports | generate_review_report+topic_moc；报告 Markdown 读取与来源版本校验 | 工具栏 MOC/报告打开 | literature_reports | 所有来源 ACL+版本 | 🔧 |
+| §11 综述报告 | writing agent→_reports | 曾 generate_review_report+topic_moc；已随轻量化下线（综述报告移除，休眠行已清除；业务备份去除报告段） | — | —（休眠行已清） | — | ❌ 已下线 |
 | §12 设置中心 | .env/插件/热切 | 同页入口接原生个人设置、模型管理、PDF 契约及工具扩展；密钥使用 secret_crypto；不移植明文 .env/任意 Python ZIP 执行 | /literature 设置 | Yuxi 原生治理 | 原生角色/身份/审批 | 🔧平台替代；不是原界面全部字段等价 |
 | 六步建库 | 摄入/清洗/enrich/期刊/计量/向量 | 持久化步骤+租约 fencing+对账；清洗预览绑定 actor/hash/版本/引用计数，确认后可恢复回收站 | 文献工作台 | library_runs/cleaning_plans/PG+Milvus | 冻结选择+每步重验 | 🔧 |
 | §12 期刊指标（JCR/中科院） | JCR xlsx → journals.db(jcr+cas) → 期刊名规范化 → 关联 IF/分区；目录按分区/IF 筛选 | 本轮补齐缺的「导入」端：`journals.py` 解析 xlsx/CSV+TSV（列名白名单、限额失败关闭、预览只回摘要不 dump 全文）→ 幂等 upsert `literature_journal_metrics` → `/library/journal-metrics` 独立触发已有 `attach_journal_metrics`（最新年份优先/只填空/meta_locked 保护）；列表新增 `quartile`（Q1–Q4/none 多值）与 `min_if` 筛选 | /literature 知识库管理「期刊指标」区 + `/api/literature/journals/*` | literature_journal_metrics → literature_papers.impact_factor/quartile | 租户隔离+RLS；导入需管理员 | ✅ |

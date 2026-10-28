@@ -3,15 +3,15 @@
     <div class="review-head">
       <span v-if="meta.total">待复核 {{ meta.blocking_pending }} / {{ meta.total }}</span>
       <label><input v-model="hideResolved" type="checkbox" />隐藏已处理</label>
-      <button class="btn" :disabled="loading || applying || busyItem !== null" @click="load">
+      <button class="btn" :disabled="!canReview || loading || applying || busyItem !== null" :title="reviewHint" @click="load">
         刷新清单
       </button>
-      <button class="btn" :disabled="dualLoading" @click="triggerDual">
+      <button class="btn" :disabled="!canReview || dualLoading" :title="reviewHint" @click="triggerDual">
         {{ dualLoading ? '双通道渲染入队中…' : '触发双通道渲染' }}
       </button>
       <button
         class="btn"
-        :disabled="applying || loading || busyItem !== null || !meta.total"
+        :disabled="!canReview || applying || loading || busyItem !== null || !meta.total"
         @click="applyDecisions"
       >
         {{ applying ? '回放中…' : '应用裁决（修正回放）' }}
@@ -19,7 +19,8 @@
     </div>
     <div v-if="notice" class="review-notice">{{ notice }}</div>
 
-    <div v-if="loading" class="review-empty">复核清单加载中…</div>
+    <div v-if="!canReview" class="review-empty" role="status">{{ reviewHint }}</div>
+    <div v-else-if="loading" class="review-empty">复核清单加载中…</div>
     <div v-else-if="!meta.total" class="review-empty">
       {{
         meta.render_digest
@@ -120,17 +121,26 @@
 <script>
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { apiGet, apiPost } from '@/apis/base'
-import { buildLiteratureAssetUrl } from '@/apis/literature_api'
+import { fetchLiteratureAssetBlob } from '@/apis/literature_api'
 import { confirmAction } from '@/composables/useLiteratureSessions'
+import { useUserStore } from '@/stores/user'
 
 export default {
   name: 'ReviewPanel',
   props: {
     rid: { type: String, required: true },
-    versionToken: { type: String, default: '' }
+    versionToken: { type: String, default: '' },
+    sourceRevisionId: { type: String, default: '' }
   },
   emits: ['changed'],
   setup(props, { emit }) {
+    const userStore = useUserStore()
+    const canReview = computed(() => Boolean(props.sourceRevisionId))
+    const reviewHint = computed(() =>
+      canReview.value
+        ? '识别复核基于当前原文解析版本'
+        : '当前文献未关联已解析原文，请先导入 PDF/Markdown 并完成解析，再查看识别复核'
+    )
     const meta = ref({ total: 0, blocking_pending: 0, items: [] })
     const notice = ref('')
     const dualLoading = ref(false)
@@ -145,6 +155,20 @@ export default {
     const pageLoading = ref(false)
     const pageError = ref('')
     const pageImageFailed = ref(false)
+    let pageGeneration = 0,
+      pageController = null
+    const clearPage = () => {
+      pageGeneration++
+      pageController?.abort()
+      pageController = null
+      if (pageImageUrl.value) URL.revokeObjectURL(pageImageUrl.value)
+      expanded.value = ''
+      pageData.value = null
+      pageImageUrl.value = ''
+      pageLoading.value = false
+      pageError.value = ''
+      pageImageFailed.value = false
+    }
     const pageBusy = computed(
       () => pageLoading.value || dualLoading.value || applying.value || busyItem.value !== null
     )
@@ -174,27 +198,37 @@ export default {
       }
     }
     const togglePage = async (item) => {
+      if (!canReview.value) return
       if (expanded.value === item.item_id) {
-        expanded.value = ''
+        clearPage()
         return
       }
+      clearPage()
+      const ticket = pageGeneration,
+        rid = props.rid,
+        controller = new AbortController()
+      pageController = controller
       expanded.value = item.item_id
-      pageData.value = null
-      pageImageUrl.value = ''
-      pageError.value = ''
-      pageImageFailed.value = false
       pageLoading.value = true
       try {
         const data = await apiGet(
-          `/api/literature/papers/${enc(props.rid)}/review/page-image?page=${encodeURIComponent(item.page)}`
+          `/api/literature/papers/${enc(rid)}/review/page-image?page=${encodeURIComponent(item.page)}`,
+          { signal: controller.signal }
         )
+        if (disposed || ticket !== pageGeneration || controller.signal.aborted) return
+        const blob = await fetchLiteratureAssetBlob(data.uri, controller.signal)
+        if (disposed || ticket !== pageGeneration || controller.signal.aborted) return
+        if (!blob.type.startsWith('image/')) throw new Error('页图内容不是有效图片')
         pageData.value = data
-        // 页图字节仍走鉴权代理，不裸取 MinIO URL
-        pageImageUrl.value = buildLiteratureAssetUrl(data.uri)
+        // Native <img> requests cannot attach the bearer header. Own a bounded
+        // lifetime object URL only after the authenticated byte request passes.
+        pageImageUrl.value = URL.createObjectURL(blob)
       } catch (err) {
-        pageError.value = err?.message || '页图加载失败'
+        if (!disposed && ticket === pageGeneration && !controller.signal.aborted)
+          pageError.value = err?.message || '页图加载失败'
       } finally {
-        pageLoading.value = false
+        if (pageController === controller) pageController = null
+        if (!disposed && ticket === pageGeneration) pageLoading.value = false
       }
     }
     const visibleItems = computed(() =>
@@ -212,6 +246,12 @@ export default {
     const enc = (v) => encodeURIComponent(v)
     const load = async () => {
       const ticket = ++generation
+      clearPage()
+      if (!canReview.value) {
+        meta.value = { total: 0, blocking_pending: 0, items: [] }
+        loading.value = false
+        return
+      }
       loading.value = true
       try {
         const data = await apiGet(`/api/literature/papers/${enc(props.rid)}/review`)
@@ -238,6 +278,7 @@ export default {
       }
     }
     const triggerDual = async () => {
+      if (!canReview.value || dualLoading.value) return
       dualLoading.value = true
       notice.value = ''
       try {
@@ -251,7 +292,7 @@ export default {
       }
     }
     const suggest = async (item) => {
-      if (busyItem.value !== null || applying.value) return
+      if (!canReview.value || busyItem.value !== null || applying.value) return
       busyItem.value = item.report_idx
       try {
         const data = await apiPost(`/api/literature/papers/${enc(props.rid)}/review/suggest`, {
@@ -265,7 +306,7 @@ export default {
       }
     }
     const applyDecisions = async () => {
-      if (applying.value || busyItem.value !== null || loading.value) return
+      if (!canReview.value || applying.value || busyItem.value !== null || loading.value) return
       applying.value = true
       notice.value = ''
       try {
@@ -280,7 +321,7 @@ export default {
       }
     }
     const decide = async (item, choice) => {
-      if (busyItem.value !== null || applying.value) return
+      if (!canReview.value || busyItem.value !== null || applying.value) return
       const legacyAck = item.stale_decision?.contract_version === 'legacy_v1'
       if (
         legacyAck &&
@@ -312,20 +353,32 @@ export default {
       }
     }
 
-    watch(() => props.rid, load, { immediate: true })
+    watch(
+      () => [props.rid, props.sourceRevisionId, userStore.uid, userStore.departmentId, userStore.userRole, userStore.isLoggedIn],
+      () => {
+        meta.value = { total: 0, blocking_pending: 0, items: [] }
+        notice.value = ''
+        load()
+      },
+      { immediate: true, flush: 'sync' }
+    )
     watch(
       () => props.versionToken,
       () => {
+        clearPage()
         if (!applying.value && busyItem.value === null) load()
       }
     )
     onBeforeUnmount(() => {
       disposed = true
       generation++
+      clearPage()
     })
 
     return {
       meta,
+      canReview,
+      reviewHint,
       hideResolved,
       visibleItems,
       busyItem,

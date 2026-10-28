@@ -28,6 +28,7 @@ export function useAgentThreadState({
         activeRunId: null,
         runLastSeq: '0-0',
         lastRetryableJobTry: null,
+        runFailure: null,
         replyLoadingVisible: false,
         replyLoadingMessage: '',
         pendingRequestId: null,

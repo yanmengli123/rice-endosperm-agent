@@ -218,6 +218,7 @@ const setActiveTab = (preferredTab) => {
 }
 
 const handleClose = () => {
+  visible.value = false
   emit('close')
 }
 

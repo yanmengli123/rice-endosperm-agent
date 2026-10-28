@@ -55,8 +55,7 @@ async function evaluate(file, modules, globals = {}, sfc = false) {
         }
       if (id === '@/utils/litDialogs')
         return { litConfirm: async () => false, litPrompt: async () => null }
-      if (id === '@/composables/useLiteratureSessions')
-        return { confirmAction: async () => false }
+      if (id === '@/composables/useLiteratureSessions') return { confirmAction: async () => false }
       if (id === '@/composables/useTablistKeyboard')
         return { useTablistKeyboard: () => ({ onTabKeydown: () => {} }) }
       if (id === '@/utils/literature_catalog') return { duplicateCounts: () => new Map() }
@@ -321,9 +320,7 @@ for (const name of ['LibraryWorkbench', 'LiteratureStatusBar']) {
   pollApp.mount({})
   await settle()
   if (name === 'LibraryWorkbench') {
-    state.runId.value = 'run-a'
     state.indexState.value = { index_id: 'index-a' }
-    void state.refreshLibrary()
     void state.refreshIndex()
   }
   assert.ok(reads.length, name + ' actually requested initial state')
@@ -336,8 +333,17 @@ for (const name of ['LibraryWorkbench', 'LiteratureStatusBar']) {
   for (const request of previousReads) request.resolve(result)
   await settle()
   assert.equal(timeouts.size + intervals.size, 0, name + ' rejects late rescheduling')
-  const snapshot = state.state || state.libraryState || state.task || state.currentUsage
-  assert.equal(snapshot.value, null, name + ' rejects late publication')
+  if (name === 'LibraryWorkbench') {
+    // 迟到的索引响应不得覆盖已登记的 indexState（library pipeline 已随端点下线移除）
+    assert.deepEqual(
+      state.indexState.value,
+      { index_id: 'index-a' },
+      name + ' rejects late publication'
+    )
+  } else {
+    const snapshot = state.state || state.task || state.currentUsage
+    assert.equal(snapshot.value, null, name + ' rejects late publication')
+  }
   visible.value = true
   await settle()
   assert.ok(reads.length > previousReads.length, name + ' resumes read-only polling')

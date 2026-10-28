@@ -14,8 +14,7 @@
       <span v-if="indexState.document_count"> · {{ indexState.document_count }} 个片段</span>
       <span v-if="indexState.error"> · {{ indexState.error }}</span>
     </p>
-    <h4>六步建库（后台可恢复）</h4>
-    <label>可选 Bib 文件 <input type="file" accept=".bib,.txt" @change="readBib" /></label>
+    <h4>文献清洗（预览后确认）</h4>
     <p>清洗规则按“任一命中”计算；默认仅引用记录，人工锁定文献受保护。空规则不移除文献。</p>
     <label
       >高级规则 JSON
@@ -37,32 +36,8 @@
       ><input v-model="includeMains" type="checkbox" />允许规则覆盖主文献（仍须预览确认）</label
     >
     <div class="actions">
-      <button class="btn" :disabled="busy" @click="startLibrary">启动六步建库</button>
-      <button class="btn" :disabled="busy" @click="previewCleaning">单独预览清洗</button>
-      <button class="btn" v-if="runId" :disabled="busy" @click="refreshLibrary">
-        刷新建库进度
-      </button>
+      <button class="btn" :disabled="busy" @click="previewCleaning">预览清洗</button>
     </div>
-    <template v-if="libraryState">
-      <p>建库 {{ libraryState.run_id }}：{{ libraryState.status }}</p>
-      <ol>
-        <li v-for="(step, name) in libraryState.steps" :key="name">
-          {{ name }}：{{ step.status }}
-          <span v-if="step.detail?.processed !== undefined">
-            · 已处理 {{ step.detail.processed }}</span
-          >
-          <span v-if="step.detail?.ok !== undefined">
-            · 成功 {{ step.detail.ok }} · 跳过 {{ step.detail.skipped || 0 }} · 失败
-            {{ step.detail.failed || 0 }}</span
-          >
-          <span v-if="step.detail?.error" class="error"> · {{ step.detail.error }}</span>
-          <span v-if="step.detail?.matched !== undefined">
-            · 指标匹配 {{ step.detail.matched }}</span
-          >
-        </li>
-      </ol>
-      <p v-if="libraryState.error" class="error">{{ libraryState.error }}</p>
-    </template>
     <div v-if="cleanPreview" class="preview">
       <p>
         预览：保留 {{ cleanPreview.to_keep }} 篇，移入回收站 {{ cleanPreview.to_remove }} 篇。
@@ -100,6 +75,7 @@
       >
       · 已覆盖 IF 文献 {{ journalStatus.if_covered_count }} 篇
     </p>
+    <p v-if="journalStatusError" role="alert">{{ journalStatusError }}</p>
     <label
       >指标表文件（xlsx / csv）<input
         type="file"
@@ -154,16 +130,12 @@ const emit = defineEmits(['session', 'editing-change'])
 const props = defineProps({ resumeRun: { type: Object, default: null } })
 const busy = ref(false)
 const notice = ref('')
-const bibText = ref('')
-const sourceName = ref('')
 const rulesText = ref('{}')
 const yearMin = ref('')
 const ifMin = ref('')
 const citedMin = ref('')
 const quartiles = ref([])
 const includeMains = ref(false)
-const runId = ref('')
-const libraryState = ref(null)
 const indexState = ref(null)
 const cleanPreview = ref(null)
 const trash = ref([])
@@ -177,7 +149,6 @@ let pollGeneration = 0
 let pollController = new AbortController()
 let journalGeneration = 0
 let disposed = false
-let libraryTimer = null
 let indexTimer = null
 const perform = async (action) => {
   if (busy.value || disposed) return
@@ -205,16 +176,6 @@ const rules = () => {
   if (quartiles.value.length) value.quartile = { keep: quartiles.value }
   return value
 }
-const readBib = (event) =>
-  perform(async () => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) return
-    if (file.size > 10 * 1024 * 1024) throw new Error('Bib 文件不得超过 10 MiB')
-    bibText.value = await file.text()
-    sourceName.value = file.name
-    notice.value = '已选择 ' + file.name + '，启动后才导入'
-  })
 // 期刊指标：文件先在服务端解析成摘要，人工确认后才落库（不自动导入）
 const previewJournals = (event) =>
   perform(async () => {
@@ -315,44 +276,6 @@ const buildIndex = () =>
     notice.value = '索引已持久化入队；构建成功后启用向量通道'
     await refreshIndex()
   })
-const refreshLibrary = async () => {
-  clearTimeout(libraryTimer)
-  if (disposed || !polling.value || !runId.value) return
-  const id = runId.value
-  const ticket = pollGeneration
-  try {
-    const result = await apiGet('/api/literature/library/pipeline/' + encodeURIComponent(id), {
-      signal: pollController.signal
-    })
-    if (disposed || !polling.value || ticket !== pollGeneration || runId.value !== id) return
-    libraryState.value = result
-    const clean = libraryState.value.steps?.clean_preview
-    cleanPreview.value =
-      clean?.status === 'WAITING_CONFIRM' && clean.detail?.plan_id ? clean.detail : null
-    if (
-      !disposed &&
-      ['PENDING', 'RUNNING', 'WAITING_CONFIRM'].includes(libraryState.value.status)
-    ) {
-      libraryTimer = setTimeout(refreshLibrary, 5000)
-    }
-  } catch (error) {
-    if (!disposed && polling.value && ticket === pollGeneration)
-      notice.value = error?.message || '读取建库进度失败'
-  }
-}
-const startLibrary = () =>
-  perform(async () => {
-    const result = await apiPost('/api/literature/library/pipeline', {
-      bib_text: bibText.value,
-      source_name: sourceName.value,
-      cleaning_rules: rules(),
-      include_mains: includeMains.value
-    })
-    runId.value = result.run_id
-    cleanPreview.value = null
-    notice.value = '后台建库已提交；命中清洗规则时会等待人工确认'
-    await refreshLibrary()
-  })
 const previewCleaning = () =>
   perform(async () => {
     cleanPreview.value = await apiPost('/api/literature/library/cleaning/preview', {
@@ -363,11 +286,7 @@ const previewCleaning = () =>
 const confirmCleaning = () =>
   perform(async () => {
     const plan = cleanPreview.value
-    if (
-      !(await confirmAction(
-        '确认将预览中 ' + plan.to_remove + ' 篇文献移入可恢复回收站？'
-      ))
-    )
+    if (!(await confirmAction('确认将预览中 ' + plan.to_remove + ' 篇文献移入可恢复回收站？')))
       return
     if (!cleanPreview.value) return
     const result = await apiPost('/api/literature/library/cleaning/' + plan.plan_id + '/confirm', {
@@ -375,7 +294,6 @@ const confirmCleaning = () =>
     })
     cleanPreview.value = null
     notice.value = '已移入回收站 ' + result.removed + ' 篇；原文件未删除'
-    if (runId.value) await refreshLibrary()
   })
 const loadTrash = () =>
   perform(async () => {
@@ -394,26 +312,20 @@ const pausePolling = () => {
   journalGeneration++
   pollController.abort()
   pollController = new AbortController()
-  clearTimeout(libraryTimer)
   clearTimeout(indexTimer)
 }
 const polling = useLiteraturePollingScope(pausePolling, () => {
   refreshIndex()
-  refreshLibrary()
   refreshJournalStatus()
 })
 watch(
   () => props.resumeRun,
   async (run) => {
     if (!run?.id) return
-    clearTimeout(libraryTimer)
     clearTimeout(indexTimer)
     cleanPreview.value = null
     notice.value = '正在读取已有运行；不会重新提交或重复计费。'
-    if (run.type === 'library') {
-      runId.value = run.id
-      await refreshLibrary()
-    } else if (run.type === 'navigation') {
+    if (run.type === 'navigation') {
       indexState.value = { index_id: run.id }
       await refreshIndex()
     }
@@ -422,7 +334,6 @@ watch(
 )
 onUnmounted(() => {
   disposed = true
-  clearTimeout(libraryTimer)
   clearTimeout(indexTimer)
 })
 // 期刊映射状态只读，进工作台即拉一次（失败不打断页面）

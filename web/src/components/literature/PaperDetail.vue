@@ -40,7 +40,7 @@
 
         <div class="detail-actions">
           <button class="btn" :disabled="sessionLoading" @click="startSession">文献专属会话</button>
-          <button class="btn" :disabled="rendering" @click="doRender">
+          <button class="btn" :disabled="rendering || !canRender" :title="renderHint" @click="doRender">
             {{ rendering ? '渲染入队中…' : '生成阅读视图' }}
           </button>
           <button
@@ -118,6 +118,7 @@
           aria-labelledby="detail-tab-review"
           :rid="rid"
           :version-token="readerVersion"
+          :source-revision-id="paper.source_revision_id || ''"
           @changed="load"
         />
         <MetadataPanel
@@ -215,6 +216,12 @@ export default {
     const loading = ref(true)
     const rendering = ref(false)
     const enriching = ref(false)
+    const canRender = computed(() => Boolean(paper.value?.source_revision_id))
+    const renderHint = computed(() =>
+      canRender.value
+        ? '生成阅读视图；已就绪的原文产物会直接复用'
+        : '当前仅有题录，请先导入 PDF/Markdown 原文并完成解析'
+    )
     // Legacy PDF papers can backfill their own DOI from the authorized body.
     const canEnrich = computed(() => Boolean(paper.value?.doi || paper.value?.source_revision_id))
     const enrichHint = computed(() =>
@@ -364,7 +371,7 @@ export default {
     }
 
     const doRender = async () => {
-      if (rendering.value) return
+      if (rendering.value || !canRender.value) return
       rendering.value = true
       try {
         const result = await triggerLiteratureRender(props.rid)
@@ -396,8 +403,11 @@ export default {
       try {
         const result = await triggerLiteratureEnrich(props.rid)
         if (result && result.ok === false) {
+          const reason = result.reason === 'timeout'
+            ? '读取外部元数据超时，请稍后重试'
+            : result.reason || '外部源未返回数据'
           message.warning(
-            `元数据补全未完成：${result.reason || '外部源未返回数据'}（不会写入空数据）`
+            `元数据补全未完成：${reason}（不会写入空数据）`
           )
         } else if (result && Array.isArray(result.filled) && result.filled.length) {
           message.success(`已从外部源补全：${result.filled.join('、')}`)
@@ -494,6 +504,8 @@ export default {
       userStore,
       loading,
       rendering,
+      canRender,
+      renderHint,
       enriching,
       canEnrich,
       enrichHint,

@@ -133,8 +133,9 @@ const cancelCrop = () => {
   dragPointer = null
 }
 const toggleCrop = () => {
+  const enable = !cropping.value
   cancelCrop()
-  cropping.value = true
+  cropping.value = enable
 }
 const fragmentPage = (fragment) => fragment.page_number ?? fragment.page_index + 1
 const highlight = (viewport) => {

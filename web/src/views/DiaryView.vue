@@ -2,7 +2,7 @@
   <div class="diary-view">
     <div class="diary-head">
       <h2>阅读日记</h2>
-      <button class="btn" :disabled="saving" @click="changeMonth(adjacentMonth(month, -1))">
+      <button class="btn" :disabled="saving || loading" @click="changeMonth(adjacentMonth(month, -1))">
         上月
       </button>
       <input
@@ -10,17 +10,18 @@
         type="month"
         class="month-input"
         aria-label="日记月份"
-        :disabled="saving"
+        :disabled="saving || loading"
         @change="changeMonth($event.target.value)"
       />
-      <button class="btn" :disabled="saving" @click="changeMonth(adjacentMonth(month, 1))">
+      <button class="btn" :disabled="saving || loading" @click="changeMonth(adjacentMonth(month, 1))">
         下月
       </button>
-      <button class="btn" :disabled="saving" @click="selectDay(today)">今天</button>
+      <button class="btn" :disabled="saving || loading" @click="selectDay(today)">今天</button>
       <input
         :value="selectedDate"
         type="date"
         aria-label="日记日期"
+        :disabled="saving || loading"
         @change="selectDay($event.target.value)"
       />
       <button class="btn" :disabled="exporting" @click="exportMonth">导出当月 Markdown</button>
@@ -36,8 +37,8 @@
         v-for="(day, index) in calendar"
         :key="index"
         class="day-chip"
-        :disabled="!day || saving"
-        :aria-label="day ? `${day}${days.includes(day) ? ' 已有日记' : ''}` : '空白日期'"
+        :disabled="!day || saving || loading"
+        :aria-label="day ? `${day}${days.includes(day) ? ' 有日记或文献活动' : ''}` : '空白日期'"
         :aria-pressed="!!day && day === selectedDate"
         :class="{
           active: day === selectedDate,
@@ -50,7 +51,7 @@
         }}<span v-if="days.includes(day)" aria-hidden="true"> ·</span>
       </button>
     </div>
-    <p class="calendar-hint">带圆点的日期已有日记；点击任意日期可新建。</p>
+    <p class="calendar-hint">带圆点的日期有日记或文献活动；点击任意日期可记录心得。</p>
     <textarea
       :disabled="loading || saving"
       v-model="content"
@@ -58,7 +59,7 @@
       rows="10"
       placeholder="写下当天的阅读心得（清空并保存即删除该天日记）"
     ></textarea>
-    <button class="btn" :disabled="saving || loading" @click="save">
+    <button class="btn" :disabled="saving || loading || !selectedDate" @click="save">
       {{ saving ? '保存中…' : '保存日记' }}
     </button>
     <p v-if="notice" role="status">{{ notice }}</p>
@@ -84,10 +85,10 @@ export default {
       String(now.getDate()).padStart(2, '0')
     ].join('-')
     const month = ref(today.slice(0, 7))
-    const selectedDate = ref(today)
+    const selectedDate = ref('')
     const content = ref('')
     const saving = ref(false)
-    const loading = ref(false)
+    const loading = ref(true)
     const exporting = ref(false)
     const notice = ref('')
     const savedContent = ref('')
@@ -164,13 +165,8 @@ export default {
     }
     const save = async () => {
       if (!selectedDate.value) {
-        // 空日记可直接创建：默认落到今天（上游语义：用户主动写下即建行）
-        const now = new Date()
-        selectedDate.value = [
-          now.getFullYear(),
-          String(now.getMonth() + 1).padStart(2, '0'),
-          String(now.getDate()).padStart(2, '0')
-        ].join('-')
+        notice.value = '请先选择日期并成功读取日记后再保存。'
+        return
       }
       saving.value = true
       const day = selectedDate.value

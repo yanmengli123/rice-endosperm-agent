@@ -24,8 +24,8 @@ export const databaseApi = {
    * 获取所有知识库
    * @returns {Promise} - 知识库列表
    */
-  getDatabases: async () => {
-    return apiAdminGet('/api/knowledge/databases')
+  getDatabases: async (options) => {
+    return apiAdminGet('/api/knowledge/databases', options)
   },
 
   /**
@@ -256,11 +256,11 @@ export const documentApi = {
    * @param {Object} params - 处理参数
    * @returns {Promise} - 添加结果
    */
-  addDocuments: async (kbId, items, params = {}) => {
+  addDocuments: async (kbId, items, params = {}, options) => {
     return apiAdminPost(`/api/knowledge/databases/${kbId}/documents`, {
       items,
       params
-    })
+    }, options)
   },
 
   /**
@@ -674,14 +674,14 @@ export const fileApi = {
    * @param {string} kbId - 知识库ID（可选）
    * @returns {Promise} - 上传结果
    */
-  uploadFile: async (file, kbId = null) => {
+  uploadFile: async (file, kbId = null, options) => {
     const formData = new FormData()
     formData.append('file', file)
 
     const url = kbId ? `/api/knowledge/files/upload?kb_id=${kbId}` : '/api/knowledge/files/upload'
 
     // Browser owns the multipart boundary; a manually supplied header drops it.
-    return apiAdminPost(url, formData)
+    return apiAdminPost(url, formData, options)
   },
 
   /**

@@ -49,13 +49,13 @@
 </template>
 
 <script setup>
-import { reactive, ref, watch, onBeforeUnmount } from 'vue'
+import { reactive, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 
 /**
  * 浮动阅读窗（对标 PaperAgent 浮动多窗的 Web 形态）：
  * - 标题栏拖动、8 向缩放手柄、双击标题停靠回并排网格；
  * - 拖动/缩放时距视口边缘 ≤12px 自动吸附（PaperAgent ui.js 同阈值）；
- * - pointer capture 保证移出窗口仍跟手；最小 320×240，出界钳制回视口。
+ * - pointer capture 保证移出窗口仍跟手；视口允许时最小 320×240，整窗钳制回视口。
  */
 const props = defineProps({
   title: { type: String, default: '' },
@@ -80,7 +80,6 @@ const stopInteraction = () => {
   snapping.value = false
 }
 watch(() => props.docked, stopInteraction)
-onBeforeUnmount(stopInteraction)
 const capture = (event, onMove) => {
   releasePointer()
   const target = event.currentTarget
@@ -134,11 +133,21 @@ const applySnap = () => {
 }
 
 const clampToViewport = () => {
-  rect.w = clamp(rect.w, MIN_W, Math.max(MIN_W, window.innerWidth))
-  rect.h = clamp(rect.h, MIN_H, Math.max(MIN_H, window.innerHeight - 8))
-  rect.x = clamp(rect.x, MIN_W - rect.w, Math.max(0, window.innerWidth - MIN_W))
-  rect.y = clamp(rect.y, 0, Math.max(0, window.innerHeight - 48))
+  const width = Math.max(1, window.innerWidth)
+  const height = Math.max(1, window.innerHeight)
+  rect.w = clamp(rect.w, Math.min(MIN_W, width), width)
+  rect.h = clamp(rect.h, Math.min(MIN_H, height), height)
+  rect.x = clamp(rect.x, 0, width - rect.w)
+  rect.y = clamp(rect.y, 0, height - rect.h)
 }
+onMounted(() => {
+  clampToViewport()
+  window.addEventListener('resize', clampToViewport)
+})
+onBeforeUnmount(() => {
+  stopInteraction()
+  window.removeEventListener('resize', clampToViewport)
+})
 
 const startDrag = (event) => {
   if (props.docked || event.button !== 0 || event.target.closest('button')) return
@@ -230,12 +239,14 @@ const startResize = (event, dir) => {
   cursor: grabbing;
 }
 .float-title-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .float-title-actions {
   display: inline-flex;
+  flex-shrink: 0;
   gap: 4px;
 }
 .btn.mini {

@@ -12,33 +12,68 @@ import { normalizeTimeoutError } from '@/utils/apiError'
 const DEFAULT_TIMEOUT_MS = 30000
 const SLOW_TIMEOUT_MS = 120000
 
-function requestTimeoutController(isFormData, responseType) {
+function requestTimeoutController(isFormData, responseType, callerSignal) {
   const controller = new AbortController()
-  const timer = setTimeout(
-    () => controller.abort(new DOMException('请求超时', 'TimeoutError')),
-    isFormData || responseType === 'blob' ? SLOW_TIMEOUT_MS : DEFAULT_TIMEOUT_MS
-  )
-  return { signal: controller.signal, clear: () => clearTimeout(timer) }
+  let timer
+  const clear = () => {
+    clearTimeout(timer)
+    callerSignal?.removeEventListener('abort', relayAbort)
+  }
+  const relayAbort = () => {
+    controller.abort(callerSignal.reason)
+    clear()
+  }
+  timer = setTimeout(() => {
+    controller.abort(new DOMException('请求超时', 'TimeoutError'))
+    clear()
+  }, isFormData || responseType === 'blob' ? SLOW_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
+  if (callerSignal?.aborted) relayAbort()
+  else callerSignal?.addEventListener('abort', relayAbort, { once: true })
+  return { signal: controller.signal, clear }
 }
 
 /**
  * 发送API请求的基础函数
  * @param {string} url - API端点
- * @param {Object} options - 请求选项
+ * @param {Object} options - 请求选项（支持 params：序列化为 query string 并入 URL）
  * @param {boolean} requiresAuth - 是否需要认证头
  * @param {string} responseType - 响应类型: 'json' | 'text' | 'blob'
  * @returns {Promise} - 请求结果
  */
+/**
+ * 把 options.params 序列化为 query string 合并进 URL。
+ * null/undefined 值跳过；数组按 key=a&key=b 展开；已有 "?" 用 "&" 拼接。
+ */
+function buildUrlWithParams(url, params) {
+  if (!params) return url
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined) continue
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item !== null && item !== undefined) search.append(key, item)
+      }
+    } else {
+      search.append(key, value)
+    }
+  }
+  const queryString = search.toString()
+  if (!queryString) return url
+  return url + (url.includes('?') ? '&' : '?') + queryString
+}
+
 export async function apiRequest(url, options = {}, requiresAuth = true, responseType = 'json') {
   const isFormData = options?.body instanceof FormData
-  // 调用方自带 signal（检索竞态等场景）时自管中止，不叠加超时
-  const timeout = options?.signal ? null : requestTimeoutController(isFormData, responseType)
+  // 生命周期取消与请求期限同时生效；一次挂起不能永久占住共享轮询。
+  const timeout = requestTimeoutController(isFormData, responseType, options?.signal)
   let response
+  let deferredBody = false
   try {
-    // 默认请求配置
+    // 默认请求配置（params 已并入 URL，不再透传给 fetch）
+    const { params: queryParams, ...restOptions } = options || {}
     const requestOptions = {
-      ...options,
-      signal: options?.signal || timeout?.signal,
+      ...restOptions,
+      signal: timeout.signal,
       headers: {
         ...(!isFormData ? { 'Content-Type': 'application/json' } : {}),
         ...options.headers
@@ -56,7 +91,8 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
     }
 
     // 发送请求
-    response = await fetch(url, requestOptions)
+    response = await fetch(buildUrlWithParams(url, queryParams), requestOptions)
+    if (timeout.signal.aborted) throw timeout.signal.reason
 
     // 处理API返回的错误
     if (!response.ok) {
@@ -84,6 +120,8 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
         console.log('无法解析错误响应JSON:', { status: response.status })
       }
 
+      // 已取消的旧请求不得继续触发当前账号的登出等副作用。
+      if (timeout.signal.aborted) throw timeout.signal.reason
       // 特殊处理401和403错误
       const error = new Error(errorMessage)
       error.response = {
@@ -126,6 +164,21 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
 
     // 根据responseType处理响应
     if (responseType === 'blob') {
+      // 保持原生 Response/headers；字节仍在传输时，调用方取消与期限不能提前解绑。
+      deferredBody = true
+      for (const method of ['arrayBuffer', 'blob', 'bytes', 'formData', 'json', 'text']) {
+        if (typeof response[method] !== 'function') continue
+        const consume = response[method].bind(response)
+        response[method] = async (...args) => {
+          try {
+            return await consume(...args)
+          } catch (error) {
+            throw normalizeTimeoutError(timeout.signal.reason?.name === 'TimeoutError' ? timeout.signal.reason : error)
+          } finally {
+            timeout.clear()
+          }
+        }
+      }
       return response
     } else if (responseType === 'json') {
       // 检查Content-Type以确定如何处理响应
@@ -140,10 +193,10 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       return response
     }
   } catch (error) {
-    if (error?.name === 'TimeoutError') {
+    if (error?.name === 'TimeoutError' || timeout.signal.reason?.name === 'TimeoutError') {
       // DOMException.message is read-only in browsers. Mutating it masks the
       // timeout with a TypeError and prevents the drawer from explaining it.
-      throw normalizeTimeoutError(error)
+      throw normalizeTimeoutError(timeout.signal.reason?.name === 'TimeoutError' ? timeout.signal.reason : error)
     } else if (error?.name !== 'AbortError') {
       console.error('API请求错误:', {
         method: options.method || 'GET',
@@ -153,7 +206,7 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
     }
     throw error
   } finally {
-    timeout?.clear()
+    if (!deferredBody) timeout.clear()
   }
 }
 
