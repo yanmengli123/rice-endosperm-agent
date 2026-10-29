@@ -13,6 +13,8 @@ x-api-worker-env: &api-worker-env
   YUXI_BIOCOMPUTE_BROKER_TOKEN: ${YUXI_BIOCOMPUTE_BROKER_TOKEN:-}
   PYTHONPATH: /app/package
   JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env.prod}
+  # 敏感凭据静态加密主密钥（AES-256-GCM，secret_crypto.py）：生产必填，缺失即拒绝启动。
+  YUXI_SECRET_MASTER_KEY: ${YUXI_SECRET_MASTER_KEY:?请在 .env 配置主密钥}
   YUXI_INSTANCE_ID: ${YUXI_INSTANCE_ID:?Set YUXI_INSTANCE_ID in .env.prod}
   POSTGRES_URL: ${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}@postgres:5432/${POSTGRES_DB:-yuxi}}
   # LangGraph checkpointer 存储：prod 固定 postgres，构建失败直接终止启动（fail-closed）。
@@ -77,6 +79,9 @@ services:
         condition: service_healthy
       sandbox-provisioner:
         condition: service_healthy
+      # Milvus 未就绪时 api 冷启动硬失败（知识库初始化），与 dev compose 一致等待 healthy。
+      milvus:
+        condition: service_healthy
 
   apisix:
     image: apache/apisix:3.17.0-debian
@@ -124,7 +129,10 @@ services:
     command: uv run --no-sync --no-dev arq server.worker_main.WorkerSettings
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('redis', 6379), 3).close()\""]
+      # 与 dev 同款真健康检查（api/worker/channels 共用同一镜像）：
+      # 锚定 ARQ 循环心跳文件（cron 每分钟写一次，容忍 200s）。原 TCP 探测 redis
+      # 只证明 redis 可达，worker 进程卡死/ARQ 启动失败时容器仍「假健康」。
+      test: ["CMD-SHELL", "python -c \"import os,time; assert time.time()-os.path.getmtime('/tmp/yuxi_worker_heartbeat')<200\""]
       interval: 15s
       timeout: 5s
       retries: 4
@@ -137,6 +145,46 @@ services:
       minio:
         condition: service_healthy
       sandbox-provisioner:
+        condition: service_healthy
+      # 与 api/dev 一致：Milvus 未就绪时 worker 冷启动硬失败，等待 healthy 消除竞态。
+      milvus:
+        condition: service_healthy
+
+  # 渠道网关运行时（与 dev compose 的 channels 同源）：持有长连接/轮询型入站
+  # 传输（当前 Telegram getUpdates）。与 api/worker 共镜像、单副本运行
+  # （每 app 一把 Redis 单活锁，败者 standby），扩容请扩 webhook 型平台。
+  channels:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: yuxi-api:${YUXI_VERSION:-0.7.1}
+    container_name: channels-prod
+    working_dir: /app
+    networks:
+      - app-network
+    volumes:
+      - ./docker/volumes/yuxi:/app/saves
+      - ./docker/volumes/models:/app/models
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env.prod
+    environment:
+      <<: *api-worker-env
+    command: uv run --no-sync --no-dev python -m server.channels_main
+    restart: unless-stopped
+    # 健康检查锚定运行时心跳文件（每 60s 刷新，容忍 200s）：
+    # 「进程活着但监督/心跳循环卡死」也能被判出，而非只测 TCP 可达。
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,time; assert time.time()-os.path.getmtime('/tmp/channels_heartbeat')<200\""]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 45s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   sandbox-provisioner:
@@ -301,12 +349,8 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}
       - POSTGRES_DB=${POSTGRES_DB:-yuxi}
       - TZ=${TZ:-Asia/Shanghai}
-      # RLS 角色引导（仅 initdb 执行；不改变运行时连接，激活见 docs/ops/rls-activation-runbook.md）
-      - YUXI_MIGRATOR_PASSWORD=${YUXI_MIGRATOR_PASSWORD:?Set YUXI_MIGRATOR_PASSWORD in .env.prod}
-      - YUXI_APP_PASSWORD=${YUXI_APP_PASSWORD:?Set YUXI_APP_PASSWORD in .env.prod}
     volumes:
       - ./docker/volumes/postgresql:/var/lib/postgresql/data
-      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-yuxi} || exit 1"]
       interval: 5s

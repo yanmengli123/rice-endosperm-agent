@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.operation_log_service import log_operation
-from yuxi.storage.postgres.models_business import Department, User
+from yuxi.storage.postgres.models_business import DEFAULT_TENANT_ID, Department, User
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.logging_config import logger
@@ -442,7 +442,9 @@ async def get_or_create_oidc_department(
     # 最终确定部门描述：优先使用处理后的OIDC部门描述，否则使用默认描述
     final_dept_desc = processed_dept_desc or f"{final_dept_name}部门"
 
-    result = await db.execute(select(Department).filter(Department.name == final_dept_name))
+    result = await db.execute(
+        select(Department).filter(Department.name == final_dept_name, Department.tenant_id == DEFAULT_TENANT_ID)
+    )
     dept = result.scalar_one_or_none()
 
     if dept:
@@ -450,10 +452,11 @@ async def get_or_create_oidc_department(
         logger.info(f"Using existing department: {final_dept_name}")
         return dept
 
-    # 部门不存在，创建新部门
+    # 部门不存在，创建新部门（新用户随 ensure_tenant_membership 落默认租户）
     dept = Department(
         name=final_dept_name,
         description=final_dept_desc,
+        tenant_id=DEFAULT_TENANT_ID,
     )
     db.add(dept)
     try:
@@ -463,7 +466,9 @@ async def get_or_create_oidc_department(
     except IntegrityError:
         # 并发创建时部门可能已存在，再次查询
         await db.rollback()
-        result = await db.execute(select(Department).filter(Department.name == final_dept_name))
+        result = await db.execute(
+            select(Department).filter(Department.name == final_dept_name, Department.tenant_id == DEFAULT_TENANT_ID)
+        )
         dept = result.scalar_one_or_none()
 
     return dept
@@ -841,6 +846,8 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
 
     if user.is_deleted:
         return _redirect_to_login_with_error("该账户已注销")
+    if user.is_disabled:
+        return _redirect_to_login_with_error("该账户已被停用，请联系管理员")
 
     token_data = {"sub": str(user.id), "auth_version": user.auth_version}
     jwt_token = AuthUtils.create_access_token(token_data)

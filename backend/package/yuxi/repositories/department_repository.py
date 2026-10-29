@@ -29,12 +29,15 @@ class DepartmentRepository:
             result = await session.execute(select(Department).order_by(Department.created_at.desc()))
             return list(result.scalars().all())
 
-    async def list_with_user_count(self) -> list[dict[str, Any]]:
-        """获取所有部门列表，包含用户数量"""
+    async def list_with_user_count(self, tenant_id: int | None = None) -> list[dict[str, Any]]:
+        """获取部门列表（含用户数量）；指定 tenant_id 时按租户过滤"""
         async with pg_manager.get_async_session_context() as session:
             from yuxi.storage.postgres.models_business import User
 
-            result = await session.execute(select(Department).order_by(Department.created_at.desc()))
+            query = select(Department).order_by(Department.created_at.desc())
+            if tenant_id is not None:
+                query = query.filter(Department.tenant_id == tenant_id)
+            result = await session.execute(query)
             departments = result.scalars().all()
 
             department_list = []

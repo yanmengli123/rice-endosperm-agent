@@ -717,22 +717,26 @@ async def import_references(tenant_id: int, data: bytes, *, fmt: str = "auto", s
                 batch.source_object = await _store_source(tenant_id, batch_id, data)
             # Reuploading an old receipt may backfill occurrences, never its immutable report.
             if not await session.scalar(
-                select(LiteratureReferenceRecord.record_no).where(
+                select(LiteratureReferenceRecord.record_no)
+                .where(
                     LiteratureReferenceRecord.batch_id == batch_id,
                     LiteratureReferenceRecord.tenant_id == tenant_id,
-                ).limit(1)
+                )
+                .limit(1)
             ):
                 identities = {rec["record_no"]: rec["_rid"] for rec in prepared}
                 rows = [
                     {
-                        "tenant_id": tenant_id, "batch_id": batch_id, "record_no": rec["record_no"],
+                        "tenant_id": tenant_id,
+                        "batch_id": batch_id,
+                        "record_no": rec["record_no"],
                         "rid": identities.get(rec["record_no"]),
                         "payload_json": {key: value for key, value in rec.items() if key != "cited_dois"},
                     }
                     for rec in records
                 ]
                 for start in range(0, len(rows), 500):
-                    await session.execute(insert(LiteratureReferenceRecord), rows[start:start + 500])
+                    await session.execute(insert(LiteratureReferenceRecord), rows[start : start + 500])
             report["source_records"] = len(records)
             report["batch_id"] = batch_id
             report["source_sha256"] = sha256

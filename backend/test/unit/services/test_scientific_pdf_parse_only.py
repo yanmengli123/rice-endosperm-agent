@@ -19,7 +19,6 @@ from yuxi.storage.postgres.models_knowledge import (
     KnowledgeParseArtifact,
 )
 from yuxi.knowledge.pdf_evidence.contracts import ParserArtifact, PipelineResult, UnifiedArticle
-from yuxi.literature.access import LiteratureAccess, _access
 
 pytestmark = pytest.mark.unit
 

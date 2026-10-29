@@ -12,6 +12,8 @@ dependencies = [
 ]
 [tool.ruff]
 line-length = 120  # 代码最大行宽
+# vendor 是锁版本上游快照（SHA256SUMS 校验），不做任何格式化/检查
+extend-exclude = ["**/literature/vendor/**"]
 lint.select = [         # 选择的规则
     "F",
     "E",

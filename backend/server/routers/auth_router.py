@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     APIKey,
+    DEFAULT_TENANT_ID,
     Department,
     OperationLog,
     TenantUserEntitlement,
@@ -498,7 +499,15 @@ async def get_register_config():
     """返回非敏感注册开关与可选部门列表，供注册页渲染。"""
     departments: list[dict] = []
     async with pg_manager.get_async_session_context() as session:
-        rows = (await session.execute(select(Department).order_by(Department.id))).scalars().all()
+        rows = (
+            (
+                await session.execute(
+                    select(Department).where(Department.tenant_id == DEFAULT_TENANT_ID).order_by(Department.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
         departments = [{"id": d.id, "name": d.name} for d in rows]
     return {
         "enabled": _register_enabled(),
@@ -562,7 +571,7 @@ async def self_register(data: SelfRegisterRequest, db: AsyncSession = Depends(ge
         await db.flush()
         from yuxi.services.principal import ensure_tenant_membership, resolve_entitlement, resolve_tenant_id
 
-        await ensure_tenant_membership(db, new_user)
+        await ensure_tenant_membership(db, new_user, tenant_id=department.tenant_id)
         tenant_id = await resolve_tenant_id(db, new_user.uid)
         entitlement = await resolve_entitlement(db, new_user.uid, tenant_id)
         entitlement.credential_policy = TenantUserEntitlement.CREDENTIAL_POLICY_BYOK_OPTIONAL
@@ -684,72 +693,83 @@ async def check_first_run():
 
 
 # 路由：初始化管理员账户
+_INITIALIZE_ADMIN_LOCK_KEY = 907001  # 固定整数；首启 check+create 串行化的 advisory lock 键
+
+
 @auth.post("/initialize", response_model=Token)
 async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depends(get_db)):
-    # 检查是否是首次运行
-    if not await pg_manager.async_check_first_run():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="系统已经初始化，无法再次创建初始管理员",
+    # 会话级 advisory lock 覆盖 first_run 检查到建户全程（建户走独立 repo session，
+    # 事务级锁会在中途 commit 失效，故用 pg_advisory_lock + finally unlock）
+    from sqlalchemy import text as _text
+
+    await db.execute(_text("SELECT pg_advisory_lock(:key)"), {"key": _INITIALIZE_ADMIN_LOCK_KEY})
+    try:
+        # 检查是否是首次运行
+        if not await pg_manager.async_check_first_run():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="系统已经初始化，无法再次创建初始管理员",
+            )
+
+        # 创建管理员账户
+        hashed_password = AuthUtils.hash_password(admin_data.password)
+
+        # 验证用户ID格式（只支持字母数字和下划线）
+        if not re.match(r"^[a-zA-Z0-9_]+$", admin_data.uid):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="用户ID只能包含字母、数字和下划线",
+            )
+
+        if len(admin_data.uid) < 3 or len(admin_data.uid) > 20:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="用户ID长度必须在3-20个字符之间",
+            )
+
+        # 验证手机号格式（如果提供了）
+        if admin_data.phone_number and not is_valid_phone_number(admin_data.phone_number):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="手机号格式不正确")
+
+        # 由于是首次初始化，直接使用输入的user_id
+        uid = admin_data.uid
+
+        # 创建默认部门
+        dept_repo = DepartmentRepository()
+        default_department = await dept_repo.create(
+            {
+                "name": "默认部门",
+                "description": "系统初始化时创建的默认部门",
+            }
         )
 
-    # 创建管理员账户
-    hashed_password = AuthUtils.hash_password(admin_data.password)
-
-    # 验证用户ID格式（只支持字母数字和下划线）
-    if not re.match(r"^[a-zA-Z0-9_]+$", admin_data.uid):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="用户ID只能包含字母、数字和下划线",
+        # 创建管理员用户
+        user_repo = UserRepository()
+        new_admin = await user_repo.create(
+            {
+                "username": admin_data.uid,
+                "uid": uid,
+                "phone_number": admin_data.phone_number,
+                "avatar": None,
+                "password_hash": hashed_password,
+                "role": "superadmin",
+                "department_id": default_department.id,
+                "last_login": utc_now_naive(),
+            }
         )
 
-    if len(admin_data.uid) < 3 or len(admin_data.uid) > 20:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="用户ID长度必须在3-20个字符之间",
-        )
+        from yuxi.services.principal import ensure_tenant_membership
 
-    # 验证手机号格式（如果提供了）
-    if admin_data.phone_number and not is_valid_phone_number(admin_data.phone_number):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="手机号格式不正确")
+        await ensure_tenant_membership(db, new_admin)
 
-    # 由于是首次初始化，直接使用输入的user_id
-    uid = admin_data.uid
+        # 生成访问令牌
+        token_data = {"sub": str(new_admin.id), "auth_version": new_admin.auth_version}
+        access_token = AuthUtils.create_access_token(token_data)
 
-    # 创建默认部门
-    dept_repo = DepartmentRepository()
-    default_department = await dept_repo.create(
-        {
-            "name": "默认部门",
-            "description": "系统初始化时创建的默认部门",
-        }
-    )
-
-    # 创建管理员用户
-    user_repo = UserRepository()
-    new_admin = await user_repo.create(
-        {
-            "username": admin_data.uid,
-            "uid": uid,
-            "phone_number": admin_data.phone_number,
-            "avatar": None,
-            "password_hash": hashed_password,
-            "role": "superadmin",
-            "department_id": default_department.id,
-            "last_login": utc_now_naive(),
-        }
-    )
-
-    from yuxi.services.principal import ensure_tenant_membership
-
-    await ensure_tenant_membership(db, new_admin)
-
-    # 生成访问令牌
-    token_data = {"sub": str(new_admin.id), "auth_version": new_admin.auth_version}
-    access_token = AuthUtils.create_access_token(token_data)
-
-    # 记录操作
-    await log_operation(db, new_admin.id, "系统初始化", "创建超级管理员账户")
+        # 记录操作
+        await log_operation(db, new_admin.id, "系统初始化", "创建超级管理员账户")
+    finally:
+        await db.execute(_text("SELECT pg_advisory_unlock(:key)"), {"key": _INITIALIZE_ADMIN_LOCK_KEY})
 
     return {
         "access_token": access_token,

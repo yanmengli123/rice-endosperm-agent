@@ -2,7 +2,7 @@
 
 三源补全（OpenAlex → Crossref → Semantic Scholar，免费公开 API + polite pool）；
 只填空字段（上游 _merge_field 语义：绝不覆盖已有值）。服务级 API Key（可选）
-经环境变量读取，不落库（无存储面即无泄露面）；外部源限流经 httpx 超时 + 串行。
+经环境变量读取，不落库（无存储面即无泄露面）；三源有界并发，按固定优先级合并。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from urllib.parse import quote, urlparse
 import httpx
 from sqlalchemy import select
 
-from yuxi.literature.access import paper_visibility
+from yuxi.literature.access import current_access, paper_visibility
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import LiteraturePaper
 
@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 _UA_BASE = "YuxiLiterature/1.0 (literature enrichment)"
 _TIMEOUT = httpx.Timeout(20.0)
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_SOURCE_DEADLINE_SECONDS = 8.0
+_ENRICH_DEADLINE_SECONDS = 10.0
 
 
 def _user_agent() -> str:
@@ -215,7 +217,20 @@ async def _backfill_doi_from_document(tenant_id: int, paper: LiteraturePaper) ->
 
 
 async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
+    """Complete one lightweight request within a total deadline, including DOI backfill."""
+    try:
+        async with asyncio.timeout(_ENRICH_DEADLINE_SECONDS):
+            return await _enrich_paper(tenant_id, rid)
+    except TimeoutError:
+        return {"rid": rid, "ok": False, "reason": "timeout"}
+
+
+async def _enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
     """Fetch external metadata, then revalidate ACL/lock and fill only empty fields."""
+    from yuxi.literature.access import build_access
+    scope = current_access()
+    if scope is not None and rid not in (await build_access(scope.user, tenant_id, rids=(rid,))).rids:
+        return {"rid": rid, "ok": False, "reason": "source_access_revoked"}
     async with pg_manager.get_async_session_context() as session:
         paper = (
             await session.execute(
@@ -231,21 +246,26 @@ async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
         if not backfilled:
             return {"rid": rid, "ok": False, "reason": "no_doi"}
     input_doi = paper.doi
-    fetched = []
-    for name, fetch in (
+    sources = (
         ("openalex", fetch_openalex),
         ("crossref", fetch_crossref),
         ("semantic_scholar", fetch_semantic_scholar),
-    ):
-        payload = await fetch(input_doi)
-        if payload:
-            fetched.append((name, payload))
+    )
+    responses = await asyncio.gather(
+        *(asyncio.wait_for(fetch(input_doi), timeout=_SOURCE_DEADLINE_SECONDS) for _name, fetch in sources),
+        return_exceptions=True,
+    )
+    # gather preserves the source priority even when completion order differs.
+    # A slow/broken optional source cannot discard the other sources' results.
+    fetched = [
+        (name, payload)
+        for (name, _fetch), payload in zip(sources, responses)
+        if isinstance(payload, dict) and payload
+    ]
     if not fetched:
         return {"rid": rid, "ok": False, "reason": "all_sources_failed"}
 
     # External awaits must not overwrite an intervening human edit/lock.
-    from yuxi.literature.access import build_access, current_access
-
     scope = current_access()
     if scope is not None and rid not in (await build_access(scope.user, tenant_id, rids=(rid,))).rids:
         return {"rid": rid, "ok": False, "reason": "source_access_revoked"}
@@ -296,7 +316,10 @@ async def enrich_paper(tenant_id: int, rid: str) -> dict[str, Any]:
 
 
 async def enrich_pending(tenant_id: int, *, batch_size: int = 50) -> dict[str, Any]:
-    """批量富化缺标题/缺期刊指标的文献（上游 enrich_all_pending 语义）。"""
+    """Batch enrichment requires a restored, current actor scope."""
+    scope = current_access()
+    if scope is None or scope.tenant_id != tenant_id:
+        raise PermissionError("批量富化必须绑定有效用户与当前来源权限")
     async with pg_manager.get_async_session_context() as session:
         rows = (
             (
@@ -324,5 +347,3 @@ async def enrich_pending(tenant_id: int, *, batch_size: int = 50) -> dict[str, A
 
 
 # ---------------------------------------------------------------- 批量富化后台化
-
-

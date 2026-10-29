@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from yuxi.literature import access, cards, graph_service, readops, reader_bundle, reconcile
+from yuxi.literature import access, cards, readops, reader_bundle, reconcile
 from yuxi.literature.reading import service as reading
 from yuxi.storage.postgres.models_business import User, Tenant, TenantMembership
 from yuxi.storage.postgres.models_knowledge import (
@@ -134,13 +134,12 @@ async def env(monkeypatch):
 
     async def pool():
         return Queue()
+
     for module in (reading,):
         monkeypatch.setattr(module, "get_arq_pool", pool)
 
-
     async def publish(*args, **kwargs):
         return {"published": False}
-
 
     policies = {
         "public": {"access_level": "global"},
@@ -232,9 +231,9 @@ async def test_ingest_progress_enforces_source_acl_before_limit_and_revocation(e
     async with sessions() as db:
         for kb in (await db.execute(select(KnowledgeBase))).scalars():
             kb.contract_key = "pdf_evidence"
-        private = await db.scalar(select(KnowledgeParseRevision).where(
-            KnowledgeParseRevision.revision_id == "rev-private"
-        ))
+        private = await db.scalar(
+            select(KnowledgeParseRevision).where(KnowledgeParseRevision.revision_id == "rev-private")
+        )
         private.error_message = "private-source-diagnostics"
     async with access.access_scope(USER, TENANT, catalog_only=True):
         items = await readops.list_paper_tasks(TENANT, limit=100)
@@ -316,5 +315,3 @@ async def _ready(env):
             )
         )
     return base
-
-

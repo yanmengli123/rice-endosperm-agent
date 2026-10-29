@@ -1017,7 +1017,7 @@ class LegacyLangChainHost(McpHost):
                 blocks,
                 provenance={"server_slug": slug, "resource_uri": uri, "protocol": self._note_adapter_version()},
             )
-            status = "success"
+            status = "error" if result.is_error else "success"
         except Exception as exc:  # noqa: BLE001
             result = McpToolResult(text=f"Error: {exc}", is_error=True)
             status = "error"
@@ -1062,7 +1062,7 @@ class LegacyLangChainHost(McpHost):
                 blocks,
                 provenance={"server_slug": slug, "prompt": name, "protocol": self._note_adapter_version()},
             )
-            status = "success"
+            status = "error" if result.is_error else "success"
         except Exception as exc:  # noqa: BLE001
             result = McpToolResult(text=f"Error: {exc}", is_error=True)
             status = "error"

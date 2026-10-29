@@ -191,7 +191,9 @@ class AgentRunRepository:
         run = await self._lock_run(run_id)
         if not run:
             return None
-        if run.status in TERMINAL_RUN_STATUSES:
+        # cancel_requested 是用户的显式意图：mark_running 不得把它翻回 running，
+        # 否则取消信号会被随后到达的 running 覆盖，run 变成"取消丢失"。
+        if run.status in TERMINAL_RUN_STATUSES or run.status == "cancel_requested":
             return run
         now = utc_now_naive()
         run.status = "running"
@@ -218,19 +220,20 @@ class AgentRunRepository:
         status: str,
         error_type: str | None = None,
         error_message: str | None = None,
-    ) -> AgentRun | None:
+    ) -> tuple[AgentRun | None, bool]:
+        """写入终态；run 已处于终态时是 no-op，返回 ``(run, False)`` 供调用方去重。"""
         run = await self._lock_run(run_id)
         if not run:
-            return None
+            return None, False
         if run.status in TERMINAL_RUN_STATUSES:
-            return run
+            return run, False
         run.status = status
         run.error_type = error_type
         run.error_message = error_message
         run.finished_at = utc_now_naive()
         run.updated_at = run.finished_at
         await self.db.flush()
-        return run
+        return run, True
 
     async def set_total_tokens(self, run_id: str, total_tokens: int) -> None:
         await self.db.execute(update(AgentRun).where(AgentRun.id == run_id).values(total_tokens=int(total_tokens)))
@@ -251,12 +254,16 @@ class AgentRunRepository:
 
         覆盖三类窗口：commit 后入队前进程崩溃遗留的 pending、worker 崩溃后
         无人收尾的 running、取消信号丢失后停滞的 cancel_requested。
+        文献域后台任务（run_type="literature"）有独立的 lease/重试生命周期
+        （llm_gateway 的 governed_runtime/_settle 收尾），不纳入本对账，
+        避免 5 分钟级 cron 误杀仍在跑的编译/翻译任务。
         """
         return list(
             (
                 await self.db.execute(
                     select(AgentRun).where(
                         AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
+                        AgentRun.run_type != "literature",
                         or_(
                             and_(
                                 AgentRun.status == "pending",

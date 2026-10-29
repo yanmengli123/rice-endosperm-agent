@@ -58,7 +58,7 @@ class TestUsageLedgerModel:
 async def test_persist_writes_ledger_row():
     from yuxi.services.chat_service import _persist_run_total_tokens
 
-    run = SimpleNamespace(id="run-1", uid="alice", tenant_id=7, total_tokens=None)
+    run = SimpleNamespace(id="run-1", uid="alice", tenant_id=7, total_tokens=None, input_payload={})
     db = _CaptureDB(run=run)
     await _persist_run_total_tokens(
         db, "run-1", 123, uid="alice", model_spec="deepseek:deepseek-v4-flash", estimated=True
@@ -76,7 +76,7 @@ async def test_persist_writes_ledger_row():
 async def test_persist_without_uid_uses_authoritative_run_owner():
     from yuxi.services.chat_service import _persist_run_total_tokens
 
-    run = SimpleNamespace(id="run-2", uid="alice", tenant_id=9, total_tokens=None)
+    run = SimpleNamespace(id="run-2", uid="alice", tenant_id=9, total_tokens=None, input_payload={})
     db = _CaptureDB(run=run)
     await _persist_run_total_tokens(db, "run-2", 5, uid=None)
 

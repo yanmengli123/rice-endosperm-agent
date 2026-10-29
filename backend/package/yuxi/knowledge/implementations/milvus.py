@@ -632,7 +632,7 @@ class MilvusKB(KnowledgeBase):
 
     async def _delete_file_chunks_from_milvus(self, collection: Collection, file_id: str) -> None:
         expr = f'file_id == "{file_id}"'
-        results = collection.query(expr=expr, output_fields=["id"], limit=1)
+        results = await asyncio.to_thread(collection.query, expr=expr, output_fields=["id"], limit=1)
 
         if not results:
             logger.info(f"File {file_id} not found in Milvus, skipping delete operation")
@@ -958,8 +958,8 @@ class MilvusKB(KnowledgeBase):
                 markdown_content = await self._read_markdown_from_minio(file_meta["markdown_file"])
             filename = file_meta.get("filename")
 
-            # Split
-            chunks = self._split_text_into_chunks(markdown_content, file_id, filename, params)
+            # Split（semantic 分块内部是同步 requests HTTP + sklearn 聚类，线程内执行避免阻塞事件循环）
+            chunks = await asyncio.to_thread(self._split_text_into_chunks, markdown_content, file_id, filename, params)
             if shadow_revision_id:
                 revision_token = self._index_revision_token(shadow_revision_id)
                 for chunk in chunks:
@@ -1098,8 +1098,10 @@ class MilvusKB(KnowledgeBase):
                 parse_params = {**resolved_params, "image_bucket": "public", "image_prefix": f"{kb_id}/kb-images"}
                 markdown_content = await Parser.aparse(source=file_path, params=parse_params)
 
-                # 重新生成 chunks
-                chunks = self._split_text_into_chunks(markdown_content, file_id, filename, resolved_params)
+                # 重新生成 chunks（同步分块逻辑，线程内执行避免阻塞事件循环）
+                chunks = await asyncio.to_thread(
+                    self._split_text_into_chunks, markdown_content, file_id, filename, resolved_params
+                )
                 logger.info(f"Split {filename} into {len(chunks)} chunks")
                 chunk_stats = self._calculate_chunk_stats(chunks)
 

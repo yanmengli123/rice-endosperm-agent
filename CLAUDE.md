@@ -104,7 +104,7 @@ make lock-check        # 校验 uv.lock 与 pyproject 一致（与 CI backend-lo
 bash backend/test/run_tests.sh unit                  # 单元测试（不依赖运行中的服务）
 bash backend/test/run_tests.sh integration           # 集成测试（需服务已启动）
 bash backend/test/run_tests.sh e2e                   # 端到端测试（需服务已启动）
-docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.py::<测试名>   # 运行单个测试
+docker compose exec api uv run --no-sync --group test pytest test/unit/<路径>/<文件>.py::<测试名>   # 运行单个测试
 ```
 
 容器内测试实操提示：
@@ -112,12 +112,9 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 - `uv run` 偶发清华镜像 403 时加 `--no-sync` 跳过环境同步（如 `uv run --no-sync --group test pytest ...`）。
 - 全量 `pytest test/unit/` 单次执行容易超时（每个目录约 10s 的 exec+收集开销叠加，并非挂起）；按目录分块跑（services、routers、knowledge…各一次）既快又能定位问题。
 
-### topic-worker（BERTopic 计量分析独立运行时）
+### topic-worker（已下线）
 
-- 主题建模引擎（`topic_engine.py`）跑在独立 **topic-worker 容器**（compose profile `analytics`，2CPU/6g），建模依赖锁定在 `docker/topic-runtime/`（bertopic/umap-learn/hdbscan/jieba **不进** backend 的 uv.lock）——宿主机与 api 容器 import 不了这些依赖是设计使然（依赖隔离），不是缺陷。
-- e2e `test_topic_engine_acceptance.py` 在非 topic-worker 容器内会 **skip：skip ≠ 通过**；引擎验收必须在 topic-worker 容器内执行（`docker compose --profile analytics up -d topic-worker` 后进容器跑 pytest）。
-- topic-worker 用专属 arq 队列（`arq:literature-topics`）与专属 `WorkerSettings`（`literature/topic_worker.py`），**不在主 run_worker 的 functions 里**——主 worker 不会兜底执行主题任务；topic-worker 缺位时任务停在 PENDING，由其每分钟 reconciler 重派。前端可用性探测走 capabilities 端点（独立 ARQ 健康键 `literature:topic-worker:arq-health`，不依赖可能被长任务占槽的 cron 心跳）。
-- 改 topic 引擎/worker 代码后必须重启 topic-worker 容器（arq 进程不热重载）；api 侧路由/服务改动照常热重载。
+- BERTopic 主题分析与 topic-worker 容器（含 12 个领域模块）已随文献工作台轻量化下线，详见 [docs/develop-guides/changelog.md](docs/develop-guides/changelog.md)。
 
 **核心原则**:
 
@@ -140,7 +137,7 @@ docker compose exec api uv run --group test pytest test/unit/<路径>/<文件>.p
 - 协议版本协商（fail-fast）：`GET /api/agent/protocol`（公开）返回能力快照 `{protocol_version, min_supported_protocol_version, capabilities}`，真源在 `package/yuxi/services/agent_protocol.py`；桌面端创建 run 时带 `X-Yuxi-Protocol-Version` 头，major 与服务端不一致直接 426（`protocol_version_unsupported`）。同 major 内只增不改不删（additive-only），破坏性变更必须升 major。`POST /runs` 同时记录 `X-Client-Version` 观测日志（版本偏斜统计）。
 - 稳定错误码注册表：`package/yuxi/services/error_registry.py` 是问答链路错误码（code/status/action/retryable）的单一真源，业务代码经 `http_error(code)` raise；新增错误码必须先登记，契约语料校验会拒绝未登记的 code。
 - 跨端契约语料：`backend/test/fixtures/agent_run_contract/`（SSE 帧 raw→压缩双向锁定、请求/结果/错误体样本、manifest sha256）由 `test/unit/services/test_agent_run_contract_fixtures.py` 保证与服务端序列化一致；桌面端（rice-endosperm-desktop）用 `scripts/sync-contract-fixtures.ps1` 同步同一批语料并做 manifest 哈希校验——**改 wire 契约的正确顺序：改服务端 → 更新语料与 manifest → 同步桌面端副本 → 两端测试全绿后同批提交**。网关闭集 schema 与 pydantic 的漂移由 `test/e2e/test_apisix_gateway_contract.py` 锁定（字段集合必须一致）。OpenAPI 工件导出：`make contract-openapi`。
-- 排障：桌面端报「error sending request」且 api 直连正常时，先 `docker port yuxi-apisix` 验证宿主端口映射是否激活——容器 healthcheck 只测内部状态，Docker Desktop 重启后映射可能静默失效，`docker compose -f docker-compose.yml -f docker-compose.apisix.yml up -d --force-recreate apisix` 重建即恢复。
+- 排障：桌面端报「error sending request」且 api 直连正常时，先 `docker port yuxi-apisix` 验证宿主端口映射是否激活——容器 healthcheck 只测内部状态，Docker Desktop 重启后映射可能静默失效，`docker compose up -d --force-recreate apisix` 重建即恢复（base compose 已含 apisix 服务）。
 - 网关限流按 `remote_addr`（IP）而非 API Key；身份认证完全下沉到 Yuxi（`yxkey_` 前缀 Bearer → api_keys 表 → 所属用户，且 Key 部门必须与用户当前部门一致）。用户级路由经 proxy-rewrite 剥离 `X-User-ID` 等可伪造身份头后再转发。
 - 桌面端用户开户走 CLI 设备码流程：`POST /auth/cli/sessions`（免登录创建）→ 用户在 Web `/auth/cli/authorize?user_code=` 批准 → `POST /auth/cli/sessions/token` 用 device_code 换取**自动创建的 API Key**；token 响应附带服务端签发的不可逆 `account_scope_id`（HMAC-SHA256 截断，前缀 `yxacct_`），桌面端本地数据按它隔离账号，不落盘原始 uid。
 - 企业批量开户走一次性激活凭证：管理员经 `POST /api/admin/onboarding/invitations` 单事务建户并签发激活码（只存哈希、24h 有效、单次消费、可撤销重签）；用户桌面端经 `POST /api/auth/onboarding/exchange` 兑换纯会话对，不产生静态 Key。注意 TIMESTAMPTZ 列读回为 aware，与 naive 比较需先归一（用 coerce_any_to_utc_datetime）。

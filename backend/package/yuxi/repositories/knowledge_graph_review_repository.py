@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Integer, cast, delete, exists, func, or_, select, update
+from sqlalchemy import Integer, cast, delete, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from yuxi.knowledge.graphs.review_overlay import KIND_ENTITY, KIND_TRIPLE, STATUS_CANONICAL
@@ -973,6 +973,7 @@ class KnowledgeGraphReviewRepository:
         async with pg_manager.get_async_session_context() as session:
             for start in range(0, len(triple_rows), 500):
                 chunk_rows = triple_rows[start : start + 500]
+                computed: list[tuple[str, float]] = []
                 for triple_id, literature_count, conflict_status in chunk_rows:
                     mention = mention_by_triple.get(triple_id)
                     score = compute_triple_risk_score(
@@ -982,12 +983,26 @@ class KnowledgeGraphReviewRepository:
                         literature_count=int(literature_count or 0),
                         conflict_status=conflict_status or "NONE",
                     )
-                    await session.execute(
-                        update(KnowledgeGraphTriple)
-                        .where(KnowledgeGraphTriple.triple_id == triple_id)
-                        .values(risk_score=score)
-                    )
-                    updated += 1
+                    computed.append((triple_id, score))
+                if not computed:
+                    continue
+                # UPDATE ... FROM (VALUES ...) 单语句批量回填（500 一批，仍单事务），
+                # 替代逐行 UPDATE，避免大库构建末尾的 N 次往返。
+                values_clause = ", ".join(f"(:tid_{i}, :score_{i})" for i in range(len(computed)))
+                params: dict[str, object] = {}
+                for i, (tid, score) in enumerate(computed):
+                    params[f"tid_{i}"] = tid
+                    params[f"score_{i}"] = score
+                await session.execute(
+                    text(
+                        "UPDATE knowledge_graph_triples AS t "
+                        "SET risk_score = v.score "
+                        f"FROM (VALUES {values_clause}) AS v(triple_id, score) "
+                        "WHERE t.triple_id = v.triple_id"
+                    ),
+                    params,
+                )
+                updated += len(computed)
         return updated
 
     # ── KB 级协作能力（P1：viewer/reviewer/publisher）────────────

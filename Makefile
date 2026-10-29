@@ -46,7 +46,7 @@ logs:
 	@echo "System: $$(uname -a)"
 
 seed:
-	docker compose exec api uv run python scripts/seed_initial_users.py
+	docker compose exec api uv run --no-sync python scripts/seed_initial_users.py
 
 ######################
 # DEPENDENCY LOCK

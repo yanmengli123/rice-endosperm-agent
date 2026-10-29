@@ -12,7 +12,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 
 import uvicorn
 from fastapi import FastAPI, Request, status
@@ -35,13 +35,17 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_ENDPOINTS = {
     ("/api/auth/token", "POST"),
     ("/api/auth/desktop/login", "POST"),
+    ("/api/auth/register", "POST"),
+    ("/api/auth/cli/sessions", "POST"),
 }
 DEFAULT_DEVELOPMENT_CORS_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 EXPLICIT_CORS_METHODS = ("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT")
 EXPLICIT_CORS_HEADERS = ("Accept", "Authorization", "Content-Type", "Last-Event-ID", "X-Requested-With")
 
-# In-memory login attempt tracker to reduce brute-force exposure per worker
-_login_attempts: defaultdict[str, deque[float]] = defaultdict(deque)
+# In-memory login attempt tracker to reduce brute-force exposure per worker.
+# OrderedDict 按 LRU 记账并设容量上限，防止伪造来源 IP 无限撑大内存。
+RATE_LIMIT_MAX_TRACKED_IPS = 8192
+_login_attempts: OrderedDict[str, deque[float]] = OrderedDict()
 _attempt_lock = asyncio.Lock()
 
 
@@ -111,7 +115,16 @@ class LoginRateLimitMiddleware(BaseHTTPMiddleware):
             now = time.monotonic()
 
             async with _attempt_lock:
-                attempt_history = _login_attempts[client_ip]
+                attempt_history = _login_attempts.get(client_ip)
+                if attempt_history is None:
+                    attempt_history = _login_attempts[client_ip] = deque()
+                else:
+                    _login_attempts.move_to_end(client_ip)
+
+                if len(_login_attempts) > RATE_LIMIT_MAX_TRACKED_IPS:
+                    # 超出容量上限时丢掉最旧一半，最新访问过的 IP（含本次）在尾部不受影响。
+                    for _ in range(len(_login_attempts) - RATE_LIMIT_MAX_TRACKED_IPS // 2):
+                        _login_attempts.popitem(last=False)
 
                 while attempt_history and now - attempt_history[0] > RATE_LIMIT_WINDOW_SECONDS:
                     attempt_history.popleft()

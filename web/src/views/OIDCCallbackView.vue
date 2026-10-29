@@ -70,7 +70,7 @@ const handleCallback = async () => {
 
     // 更新用户状态
     userStore.token = tokenData.access_token
-    userStore.userId = tokenData.uid
+    userStore.userId = tokenData.user_id
     userStore.username = tokenData.username
     userStore.uid = tokenData.uid || ''
     userStore.phoneNumber = tokenData.phone_number || ''

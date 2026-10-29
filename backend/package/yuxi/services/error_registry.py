@@ -108,6 +108,27 @@ ERROR_REGISTRY: dict[str, ErrorSpec] = {
             retryable=False,
             default_message="客户端与服务端协议版本不兼容，请升级后重试",
         ),
+        ErrorSpec(
+            code="mention_rejected",
+            status_code=422,
+            action=None,
+            retryable=False,
+            default_message="提及解析未通过，请重新选择资源后重试",
+        ),
+        ErrorSpec(
+            code="mention_protocol_unsupported",
+            status_code=422,
+            action=None,
+            retryable=False,
+            default_message="不支持的提及协议",
+        ),
+        ErrorSpec(
+            code="subagent_referenced",
+            status_code=409,
+            action=None,
+            retryable=False,
+            default_message="该子智能体仍被主智能体引用，请先移除引用后再删除",
+        ),
     )
 }
 

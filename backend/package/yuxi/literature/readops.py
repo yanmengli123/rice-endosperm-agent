@@ -218,7 +218,10 @@ async def get_paper_detail(tenant_id: int, rid: str) -> dict[str, Any] | None:
         )
         latest_translations = {}
         for job in sorted(translation_jobs, key=lambda item: item.id, reverse=True):
-            if source_matches(job, paper) and job.generator_version in {"literature-translate-v1", "supertranslate-native-v1"}:
+            if source_matches(job, paper) and job.generator_version in {
+                "literature-translate-v1",
+                "supertranslate-native-v1",
+            }:
                 latest_translations.setdefault(job.variant_kind, job)
         attachments = (
             (await session.execute(select(LiteratureAttachment).where(LiteratureAttachment.paper_id == paper.id)))
@@ -430,8 +433,10 @@ async def _project_ingest_tasks(session, tenant_id: int, limit: int) -> list[dic
     ``source_revision_id`` 反查 rid，登记完成即原地可点击。
     """
     scope = current_access()
-    acl = True if scope is None else (
-        KnowledgeBase.kb_id.in_(getattr(scope, "allowed_kbs", ())) if scope.tenant_id == tenant_id else False
+    acl = (
+        True
+        if scope is None
+        else (KnowledgeBase.kb_id.in_(getattr(scope, "allowed_kbs", ())) if scope.tenant_id == tenant_id else False)
     )
     rows = (
         await session.execute(
@@ -587,7 +592,13 @@ async def list_literature_pipeline_tasks(*, status: str | None = None, limit: in
                 "name": name,
                 "type": f"literature_{task_type}",
                 "status": mapped_status,
-                "progress": float(row.progress or 0) * 100 if getattr(row, "variant_kind", None) == "pdf_zh" else 100.0 if mapped_status == "success" else 50.0 if mapped_status == "running" else 0.0,
+                "progress": float(row.progress or 0) * 100
+                if getattr(row, "variant_kind", None) == "pdf_zh"
+                else 100.0
+                if mapped_status == "success"
+                else 50.0
+                if mapped_status == "running"
+                else 0.0,
                 "message": str(row.error or "") if mapped_status == "failed" else None,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,

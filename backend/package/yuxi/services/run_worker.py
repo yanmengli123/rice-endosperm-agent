@@ -99,6 +99,11 @@ class RunContext:
     run_id: str
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     _watch_task: asyncio.Task | None = None
+    cancel_suppressed: bool = False
+
+    def suppress_cancel(self) -> None:
+        """终态 chunk 已捕获后的排空期调用：取消信号不再终止流消费（见调用方注释）。"""
+        self.cancel_suppressed = True
 
     async def start(self) -> None:
         if self._watch_task is None:
@@ -535,7 +540,9 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
         next_task = asyncio.create_task(agen.__anext__())
         idle_started_at = time.monotonic()
         while True:
-            cancel_task = asyncio.create_task(run_ctx.wait_cancelled())
+            # 排空期（终态已捕获）不响应取消：此刻输出已完整产生，取消只会截断
+            # 生成器收尾的消息落库并制造自相矛盾终态；非排空期取消语义不变。
+            cancel_task = None if run_ctx.cancel_suppressed else asyncio.create_task(run_ctx.wait_cancelled())
             idle_remaining = RUN_STREAM_IDLE_TIMEOUT_SECONDS - (time.monotonic() - idle_started_at)
             total_remaining = RUN_STREAM_TOTAL_TIMEOUT_SECONDS - (time.monotonic() - stream_started_at)
             wait_seconds = max(
@@ -543,18 +550,19 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
                 min(RUN_STREAM_PROGRESS_HEARTBEAT_SECONDS, idle_remaining, total_remaining),
             )
             done, _ = await asyncio.wait(
-                {next_task, cancel_task},
+                {next_task, cancel_task} if cancel_task is not None else {next_task},
                 timeout=wait_seconds,
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            if cancel_task in done:
+            if cancel_task is not None and cancel_task in done:
                 next_task.cancel("cancel_requested")
                 await asyncio.gather(next_task, return_exceptions=True)
                 raise asyncio.CancelledError(f"run {run_ctx.run_id} cancelled")
 
-            cancel_task.cancel()
-            await asyncio.gather(cancel_task, return_exceptions=True)
+            if cancel_task is not None:
+                cancel_task.cancel()
+                await asyncio.gather(cancel_task, return_exceptions=True)
 
             if next_task in done:
                 try:
@@ -987,6 +995,7 @@ async def process_agent_run(ctx, run_id: str):
                     logger.warning(f"trace mid-run flush timed out for run {run_id}; deferred")
                 if stop_stream:
                     draining_for_terminal = True
+                    run_ctx.suppress_cancel()
 
         # The stream writes the final assistant message with the session above.  Only
         # expose a terminal run after that transaction has committed, otherwise a
@@ -1049,6 +1058,35 @@ async def process_agent_run(ctx, run_id: str):
         return
     except asyncio.CancelledError:
         await writer.flush()
+        if not run_ctx.cancel_event.is_set():
+            # 非用户取消的 CancelledError（ARQ job_timeout 等外部终止）：按 failed +
+            # run_worker_timeout 收尾，不再误标 cancelled（用户从未请求取消）。
+            error_message = "任务执行超过 worker 时限，已被终止，请重试。"
+            error_chunk = {
+                "status": "error",
+                "error_type": "run_worker_timeout",
+                "error_message": error_message,
+                "message": error_message,
+                "request_id": request_id,
+                "retryable": True,
+            }
+            await append_run_event(
+                run_id,
+                "error",
+                {"chunk": error_chunk, "retryable": True},
+                thread_id=thread_id,
+            )
+            trace_committed = await _persist_terminal_trace(
+                recorder, "failed", error_type="run_worker_timeout", error_message=error_message
+            )
+            await _append_end_event(
+                run_id,
+                "failed",
+                thread_id=thread_id,
+                payload={"chunk": error_chunk, "trace_status": "COMMITTED" if trace_committed else "DEGRADED"},
+            )
+            logger.error(f"Run worker timeout {run_id}")
+            return
         cancel_chunk = {"status": "interrupted", "message": "对话已取消", "request_id": request_id}
         await append_run_event(
             run_id,
@@ -1152,6 +1190,34 @@ async def process_agent_run(ctx, run_id: str):
         await clear_cancel_signal(run_id)
 
 
+async def process_literature_enrich_pending(
+    ctx: dict[str, Any], tenant_id: int, batch_size: int = 50, *, requested_by: str | None = None
+) -> dict:
+    """Restore the submitter before any source read; legacy anonymous jobs fail closed."""
+    del ctx
+    from yuxi.literature.access import access_scope
+    from yuxi.literature.enrich import enrich_pending
+    from yuxi.services.principal import resolve_tenant_id
+    from yuxi.storage.postgres.runtime_security import actor
+
+    if not isinstance(requested_by, str) or not requested_by.strip() or requested_by == "system":
+        raise PermissionError("批量富化任务缺少可信提交者，请重新提交")
+    if type(tenant_id) is not int or tenant_id < 1 or type(batch_size) is not int or not 1 <= batch_size <= 200:
+        raise ValueError("批量富化任务参数无效")
+    with actor(tenant_id, requested_by):
+        async with pg_manager.get_async_session_context() as session:
+            user = (await session.execute(
+                select(User.uid, User.role, User.department_id, User.is_disabled, User.is_deleted)
+                .where(User.uid == requested_by)
+            )).first()
+            if user is None or user.is_disabled or user.is_deleted:
+                raise PermissionError("批量富化任务提交者已失效")
+            if await resolve_tenant_id(session, user.uid) != tenant_id:
+                raise PermissionError("批量富化任务的租户身份已变更")
+        async with access_scope(user, tenant_id):
+            return await enrich_pending(tenant_id, batch_size=batch_size)
+
+
 async def _load_input_message(message_id: int | None) -> Message | None:
     """加载 run 绑定的输入消息；worker 从这里恢复 query、resume、图片和请求元数据。"""
     if not message_id:
@@ -1225,12 +1291,16 @@ async def _worker_shutdown(ctx):
 
 
 class WorkerSettings:
+    # Admission reads ARQ's expiring Redis health key. Refresh frequently so a
+    # retired duplicate worker cannot leave it absent for the default hour.
+    health_check_interval = 30
     functions = [
         process_agent_run,
         worker_heartbeat,
         process_scientific_pdf_ingest,
         process_literature_reader_render,
         process_literature_navigation_index,
+        process_literature_enrich_pending,
         process_dynamic_wiki_build,
         prewarm_doclex_for_kb,
         process_channel_message,

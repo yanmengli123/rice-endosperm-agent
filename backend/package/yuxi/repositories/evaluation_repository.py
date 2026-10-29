@@ -119,11 +119,13 @@ class EvaluationRepository:
         if status:
             conditions.append(EvaluationDatasetItem.status == status)
         if keyword:
-            pattern = f"%{keyword}%"
+            # 容器 SQLAlchemy ilike 无 autoescape；用户原词进 LIKE 手写转义（对齐 conversation_repository）
+            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
             conditions.append(
-                EvaluationDatasetItem.query_text.ilike(pattern)
-                | EvaluationDatasetItem.gold_answer.ilike(pattern)
-                | EvaluationDatasetItem.external_id.ilike(pattern)
+                EvaluationDatasetItem.query_text.ilike(pattern, escape="\\")
+                | EvaluationDatasetItem.gold_answer.ilike(pattern, escape="\\")
+                | EvaluationDatasetItem.external_id.ilike(pattern, escape="\\")
             )
         return conditions
 

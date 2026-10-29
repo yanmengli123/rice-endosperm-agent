@@ -54,9 +54,13 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         process_time_ms = int(process_time * 1000)  # 转换为毫秒
 
         # 格式化日志消息，添加处理时间
+        # auth 相关端点的 query 可能携带敏感参数（token/凭据回执等），统一打码后再落日志
+        query_part = f"?{request.url.query}" if request.url.query else ""
+        if query_part and request.url.path.startswith("/api/auth"):
+            query_part = "?***"
         log_message = (
             f"{client_ip}:{request.client.port if request.client else 'unknown'} - "
-            f'"{request.method} {request.url.path}{"?" + request.url.query if request.url.query else ""} '
+            f'"{request.method} {request.url.path}{query_part} '
             f'HTTP/{request.scope["http_version"]}" '
             f"{response.status_code} - {process_time_ms}ms"
         )

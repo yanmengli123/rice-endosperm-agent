@@ -91,6 +91,13 @@ async def call(
         meta["request_id"] = str(uuid.uuid4())
 
     model_spec = meta.get("model_spec") or meta.get("model") or conf.default_model
+
+    # 直调也受平台 token 月度配额约束（run 创建同款 429 错误体）；直调无 run
+    # 语境，不进入 run 侧的活跃预约窗口检查。BYOK 不计平台额度的口径与 run 侧一致。
+    from yuxi.services.agent_run_service import enforce_direct_call_platform_token_quota
+
+    await enforce_direct_call_platform_token_quota(db=db, uid=str(current_user.uid))
+
     model = select_model(
         model_spec=model_spec,
         **_extract_generation_params(meta),

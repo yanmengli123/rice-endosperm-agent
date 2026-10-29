@@ -49,6 +49,7 @@ class _NeverAsyncIter:
 
 class _NeverCancelledContext:
     run_id = "run-never"
+    cancel_suppressed = False
 
     async def wait_cancelled(self):
         await asyncio.Event().wait()

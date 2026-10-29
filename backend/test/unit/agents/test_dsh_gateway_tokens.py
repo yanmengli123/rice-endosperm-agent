@@ -15,8 +15,16 @@ from yuxi.agents.buildin.dsh.gateway_tokens import (
 @pytest.fixture(autouse=True)
 def _master_key(monkeypatch):
     # 单元测试不依赖部署环境的主密钥配置，直接注入测试密钥（≥32 字符）。
+    # 容器可能同时配置 MASTER_KEY 与 MASTER_KEY_FILE（二者互斥），先清空环境并
+    # 重置 lru_cache，结束时再清缓存让后续用例按原环境重新解析。
+    from yuxi.utils import secret_crypto
+
+    monkeypatch.delenv("YUXI_SECRET_MASTER_KEY", raising=False)
+    monkeypatch.delenv("YUXI_SECRET_MASTER_KEY_FILE", raising=False)
     monkeypatch.setenv("YUXI_SECRET_MASTER_KEY", "unit-test-master-key-0123456789abcdef")
+    secret_crypto._master_key.cache_clear()
     yield
+    secret_crypto._master_key.cache_clear()
 
 
 def test_mint_and_verify_roundtrip():

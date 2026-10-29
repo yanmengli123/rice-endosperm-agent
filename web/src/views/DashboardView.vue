@@ -140,7 +140,7 @@ const handleOpenFeedback = () => {
 // 清理函数 - 清理所有子组件的图表实例
 const cleanupCharts = () => {
   if (userStatsRef.value?.cleanup) userStatsRef.value.cleanup()
-  if (toolStatsRef.value?.cleanup) userStatsRef.value.cleanup()
+  if (toolStatsRef.value?.cleanup) toolStatsRef.value.cleanup()
   if (knowledgeStatsRef.value?.cleanup) knowledgeStatsRef.value.cleanup()
   if (agentStatsRef.value?.cleanup) agentStatsRef.value.cleanup()
   if (callStatsRef.value?.cleanup) callStatsRef.value.cleanup()

@@ -21,7 +21,7 @@ import secrets
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import timedelta, UTC
 from typing import Any, Literal
 
 from fastapi import HTTPException
@@ -554,7 +554,7 @@ def _quota_detail(*, code: str, message: str, action: str | None = None) -> dict
     return dict(detail)  # type: ignore[return-value]
 
 
-async def _enforce_platform_token_quota(
+async def _assert_monthly_platform_token_quota(
     *,
     db: AsyncSession,
     uid: str,
@@ -562,15 +562,14 @@ async def _enforce_platform_token_quota(
     monthly_platform_token_limit: int | None,
     now,
 ) -> None:
-    """Enforce only the platform-funded token pool.
-
-    ``usage_ledger`` is the accounting source of truth.  User BYOK rows are
-    intentionally excluded; historical ``legacy_unknown`` rows are counted
-    conservatively until an operator classifies them.
-    """
+    """按 usage_ledger 月度求和比对平台 token 上限（无 run 语境，可被直调入口复用）。"""
     if monthly_platform_token_limit is None:
         return
 
+    # usage_ledger.created_at 是 TIMESTAMPTZ；naive 比较值经上海时区会话解释会偏 8 小时。
+    # 调用方传入的 naive now 本就是 UTC，这里显式挂上 UTC 再开月度窗口。
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     used_tokens = (
         await db.execute(
@@ -590,6 +589,62 @@ async def _enforce_platform_token_quota(
                 "请在设置中配置并选择自己的模型继续使用，或联系管理员调整平台额度"
             ),
         )
+
+
+async def enforce_direct_call_platform_token_quota(*, db: AsyncSession, uid: str) -> None:
+    """/api/chat/call 直调入口的平台 token 月度配额预检（与 run 创建同款错误体）。
+
+    直调没有 AgentRun，不进入 run 侧的活跃预约窗口检查；直调始终平台凭据
+    （persist_direct_call_usage 记 credential_source="platform"），不存在
+    BYOK 豁免分支。BYOK 行不计入求和的口径与 run 侧完全一致。
+    """
+    from yuxi.services.principal import resolve_entitlement, resolve_tenant_id
+
+    tenant_id = await resolve_tenant_id(db, uid)
+    await resolve_entitlement(db, uid, tenant_id)
+    entitlement = (
+        await db.execute(
+            select(TenantUserEntitlement).where(
+                TenantUserEntitlement.tenant_id == tenant_id,
+                TenantUserEntitlement.uid == uid,
+            )
+        )
+    ).scalar_one_or_none()
+    if entitlement is None:  # pragma: no cover - resolve_entitlement above guarantees the row
+        return
+    await _assert_monthly_platform_token_quota(
+        db=db,
+        uid=uid,
+        tenant_id=tenant_id,
+        monthly_platform_token_limit=entitlement.monthly_platform_token_limit,
+        now=utc_now_naive(),
+    )
+
+
+async def _enforce_platform_token_quota(
+    *,
+    db: AsyncSession,
+    uid: str,
+    tenant_id: int,
+    monthly_platform_token_limit: int | None,
+    now,
+) -> None:
+    """Enforce only the platform-funded token pool.
+
+    ``usage_ledger`` is the accounting source of truth.  User BYOK rows are
+    intentionally excluded; historical ``legacy_unknown`` rows are counted
+    conservatively until an operator classifies them.
+    """
+    # 月度上限未配置时整个平台门禁（含活跃预约窗口检查）都不启用，语义与历史一致。
+    if monthly_platform_token_limit is None:
+        return
+    await _assert_monthly_platform_token_quota(
+        db=db,
+        uid=uid,
+        tenant_id=tenant_id,
+        monthly_platform_token_limit=monthly_platform_token_limit,
+        now=now,
+    )
 
     # Token usage is settled after a model call.  The entitlement row is
     # already locked by ``_enforce_user_quota``; admitting at most one
@@ -815,13 +870,12 @@ async def create_agent_run_view(
             mentions=mentions,
         )
         if mention_outcome.rejected:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "mention_rejected",
-                    **(mention_public_error(mention_outcome) or {}),
-                    "mentions": mention_outcome.public_dict()["mentions"],
-                },
+            # 公共错误载荷（code/message 等）经 extra 覆写 detail，与原手写
+            # HTTPException 的字段合成语义一致。
+            raise _registry_error(
+                "mention_rejected",
+                **(mention_public_error(mention_outcome) or {}),
+                mentions=mention_outcome.public_dict()["mentions"],
             )
         mention_resolution_audit = mention_outcome.audit_dict()
         mention_session_kb_ids = mention_outcome.session_kb_ids
@@ -1511,14 +1565,14 @@ async def reconcile_stale_agent_runs(ctx: Any = None) -> int:
                     "error_message": "执行中断（worker 失联超时），请重新发送",
                     "retryable": False,
                 }
-            updated = await repo.set_terminal_status(
+            updated, changed = await repo.set_terminal_status(
                 run.id,
                 status=status,
                 error_type="stale_run_reconciled",
                 error_message=chunk.get("error_message") or chunk.get("message"),
             )
-            # set_terminal_status 对已终态 run 是 no-op；只有真正写入才补发 end 事件
-            if updated is not None and updated.status == status:
+            # 已终态 run 的 set_terminal_status 是 no-op：不重复发 end 事件/record_run_lost
+            if changed and updated is not None:
                 reconciled.append((run.id, run.conversation_thread_id, status, chunk))
         # 会话上下文退出时统一 commit
 

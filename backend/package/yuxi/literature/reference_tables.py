@@ -157,8 +157,16 @@ def _table_record(values: dict[str, str], fmt: str) -> dict:
     record["source_fields"] = {
         key: values.get(key, "")
         for key in (
-            "ut (unique wos id)", "clc-中图分类号", "中图分类号", "addresses",
-            "document type", "srcdatabase-来源库", "publication year", "year-年", "年", "pubtime-发表时间",
+            "ut (unique wos id)",
+            "clc-中图分类号",
+            "中图分类号",
+            "addresses",
+            "document type",
+            "srcdatabase-来源库",
+            "publication year",
+            "year-年",
+            "年",
+            "pubtime-发表时间",
         )
         if values.get(key)
     }

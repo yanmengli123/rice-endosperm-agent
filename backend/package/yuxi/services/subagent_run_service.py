@@ -363,6 +363,13 @@ class SubagentRunService:
         )
         if inherited_mentions is not None:
             input_payload["mention_resolution"] = inherited_mentions
+        # BYOK 血缘下传：子 run 冻结父 run 的凭据引用（credential_source/policy_version
+        # 同批复制）。缺失时子轮永远回落平台凭据，既绕过 BYOK 计费豁免，也可能在
+        # platform_only 策略下无凭据可用。
+        if isinstance(creator_payload, dict):
+            for freeze_key in ("user_credential", "credential_source", "policy_version"):
+                if creator_payload.get(freeze_key) is not None:
+                    input_payload[freeze_key] = creator_payload[freeze_key]
         subagent_input_message = input_message.with_metadata(
             {
                 "request_id": request_id,

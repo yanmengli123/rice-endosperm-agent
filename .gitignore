@@ -90,5 +90,6 @@ docs/vibe
 backend/package/yuxi/knowledge/eval/.ragas_prompt_cache/
 # Private administrator-provisioned runtime configuration.
 /.env.api-runtime
+/.env.worker-runtime
 /.env.pdf-runtime
 /.env.enterprise

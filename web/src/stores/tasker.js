@@ -88,7 +88,7 @@ export const useTaskerStore = defineStore('tasker', () => {
   }
 
   async function loadTasks(params = {}) {
-    if (!userStore.isAdmin) {
+    if (!userStore.isSuperAdmin) {
       tasks.value = []
       summary.value = createDefaultSummary()
       lastError.value = null
@@ -201,7 +201,7 @@ export const useTaskerStore = defineStore('tasker', () => {
   // 轮询所有权收敛到 store：抽屉打开或存在活跃任务时持续轮询，否则停止，
   // 修复抽屉关闭后任务角标（activeCount）不再更新的问题。
   function syncPolling() {
-    if (userStore.isAdmin && (isDrawerOpen.value || hasActiveTasks.value)) {
+    if (userStore.isSuperAdmin && (isDrawerOpen.value || hasActiveTasks.value)) {
       startPolling()
     } else {
       stopPolling()

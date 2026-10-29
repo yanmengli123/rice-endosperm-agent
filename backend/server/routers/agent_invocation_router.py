@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.services.agent_invocation_service import (
@@ -10,6 +10,7 @@ from yuxi.services.agent_invocation_service import (
     create_agent_eval_run_view,
     get_agent_call_run_result_view,
 )
+from yuxi.services.error_registry import http_error
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.auth_utils import AuthUtils
 
@@ -87,9 +88,9 @@ async def create_agent_call_run(
 ):
     """创建外部系统 Agent 调用 run，并按 async_mode 决定是否等待最终结果。"""
     if payload.mentions and payload.mention_protocol and payload.mention_protocol != "mention.v2":
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "mention_protocol_unsupported", "message": f"不支持的提及协议：{payload.mention_protocol}"},
+        raise http_error(
+            "mention_protocol_unsupported",
+            message=f"不支持的提及协议：{payload.mention_protocol}",
         )
     return await create_agent_call_run_view(
         agent_slug=payload.agent_slug,

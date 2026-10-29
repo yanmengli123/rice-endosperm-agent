@@ -201,11 +201,16 @@ async def get_superadmin_user(current_user: User = Depends(get_required_user)):
     return current_user
 
 
+# 对话类能力：scopes 为空（=仅对话调用）的 external_agent Key 仍可调用的端点集合。
+_CONVERSATION_SCOPES = frozenset({"agent:runs"})
+
+
 def require_scope(scope: str):
     """API Key 能力范围门禁。
 
-    语义（与 api_keys.scopes 列注释一致）：scopes 为空 = 仅对话调用，对话类
-    端点放行；非空列表必须包含目标 scope（或 "*"）。JWT 交互登录与
+    语义（与 api_keys.scopes 列注释一致）：scopes 为空 = 仅对话调用，仅放行
+    对话类 scope（_CONVERSATION_SCOPES）；其余 scope（literature:read/write
+    等数据面能力）空 scopes 一律拒绝，需显式配置或 "*"。JWT 交互登录与
     desktop_legacy 过渡 Key 不受约束。
     """
 
@@ -214,6 +219,12 @@ def require_scope(scope: str):
         if purpose is None or purpose == "desktop_legacy":
             return
         scopes = getattr(request.state, "api_key_scopes", None)
+        if not scopes:
+            if scope in _CONVERSATION_SCOPES:
+                # 空 = 仅对话调用（与 api_keys.scopes 列注释一致）
+                return
+        elif isinstance(scopes, list) and (scope in scopes or "*" in scopes):
+            return
         if isinstance(scopes, list) and (scope in scopes or "*" in scopes):
             return
         raise HTTPException(

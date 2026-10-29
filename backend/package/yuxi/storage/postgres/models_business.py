@@ -18,7 +18,9 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import declarative_base, relationship, validates
+from sqlalchemy.sql.functions import FunctionElement
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now, utc_now_naive
 
@@ -27,6 +29,30 @@ BigIntPk = BigInteger().with_variant(Integer(), "sqlite")
 
 # PG 走 JSONB（0069 起与迁移对齐），SQLite 测试方言回落通用 JSON
 JSONB_COMPAT = JSON().with_variant(JSONB(), "postgresql")
+
+
+class _UtcNowDefault(FunctionElement):
+    """naive-UTC 建库时间默认值（方言变体）。
+
+    PG 的 CURRENT_TIMESTAMP 按会话时区（上海）解释，与 ORM 写入的 utc_now_naive
+    形成双口径（偏 8 小时），改为 now() AT TIME ZONE 'utc'；SQLite 的
+    CURRENT_TIMESTAMP 本就是 UTC，沿用。与 manager.ensure_business_schema
+    对存量的幂等矫正配套。
+    """
+
+    name = "_utc_now_default"
+    inherit_cache = True
+
+
+@compiles(_UtcNowDefault, "postgresql")
+def _compile_utc_now_pg(element, compiler, **kw):
+    return "(now() AT TIME ZONE 'utc')"
+
+
+@compiles(_UtcNowDefault)
+def _compile_utc_now_default(element, compiler, **kw):
+    return "CURRENT_TIMESTAMP"
+
 
 Base = declarative_base()
 
@@ -45,11 +71,12 @@ class Department(Base):
     name = Column(String(50), nullable=False)  # 租户内唯一（迁移 0011 前身 0010 的联合唯一索引强制）
     tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)  # 迁移 0010 回填
     description = Column(String(255), nullable=True)
+    # naive-UTC 口径：见 _UtcNowDefault（PG 会话时区 vs ORM 双口径修复）
     created_at = Column(
         DateTime,
         nullable=False,
         default=utc_now_naive,
-        server_default=text("CURRENT_TIMESTAMP"),
+        server_default=_UtcNowDefault(),
     )
 
     # 关联关系
@@ -74,7 +101,7 @@ class Tenant(Base):
     status = Column(String(32), nullable=False, default="active")  # active / suspended
     # 租户级知识库默认共享策略（迁移 0029）；未配置时创建入口兜底 private
     default_kb_share_policy = Column(JSON)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 TENANT_MEMBERSHIP_ROLES = ("platform_admin", "tenant_admin", "member")
@@ -95,7 +122,7 @@ class TenantMembership(Base):
     uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
     role = Column(String(32), nullable=False, default="member")  # platform_admin / tenant_admin / member
     status = Column(String(32), nullable=False, default="active")  # active / suspended
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
     __table_args__ = (Index("uq_tenant_memberships_tenant_uid", "tenant_id", "uid", unique=True),)
 
@@ -129,8 +156,8 @@ class TenantUserEntitlement(Base):
     byok_platform_token_exempt = Column(Boolean, nullable=False, default=True)
     policy_version = Column(Integer, nullable=False, default=1)  # 每次变更 +1，run 冻结用
     updated_by = Column(String(64), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     __table_args__ = (Index("uq_tenant_user_entitlements_tenant_uid", "tenant_id", "uid", unique=True),)
 
@@ -155,7 +182,7 @@ class OnboardingActivation(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     consumed_at = Column(DateTime(timezone=True), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class UserModelCredential(Base):
@@ -186,7 +213,7 @@ class UserModelCredential(Base):
     tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=True, index=True)  # 迁移 0010 回填后收紧
     last_tested_at = Column(DateTime(timezone=True), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
     __table_args__ = (
         # P5 版本化：同一用户同一供应商只允许一把 active 密钥；历史版本行保留
@@ -211,7 +238,7 @@ class DeviceSession(Base):
     uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
     tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False, index=True)  # 迁移 0010 回填
     status = Column(String(32), nullable=False, default="active", index=True)  # active / revoked
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
     last_refreshed_at = Column(DateTime(timezone=True), nullable=True)
 
 
@@ -230,7 +257,7 @@ class DeviceSessionToken(Base):
     token_hash = Column(String(64), nullable=False, unique=True, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class UsageLedger(Base):
@@ -252,7 +279,7 @@ class UsageLedger(Base):
     credential_id = Column(BigIntPk, nullable=True)
     provider_id = Column(String(100), nullable=True)
     policy_version = Column(Integer, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, index=True)
 
 
 class DshModelCall(Base):
@@ -291,11 +318,12 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False, default="user")  # 角色: superadmin, admin, user
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)  # 部门ID
+    # naive-UTC 口径：与 departments.created_at 同理，见 _UtcNowDefault
     created_at = Column(
         DateTime,
         nullable=False,
         default=utc_now_naive,
-        server_default=text("CURRENT_TIMESTAMP"),
+        server_default=_UtcNowDefault(),
     )
     last_login = Column(DateTime, nullable=True)
 
@@ -402,8 +430,8 @@ class UserModelPreference(Base):
     )
     chat_model_spec = Column(String(200), nullable=True)
     updated_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     user = relationship("User", back_populates="model_preference", uselist=False)
 
@@ -424,8 +452,8 @@ class UserQuota(Base):
     daily_run_limit = Column(Integer, nullable=True)
     monthly_token_limit = Column(BigInteger, nullable=True)
     updated_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     user = relationship("User", back_populates="quota", uselist=False)
 
@@ -499,6 +527,9 @@ class Agent(Base):
 
     # P3 模型策略：locked=智能体指定模型优先且请求/用户不可绕过；preferred=常规解析链
     model_policy = Column(String(16), nullable=False, default="preferred")
+
+    # P5 凭据策略（迁移 0009）：inherit_user=沿用用户权益策略；platform_only/byok_required 可收紧
+    credential_policy = Column(String(16), nullable=False, default="inherit_user")
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     slug = Column(String(80), nullable=False, unique=True, index=True)
@@ -1003,8 +1034,8 @@ class MCPCatalog(Base):
     normalized_manifest = Column(JSON, nullable=False, default=dict)
     content_digest = Column(String(80), nullable=False, index=True)
     provenance = Column(JSON, nullable=False, default=dict)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class MCPUserCredential(Base):
@@ -1021,7 +1052,7 @@ class MCPUserCredential(Base):
     masked_hint = Column(String(64), nullable=True)
     metadata_json = Column(JSON, nullable=False, default=dict)
     status = Column(String(32), nullable=False, default="active")
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
@@ -1056,8 +1087,8 @@ class TenantMCPInstallation(Base):
     enabled = Column(Boolean, nullable=False, default=False)
     last_error = Column(Text, nullable=True)
     installed_by = Column(String(64), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     __table_args__ = (Index("uq_tenant_mcp_installation", "tenant_id", "catalog_id", unique=True),)
 
@@ -1076,7 +1107,7 @@ class AgentMCPBinding(Base):
     dependency_mode = Column(String(32), nullable=False, default="OPTIONAL")
     policy_json = Column(JSON, nullable=False, default=dict)
     enabled = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
     __table_args__ = (Index("uq_agent_mcp_binding", "tenant_id", "agent_id", "installation_id", unique=True),)
 
@@ -1097,8 +1128,8 @@ class MCPRuntimeInstance(Base):
     endpoint = Column(String(500), nullable=True)
     state = Column(String(40), nullable=False, index=True)
     metadata_json = Column(JSON, nullable=False, default=dict)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class MCPCallAudit(Base):

@@ -145,7 +145,7 @@ def test_wos_tab_delimited_quotes_lists_and_citations():
     text = (
         "PT\tAU\tAF\tTI\tSO\tPY\tDI\tDE\tC1\tCR\n"
         'J\tZhang W; Li M\tZhang, Wei; Li, Ming\t"Rice\tgrain\nquality"\t'
-        'Rice Science\t2024\t10.1000/rice\tRice; Grain\t'
+        "Rice Science\t2024\t10.1000/rice\tRice; Grain\t"
         '"[Zhang, Wei; Wang, Hong] Rice Inst, Wuhan, China; [Li, Ming] Rice Univ, USA"\t'
         '"Smith, DOI 10.1000/a; Wang, DOI 10.1000/b"\n'
     )

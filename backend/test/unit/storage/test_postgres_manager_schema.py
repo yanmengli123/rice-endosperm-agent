@@ -36,6 +36,10 @@ class _RecordingConnection:
             return _EmptySelectResult()
         return None
 
+    async def scalar(self, statement, *args):
+        self.statements.append(str(statement))
+        return None
+
     async def run_sync(self, fn, *args, **kwargs):
         """版本化迁移（如 0021/0080 建表）用 await conn.run_sync(fn) 执行 DDL。
 

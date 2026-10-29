@@ -62,8 +62,9 @@ class MilvusGraphVectorStore:
         if not embedding_info or embedding_info.model_type != "embedding":
             raise ValueError(f"Unsupported embedding model: {embedding_model_spec}")
 
-        entity_collection = self._get_or_create_entity_collection(kb_id, embedding_info)
-        triple_collection = self._get_or_create_triple_collection(kb_id, embedding_info)
+        # 集合不存在时 create_index 为同步 gRPC，线程内执行避免阻塞事件循环
+        entity_collection = await asyncio.to_thread(self._get_or_create_entity_collection, kb_id, embedding_info)
+        triple_collection = await asyncio.to_thread(self._get_or_create_triple_collection, kb_id, embedding_info)
 
         entity_ids = [entity["entity_id"] for entity in entities]
         triple_ids = [triple["triple_id"] for triple in triples]
@@ -308,7 +309,7 @@ class MilvusGraphVectorStore:
         collection.load()
         existing_ids: set[str] = set()
         for start in range(0, len(ids), 1000):
-            batch = ids[start : start + 1000]
+            batch = [item.replace('"', '\\"') for item in ids[start : start + 1000]]
             quoted_ids = ", ".join(f'"{item}"' for item in batch)
             rows = collection.query(expr=f"id in [{quoted_ids}]", output_fields=["id"])
             existing_ids.update(row["id"] for row in rows)
@@ -346,7 +347,7 @@ class MilvusGraphVectorStore:
             return
         collection = Collection(name=collection_name, using=self.connection_alias)
         for start in range(0, len(ids), 1000):
-            batch = ids[start : start + 1000]
+            batch = [item.replace('"', '\\"') for item in ids[start : start + 1000]]
             quoted_ids = ", ".join(f'"{item}"' for item in batch)
             collection.delete(expr=f"id in [{quoted_ids}]")
         collection.flush()

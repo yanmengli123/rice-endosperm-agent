@@ -5,11 +5,11 @@ import csv
 import io
 import re
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -164,6 +164,15 @@ def ensure_api_key_owner(api_key: APIKey, current_user: User) -> None:
         raise HTTPException(status_code=403, detail="无权操作此 API Key")
 
 
+def parse_api_key_expiry(value: str) -> datetime | None:
+    """解析 API Key 有效期；解析失败返回 400，而不是静默存成永久有效。"""
+    try:
+        aware_dt = coerce_any_to_utc_datetime(value)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="expires_at 无法解析为有效时间") from exc
+    return aware_dt.replace(tzinfo=None) if aware_dt else None
+
+
 async def get_accessible_api_key(db: AsyncSession, api_key_id: int, current_user: User) -> APIKey:
     result = await db.execute(select(APIKey).filter(APIKey.id == api_key_id))
     api_key = result.scalar_one_or_none()
@@ -235,11 +244,7 @@ async def create_api_key(
         raise HTTPException(status_code=403, detail="API Key 部门必须与关联用户部门一致")
 
     full_key, key_hash, key_prefix = AuthUtils.generate_api_key()
-    expires_at = None
-    if data.expires_at:
-        aware_dt = coerce_any_to_utc_datetime(data.expires_at)
-        if aware_dt:
-            expires_at = aware_dt.replace(tzinfo=None)
+    expires_at = parse_api_key_expiry(data.expires_at) if data.expires_at else None
 
     from yuxi.services.principal import resolve_tenant_id
 
@@ -286,8 +291,7 @@ async def update_api_key(
     if data.name is not None:
         api_key.name = data.name
     if data.expires_at is not None:
-        aware_dt = coerce_any_to_utc_datetime(data.expires_at)
-        api_key.expires_at = aware_dt.replace(tzinfo=None) if aware_dt else None
+        api_key.expires_at = parse_api_key_expiry(data.expires_at)
     if data.is_enabled is not None:
         api_key.is_enabled = data.is_enabled
 
@@ -299,6 +303,7 @@ async def update_api_key(
 @user_router.delete("/apikey/{api_key_id}", response_model=dict)
 async def delete_api_key(
     api_key_id: int,
+    request: Request,
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -322,7 +327,7 @@ async def delete_api_key(
         current_user.id,
         "删除 API Key",
         f"目标用户 uid={owner_uid}, prefix={key_prefix}",
-        None if current_user.id == api_key.user_id else None,
+        request,
     )
     return {"success": True, "message": "密钥已删除"}
 

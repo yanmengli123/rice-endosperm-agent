@@ -464,9 +464,6 @@ async def export_business_backup(tenant_id: int, uid: str) -> bytes:
         "Not a full-service disaster-recovery backup. See manifest exclusions and member digests.",
     )
     fresh = await literature_access.build_access(scope.user, tenant_id)
-    if (
-        not {p["rid"] for p in papers} <= fresh.rids
-        or _json(await _snapshot(tenant_id, uid)) != frozen
-    ):
+    if not {p["rid"] for p in papers} <= fresh.rids or _json(await _snapshot(tenant_id, uid)) != frozen:
         raise ValueError("备份期间权限或业务数据变更，请重新导出")
     return result

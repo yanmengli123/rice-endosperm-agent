@@ -20,7 +20,7 @@ from sqlalchemy import select
 from yuxi.storage.postgres.models_knowledge import LiteratureJournalMetric, LiteraturePaper
 from yuxi.literature.access import current_access, paper_visibility
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_knowledge import LiteratureCitation, LiteraturePaper
+from yuxi.storage.postgres.models_knowledge import LiteratureCitation
 
 logger = logging.getLogger(__name__)
 

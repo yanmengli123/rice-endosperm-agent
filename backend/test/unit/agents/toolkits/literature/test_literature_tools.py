@@ -143,6 +143,7 @@ async def test_search_returns_navigation_metadata_not_evidence(monkeypatch):
         for forbidden in ("content", "text", "quote", "evidence_id", "markdown"):
             assert forbidden not in item, f"导航元数据不得携带证据字段: {forbidden}"
 
+
 # --- 依赖方向 ---------------------------------------------------------------------
 
 
@@ -156,5 +157,3 @@ def test_toolkit_depends_only_on_literature_domain():
     assert "from yuxi.literature" in source  # 正向依赖成立
     # B2：不构造 EvidenceEnvelope / 不触碰证据构造面
     assert find_forbidden_imports(source, ("yuxi.knowledge.products.contracts",)) == []
-
-

@@ -80,7 +80,13 @@ def current_access() -> LiteratureAccess | None:
 
 
 async def build_access(
-    user, tenant_id: int, *, include_trashed: bool = False, rids=None, paper_ids=None, revision_ids=None,
+    user,
+    tenant_id: int,
+    *,
+    include_trashed: bool = False,
+    rids=None,
+    paper_ids=None,
+    revision_ids=None,
     catalog_only: bool = False,
 ) -> LiteratureAccess:
     from yuxi.knowledge.manager import KnowledgeBaseManager
@@ -110,12 +116,19 @@ async def build_access(
         ]
         if catalog_only:
             return LiteratureAccess(
-                tenant_id, frozenset(), frozenset(), {}, {}, user,
-                catalog_only=True, allowed_kbs=frozenset(allowed_kbs),
+                tenant_id,
+                frozenset(),
+                frozenset(),
+                {},
+                {},
+                user,
+                catalog_only=True,
+                allowed_kbs=frozenset(allowed_kbs),
             )
         selections = []
         for values, column in (
-            (rids, LiteraturePaper.rid), (paper_ids, LiteraturePaper.id),
+            (rids, LiteraturePaper.rid),
+            (paper_ids, LiteraturePaper.id),
             (revision_ids, LiteraturePaper.source_revision_id),
         ):
             if values is not None:
@@ -214,10 +227,12 @@ async def asset_access_scope(user, tenant_id: int, object_name: str):
                 selection = {"paper_ids": (int(owner),)}
             elif namespace == "reports" and owner.removesuffix(".md").isdigit():
                 async with pg_manager.get_async_session_context() as db:
-                    report = await db.scalar(select(LiteratureReport).where(
-                        LiteratureReport.id == int(owner.removesuffix(".md")),
-                        LiteratureReport.tenant_id == tenant_id,
-                    ))
+                    report = await db.scalar(
+                        select(LiteratureReport).where(
+                            LiteratureReport.id == int(owner.removesuffix(".md")),
+                            LiteratureReport.tenant_id == tenant_id,
+                        )
+                    )
                     selection = {"rids": tuple(report.source_rids_json or ()) if report else ()}
     async with access_scope(user, tenant_id, **selection) as scope:
         yield scope

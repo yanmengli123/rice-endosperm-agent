@@ -414,8 +414,11 @@ export const checkAdminPermission = () => {
   return true
 }
 
-// 检查当前用户是否有超级管理员权限
+// 检查当前用户是否有超级管理员权限（与 checkAdminPermission 同款 throw 语义）
 export const checkSuperAdminPermission = () => {
   const userStore = useUserStore()
-  return userStore.isSuperAdmin
+  if (!userStore.isSuperAdmin) {
+    throw new Error('需要超级管理员权限')
+  }
+  return true
 }

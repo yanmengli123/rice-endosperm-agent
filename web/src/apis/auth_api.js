@@ -165,7 +165,8 @@ async function getManagedUserStats(uid, days = 14) {
 }
 
 async function resetManagedUserPassword(uid, newPassword) {
-  return apiAdminPut(`/api/auth/users/${encodeURIComponent(uid)}/password`, {
+  // 后端无独立密码端点：PUT /api/auth/users/{user_id}（UserUpdate.password，min_length=8）
+  return apiAdminPut(`/api/auth/users/${encodeURIComponent(uid)}`, {
     password: newPassword
   })
 }

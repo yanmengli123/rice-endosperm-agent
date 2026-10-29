@@ -11,6 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import aliased
 
 from yuxi.knowledge.base import KnowledgeBase
+from yuxi.knowledge.evidence.verbatim import escape_like
 from yuxi.knowledge.products.registry import is_derived_product, is_evidence_authority
 from yuxi.knowledge.research_evidence import (
     build_evidence_semantics,
@@ -318,18 +319,18 @@ async def _query_managed_graph_source(
     else:
         filters = []
         for token in tokens:
-            pattern = f"%{token}%"
+            pattern = f"%{escape_like(token)}%"
             filters.extend(
                 [
-                    source_entity.name.ilike(pattern),
-                    source_entity.normalized_name.ilike(pattern),
-                    target_entity.name.ilike(pattern),
-                    target_entity.normalized_name.ilike(pattern),
-                    KnowledgeGraphTriple.relation_type.ilike(pattern),
-                    KnowledgeGraphTriple.content.ilike(pattern),
-                    KnowledgeGraphRelationEvidence.pmid.ilike(pattern),
-                    KnowledgeGraphRelationEvidence.doi.ilike(pattern),
-                    KnowledgeGraphRelationEvidence.evidence_quote.ilike(pattern),
+                    source_entity.name.ilike(pattern, escape="/"),
+                    source_entity.normalized_name.ilike(pattern, escape="/"),
+                    target_entity.name.ilike(pattern, escape="/"),
+                    target_entity.normalized_name.ilike(pattern, escape="/"),
+                    KnowledgeGraphTriple.relation_type.ilike(pattern, escape="/"),
+                    KnowledgeGraphTriple.content.ilike(pattern, escape="/"),
+                    KnowledgeGraphRelationEvidence.pmid.ilike(pattern, escape="/"),
+                    KnowledgeGraphRelationEvidence.doi.ilike(pattern, escape="/"),
+                    KnowledgeGraphRelationEvidence.evidence_quote.ilike(pattern, escape="/"),
                 ]
             )
 

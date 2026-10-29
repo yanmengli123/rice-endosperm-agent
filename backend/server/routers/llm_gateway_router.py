@@ -373,7 +373,9 @@ async def chat_completions(request: _ChatCompletionRequest, authorization: str |
 
         tap_run_id = str(run.id) if token_stream_enabled() else None
         return StreamingResponse(
-            _stream_completion(model, messages, call.id, completion_id, created, request.model, tap_run_id, publish_token_delta),
+            _stream_completion(
+                model, messages, call.id, completion_id, created, request.model, tap_run_id, publish_token_delta
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -415,7 +417,9 @@ async def chat_completions(request: _ChatCompletionRequest, authorization: str |
         await asyncio.shield(record_call(call.id, usage, status, error))
 
 
-async def _stream_completion(model, messages, call_id, completion_id, created, requested_model):
+async def _stream_completion(
+    model, messages, call_id, completion_id, created, requested_model, tap_run_id=None, publish=None
+):
     usage, finish, status, error = None, None, "failed", None
     try:
         async for chunk in model.astream(messages):

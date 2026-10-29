@@ -104,6 +104,8 @@ LITERATURE_NOTES = KnowledgeProductSpec(
     capabilities=_LLMWIKI_CAPABILITIES,
 )
 
+# 生产者已于 literature-simplify 下线；保留类型仅为存量库兼容（get_product_spec/
+# 快照/证据通道封锁仍需识别该 kb_type），不再支持新发布。
 LITERATURE_TOPICS = KnowledgeProductSpec(
     kb_type="literature_topics",
     category="derived_product",
@@ -113,7 +115,7 @@ LITERATURE_TOPICS = KnowledgeProductSpec(
         supports_upload=False,
         supports_source_binding=True,
         supports_raw_evidence=False,
-        supports_publication=True,
+        supports_publication=False,
     ),
 )
 

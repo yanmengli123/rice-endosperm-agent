@@ -37,7 +37,14 @@ async def env(monkeypatch):
         connection.execute("PRAGMA foreign_keys=ON")
 
     async with engine.begin() as conn:
-        for model in (Tenant, LiteraturePaper, LiteratureCitation, LiteratureReferenceBatch, LiteratureReferenceMember, LiteratureReferenceRecord):
+        for model in (
+            Tenant,
+            LiteraturePaper,
+            LiteratureCitation,
+            LiteratureReferenceBatch,
+            LiteratureReferenceMember,
+            LiteratureReferenceRecord,
+        ):
             await conn.run_sync(model.__table__.create)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     async with sessions() as db:

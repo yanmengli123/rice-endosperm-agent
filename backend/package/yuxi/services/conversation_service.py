@@ -588,6 +588,33 @@ async def delete_thread_view(
 ) -> dict:
     conv_repo = ConversationRepository(db)
     await require_user_conversation(conv_repo, thread_id, str(current_uid))
+    # 删除前取消线程内仍在运行的 run：消息即将不可见，继续跑完只会产出指向
+    # 已删线程的孤儿输出。取消失败不阻断删除（warning 即可）。
+    try:
+        from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES
+        from yuxi.services.agent_run_service import request_cancel_agent_run
+        from yuxi.storage.postgres.models_business import AgentRun as _AgentRun
+
+        active_runs = (
+            (
+                await db.execute(
+                    select(_AgentRun.id).where(
+                        _AgentRun.conversation_thread_id == thread_id,
+                        _AgentRun.uid == str(current_uid),
+                        _AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for active_run_id in active_runs:
+            try:
+                await request_cancel_agent_run(run_id=active_run_id, current_uid=str(current_uid), db=db)
+            except Exception as error:  # noqa: BLE001 —— 单个 run 取消失败不阻断删除
+                logger.warning(f"取消线程 {thread_id} 内运行中 run {active_run_id} 失败: {type(error).__name__}")
+    except Exception as error:  # noqa: BLE001 —— 取消扫描整体失败不阻断删除
+        logger.warning(f"删除线程 {thread_id} 前取消活跃 run 失败: {type(error).__name__}")
     deleted = await conv_repo.delete_conversation(thread_id, soft_delete=True, uid=str(current_uid))
     if not deleted:
         raise HTTPException(status_code=404, detail="对话线程不存在")

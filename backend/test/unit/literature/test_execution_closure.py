@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 import io
 import json
 from types import SimpleNamespace
-import sqlite3
 import zipfile
 
 import pytest

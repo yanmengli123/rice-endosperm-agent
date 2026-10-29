@@ -257,9 +257,7 @@ async def process_literature_navigation_index(ctx: dict, index_id: str):
             from yuxi.storage.postgres.models_business import User
 
             async with pg_manager.get_async_session_context() as session:
-                user = (
-                    await session.execute(select(User).where(User.uid == run.requested_by))
-                ).scalar_one_or_none()
+                user = (await session.execute(select(User).where(User.uid == run.requested_by))).scalar_one_or_none()
                 if user is None or user.is_disabled or user.is_deleted:
                     raise ValueError("请求者不存在或已停用")
                 if await resolve_tenant_id(session, user.uid) != run.tenant_id:

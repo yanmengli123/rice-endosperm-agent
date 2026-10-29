@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from yuxi.knowledge.products.contracts import EvidenceEnvelope, WikiNavigationHit, to_evidence_envelope
+from yuxi.utils import logger
 
 
 class AuthorityGateError(Exception):
@@ -32,13 +33,21 @@ class AuthorityGate:
         而不是抛异常——批量管道里一条脏行不应中断整个回答。
         """
         envelopes: list[EvidenceEnvelope] = []
+        rejected = 0
         for row in rows or []:
             if not isinstance(row, dict):
+                rejected += 1
                 continue
             try:
                 envelopes.append(to_evidence_envelope(row))
             except Exception:  # noqa: BLE001 - 单行越界不中断批处理
+                rejected += 1
                 continue
+        if rejected:
+            logger.warning(
+                f"AuthorityGate.filter_evidence_rows dropped {rejected}/{len(rows or [])} rows "
+                "(derived/unauthorized products or malformed rows)"
+            )
         return envelopes
 
     @staticmethod

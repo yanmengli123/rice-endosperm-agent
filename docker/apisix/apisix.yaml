@@ -300,6 +300,10 @@ routes:
                     minLength: 1
                     maxLength: 20000
                 additionalProperties: false
+            stream:
+              type: boolean
+            agent_call_meta:
+              type: object
             thread_id:
               type: string
               minLength: 1
@@ -317,6 +321,12 @@ routes:
               type: boolean
               enum:
                 - true
+            mention_protocol:
+              type: string
+            mentions:
+              type: array
+              items:
+                type: object
           additionalProperties: false
         rejected_code: 400
         rejected_msg: invalid request

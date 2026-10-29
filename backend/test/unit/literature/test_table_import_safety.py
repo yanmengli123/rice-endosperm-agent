@@ -121,7 +121,7 @@ def test_csv_formula_like_cells_stay_literal():
         "@SUM(Journal),1.0,2024\n"
         "+Journal B,1.5,2024\n"
         "-Journal C,1.5,2024\n"
-    ).encode("utf-8")
+    ).encode()
     parsed = journals.parse_journals_table(payload, "injection.csv")
     names = {row["journal_name"] for row in parsed["rows"]}
     # 四个注入样式串全部按字面进入期刊名（数值列仍正常解析），无任何求值/剥离产物
@@ -167,14 +167,12 @@ async def env(monkeypatch):
             lambda: _AsyncSessionContext(session),
         )
         # 原始行分支只在有用户上下文时启用；rids 模拟"用户可访问来源集合"
-        #（导入新建的文献并入自己的可访问范围，与真实 access 语义一致）
+        # （导入新建的文献并入自己的可访问范围，与真实 access 语义一致）
         scope_rids: set[str] = set()
         monkeypatch.setattr(
             reference_import,
             "current_access",
-            lambda: SimpleNamespace(
-                tenant_id=1, user=SimpleNamespace(uid="safety-user"), rids=scope_rids
-            ),
+            lambda: SimpleNamespace(tenant_id=1, user=SimpleNamespace(uid="safety-user"), rids=scope_rids),
         )
         # 原件落 MinIO 不在安全验收范围内：记录调用即可
         stored: list[tuple[int, str]] = []
@@ -197,18 +195,15 @@ async def test_raw_rows_retained_and_reupload_idempotent(env):
 
     session = env.session
     rows = (
-        await session.execute(
-            select(LiteratureReferenceRecord).order_by(LiteratureReferenceRecord.record_no)
-        )
-    ).scalars().all()
+        (await session.execute(select(LiteratureReferenceRecord).order_by(LiteratureReferenceRecord.record_no)))
+        .scalars()
+        .all()
+    )
     assert len(rows) == first["source_records"]
     # 原始行保留来源字段与身份关联：payload 含原始标题，rid 指向去重文献
     assert all(row.payload_json.get("title") for row in rows)
     assert all(row.rid for row in rows)
-    known_rids = {
-        paper.rid
-        for paper in (await session.execute(select(LiteraturePaper))).scalars()
-    }
+    known_rids = {paper.rid for paper in (await session.execute(select(LiteraturePaper))).scalars()}
     assert {row.rid for row in rows} <= known_rids
     # 重传前把已建文献并入可访问范围（真实语义：自己的导入结果自己可见）
     env.scope_rids.update(known_rids)
@@ -221,17 +216,17 @@ async def test_raw_rows_retained_and_reupload_idempotent(env):
     assert second["batch_id"] == first["batch_id"]
     assert second["papers_written"] == 0
     assert second["papers_skipped"] == papers_first
-    assert (
-        await session.execute(select(func.count()).select_from(LiteratureReferenceRecord))
-    ).scalar_one() == first["source_records"]
+    assert (await session.execute(select(func.count()).select_from(LiteratureReferenceRecord))).scalar_one() == first[
+        "source_records"
+    ]
 
     # 历史批次缺行（模拟旧数据）→ 重传按 receipt 补齐 occurrences
     await session.execute(delete(LiteratureReferenceRecord))
     await session.commit()
     backfill = await reference_import.import_references(1, wos, source_name="wos_sample.txt")
     assert backfill["batch_id"] == first["batch_id"]
-    assert (
-        await session.execute(select(func.count()).select_from(LiteratureReferenceRecord))
-    ).scalar_one() == first["source_records"]
+    assert (await session.execute(select(func.count()).select_from(LiteratureReferenceRecord))).scalar_one() == first[
+        "source_records"
+    ]
     # 补齐不得新建文献
     assert backfill["papers_written"] == 0

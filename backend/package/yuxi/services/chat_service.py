@@ -2785,9 +2785,9 @@ async def _persist_run_total_tokens(
                 model_spec=model_spec,
                 total_tokens=int(total_tokens),
                 input_tokens=dsh_usage["input_tokens"] if dsh_usage else 0,
-                output_tokens=(
-                    dsh_usage["output_tokens"] + max(0, int(total_tokens) - dsh_usage["total_tokens"])
-                ) if dsh_usage else 0,
+                output_tokens=(dsh_usage["output_tokens"] + max(0, int(total_tokens) - dsh_usage["total_tokens"]))
+                if dsh_usage
+                else 0,
                 estimated=bool(estimated),
                 credential_source="user_byok" if credential_ref else "platform",
                 credential_id=credential_ref.get("credential_id"),
@@ -2796,6 +2796,46 @@ async def _persist_run_total_tokens(
             )
         )
     await db.flush()
+
+
+async def _persist_aborted_run_usage(
+    *,
+    agent,
+    context,
+    langgraph_config: dict | None,
+    token_usage_baseline: int | None,
+    meta: dict,
+) -> None:
+    """取消/连接中断/通用异常路径的用量补账（best-effort）。
+
+    正常路径在生成器收尾统一经 ``_persist_run_total_tokens`` 记账；提前退出时
+    从 checkpoint 读已累计的 ``run_model_usage`` 补写 ledger。该函数对同 run
+    已有 ledger 行幂等；基线未建立（护栏 pre-model return）或无用量时跳过。
+    补账失败只告警，绝不掩盖原异常或改变原终态。
+    """
+    run_id = meta.get("run_id")
+    if not run_id or langgraph_config is None:
+        return
+    try:
+        graph = await agent.get_graph(context=context)
+        state = await graph.aget_state(langgraph_config)
+        total_tokens = _token_usage_delta(_extract_total_tokens(state), token_usage_baseline)
+        if not total_tokens:
+            return
+        usage_payload = (getattr(state, "values", None) or {}).get("token_usage")
+        async with pg_manager.get_async_session_context() as usage_db:
+            await _persist_run_total_tokens(
+                usage_db,
+                run_id,
+                total_tokens,
+                uid=meta.get("uid"),
+                model_spec=meta.get("model_spec"),
+                estimated=bool(usage_payload.get("estimate")) if isinstance(usage_payload, dict) else None,
+                credential_ref=meta.get("user_credential"),
+                policy_version=meta.get("policy_version"),
+            )
+    except Exception as error:  # noqa: BLE001 —— 补账绝不影响原终态
+        logger.warning(f"补写中止 run 用量失败（忽略）: run_id={run_id}, {type(error).__name__}")
 
 
 async def persist_direct_call_usage(
@@ -3413,6 +3453,9 @@ async def stream_agent_chat(
     buffered_root_message_id: str | None = None
     buffered_root_metadata: dict[str, Any] | None = None
     source_output_validation: dict[str, Any] | None = None
+    # 在 try 内才赋值；预置 None 供 except 路径判断「基线未建立 ⇒ 无用量可补账」。
+    langgraph_config: dict | None = None
+    token_usage_baseline: int | None = None
 
     try:
         credential_context_token = await _activate_user_credential(db=db, uid=uid, meta=meta)
@@ -4682,6 +4725,15 @@ async def stream_agent_chat(
                     source_guard_metadata=guard_metadata,
                 )
 
+            # 中止前模型可能已消耗 token：从 checkpoint 补写 usage_ledger（best-effort）。
+            await _persist_aborted_run_usage(
+                agent=agent,
+                context=context,
+                langgraph_config=langgraph_config,
+                token_usage_baseline=token_usage_baseline,
+                meta=meta,
+            )
+
         cleanup_task = asyncio.create_task(save_cleanup())
         try:
             await asyncio.shield(cleanup_task)
@@ -4752,6 +4804,15 @@ async def stream_agent_chat(
                 source_guard_metadata=guard_metadata,
             )
 
+        # 失败前模型可能已消耗 token：从 checkpoint 补写 usage_ledger（best-effort）。
+        await _persist_aborted_run_usage(
+            agent=agent,
+            context=context,
+            langgraph_config=langgraph_config,
+            token_usage_baseline=token_usage_baseline,
+            meta=meta,
+        )
+
         yield make_chunk(
             status="error",
             error_type=error_type,
@@ -4776,7 +4837,8 @@ async def stream_agent_chat(
         reset_mcp_execution_context(mcp_context_token)
         reset_browser_execution_context(browser_context_token)
         end_artifact_accumulation(artifact_accumulation_token)
-        flush_langfuse()
+        # flush 是同步阻塞网络调用：丢线程池执行，不卡事件循环（feedback_service 同款）。
+        await asyncio.to_thread(flush_langfuse)
 
 
 async def stream_agent_resume(
@@ -5135,7 +5197,8 @@ async def stream_agent_resume(
         reset_mcp_execution_context(mcp_context_token)
         reset_browser_execution_context(browser_context_token)
         end_artifact_accumulation(artifact_accumulation_token)
-        flush_langfuse()
+        # flush 是同步阻塞网络调用：丢线程池执行，不卡事件循环（feedback_service 同款）。
+        await asyncio.to_thread(flush_langfuse)
 
 
 def _serialize_state_messages(values: dict[str, Any]) -> list[dict[str, Any]]:

@@ -113,6 +113,8 @@ class PostgresManager(metaclass=SingletonMeta):
     async def create_business_tables(self):
         """创建所有业务数据表"""
         self._check_initialized()
+        if await self._runtime_schema_ready():
+            return
         async with self.async_engine.begin() as conn:
             await conn.execute(text(SCHEMA_LOCK_SQL))
             await conn.run_sync(BusinessBase.metadata.create_all)
@@ -740,11 +742,21 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(text("ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS created_by VARCHAR(64)"))
         await conn.execute(text("UPDATE tasks SET tenant_id = 1 WHERE tenant_id IS NULL"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_tenant ON tasks(tenant_id)"))
+        # knowledge_bases 属知识域（KnowledgeBase.metadata 建表），而本迁移属业务域、
+        # 全新库分路径初始化时可能先于知识域建表执行：跨域表的全部引用语句统一加
+        # to_regclass 存在性守卫；同域表由 BusinessBase 先建，无需守卫。
+        # 已迁移库不重跑本迁移，零风险。
         for table in scoped_tables:
             await conn.execute(text(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS tenant_id BIGINT"))
-            await conn.execute(text(f"UPDATE {table} SET tenant_id = 1 WHERE tenant_id IS NULL"))
-            await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN tenant_id SET NOT NULL"))
-            await conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant ON {table}(tenant_id)"))
+            if table == "knowledge_bases":
+                guard = f"DO $$ BEGIN IF to_regclass('public.{table}') IS NOT NULL THEN {{}}; END IF; END $$"
+            else:
+                guard = "{}"
+            await conn.execute(text(guard.format(f"UPDATE {table} SET tenant_id = 1 WHERE tenant_id IS NULL")))
+            await conn.execute(text(guard.format(f"ALTER TABLE {table} ALTER COLUMN tenant_id SET NOT NULL")))
+            await conn.execute(
+                text(guard.format(f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant ON {table}(tenant_id)"))
+            )
             constraint_sql = (
                 f"ALTER TABLE {table} ADD CONSTRAINT fk_{table}_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id)"
             )
@@ -756,7 +768,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 )
             ).scalar()
             if not exists:
-                await conn.execute(text(constraint_sql))
+                await conn.execute(text(guard.format(constraint_sql)))
 
     async def _migration_0003_device_sessions(self, conn) -> None:
         """P2 认证：设备会话族与旋转刷新令牌。"""
@@ -1146,6 +1158,9 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0118_pdf_worker_minimal_reads", "_migration_0118_pdf_worker_minimal_reads"),
         ("0119_pdf_source_lock", "_migration_0119_pdf_source_lock"),
         ("0120_literature_report_jobs", "_migration_0120_literature_report_jobs"),
+        ("0121_missing_indexes_feedback_unique", "_migration_0121_missing_indexes_feedback_unique"),
+        ("0122_rls_tenant_setting_nullif", "_migration_0122_rls_tenant_setting_nullif"),
+        ("0123_lightweight_runtime_security", "_migration_0123_lightweight_runtime_security"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:
@@ -1160,10 +1175,12 @@ class PostgresManager(metaclass=SingletonMeta):
             await conn.execute(text(f"ALTER TABLE literature_translation_jobs {ddl}"))
         await conn.run_sync(lambda sync_conn: LiteraturePdfModelCall.__table__.create(sync_conn, checkfirst=True))
         await conn.execute(text("ALTER TABLE literature_pdf_model_calls ENABLE ROW LEVEL SECURITY"))
-        await conn.execute(text(
-            "CREATE POLICY p_literature_pdf_calls_tenant ON literature_pdf_model_calls "
-            "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::bigint)"
-        ))
+        await conn.execute(
+            text(
+                "CREATE POLICY p_literature_pdf_calls_tenant ON literature_pdf_model_calls "
+                "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::bigint)"
+            )
+        )
 
     async def _migration_0116_literature_production_security(self, conn) -> None:
         from yuxi.literature.production_security import migrate
@@ -1171,9 +1188,14 @@ class PostgresManager(metaclass=SingletonMeta):
         await migrate(conn)
 
     async def _migration_0117_pdf_usage_resolution(self, conn) -> None:
-        await conn.execute(text("ALTER TABLE literature_pdf_model_calls ADD COLUMN IF NOT EXISTS "
-                                "resolution_json JSONB NOT NULL DEFAULT '{}'::jsonb"))
-        await conn.execute(text("""
+        await conn.execute(
+            text(
+                "ALTER TABLE literature_pdf_model_calls ADD COLUMN IF NOT EXISTS "
+                "resolution_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+            )
+        )
+        await conn.execute(
+            text("""
             CREATE OR REPLACE FUNCTION yuxi_pdf_resolution_immutable() RETURNS trigger
             LANGUAGE plpgsql SET search_path=pg_catalog,public AS $fn$ BEGIN
               IF OLD.resolution_json <> '{}'::jsonb AND
@@ -1183,12 +1205,15 @@ class PostgresManager(metaclass=SingletonMeta):
               IF TG_OP='DELETE' THEN RETURN OLD; END IF;
               RETURN NEW;
             END $fn$
-        """))
+        """)
+        )
         await conn.execute(text("DROP TRIGGER IF EXISTS pdf_resolution_immutable ON literature_pdf_model_calls"))
-        await conn.execute(text(
-            "CREATE TRIGGER pdf_resolution_immutable BEFORE UPDATE OR DELETE "
-            "ON literature_pdf_model_calls FOR EACH ROW EXECUTE FUNCTION yuxi_pdf_resolution_immutable()"
-        ))
+        await conn.execute(
+            text(
+                "CREATE TRIGGER pdf_resolution_immutable BEFORE UPDATE OR DELETE "
+                "ON literature_pdf_model_calls FOR EACH ROW EXECUTE FUNCTION yuxi_pdf_resolution_immutable()"
+            )
+        )
         await conn.execute(text("REVOKE DELETE ON literature_pdf_model_calls FROM yuxi_api_runtime"))
 
     async def _migration_0118_pdf_worker_minimal_reads(self, conn) -> None:
@@ -1205,51 +1230,148 @@ class PostgresManager(metaclass=SingletonMeta):
 
         await conn.run_sync(lambda sync_conn: LiteratureReportJob.__table__.create(sync_conn, checkfirst=True))
         await conn.execute(text("ALTER TABLE literature_report_jobs ENABLE ROW LEVEL SECURITY"))
-        await conn.execute(text(
-            "CREATE POLICY p_literature_report_jobs_tenant ON literature_report_jobs "
-            "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::bigint)"
-        ))
+        await conn.execute(
+            text(
+                "CREATE POLICY p_literature_report_jobs_tenant ON literature_report_jobs "
+                "USING (tenant_id = NULLIF(current_setting('yuxi.tenant_id', true), '')::bigint)"
+            )
+        )
         # production_security 的 GRANT ON ALL TABLES 只覆盖其执行时已存在的表；
         # 新表必须显式补上受限运行角色的表/序列权限（角色幂等创建，非受限库同样安全）。
-        await conn.execute(text(
-            "DO $role$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='yuxi_api_runtime') THEN "
-            "CREATE ROLE yuxi_api_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; "
-            "END IF; END $role$"
-        ))
-        await conn.execute(text(
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON literature_report_jobs TO yuxi_api_runtime"
-        ))
-        await conn.execute(text(
-            "GRANT USAGE, SELECT ON SEQUENCE literature_report_jobs_id_seq TO yuxi_api_runtime"
-        ))
+        await conn.execute(
+            text(
+                "DO $role$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='yuxi_api_runtime') THEN "
+                "CREATE ROLE yuxi_api_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; "
+                "END IF; END $role$"
+            )
+        )
+        await conn.execute(text("GRANT SELECT, INSERT, UPDATE, DELETE ON literature_report_jobs TO yuxi_api_runtime"))
+        await conn.execute(text("GRANT USAGE, SELECT ON SEQUENCE literature_report_jobs_id_seq TO yuxi_api_runtime"))
+
+    async def _migration_0121_missing_indexes_feedback_unique(self, conn) -> None:
+        """补齐 ORM 声明（index=True）但历史建表路径遗漏的物理索引，并为消息反馈加幂等唯一约束。
+
+        - model_user_credentials.tenant_id / literature_reports.tenant_id /
+          users.is_disabled / evidence_benchmark_candidates.feedback_id：
+          ORM 与 information_schema 对照发现的漂移，对齐后 create_all 不再重复建。
+        - message_feedbacks (message_id, uid) 唯一：feedback_service 依赖它把并发重复
+          提交按幂等成功处理（当前表为空，无存量重复冲突）。
+        """
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_model_user_credentials_tenant_id ON model_user_credentials (tenant_id)")
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_evidence_benchmark_candidates_feedback_id "
+                "ON evidence_benchmark_candidates (feedback_id)"
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_literature_reports_tenant_id ON literature_reports (tenant_id)")
+        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_is_disabled ON users (is_disabled)"))
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_feedbacks_message_uid "
+                "ON message_feedbacks (message_id, uid)"
+            )
+        )
+
+    async def _migration_0122_rls_tenant_setting_nullif(self, conn) -> None:
+        """宽容租户 RLS 策略补 NULLIF。
+
+        历史 literature 系策略直接写 current_setting('yuxi.tenant_id', true)：会话未设置
+        该 GUC 时返回 NULL 无碍，但设置为空串时 ''::bigint 转换直接报错。此处遍历
+        pg_policies，对引用该 GUC 且尚未包 NULLIF 的表达式做精确子串替换（保持
+        ::bigint / ::text 转换位置不变），with_check 非空同样处理。已含 NULLIF 的跳过。
+        """
+        await conn.execute(
+            text("""
+            DO $fix$
+            DECLARE
+                rec record;
+                new_qual text;
+                new_check text;
+            BEGIN
+                FOR rec IN
+                    SELECT schemaname, tablename, policyname, qual, with_check
+                    FROM pg_policies
+                    WHERE qual LIKE '%current_setting(''yuxi.tenant_id''%'
+                      AND qual NOT LIKE '%NULLIF(current_setting(''yuxi.tenant_id''%'
+                LOOP
+                    -- 变体一（pg_get_expr 实际输出）：current_setting('yuxi.tenant_id'::text, true)
+                    new_qual := replace(rec.qual,
+                        'current_setting(''yuxi.tenant_id''::text, true)',
+                        'NULLIF(current_setting(''yuxi.tenant_id''::text, true), ''''::text)');
+                    -- 变体二（无 ::text 标注的手写策略）
+                    new_qual := replace(new_qual,
+                        'current_setting(''yuxi.tenant_id'', true)',
+                        'NULLIF(current_setting(''yuxi.tenant_id'', true), '''')');
+                    IF new_qual IS DISTINCT FROM rec.qual THEN
+                        EXECUTE format('ALTER POLICY %I ON %I.%I USING %s',
+                                       rec.policyname, rec.schemaname, rec.tablename, new_qual);
+                    END IF;
+                    IF rec.with_check IS NOT NULL THEN
+                        new_check := replace(rec.with_check,
+                            'current_setting(''yuxi.tenant_id''::text, true)',
+                            'NULLIF(current_setting(''yuxi.tenant_id''::text, true), ''''::text)');
+                        new_check := replace(new_check,
+                            'current_setting(''yuxi.tenant_id'', true)',
+                            'NULLIF(current_setting(''yuxi.tenant_id'', true), '''')');
+                        IF new_check IS DISTINCT FROM rec.with_check THEN
+                            EXECUTE format('ALTER POLICY %I ON %I.%I WITH CHECK %s',
+                                           rec.policyname, rec.schemaname, rec.tablename, new_check);
+                        END IF;
+                    END IF;
+                END LOOP;
+            END $fix$
+        """)
+        )
+
+    async def _migration_0123_lightweight_runtime_security(self, conn) -> None:
+        from yuxi.literature.lightweight_security import migrate
+
+        await migrate(conn)
 
     async def _runtime_schema_ready(self):
         if os.getenv("YUXI_DB_SKIP_MIGRATIONS", "").lower() != "true":
             return False
         async with self.async_engine.connect() as conn:
-            unsafe = await conn.scalar(text(
-                "SELECT rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication "
-                "FROM pg_roles WHERE rolname=current_user"
-            ))
-            unsafe = unsafe or await conn.scalar(text(
-                "SELECT has_schema_privilege(current_user,'public','CREATE') OR NOT "
-                "(pg_has_role(current_user,'yuxi_api_runtime','USAGE') OR "
-                "pg_has_role(current_user,'yuxi_pdf_runtime','USAGE')) OR EXISTS "
-                "(SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'MEMBER') AND "
-                "(r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR "
-                "r.oid IN (SELECT relowner FROM pg_class WHERE relname LIKE 'literature_%')))"
-            ))
-            boundaries = await conn.scalar(text(
-                "SELECT count(*) FROM pg_policies p JOIN pg_class c ON c.relname=p.tablename "
-                "JOIN pg_namespace n ON n.oid=c.relnamespace AND n.nspname=p.schemaname "
-                "WHERE p.schemaname='public' AND c.relrowsecurity AND p.permissive='RESTRICTIVE' "
-                "AND p.cmd='ALL' AND p.policyname='runtime_tenant_boundary' AND p.tablename IN "
-                "('literature_papers','literature_translation_jobs','literature_pdf_model_calls',"
-                "'literature_variants','agent_runs','usage_ledger')"
-            ))
-            ready = await conn.scalar(text(
-                "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version=:version)"
-            ), {"version": self._VERSIONED_MIGRATIONS[-1][0]})
+            unsafe = await conn.scalar(
+                text(
+                    "SELECT rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication "
+                    "FROM pg_roles WHERE rolname=current_user"
+                )
+            )
+            unsafe = unsafe or await conn.scalar(
+                text(
+                    "SELECT has_schema_privilege(current_user,'public','CREATE') OR NOT "
+                    "(pg_has_role(current_user,'yuxi_api_runtime','USAGE') OR "
+                    "pg_has_role(current_user,'yuxi_worker_runtime','USAGE')) OR EXISTS "
+                    "(SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'MEMBER') AND "
+                    "(r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR "
+                    "r.oid IN (SELECT relowner FROM pg_class WHERE relname LIKE 'literature_%')))"
+                )
+            )
+            worker = await conn.scalar(text("SELECT pg_has_role(current_user,'yuxi_worker_runtime','USAGE')"))
+            boundary_name = "lightweight_worker_boundary" if worker else "runtime_tenant_boundary"
+            boundaries = await conn.scalar(
+                text(
+                    "SELECT count(*) FROM pg_policies p JOIN pg_class c ON c.relname=p.tablename "
+                    "JOIN pg_namespace n ON n.oid=c.relnamespace AND n.nspname=p.schemaname "
+                    "WHERE p.schemaname='public' AND c.relrowsecurity AND p.permissive='RESTRICTIVE' "
+                    "AND p.cmd='ALL' AND p.policyname=:policy AND p.tablename IN "
+                    "('literature_papers','literature_reader_renders','literature_cards',"
+                    "'literature_attachments','agent_runs','usage_ledger') "
+                    "AND EXISTS (SELECT 1 FROM unnest(p.roles) AS r(name) "
+                    "WHERE CASE WHEN r.name='public' THEN true "
+                    "ELSE pg_has_role(current_user,r.name,'USAGE') END)"
+                ), {"policy": boundary_name}
+            )
+            ready = await conn.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version=:version)"),
+                {"version": self._VERSIONED_MIGRATIONS[-1][0]},
+            )
             if unsafe or not ready or boundaries != 6:
                 raise RuntimeError("Runtime database role/schema failed production admission")
         return True
@@ -1264,11 +1386,13 @@ class PostgresManager(metaclass=SingletonMeta):
 
         await conn.run_sync(lambda sync_conn: DshModelCall.__table__.create(sync_conn, checkfirst=True))
         await conn.execute(text("ALTER TABLE dsh_model_calls ENABLE ROW LEVEL SECURITY"))
-        await conn.execute(text(
-            "CREATE POLICY p_dsh_model_calls_own_uid ON dsh_model_calls "
-            "USING (EXISTS (SELECT 1 FROM agent_runs r WHERE r.id = run_id "
-            "AND r.uid = NULLIF(current_setting('yuxi.uid', true), '')))"
-        ))
+        await conn.execute(
+            text(
+                "CREATE POLICY p_dsh_model_calls_own_uid ON dsh_model_calls "
+                "USING (EXISTS (SELECT 1 FROM agent_runs r WHERE r.id = run_id "
+                "AND r.uid = NULLIF(current_setting('yuxi.uid', true), '')))"
+            )
+        )
 
     async def _migration_0112_literature_topic_analysis(self, conn) -> None:
         """原始行/不可变语料/私有分析运行。旧批次无行数据时不猜测补齐。"""
@@ -1304,8 +1428,10 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         )
         await conn.execute(
-            text("CREATE INDEX IF NOT EXISTS ix_topic_runs_owner "
-                 "ON literature_topic_runs (tenant_id, created_by, created_at)")
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_topic_runs_owner "
+                "ON literature_topic_runs (tenant_id, created_by, created_at)"
+            )
         )
 
     async def _migration_0111_literature_reference_batches(self, conn) -> None:
@@ -2674,22 +2800,29 @@ class PostgresManager(metaclass=SingletonMeta):
             )
         )
         statements = (
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_apps_tenant_type_app ON channel_apps(tenant_id, channel_type, platform_app_id)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_apps_path_token ON channel_apps(channel_type, path_token_hash)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_apps_tenant_type_app "
+            "ON channel_apps(tenant_id, channel_type, platform_app_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_apps_path_token "
+            "ON channel_apps(channel_type, path_token_hash)",
             "CREATE INDEX IF NOT EXISTS ix_channel_apps_service_uid ON channel_apps(service_uid)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_end_users ON channel_end_users(channel_app_id, platform_user_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_end_users "
+            "ON channel_end_users(channel_app_id, platform_user_id)",
             "CREATE INDEX IF NOT EXISTS ix_channel_end_users_app ON channel_end_users(channel_app_id)",
             "CREATE INDEX IF NOT EXISTS ix_channel_end_users_bound_uid ON channel_end_users(bound_uid)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_chats ON channel_chats(channel_app_id, platform_chat_id, owner_uid)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_chats "
+            "ON channel_chats(channel_app_id, platform_chat_id, owner_uid)",
             "CREATE INDEX IF NOT EXISTS ix_channel_chats_thread ON channel_chats(thread_id)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_messages_inbound ON channel_messages(channel_app_id, platform_message_id) WHERE direction = 'in'",
-            "CREATE INDEX IF NOT EXISTS ix_channel_messages_app_created ON channel_messages(channel_app_id, created_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_messages_inbound "
+            "ON channel_messages(channel_app_id, platform_message_id) WHERE direction = 'in'",
+            "CREATE INDEX IF NOT EXISTS ix_channel_messages_app_created "
+            "ON channel_messages(channel_app_id, created_at)",
             "CREATE INDEX IF NOT EXISTS ix_channel_messages_chat ON channel_messages(platform_chat_id)",
             "CREATE INDEX IF NOT EXISTS ix_channel_messages_run ON channel_messages(run_id)",
             "CREATE INDEX IF NOT EXISTS ix_channel_messages_status ON channel_messages(status)",
             "CREATE INDEX IF NOT EXISTS ix_channel_outbound_app ON channel_outbound_outbox(channel_app_id)",
             "CREATE INDEX IF NOT EXISTS ix_channel_outbound_message ON channel_outbound_outbox(channel_message_id)",
-            "CREATE INDEX IF NOT EXISTS ix_channel_outbound_status_due ON channel_outbound_outbox(status, next_attempt_at)",
+            "CREATE INDEX IF NOT EXISTS ix_channel_outbound_status_due "
+            "ON channel_outbound_outbox(status, next_attempt_at)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_pairings_code ON channel_pairings(code_hash)",
             "CREATE INDEX IF NOT EXISTS ix_channel_pairings_app ON channel_pairings(channel_app_id)",
         )
@@ -2870,7 +3003,8 @@ class PostgresManager(metaclass=SingletonMeta):
         )
         statements = (
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_domain_policy_tenant ON browser_domain_policies(tenant_id)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_connection_lease_device ON browser_connection_leases(device_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_connection_lease_device "
+            "ON browser_connection_leases(device_id)",
             "CREATE INDEX IF NOT EXISTS ix_browser_connection_leases_until ON browser_connection_leases(lease_until)",
         )
         for statement in statements:
@@ -5359,7 +5493,11 @@ class PostgresManager(metaclass=SingletonMeta):
             return
         await self._apply_versioned_migrations()
         stmts = [
-            "ALTER TABLE IF EXISTS departments ALTER COLUMN created_at SET DEFAULT NOW()",
+            # departments/users 的 created_at 为 naive-UTC 口径（models_business 同步）：
+            # DB 侧默认值用 now() AT TIME ZONE 'utc'，避免会话时区（上海）再解释偏移 8 小时。
+            # 0012 曾把两表设为 CURRENT_TIMESTAMP，此处每次启动幂等矫正。
+            "ALTER TABLE IF EXISTS departments ALTER COLUMN created_at SET DEFAULT (now() AT TIME ZONE 'utc')",
+            "ALTER TABLE IF EXISTS users ALTER COLUMN created_at SET DEFAULT (now() AT TIME ZONE 'utc')",
             "UPDATE departments SET created_at = NOW() WHERE created_at IS NULL",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",

@@ -36,6 +36,7 @@ import csv
 import hashlib
 import io
 import json
+import tempfile
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -433,13 +434,17 @@ def build_roundtrip_package(
             "将本包重新导入原库会为已导出实体创建新身份，建议仅导入到新库。"
         )
 
-    buffer = io.BytesIO()
+    # 滚动临时文件：小包留在内存，大包溢写磁盘，避免整包驻留内存
+    buffer = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("nodes.csv", built["nodes_csv"])
         archive.writestr("relationships.csv", built["relationships_csv"])
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
     filename = f"graph-roundtrip-{kb_id}.zip"
-    return {"filename": filename, "content": buffer.getvalue(), "media_type": "application/zip", "manifest": manifest}
+    buffer.seek(0)
+    content = buffer.read()
+    buffer.close()
+    return {"filename": filename, "content": content, "media_type": "application/zip", "manifest": manifest}
 
 
 def build_evidence_workbook(
@@ -1398,7 +1403,8 @@ def write_projection_graph_members(
     }
 
     tally = ProjectionTally()
-    buffer = io.BytesIO()
+    # 滚动临时文件：小包留在内存，大包溢写磁盘，避免整包驻留内存
+    buffer = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         files = {
             "nodes.jsonl": write_jsonl_member(
@@ -1448,9 +1454,13 @@ def close_projection_package(
         # 与 JSONL 成员同样走 zip64 通道：大包（>4GB 偏移）下也不因中央目录写不进而失败
         with archive.open("manifest.json", "w", force_zip64=True) as member:
             member.write(json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+    staged_buffer = staged["buffer"]
+    staged_buffer.seek(0)
+    content = staged_buffer.read()
+    staged_buffer.close()
     return {
         "filename": f"graph-projection-{kb_id}.zip",
-        "content": staged["buffer"].getvalue(),
+        "content": content,
         "media_type": "application/zip",
         "manifest": manifest,
     }

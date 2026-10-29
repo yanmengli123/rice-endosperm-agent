@@ -21,12 +21,12 @@ async def provision():
     try:
         async with connection.transaction():
             if not await connection.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version='0116_literature_production_security')"
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version='0123_lightweight_runtime_security')"
             ):
                 raise RuntimeError("Apply administrator migrations first")
             for name, group, filename in (
                 ("yuxi_api_login", "yuxi_api_runtime", "api.env"),
-                ("yuxi_pdf_login", "yuxi_pdf_runtime", "pdf.env"),
+                ("yuxi_worker_login", "yuxi_worker_runtime", "worker.env"),
             ):
                 file = output / filename
                 existing = dotenv_values(file) if file.exists() else {}
@@ -55,13 +55,6 @@ async def provision():
                     and not k.endswith("MIGRATION_URL")
                     and not k.endswith("SCHEDULER_DATABASE_URL")
                 }
-                if filename == "pdf.env":
-                    values = {
-                        k: v
-                        for k, v in values.items()
-                        if k.startswith(("MINIO_", "SUPER_TRANSLATE_", "REDIS_"))
-                        or k in ("RUNNING_IN_DOCKER", "SAVES_DIR", "NO_PROXY", "no_proxy")
-                    }
                 values.update(
                     {
                         "POSTGRES_URL": admin_url.set(username=name, password=password).render_as_string(
@@ -72,7 +65,7 @@ async def provision():
                         "RUNNING_IN_DOCKER": "true",
                     }
                 )
-                variable = "YUXI_API_RUNTIME_URL" if filename == "api.env" else "YUXI_PDF_RUNTIME_URL"
+                variable = "YUXI_API_RUNTIME_URL" if filename == "api.env" else "YUXI_WORKER_RUNTIME_URL"
                 runtime_urls[variable] = values["POSTGRES_URL"]
                 content = "".join(
                     k + "='" + v.replace("\\", "\\\\").replace("'", "\\'") + "'\n" for k, v in sorted(values.items())
@@ -82,9 +75,14 @@ async def provision():
     finally:
         await connection.close()
     compose_file = output / "compose.env"
-    compose_file.write_text("".join(k + "='" + v + "'\n" for k, v in runtime_urls.items()), encoding="utf-8")
+    compose_values = dict(dotenv_values(compose_file)) if compose_file.exists() else {}
+    compose_values.pop("YUXI_PDF_RUNTIME_URL", None)
+    compose_values.update(runtime_urls)
+    compose_file.write_text(
+        "".join(k + "='" + v + "'\n" for k, v in compose_values.items() if v is not None), encoding="utf-8"
+    )
     compose_file.chmod(0o600)
-    print("Restricted API/PDF logins provisioned; private runtime files written")
+    print("Restricted API/worker logins provisioned; private runtime files written")
 
 
 if __name__ == "__main__":

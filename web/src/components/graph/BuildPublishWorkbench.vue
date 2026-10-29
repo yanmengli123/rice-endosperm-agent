@@ -322,7 +322,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { Modal, message } from 'ant-design-vue'
 import { graphApi } from '@/apis/graph_api'
 import { graphBuildApi, kbReleaseApi } from '@/apis/knowledge_api'
@@ -429,6 +429,10 @@ watch(
   },
   { immediate: true }
 )
+// 组件卸载时停掉轮询，避免离开页面后 setInterval 继续打接口
+onUnmounted(() => {
+  resetPollTimer()
+})
 
 const confirmReset = () => {
   Modal.confirm({

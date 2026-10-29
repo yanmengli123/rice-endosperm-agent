@@ -19,7 +19,7 @@ async def migrate():
         # the established runtime roles only after all administrator DDL finishes.
         async with pg_manager.async_engine.begin() as conn:
             await conn.execute(text(SCHEMA_LOCK_SQL))
-            await pg_manager._migration_0118_pdf_worker_minimal_reads(conn)
+            await pg_manager._migration_0123_lightweight_runtime_security(conn)
     finally:
         await pg_manager.close()
 

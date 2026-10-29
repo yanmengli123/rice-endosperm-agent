@@ -38,6 +38,7 @@ from yuxi.services.agent_protocol import (
     ensure_client_protocol_supported,
     protocol_capability_snapshot,
 )
+from yuxi.services.error_registry import http_error
 from yuxi.services.agent_run_service import (
     cancel_agent_run_view,
     create_agent_run_view,
@@ -434,19 +435,14 @@ async def delete_agent(
         if referencing and not (force and current_user.role == "superadmin"):
             names = "、".join(f"{agent.name}（{agent.slug}）" for agent in referencing[:5])
             more = f" 等 {len(referencing)} 个" if len(referencing) > 5 else ""
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "subagent_referenced",
-                    "message": (
-                        f"该子智能体仍被主智能体引用：{names}{more}。请先从这些智能体的子智能体白名单中移除，再删除。"
-                    ),
-                    "references": [
-                        _reference_summary(agent) for agent in referencing if user_can_access_agent(current_user, agent)
-                    ],
-                    "count": len(referencing),
-                    "force_allowed": current_user.role == "superadmin",
-                },
+            raise http_error(
+                "subagent_referenced",
+                message=f"该子智能体仍被主智能体引用：{names}{more}。请先从这些智能体的子智能体白名单中移除，再删除。",
+                references=[
+                    _reference_summary(agent) for agent in referencing if user_can_access_agent(current_user, agent)
+                ],
+                count=len(referencing),
+                force_allowed=current_user.role == "superadmin",
             )
     await repo.delete(agent=item)
     return {"success": True}
@@ -493,9 +489,9 @@ async def create_agent_run(
     if payload.resume is None and payload.query:
         input_message = build_chat_input_message(payload.query, payload.image_content)
     if payload.mentions and payload.mention_protocol and payload.mention_protocol != "mention.v2":
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "mention_protocol_unsupported", "message": f"不支持的提及协议：{payload.mention_protocol}"},
+        raise http_error(
+            "mention_protocol_unsupported",
+            message=f"不支持的提及协议：{payload.mention_protocol}",
         )
     return await create_agent_run_view(
         input_message=input_message,

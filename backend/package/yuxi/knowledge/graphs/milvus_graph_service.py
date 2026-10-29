@@ -279,6 +279,18 @@ async def _run_neo4j_query_io(func, /, *args, **kwargs):
     return await asyncio.shield(task)
 
 
+_shared_milvus_graph_vector_store: MilvusGraphVectorStore | None = None
+
+
+def get_shared_milvus_graph_vector_store() -> MilvusGraphVectorStore:
+    """模块级共享单例：store 无 per-kb 状态且 Milvus alias 固定（由环境派生），
+    构造即同步连接 + ``db.list_database``，避免每个服务实例重复建连。"""
+    global _shared_milvus_graph_vector_store
+    if _shared_milvus_graph_vector_store is None:
+        _shared_milvus_graph_vector_store = MilvusGraphVectorStore()
+    return _shared_milvus_graph_vector_store
+
+
 class MilvusGraphService:
     def __init__(
         self,
@@ -315,7 +327,7 @@ class MilvusGraphService:
     @property
     def graph_vector_store(self) -> MilvusGraphVectorStore:
         if self._graph_vector_store is None:
-            self._graph_vector_store = MilvusGraphVectorStore()
+            self._graph_vector_store = get_shared_milvus_graph_vector_store()
         return self._graph_vector_store
 
     @property

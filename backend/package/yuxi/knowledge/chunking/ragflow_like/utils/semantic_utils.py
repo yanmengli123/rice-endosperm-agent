@@ -137,7 +137,26 @@ def semantic_chunking_with_auto_clusters(
     """
     sentences = split_mixed_sentences(text)
     if len(sentences) < 2:
-        return [text.strip()]
+        stripped = text.strip()
+        total_tokens = token_count_fn(stripped)
+        if total_tokens <= max_chunk_size:
+            return [stripped]
+        # 无句界超长行（超长 URL/无标点文本等）：分句失效，按 token 上限折算的
+        # 字符窗口硬切，并按实际 token 数回调窗口，确保返回的单块不超限。
+        chunks: list[str] = []
+        start = 0
+        length = len(stripped)
+        window = max(1, int(length * max_chunk_size / total_tokens))
+        while start < length:
+            piece = stripped[start : start + window]
+            piece_tokens = token_count_fn(piece)
+            if piece_tokens > max_chunk_size and window > 1:
+                window = max(1, int(window * max_chunk_size / piece_tokens))
+                continue
+            if piece.strip():
+                chunks.append(piece.strip())
+            start += window
+        return chunks
 
     # 计算每个句子的token数量
     sentence_token_counts = [token_count_fn(s) for s in sentences]

@@ -19,8 +19,10 @@ async def test_api_key_without_billing_scope_is_denied(scopes):
     assert error.value.status_code == 403
 
 
-@pytest.mark.parametrize("purpose,scopes", [(None, None), ("desktop_legacy", []),
-                                            ("automation", ["literature:billing"]), ("automation", ["*"])])
+@pytest.mark.parametrize(
+    "purpose,scopes",
+    [(None, None), ("desktop_legacy", []), ("automation", ["literature:billing"]), ("automation", ["*"])],
+)
 async def test_interactive_legacy_and_explicit_capabilities_preserve_access(purpose, scopes):
     request = Request({"type": "http"})
     request.state.api_key_purpose = purpose

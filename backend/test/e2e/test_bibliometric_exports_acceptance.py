@@ -51,7 +51,14 @@ async def test_real_four_database_exports_import_catalog_and_statistics(tmp_path
         assert any(record["authors"] for record in records)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'exports.sqlite'}")
     async with engine.begin() as conn:
-        for model in (Tenant, LiteraturePaper, LiteratureCitation, LiteratureReferenceBatch, LiteratureReferenceMember, LiteratureReferenceRecord):
+        for model in (
+            Tenant,
+            LiteraturePaper,
+            LiteratureCitation,
+            LiteratureReferenceBatch,
+            LiteratureReferenceMember,
+            LiteratureReferenceRecord,
+        ):
             await conn.run_sync(model.__table__.create)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:

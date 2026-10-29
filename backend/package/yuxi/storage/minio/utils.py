@@ -25,6 +25,16 @@ def generate_unique_filename(original_name: str) -> str:
     return f"{base_name}_{uuid.uuid4().hex[:8]}{extension}"
 
 
+# 头像等用户图片只按服务端可见的 content-type 白名单映射扩展名，
+# 不信任原始 filename 的扩展名，防伪造扩展（如 image/png 壳带 .html）落盘公开桶。
+_IMAGE_CONTENT_TYPE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+
 async def upload_image_to_minio(
     upload: UploadFile,
     *,
@@ -32,14 +42,14 @@ async def upload_image_to_minio(
     max_size_bytes: int,
     too_large_message: str,
 ) -> str:
-    if not upload.content_type or not upload.content_type.startswith("image/"):
-        raise ValueError("只能上传图片文件")
+    file_extension = _IMAGE_CONTENT_TYPE_EXTENSIONS.get(upload.content_type or "")
+    if file_extension is None:
+        raise ValueError("只能上传 png/jpeg/gif/webp 格式的图片文件")
 
     file_content = await read_upload_with_limit(
         upload,
         max_size_bytes=max_size_bytes,
         too_large_message=too_large_message,
     )
-    file_extension = upload.filename.rsplit(".", 1)[-1].lower() if upload.filename and "." in upload.filename else "jpg"
-    object_name = f"{object_prefix.strip('/')}/{uuid.uuid4()}.{file_extension}"
+    object_name = f"{object_prefix.strip('/')}/{uuid.uuid4()}{file_extension}"
     return await aupload_file_to_minio("public", object_name, file_content)

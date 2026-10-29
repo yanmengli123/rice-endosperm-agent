@@ -26,3 +26,7 @@ docker/volumes/
 # 忽略 Docker 本身的文件
 Dockerfile
 docker-compose.yml
+
+# 忽略环境变量文件：构建上下文不得携带任何真实凭据（模板例外，可进上下文）
+.env*
+!.env.template

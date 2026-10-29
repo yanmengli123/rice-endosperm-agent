@@ -63,9 +63,14 @@ class DepartmentResponse(BaseModel):
 
 @department.get("", response_model=list[DepartmentResponse])
 async def get_departments(current_user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
-    """获取所有部门列表（管理员可访问）"""
+    """获取部门列表（superadmin 全量；admin 仅本租户）"""
     dept_repo = DepartmentRepository()
-    return await dept_repo.list_with_user_count()
+    if current_user.role == "superadmin":
+        return await dept_repo.list_with_user_count()
+    from yuxi.services.principal import resolve_principal
+
+    principal = await resolve_principal(db, current_user)
+    return await dept_repo.list_with_user_count(tenant_id=principal.tenant_id)
 
 
 @department.get("/{department_id}", response_model=DepartmentResponse)
@@ -163,7 +168,7 @@ async def create_department(
         # 新建管理员必然无成员资格：直接落入默认租户（幂等），不走严格解析
         from sqlalchemy import text as _text
 
-        membership_session.execute(
+        await membership_session.execute(
             _text(
                 "INSERT INTO tenant_memberships (tenant_id, uid, role, status) "
                 "VALUES (1, :uid, 'member', 'active') ON CONFLICT (tenant_id, uid) DO NOTHING"

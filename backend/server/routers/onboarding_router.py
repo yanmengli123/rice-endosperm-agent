@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
 from yuxi.storage.postgres.models_business import OnboardingActivation, TenantUserEntitlement, User
 from yuxi.services.onboarding_service import (
     OnboardingError,
@@ -34,7 +34,7 @@ class InvitationCreate(BaseModel):
 @onboarding.post("/admin/onboarding/invitations")
 async def create_invitation(
     payload: InvitationCreate,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """单事务开户：建户+成员+权益+一次性激活码。明文激活码仅此一次返回。"""

@@ -47,7 +47,11 @@ class TestSecretCrypto:
         from yuxi.utils import secret_crypto
 
         key_file = tmp_path / "shared" / "master-key"
+        # 容器环境可能配置 MASTER_KEY_FILE（与本测试的 KEY 互斥）或
+        # YUXI_DB_SKIP_MIGRATIONS=true（会禁用开发密钥文件分支），一并隔离。
         monkeypatch.delenv("YUXI_SECRET_MASTER_KEY", raising=False)
+        monkeypatch.delenv("YUXI_SECRET_MASTER_KEY_FILE", raising=False)
+        monkeypatch.delenv("YUXI_DB_SKIP_MIGRATIONS", raising=False)
         monkeypatch.setenv("YUXI_ENV", "development")
         monkeypatch.setenv("YUXI_DEV_SECRET_KEY_FILE", str(key_file))
         secret_crypto._master_key.cache_clear()

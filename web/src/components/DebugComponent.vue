@@ -63,6 +63,11 @@
             <template #icon><SwapOutlined /></template>
             切换用户
           </a-button>
+          <!-- impersonate 留存过原管理员 token 时提供一键切回，避免原 token 丢失 -->
+          <a-button v-if="hasAdminFallback" danger @click="restoreAdmin">
+            <template #icon><SwapOutlined /></template>
+            切回管理员
+          </a-button>
         </div>
         <div class="filter-group">
           <a-input-search
@@ -275,7 +280,7 @@ const processedLogs = computed(() => {
 
 // 获取日志数据
 const fetchLogs = async () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
 
   state.fetching = true
   try {
@@ -301,7 +306,7 @@ const fetchLogs = async () => {
 
 // 清空日志
 const clearLogs = () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
   state.rawLogs = []
 }
 
@@ -336,7 +341,7 @@ const toggleLogLevel = (level) => {
 
 // 自动刷新
 const toggleAutoRefresh = (value) => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
 
   if (value) {
     autoRefreshInterval = setInterval(fetchLogs, 5000)
@@ -352,7 +357,7 @@ const toggleAutoRefresh = (value) => {
 
 // 全屏切换
 const toggleFullscreen = async () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
 
   try {
     if (!state.isFullscreen) {
@@ -410,14 +415,14 @@ onUnmounted(() => {
 
 // 打印系统配置
 const printSystemConfig = () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
   console.log('=== 系统配置 ===')
   console.log(config)
 }
 
 // 打印用户信息
 const printUserInfo = () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
   console.log('=== 用户信息 ===')
   const userInfo = {
     token: userStore.token ? '*** (已隐藏)' : null,
@@ -436,7 +441,7 @@ const printUserInfo = () => {
 
 // 打印知识库信息
 const printDatabaseInfo = async () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
 
   try {
     console.log('=== 知识库信息 ===')
@@ -468,13 +473,13 @@ const printDatabaseInfo = async () => {
 
 // 切换Debug模式
 const toggleDebugMode = () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
   infoStore.toggleDebugMode()
 }
 
 // 打印智能体配置
 const printAgentConfig = async () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
 
   try {
     console.log('=== 智能体配置信息 ===')
@@ -553,14 +558,14 @@ const fetchUsers = async () => {
 
 // 打开用户选择器
 const openUserSwitcher = () => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
   state.showUserSwitcher = true
   fetchUsers()
 }
 
 // 切换用户
 const switchToUser = async (user) => {
-  if (!checkSuperAdminPermission()) return
+  checkSuperAdminPermission()
 
   // 危险操作确认
   Modal.confirm({
@@ -581,6 +586,9 @@ const switchToUser = async (user) => {
           throw new Error(error.detail || '切换用户失败')
         }
         const data = await response.json()
+        // 覆盖 user_token 前留存原管理员 token（仅首次保存），供「切回管理员」恢复
+        if (!localStorage.getItem('debug_admin_token'))
+          localStorage.setItem('debug_admin_token', localStorage.getItem('user_token') || '')
         // 设置新 token
         localStorage.setItem('user_token', data.access_token)
         message.success(`已切换用户: ${user.username}`)
@@ -594,6 +602,16 @@ const switchToUser = async (user) => {
       }
     }
   })
+}
+
+// 切回管理员：恢复 impersonate 前的原 token 并清掉留存，刷新生效
+const hasAdminFallback = ref(!!localStorage.getItem('debug_admin_token'))
+const restoreAdmin = () => {
+  const adminToken = localStorage.getItem('debug_admin_token')
+  if (!adminToken) return
+  localStorage.setItem('user_token', adminToken)
+  localStorage.removeItem('debug_admin_token')
+  window.location.reload()
 }
 </script>
 

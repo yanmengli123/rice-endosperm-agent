@@ -673,7 +673,7 @@ async def test_search_captions_by_observation_matches_entities(caption_session):
         revision_id="pr_a",
         file_id="file_a",
         container_label="Figure 5",
-        quote=f"Figure 5 OsMYB73 gene expression qRT-PCR analysis",
+        quote="Figure 5 OsMYB73 gene expression qRT-PCR analysis",
         page=10,
     )
     await _add_caption(
@@ -682,7 +682,7 @@ async def test_search_captions_by_observation_matches_entities(caption_session):
         revision_id="pr_a",
         file_id="file_a",
         container_label="Figure 4",
-        quote=f"Figure 4 OsMYB73 protein structure prediction",
+        quote="Figure 4 OsMYB73 protein structure prediction",
         page=9,
     )
     await caption_session.commit()

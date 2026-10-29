@@ -124,6 +124,10 @@ def format_utc_datetime(value: dt.datetime | None) -> str | None:
     """
     if value is None:
         return None
+    if value.tzinfo is None:
+        # Naive DB values are stored as UTC; attach UTC directly instead of
+        # going through ensure_utc (which would reinterpret them as Shanghai).
+        value = value.replace(tzinfo=UTC)
     return utc_isoformat(value)
 
 

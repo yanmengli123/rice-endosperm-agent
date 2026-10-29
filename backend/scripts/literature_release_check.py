@@ -1,4 +1,4 @@
-"""Read-only, no-provider PDF release admission. Run inside the protected API container."""
+"""Read-only lightweight admission; historical billing/operations gates stay blocking."""
 
 import argparse
 import asyncio
@@ -6,7 +6,7 @@ import json
 
 from sqlalchemy import select
 
-from yuxi.literature.pdf_operations import operations, readiness
+from yuxi.literature.runtime_admission import operations, readiness
 from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User

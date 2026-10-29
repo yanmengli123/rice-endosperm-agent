@@ -314,6 +314,7 @@ const handlePastedImage = async (file) => {
     handleImageUpload(imageData)
   } catch (error) {
     console.error('图片上传失败:', error)
+    message.error(error?.message || '粘贴图片上传失败，请重试')
   }
 }
 

@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException, Request, Response
 
 from server.utils.auth_middleware import get_authenticated_user
 from yuxi.knowledge.runtime import knowledge_base
+from yuxi.services.principal import PrincipalResolutionError
 from yuxi.storage.postgres.models_business import User
 
 _READ_ONLY_POST_SUFFIXES = ("/query", "/query-test")
@@ -28,11 +29,15 @@ async def authorize_knowledge_resource(
     manage: bool,
 ) -> None:
     """Authorize a knowledge-base id obtained from a path, query, or related record."""
-    allowed = (
-        await knowledge_base.check_manageable(_user_info(current_user), kb_id)
-        if manage
-        else await knowledge_base.check_accessible(_user_info(current_user), kb_id)
-    )
+    try:
+        allowed = (
+            await knowledge_base.check_manageable(_user_info(current_user), kb_id)
+            if manage
+            else await knowledge_base.check_accessible(_user_info(current_user), kb_id)
+        )
+    except PrincipalResolutionError:
+        # 无租户成员关系的账号在这里属于调用方自身状态，不泄露资源存在性，返回 403。
+        raise HTTPException(status_code=403, detail="当前账号没有可用的租户成员资格") from None
     if not allowed:
         raise HTTPException(status_code=404, detail="知识库不存在或无权访问")
 
@@ -96,11 +101,14 @@ async def authorize_graph_path(
     if not kb_id:
         return
     is_read = request.method == "GET" or request.url.path.endswith(_READ_ONLY_POST_SUFFIXES)
-    allowed = (
-        await knowledge_base.check_accessible(_user_info(current_user), kb_id)
-        if is_read
-        else await knowledge_base.check_manageable(_user_info(current_user), kb_id)
-    )
+    try:
+        allowed = (
+            await knowledge_base.check_accessible(_user_info(current_user), kb_id)
+            if is_read
+            else await knowledge_base.check_manageable(_user_info(current_user), kb_id)
+        )
+    except PrincipalResolutionError:
+        raise HTTPException(status_code=403, detail="当前账号没有可用的租户成员资格") from None
     if allowed:
         return
     uid = str(getattr(current_user, "uid", "") or "")

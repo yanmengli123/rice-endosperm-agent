@@ -14,6 +14,20 @@ from server.routers.llm_gateway_router import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _master_key(monkeypatch):
+    # 部署容器可能同时配置 MASTER_KEY 与 MASTER_KEY_FILE（二者互斥），网关
+    # 令牌用例自备密钥；先清环境并重置 lru_cache，结束后再清缓存恢复。
+    from yuxi.utils import secret_crypto
+
+    monkeypatch.delenv("YUXI_SECRET_MASTER_KEY", raising=False)
+    monkeypatch.delenv("YUXI_SECRET_MASTER_KEY_FILE", raising=False)
+    monkeypatch.setenv("YUXI_SECRET_MASTER_KEY", "unit-test-master-key-0123456789abcdef")
+    secret_crypto._master_key.cache_clear()
+    yield
+    secret_crypto._master_key.cache_clear()
+
+
 def test_openai_messages_to_langchain_covers_role_set():
     messages = openai_messages_to_langchain(
         [

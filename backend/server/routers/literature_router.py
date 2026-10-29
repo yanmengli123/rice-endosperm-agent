@@ -398,12 +398,12 @@ async def journals_status_endpoint(current_user: User = Depends(get_required_use
 # ---------------------------------------------------------------- P7：G1 富化
 
 
-@literature.post("/papers/{rid}/enrich", status_code=202)
+@literature.post("/papers/{rid}/enrich", status_code=200)
 async def enrich_paper_endpoint(rid: str, current_user: User = Depends(get_required_user)):
     """富化单篇（Crossref/OpenAlex/S2 免费源，只填空字段）。"""
     tenant_id = await _current_tenant(current_user)
     result = await enrich_module.enrich_paper(tenant_id, rid)
-    return {"status": 202, **result}
+    return {"status": 200, **result}
 
 
 @literature.get("/metrics/quality")
@@ -543,16 +543,23 @@ async def enrich_pending_endpoint(
     current_user: User = Depends(get_required_user),
 ):
     """批量富化缺元数据文献（202 入队后台执行；逐篇串行外部调用不再阻塞 HTTP）。"""
+    import uuid as _uuid
+
+    from yuxi.services.run_queue_service import get_arq_pool
+
     tenant_id = await _current_tenant(current_user)
     try:
-        result = await enrich_module.enqueue_enrich_pending(tenant_id, batch_size=batch_size)
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        queue = await get_arq_pool()
+        job = await queue.enqueue_job(
+            "process_literature_enrich_pending",
+            tenant_id,
+            batch_size,
+            requested_by=current_user.uid,
+            _job_id=f"lit-enrich:{tenant_id}:{_uuid.uuid4().hex}",
+        )
     except Exception as exc:  # noqa: BLE001 - Redis 入队不可用时不假装已受理
         raise HTTPException(status_code=503, detail=f"批量富化入队失败，请稍后重试: {type(exc).__name__}") from exc
-    return {"status": 202, **result}
+    return {"status": 202, "job_id": job.job_id if job is not None else None}
 
 
 # ---------------------------------------------------------------- P7：G5 日记

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -24,6 +25,8 @@ from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import AgentRun, UsageLedger, UserModelPreference
 from yuxi.utils.datetime_utils import utc_now, utc_now_naive
+
+logger = logging.getLogger(__name__)
 
 
 async def _supersede_stale_literature_runs(
@@ -384,6 +387,16 @@ async def _settle(policy: LiteratureLlmPolicy, usage: _Usage, error: BaseExcepti
         run = (
             await session.execute(select(AgentRun).where(AgentRun.id == policy.run_id).with_for_update())
         ).scalar_one()
+        if run.status in TERMINAL_RUN_STATUSES:
+            # 终态守卫：run 已被收敛（superseded/对账/人工终态）时不再覆写终态
+            # 与用量行，保持既有终态权威；本轮已累计消耗只留在日志里。
+            logger.warning(
+                "literature run %s already terminal (%s); settle skipped (tokens=%d)",
+                policy.run_id,
+                run.status,
+                usage.input_tokens + usage.output_tokens,
+            )
+            return
         total = usage.input_tokens + usage.output_tokens
         run.total_tokens = total
         run.status = "failed" if error else "completed"
@@ -436,6 +449,10 @@ async def governed_runtime(policy: LiteratureLlmPolicy, *, model_options: dict |
     try:
         async with pg_manager.get_async_session_context() as session:
             run = (await session.execute(select(AgentRun).where(AgentRun.id == policy.run_id))).scalar_one()
+            if run.status in TERMINAL_RUN_STATUSES:
+                # 终态守卫：已被收敛为终态的 run 不再翻回 running，也不进入执行
+                # （否则 _settle 会二次覆写终态）；直接放弃并让既有终态保持权威。
+                raise RuntimeError(f"literature run {policy.run_id} is already terminal: {run.status}")
             run.status = "running"
             run.started_at = run.started_at or utc_now_naive()
             if policy.credential_id and policy.provider_id:

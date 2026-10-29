@@ -339,7 +339,10 @@ watch(
 <template>
   <div
     class="app-layout"
-    :class="{ 'sidebar-collapsed': sidebarEffectivelyCollapsed, 'sidebar-resizing': isSidebarResizing }"
+    :class="{
+      'sidebar-collapsed': sidebarEffectivelyCollapsed,
+      'sidebar-resizing': isSidebarResizing
+    }"
     :style="sidebarStyle"
   >
     <div class="header">
@@ -511,7 +514,7 @@ watch(
     >
       <DebugComponent />
     </a-modal>
-    <TaskCenterDrawer v-if="userStore.isAdmin" />
+    <TaskCenterDrawer v-if="userStore.isSuperAdmin" />
   </div>
 </template>
 

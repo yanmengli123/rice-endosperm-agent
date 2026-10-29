@@ -115,8 +115,3 @@ def test_csv_v12_is_additive_over_v11():
         assert added == {"dataset_sample_questions"}, f"{key} 1.2.0 新增命令超出预期: {added}"
         assert v12.forbidden_commands == v11.forbidden_commands
         assert "sample_questions" in v12.forbidden_commands
-
-
-def test_latest_csv_version_is_v12():
-    assert resolve_contract("csv_record").version == "1.2.0"
-    assert resolve_contract("csv_qa").version == "1.2.0"

@@ -72,9 +72,7 @@ async def env(monkeypatch):
 
 async def test_same_rid_is_idempotent_and_backfills_doi(env):
     first = await register_literature_paper(tenant_id=TENANT, doi="10.1002/adma.202407106", title="T1")
-    second = await register_literature_paper(
-        tenant_id=TENANT, doi="10.1002/adma.202407106", title="T2"
-    )
+    second = await register_literature_paper(tenant_id=TENANT, doi="10.1002/adma.202407106", title="T2")
     assert second.id == first.id, "同租户同 RID 必须复用既有行"
     assert second.rid == first.rid
     assert second.title == "T1", "既有标题不被空位覆盖"

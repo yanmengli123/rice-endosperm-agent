@@ -44,6 +44,9 @@ EVALUATION_FIELDS = ("dataset_name", "dataset_item_id", "experiment_name")
 MAX_REQUEST_ID_LENGTH = 64
 TRAJECTORY_SUMMARY_EVENT_LIMIT = 500
 INTERRUPT_STATUSES = {"ask_user_question_required", "human_approval_required", "interrupted"}
+#: 无 thread_id 外部调用的确定性线程命名空间：同 (uid, request_id) 的并发重试
+#: 派生出同一线程，幂等命中 ``_same_run_request_scope`` 返回已有 run 而非 409。
+_AGENT_CALL_THREAD_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "yuxi.agent-call.v1")
 
 
 async def create_agent_call_run_view(
@@ -203,7 +206,11 @@ async def create_agent_invocation_run_view(
             raise HTTPException(status_code=409, detail="request_id 冲突")
         resolved_thread_id = existing_run.conversation_thread_id
     else:
-        resolved_thread_id = requested_thread_id or str(uuid.uuid4())
+        # uuid4 会把同 request_id 的并发重试分叉到随机线程，第二次创建因
+        # request_id 唯一冲突 409；uuid5 派生使其落进同一幂等 scope。
+        resolved_thread_id = requested_thread_id or str(
+            uuid.uuid5(_AGENT_CALL_THREAD_NAMESPACE, f"agent-call:{current_user.uid}:{request_id}")
+        )
 
     conv_repo = ConversationRepository(db)
     conversation = await conv_repo.get_conversation_by_thread_id(resolved_thread_id)

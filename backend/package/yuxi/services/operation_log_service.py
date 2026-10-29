@@ -1,6 +1,10 @@
+import logging
+
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.storage.postgres.models_business import OperationLog
+
+logger = logging.getLogger(__name__)
 
 
 async def resolve_operator_tenant_id(db: AsyncSession, user_id: int | None) -> int | None:
@@ -15,7 +19,8 @@ async def resolve_operator_tenant_id(db: AsyncSession, user_id: int | None) -> i
                 text(
                     "SELECT m.tenant_id FROM tenant_memberships m "
                     "JOIN users u ON u.uid = m.uid "
-                    "WHERE u.id = :user_id AND u.is_deleted = 0 AND m.status = 'active' LIMIT 1"
+                    "WHERE u.id = :user_id AND u.is_deleted = 0 AND m.status = 'active' "
+                    "ORDER BY m.id ASC LIMIT 1"
                 ),
                 {"user_id": user_id},
             )
@@ -56,5 +61,6 @@ async def log_operation(
             )
         )
         await db.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        # 审计日志写入失败不应中断业务，但必须留痕，不能静默吞掉。
+        logger.warning("写入操作审计日志失败 user_id=%s operation=%s: %s", user_id, operation, exc)

@@ -2,6 +2,7 @@ import asyncio
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.services.langfuse_service import submit_user_feedback_score
 from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback
@@ -30,13 +31,8 @@ async def submit_message_feedback_view(
         if not conversation or conversation.uid != str(current_uid):
             raise HTTPException(status_code=403, detail="Access denied")
 
-        existing_feedback_result = await db.execute(
-            select(MessageFeedback).filter_by(message_id=message_id, uid=str(current_uid))
-        )
-        existing_feedback = existing_feedback_result.scalar_one_or_none()
-        if existing_feedback:
-            raise HTTPException(status_code=409, detail="Feedback already submitted for this message")
-
+        # 不做前置存在性查询（消除查后插竞态窗口）：并发/重复提交由
+        # uq_message_feedbacks_message_uid 唯一索引兜底，IntegrityError 按幂等成功处理。
         new_feedback = MessageFeedback(
             message_id=message_id,
             uid=str(current_uid),
@@ -45,7 +41,29 @@ async def submit_message_feedback_view(
         )
 
         db.add(new_feedback)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # 唯一索引冲突 = 该用户已对这条消息提交过反馈：回滚后返回既有记录，
+            # 响应与首次提交一致；langfuse 评分首提时已推送，不重复推送。
+            await db.rollback()
+            duplicate_result = await db.execute(
+                select(MessageFeedback).filter_by(message_id=message_id, uid=str(current_uid))
+            )
+            existing_feedback = duplicate_result.scalar_one_or_none()
+            if existing_feedback is None:
+                raise
+            logger.info(
+                f"User {current_uid} re-submitted feedback for message {message_id}; "
+                "returning existing feedback as idempotent success"
+            )
+            return {
+                "id": existing_feedback.id,
+                "message_id": existing_feedback.message_id,
+                "rating": existing_feedback.rating,
+                "reason": existing_feedback.reason,
+                "created_at": existing_feedback.created_at.isoformat(),
+            }
         await db.refresh(new_feedback)
 
         trace_id = (message.extra_metadata or {}).get("langfuse_trace_id")

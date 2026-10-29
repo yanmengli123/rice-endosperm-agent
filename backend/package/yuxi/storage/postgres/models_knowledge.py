@@ -19,7 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from yuxi.storage.postgres.models_business import Base, BigIntPk
-from yuxi.utils.datetime_utils import utc_now, utc_now_naive
+from yuxi.utils.datetime_utils import utc_now
 
 JSON_VALUE = JSON().with_variant(JSONB, "postgresql")
 
@@ -68,8 +68,8 @@ class KnowledgeBase(Base):
     mindmap_metadata = Column(JSON_VALUE)
     sample_questions = Column(JSON_VALUE)
     created_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeScope(Base):
@@ -91,8 +91,8 @@ class KnowledgeScope(Base):
     version = Column(Integer, nullable=False, default=1)
     created_by = Column(String(64))
     updated_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeScopeMember(Base):
@@ -125,8 +125,8 @@ class KnowledgeScopeMember(Base):
     last_validated_at = Column(DateTime(timezone=True))
     created_by = Column(String(64))
     updated_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class AgentKnowledgeScopeConfig(Base):
@@ -146,8 +146,8 @@ class AgentKnowledgeScopeConfig(Base):
     allow_web = Column(Boolean)
     created_by = Column(String(64))
     updated_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeScopeAudit(Base):
@@ -167,7 +167,7 @@ class KnowledgeScopeAudit(Base):
     before_json = Column(JSON_VALUE)
     after_json = Column(JSON_VALUE)
     updated_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeFile(Base):
@@ -201,8 +201,8 @@ class KnowledgeFile(Base):
     evidence_capabilities = Column(JSON_VALUE)
     created_by = Column(String(64))
     updated_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeChunk(Base):
@@ -238,8 +238,8 @@ class KnowledgeChunk(Base):
     # ``extraction_result`` and must never overwrite this column.
     source_provenance = Column(JSON_VALUE)
     extraction_result = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeParseRevision(Base):
@@ -331,8 +331,8 @@ class KnowledgeDocumentIdentityCache(Base):
     parser_fingerprint = Column(String(64), nullable=False, index=True)
     canonical_revision_id = Column(String(64), index=True)
     status = Column(String(32), nullable=False, default="BUILDING", index=True)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeParseArtifact(Base):
@@ -352,7 +352,7 @@ class KnowledgeParseArtifact(Base):
     content_type = Column(String(128))
     size_bytes = Column(BigInteger, nullable=False)
     metadata_json = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeIndexRevision(Base):
@@ -377,7 +377,7 @@ class KnowledgeIndexRevision(Base):
     chunk_count = Column(Integer, nullable=False, default=0)
     token_count = Column(BigInteger, nullable=False, default=0)
     error_message = Column(Text)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
     activated_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
 
@@ -410,7 +410,7 @@ class EvidenceAnchorRecord(Base):
     source = Column(String(32), nullable=False, default="pymupdf")
     document_partition = Column(String(32), nullable=False, default="UNKNOWN")
     partition_confidence = Column(Float, nullable=False, default=0.0)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class EvidenceSpanRecord(Base):
@@ -641,7 +641,7 @@ class ArticleReference(Base):
     doi = Column(String(512), index=True)
     raw_text = Column(Text)
     metadata_json = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class CitationMention(Base):
@@ -657,7 +657,7 @@ class CitationMention(Base):
     mention_text = Column(Text)
     anchor_id = Column(String(64), index=True)
     metadata_json = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeGraphEntity(Base):
@@ -682,8 +682,8 @@ class KnowledgeGraphEntity(Base):
     # CANDIDATE（LLM 产物）/ APPROVED / REJECTED / CANONICAL（托管导入，只读）
     review_status = Column(String(16), nullable=False, default="CANDIDATE")
     review_version = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeGraphEntityAlias(Base):
@@ -704,7 +704,7 @@ class KnowledgeGraphEntityAlias(Base):
     alias_type = Column(String(64), nullable=False, default="IMPORTED")
     source = Column(String(128))
     is_official = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeGraphEntityMention(Base):
@@ -729,7 +729,7 @@ class KnowledgeGraphEntityMention(Base):
     # 审核人点「验证」时看着的证据：pinned 的 mention 不随单 chunk 重抽删除（I3）
     pinned_by = Column(String(64))
     pinned_at = Column(DateTime(timezone=True))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeGraphTriple(Base):
@@ -762,8 +762,8 @@ class KnowledgeGraphTriple(Base):
     review_version = Column(Integer, nullable=False, default=0)
     # 物化风险分（构建/重算时按 mention 聚合更新，队列 risk_desc 排序用；NULL=未计算）
     risk_score = Column(Float)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeGraphTripleMention(Base):
@@ -803,7 +803,7 @@ class KnowledgeGraphTripleMention(Base):
     comparison_group_id = Column(String(64))
     pinned_by = Column(String(64))
     pinned_at = Column(DateTime(timezone=True))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeGraphGateReview(Base):
@@ -1041,8 +1041,8 @@ class KnowledgeGraphImport(Base):
     result = Column(JSON_VALUE)
     error_message = Column(Text)
     created_by = Column(String(64), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
 
@@ -1065,7 +1065,7 @@ class KnowledgeGraphEntitySource(Base):
     external_id = Column(String(512), nullable=False)
     row_number = Column(Integer)
     raw_data = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeSourceAsset(Base):
@@ -1123,7 +1123,7 @@ class KnowledgeGraphTripleSource(Base):
     source_id = Column(String(512), nullable=False)
     row_number = Column(Integer)
     raw_data = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeGraphRelationEvidence(Base):
@@ -1168,8 +1168,8 @@ class KnowledgeGraphRelationEvidence(Base):
     claim_eligible = Column(Boolean, nullable=False, default=False)
     source_scope = Column(String(64), nullable=False, default="relation_row")
     metadata_json = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeGraphEvidenceSource(Base):
@@ -1190,7 +1190,7 @@ class KnowledgeGraphEvidenceSource(Base):
     )
     row_number = Column(Integer)
     raw_data = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeGraphOutboxEvent(Base):
@@ -1213,8 +1213,8 @@ class KnowledgeGraphOutboxEvent(Base):
     status = Column(String(32), nullable=False, default="PENDING")
     attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(Text)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     processed_at = Column(DateTime(timezone=True))
 
 
@@ -1395,7 +1395,7 @@ class KnowledgeRetrievalRun(Base):
     status = Column(String(32), nullable=False, default="RUNNING")
     warnings_json = Column(JSON_VALUE)
     error_code = Column(String(128))
-    started_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    started_at = Column(DateTime(timezone=True), default=utc_now)
     finished_at = Column(DateTime(timezone=True))
 
 
@@ -1415,8 +1415,8 @@ class EvaluationDataset(Base):
     has_gold_answers = Column(Boolean, default=False)
     build_metadata = Column(JSON_VALUE)
     created_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
-    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class EvaluationDatasetItem(Base):
@@ -1451,7 +1451,7 @@ class EvaluationDatasetItem(Base):
     # draft/approved/rejected：仅对 draft 态数据集有意义，完成基准时按 review_required 门禁
     status = Column(String(32), nullable=False, default="draft", server_default="draft")
     created_by = Column(String(64))
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
@@ -1476,7 +1476,7 @@ class EvaluationRun(Base):
     overall_score = Column(Float)
     total_items = Column(Integer, default=0)
     completed_items = Column(Integer, default=0)
-    started_at = Column(DateTime(timezone=True), default=utc_now_naive, index=True)
+    started_at = Column(DateTime(timezone=True), default=utc_now, index=True)
     completed_at = Column(DateTime(timezone=True))
     created_by = Column(String(64))
 
@@ -1513,7 +1513,7 @@ class EvaluationRunItem(Base):
     eval_status_reason = Column(Text)
     # 运行时从题目 item_metadata.tags 快照，供按标签切片聚合与导出透视
     item_tags = Column(JSON_VALUE)
-    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class KnowledgeWiki(Base):

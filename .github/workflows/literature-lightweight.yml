@@ -1,0 +1,85 @@
+name: Literature Lightweight Gates
+
+'on':
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'backend/package/yuxi/literature/**'
+      - 'backend/package/yuxi/storage/postgres/**'
+      - 'backend/package/yuxi/services/run_worker.py'
+      - 'backend/server/routers/literature*'
+      - 'backend/server/utils/auth_middleware.py'
+      - 'backend/scripts/*literature*'
+      - 'backend/test/**/literature/**'
+      - 'backend/test/**/test_literature*.py'
+      - 'backend/test/unit/storage/test_postgres_manager_schema.py'
+      - 'backend/test/unit/services/test_run_worker.py'
+      - 'web/src/components/literature/**'
+      - 'web/src/components/SettingsModal.vue'
+      - 'web/src/components/AgentChatComponent.vue'
+      - 'web/src/views/LiteratureView.vue'
+      - 'web/src/views/LiteratureGraphView.vue'
+      - 'web/src/views/DiaryView.vue'
+      - 'web/src/apis/base.js'
+      - 'web/src/apis/knowledge_api.js'
+      - 'web/src/apis/literature_api.js'
+      - 'web/src/composables/useLiteratureTaskFeed.js'
+      - 'web/src/composables/useAgentStreamHandler.js'
+      - 'web/src/composables/useAgentThreadState.js'
+      - 'web/src/utils/__tests__/literature*.spec.js'
+      - 'web/src/utils/literature/**'
+      - 'web/src/utils/runFailure.js'
+      - 'web/src/utils/litDialogs.js'
+      - 'web/src/utils/__tests__/api_error_redaction.spec.js'
+      - 'web/src/utils/__tests__/apiError.spec.js'
+      - 'docker-compose*'
+      - '.github/workflows/literature-lightweight.yml'
+
+permissions:
+  contents: read
+concurrency:
+  group: literature-lightweight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locked frontend and current literature regression
+        run: |
+          docker build --target development -f docker/web.Dockerfile -t yuxi-web:literature-ci .
+          docker run --rm --network none yuxi-web:literature-ci sh -c 'pnpm exec eslint src/components/AgentChatComponent.vue src/composables/useAgentStreamHandler.js src/composables/useAgentThreadState.js src/utils/runFailure.js src/utils/litDialogs.js src/views/LiteratureView.vue src/views/LiteratureGraphView.vue src/components/SettingsModal.vue src/components/literature/ImportPanel.vue src/components/literature/ReaderTabs.vue src/components/literature/FloatingReaderWindow.vue src/components/literature/PaperDetail.vue src/components/literature/AttachmentPanel.vue src/components/literature/ReviewPanel.vue src/components/literature/LiteraturePdfReader.vue src/components/literature/LibraryWorkbench.vue src/views/DiaryView.vue src/components/literature/LiteraturePdfWorkspace.vue src/components/literature/LiteratureSettingsPanel.vue src/apis/base.js src/apis/knowledge_api.js src/apis/literature_api.js src/composables/useLiteratureTaskFeed.js && for spec in $(find src/utils -name "literature*.spec.js" -o -path "src/utils/literature/__tests__/*.spec.js" | sort); do node "$spec" || exit 1; done && node src/utils/__tests__/api_error_redaction.spec.js && node src/utils/__tests__/apiError.spec.js && pnpm run build'
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locked shared API image and current domain tests
+        run: |
+          docker build -f docker/api.Dockerfile -t yuxi-api:literature-ci .
+          docker run --rm --network none -v "$PWD/backend/test:/app/test:ro" -e YUXI_DB_SKIP_MIGRATIONS=false --entrypoint uv yuxi-api:literature-ci run --no-sync --group test pytest test/unit/literature/ test/unit/routers/test_literature_router.py test/unit/agents/toolkits/literature/ test/unit/storage/test_postgres_manager_schema.py test/unit/services/test_run_worker.py -q
+      - name: Isolated PostgreSQL with no public ports
+        run: |
+          docker network create --internal --label yuxi.literature-fixture=true literature-ci-net
+          docker run -d --name literature-ci-pg --label yuxi.literature-fixture=true --network literature-ci-net --network-alias literature-pg -e POSTGRES_USER=fixture -e POSTGRES_DB=literature_fixture -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17-alpine
+          for attempt in $(seq 1 40); do
+            if docker exec literature-ci-pg pg_isready -h 127.0.0.1 -U fixture -d literature_fixture; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Real runtime grants, RLS and pooled identities
+        run: |
+          docker run --rm --network literature-ci-net -v "$PWD/backend/test:/app/test:ro" -e YUXI_LIGHT_SECURITY_FIXTURE=1 -e YUXI_LIGHT_SECURITY_DATABASE_URL=postgresql+asyncpg://fixture@literature-pg:5432/literature_fixture --entrypoint uv yuxi-api:literature-ci run --no-sync --group test pytest --confcutdir=test/integration/literature test/integration/literature/test_lightweight_runtime_security.py -q
+      - name: Cleanup exact labelled fixtures
+        if: always()
+        run: |
+          if docker inspect literature-ci-pg >/dev/null 2>&1; then
+            test "$(docker inspect -f '{{index .Config.Labels "yuxi.literature-fixture"}}' literature-ci-pg)" = true
+            docker rm -f -v literature-ci-pg
+          fi
+          if docker network inspect literature-ci-net >/dev/null 2>&1; then
+            test "$(docker network inspect -f '{{index .Labels "yuxi.literature-fixture"}}' literature-ci-net)" = true
+            docker network rm literature-ci-net
+          fi

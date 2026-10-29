@@ -2154,7 +2154,8 @@ async def test_reconcile_stale_agent_runs_marks_terminal_and_notifies(monkeypatc
             for run in runs:
                 if run.id == run_id:
                     run.status = status
-                    return run
+                    return run, True
+            return None, False
 
     captured_events: list[tuple[str, str, str]] = []
 

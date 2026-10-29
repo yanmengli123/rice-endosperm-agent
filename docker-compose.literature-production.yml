@@ -1,4 +1,4 @@
-# Apply after supertranslate; provisioning is a separate administrator command.
+# Lightweight API/worker runtime; administrator migrations/provisioning are separate.
 services:
   literature-migrate:
     image: yuxi-api:${YUXI_VERSION:-0.7.1}
@@ -34,6 +34,30 @@ services:
       - ./backend/scripts:/app/scripts:ro
       - ./backend/test:/app/test:ro
       - ./.env.api-runtime:/app/.env:ro
+      - type: bind
+        source: ${YUXI_SECRET_MASTER_KEY_PATH:?Configure an external preserved credential master key}
+        target: /run/secrets/yuxi-secret-master-key
+        read_only: true
+        bind:
+          create_host_path: false
+  worker:
+    # Shared OCI MCP tools still require the base Docker socket mount. This is
+    # a trusted control-plane worker, not a sandbox for untrusted execution.
+    command: uv run --no-sync --no-dev arq server.worker_main.WorkerSettings
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file: !override [.env.worker-runtime]
+    environment:
+      POSTGRES_URL: ${YUXI_WORKER_RUNTIME_URL:?Provision restricted worker login first}
+      YUXI_DB_SKIP_MIGRATIONS: "true"
+      YUXI_ENV_FILE: /app/.env
+      YUXI_SECRET_MASTER_KEY_FILE: /run/secrets/yuxi-secret-master-key
+    volumes:
+      - ./backend/server:/app/server:ro
+      - ./backend/package:/app/package:ro
+      - ./backend/scripts:/app/scripts:ro
+      - ./backend/test:/app/test:ro
+      - ./.env.worker-runtime:/app/.env:ro
       - type: bind
         source: ${YUXI_SECRET_MASTER_KEY_PATH:?Configure an external preserved credential master key}
         target: /run/secrets/yuxi-secret-master-key

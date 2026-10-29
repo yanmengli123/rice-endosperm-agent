@@ -13,9 +13,13 @@ from yuxi.services.principal import resolve_tenant_id
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
 
-pytestmark = [pytest.mark.integration, pytest.mark.skipif(
-    not os.getenv("YUXI_LITERATURE_BENCHMARK_UID"), reason="Requires explicit current-library read benchmark identity"
-)]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not os.getenv("YUXI_LITERATURE_BENCHMARK_UID"),
+        reason="Requires explicit current-library read benchmark identity",
+    ),
+]
 
 
 async def test_current_library_bounded_reads_and_sql_pagination(record_property):
