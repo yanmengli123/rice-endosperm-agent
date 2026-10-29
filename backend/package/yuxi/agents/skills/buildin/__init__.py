@@ -19,6 +19,12 @@ _SKILLS_ROOT = Path(__file__).resolve().parent
 
 BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
     BuiltinSkillSpec(
+        slug="chat-widgets",
+        source_dir=_SKILLS_ROOT / "chat-widgets",
+        description="在支持对话组件的客户端展示图表、图片、卡片和表单；普通客户端使用 Markdown。",
+        version="2026.10.25.1",
+    ),
+    BuiltinSkillSpec(
         slug="image-gen",
         source_dir=_SKILLS_ROOT / "image-gen",
         description="在 Agent 沙盒中生成图片并保存到 outputs，默认支持 Qwen-Image，也可接入其它图片生成接口。",

@@ -18,7 +18,7 @@ from yuxi.config import config
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _application_lifespan(app: FastAPI):
     """FastAPI lifespan事件管理器"""
     # 初始化数据库连接
     try:
@@ -220,3 +220,21 @@ async def lifespan(app: FastAPI):
     await close_queue_clients()
     close_shared_neo4j_connection()
     await pg_manager.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.initialized = False
+    if os.getenv("LITE_MODE", "").lower() in ("true", "1"):
+        async with _application_lifespan(app):
+            app.state.initialized = True
+            yield
+            app.state.initialized = False
+    else:
+        from server.routers.knowledge_mcp_router import knowledge_mcp
+
+        async with knowledge_mcp.manager.run():
+            async with _application_lifespan(app):
+                app.state.initialized = True
+                yield
+                app.state.initialized = False

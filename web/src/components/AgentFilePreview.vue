@@ -457,6 +457,8 @@ const requestSave = () => {
   emit('save', draftContent.value)
 }
 
+defineExpose({ getDraftContent: () => editMode.value === 'edit' ? draftContent.value : savedContent.value })
+
 const cancelEdit = () => {
   syncDraftContent()
 }

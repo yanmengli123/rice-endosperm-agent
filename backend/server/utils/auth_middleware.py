@@ -162,11 +162,35 @@ async def get_authenticated_user(user: User | None = Depends(get_current_user)):
     return user
 
 
+def enforce_external_key_scope(request: Request | None) -> None:
+    """External keys delegate conversation/data use, never account administration."""
+    if request is None or getattr(request.state, "api_key_purpose", None) != "external_agent":
+        return
+    raw = getattr(request.state, "api_key_scopes", None)
+    scopes = set(raw) if isinstance(raw, list) and raw else {"agent:runs"}
+    path, method = request.url.path.rstrip("/"), request.method
+    conversation = (
+        path == "/api/agent/runs" or path.startswith("/api/agent/runs/")
+        or path.startswith("/api/agent/thread/")
+        or path.startswith("/api/chat/")
+        or path.startswith("/api/agent-invocation/agent-call/")
+        or (method == "GET" and path in {"/api/agent", "/api/agent/default", "/api/agent/protocol"})
+        or (method == "GET" and path.startswith("/api/viewer/filesystem/"))
+    )
+    if conversation and "agent:runs" in scopes:
+        return
+    if path.startswith("/api/literature/") and ("literature:read" if method == "GET" else "literature:write") in scopes:
+        return
+    raise HTTPException(status_code=403, detail="外部 API Key 无权访问此接口，请使用登录会话管理资源")
+
+
 # 获取可访问业务资源的用户；未绑定部门时明确拒绝。
 async def get_required_user(
     user: User = Depends(get_authenticated_user),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
+    enforce_external_key_scope(request)
     if not user.department_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

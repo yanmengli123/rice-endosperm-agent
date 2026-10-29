@@ -99,6 +99,13 @@ export const deleteSkillsBatch = async (slugs) => {
 }
 
 export const skillApi = {
+  getContent: (slug) => apiGet(`${BASE_URL}/${encodeURIComponent(slug)}/content`),
+  saveContent: (slug, payload) => apiPut(`${BASE_URL}/${encodeURIComponent(slug)}/content`, payload),
+  listVersions: (slug) => apiGet(`${BASE_URL}/${encodeURIComponent(slug)}/versions`),
+  releaseVersion: (slug, expected_revision) => apiPost(`${BASE_URL}/${encodeURIComponent(slug)}/versions`, { expected_revision }),
+  restoreVersion: (slug, version, expected_revision) => apiPost(`${BASE_URL}/${encodeURIComponent(slug)}/versions/${encodeURIComponent(version)}/restore`, { expected_revision }),
+  getBoundSkill: (slug) => apiGet(`${BASE_URL}/agents/${encodeURIComponent(slug)}/bound`),
+  createBoundSkill: (slug) => apiPost(`${BASE_URL}/agents/${encodeURIComponent(slug)}/bound`, {}),
   listSkills,
   listAccessibleSkills,
   prepareSkillUpload,

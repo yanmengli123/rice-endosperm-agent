@@ -106,6 +106,8 @@
                     v-else-if="displayItem.type === 'message'"
                     :message="displayItem.message"
                     :is-processing="isDisplayMessageProcessing(row.conv, displayItem)"
+                    :widget-action-handler="handleWidgetAction"
+                    :widget-image-loader="loadWidgetImage"
                     :show-refs="showMsgRefs(displayItem.message, row.conv)"
                     :hide-tool-calls="true"
                     :mention="mentionConfigWithDocuments"
@@ -4092,7 +4094,7 @@ const selectExternalThread = async (thread) => {
 
 const handleSendMessage = async (
   { image, browserEnabled } = {},
-  { readerIntent = null, onRunCreated = null } = {}
+  { readerIntent = null, onRunCreated = null, widgetText = null } = {}
 ) => {
   // Reader auto-send is send-only: never cancel a different in-flight run.
   if (
@@ -4105,7 +4107,7 @@ const handleSendMessage = async (
       userInput.value !== readerIntent.draft)
   )
     return
-  const text = userInput.value.trim()
+  const text = (widgetText ?? userInput.value).trim()
   const imageContent = image?.imageContent || null
   if (
     (!text && !image) ||
@@ -4149,7 +4151,7 @@ const handleSendMessage = async (
   // 服务端解析鉴权后冻结；无提及时不发送该字段（后端走文本 token 兼容层）。
   const structuredMentions = buildStructuredMentions(text, mentionConfigWithDocuments.value)
 
-  userInput.value = ''
+  if (widgetText === null) userInput.value = ''
 
   await nextTick()
   if (
@@ -4170,7 +4172,9 @@ const handleSendMessage = async (
     hideApprovalState()
   }
 
-  const pendingAttachments = readerAttachments || [...currentPendingThreadAttachments.value]
+  const pendingAttachments = widgetText === null
+    ? readerAttachments || [...currentPendingThreadAttachments.value]
+    : []
   const pendingAttachmentFileIds = pendingAttachments
     .map((attachment) => attachment.file_id)
     .filter(Boolean)
@@ -4200,6 +4204,7 @@ const handleSendMessage = async (
       thread_id: threadId,
       meta: {
         request_id: requestId,
+        client_capabilities: ['chat_widgets'],
         attachment_file_ids: pendingAttachmentFileIds,
         ...(readingContext ? { literature_reader_context: readingContext } : {})
       },
@@ -4255,6 +4260,37 @@ const handleSendMessage = async (
     if (!readingContext || (!readerDisposed && readerOwnerKey() === readerOwner))
       handleChatError(error, 'send')
   }
+}
+
+// Components submit through the existing run path without consuming an edited draft or attachments.
+const handleWidgetAction = async (action) => {
+  if (isProcessing.value || sendCooldownActive.value || props.sendDisabled)
+    throw new Error('当前会话暂时不能发送消息')
+  if (typeof action === 'string') {
+    userInput.value = [userInput.value.trim(), action].filter(Boolean).join('\n')
+    return true
+  }
+  if (action?.type !== 'send_message' || !action.text?.trim())
+    throw new Error('组件动作无效')
+  return new Promise((resolve, reject) => {
+    let accepted = false
+    handleSendMessage({}, {
+      widgetText: action.text,
+      onRunCreated: () => {
+        accepted = true
+        action.onAccepted?.()
+        resolve(true)
+      }
+    }).then(() => {
+      if (!accepted) reject(new Error('消息未被接收，请重试'))
+    }).catch(reject)
+  })
+}
+
+const loadWidgetImage = async (path) => {
+  if (!currentChatId.value) throw new Error('缺少图片所属会话')
+  const blob = await downloadViewerFile(currentChatId.value, path)
+  return { blob: async () => blob }
 }
 
 // 发送或中断

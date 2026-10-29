@@ -43,13 +43,13 @@
       </div>
 
       <!-- 消息内容 -->
-      <MarkdownPreview
+      <ChatMessageContent
         v-if="parsedData.content"
         :key="message.id"
         :content="parsedData.content"
-        code-copy
-        evidence-links
-        figure-ref-links
+        :disabled="isProcessing"
+        :action-handler="widgetActionHandler"
+        :image-loader="widgetImageLoader"
         class="message-md"
         @locate-evidence="emit('locateEvidence', $event)"
         @figure-ref-click="handleFigureRefClick"
@@ -198,7 +198,7 @@ import { computed, ref, onUnmounted } from 'vue'
 import RefsComponent from '@/components/RefsComponent.vue'
 import { Copy, Check, LoaderCircle, X, Activity } from '@lucide/vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
-import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
+import ChatMessageContent from '@/components/widgets/ChatMessageContent.vue'
 import MentionTextRenderer from '@/components/common/MentionTextRenderer.vue'
 import { useAgentStore } from '@/stores/agent'
 import { useInfoStore } from '@/stores/info'
@@ -215,6 +215,8 @@ import { figureRefClickAction } from '@/utils/figureCard'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 
 const props = defineProps({
+  widgetActionHandler: { type: Function, default: null },
+  widgetImageLoader: { type: Function, default: null },
   // 消息角色：'user'|'assistant'|'sent'|'received'
   message: {
     type: Object,

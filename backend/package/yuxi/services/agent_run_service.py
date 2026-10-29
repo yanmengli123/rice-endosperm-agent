@@ -1024,7 +1024,17 @@ async def create_agent_run_view(
         request_id=request_id,
         input_message=run_input_message,
     )
+    client_capabilities = (
+        (parent_payload or {}).get("client_capabilities")
+        if run_type == "resume"
+        else meta.get("client_capabilities")
+    )
     input_payload = {
+        "client_capabilities": (
+            ["chat_widgets"]
+            if isinstance(client_capabilities, list) and "chat_widgets" in client_capabilities
+            else []
+        ),
         "model_spec": resolved_model_spec,
         "knowledge_scope_snapshot": knowledge_scope_snapshot,
         "policy_version": entitlement_snapshot.get("policy_version"),

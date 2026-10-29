@@ -185,6 +185,12 @@ class BaseContext:
         metadata={"name": "线程ID", "configurable": False, "description": "用来唯一标识一个对话线程"},
     )
 
+    client_capabilities: list[str] = field(
+        default_factory=list,
+        metadata={"configurable": False, "hide": True},
+    )
+    agent_slug: str | None = field(default=None, metadata={"configurable": False, "hide": True})
+
     uid: str = field(
         default_factory=lambda: str(uuid.uuid4()),
         metadata={"name": "UID", "configurable": False, "description": "用来唯一标识一个用户"},
@@ -661,5 +667,6 @@ async def prepare_agent_runtime_context(
         setattr(context, "_readable_skills", skill_scope["readable_skills"])
         setattr(context, "_runtime_skill_metadata", skill_scope["runtime_skill_metadata"])
         setattr(context, "_runtime_skill_dependency_map", skill_scope["runtime_skill_dependency_map"])
+        setattr(context, "_bound_skill_prompt", skill_scope.get("bound_skill_prompt", ""))
 
     return context

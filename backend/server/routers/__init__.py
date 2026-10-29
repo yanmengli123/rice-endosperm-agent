@@ -19,6 +19,7 @@ from server.routers.onboarding_router import onboarding
 from server.routers.model_provider_router import model_providers
 from server.routers.skill_router import skills, user_skills
 from server.routers.system_router import system
+from server.routers.readiness_router import readiness
 from server.routers.system_task_router import tasks
 from server.routers.tenant_router import tenants
 from server.routers.tool_router import tools
@@ -31,6 +32,7 @@ router = APIRouter()
 
 # 基础系统接口：健康检查、配置、认证与聊天主链路。
 router.include_router(system)  # /api/system/* 系统状态与全局配置
+router.include_router(readiness)
 router.include_router(auth)  # /api/auth/* 登录、用户信息与 CLI 浏览器登录授权
 router.include_router(agent_router)  # /api/agent/* 智能体管理与运行态
 router.include_router(agent_invocation_router)  # /api/agent-invocation/* 外部 Agent 调用与评估

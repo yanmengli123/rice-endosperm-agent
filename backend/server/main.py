@@ -89,6 +89,12 @@ app = FastAPI(
 # 所有业务接口统一挂载到 /api，具体分组在 server.routers 中集中注册。
 app.include_router(router, prefix="/api")
 
+if os.getenv("LITE_MODE", "").lower() not in ("true", "1"):
+    from starlette.routing import Route
+    from server.routers.knowledge_mcp_router import knowledge_mcp
+
+    app.router.routes.append(Route("/api/mcp", endpoint=knowledge_mcp, methods=["GET", "POST", "DELETE"]))
+
 # CORS 设置
 app.add_middleware(
     CORSMiddleware,

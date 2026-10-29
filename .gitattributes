@@ -6,3 +6,4 @@ docker/mcp/bioinfomcp-tools/** text eol=lf
 
 # PaperAgent vendor（ADR-0010 决议 8）：字节级一致守卫依赖行尾不变，禁用 EOL 转换
 backend/package/yuxi/literature/vendor/** -text
+backend/test/fixtures/agent_run_contract/** -text

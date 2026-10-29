@@ -583,6 +583,8 @@ class Skill(Base):
     tenant_id = _tenant_column()
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    bound_agent_id = Column(Integer, ForeignKey("agents.id", ondelete="CASCADE"), nullable=True, unique=True)
+    bound_agent = relationship("Agent", lazy="joined")
     slug = Column(String(128), nullable=False, unique=True, index=True, comment="技能唯一标识（目录名）")
     name = Column(String(128), nullable=False, comment="技能名称（来自 SKILL.md frontmatter.name）")
     description = Column(Text, nullable=False, comment="技能描述（来自 SKILL.md frontmatter.description）")
@@ -609,6 +611,7 @@ class Skill(Base):
             "name": self.name,
             "description": self.description,
             "source_type": self.source_type,
+            "bound_agent_id": self.bound_agent_id,
             "tool_dependencies": self.tool_dependencies or [],
             "mcp_dependencies": self.mcp_dependencies or [],
             "skill_dependencies": self.skill_dependencies or [],
@@ -622,6 +625,20 @@ class Skill(Base):
             "created_at": format_utc_datetime(self.created_at),
             "updated_at": format_utc_datetime(self.updated_at),
         }
+
+
+class SkillVersion(Base):
+    """Immutable full-package snapshots for an Agent-bound Skill."""
+
+    __tablename__ = "skill_versions"
+    id = Column(BigIntPk, primary_key=True, autoincrement=True)
+    tenant_id = _tenant_column()
+    skill_id = Column(Integer, ForeignKey("skills.id", ondelete="CASCADE"), nullable=False, index=True)
+    version = Column(String(64), nullable=False, unique=True)
+    content_hash = Column(String(64), nullable=False)
+    dir_path = Column(String(512), nullable=False)
+    created_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class Conversation(Base):
@@ -1400,6 +1417,8 @@ class APIKey(Base):
         return {
             "id": self.id,
             "key_prefix": self.key_prefix,
+            "purpose": self.purpose,
+            "scopes": self.scopes,
             "name": self.name,
             "user_id": self.user_id,
             "department_id": self.department_id,

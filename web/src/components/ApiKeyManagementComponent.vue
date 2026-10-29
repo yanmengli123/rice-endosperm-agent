@@ -5,7 +5,7 @@
       <div class="header-content">
         <div class="section-title">API Key 管理</div>
         <p class="section-description">
-          用于外部系统调用 Agent 对话接口。密钥仅显示一次，请妥善保管。
+          为外部系统选择对话或知识库只读权限。密钥仅显示一次，请妥善保管。
         </p>
       </div>
       <div class="header-actions">
@@ -57,6 +57,10 @@
                 <div class="info-item">
                   <span class="info-label">过期时间:</span>
                   <span class="info-value">{{ key.expires_at || '永不过期' }}</span>
+                </div>
+                <div class="info-item">
+                  <span class="info-label">知识库 MCP:</span>
+                  <span class="info-value">{{ key.scopes?.includes('knowledge:read') ? '已授权只读访问' : '未授权' }}</span>
                 </div>
                 <div class="info-item">
                   <span class="info-label">最后使用:</span>
@@ -123,6 +127,10 @@
             style="width: 100%"
           />
         </a-form-item>
+        <a-form-item label="允许访问">
+          <a-checkbox-group v-model:value="createForm.scopes" :options="[{ label: '智能体对话', value: 'agent:runs' }, { label: '知识库只读（MCP）', value: 'knowledge:read' }]" />
+        </a-form-item>
+        <p>知识库 MCP 地址：<code>{{ mcpUrl }}</code>。外部客户端使用 Bearer 密钥连接；可见资料受所属用户权限限制。</p>
       </a-form>
     </a-modal>
 
@@ -173,8 +181,10 @@ const createdSecret = ref('')
 
 const createForm = reactive({
   name: '',
-  expires_at: null
+  expires_at: null,
+  scopes: ['agent:runs']
 })
+const mcpUrl = `${window.location.origin}/api/mcp`
 
 const formatTime = (timeStr) => {
   if (!timeStr) return '-'
@@ -219,6 +229,7 @@ const handleRefresh = async () => {
 const showCreateModal = () => {
   createForm.name = ''
   createForm.expires_at = null
+  createForm.scopes = ['agent:runs']
   createModalVisible.value = true
 }
 
@@ -230,7 +241,7 @@ const handleCreate = async () => {
 
   createLoading.value = true
   try {
-    const data = { name: createForm.name }
+    const data = { name: createForm.name, scopes: createForm.scopes }
     if (createForm.expires_at) {
       data.expires_at = createForm.expires_at.format('YYYY-MM-DDTHH:mm:ss')
     }

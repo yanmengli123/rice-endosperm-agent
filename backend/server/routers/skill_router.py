@@ -38,10 +38,13 @@ from yuxi.agents.skills.service import (
     user_can_manage_skill,
 )
 from yuxi.agents.skills.remote_install import list_remote_skills, search_remote_skills
+from yuxi.agents.skills.edit import SkillEditConflict, package_state, save_package
+from server.routers.skill_package_router import router as package_router
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
 
 skills = APIRouter(prefix="/system/skills", tags=["skills"])
+skills.include_router(package_router)
 user_skills = APIRouter(prefix="/skills", tags=["skills"])
 
 
@@ -60,6 +63,7 @@ class SkillNodeCreateRequest(BaseModel):
 
 
 class SkillFileUpdateRequest(BaseModel):
+    expected_revision: str | None = None
     path: str = Field(..., description="相对 skill 根目录的路径")
     content: str = Field(..., description="文件内容")
 
@@ -91,6 +95,8 @@ class SkillDraftConfirmRequest(BaseModel):
 
 
 def _raise_from_value_error(e: ValueError) -> None:
+    if isinstance(e, SkillEditConflict):
+        raise HTTPException(status_code=409, detail=str(e)) from e
     message = str(e)
     status_code = 404 if "不存在" in message or "无权" in message else 400
     raise HTTPException(status_code=status_code, detail=message)
@@ -396,14 +402,9 @@ async def update_skill_file_route(
 ):
     try:
         await get_manageable_skill_or_raise(db, current_user, slug)
-        await update_skill_file(
-            db,
-            slug=slug,
-            relative_path=payload.path,
-            content=payload.content,
-            updated_by=current_user.uid,
-        )
-        return {"success": True}
+        state = await package_state(db, slug=slug, operator=current_user)
+        result = await save_package(db, slug=slug, operator=current_user, expected_revision=payload.expected_revision or state["revision"], files={payload.path: payload.content})
+        return {"success": True, "data": result}
     except ValueError as e:
         _raise_from_value_error(e)
     except Exception as e:

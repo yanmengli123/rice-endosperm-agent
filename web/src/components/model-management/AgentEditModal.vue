@@ -14,6 +14,8 @@ import {
 
 import { userApi } from '@/apis/user_api'
 import { agentApi } from '@/apis/agent_api'
+import { skillApi } from '@/apis/skill_api'
+import { useRouter } from 'vue-router'
 import AgentRuntimeConfigForm from '@/components/AgentRuntimeConfigForm.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
@@ -25,6 +27,14 @@ import { MAX_IMAGE_UPLOAD_SIZE_BYTES, MAX_IMAGE_UPLOAD_SIZE_MB } from '@/utils/u
 const props = defineProps({
   backendOptions: { type: Array, default: () => [] }
 })
+const router = useRouter()
+const openBoundSkill = async () => {
+  try {
+    const result = await skillApi.createBoundSkill(editingAgentId.value)
+    closeAgentModal()
+    await router.push({ name: 'ExtensionSkillDetail', params: { slug: result.data.skill.slug } })
+  } catch (error) { message.error(error.message || '打开专属 Skill 失败') }
+}
 
 const emit = defineEmits(['saved'])
 
@@ -364,6 +374,7 @@ defineExpose({
       <div class="agent-modal-titlebar">
         <span class="agent-modal-title">{{ agentModalTitle }}</span>
         <div class="agent-modal-actions">
+          <a-button v-if="editingAgentId" :disabled="saving || agentStore.hasConfigChanges" @click="openBoundSkill">专属 Skill</a-button>
           <a-button :disabled="saving" @click="closeAgentModal">取消</a-button>
           <a-button type="primary" :loading="saving" @click="saveAgent">
             {{ agentStore.hasConfigChanges ? '保存（有修改）' : '保存' }}

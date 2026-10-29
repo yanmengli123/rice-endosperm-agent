@@ -6,7 +6,7 @@ import io
 import re
 import secrets
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
@@ -53,6 +53,7 @@ class APIKeyCreate(BaseModel):
     user_id: int | None = None
     department_id: int | None = None
     expires_at: str | None = None
+    scopes: list[Literal["agent:runs", "knowledge:read"]] = Field(default_factory=list, max_length=2)
 
 
 class APIKeyUpdate(BaseModel):
@@ -74,6 +75,8 @@ class APIKeyResponse(BaseModel):
     created_at: str
     owner_uid: str | None = None
     owner_username: str | None = None
+    purpose: str | None = None
+    scopes: list[str] | None = None
 
 
 class APIKeyCreateResponse(BaseModel):
@@ -223,7 +226,10 @@ async def create_api_key(
     data: APIKeyCreate,
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
+    if request is not None and getattr(request.state, "api_key_purpose", None) is not None:
+        raise HTTPException(status_code=403, detail="请使用登录会话创建 API Key")
     if data.user_id and data.user_id != current_user.id and current_user.role != "superadmin":
         raise HTTPException(status_code=403, detail="无权为其他用户创建 API Key")
 
@@ -252,6 +258,8 @@ async def create_api_key(
         key_hash=key_hash,
         key_prefix=key_prefix,
         name=data.name,
+        purpose="external_agent",
+        scopes=list(dict.fromkeys(data.scopes)),
         user_id=target_user.id,
         department_id=target_user.department_id,
         tenant_id=await resolve_tenant_id(db, target_user.uid),

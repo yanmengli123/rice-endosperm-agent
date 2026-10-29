@@ -769,6 +769,7 @@ async def process_agent_run(ctx, run_id: str):
         "user_credential": payload.get("user_credential"),
         "policy_version": payload.get("policy_version"),
         "browser_enabled": bool(payload.get("browser_enabled")),
+        "client_capabilities": payload.get("client_capabilities") or [],
         "run_type": run_type,
         "created_by_run_id": run.created_by_run_id,
     }
@@ -1240,7 +1241,12 @@ async def worker_heartbeat(ctx: Any = None) -> None:
     marker = _P("/tmp/yuxi_worker_heartbeat")
     try:
         marker.write_text(str(time.time()), encoding="utf-8")
-    except OSError as error:  # noqa: BLE001 —— /tmp 不可写属部署异常,交由健康检查暴露
+        from yuxi.services.readiness_service import WORKER_HEARTBEAT_TTL, worker_heartbeat_key
+        from yuxi.services.run_queue_service import get_redis_client
+
+        redis = await get_redis_client()
+        await redis.set(worker_heartbeat_key(), str(time.time()), ex=WORKER_HEARTBEAT_TTL)
+    except Exception as error:  # noqa: BLE001 - readiness expires when either heartbeat sink fails
         logger.warning(f"worker heartbeat write failed: {type(error).__name__}")
 
 

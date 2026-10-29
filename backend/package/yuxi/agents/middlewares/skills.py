@@ -131,10 +131,15 @@ def expand_skill_closure(
 
 async def resolve_runtime_skills_for_context(context, *, db: AsyncSession | None = None, user=None) -> dict[str, Any]:
     skill_items = await _list_skills_from_db(db, user)
+    skill_items = [item for item in skill_items if getattr(item, "bound_agent_id", None) is None or getattr(getattr(item, "bound_agent", None), "slug", None) == getattr(context, "agent_slug", None)]
+    capabilities = getattr(context, "client_capabilities", [])
+    if not isinstance(capabilities, list) or "chat_widgets" not in capabilities:
+        skill_items = [item for item in skill_items if item.slug != "chat-widgets"]
     dependency_map = build_dependency_map(skill_items)
     prompt_metadata = build_prompt_metadata(skill_items)
     available = set(dependency_map)
     selected = normalize_string_list(getattr(context, "skills", None))
+    selected = list(dict.fromkeys([*selected, *[item.slug for item in skill_items if getattr(item, "bound_agent_id", None) is not None]]))
     context_skills = [slug for slug in selected if slug in available]
     prompt_skills = expand_skill_closure(context_skills, dependency_map)
     from yuxi.trace import emit_trace
@@ -147,7 +152,18 @@ async def resolve_runtime_skills_for_context(context, *, db: AsyncSession | None
             title="Skill 依赖已解析",
             attributes={"prompt_skills": prompt_skills, "skill_count": len(prompt_skills)},
         )
+    import asyncio
+    from yuxi.agents.skills.service import _resolve_skill_dir
+
+    bound_parts = []
+    for item in skill_items:
+        if getattr(item, "bound_agent_id", None) is not None:
+            content = await asyncio.to_thread((_resolve_skill_dir(item) / "SKILL.md").read_text, encoding="utf-8")
+            if len(content.encode("utf-8")) > 65536:
+                raise ValueError("专属 Skill 根说明超过 64 KiB")
+            bound_parts.append(content)
     return {
+        "bound_skill_prompt": "\n\n".join(bound_parts),
         "context_skills": context_skills,
         "prompt_skills": prompt_skills,
         "readable_skills": prompt_skills,
@@ -231,6 +247,9 @@ class SkillsMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         """包装模型调用，处理 skills 提示词注入、动态激活和依赖展开"""
         runtime_context = request.runtime.context
+        bound_prompt = getattr(runtime_context, "_bound_skill_prompt", "")
+        if bound_prompt:
+            request = request.override(system_message=append_to_system_message(getattr(request, "system_message", None), "智能体专属操作指南：\n" + bound_prompt))
 
         # mention.v2 服务端预激活：Run 创建时冻结的 @skill 在这里确定性生效——
         # 不依赖模型读取 SKILL.md；readable 过滤保证运行中被撤权时失败关闭。

@@ -85,6 +85,7 @@
                   />
                   <template v-else>
                     <AgentFilePreview
+                      ref="skillFilePreviewRef"
                       :file="selectedFilePreview"
                       :file-path="selectedPath"
                       :show-download="false"
@@ -311,6 +312,19 @@
               </div>
             </div>
           </a-tab-pane>
+          <a-tab-pane v-if="currentSkill.bound_agent_id" key="history" tab="历史版本">
+            <p>发版会保存完整文件包和依赖。恢复将替换当前内容，请先保存并发版需要保留的修改。</p>
+            <a-button :disabled="!canManageCurrentSkill" @click="publishSkillVersion">发版</a-button>
+            <a-button @click="loadSkillVersions">刷新</a-button>
+            <a-list :data-source="skillVersions">
+              <template #renderItem="{ item }">
+                <a-list-item>
+                  {{ item.version }} · {{ item.created_at }}
+                  <a-button :disabled="!canManageCurrentSkill" @click="restoreSkillVersion(item.version)">恢复</a-button>
+                </a-list-item>
+              </template>
+            </a-list>
+          </a-tab-pane>
         </a-tabs>
       </div>
       <div v-else-if="!loading" class="detail-empty">
@@ -374,6 +388,9 @@ const expandedKeys = ref([])
 const selectedPath = ref('')
 const selectedIsDir = ref(false)
 const fileContent = ref('')
+const skillFilePreviewRef = ref(null)
+const packageRevision = ref('')
+const skillVersions = ref([])
 const savingFile = ref(false)
 const creatingNode = ref(false)
 const savingDependencies = ref(false)
@@ -534,13 +551,16 @@ const fetchSkillDetail = async () => {
     skills.value = skillResult?.data || []
     allowedSkillAccessLevels.value = skillResult?.allowed_access_levels || ['user']
 
-    const found = skills.value.find((s) => s.slug === slug.value)
+    const packageResult = await skillApi.getContent(slug.value)
+    packageRevision.value = packageResult.data.revision
+    const found = { ...skills.value.find((s) => s.slug === slug.value), ...packageResult.data.skill }
     if (found) {
       currentSkill.value = found
       syncDependencyFormFromSkill(found)
       syncShareConfigFromSkill(found)
       await reloadTree()
       await loadSkillFile(found.slug)
+      if (found.bound_agent_id) await loadSkillVersions()
     }
     await fetchDependencyOptions(currentSkill.value?.slug)
   } catch {
@@ -608,6 +628,7 @@ const loadSkillFile = async (skillSlug, path = 'SKILL.md') => {
   try {
     const fileResult = await skillApi.getSkillFile(skillSlug, path)
     const content = fileResult?.data?.content || ''
+    packageRevision.value = fileResult?.data?.revision || packageRevision.value
     fileContent.value = content
     selectedPath.value = path
     selectedIsDir.value = false
@@ -635,6 +656,7 @@ const handleTreeSelect = async (keys, info) => {
   try {
     const result = await skillApi.getSkillFile(currentSkill.value.slug, path)
     const content = result?.data?.content || ''
+    packageRevision.value = result?.data?.revision || packageRevision.value
     fileContent.value = content
   } catch {
     message.error('文件读取失败')
@@ -646,15 +668,17 @@ const saveCurrentFile = async (content = fileContent.value) => {
     return
   savingFile.value = true
   try {
-    await skillApi.updateSkillFile(currentSkill.value.slug, {
-      path: selectedPath.value,
-      content
+    const result = await skillApi.saveContent(currentSkill.value.slug, {
+      expected_revision: packageRevision.value,
+      files: { [selectedPath.value]: content },
+      dependencies: { ...dependencyForm }
     })
+    packageRevision.value = result.data.revision
     fileContent.value = content
     message.success('已保存')
     if (selectedPath.value === 'SKILL.md') await fetchSkillDetail()
-  } catch {
-    message.error('保存失败')
+  } catch (error) {
+    message.error(error.message || '保存失败；请保留草稿并核对最新内容')
   } finally {
     savingFile.value = false
   }
@@ -757,12 +781,14 @@ const saveDependencies = async () => {
   if (!currentSkill.value || !isInstalledSkill.value || !canEditSkillDependencies.value) return
   savingDependencies.value = true
   try {
-    const result = await skillApi.updateSkillDependencies(currentSkill.value.slug, {
-      tool_dependencies: dependencyForm.tool_dependencies,
-      mcp_dependencies: dependencyForm.mcp_dependencies,
-      skill_dependencies: dependencyForm.skill_dependencies
+    const draft = skillFilePreviewRef.value?.getDraftContent()
+    const result = await skillApi.saveContent(currentSkill.value.slug, {
+      expected_revision: packageRevision.value,
+      files: selectedPath.value && !selectedIsDir.value && typeof draft === 'string' ? { [selectedPath.value]: draft } : {},
+      dependencies: { ...dependencyForm }
     })
-    const updated = result?.data
+    packageRevision.value = result.data.revision
+    const updated = result?.data?.skill
     if (updated) {
       currentSkill.value = updated
       syncDependencyFormFromSkill(updated)
@@ -774,6 +800,38 @@ const saveDependencies = async () => {
   } finally {
     savingDependencies.value = false
   }
+}
+
+const loadSkillVersions = async () => {
+  skillVersions.value = (await skillApi.listVersions(slug.value)).data || []
+}
+
+const hasSkillDraft = () => {
+  const draft = skillFilePreviewRef.value?.getDraftContent()
+  return (typeof draft === 'string' && draft !== fileContent.value) ||
+    ['tool_dependencies', 'mcp_dependencies', 'skill_dependencies'].some((key) => JSON.stringify(dependencyForm[key]) !== JSON.stringify(currentSkill.value?.[key] || []))
+}
+
+const publishSkillVersion = async () => {
+  if (hasSkillDraft()) return message.warning('请先保存文件和依赖修改，再发版')
+  try {
+    await skillApi.releaseVersion(slug.value, packageRevision.value)
+    await loadSkillVersions()
+    message.success('已保存完整历史版本')
+  } catch (error) { message.error(error.message || '发版失败') }
+}
+
+const restoreSkillVersion = (version) => {
+  if (hasSkillDraft()) return message.warning('请先保存或放弃当前草稿')
+  Modal.confirm({
+    title: `恢复版本 ${version}？`,
+    content: '当前未发版的文件和依赖将被替换。',
+    onOk: async () => {
+      await skillApi.restoreVersion(slug.value, version, packageRevision.value)
+      await fetchSkillDetail()
+      message.success('已恢复历史版本')
+    }
+  })
 }
 
 onMounted(() => {

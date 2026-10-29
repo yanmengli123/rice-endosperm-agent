@@ -279,6 +279,14 @@ def _apply_model_override(input_context: dict, meta: dict | None) -> None:
         input_context["model"] = model_spec
 
 
+def _apply_client_capabilities(input_context: dict, meta: dict | None) -> None:
+    input_context["agent_slug"] = (meta or {}).get("agent_slug")
+    capabilities = (meta or {}).get("client_capabilities")
+    input_context["client_capabilities"] = (
+        ["chat_widgets"] if isinstance(capabilities, list) and "chat_widgets" in capabilities else []
+    )
+
+
 async def _activate_user_credential(*, db, uid: str, meta: dict | None):
     """P3 BYOK：按 run 冻结的凭据引用解密并激活任务级密钥覆盖。
 
@@ -3365,6 +3373,7 @@ async def stream_agent_chat(
         request_id=meta.get("request_id"),
     )
     _apply_model_override(input_context, meta)
+    _apply_client_capabilities(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     # 本机浏览器（P1）：run 冻结的开关以实际布尔写入 runtime——即使配置面持久化过
@@ -4935,6 +4944,7 @@ async def stream_agent_resume(
         request_id=meta.get("request_id"),
     )
     _apply_model_override(input_context, meta)
+    _apply_client_capabilities(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）；
     if meta.get("agent_runtime") == "dsh":

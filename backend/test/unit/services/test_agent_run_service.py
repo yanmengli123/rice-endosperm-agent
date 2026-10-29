@@ -122,6 +122,8 @@ def _assert_run_input_payload(payload: dict, *, clean_question: str) -> None:
 
     @mention 特性起，run 创建会把解析结论冻结进 input_payload（无提及场景
     也有审计快照）；枚举 str 与协议版本不硬编码，断言语义字段。
+    0.8 兼容回移起，客户端能力（chat_widgets）也随载荷冻结；未声明能力的
+    客户端为空列表，与旧客户端载荷保持逐字段兼容。
     """
     stable = {
         "model_spec": "agent-default-model",
@@ -131,6 +133,7 @@ def _assert_run_input_payload(payload: dict, *, clean_question: str) -> None:
         "credential_source": "platform",
         # 聊天基座标记（ADR-dsh-chat-runtime）：默认运行时为 langgraph。
         "agent_runtime": "langgraph",
+        "client_capabilities": [],
     }
     assert {key: payload[key] for key in stable} == stable
     assert set(payload) == {*stable, "mention_resolution"}

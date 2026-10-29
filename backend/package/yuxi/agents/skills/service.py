@@ -146,6 +146,10 @@ def normalize_skill_share_config(
 
 
 def user_can_access_skill(user: User, skill: Skill, *, require_enabled: bool = True) -> bool:
+    if getattr(skill, "bound_agent_id", None) is not None:
+        from yuxi.repositories.agent_repository import user_can_access_agent
+
+        return bool((not require_enabled or skill.enabled) and skill.bound_agent and user_can_access_agent(user, skill.bound_agent))
     if require_enabled and not skill.enabled:
         return False
     if user.role == "superadmin":
@@ -185,6 +189,8 @@ def user_can_manage_skill(user: User, skill: Skill, *, creator_department_id: in
 
 
 def can_skill_depend_on(parent: Skill, dependency: Skill) -> bool:
+    if getattr(dependency, "bound_agent_id", None) is not None:
+        return False
     if not dependency.enabled:
         return False
     if is_builtin_skill(dependency):
@@ -1082,6 +1088,11 @@ async def get_manageable_skill_or_raise(db: AsyncSession, user: User, slug: str)
     item = await get_skill_or_raise(db, slug)
     if not await _skill_in_user_tenant(db, user, item):
         raise ValueError(f"技能 '{slug}' 不存在或无权管理")
+    if getattr(item, "bound_agent_id", None) is not None:
+        from yuxi.agents.skills.edit import require_bound_agent
+
+        await require_bound_agent(db, operator=user, agent_id=item.bound_agent_id, manage=True)
+        return item
     creator_dept: int | None = None
     needs_lookup = (
         user.role == "admin"
@@ -1126,7 +1137,10 @@ async def read_skill_file(db: AsyncSession, slug: str, relative_path: str) -> di
     except UnicodeDecodeError as e:
         raise ValueError(f"文件编码不支持（仅支持 UTF-8）: {e}") from e
 
-    return {"path": rel, "content": content}
+    from yuxi.agents.skills.edit import directory_revision
+    import asyncio
+
+    return {"path": rel, "content": content, "revision": await asyncio.to_thread(directory_revision, skill_dir)}
 
 
 async def create_skill_node(
