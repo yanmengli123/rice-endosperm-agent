@@ -110,6 +110,11 @@ const props = defineProps({
 const emit = defineEmits(['submit', 'cancel'])
 
 const isProcessing = ref(false)
+defineExpose({
+  resetSubmission: () => {
+    isProcessing.value = false
+  }
+})
 const activeQuestionIndex = ref(0)
 const selectedValues = ref({})
 const otherTexts = ref({})

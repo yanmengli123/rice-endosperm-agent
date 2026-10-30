@@ -775,12 +775,13 @@ async def process_agent_run(ctx, run_id: str):
     }
     if isinstance(frozen_scope, dict) and frozen_scope.get("literature_binding"):
         meta["input_message_id"] = input_message.id
-    if run_type == "subagent":
+    if run_type == "subagent" or (run_type == "resume" and runtime.get("kind") == "subagent"):
         # 三个线程 ID 在 subagent_run_service 创建 run 时已写入 runtime，此处不再二次兜底；
         # 缺失会在 chat_service._apply_subagent_runtime_context 处直接报错。
         meta["parent_thread_id"] = runtime.get("parent_thread_id")
         meta["file_thread_id"] = runtime.get("file_thread_id")
         meta["skills_thread_id"] = runtime.get("skills_thread_id")
+        meta["subagent_runtime"] = True
     if input_metadata.get("source"):
         meta["source"] = input_metadata.get("source")
     if isinstance(input_metadata.get("agent_invocation_meta"), dict):
@@ -823,7 +824,7 @@ async def process_agent_run(ctx, run_id: str):
         "source": input_metadata.get("source"),
         "run_type": run_type,
         "created_by_run_id": run.created_by_run_id,
-        "subagent_slug": agent_slug if run_type == "subagent" else None,
+        "subagent_slug": agent_slug if meta.get("subagent_runtime") else None,
     }
     if isinstance(input_metadata.get("agent_invocation_meta"), dict):
         metadata_event["agent_invocation_meta"] = input_metadata.get("agent_invocation_meta") or {}
@@ -1005,6 +1006,11 @@ async def process_agent_run(ctx, run_id: str):
         if terminal_outcome is not None:
             terminal_status, error_type, error_message, terminal_chunk = terminal_outcome
             terminal_chunk = await _attach_run_artifacts_to_finished_chunk(run_id, terminal_chunk)
+            if terminal_status == "interrupted" and terminal_chunk.get("questions"):
+                from yuxi.services.waitpoint_service import persist_waitpoint
+
+                async with pg_manager.get_async_session_context() as waitpoint_db:
+                    await persist_waitpoint(waitpoint_db, run_id=run_id, chunk=terminal_chunk)
             trace_committed = await _persist_terminal_trace(
                 recorder,
                 terminal_status,
@@ -1207,10 +1213,13 @@ async def process_literature_enrich_pending(
         raise ValueError("批量富化任务参数无效")
     with actor(tenant_id, requested_by):
         async with pg_manager.get_async_session_context() as session:
-            user = (await session.execute(
-                select(User.uid, User.role, User.department_id, User.is_disabled, User.is_deleted)
-                .where(User.uid == requested_by)
-            )).first()
+            user = (
+                await session.execute(
+                    select(User.uid, User.role, User.department_id, User.is_disabled, User.is_deleted).where(
+                        User.uid == requested_by
+                    )
+                )
+            ).first()
             if user is None or user.is_disabled or user.is_deleted:
                 raise PermissionError("批量富化任务提交者已失效")
             if await resolve_tenant_id(session, user.uid) != tenant_id:

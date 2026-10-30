@@ -581,7 +581,7 @@ async def test_subagent_run_service_rejects_parent_run_without_conversation_befo
 
 
 @pytest.mark.asyncio
-async def test_subagent_run_service_rejects_subagent_as_creator(monkeypatch: pytest.MonkeyPatch):
+async def test_nested_dispatch_policy_runs_before_creating_child_records(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, object] = {}
     _patch_repos(
         monkeypatch,
@@ -594,7 +594,11 @@ async def test_subagent_run_service_rejects_subagent_as_creator(monkeypatch: pyt
         ),
     )
 
-    with pytest.raises(ValueError, match="子智能体不能创建子智能体"):
+    async def deny_depth(*_args, **_kwargs):
+        raise HTTPException(409, "已达到协作层级上限")
+
+    monkeypatch.setattr("yuxi.services.collaboration_service.assert_spawn_allowed", deny_depth)
+    with pytest.raises(ValueError, match="协作层级上限"):
         await SubagentRunService(_FakeDB()).start(
             uid="user-1",
             created_by_run_id="parent-run",
@@ -707,6 +711,7 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
     assert db.created_run_kwargs["input_payload"] == {
         "model_spec": "agent-default-model",
         "runtime": {
+            "kind": "subagent",
             "tool_call_id": "tool-1",
             "subagent_name": "Worker",
             "parent_thread_id": "parent-thread",

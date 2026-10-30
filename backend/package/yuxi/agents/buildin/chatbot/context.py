@@ -9,6 +9,15 @@ from yuxi.agents.context import (
 
 @dataclass(kw_only=True)
 class ChatBotContext(BaseContext):
+    max_collaboration_depth: int = field(
+        default=1,
+        metadata={
+            "name": "协作层级上限",
+            "description": "默认仅允许直接委派；管理员可设置 1–4 层。所有层级共享根任务的并发名额和知识范围。",
+            "type": "int",
+            "auth": "admin",
+        },
+    )
     subagents: list[str] | None = field(
         default=None,
         metadata={

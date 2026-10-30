@@ -28,9 +28,10 @@ from yuxi.agents.middlewares import (
 from yuxi.agents.middlewares.skills import SkillsMiddleware
 from yuxi.agents.middlewares.trace import TraceMiddleware
 from yuxi.agents.middlewares.collaboration import CollaborationMiddleware
+from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 
-_SUBAGENT_DISABLED_TOOLS = frozenset({"present_artifacts", "ask_user_question", "install_skill"})
+_SUBAGENT_DISABLED_TOOLS = frozenset({"present_artifacts", "install_skill"})
 
 
 def _tool_name(tool) -> str | None:
@@ -74,7 +75,7 @@ async def _build_middlewares(context):
         l1_l2_trigger_ratio=summary_l2_trigger_ratio,
     )
 
-    return [
+    middlewares = [
         create_agent_filesystem_middleware(
             getattr(context, "tool_token_limit", DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS) * 1024,
             context=context,
@@ -92,6 +93,17 @@ async def _build_middlewares(context):
         ImageInputCompatibilityMiddleware(),
         TokenUsageMiddleware(),
     ]
+    if getattr(context, "subagents", None) and getattr(context, "run_id", None):
+        from yuxi.services.collaboration_service import may_delegate
+        from yuxi.storage.postgres.manager import pg_manager
+
+        async with pg_manager.get_async_session_context() as db:
+            allowed = await may_delegate(db, uid=context.uid, run_id=context.run_id)
+        if allowed:
+            delegation = await create_subagent_task_middleware(context)
+            if delegation:
+                middlewares.insert(6, delegation)
+    return middlewares
 
 
 class SubAgentBackend(BaseAgent):

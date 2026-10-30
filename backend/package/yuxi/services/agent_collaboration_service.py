@@ -236,8 +236,6 @@ async def validate_subagent_collaboration(
 
 def agent_references_subagent(agent: Agent, subagent_slug: str) -> bool:
     """判断主智能体的协作白名单是否引用了指定子智能体 slug。"""
-    if agent.is_subagent:
-        return False
     return subagent_slug in extract_subagent_slugs(agent.config_json)
 
 
@@ -247,6 +245,6 @@ async def list_referencing_agents(db: AsyncSession, subagent_slug: str) -> list[
     不做可见性过滤：删除保护必须覆盖「当前用户看不到但真实存在」的引用方，
     否则部门管理员可能删掉其他部门编排器正在使用的专家。
     """
-    result = await db.execute(select(Agent).where(Agent.is_subagent.is_(False)))
+    result = await db.execute(select(Agent))
     mains = list(result.scalars().all())
     return [agent for agent in mains if agent_references_subagent(agent, subagent_slug)]

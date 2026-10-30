@@ -7,9 +7,11 @@ from yuxi.services import collaboration_service as service
 from yuxi.storage.postgres.models_business import (
     Agent,
     AgentRun,
+    AgentRunWaitpoint,
     Base,
     CollaborationMessage,
     CollaborationStop,
+    Message,
     Tenant,
     TenantMembership,
     User,
@@ -31,6 +33,8 @@ async def collaboration_db():
                     AgentRun.__table__,
                     CollaborationMessage.__table__,
                     CollaborationStop.__table__,
+                    AgentRunWaitpoint.__table__,
+                    Message.__table__,
                 ],
             )
         )
@@ -192,3 +196,154 @@ async def test_stop_invalidates_waitpoints_without_rewriting_terminal_history(co
     assert member["waiting_for_input"] is False
     with pytest.raises(asyncio.CancelledError):
         await service.pending_guidance(db, uid="alice", run_id="root", delivered_ids=set())
+
+
+async def test_nested_dispatch_respects_frozen_depth_and_shared_root_budget(collaboration_db):
+    db = collaboration_db
+    root = await db.get(AgentRun, "root")
+    assert await service.may_delegate(db, uid="alice", run_id="root") is True
+    assert await service.may_delegate(db, uid="alice", run_id="child") is False
+    with pytest.raises(HTTPException) as depth:
+        await service.assert_spawn_allowed(db, uid="alice", creator_run_id="child")
+    assert "层级上限" in depth.value.detail
+    root.input_payload = {"collaboration_limits": {"version": 1, "max_depth": 2, "max_concurrent": 3}}
+    await db.commit()
+    assert await service.may_delegate(db, uid="alice", run_id="child") is True
+    await service.assert_spawn_allowed(db, uid="alice", creator_run_id="child", child_thread_id="grandchild-thread")
+    db.add(
+        AgentRun(
+            id="grandchild",
+            tenant_id=1,
+            uid="alice",
+            request_id="grandchild",
+            agent_slug="research",
+            run_type="subagent",
+            created_by_run_id="child",
+            conversation_thread_id="grandchild-thread",
+            status="running",
+            input_payload={},
+        )
+    )
+    await db.commit()
+    with pytest.raises(HTTPException) as maximum:
+        await service.assert_spawn_allowed(db, uid="alice", creator_run_id="grandchild")
+    assert "层级上限" in maximum.value.detail
+    from yuxi.services.subagent_run_service import SubagentRunConcurrencyLimit
+
+    with pytest.raises(SubagentRunConcurrencyLimit):
+        await service.assert_spawn_allowed(db, uid="alice", creator_run_id="root")
+
+
+@pytest.mark.parametrize("value,expected", [(None, 1), (0, 1), (2, 2), (99, 4), ("bad", 1)])
+def test_collaboration_depth_has_a_hard_server_limit(value, expected):
+    from types import SimpleNamespace
+
+    agent = SimpleNamespace(config_json={"context": {"max_collaboration_depth": value}})
+    assert service.freeze_collaboration_limits(agent)["max_depth"] == expected
+
+
+async def test_waitpoint_revision_claim_replay_and_member_lineage(collaboration_db, monkeypatch):
+    import json
+    from yuxi.services import agent_run_service, waitpoint_service
+    from yuxi.repositories.agent_run_repository import AgentRunRepository
+
+    db = collaboration_db
+    parent = await db.get(AgentRun, "child")
+    parent.status = "interrupted"
+    parent.input_payload = {"runtime": {"kind": "subagent"}}
+    chunk = {
+        "status": "ask_user_question_required",
+        "questions": [{"question_id": "q1", "question": "Select method", "options": []}],
+    }
+    await waitpoint_service.persist_waitpoint(db, run_id="child", chunk=chunk)
+    await db.commit()
+    point = await waitpoint_service.get_waitpoint(db, uid="alice", run_id="child")
+    answer = {"q1": "verified method"}
+    with pytest.raises(HTTPException) as stale:
+        await waitpoint_service.resume_waitpoint(
+            db, uid="alice", run_id="child", revision="0" * 64, answer=answer, request_id="r"
+        )
+    assert stale.value.status_code == 409
+    with pytest.raises(HTTPException) as wrong_question:
+        await waitpoint_service.resume_waitpoint(
+            db, uid="alice", run_id="child", revision=point["revision"], answer={"foreign": "yes"}, request_id="r"
+        )
+    assert wrong_question.value.status_code == 422
+
+    created = []
+
+    async def create(**kwargs):
+        assert kwargs["agent_kind"] == "subagent" and kwargs["created_by_run_id"] == "child"
+        await service.assert_resume_allowed(db, uid="alice", run_id="child")
+        message = Message(
+            id=10, conversation_id=1, role="user", content=json.dumps(kwargs["resume"]), message_type="resume"
+        )
+        db.add(message)
+        db.add(
+            AgentRun(
+                id="resumed",
+                tenant_id=1,
+                uid="alice",
+                request_id=kwargs["meta"]["request_id"],
+                agent_slug="research",
+                run_type="resume",
+                created_by_run_id="child",
+                conversation_thread_id="child-thread",
+                status="pending",
+                input_payload={"runtime": {"kind": "subagent"}},
+                input_message_id=10,
+            )
+        )
+        await db.flush()
+        await waitpoint_service.claim_waitpoint(db, parent_run_id="child", resume_run_id="resumed")
+        await db.commit()
+        created.append("resumed")
+        return {"run_id": "resumed"}
+
+    monkeypatch.setattr(agent_run_service, "create_agent_run_view", create)
+    for _retry in range(2):
+        receipt = await waitpoint_service.resume_waitpoint(
+            db, uid="alice", run_id="child", revision=point["revision"], answer=answer, request_id="r"
+        )
+        assert receipt["run_id"] == "resumed"
+    assert created == ["resumed"]
+    with pytest.raises(HTTPException) as conflict:
+        await waitpoint_service.resume_waitpoint(
+            db, uid="alice", run_id="child", revision=point["revision"], answer={"q1": "changed"}, request_id="r"
+        )
+    assert conflict.value.status_code == 409
+    group = await service.tree(db, uid="alice", run_id="root")
+    original = next(member for member in group["members"] if member["run_id"] == "child")
+    assert original["current_run_id"] == "resumed" and original["waiting_for_input"] is False
+    latest = await AgentRunRepository(db).get_latest_subagent_run_by_thread_for_user("child-thread", "alice")
+    assert latest.id == "resumed"
+
+
+async def test_waitpoint_content_is_immutable_and_requires_real_question_ids(collaboration_db):
+    from yuxi.services.waitpoint_service import persist_waitpoint
+
+    db = collaboration_db
+    chunk = {"questions": [{"question_id": "q1", "question": "Which method?"}]}
+    await persist_waitpoint(db, run_id="child", chunk=chunk)
+    await persist_waitpoint(db, run_id="child", chunk=chunk)
+    with pytest.raises(ValueError, match="不能改写"):
+        await persist_waitpoint(
+            db, run_id="child", chunk={"questions": [{"question_id": "q1", "question": "Different?"}]}
+        )
+    with pytest.raises(ValueError, match="question_id"):
+        await persist_waitpoint(db, run_id="sibling", chunk={"questions": [{"question": "Missing identifier"}]})
+    with pytest.raises(ValueError, match="不能重复"):
+        await persist_waitpoint(db, run_id="sibling", chunk={"questions": chunk["questions"] * 2})
+
+
+async def test_resume_member_respects_frozen_group_capacity(collaboration_db):
+    db = collaboration_db
+    root = await db.get(AgentRun, "root")
+    root.input_payload = {"collaboration_limits": {"max_concurrent": 1, "max_depth": 2}}
+    (await db.get(AgentRun, "child")).status = "interrupted"
+    await db.commit()
+    with pytest.raises(HTTPException, match="并发上限"):
+        await service.assert_resume_allowed(db, uid="alice", run_id="child")
+    (await db.get(AgentRun, "sibling")).status = "completed"
+    await db.commit()
+    await service.assert_resume_allowed(db, uid="alice", run_id="child")

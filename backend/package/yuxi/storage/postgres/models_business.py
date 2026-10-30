@@ -1594,6 +1594,20 @@ class AgentRun(Base):
         }
 
 
+class AgentRunWaitpoint(Base):
+    """Durable human input, separate from immutable interrupted run history."""
+
+    __tablename__ = "agent_run_waitpoints"
+    run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False)
+    revision = Column(String(64), nullable=False)
+    payload_json = Column(JSON, nullable=False)
+    resolved_by_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class CollaborationStop(Base):
     """Invalidate a collaboration subtree without rewriting terminal run history."""
 

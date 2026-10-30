@@ -324,7 +324,7 @@ def _apply_subagent_runtime_context(input_context: dict, meta: dict | None) -> N
     """把子智能体 run 的父线程和文件线程信息注入运行 context。"""
     meta = meta or {}
     # 仅对子智能体类型的 run 生效
-    if meta.get("run_type") != "subagent":
+    if not meta.get("subagent_runtime") and meta.get("run_type") != "subagent":
         return
     # 这三个线程 ID 由 subagent_run_service 在创建 run 时写入 runtime，
     # 是子智能体区别于普通对话的唯一依据；缺失即上游契约被破坏，直接失败而非静默回退。

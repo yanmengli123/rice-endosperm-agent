@@ -64,7 +64,7 @@ def collaboration_tools():
             group = {item["run_id"]: item for item in result["members"]}
             if any(item not in group for item in run_ids):
                 raise ToolException("成员不属于当前协作")
-            selected = [group[item] for item in dict.fromkeys(run_ids)]
+            selected = [group[group[item].get("current_run_id", item)] for item in dict.fromkeys(run_ids)]
             done = [
                 item
                 for item in selected

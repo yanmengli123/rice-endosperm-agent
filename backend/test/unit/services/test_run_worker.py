@@ -195,6 +195,8 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
         del args, kwargs
         return None
 
+    monkeypatch.setattr(run_worker, "append_run_event", fake_noop)
+
     async def fake_trace_flush(self, *, transaction_action=None):
         del self
         if transaction_action is not None:
@@ -315,6 +317,36 @@ async def test_process_agent_run_commits_output_before_marking_completed(monkeyp
     )
 
     await run_worker.process_agent_run({"job_try": 1}, "run-1")
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+async def test_member_waitpoint_is_saved_before_terminal_publication(monkeypatch, save_fails):
+    from yuxi.services import waitpoint_service
+
+    run = _build_run()
+    _patch_common(monkeypatch, run)
+    order = []
+
+    async def save(db, *, run_id, chunk):
+        assert run_id == run.id and chunk["questions"][0]["question_id"] == "q"
+        order.append("saved")
+        if save_fails:
+            raise ValueError("storage unavailable")
+
+    async def terminal(run_id, status, *args, **kwargs):
+        order.append(status)
+
+    monkeypatch.setattr(waitpoint_service, "persist_waitpoint", save)
+    monkeypatch.setattr(run_worker, "mark_run_terminal", terminal)
+    monkeypatch.setattr(
+        run_worker,
+        "stream_agent_chat",
+        lambda **kwargs: _BytesAsyncIter(
+            [b'{"status":"ask_user_question_required","questions":[{"question_id":"q","question":"Choose"}]}\n']
+        ),
+    )
+    await run_worker.process_agent_run({"job_try": 1}, "run-1")
+    assert order == ["saved", "failed" if save_fails else "interrupted"]
 
 
 @pytest.mark.asyncio

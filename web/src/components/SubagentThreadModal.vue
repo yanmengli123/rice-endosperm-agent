@@ -274,6 +274,21 @@ const loadHistory = async (threadId) => {
   messages.value = []
   try {
     historyRunStatus.value = normalizeRunStatus(props.runStatus)
+    if (props.runId) {
+      try {
+        const group = await agentApi.getCollaboration(props.runId)
+        const original = group.members?.find((member) => member.run_id === props.runId)
+        const current = group.members?.find(
+          (member) => member.run_id === (original?.current_run_id || props.runId)
+        )
+        if (current) {
+          historyRunId.value = current.run_id
+          historyRunStatus.value = normalizeRunStatus(current.effective_status || current.status)
+        }
+      } catch (cause) {
+        if (cause?.status !== 404 && cause?.response?.status !== 404) throw cause
+      }
+    }
     if (isTerminalRunStatus(historyRunStatus.value)) {
       stopRunStream()
       resetStreamState()

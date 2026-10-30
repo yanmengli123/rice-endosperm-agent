@@ -11,6 +11,22 @@ from server.utils.auth_middleware import get_admin_user, get_db, get_required_us
 agent_router_module = importlib.import_module("server.routers.agent_router")
 
 
+def test_member_cannot_erase_or_replace_admin_collaboration_limits(monkeypatch):
+    from yuxi.agents.buildin.chatbot.context import ChatBotContext
+
+    monkeypatch.setattr(
+        agent_router_module,
+        "agent_manager",
+        SimpleNamespace(get_agent=lambda _: SimpleNamespace(context_schema=ChatBotContext)),
+    )
+    stored = {"context": {"max_collaboration_depth": 3, "max_concurrent_subagent_runs": 2}}
+    proposed = {"context": {"system_prompt": "updated", "max_collaboration_depth": 4}}
+    result = agent_router_module._filter_agent_config_json("chatbot", proposed, "user", existing=stored)
+    assert result["context"] == {**stored["context"], "system_prompt": "updated"}
+    result = agent_router_module._filter_agent_config_json("chatbot", proposed, "admin", existing=stored)
+    assert result["context"] == proposed["context"]
+
+
 def _user(role: str = "admin"):
     uid = "admin" if role in {"admin", "superadmin"} else "user"
     return SimpleNamespace(uid=uid, role=role, department_id=1)

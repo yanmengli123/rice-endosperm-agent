@@ -74,7 +74,13 @@ class AgentRunRepository:
             .where(
                 AgentRun.conversation_thread_id == conversation_thread_id,
                 AgentRun.uid == str(uid),
-                AgentRun.run_type == "subagent",
+                or_(
+                    AgentRun.run_type == "subagent",
+                    and_(
+                        AgentRun.run_type == "resume",
+                        AgentRun.input_payload["runtime"]["kind"].as_string() == "subagent",
+                    ),
+                ),
             )
             .order_by(AgentRun.created_at.desc())
             .limit(1)

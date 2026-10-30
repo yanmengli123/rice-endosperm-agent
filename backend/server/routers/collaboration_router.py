@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_db, get_required_user
 from yuxi.services import collaboration_service as service
+from yuxi.services import waitpoint_service
 from yuxi.storage.postgres.models_business import User
 
 collaboration = APIRouter(prefix="/agent/runs", tags=["collaboration"])
@@ -14,6 +15,27 @@ class GuidanceRequest(BaseModel):
     target_run_id: str = Field(min_length=1, max_length=64)
     message: str = Field(min_length=1, max_length=8192)
     request_id: str = Field(min_length=1, max_length=64)
+
+
+class WaitpointAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_id: str = Field(min_length=1, max_length=64)
+    answer: dict | str
+
+
+@collaboration.get("/{run_id}/collaboration/waitpoint")
+async def get_waitpoint(run_id: str, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+    return await waitpoint_service.get_waitpoint(db, uid=str(user.uid), run_id=run_id)
+
+
+@collaboration.post("/{run_id}/collaboration/resume")
+async def resume_waitpoint(
+    run_id: str, body: WaitpointAnswer, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+):
+    return await waitpoint_service.resume_waitpoint(
+        db, uid=str(user.uid), run_id=run_id, revision=body.revision, answer=body.answer, request_id=body.request_id
+    )
 
 
 @collaboration.get("/{run_id}/collaboration")

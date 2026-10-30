@@ -201,7 +201,13 @@ class SubagentRunService:
         if not creator_run:
             raise ValueError("父运行任务不存在")
         if getattr(creator_run, "run_type", None) == "subagent":
-            raise ValueError("子智能体不能创建子智能体")
+            from yuxi.services.collaboration_service import assert_spawn_allowed
+
+            try:
+                await assert_spawn_allowed(self.db, uid=uid, creator_run_id=creator_run.id,
+                    child_thread_id=requested_thread_id)
+            except HTTPException as exc:
+                raise ValueError(str(exc.detail)) from exc
 
         child_thread_id = str(requested_thread_id or "").strip()
         continuing = bool(child_thread_id)  # 表示是继续运行已有子智能体线程，而非新建子线程
@@ -328,6 +334,7 @@ class SubagentRunService:
             scope.agent_backend,
         )
         runtime_payload = {
+            "kind": "subagent",
             "tool_call_id": tool_call_id,
             "subagent_name": scope.agent_item.name,
             "parent_thread_id": creator_run.conversation_thread_id,

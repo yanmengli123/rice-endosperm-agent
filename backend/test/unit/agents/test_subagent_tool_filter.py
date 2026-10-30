@@ -26,7 +26,7 @@ def test_filter_disabled_tools_keeps_allowed_tools_order():
 
     filtered = subagent_graph._filter_disabled_tools(tools)
 
-    assert [subagent_graph._tool_name(tool) for tool in filtered] == ["search", "calculator"]
+    assert [subagent_graph._tool_name(tool) for tool in filtered] == ["search", "ask_user_question", "calculator"]
 
 
 def test_subagent_tool_filter_middleware_filters_before_handler():
@@ -71,7 +71,7 @@ async def test_subagent_tool_filter_middleware_filters_async_before_handler():
     )
 
     assert result == "ok"
-    assert [subagent_graph._tool_name(tool) for tool in seen["tools"]] == ["allowed_tool"]
+    assert [subagent_graph._tool_name(tool) for tool in seen["tools"]] == ["ask_user_question", "allowed_tool"]
 
 
 @pytest.mark.asyncio
@@ -95,4 +95,4 @@ async def test_subagent_get_info_hides_disabled_tool_options(monkeypatch):
 
     info = await subagent_graph.SubAgentBackend().get_info()
 
-    assert [option["key"] for option in info["configurable_items"]["tools"]["options"]] == ["allowed_tool"]
+    assert [option["key"] for option in info["configurable_items"]["tools"]["options"]] == ["allowed_tool", "ask_user_question"]

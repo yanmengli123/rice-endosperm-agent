@@ -11,7 +11,7 @@
     </div>
     <a-alert v-if="error" type="warning" :message="error" show-icon />
     <div
-      v-for="member in members"
+      v-for="member in visibleMembers"
       :key="member.run_id"
       class="member"
       :style="{ paddingLeft: `${depth(member) * 12}px` }"
@@ -19,13 +19,19 @@
       <button
         type="button"
         class="member-link"
-        :disabled="member.run_type !== 'subagent'"
+        :disabled="!member.is_subagent_member"
         @click="openMember(member)"
       >
         {{ member.agent_slug }}
       </button>
       <span>{{ statusLabel(member.effective_status || member.status) }}</span>
       <a-tag v-if="member.waiting_for_input" color="orange">待人工处理</a-tag>
+      <a-button
+        v-if="member.waiting_for_input && member.is_subagent_member"
+        size="small"
+        @click="openWaitpoint(member)"
+        >处理问题</a-button
+      >
     </div>
     <a-form v-if="activeMembers.length" layout="vertical" @finish="send">
       <a-select
@@ -62,13 +68,30 @@
         <p>{{ item.body }}</p>
       </div>
     </details>
+    <a-modal
+      v-model:open="waitpointOpen"
+      title="成员需要你的输入"
+      :footer="null"
+      :destroy-on-close="true"
+      @cancel="waitpointOpen = false"
+    >
+      <HumanApprovalModal
+        v-if="waitpoint"
+        ref="waitpointForm"
+        :visible="true"
+        :questions="waitpoint.questions"
+        @submit="resumeWaitpoint"
+        @cancel="resumeWaitpoint('reject')"
+      />
+    </a-modal>
   </section>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { apiGet, apiPost } from '@/apis/base'
+import { agentApi } from '@/apis/agent_api'
+import HumanApprovalModal from '@/components/HumanApprovalModal.vue'
 
 const props = defineProps({ runId: { type: String, required: true } })
 const emit = defineEmits(['open-member'])
@@ -80,8 +103,17 @@ const loading = ref(false),
   stopping = ref(false)
 const target = ref(),
   draft = ref('')
-const activeMembers = computed(() =>
+const waitpoint = ref(null),
+  waitpointOpen = ref(false),
+  waitpointForm = ref(null)
+let pendingAnswer
+const visibleMembers = computed(() =>
   members.value.filter(
+    (member) => !member.current_run_id || member.current_run_id === member.run_id
+  )
+)
+const activeMembers = computed(() =>
+  visibleMembers.value.filter(
     (member) => !member.stopped && ['pending', 'running', 'interrupted'].includes(member.status)
   )
 )
@@ -96,7 +128,6 @@ function messageStatus(item) {
 let generation = 0,
   timer,
   pendingMessage
-const base = () => `/api/agent/runs/${encodeURIComponent(props.runId)}/collaboration`
 const statusLabel = (status) =>
   ({
     pending: '排队',
@@ -115,7 +146,7 @@ function depth(member) {
     current = member
   while (current?.parent_run_id && count < 16 && !seen.has(current.run_id)) {
     seen.add(current.run_id)
-    count++
+    if (current.run_type === 'subagent') count++
     current = members.value.find((item) => item.run_id === current.parent_run_id)
   }
   return count
@@ -133,7 +164,7 @@ async function load() {
     runId = props.runId
   loading.value = true
   try {
-    const result = await apiGet(base())
+    const result = await agentApi.getCollaboration(runId)
     if (ticket !== generation || runId !== props.runId) return
     members.value = result.members || []
     messages.value = result.messages || []
@@ -154,7 +185,7 @@ async function send() {
   try {
     const key = JSON.stringify([runId, receiver, body])
     if (pendingMessage?.key !== key) pendingMessage = { key, id: crypto.randomUUID() }
-    await apiPost(base() + '/messages', {
+    await agentApi.sendCollaborationMessage(runId, {
       target_run_id: receiver,
       message: body,
       request_id: pendingMessage.id
@@ -173,7 +204,7 @@ async function send() {
 async function stopAll() {
   stopping.value = true
   try {
-    await apiPost(base() + '/stop')
+    await agentApi.stopCollaboration(props.runId)
     await load()
   } catch (cause) {
     message.error(cause.message || '停止失败')
@@ -181,10 +212,48 @@ async function stopAll() {
     stopping.value = false
   }
 }
+async function openWaitpoint(member) {
+  try {
+    const point = await agentApi.getCollaborationWaitpoint(member.run_id)
+    waitpoint.value = { ...point, member }
+    pendingAnswer = null
+    waitpointOpen.value = true
+  } catch (cause) {
+    message.error(cause.message || '读取问题失败')
+    await load()
+  }
+}
+async function resumeWaitpoint(answer) {
+  if (!waitpoint.value) return
+  const point = waitpoint.value
+  try {
+    const key = JSON.stringify([point.run_id, point.revision, answer])
+    if (pendingAnswer?.key !== key) pendingAnswer = { key, id: crypto.randomUUID() }
+    const receipt = await agentApi.resumeCollaborationWaitpoint(point.run_id, {
+      revision: point.revision,
+      request_id: pendingAnswer.id,
+      answer
+    })
+    waitpointOpen.value = false
+    pendingAnswer = null
+    await load()
+    openMember({
+      ...point.member,
+      run_id: receipt.run_id,
+      thread_id: point.thread_id,
+      status: 'pending'
+    })
+  } catch (cause) {
+    message.error(cause.message || '提交失败，回答已保留，可重试')
+    waitpointForm.value?.resetSubmission()
+    await load()
+  }
+}
 watch(
   () => props.runId,
   () => {
     generation++
+    waitpointOpen.value = false
     members.value = []
     messages.value = []
     draft.value = ''
@@ -205,7 +274,7 @@ onBeforeUnmount(() => {
 })
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .collaboration-panel {
   padding: 12px 0;
 }

@@ -14,6 +14,7 @@ from yuxi.storage.postgres.manager import PostgresManager
 from yuxi.storage.postgres.models_business import (
     Agent,
     AgentRun,
+    AgentRunWaitpoint,
     CollaborationMessage,
     CollaborationStop,
     Base,
@@ -78,10 +79,12 @@ async def postgres(monkeypatch):
         await manager._migration_0124_skill_package_versions(conn)
         await manager._migration_0125_personal_mcp_oauth(conn)
         await manager._migration_0126_collaboration_messages(conn)
+        await manager._migration_0127_agent_run_waitpoints(conn)
         # Idempotent DDL also works after interrupted deployment/replay.
         await manager._migration_0124_skill_package_versions(conn)
         await manager._migration_0125_personal_mcp_oauth(conn)
         await manager._migration_0126_collaboration_messages(conn)
+        await manager._migration_0127_agent_run_waitpoints(conn)
     engine = create_async_engine(dsn, connect_args={"server_settings": {"search_path": schema}})
     monkeypatch.setenv("YUXI_SECRET_MASTER_KEY", "v08-test-master-key-over-32-characters-only")
     monkeypatch.setenv("YUXI_PUBLIC_URL", "https://yuxi.example")
@@ -105,13 +108,14 @@ async def test_migrated_columns_match_orm_and_use_timezone(postgres):
             MCPOAuthAttempt,
             CollaborationMessage,
             CollaborationStop,
+            AgentRunWaitpoint,
         ):
             columns = await conn.run_sync(lambda conn, model=model: inspect(conn).get_columns(model.__tablename__))
             actual = {column["name"]: column for column in columns}
             assert set(actual) == set(model.__table__.columns.keys())
             for column in model.__table__.columns:
                 assert actual[column.name]["nullable"] == column.nullable
-                if column.name in {"updated_at", "created_at", "expires_at", "used_at"}:
+                if column.name in {"updated_at", "created_at", "expires_at", "used_at", "resolved_at"}:
                     assert actual[column.name]["type"].timezone is True
         columns = await conn.run_sync(lambda conn: inspect(conn).get_columns("skills"))
         assert "bound_agent_id" in {column["name"] for column in columns}
@@ -402,3 +406,65 @@ async def test_stopped_waitpoint_is_fenced_at_resume_insertion(postgres):
             )
         assert fence.value.status_code == 409 and "旧等待点不能恢复" in fence.value.detail
         assert (await db.get(AgentRun, "root")).status == "interrupted"
+
+
+async def test_parallel_answers_consume_a_waitpoint_once(postgres):
+    from fastapi import HTTPException
+    from yuxi.services.collaboration_service import assert_resume_allowed
+    from yuxi.services.waitpoint_service import claim_waitpoint, persist_waitpoint
+
+    sessions = await _connected(postgres)
+    async with sessions() as db:
+        db.add(
+            AgentRun(
+                id="root",
+                tenant_id=1,
+                uid="alice",
+                request_id="root",
+                agent_slug="orchestrator",
+                run_type="chat",
+                conversation_thread_id="main",
+                status="interrupted",
+                input_payload={},
+            )
+        )
+        await db.flush()
+        await persist_waitpoint(
+            db, run_id="root", chunk={"questions": [{"question_id": "q", "question": "Which method?"}]}
+        )
+        await db.commit()
+
+    async def answer(name):
+        async with sessions() as db:
+            try:
+                await assert_resume_allowed(db, uid="alice", run_id="root")
+                await asyncio.sleep(0.05)
+                db.add(
+                    AgentRun(
+                        id=name,
+                        tenant_id=1,
+                        uid="alice",
+                        request_id=name,
+                        agent_slug="orchestrator",
+                        run_type="resume",
+                        created_by_run_id="root",
+                        conversation_thread_id="main",
+                        status="pending",
+                        input_payload={},
+                    )
+                )
+                await db.flush()
+                await claim_waitpoint(db, parent_run_id="root", resume_run_id=name)
+                await db.commit()
+                return name
+            except HTTPException as exc:
+                assert exc.status_code == 409 and "已处理" in exc.detail
+                await db.rollback()
+                return None
+
+    accepted = [name for name in await asyncio.gather(answer("answer1"), answer("answer2")) if name]
+    assert len(accepted) == 1
+    async with sessions() as db:
+        point = await db.get(AgentRunWaitpoint, "root")
+        assert point.resolved_by_run_id == accepted[0] and point.resolved_at.tzinfo is not None
+        assert list(await db.scalars(select(AgentRun.id).where(AgentRun.created_by_run_id == "root"))) == accepted

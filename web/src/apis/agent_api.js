@@ -198,6 +198,16 @@ export const agentApi = {
    */
   cancelAgentRun: (runId) => apiPost(`/api/agent/runs/${runId}/cancel`, {}),
 
+  getCollaboration: (runId) => apiGet(`/api/agent/runs/${encodeURIComponent(runId)}/collaboration`),
+  sendCollaborationMessage: (runId, payload) =>
+    apiPost(`/api/agent/runs/${encodeURIComponent(runId)}/collaboration/messages`, payload),
+  stopCollaboration: (runId) =>
+    apiPost(`/api/agent/runs/${encodeURIComponent(runId)}/collaboration/stop`, {}),
+  getCollaborationWaitpoint: (runId) =>
+    apiGet(`/api/agent/runs/${encodeURIComponent(runId)}/collaboration/waitpoint`),
+  resumeCollaborationWaitpoint: (runId, payload) =>
+    apiPost(`/api/agent/runs/${encodeURIComponent(runId)}/collaboration/resume`, payload),
+
   /**
    * 获取线程活跃 Run
    * @param {string} threadId - 线程ID

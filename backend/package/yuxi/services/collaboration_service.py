@@ -8,12 +8,63 @@ from langchain_core.messages import HumanMessage
 from sqlalchemy import func, select
 
 from yuxi.services.principal import resolve_tenant_id
-from yuxi.storage.postgres.models_business import AgentRun, CollaborationMessage, CollaborationStop
+from yuxi.storage.postgres.models_business import AgentRun, AgentRunWaitpoint, CollaborationMessage, CollaborationStop
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now
 
 ACTIVE = {"pending", "running", "interrupted"}
 MAX_MEMBERS = 256
 MAX_MESSAGES = 100
+
+
+def freeze_collaboration_limits(agent):
+    from yuxi.services.subagent_run_service import resolve_max_concurrent_subagent_runs
+
+    config = getattr(agent, "config_json", None) or {}
+    context = config.get("context") if isinstance(config, dict) else {}
+    context = context if isinstance(context, dict) else {}
+    try:
+        depth = max(1, min(4, int(context.get("max_collaboration_depth", 1))))
+    except (TypeError, ValueError, OverflowError):
+        depth = 1
+    return {"version": 1, "max_depth": depth, "max_concurrent": resolve_max_concurrent_subagent_runs(agent)}
+
+
+async def _limits(db, root):
+    from yuxi.repositories.agent_repository import AgentRepository
+    from types import SimpleNamespace
+
+    frozen = (root.input_payload or {}).get("collaboration_limits")
+    if isinstance(frozen, dict):
+        # Validate even server-owned snapshots, including restored legacy data.
+        return freeze_collaboration_limits(
+            SimpleNamespace(
+                config_json={
+                    "context": {
+                        "max_collaboration_depth": frozen.get("max_depth", 1),
+                        "max_concurrent_subagent_runs": frozen.get("max_concurrent"),
+                    }
+                }
+            )
+        )
+    return freeze_collaboration_limits(await AgentRepository(db).get_by_slug(root.agent_slug))
+
+
+async def _depth(db, uid, run):
+    depth, seen = 0, set()
+    while run.created_by_run_id:
+        if run.id in seen or len(seen) >= 32:
+            raise HTTPException(409, "协作层级异常")
+        seen.add(run.id)
+        if run.run_type == "subagent":
+            depth += 1
+        run = await _run(db, uid, run.created_by_run_id)
+    return depth
+
+
+async def may_delegate(db, *, uid, run_id):
+    root = await root_run(db, uid=uid, run_id=run_id)
+    current = await _run(db, uid, run_id)
+    return await _depth(db, uid, current) < (await _limits(db, root))["max_depth"]
 
 
 async def _run(db, uid, run_id, *, lock=False):
@@ -113,6 +164,29 @@ async def tree(db, *, uid, run_id):
     rows = await members(db, root)
     group = {row.id: row for row in rows}
     scopes = await _stopped_scopes(db, root)
+    waits = {
+        item.run_id: item
+        for item in (
+            await db.scalars(
+                select(AgentRunWaitpoint).where(
+                    AgentRunWaitpoint.run_id.in_(group),
+                    AgentRunWaitpoint.uid == uid,
+                    AgentRunWaitpoint.tenant_id == root.tenant_id,
+                )
+            )
+        ).all()
+    }
+
+    def latest(row):
+        seen = set()
+        while row.id not in seen:
+            seen.add(row.id)
+            target = waits.get(row.id)
+            if not target or not target.resolved_by_run_id or target.resolved_by_run_id not in group:
+                break
+            row = group[target.resolved_by_run_id]
+        return row
+
     messages = (
         await db.scalars(
             select(CollaborationMessage)
@@ -134,11 +208,15 @@ async def tree(db, *, uid, run_id):
                 "agent_slug": row.agent_slug,
                 "status": row.status,
                 "run_type": row.run_type,
+                "is_subagent_member": is_worker_member(row),
+                "current_run_id": latest(row).id,
                 "stopped": _is_stopped(row.id, group, scopes),
                 "effective_status": (
                     "cancelled" if row.status == "interrupted" and _is_stopped(row.id, group, scopes) else row.status
                 ),
-                "waiting_for_input": row.status == "interrupted" and not _is_stopped(row.id, group, scopes),
+                "waiting_for_input": row.status == "interrupted"
+                and latest(row).id == row.id
+                and not _is_stopped(row.id, group, scopes),
             }
             for row in rows
         ],
@@ -249,8 +327,7 @@ async def pending_guidance(db, *, uid, run_id, delivered_ids):
 
 
 async def assert_spawn_allowed(db, *, uid, creator_run_id, child_thread_id=None):
-    from yuxi.repositories.agent_repository import AgentRepository
-    from yuxi.services.subagent_run_service import SubagentRunConcurrencyLimit, resolve_max_concurrent_subagent_runs
+    from yuxi.services.subagent_run_service import SubagentRunConcurrencyLimit
 
     root = await root_run(db, uid=uid, run_id=creator_run_id, lock=True)
     creator = await _run(db, uid, creator_run_id, lock=True)
@@ -258,8 +335,10 @@ async def assert_spawn_allowed(db, *, uid, creator_run_id, child_thread_id=None)
         raise HTTPException(409, "父运行已停止，不能继续派发子智能体")
     # Recheck the group budget under the root lock. The earlier UI preflight
     # cannot serialize two concurrent inserts into different child threads.
-    parent_agent = await AgentRepository(db).get_by_slug(root.agent_slug)
-    limit = resolve_max_concurrent_subagent_runs(parent_agent)
+    limits = await _limits(db, root)
+    if await _depth(db, uid, creator) >= limits["max_depth"]:
+        raise HTTPException(409, f"已达到协作层级上限（{limits['max_depth']} 层）")
+    limit = limits["max_concurrent"]
     group = await members(db, root)
     if _is_stopped(creator.id, {item.id: item for item in group}, await _stopped_scopes(db, root)):
         raise HTTPException(409, "协作已停止，不能继续派发")
@@ -268,7 +347,7 @@ async def assert_spawn_allowed(db, *, uid, creator_run_id, child_thread_id=None)
     active = [
         item
         for item in group
-        if item.run_type == "subagent"
+        if is_worker_member(item)
         and item.status in {"pending", "running", "cancel_requested"}
         and item.conversation_thread_id != child_thread_id
     ]
@@ -276,17 +355,65 @@ async def assert_spawn_allowed(db, *, uid, creator_run_id, child_thread_id=None)
         raise SubagentRunConcurrencyLimit(limit=limit, active_run_ids=tuple(item.id for item in active))
 
 
+def is_worker_member(run):
+    runtime = (run.input_payload or {}).get("runtime") or {}
+    return run.run_type == "subagent" or (run.run_type == "resume" and runtime.get("kind") == "subagent")
+
+
 async def assert_resume_allowed(db, *, uid, run_id):
     root = await root_run(db, uid=uid, run_id=run_id, lock=True)
     scopes = await _stopped_scopes(db, root)
     current = await _run(db, uid, run_id)
+    target = current
     for _depth in range(32):
         if current.id in scopes:
             raise HTTPException(409, "协作已停止，旧等待点不能恢复；请发送新任务")
         if not current.created_by_run_id:
-            return
+            break
         current = await _run(db, uid, current.created_by_run_id)
-    raise HTTPException(409, "协作层级异常")
+    else:
+        raise HTTPException(409, "协作层级异常")
+    if target.status != "interrupted":
+        raise HTTPException(409, "运行当前不在等待人工输入")
+    consumed = await db.scalar(
+        select(AgentRun.id)
+        .where(
+            AgentRun.created_by_run_id == target.id,
+            AgentRun.run_type == "resume",
+            AgentRun.uid == uid,
+        )
+        .limit(1)
+    )
+    point = await db.get(AgentRunWaitpoint, target.id)
+    if consumed or (point and point.resolved_by_run_id):
+        raise HTTPException(409, "此等待点已处理，请刷新成员状态")
+    if is_worker_member(target):
+        group = await members(db, root)
+        limit = (await _limits(db, root))["max_concurrent"]
+        active = [
+            item
+            for item in group
+            if is_worker_member(item)
+            and item.status in {"pending", "running", "cancel_requested"}
+            and item.conversation_thread_id != target.conversation_thread_id
+        ]
+        if len(active) >= limit:
+            raise HTTPException(409, f"已达协作并发上限（{limit}），请等待其他成员结束后重试")
+        if len(group) >= MAX_MEMBERS:
+            raise HTTPException(409, "本组协作已达到成员记录上限，请在新会话继续")
+    if target.created_at is not None:
+        newer = await db.scalar(
+            select(AgentRun.id)
+            .where(
+                AgentRun.conversation_thread_id == target.conversation_thread_id,
+                AgentRun.uid == uid,
+                AgentRun.created_at > target.created_at,
+                AgentRun.run_type.in_(["chat", "resume", "subagent"]),
+            )
+            .limit(1)
+        )
+        if newer:
+            raise HTTPException(409, "此会话已推进到新任务，不能重放旧等待点")
 
 
 async def stop_group(db, *, uid, run_id, whole_group=True):

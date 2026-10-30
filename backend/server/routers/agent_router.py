@@ -14,7 +14,6 @@ from yuxi.repositories.agent_repository import (
     ADMIN_ROLES,
     DEFAULT_SHARE_CONFIG,
     PLATFORM_BUILTIN_AGENT_SLUGS,
-    SUB_AGENT_BACKEND_ID,
     AgentRepository,
     is_builtin_agent,
     normalize_agent_share_config,
@@ -136,10 +135,18 @@ def _backend_info(info: dict) -> dict:
     return data
 
 
-def _filter_agent_config_json(backend_id: str, config_json: dict | None, role: str | None) -> dict:
+def _filter_agent_config_json(
+    backend_id: str, config_json: dict | None, role: str | None, *, existing: dict | None = None
+) -> dict:
     backend = agent_manager.get_agent(backend_id)
     context_schema = backend.context_schema if backend else None
     filtered = filter_config_by_role(config_json or {}, role, context_schema=context_schema)
+    if existing:
+        stored = strip_non_configurable_context(existing, context_schema).get("context") or {}
+        visible = filter_config_by_role(existing, role, context_schema=context_schema).get("context") or {}
+        protected = {key: value for key, value in stored.items() if key not in visible}
+        if protected:
+            filtered["context"] = {**(filtered.get("context") or {}), **protected}
     # 剥离运行时注入字段（browser_enabled 等 configurable=False 的 context 键）：
     # 防止配置保存形成绕过 run 冻结语义的第二写入源。
     return strip_non_configurable_context(filtered, context_schema)
@@ -276,7 +283,7 @@ async def create_agent(
             "department_ids": [current_user.department_id],
             "user_uids": [],
         }
-    if payload.backend_id != SUB_AGENT_BACKEND_ID and extract_subagent_slugs(payload.config_json):
+    if extract_subagent_slugs(payload.config_json):
         try:
             share_for_validation = _share_config_as_repo_would_store(effective_share_config, current_user)
         except ValueError as exc:
@@ -334,26 +341,25 @@ async def update_agent(
     if not user_can_manage_agent(current_user, item, creator_department_id=creator_dept):
         raise HTTPException(status_code=403, detail="不能编辑非自己创建的智能体")
 
-    if not item.is_subagent:
-        # 以「保存后的真实形态」校验：新配置/新共享范围缺省时沿用现值，共享范围按仓储同一规则归一化
-        effective_config = payload.config_json if payload.config_json is not None else item.config_json
-        if extract_subagent_slugs(effective_config):
-            if payload.share_config is None:
-                effective_share = item.share_config
-            elif is_builtin_agent(item):
-                effective_share = DEFAULT_SHARE_CONFIG.copy()
-            else:
-                try:
-                    effective_share = _share_config_as_repo_would_store(payload.share_config, current_user)
-                except ValueError as exc:
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-            await _validate_collaboration_or_422(
-                db,
-                config_json=effective_config,
-                share_config=effective_share,
-                created_by=item.created_by,
-                tenant_id=item.tenant_id,
-            )
+    # Every delegation edge must preserve audience coverage, including nested members.
+    effective_config = payload.config_json if payload.config_json is not None else item.config_json
+    if extract_subagent_slugs(effective_config):
+        if payload.share_config is None:
+            effective_share = item.share_config
+        elif is_builtin_agent(item):
+            effective_share = DEFAULT_SHARE_CONFIG.copy()
+        else:
+            try:
+                effective_share = _share_config_as_repo_would_store(payload.share_config, current_user)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        await _validate_collaboration_or_422(
+            db,
+            config_json=effective_config,
+            share_config=effective_share,
+            created_by=item.created_by,
+            tenant_id=item.tenant_id,
+        )
 
     try:
         fields_set = payload.model_fields_set
@@ -368,7 +374,9 @@ async def update_agent(
             description=payload.description,
             icon=payload.icon,
             pics=payload.pics,
-            config_json=_filter_agent_config_json(item.backend_id, payload.config_json, current_user.role)
+            config_json=_filter_agent_config_json(
+                item.backend_id, payload.config_json, current_user.role, existing=item.config_json
+            )
             if payload.config_json is not None
             else None,
             share_config=payload.share_config,

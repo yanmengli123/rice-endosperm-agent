@@ -27,6 +27,8 @@ routes:
       - /api/agent/runs/:run_id/collaboration
       - /api/agent/runs/:run_id/collaboration/messages
       - /api/agent/runs/:run_id/collaboration/stop
+      - /api/agent/runs/:run_id/collaboration/waitpoint
+      - /api/agent/runs/:run_id/collaboration/resume
     methods: [GET, POST]
     priority: 120
     upstream_id: yuxi-backend

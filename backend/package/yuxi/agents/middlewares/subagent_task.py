@@ -54,6 +54,9 @@ TASK_SYSTEM_PROMPT = """## `task`（子智能体任务工具）
 - 同时运行的子智能体数量有上限；返回 concurrency_limit 时先用 `subagent_await` / `subagent_status`
   收割现有子任务再派发新的，不要重试刷屏。
 - 短任务且父智能体必须立刻依赖结果时继续使用 `task`。
+- interrupted 表示成员等待人工输入，不是成功完成；引导用户在协作面板处理问题或审批。
+  使用 `subagent_tree` 查看 current_run_id，`subagent_wait` 会跟随恢复后的成员继续等待。
+- `subagent_message` 可向同组成员发送引导，在接收方下一次模型执行边界生效；已完成的外部操作不会撤销。
 
 Available subagent slugs:
 

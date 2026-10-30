@@ -628,6 +628,7 @@ async def _enforce_platform_token_quota(
     tenant_id: int,
     monthly_platform_token_limit: int | None,
     now,
+    reserve_active_run: bool = True,
 ) -> None:
     """Enforce only the platform-funded token pool.
 
@@ -645,6 +646,9 @@ async def _enforce_platform_token_quota(
         monthly_platform_token_limit=monthly_platform_token_limit,
         now=now,
     )
+    if not reserve_active_run:
+        # Resumed members use the existing group's bounded concurrency slots.
+        return
 
     # Token usage is settled after a model call.  The entitlement row is
     # already locked by ``_enforce_user_quota``; admitting at most one
@@ -819,6 +823,7 @@ async def create_agent_run_view(
     created_by_run_id: str | None = None,
     mentions: list[dict[str, Any]] | None = None,
     browser_enabled: bool = False,
+    agent_kind: Literal["main", "subagent"] = "main",
 ) -> dict:
     """创建 chat/resume run 的 HTTP 入口，输入正文由 Message 承载，run 只登记运行元数据。"""
     meta = meta or {}
@@ -841,7 +846,7 @@ async def create_agent_run_view(
         db=db,
         request_id=request_id,
         run_type=run_type,
-        agent_kind="main",
+        agent_kind=agent_kind,
         created_by_run_id=run_created_by_id,
     )
     if scope.existing_run:
@@ -947,6 +952,7 @@ async def create_agent_run_view(
             tenant_id=int(entitlement_snapshot["tenant_id"]),
             monthly_platform_token_limit=entitlement_snapshot.get("monthly_platform_token_limit"),
             now=utc_now_naive(),
+            reserve_active_run=agent_kind != "subagent",
         )
     entitlement_snapshot["credential_source"] = credential_source
 
@@ -1025,15 +1031,17 @@ async def create_agent_run_view(
         input_message=run_input_message,
     )
     client_capabilities = (
-        (parent_payload or {}).get("client_capabilities")
-        if run_type == "resume"
-        else meta.get("client_capabilities")
+        (parent_payload or {}).get("client_capabilities") if run_type == "resume" else meta.get("client_capabilities")
     )
+    from yuxi.services.collaboration_service import freeze_collaboration_limits
+
+    collaboration_limits = (
+        (parent_payload or {}).get("collaboration_limits") if run_type == "resume" else None
+    ) or freeze_collaboration_limits(scope.agent_item)
     input_payload = {
+        "collaboration_limits": collaboration_limits,
         "client_capabilities": (
-            ["chat_widgets"]
-            if isinstance(client_capabilities, list) and "chat_widgets" in client_capabilities
-            else []
+            ["chat_widgets"] if isinstance(client_capabilities, list) and "chat_widgets" in client_capabilities else []
         ),
         "model_spec": resolved_model_spec,
         "knowledge_scope_snapshot": knowledge_scope_snapshot,
@@ -1051,6 +1059,8 @@ async def create_agent_run_view(
             raise HTTPException(status_code=409, detail="父运行缺少 DSH 运行时快照，请重新提问")
         validate_snapshot(snapshot)
         input_payload["agent_runtime_snapshot"] = dict(snapshot)
+    if run_type == "resume" and agent_kind == "subagent" and isinstance((parent_payload or {}).get("runtime"), dict):
+        input_payload["runtime"] = {**parent_payload["runtime"], "kind": "subagent"}
     if user_credential_ref:
         input_payload["user_credential"] = user_credential_ref
     if reader_context is not None:
@@ -1217,8 +1227,9 @@ async def persist_agent_run_record(
             if run_type == "subagent":
                 from yuxi.services.collaboration_service import assert_spawn_allowed
 
-                await assert_spawn_allowed(db, uid=str(current_uid), creator_run_id=created_by_run_id,
-                    child_thread_id=conversation_thread_id)
+                await assert_spawn_allowed(
+                    db, uid=str(current_uid), creator_run_id=created_by_run_id, child_thread_id=conversation_thread_id
+                )
             elif run_type == "resume":
                 from yuxi.services.collaboration_service import assert_resume_allowed
 
@@ -1237,6 +1248,10 @@ async def persist_agent_run_record(
                 input_message_id=persisted_input_message.id,
             )
             persisted_input_message.run_id = run_id
+            if run_type == "resume":
+                from yuxi.services.waitpoint_service import claim_waitpoint
+
+                await claim_waitpoint(db, parent_run_id=created_by_run_id, resume_run_id=run_id)
             # All run sources, including SubAgents, publish the same durable
             # trace identity and dispatch intent with the business row.
             db.add(

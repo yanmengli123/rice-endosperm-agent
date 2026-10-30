@@ -31,6 +31,7 @@ def no_user_byok_credential(monkeypatch):
 def stub_collaboration_resume_boundary(monkeypatch):
     """This module uses repository fakes; SQL fencing has dedicated coverage."""
     monkeypatch.setattr("yuxi.services.collaboration_service.assert_resume_allowed", AsyncMock(return_value=None))
+    monkeypatch.setattr("yuxi.services.waitpoint_service.claim_waitpoint", AsyncMock(return_value=None))
 
 
 @pytest.fixture(autouse=True)
@@ -140,6 +141,7 @@ def _assert_run_input_payload(payload: dict, *, clean_question: str) -> None:
         # 聊天基座标记（ADR-dsh-chat-runtime）：默认运行时为 langgraph。
         "agent_runtime": "langgraph",
         "client_capabilities": [],
+        "collaboration_limits": {"version": 1, "max_depth": 1, "max_concurrent": 3},
     }
     assert {key: payload[key] for key in stable} == stable
     assert set(payload) == {*stable, "mention_resolution"}

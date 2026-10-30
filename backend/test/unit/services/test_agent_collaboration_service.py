@@ -278,9 +278,9 @@ async def test_validate_accepts_private_parent_with_private_child_superset(monke
 # ---------------------------------------------------------------------------
 
 
-def test_agent_references_subagent_ignores_subagents_and_matches_whitelist():
+def test_agent_references_subagent_covers_nested_edges_and_matches_whitelist():
     main = make_agent("main", is_subagent=False, config={"context": {"subagents": ["a", "b"]}})
     sub = make_agent("sub", is_subagent=True, config={"context": {"subagents": ["a"]}})
     assert agent_references_subagent(main, "a") is True
     assert agent_references_subagent(main, "zzz") is False
-    assert agent_references_subagent(sub, "a") is False
+    assert agent_references_subagent(sub, "a") is True
