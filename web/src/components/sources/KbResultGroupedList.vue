@@ -38,10 +38,11 @@
             :key="getChunkKey(chunk, index)"
             class="chunk-item"
             :class="{ 'high-relevance': typeof chunk.score === 'number' && chunk.score > 0.5 }"
-            @click="openChunkDetail(chunk, index + 1)"
           >
             <div class="chunk-summary">
-              <span class="chunk-index">#{{ index + 1 }}</span>
+              <button type="button" class="chunk-index" @click="openChunkDetail(chunk, index + 1)">
+                片段 #{{ index + 1 }}
+              </button>
               <div class="chunk-scores">
                 <span v-if="typeof chunk.score === 'number'" class="score-item"
                   >相似度 {{ (chunk.score * 100).toFixed(0) }}%</span
@@ -51,10 +52,8 @@
                 >
                 <span v-if="getLineRange(chunk)" class="score-item">{{ getLineRange(chunk) }}</span>
               </div>
-              <KeywordHighlights v-if="chunk.highlights?.length" :fragments="chunk.highlights.slice(0, 1)" class="chunk-preview" />
-              <span v-else class="chunk-preview">{{ getPreviewText(chunk.content) }}</span>
-              <Eye :size="14" class="view-icon" />
             </div>
+            <QueryChunkPreview :content="chunk.content" :highlights="chunk.highlights || []" />
           </div>
         </div>
       </div>
@@ -79,7 +78,7 @@
 </template>
 
 <script setup>
-import KeywordHighlights from './KeywordHighlights.vue'
+import QueryChunkPreview from './QueryChunkPreview.vue'
 import { computed, ref, watch } from 'vue'
 import { FileText, ChevronRight, ChevronDown, Eye } from '@lucide/vue'
 import KbChunkDetailModal from './KbChunkDetailModal.vue'
@@ -187,11 +186,6 @@ const toggleFile = (filename) => {
 const getChunkKey = (chunk, index) => {
   if (chunk?.metadata?.chunk_id) return `${chunk.metadata.chunk_id}-${index}`
   return `${chunk?.metadata?.source || 'chunk'}-${index}`
-}
-
-const getPreviewText = (text = '') => {
-  const content = String(text)
-  return content.length <= 100 ? content : `${content.substring(0, 100)}...`
 }
 
 const getLineRange = (chunk) => {
@@ -310,7 +304,6 @@ const openFileDetail = (fileGroup) => {
     .chunk-item {
       padding: 6px 10px;
       border-bottom: 1px solid var(--gray-100);
-      cursor: pointer;
 
       &:last-child {
         border-bottom: none;
@@ -328,8 +321,12 @@ const openFileDetail = (fileGroup) => {
         display: flex;
         align-items: center;
         gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 6px;
 
         .chunk-index {
+          border: none;
+          cursor: pointer;
           color: var(--gray-700);
           font-size: 11px;
           min-width: 22px;
@@ -342,6 +339,7 @@ const openFileDetail = (fileGroup) => {
         .chunk-scores {
           display: flex;
           gap: 6px;
+          flex-wrap: wrap;
 
           .score-item {
             font-size: 11px;

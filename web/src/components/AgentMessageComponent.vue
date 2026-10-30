@@ -62,9 +62,7 @@
         {{ captionOnlyRefs.map((item) => item.label).join('、') }}。
       </div>
       <div v-if="panelFallbackRefs.length" class="figure-caption-only-notice" role="status">
-        {{
-          panelFallbackRefs.map((item) => item.label).join('、')
-        }}
+        {{ panelFallbackRefs.map((item) => item.label).join('、') }}
         的子图未完成几何核验，请通过整图或题注查看来源。
       </div>
 
@@ -72,6 +70,18 @@
         v-for="sourceQuote in sourceQuotes"
         :key="`${sourceQuote.source.parse_revision_id}:${sourceQuote.source.anchor_id}`"
         :source-quote="sourceQuote"
+        @open-source="emit('openEvidenceSource', $event)"
+      />
+
+      <SourceAnnotationsPanel
+        v-if="
+          !isProcessing &&
+          message.run_id &&
+          parsedData.content &&
+          ['finished', 'complete', 'completed'].includes(message.status)
+        "
+        :run-id="String(message.run_id)"
+        :answer="parsedData.content"
         @open-source="emit('openEvidenceSource', $event)"
       />
 
@@ -211,6 +221,7 @@ import FigureCardGroup from '@/components/evidence/FigureCardGroup.vue'
 import GraphSnapshotCard from '@/components/evidence/GraphSnapshotCard.vue'
 import TableCard from '@/components/evidence/TableCard.vue'
 import SourceQuoteCard from '@/components/evidence/SourceQuoteCard.vue'
+import SourceAnnotationsPanel from '@/components/sources/SourceAnnotationsPanel.vue'
 import { figureRefClickAction } from '@/utils/figureCard'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 

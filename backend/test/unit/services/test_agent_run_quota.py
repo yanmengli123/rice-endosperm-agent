@@ -207,6 +207,23 @@ async def test_daily_quota_no_longer_counts_literature_tasks(quota_session):
     await _enforce_user_quota(db=db, uid=user.uid)
 
 
+async def test_annotation_calls_reserve_platform_budget_and_count_daily_limit(quota_session):
+    db, user, quota, conversation = quota_session
+    quota.daily_run_limit = 1
+    quota.monthly_platform_token_limit = 1_000
+    run = _run(user=user, conversation=conversation, run_type="source_annotation", status="running")
+    db.add(run)
+    await db.commit()
+    with pytest.raises(HTTPException) as active:
+        await _enforce_user_quota(db=db, uid=user.uid)
+    assert active.value.status_code == 429
+    run.status = "completed"
+    await db.commit()
+    with pytest.raises(HTTPException) as daily:
+        await _enforce_user_quota(db=db, uid=user.uid)
+    assert daily.value.detail["code"] == "daily_run_quota_exceeded"
+
+
 async def test_literature_scope_uses_its_own_budget(quota_session):
     db, user, quota, conversation = quota_session
     quota.daily_literature_task_limit = 1

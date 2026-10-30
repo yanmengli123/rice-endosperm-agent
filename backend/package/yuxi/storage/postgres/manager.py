@@ -1063,6 +1063,11 @@ class PostgresManager(metaclass=SingletonMeta):
 
         await conn.run_sync(lambda sync_conn: AgentRunWaitpoint.__table__.create(sync_conn, checkfirst=True))
 
+    async def _migration_0128_answer_source_annotations(self, conn) -> None:
+        from yuxi.storage.postgres.models_business import AnswerSourceAnnotation
+
+        await conn.run_sync(lambda connection: AnswerSourceAnnotation.__table__.create(connection, checkfirst=True))
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
@@ -1195,6 +1200,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0125_personal_mcp_oauth", "_migration_0125_personal_mcp_oauth"),
         ("0126_collaboration_messages", "_migration_0126_collaboration_messages"),
         ("0127_agent_run_waitpoints", "_migration_0127_agent_run_waitpoints"),
+        ("0128_answer_source_annotations", "_migration_0128_answer_source_annotations"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:

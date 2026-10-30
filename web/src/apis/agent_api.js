@@ -174,6 +174,11 @@ export const agentApi = {
   /** 获取 Run 的科研检索证据候选 DTO（尚未等同于答案 Claim 引用）。 */
   getAgentRunEvidence: (runId) => apiGet(`/api/agent/runs/${runId}/evidence`),
 
+  getSourceAnnotations: (runId) =>
+    apiGet(`/api/agent/runs/${encodeURIComponent(runId)}/source-annotations`),
+  annotateSources: (runId) =>
+    apiPost(`/api/agent/runs/${encodeURIComponent(runId)}/source-annotations`, {}),
+
   /** 原文查看审计：记录谁在何时查看了哪条证据的原文。 */
   recordEvidenceSourceView: (runId, evidenceId) =>
     apiPost(`/api/agent/runs/${runId}/evidence/${evidenceId}/view`, {}),

@@ -15,10 +15,12 @@ from yuxi.storage.postgres.models_business import (
     Agent,
     AgentRun,
     AgentRunWaitpoint,
+    AnswerSourceAnnotation,
     CollaborationMessage,
     CollaborationStop,
     Base,
     MCPServer,
+    Message,
     MCPOAuthAttempt,
     MCPOAuthConfig,
     MCPOAuthConnection,
@@ -27,9 +29,14 @@ from yuxi.storage.postgres.models_business import (
     Tenant,
     TenantMembership,
     User,
+    UserModelPreference,
+    UserModelCredential,
+    TenantUserEntitlement,
+    UsageLedger,
 )
 from yuxi.utils.datetime_utils import utc_now
 from yuxi.utils.secret_crypto import _master_key
+from yuxi.storage.postgres.models_knowledge import KnowledgeFile, KnowledgeBase
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -68,7 +75,18 @@ async def postgres(monkeypatch):
         for fk in table.foreign_keys:
             add_table(fk.column.table)
 
-    for model in (Skill, MCPServer, TenantMembership, AgentRun):
+    for model in (
+        Skill,
+        MCPServer,
+        TenantMembership,
+        AgentRun,
+        Message,
+        UserModelPreference,
+        UserModelCredential,
+        TenantUserEntitlement,
+        UsageLedger,
+        KnowledgeFile,
+    ):
         add_table(model.__table__)
     async with admin.begin() as conn:
         await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
@@ -80,11 +98,13 @@ async def postgres(monkeypatch):
         await manager._migration_0125_personal_mcp_oauth(conn)
         await manager._migration_0126_collaboration_messages(conn)
         await manager._migration_0127_agent_run_waitpoints(conn)
+        await manager._migration_0128_answer_source_annotations(conn)
         # Idempotent DDL also works after interrupted deployment/replay.
         await manager._migration_0124_skill_package_versions(conn)
         await manager._migration_0125_personal_mcp_oauth(conn)
         await manager._migration_0126_collaboration_messages(conn)
         await manager._migration_0127_agent_run_waitpoints(conn)
+        await manager._migration_0128_answer_source_annotations(conn)
     engine = create_async_engine(dsn, connect_args={"server_settings": {"search_path": schema}})
     monkeypatch.setenv("YUXI_SECRET_MASTER_KEY", "v08-test-master-key-over-32-characters-only")
     monkeypatch.setenv("YUXI_PUBLIC_URL", "https://yuxi.example")
@@ -109,6 +129,7 @@ async def test_migrated_columns_match_orm_and_use_timezone(postgres):
             CollaborationMessage,
             CollaborationStop,
             AgentRunWaitpoint,
+            AnswerSourceAnnotation,
         ):
             columns = await conn.run_sync(lambda conn, model=model: inspect(conn).get_columns(model.__tablename__))
             actual = {column["name"]: column for column in columns}
@@ -468,3 +489,165 @@ async def test_parallel_answers_consume_a_waitpoint_once(postgres):
         point = await db.get(AgentRunWaitpoint, "root")
         assert point.resolved_by_run_id == accepted[0] and point.resolved_at.tzinfo is not None
         assert list(await db.scalars(select(AgentRun.id).where(AgentRun.created_by_run_id == "root"))) == accepted
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+async def test_source_annotations_are_private_replayable_metered_and_acl_filtered(postgres, monkeypatch, bad_first):
+    import json
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from yuxi.knowledge.runtime import knowledge_base
+    from yuxi.literature import llm_gateway
+    from yuxi.models import chat
+    from yuxi.services import source_annotation_service as service
+    from yuxi.storage.postgres.models_business import Conversation, Message
+
+    sessions = await _connected(postgres)
+    async with sessions() as db:
+        db.add(KnowledgeBase(kb_id="papers", name="papers", kb_type="milvus", tenant_id=1))
+        db.add(User(uid="bob", username="bob", password_hash="unused", role="user"))
+        await db.flush()
+        db.add(TenantMembership(tenant_id=1, uid="bob", role="member", status="active"))
+        db.add(KnowledgeFile(kb_id="papers", file_id="doc", filename="source.pdf", active_parse_revision_id="v1"))
+        conversation = Conversation(thread_id="source-thread", uid="alice", agent_id="chatbot", status="active")
+        db.add(conversation)
+        await db.flush()
+        run = AgentRun(
+            id="answer",
+            tenant_id=1,
+            uid="alice",
+            request_id="answer",
+            agent_slug="chatbot",
+            run_type="chat",
+            conversation_thread_id="source-thread",
+            conversation_id=conversation.id,
+            status="completed",
+            input_payload={"knowledge_scope_snapshot": {"effective_kb_ids": ["papers"]}},
+        )
+        db.add(run)
+        await db.flush()
+        answer = Message(
+            conversation_id=conversation.id, run_id="answer", role="assistant", content="The measured value was 12."
+        )
+        db.add(answer)
+        await db.flush()
+        run.output_message_id = answer.id
+        db.add(UsageLedger(run_id="answer", tenant_id=1, uid="alice", total_tokens=10, credential_source="platform"))
+        await db.commit()
+        message_id = answer.id
+
+    @asynccontextmanager
+    async def context():
+        async with sessions() as db:
+            try:
+                yield db
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(llm_gateway.pg_manager, "get_async_session_context", context)
+    monkeypatch.setattr(llm_gateway, "resolve_effective_model_spec", AsyncMock(return_value="test:references"))
+    visible = {"papers"}
+
+    async def databases(user):
+        return {"databases": [{"kb_id": kb} for kb in visible]}
+
+    monkeypatch.setattr(knowledge_base, "get_databases_by_user", databases)
+
+    async def assemble(db, run_id, *, allowed_kb_ids):
+        assert run_id == "answer"
+        return {
+            "evidence": [
+                {
+                    "evidence_id": "e1",
+                    "citable": True,
+                    "verification": {"status": "OK"},
+                    "source": {
+                        "kb_id": "papers",
+                        "file_id": "doc",
+                        "parse_revision_id": "v1",
+                        "source_sha256": "a" * 64,
+                    },
+                    "quote": {"exact": "The measured value was 12."},
+                    "locator": {"fragments": []},
+                }
+            ]
+            if "papers" in allowed_kb_ids
+            else []
+        }
+
+    monkeypatch.setattr(service, "assemble_evidence_for_run", assemble)
+    calls, entered, release = [], asyncio.Event(), asyncio.Event()
+
+    class Model:
+        async def call(self, messages, stream=False):
+            payload = json.loads(messages[-1]["content"])
+            calls.append(payload)
+            entered.set()
+            await release.wait()
+            match = {
+                "answer_start_line": 1,
+                "answer_end_line": 1,
+                "source_id": payload["sources"][0]["id"],
+                "quote": "value was 12",
+            }
+            if bad_first and len(calls) == 1:
+                match["quote"] = "fabricated quote"
+            return SimpleNamespace(
+                content=json.dumps({"citations": [match]}), usage_metadata={"input_tokens": 20, "output_tokens": 5}
+            )
+
+    monkeypatch.setattr(chat, "select_model", lambda **_: Model())
+    user = SimpleNamespace(uid="alice")
+
+    async with sessions() as db:
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as denied:
+            await service.get_annotations(db, user=SimpleNamespace(uid="bob"), run_id="answer")
+        assert denied.value.status_code == 404
+
+    async def create():
+        async with sessions() as db:
+            return await service.annotate(db, user=user, run_id="answer")
+
+    first = asyncio.create_task(create())
+    await asyncio.wait_for(entered.wait(), 10)
+    async with sessions() as db:
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as busy:
+            await service.annotate(db, user=user, run_id="answer")
+        assert busy.value.status_code == 409
+    release.set()
+    if bad_first:
+        with pytest.raises(HTTPException) as invalid:
+            await asyncio.wait_for(first, 10)
+        assert invalid.value.status_code == 502
+        async with sessions() as db:
+            assert await db.get(AnswerSourceAnnotation, "answer") is None
+        result = await create()
+    else:
+        result = await asyncio.wait_for(first, 10)
+    async with sessions() as db:
+        replay = await service.annotate(db, user=user, run_id="answer")
+        assert replay["accounting_run_id"] == result["accounting_run_id"] and len(calls) == (2 if bad_first else 1)
+        ledger = list(await db.scalars(select(UsageLedger).order_by(UsageLedger.id)))
+        assert ledger[0].run_id == "answer" and ledger[0].total_tokens == 10
+        assert len(ledger) == len(calls) + 1
+        assert all(row.total_tokens == 25 for row in ledger[1:])
+        assert ledger[-1].run_id == result["accounting_run_id"]
+        message = await db.get(Message, message_id)
+        assert message.content == "The measured value was 12." and message.extra_metadata is None
+        file = await db.scalar(select(KnowledgeFile).where(KnowledgeFile.file_id == "doc"))
+        file.active_parse_revision_id = "v2"
+        await db.commit()
+        outdated = await service.get_annotations(db, user=user, run_id="answer")
+        assert outdated["annotations"]["citations"] == [] and outdated["annotations"]["hidden_count"] == 1
+        file.active_parse_revision_id = "v1"
+        await db.commit()
+        visible.clear()
+        filtered = await service.get_annotations(db, user=user, run_id="answer")
+        assert filtered["annotations"]["citations"] == [] and filtered["annotations"]["hidden_count"] == 1

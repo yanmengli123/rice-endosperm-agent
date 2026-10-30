@@ -21,12 +21,12 @@
           <span v-if="viewInfoText" class="view-info">{{ viewInfoText }}</span>
 
           <!-- 视图模式切换 -->
-          <div class="view-controls" v-if="file && viewModeOptions.length > 1">
+          <div class="view-controls regular-file-actions" v-if="file && viewModeOptions.length > 1">
             <a-segmented v-model:value="viewMode" :options="viewModeOptions" />
           </div>
 
           <!-- 下载按钮下拉菜单 -->
-          <a-dropdown trigger="click" v-if="file">
+          <a-dropdown trigger="click" v-if="file" class="regular-file-actions">
             <a-button type="default" class="download-btn" title="下载" aria-label="下载">
               <Download :size="16" />
               <ChevronDown :size="14" />
@@ -41,6 +41,28 @@
                   <template #icon><FileText :size="16" /></template>
                   下载 Markdown
                 </a-menu-item>
+              </a-menu>
+            </template>
+          </a-dropdown>
+
+          <a-dropdown v-if="file" :trigger="['click']" class="compact-file-actions">
+            <a-button title="更多文件操作" aria-label="更多文件操作"
+              ><ChevronDown :size="16"
+            /></a-button>
+            <template #overlay>
+              <a-menu @click="handleCompactFileAction" :selected-keys="[`view:${viewMode}`]">
+                <a-menu-item v-for="option in viewModeOptions" :key="`view:${option.value}`">
+                  {{
+                    { source: '源文件', markdown: 'Markdown', text: '纯文本', chunks: '文档片段' }[
+                      option.value
+                    ] || option.value
+                  }}
+                </a-menu-item>
+                <a-menu-divider />
+                <a-menu-item key="original" :disabled="!file.file_id">下载原文</a-menu-item>
+                <a-menu-item key="markdown" :disabled="contentState.loading || !mergedContent"
+                  >下载 Markdown</a-menu-item
+                >
               </a-menu>
             </template>
           </a-dropdown>
@@ -517,6 +539,11 @@ const handleDownloadMenuClick = ({ key }) => {
   }
 }
 
+const handleCompactFileAction = ({ key }) => {
+  if (key.startsWith('view:')) viewMode.value = key.slice(5)
+  else handleDownloadMenuClick({ key })
+}
+
 // 下载原文
 const handleDownloadOriginal = async () => {
   if (!file.value || !props.kbId || !props.fileId) {
@@ -723,6 +750,26 @@ onBeforeUnmount(resetLocalState)
 
 <style lang="less">
 .file-detail {
+  .ant-modal-content {
+    container-type: inline-size;
+    container-name: knowledge-file;
+  }
+  .compact-file-actions {
+    display: none;
+  }
+  @container knowledge-file (max-width: 640px) {
+    .regular-file-actions,
+    .view-info {
+      display: none;
+    }
+    .compact-file-actions {
+      display: inline-flex;
+      align-items: center;
+    }
+    .modal-title-wrapper {
+      gap: 6px;
+    }
+  }
   .ant-modal {
     top: 20px;
   }

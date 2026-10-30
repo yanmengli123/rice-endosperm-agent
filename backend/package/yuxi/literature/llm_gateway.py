@@ -15,7 +15,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 
@@ -146,6 +146,7 @@ async def freeze_literature_policy(
     model_spec: str | None = None,
     model_type: str = "chat",
     frozen_credentials: dict | None = None,
+    accounting_scope: Literal["literature", "source_annotation"] = "literature",
 ) -> LiteratureLlmPolicy:
     """Resolve and persist a fail-closed model/credential policy snapshot."""
     if not uid:
@@ -154,7 +155,12 @@ async def freeze_literature_policy(
     from yuxi.services.agent_run_service import _enforce_platform_token_quota, _enforce_user_quota
     from yuxi.services.user_credential_service import get_active_user_credential, list_active_custom_model_specs
 
-    entitlement = await _enforce_user_quota(db=session, uid=uid, credential_source=None, scope="literature")
+    entitlement = await _enforce_user_quota(
+        db=session,
+        uid=uid,
+        credential_source=None,
+        scope="chat" if accounting_scope == "source_annotation" else "literature",
+    )
     if int(entitlement.get("tenant_id") or 0) != int(tenant_id):
         raise ValueError("LLM 文献任务的用户与租户归属不一致")
 
@@ -198,10 +204,12 @@ async def freeze_literature_policy(
             now=utc_now(),
         )
 
-    thread_key = f"literature:{resource_ref}"
+    thread_key = f"{accounting_scope}:{resource_ref}"
     if len(thread_key) > 64:
-        thread_key = "literature:" + hashlib.sha256(resource_ref.encode()).hexdigest()[:48]
-    await _supersede_stale_literature_runs(session, thread_key=thread_key, tenant_id=tenant_id, uid=uid)
+        digest_length = 48 if accounting_scope == "literature" else 40
+        thread_key = accounting_scope + ":" + hashlib.sha256(resource_ref.encode()).hexdigest()[:digest_length]
+    if accounting_scope == "literature":
+        await _supersede_stale_literature_runs(session, thread_key=thread_key, tenant_id=tenant_id, uid=uid)
     run_id = uuid.uuid4().hex
     policy = LiteratureLlmPolicy(
         run_id=run_id,
@@ -221,11 +229,11 @@ async def freeze_literature_policy(
             id=run_id,
             tenant_id=tenant_id,
             conversation_thread_id=thread_key,
-            agent_slug="literature",
+            agent_slug=accounting_scope,
             uid=uid,
             status="pending",
             request_id=uuid.uuid4().hex,
-            run_type="literature",
+            run_type=accounting_scope,
             input_payload={
                 "operation": operation,
                 "resource_ref": resource_ref,

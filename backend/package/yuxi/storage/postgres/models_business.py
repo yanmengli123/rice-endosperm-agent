@@ -260,6 +260,18 @@ class DeviceSessionToken(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
+class AnswerSourceAnnotation(Base):
+    """Private derived matches; never part of public message metadata or evidence."""
+
+    __tablename__ = "answer_source_annotations"
+    run_id = Column(String(64), ForeignKey("agent_runs.id"), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False)
+    uid = Column(String, nullable=False)
+    message_id = Column(Integer, ForeignKey("messages.id"), nullable=False)
+    result_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class UsageLedger(Base):
     """append-only 用量事件流：计费与对账的唯一权威来源，禁止 UPDATE/DELETE。"""
 

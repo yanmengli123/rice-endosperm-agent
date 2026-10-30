@@ -32,6 +32,7 @@ async def check_readiness(*, initialized, db_context, redis):
                         " AND to_regclass('collaboration_messages') IS NOT NULL"
                         " AND to_regclass('collaboration_stops') IS NOT NULL"
                         " AND to_regclass('agent_run_waitpoints') IS NOT NULL"
+                        " AND to_regclass('answer_source_annotations') IS NOT NULL"
                     )
                 )
                 checks["schema"] = bool(result.scalar())

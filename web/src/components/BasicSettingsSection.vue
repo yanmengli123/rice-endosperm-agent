@@ -48,6 +48,25 @@
               </div>
             </div>
           </div>
+          <div class="setting-row">
+            <div class="col-item">
+              <div class="setting-label">来源标注模型</div>
+              <div class="setting-content">
+                <ModelSelectorComponent
+                  :model_spec="configStore.config?.reference_model || ''"
+                  placeholder="留空沿用快速响应模型"
+                  @select-model="handleChange('reference_model', $event)"
+                />
+                <a-button
+                  v-if="configStore.config?.reference_model"
+                  type="link"
+                  size="small"
+                  @click="handleChange('reference_model', '')"
+                  >沿用快速响应模型</a-button
+                >
+              </div>
+            </div>
+          </div>
           <div class="setting-row two-cols">
             <div class="col-item">
               <div class="setting-label">

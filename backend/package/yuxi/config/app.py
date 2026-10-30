@@ -47,6 +47,7 @@ class Config(BaseModel):
         default="siliconflow-cn:Pro/MiniMaxAI/MiniMax-M2.5",
         description="快速响应模型",
     )
+    reference_model: str = Field(default="", description="来源标注模型（留空沿用快速响应模型）")
     embed_model: str = Field(
         default="siliconflow-cn:BAAI/bge-m3",
         description="默认 Embedding 模型",
