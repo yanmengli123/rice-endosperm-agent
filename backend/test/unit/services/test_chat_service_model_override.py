@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+import pytest
+
 from yuxi.agents.context import BaseContext
 from yuxi.services import chat_service as svc
 
@@ -68,3 +72,50 @@ def test_scope_snapshot_survives_base_agent_context_reconstruction():
     context.update_from_dict(input_context)
 
     assert context._effective_knowledge_scope == snapshot
+
+
+@pytest.mark.parametrize("member", [False, True])
+async def test_resume_entry_resolves_member_backend_and_restores_shared_file_context(monkeypatch, member):
+    from yuxi.agents.mcp import execution, artifact_materializer
+
+    class ContextReached(Exception):
+        pass
+
+    meta = {
+        "tenant_id": 1,
+        "run_type": "resume",
+        "subagent_runtime": member,
+        "parent_thread_id": "parent",
+        "file_thread_id": "shared",
+        "skills_thread_id": "skills",
+    }
+    captured = {}
+
+    async def resolve(**kwargs):
+        assert kwargs["agent_kind"] == ("subagent" if member else "main")
+        return SimpleNamespace(slug="researcher", backend_id="SubAgentBackend"), object(), {}
+
+    def build(_agent, context):
+        captured.update(context)
+        raise ContextReached
+
+    monkeypatch.setattr(execution, "set_mcp_execution_context", lambda _: None)
+    monkeypatch.setattr(artifact_materializer, "begin_artifact_accumulation", lambda: None)
+    monkeypatch.setattr(svc, "_resolve_agent_runtime", resolve)
+    monkeypatch.setattr(svc, "_ensure_knowledge_scope_snapshot", AsyncMock(return_value={}))
+    monkeypatch.setattr(svc, "build_agent_input_context", AsyncMock(return_value={}))
+    monkeypatch.setattr(svc, "_build_agent_context", build)
+    with pytest.raises(ContextReached):
+        async for _ in svc.stream_agent_resume(
+            thread_id="child",
+            resume_input={"q": "yes"},
+            meta=meta,
+            current_user=SimpleNamespace(uid="alice"),
+            db=SimpleNamespace(commit=AsyncMock()),
+        ):
+            pass
+    if member:
+        assert captured["parent_thread_id"] == "parent" and captured["file_thread_id"] == "shared"
+        assert captured["skills_thread_id"] == "skills" and captured["is_subagent_runtime"] is True
+    else:
+        assert "is_subagent_runtime" not in captured and "file_thread_id" not in captured

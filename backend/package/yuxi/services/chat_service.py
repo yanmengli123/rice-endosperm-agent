@@ -3330,7 +3330,7 @@ async def stream_agent_chat(
             user=current_user,
             requested_agent_slug=agent_slug,
             thread_id=thread_id,
-            agent_kind="subagent" if meta.get("run_type") == "subagent" else "main",
+            agent_kind="subagent" if meta.get("subagent_runtime") or meta.get("run_type") == "subagent" else "main",
             frozen_runtime=meta.get("agent_runtime"),
             runtime_snapshot=meta.get("agent_runtime_snapshot"),
         )
@@ -4910,6 +4910,7 @@ async def stream_agent_resume(
             user=current_user,
             requested_agent_slug=None,
             thread_id=thread_id,
+            agent_kind="subagent" if meta.get("subagent_runtime") else "main",
             frozen_runtime=meta.get("agent_runtime"),
             runtime_snapshot=meta.get("agent_runtime_snapshot"),
         )
@@ -4945,6 +4946,7 @@ async def stream_agent_resume(
     )
     _apply_model_override(input_context, meta)
     _apply_client_capabilities(input_context, meta)
+    _apply_subagent_runtime_context(input_context, meta)
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）；
     if meta.get("agent_runtime") == "dsh":
