@@ -281,6 +281,12 @@ def _patch_run_record_creation(
     missing_subagent: bool = False,
     active_run=None,
 ):
+    # The repository fakes have no SQL executor; real locking and rejection
+    # live in test_collaboration_service and test_v08_compat_postgres.
+    async def fake_dispatch_boundary(_db, *, uid, creator_run_id, child_thread_id):
+        assert uid == "user-1" and creator_run_id == "parent-run"
+
+    monkeypatch.setattr("yuxi.services.collaboration_service.assert_spawn_allowed", fake_dispatch_boundary)
     db.active_run = active_run
 
     class _FakeContext:

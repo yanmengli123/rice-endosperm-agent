@@ -239,7 +239,9 @@ class AgentRunRepository:
         await self.db.execute(update(AgentRun).where(AgentRun.id == run_id).values(total_tokens=int(total_tokens)))
 
     async def _lock_run(self, run_id: str) -> AgentRun | None:
-        result = await self.db.execute(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
+        result = await self.db.execute(
+            select(AgentRun).where(AgentRun.id == run_id).with_for_update().execution_options(populate_existing=True)
+        )
         return result.scalar_one_or_none()
 
     async def list_stale_non_terminal_runs(

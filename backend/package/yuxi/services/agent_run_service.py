@@ -1214,6 +1214,15 @@ async def persist_agent_run_record(
     run_id = str(uuid.uuid4())
     try:
         async with db.begin_nested():
+            if run_type == "subagent":
+                from yuxi.services.collaboration_service import assert_spawn_allowed
+
+                await assert_spawn_allowed(db, uid=str(current_uid), creator_run_id=created_by_run_id,
+                    child_thread_id=conversation_thread_id)
+            elif run_type == "resume":
+                from yuxi.services.collaboration_service import assert_resume_allowed
+
+                await assert_resume_allowed(db, uid=str(current_uid), run_id=created_by_run_id)
             run = await AgentRunRepository(db).create_run(
                 run_id=run_id,
                 conversation_thread_id=conversation_thread_id,
@@ -1740,13 +1749,14 @@ async def request_cancel_agent_run(
     if not run:
         raise HTTPException(status_code=404, detail="运行任务不存在")
 
+    if cascade_children or run.status == "interrupted":
+        from yuxi.services.collaboration_service import stop_group
+
+        await stop_group(db, uid=str(current_uid), run_id=run_id, whole_group=False)
+        return await repo.get_run_for_user(run_id, str(current_uid))
+
     # FOR UPDATE 写锁在同一会话上必须串行；取消信号之间互不依赖，统一并发发布。
     cancelled_ids = []
-    if cascade_children:
-        child_runs = await repo.list_active_child_runs_for_user(run_id, str(current_uid))
-        for child_run in child_runs:
-            await repo.request_cancel(child_run.id)
-            cancelled_ids.append(child_run.id)
 
     run = await repo.request_cancel(run_id)
     cancelled_ids.append(run_id)

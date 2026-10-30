@@ -21,6 +21,39 @@ upstreams:
       read: 600
 
 routes:
+  - id: yuxi-collaboration
+    name: yuxi-collaboration
+    uris:
+      - /api/agent/runs/:run_id/collaboration
+      - /api/agent/runs/:run_id/collaboration/messages
+      - /api/agent/runs/:run_id/collaboration/stop
+    methods: [GET, POST]
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      proxy-rewrite:
+        headers:
+          remove:
+            - X-Consumer-Username
+            - X-Credential-Identifier
+            - X-Yuxi-Key-ID
+            - X-Yuxi-User-ID
+            - X-Yuxi-Tenant-ID
+            - X-User-ID
+            - X-Authenticated-User
+            - X-Authenticated-Tenant
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_database: 3
+        rejected_code: 429
+        allow_degradation: true
+
   - id: yuxi-readiness
     name: yuxi-readiness
     uri: /api/system/ready

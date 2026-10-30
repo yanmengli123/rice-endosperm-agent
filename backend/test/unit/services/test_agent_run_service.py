@@ -28,6 +28,12 @@ def no_user_byok_credential(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def stub_collaboration_resume_boundary(monkeypatch):
+    """This module uses repository fakes; SQL fencing has dedicated coverage."""
+    monkeypatch.setattr("yuxi.services.collaboration_service.assert_resume_allowed", AsyncMock(return_value=None))
+
+
+@pytest.fixture(autouse=True)
 def stub_mention_authorizer(monkeypatch):
     """run 创建链路会装载 @mention 鉴权事实（内部查库）。
 
@@ -1712,15 +1718,7 @@ async def test_await_agent_run_result_raises_when_stream_ends_before_terminal(mo
 @pytest.mark.asyncio
 async def test_cancel_agent_run_view_cascades_children(monkeypatch: pytest.MonkeyPatch):
     parent_run = SimpleNamespace(id="parent-run", uid="user-1", to_dict=lambda: {"id": "parent-run"})
-    child_runs = [SimpleNamespace(id="child-1"), SimpleNamespace(id="child-2")]
-    requested: list[str] = []
-    signals: list[tuple[str, bool]] = []
-
-    class Db:
-        committed = False
-
-        async def commit(self):
-            self.committed = True
+    stopped = []
 
     class RunRepo:
         def __init__(self, db):
@@ -1731,21 +1729,12 @@ async def test_cancel_agent_run_view_cascades_children(monkeypatch: pytest.Monke
             assert uid == "user-1"
             return parent_run
 
-        async def list_active_child_runs_for_user(self, created_by_run_id: str, uid: str):
-            assert created_by_run_id == "parent-run"
-            assert uid == "user-1"
-            return child_runs
-
-        async def request_cancel(self, run_id: str):
-            requested.append(run_id)
-            return parent_run if run_id == "parent-run" else SimpleNamespace(id=run_id)
-
-    async def fake_publish_cancel_signal(run_id: str):
-        signals.append((run_id, db.committed))
+    async def stop_subtree(_db, *, uid, run_id, whole_group):
+        stopped.append((uid, run_id, whole_group))
 
     monkeypatch.setattr(agent_run_service, "AgentRunRepository", RunRepo)
-    monkeypatch.setattr(agent_run_service, "publish_cancel_signal", fake_publish_cancel_signal)
-    db = Db()
+    monkeypatch.setattr("yuxi.services.collaboration_service.stop_group", stop_subtree)
+    db = SimpleNamespace()
 
     result = await agent_run_service.cancel_agent_run_view(
         run_id="parent-run",
@@ -1754,8 +1743,7 @@ async def test_cancel_agent_run_view_cascades_children(monkeypatch: pytest.Monke
     )
 
     assert result["run"]["id"] == "parent-run"
-    assert requested == ["child-1", "child-2", "parent-run"]
-    assert signals == [("child-1", True), ("child-2", True), ("parent-run", True)]
+    assert stopped == [("user-1", "parent-run", False)]
 
 
 def test_resolve_agent_run_model_spec_rejects_unknown_explicit_model(monkeypatch: pytest.MonkeyPatch):

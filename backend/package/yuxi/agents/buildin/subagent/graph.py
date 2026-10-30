@@ -27,6 +27,7 @@ from yuxi.agents.middlewares import (
 )
 from yuxi.agents.middlewares.skills import SkillsMiddleware
 from yuxi.agents.middlewares.trace import TraceMiddleware
+from yuxi.agents.middlewares.collaboration import CollaborationMiddleware
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 
 _SUBAGENT_DISABLED_TOOLS = frozenset({"present_artifacts", "ask_user_question", "install_skill"})
@@ -82,6 +83,7 @@ async def _build_middlewares(context):
         TraceMiddleware(),
         SkillsMiddleware(),
         KnowledgeContextMiddleware(),
+        CollaborationMiddleware(),
         summary_middleware,
         TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
         PatchToolCallsMiddleware(),

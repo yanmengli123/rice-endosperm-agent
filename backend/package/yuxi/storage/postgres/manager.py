@@ -1052,6 +1052,12 @@ class PostgresManager(metaclass=SingletonMeta):
         for model in (MCPOAuthConfig, MCPOAuthConnection, MCPOAuthAttempt):
             await conn.run_sync(lambda sync_conn, model=model: model.__table__.create(sync_conn, checkfirst=True))
 
+    async def _migration_0126_collaboration_messages(self, conn) -> None:
+        from yuxi.storage.postgres.models_business import CollaborationMessage, CollaborationStop
+
+        await conn.run_sync(lambda sync_conn: CollaborationMessage.__table__.create(sync_conn, checkfirst=True))
+        await conn.run_sync(lambda sync_conn: CollaborationStop.__table__.create(sync_conn, checkfirst=True))
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
@@ -1182,6 +1188,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0123_lightweight_runtime_security", "_migration_0123_lightweight_runtime_security"),
         ("0124_skill_package_versions", "_migration_0124_skill_package_versions"),
         ("0125_personal_mcp_oauth", "_migration_0125_personal_mcp_oauth"),
+        ("0126_collaboration_messages", "_migration_0126_collaboration_messages"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:

@@ -20,6 +20,7 @@ class BaseState(AgentState):
     """Shared state fields for Yuxi agents."""
 
     artifacts: Annotated[list[str], merge_artifacts]
+    collaboration_delivered_ids: list[str]
 
 
 class AgentStatePayload(TypedDict):

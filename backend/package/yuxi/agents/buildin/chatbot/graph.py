@@ -32,6 +32,7 @@ from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, BRAND_NAME
 from .context import ChatBotContext
 from .prompt import TODO_MID_PROMPT, build_prompt_with_context
 from .state import ChatBotState
+from yuxi.agents.middlewares.collaboration import CollaborationMiddleware
 
 
 async def _build_middlewares(context):
@@ -68,6 +69,7 @@ async def _build_middlewares(context):
         ArtifactStateMiddleware(),
         SkillsMiddleware(),
         KnowledgeContextMiddleware(),
+        CollaborationMiddleware(),
     ]
     subagent_middleware = await create_subagent_task_middleware(context)
     if subagent_middleware:

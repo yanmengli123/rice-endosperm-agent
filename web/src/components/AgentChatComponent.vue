@@ -1035,6 +1035,12 @@
                   id="state-section-subagents"
                   class="state-section-content"
                 >
+                  <CollaborationPanel
+                    v-if="currentThreadState?.activeRunId || currentTrace?.runId"
+                    :key="currentThreadState?.activeRunId || currentTrace?.runId"
+                    :run-id="currentThreadState?.activeRunId || currentTrace?.runId"
+                    @open-member="openSubagentThread"
+                  />
                   <div class="state-list">
                     <div
                       v-for="(run, index) in displaySubagentRuns"
@@ -1260,6 +1266,7 @@ import FollowupSuggestionsBar from '@/components/FollowupSuggestionsBar.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import AttachmentTmpUploadModal from '@/components/AttachmentTmpUploadModal.vue'
 import SubagentThreadModal from '@/components/SubagentThreadModal.vue'
+import CollaborationPanel from '@/components/CollaborationPanel.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCallingResult/toolRegistry'
 import { getConversationDisplayItems } from '@/utils/messageGrouping'

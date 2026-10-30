@@ -9,6 +9,7 @@ from server.routers.auth_router import auth
 from server.routers.browser_router import router as browser_router
 from server.routers.channel_router import channel_router, webhook_router
 from server.routers.chat_router import chat
+from server.routers.collaboration_router import collaboration
 from server.routers.literature_router import literature
 from server.routers.dashboard_router import dashboard
 from server.routers.filesystem_router import filesystem_router
@@ -36,6 +37,7 @@ router.include_router(system)  # /api/system/* 系统状态与全局配置
 router.include_router(readiness)
 router.include_router(auth)  # /api/auth/* 登录、用户信息与 CLI 浏览器登录授权
 router.include_router(agent_router)  # /api/agent/* 智能体管理与运行态
+router.include_router(collaboration)
 router.include_router(agent_invocation_router)  # /api/agent-invocation/* 外部 Agent 调用与评估
 router.include_router(chat)  # /api/chat/* 对话线程、消息历史与附件
 

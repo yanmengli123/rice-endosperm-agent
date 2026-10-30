@@ -1594,6 +1594,38 @@ class AgentRun(Base):
         }
 
 
+class CollaborationStop(Base):
+    """Invalidate a collaboration subtree without rewriting terminal run history."""
+
+    __tablename__ = "collaboration_stops"
+    root_run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), primary_key=True)
+    scope_run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class CollaborationMessage(Base):
+    """Durable guidance between members of the same user-owned run tree."""
+
+    __tablename__ = "collaboration_messages"
+    id = Column(String(36), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False)
+    root_run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    sender_run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
+    target_run_id = Column(String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
+    target_thread_id = Column(String(64), nullable=False, index=True)
+    request_id = Column(String(64), nullable=False)
+    body = Column(Text, nullable=False)
+    sender_kind = Column(String(16), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        Index("uq_collaboration_message_request", "root_run_id", "sender_run_id", "request_id", unique=True),
+    )
+
+
 class AgentRunDispatchOutbox(Base):
     """AgentRun 创建事务内的可靠队列投递意图；ARQ job_id 保证重复投递幂等。"""
 
