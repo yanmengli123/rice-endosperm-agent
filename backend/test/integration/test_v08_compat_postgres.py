@@ -31,6 +31,7 @@ from yuxi.storage.postgres.models_business import (
     SkillVersion,
     Tenant,
     TenantMembership,
+    ToolCall,
     User,
     UserModelPreference,
     UserModelCredential,
@@ -97,6 +98,7 @@ async def postgres(monkeypatch):
         AgentRunDispatchOutbox,
         AgentRunTraceHead,
         ConversationStats,
+        ToolCall,
         Message,
         UserModelPreference,
         UserModelCredential,
@@ -793,6 +795,7 @@ async def test_public_dispatch_is_atomic_and_preserves_multiple_messages(postgre
     from yuxi.services.input_message_service import build_chat_input_message
     from yuxi.services.waitpoint_service import persist_waitpoint
     from yuxi.services.public_api_schemas import ResumeEvent
+    from yuxi.services.public_query_service import list_items, turn_resource, input_resource, list_sessions, list_turns
 
     sessions = await _connected(postgres)
     monkeypatch.setattr(reception.agent_manager, "get_agent", lambda _: SimpleNamespace())
@@ -896,10 +899,44 @@ async def test_public_dispatch_is_atomic_and_preserves_multiple_messages(postgre
             )
         assert legacy.value.status_code == 409
         run.status = "completed"
+        final_message = Message(
+            conversation_id=run.conversation_id, run_id=run.id, role="assistant", content="final answer"
+        )
+        db.add(final_message)
+        await db.flush()
+        run.output_message_id = final_message.id
+        db.add(
+            ToolCall(
+                message_id=final_message.id,
+                langgraph_tool_call_id="read-1",
+                tool_name="read_file",
+                tool_input={"path": "report.txt"},
+                tool_output="contents",
+                status="success",
+            )
+        )
         await db.commit()
         session = await db.get(PublicSession, session_id)
         turn = await refresh_turn(db, session, await latest_turn(db, session_id))
         assert turn.status == "completed" and turn.result_run_id == run_id
+        page = await list_items(db, actor, session_id, turn_id=turn.id, order="asc", limit=100)
+        assert [item["type"] for item in page["data"]] == [
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+        ]
+        following = await list_items(
+            db, actor, session_id, turn_id=turn.id, order="asc", limit=2, after=page["data"][1]["id"]
+        )
+        assert following["has_more"] and following["data"][0]["type"] == "message"
+        assert (await list_sessions(db, actor))["data"][0]["yuxi"]["current_turn"]["id"] == turn.id
+        assert (await list_turns(db, actor, session_id))["last_id"] == turn.id
+        assert (await input_resource(db, actor, session_id, receipt["input_id"]))["items"][1]["role"] == "user"
+        assert (await turn_resource(db, actor, session_id, turn.id))["yuxi"]["output"][0]["content"][0][
+            "text"
+        ] == "final answer"
         event = MessageEvent(
             input=[InputMessage(role="user", content=[{"type": "input_text", "text": "next"}])],
             type="agent.session.input.message",

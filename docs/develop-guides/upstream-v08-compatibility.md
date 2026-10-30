@@ -95,4 +95,8 @@ APP Key 仅在新的公开认证适配层解析，不能作为产品登录凭据
 
 人工回答/工具审批恢复在同一 Turn 创建下一 Run，等待点消费、运行、Outbox 与控制回执同事务提交。审批先检查全部 call_id，再以 LangGraph checkpoint 保存决策；拒绝或参数变更不会执行工具。保留审批时绑定的原调用详情，worker 再次发布等待点不能覆盖。真实 SQLite checkpoint 关闭/重开验证通过；隔离 PostgreSQL 验证恢复回滚、旧等待点和改变幂等意图拒绝。
 
-本批后端回归 188 passed；隔离 PostgreSQL 14 passed（包含旧功能，分组有重叠，不累计）。尚未注册公开 HTTP 路由与扫描派发，APP 管理 UI、长期 SSE/Items 投影、运行中 steer、取消清理及 CLI/浏览器完整链路仍需完成，不能据此宣称 Public API 已可对外使用。原服务未重启、未执行迁移。
+本批后端回归 188 passed；隔离 PostgreSQL 14 passed（包含旧功能，分组有重叠，不累计）。尚未注册公开 HTTP 路由与扫描派发，APP 管理 UI、长期 SSE/事件恢复、运行中 steer、取消清理及 CLI/浏览器完整链路仍需完成，不能据此宣称 Public API 已可对外使用。原服务未重启、未执行迁移。
+
+公开读取投影已补齐 Session/Turn 分页、Input 归属及消息/实际工具 Items 分页。SQL 先按用户、租户、APP、会话和轮次限定候选，再按稳定 item 身份选页；不整段加载历史后截页。跨会话或跨 Turn 游标返回 400，越权资源返回 404。仅投影已登记 Run 且会话绑定一致的正式消息，排除系统提示、未登记审计与未消费/取消 Input；用户图片保留原 MIME 与内容块顺序。助手正文沿用既有推理隐藏与确定性 MCP 答案展示边界。最终答案严格读取 result_run_id 的 output_message_id，不回退到上一轮或其他消息。资源与回执查询不准备文件、不创建 Run、不派发队列；HTTP 注册、SSE 与调度恢复仍待接入。
+
+读取/接收/旧协议分组 30 passed；新增读取行为在隔离 PostgreSQL 的原子执行测试中通过，覆盖 UNION Items、稳定翻页、窗口函数当前轮次、正式消息归属和严格结果指针。身份/登录分组另有 20 passed；实际 create_agent 装配后的工具审批与 SQLite checkpoint 重开 2 passed。以上分组同样有重叠，不累计。
