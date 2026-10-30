@@ -669,6 +669,22 @@ async def _runtime_config_for_server(
     credential_id: Any = _UNSET_SENTINEL,
 ) -> dict[str, Any]:
     config = server.to_mcp_config()
+    from yuxi.agents.mcp.oauth import personal_runtime_config
+    from yuxi.storage.postgres.models_business import MCPOAuthConfig
+
+    context = get_mcp_execution_context()
+    if context is not None:
+        personal = await personal_runtime_config(
+            db, server=server, tenant_id=context.tenant_id, uid=context.uid, config=config
+        )
+        if personal is not None:
+            return personal
+    elif await db.scalar(
+        select(MCPOAuthConfig.server_slug)
+        .where(MCPOAuthConfig.server_slug == server.slug, MCPOAuthConfig.enabled.is_(True))
+        .limit(1)
+    ):
+        raise PolicyError(f"MCP '{server.slug}' requires a personal execution context")
     if credential_id is _UNSET_SENTINEL:
         credential_id = getattr(server, "credential_id", None)
     if credential_id is None:
@@ -1732,45 +1748,23 @@ async def probe_mcp_server(
                 retryable=False,
             )
         )
-    if server.credential_id is not None:
-        effective_tenant = int(tenant_id or server.tenant_id or 0)
-        if not effective_tenant or not uid:
-            return await _finish(
-                error_result(
-                    STAGE_CONFIG,
-                    "CREDENTIAL_CONTEXT_REQUIRED",
-                    "credential-bound MCP verification requires tenant and user context",
-                    retryable=False,
-                )
-            )
-        session = db
-        if session is None:
+    from yuxi.agents.mcp.execution import McpExecutionContext, reset_mcp_execution_context, set_mcp_execution_context
+
+    identity_token = None
+    if tenant_id and uid:
+        identity_token = set_mcp_execution_context(McpExecutionContext(tenant_id=int(tenant_id), uid=uid))
+    try:
+        if db is None:
             from yuxi.storage.postgres.manager import pg_manager
 
             async with pg_manager.get_async_session_context() as credential_session:
-                opened = await open_mcp_credential(
-                    credential_session,
-                    tenant_id=effective_tenant,
-                    uid=uid,
-                    credential_id=int(server.credential_id),
-                )
+                server_config = await _runtime_config_for_server(credential_session, server)
         else:
-            opened = await open_mcp_credential(
-                session,
-                tenant_id=effective_tenant,
-                uid=uid,
-                credential_id=int(server.credential_id),
-            )
-        if opened is None:
-            return await _finish(
-                error_result(
-                    STAGE_CONFIG,
-                    "CREDENTIAL_UNAVAILABLE",
-                    "MCP credential is missing, revoked, or belongs to another tenant/user",
-                    retryable=False,
-                )
-            )
-        server_config = inject_credential(server_config, opened)
+            server_config = await _runtime_config_for_server(db, server)
+    except PolicyError as exc:
+        return await _finish(error_result(STAGE_CONFIG, "CREDENTIAL_UNAVAILABLE", str(exc), retryable=False))
+    finally:
+        reset_mcp_execution_context(identity_token)
     runtime_config = build_runtime_config(slug, server_config)
 
     try:

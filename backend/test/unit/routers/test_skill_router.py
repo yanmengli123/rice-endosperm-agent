@@ -284,23 +284,25 @@ def test_skill_export_route_still_checks_manage_permission(monkeypatch, tmp_path
 def test_update_skill_dependencies_route_passes_operator(monkeypatch):
     captured: dict[str, object] = {}
 
-    async def fake_update_skill_dependencies(
+    async def fake_save_package(
         _db,
         *,
         slug,
-        tool_dependencies,
-        mcp_dependencies,
-        skill_dependencies,
+        expected_revision,
+        dependencies,
         operator,
     ):
         captured["slug"] = slug
-        captured["tool_dependencies"] = tool_dependencies
-        captured["mcp_dependencies"] = mcp_dependencies
-        captured["skill_dependencies"] = skill_dependencies
+        assert expected_revision == "revision"
+        captured.update(dependencies)
         captured["operator_uid"] = operator.uid
-        return _skill(slug=slug)
+        return {"skill": _skill(slug=slug).to_dict()}
 
-    monkeypatch.setattr("server.routers.skill_router.update_skill_dependencies", fake_update_skill_dependencies)
+    async def fake_package_state(_db, **_kwargs):
+        return {"revision": "revision"}
+
+    monkeypatch.setattr("server.routers.skill_router.package_state", fake_package_state)
+    monkeypatch.setattr("server.routers.skill_router.save_package", fake_save_package)
 
     client = TestClient(_build_app())
     resp = client.put(

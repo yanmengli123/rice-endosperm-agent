@@ -314,13 +314,19 @@
           </a-tab-pane>
           <a-tab-pane v-if="currentSkill.bound_agent_id" key="history" tab="历史版本">
             <p>发版会保存完整文件包和依赖。恢复将替换当前内容，请先保存并发版需要保留的修改。</p>
-            <a-button :disabled="!canManageCurrentSkill" @click="publishSkillVersion">发版</a-button>
+            <a-button :disabled="!canManageCurrentSkill" @click="publishSkillVersion"
+              >发版</a-button
+            >
             <a-button @click="loadSkillVersions">刷新</a-button>
             <a-list :data-source="skillVersions">
               <template #renderItem="{ item }">
                 <a-list-item>
                   {{ item.version }} · {{ item.created_at }}
-                  <a-button :disabled="!canManageCurrentSkill" @click="restoreSkillVersion(item.version)">恢复</a-button>
+                  <a-button
+                    :disabled="!canManageCurrentSkill"
+                    @click="restoreSkillVersion(item.version)"
+                    >恢复</a-button
+                  >
                 </a-list-item>
               </template>
             </a-list>
@@ -353,7 +359,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
   ArrowLeft,
@@ -553,7 +559,10 @@ const fetchSkillDetail = async () => {
 
     const packageResult = await skillApi.getContent(slug.value)
     packageRevision.value = packageResult.data.revision
-    const found = { ...skills.value.find((s) => s.slug === slug.value), ...packageResult.data.skill }
+    const found = {
+      ...skills.value.find((s) => s.slug === slug.value),
+      ...packageResult.data.skill
+    }
     if (found) {
       currentSkill.value = found
       syncDependencyFormFromSkill(found)
@@ -639,6 +648,10 @@ const loadSkillFile = async (skillSlug, path = 'SKILL.md') => {
 }
 
 const handleTreeSelect = async (keys, info) => {
+  if (hasSkillDraft()) {
+    message.warning('请先保存当前文件和依赖修改，再切换文件')
+    return
+  }
   if (!keys?.length) {
     resetFileState()
     return
@@ -671,9 +684,11 @@ const saveCurrentFile = async (content = fileContent.value) => {
     const result = await skillApi.saveContent(currentSkill.value.slug, {
       expected_revision: packageRevision.value,
       files: { [selectedPath.value]: content },
-      dependencies: { ...dependencyForm }
+      ...(hasDependencyDraft() ? { dependencies: { ...dependencyForm } } : {})
     })
     packageRevision.value = result.data.revision
+    currentSkill.value = { ...currentSkill.value, ...result.data.skill }
+    syncDependencyFormFromSkill(currentSkill.value)
     fileContent.value = content
     message.success('已保存')
     if (selectedPath.value === 'SKILL.md') await fetchSkillDetail()
@@ -723,6 +738,7 @@ const handleExport = async () => {
 }
 
 const openCreateModal = (isDir) => {
+  if (hasSkillDraft()) return message.warning('请先保存当前文件和依赖修改')
   if (!currentSkill.value || !canEditSkillFiles.value) return
   createForm.path = ''
   createForm.content = ''
@@ -784,7 +800,10 @@ const saveDependencies = async () => {
     const draft = skillFilePreviewRef.value?.getDraftContent()
     const result = await skillApi.saveContent(currentSkill.value.slug, {
       expected_revision: packageRevision.value,
-      files: selectedPath.value && !selectedIsDir.value && typeof draft === 'string' ? { [selectedPath.value]: draft } : {},
+      files:
+        selectedPath.value && !selectedIsDir.value && typeof draft === 'string'
+          ? { [selectedPath.value]: draft }
+          : {},
       dependencies: { ...dependencyForm }
     })
     packageRevision.value = result.data.revision
@@ -806,11 +825,27 @@ const loadSkillVersions = async () => {
   skillVersions.value = (await skillApi.listVersions(slug.value)).data || []
 }
 
+const hasDependencyDraft = () =>
+  ['tool_dependencies', 'mcp_dependencies', 'skill_dependencies'].some(
+    (key) => JSON.stringify(dependencyForm[key]) !== JSON.stringify(currentSkill.value?.[key] || [])
+  )
+
 const hasSkillDraft = () => {
   const draft = skillFilePreviewRef.value?.getDraftContent()
-  return (typeof draft === 'string' && draft !== fileContent.value) ||
-    ['tool_dependencies', 'mcp_dependencies', 'skill_dependencies'].some((key) => JSON.stringify(dependencyForm[key]) !== JSON.stringify(currentSkill.value?.[key] || []))
+  return (typeof draft === 'string' && draft !== fileContent.value) || hasDependencyDraft()
 }
+
+onBeforeRouteLeave(() => {
+  if (!hasSkillDraft()) return true
+  return new Promise((resolve) =>
+    Modal.confirm({
+      title: '离开并放弃当前草稿？',
+      content: '尚未保存的文件和依赖修改将丢失。',
+      onOk: () => resolve(true),
+      onCancel: () => resolve(false)
+    })
+  )
+})
 
 const publishSkillVersion = async () => {
   if (hasSkillDraft()) return message.warning('请先保存文件和依赖修改，再发版')
@@ -818,7 +853,9 @@ const publishSkillVersion = async () => {
     await skillApi.releaseVersion(slug.value, packageRevision.value)
     await loadSkillVersions()
     message.success('已保存完整历史版本')
-  } catch (error) { message.error(error.message || '发版失败') }
+  } catch (error) {
+    message.error(error.message || '发版失败')
+  }
 }
 
 const restoreSkillVersion = (version) => {

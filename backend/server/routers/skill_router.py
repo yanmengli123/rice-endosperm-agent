@@ -12,9 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
 from yuxi.agents.skills.service import (
     confirm_skill_install_draft,
-    create_skill_node,
     delete_skill,
-    delete_skill_node,
     delete_skills_batch,
     discard_skill_install_draft,
     export_skill_zip,
@@ -31,9 +29,7 @@ from yuxi.agents.skills.service import (
     prepare_remote_skill_install,
     prepare_skill_upload,
     read_skill_file,
-    update_skill_dependencies,
     update_skill_enabled,
-    update_skill_file,
     update_skill_share_config,
     user_can_manage_skill,
 )
@@ -57,6 +53,7 @@ class SkillEnabledUpdateRequest(BaseModel):
 
 
 class SkillNodeCreateRequest(BaseModel):
+    expected_revision: str | None = None
     path: str = Field(..., description="相对 skill 根目录的路径")
     is_dir: bool = Field(False, description="是否创建目录")
     content: str | None = Field("", description="文件内容（仅文件创建时生效）")
@@ -69,6 +66,7 @@ class SkillFileUpdateRequest(BaseModel):
 
 
 class SkillDependenciesUpdateRequest(BaseModel):
+    expected_revision: str | None = None
     tool_dependencies: list[str] = Field(default_factory=list, description="依赖的内置工具列表")
     mcp_dependencies: list[str] = Field(default_factory=list, description="依赖的 MCP 服务列表")
     skill_dependencies: list[str] = Field(default_factory=list, description="依赖的其他 skill slug 列表")
@@ -376,14 +374,15 @@ async def create_skill_file_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_manageable_skill_or_raise(db, current_user, slug)
-        await create_skill_node(
+        state = await package_state(db, slug=slug, operator=current_user)
+        await save_package(
             db,
             slug=slug,
-            relative_path=payload.path,
-            is_dir=payload.is_dir,
-            content=payload.content,
-            updated_by=current_user.uid,
+            operator=current_user,
+            expected_revision=payload.expected_revision or state["revision"],
+            files={} if payload.is_dir else {payload.path: payload.content or ""},
+            directories=[payload.path] if payload.is_dir else [],
+            create_paths=[payload.path],
         )
         return {"success": True}
     except ValueError as e:
@@ -403,7 +402,13 @@ async def update_skill_file_route(
     try:
         await get_manageable_skill_or_raise(db, current_user, slug)
         state = await package_state(db, slug=slug, operator=current_user)
-        result = await save_package(db, slug=slug, operator=current_user, expected_revision=payload.expected_revision or state["revision"], files={payload.path: payload.content})
+        result = await save_package(
+            db,
+            slug=slug,
+            operator=current_user,
+            expected_revision=payload.expected_revision or state["revision"],
+            files={payload.path: payload.content},
+        )
         return {"success": True, "data": result}
     except ValueError as e:
         _raise_from_value_error(e)
@@ -420,15 +425,15 @@ async def update_skill_dependencies_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        item = await update_skill_dependencies(
+        state = await package_state(db, slug=slug, operator=current_user)
+        result = await save_package(
             db,
             slug=slug,
-            tool_dependencies=payload.tool_dependencies,
-            mcp_dependencies=payload.mcp_dependencies,
-            skill_dependencies=payload.skill_dependencies,
             operator=current_user,
+            expected_revision=payload.expected_revision or state["revision"],
+            dependencies=payload.model_dump(exclude={"expected_revision"}),
         )
-        return {"success": True, "data": _serialize_skill_for_user(item, current_user)}
+        return {"success": True, "data": result["skill"]}
     except ValueError as e:
         _raise_from_value_error(e)
     except Exception as e:
@@ -440,12 +445,19 @@ async def update_skill_dependencies_route(
 async def delete_skill_file_route(
     slug: str,
     path: str = Query(..., description="相对 skill 根目录路径"),
+    expected_revision: str | None = Query(None),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_manageable_skill_or_raise(db, current_user, slug)
-        await delete_skill_node(db, slug=slug, relative_path=path)
+        state = await package_state(db, slug=slug, operator=current_user)
+        await save_package(
+            db,
+            slug=slug,
+            operator=current_user,
+            expected_revision=expected_revision or state["revision"],
+            deletions=[path],
+        )
         return {"success": True}
     except ValueError as e:
         _raise_from_value_error(e)

@@ -85,6 +85,14 @@ NOTION = KnowledgeProductSpec(
     capabilities=KnowledgeProductCapabilities(supports_upload=False),
 )
 
+FEISHU = KnowledgeProductSpec(
+    kb_type="feishu",
+    category="authority_source",
+    trust_class="SECONDARY",
+    authority_class="FACT_AUTHORITY",
+    capabilities=KnowledgeProductCapabilities(supports_upload=False),
+)
+
 # 派生知识产品：动态 LLM-Wiki。控制面实体，不是 KnowledgeBase 适配器。
 LLMWIKI = KnowledgeProductSpec(
     kb_type="llmwiki",
@@ -123,6 +131,7 @@ _REGISTRY: dict[str, KnowledgeProductSpec] = {
     _AUTHORITY_SOURCE.kb_type: _AUTHORITY_SOURCE,
     DIFY.kb_type: DIFY,
     NOTION.kb_type: NOTION,
+    FEISHU.kb_type: FEISHU,
     LLMWIKI.kb_type: LLMWIKI,
     LITERATURE_NOTES.kb_type: LITERATURE_NOTES,
     LITERATURE_TOPICS.kb_type: LITERATURE_TOPICS,

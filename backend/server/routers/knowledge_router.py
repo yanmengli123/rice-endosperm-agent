@@ -495,7 +495,7 @@ async def create_database(
     additional_params = data.additional_params
     logger.debug(
         f"Create database {database_name} with kb_type {kb_type}, "
-        f"additional_params {additional_params}, contract {data.source_contract}, "
+        f"parameter_keys {list(additional_params or {})}, contract {data.source_contract}, "
         f"llm_model_spec {data.llm_model_spec}, embedding_model_spec {data.embedding_model_spec}, "
         f"share_config {data.share_config}"
     )
@@ -602,6 +602,10 @@ async def create_database(
         if managed_preset:
             additional_params["chunk_preset_id"] = managed_preset
 
+        if kb_type == "feishu":
+            from yuxi.knowledge.connector_secrets import submitted_feishu_params
+
+            additional_params = submitted_feishu_params(additional_params)
         additional_params = kb_class.normalize_additional_params(additional_params)
 
         if kb_class.requires_embedding_model:
@@ -1293,7 +1297,7 @@ async def update_database_info(
     """更新知识库信息"""
     logger.debug(
         f"[update_database_info] 接收到的参数: name={data.name}, llm_model_spec={data.llm_model_spec}, "
-        f"additional_params={data.additional_params}, share_config={data.share_config}"
+        f"parameter_keys={list(data.additional_params or {})}, share_config={data.share_config}"
     )
     try:
         update_llm_model_spec = "llm_model_spec" in data.model_fields_set
@@ -1308,6 +1312,12 @@ async def update_database_info(
             kb_class = KnowledgeBaseFactory.get_kb_class(kb_type)
             merged_params = dict(db_info.get("additional_params") or {})
             merged_params.update(additional_params)
+            if kb_type == "feishu":
+                from yuxi.knowledge.connector_secrets import submitted_feishu_params
+                from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
+                stored = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
+                merged_params = submitted_feishu_params(additional_params, stored.additional_params or {})
             kb_class.normalize_additional_params(merged_params)
             additional_params = (
                 kb_class.normalize_additional_params(additional_params)

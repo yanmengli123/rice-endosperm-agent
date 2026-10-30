@@ -81,7 +81,8 @@
                   </div>
 
                   <div class="result-content">
-                    {{ chunk.content }}
+                    <KeywordHighlights v-if="chunk.highlights?.length" :fragments="chunk.highlights" />
+                    <template v-else>{{ chunk.content }}</template>
                   </div>
 
                   <div class="result-metadata">
@@ -175,6 +176,7 @@
 </template>
 
 <script setup>
+import KeywordHighlights from '@/components/sources/KeywordHighlights.vue'
 import { ref, computed, onMounted, watch, h } from 'vue'
 import { useDatabaseStore } from '@/stores/database'
 import { message } from 'ant-design-vue'

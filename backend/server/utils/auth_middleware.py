@@ -174,7 +174,9 @@ def enforce_external_key_scope(request: Request | None) -> None:
         or path.startswith("/api/agent/thread/")
         or path.startswith("/api/chat/")
         or path.startswith("/api/agent-invocation/agent-call/")
+        or path.startswith("/api/agent-invocation/eval/")
         or (method == "GET" and path in {"/api/agent", "/api/agent/default", "/api/agent/protocol"})
+        or (method == "GET" and path.startswith("/api/agent/") and len(path.split("/")) == 4)
         or (method == "GET" and path.startswith("/api/viewer/filesystem/"))
     )
     if conversation and "agent:runs" in scopes:

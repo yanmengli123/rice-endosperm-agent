@@ -1085,6 +1085,51 @@ class MCPUserCredential(Base):
     )
 
 
+class MCPOAuthConfig(Base):
+    """Administrator-approved authorization endpoints for one tenant installation."""
+
+    __tablename__ = "mcp_oauth_configs"
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
+    server_slug = Column(String(100), ForeignKey("mcp_servers.slug", ondelete="CASCADE"), primary_key=True)
+    revision = Column(String(36), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    config_json = Column(JSON, nullable=False)
+    client_secret_ciphertext = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class MCPOAuthConnection(Base):
+    """Personal tokens are never shared by a tenant installation."""
+
+    __tablename__ = "mcp_oauth_connections"
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), primary_key=True)
+    server_slug = Column(String(100), ForeignKey("mcp_servers.slug", ondelete="CASCADE"), primary_key=True)
+    revision = Column(String(36), nullable=False)
+    auth_epoch = Column(String(36), nullable=False)
+    status = Column(String(24), nullable=False, default="pending")
+    tokens_ciphertext = Column(Text, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class MCPOAuthAttempt(Base):
+    """Single-use PKCE transaction, including browser and revocation bindings."""
+
+    __tablename__ = "mcp_oauth_attempts"
+    state_hash = Column(String(64), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    uid = Column(String, ForeignKey("users.uid", ondelete="CASCADE"), nullable=False)
+    server_slug = Column(String(100), ForeignKey("mcp_servers.slug", ondelete="CASCADE"), nullable=False)
+    revision = Column(String(36), nullable=False)
+    auth_epoch = Column(String(36), nullable=False)
+    browser_hash = Column(String(64), nullable=False)
+    verifier_ciphertext = Column(Text, nullable=False)
+    redirect_uri = Column(Text, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class TenantMCPInstallation(Base):
     """Tenant-owned deployment decision for one catalog entry."""
 

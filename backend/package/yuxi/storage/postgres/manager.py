@@ -1036,9 +1036,21 @@ class PostgresManager(metaclass=SingletonMeta):
     async def _migration_0124_skill_package_versions(self, conn) -> None:
         from yuxi.storage.postgres.models_business import SkillVersion
 
-        await conn.execute(text("ALTER TABLE skills ADD COLUMN IF NOT EXISTS bound_agent_id INTEGER REFERENCES agents(id) ON DELETE CASCADE"))
-        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_skills_bound_agent ON skills(bound_agent_id) WHERE bound_agent_id IS NOT NULL"))
+        await conn.execute(text(
+            "ALTER TABLE skills ADD COLUMN IF NOT EXISTS bound_agent_id "
+            "INTEGER REFERENCES agents(id) ON DELETE CASCADE"
+        ))
+        await conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_skills_bound_agent "
+            "ON skills(bound_agent_id) WHERE bound_agent_id IS NOT NULL"
+        ))
         await conn.run_sync(lambda sync_conn: SkillVersion.__table__.create(sync_conn, checkfirst=True))
+
+    async def _migration_0125_personal_mcp_oauth(self, conn) -> None:
+        from yuxi.storage.postgres.models_business import MCPOAuthAttempt, MCPOAuthConfig, MCPOAuthConnection
+
+        for model in (MCPOAuthConfig, MCPOAuthConnection, MCPOAuthAttempt):
+            await conn.run_sync(lambda sync_conn, model=model: model.__table__.create(sync_conn, checkfirst=True))
 
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
@@ -1169,6 +1181,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0122_rls_tenant_setting_nullif", "_migration_0122_rls_tenant_setting_nullif"),
         ("0123_lightweight_runtime_security", "_migration_0123_lightweight_runtime_security"),
         ("0124_skill_package_versions", "_migration_0124_skill_package_versions"),
+        ("0125_personal_mcp_oauth", "_migration_0125_personal_mcp_oauth"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:

@@ -31,15 +31,24 @@ def directory_revision(root: Path) -> str:
     if root.is_symlink() or not root.is_dir():
         raise ValueError("技能目录不存在或不是普通目录")
     for path in sorted(root.rglob("*")):
+        count += 1
+        if count > MAX_PACKAGE_FILES:
+            raise ValueError("技能内容超过 2000 个文件和目录")
         if path.is_symlink():
             raise ValueError("技能内容不允许符号链接")
+        if path.is_dir():
+            digest.update(b"directory\0" + path.relative_to(root).as_posix().encode() + b"\0")
+            continue
         if not path.is_file():
             continue
-        count += 1
         total += path.stat().st_size
         if count > MAX_PACKAGE_FILES or total > MAX_PACKAGE_BYTES:
             raise ValueError("技能内容超过 2000 个文件或 50 MiB")
-        digest.update(json.dumps([path.relative_to(root).as_posix(), bool(path.stat().st_mode & 0o111)], ensure_ascii=False).encode())
+        digest.update(
+            json.dumps(
+                [path.relative_to(root).as_posix(), bool(path.stat().st_mode & 0o111)], ensure_ascii=False
+            ).encode()
+        )
         with path.open("rb") as stream:
             for block in iter(lambda: stream.read(65536), b""):
                 digest.update(block)
@@ -48,7 +57,14 @@ def directory_revision(root: Path) -> str:
 
 async def package_state(db, *, slug: str, operator) -> dict:
     item = await service.get_management_readable_skill_or_raise(db, operator, slug)
-    return {"skill": item.to_dict(), "revision": await asyncio.to_thread(directory_revision, service._resolve_skill_dir(item))}
+    data = item.to_dict()
+    try:
+        await service.get_manageable_skill_or_raise(db, operator, slug)
+        data["can_manage"] = True
+    except ValueError:
+        data["can_manage"] = False
+    data["is_builtin"] = service.is_builtin_skill(item)
+    return {"skill": data, "revision": await asyncio.to_thread(directory_revision, service._resolve_skill_dir(item))}
 
 
 async def _locked_skill(db, slug, operator, expected_revision):
@@ -63,16 +79,26 @@ async def _locked_skill(db, slug, operator, expected_revision):
     return item, root
 
 
-def _prepare_package(root, destination, changes, deletions, dependencies):
+def _prepare_package(root, destination, changes, deletions, dependencies, directories=(), create_paths=()):
     directory_revision(root)
     shutil.copytree(root, destination)
+    for relative in create_paths:
+        target, _ = service._resolve_relative_path(destination, relative)
+        if target.exists():
+            raise ValueError("目标已存在")
+    for relative in directories:
+        target, _ = service._resolve_relative_path(destination, relative)
+        target.mkdir(parents=True, exist_ok=False)
     for relative in deletions:
         target, _ = service._resolve_relative_path(destination, relative)
         if target.name == "SKILL.md" and target.parent == destination:
             raise ValueError("不能删除根 SKILL.md")
-        if not target.is_file():
-            raise ValueError("仅支持删除普通文件")
-        target.unlink()
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.is_file():
+            target.unlink()
+        else:
+            raise ValueError("待删除路径不存在")
     for relative, content in changes.items():
         target, _ = service._resolve_relative_path(destination, relative)
         if not service._is_text_path(target) or not isinstance(content, str):
@@ -83,21 +109,50 @@ def _prepare_package(root, destination, changes, deletions, dependencies):
     content = root_file.read_text(encoding="utf-8")
     slug, name, description, metadata = service._parse_skill_markdown(content)
     if dependencies is not None:
+        if "SKILL.md" in changes:
+            previous = service._parse_skill_markdown((root / "SKILL.md").read_text(encoding="utf-8"))[3]
+            for key in ("tool_dependencies", "mcp_dependencies", "skill_dependencies"):
+                if metadata.get(key, []) != previous.get(key, []) and metadata.get(key, []) != dependencies.get(
+                    key, []
+                ):
+                    raise ValueError("SKILL.md 与依赖面板的修改不一致，请先统一依赖后保存")
         metadata.update(dependencies)
         _, body = service._split_frontmatter(content)
-        root_file.write_text("---\n" + yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False) + "---\n" + body, encoding="utf-8")
+        root_file.write_text(
+            "---\n" + yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False) + "---\n" + body, encoding="utf-8"
+        )
     for key in ("tool_dependencies", "mcp_dependencies", "skill_dependencies"):
         if not isinstance(metadata.get(key, []), list):
             raise ValueError(f"{key} 必须是列表")
     return slug, name, description, metadata, directory_revision(destination)
 
 
-async def save_package(db, *, slug, operator, expected_revision, files=None, deletions=None, dependencies=None, restore_version=None):
+async def save_package(
+    db,
+    *,
+    slug,
+    operator,
+    expected_revision,
+    files=None,
+    deletions=None,
+    dependencies=None,
+    restore_version=None,
+    directories=(),
+    create_paths=(),
+):
     item, root = await _locked_skill(db, slug, operator, expected_revision)
     if restore_version is not None:
         if item.bound_agent_id is None:
             raise ValueError("历史恢复仅适用于 Agent 专属 Skill")
-        snapshot = (await db.execute(select(SkillVersion).where(SkillVersion.skill_id == item.id, SkillVersion.tenant_id == item.tenant_id, SkillVersion.version == restore_version))).scalar_one_or_none()
+        snapshot = (
+            await db.execute(
+                select(SkillVersion).where(
+                    SkillVersion.skill_id == item.id,
+                    SkillVersion.tenant_id == item.tenant_id,
+                    SkillVersion.version == restore_version,
+                )
+            )
+        ).scalar_one_or_none()
         if snapshot is None:
             raise ValueError("历史版本不存在")
         root = Path(service.sys_config.save_dir) / snapshot.dir_path
@@ -106,11 +161,17 @@ async def save_package(db, *, slug, operator, expected_revision, files=None, del
     destination = service.get_skills_root_dir() / ".packages" / item.slug / uuid.uuid4().hex
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        new_slug, name, description, metadata, revision = await asyncio.to_thread(_prepare_package, root, destination, files or {}, deletions or [], dependencies)
+        new_slug, name, description, metadata, revision = await asyncio.to_thread(
+            _prepare_package, root, destination, files or {}, deletions or [], dependencies, directories, create_paths
+        )
         if new_slug != item.slug:
             raise ValueError("SKILL.md 的 slug 不能更改")
         visible = {skill.slug: skill for skill in await service.list_accessible_skills(db, operator)}
-        tools, mcps, skills = await service._validate_dependencies(parent=item, available_skills=visible, **{key: metadata.get(key, []) for key in ("tool_dependencies", "mcp_dependencies", "skill_dependencies")})
+        tools, mcps, skills = await service._validate_dependencies(
+            parent=item,
+            available_skills=visible,
+            **{key: metadata.get(key, []) for key in ("tool_dependencies", "mcp_dependencies", "skill_dependencies")},
+        )
         item.name, item.description = name, description
         item.tool_dependencies, item.mcp_dependencies, item.skill_dependencies = tools, mcps, skills
         item.dir_path = destination.relative_to(Path(service.sys_config.save_dir)).as_posix()
@@ -121,15 +182,33 @@ async def save_package(db, *, slug, operator, expected_revision, files=None, del
         await db.rollback()
         # A commit error can be ambiguous. Keep the immutable package recoverable.
         raise
-    return {"skill": item.to_dict(), "revision": revision}
+    return {"skill": dict(item.to_dict(), can_manage=True, is_builtin=False), "revision": revision}
 
 
 async def list_versions(db, *, slug, operator):
     item = await service.get_management_readable_skill_or_raise(db, operator, slug)
     if item.bound_agent_id is None:
         raise ValueError("历史版本仅适用于 Agent 专属 Skill")
-    rows = (await db.execute(select(SkillVersion).where(SkillVersion.skill_id == item.id, SkillVersion.tenant_id == item.tenant_id).order_by(SkillVersion.created_at.desc()))).scalars().all()
-    return [{"version": row.version, "revision": row.content_hash, "created_by": row.created_by, "created_at": format_utc_datetime(row.created_at)} for row in rows]
+    rows = (
+        (
+            await db.execute(
+                select(SkillVersion)
+                .where(SkillVersion.skill_id == item.id, SkillVersion.tenant_id == item.tenant_id)
+                .order_by(SkillVersion.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "version": row.version,
+            "revision": row.content_hash,
+            "created_by": row.created_by,
+            "created_at": format_utc_datetime(row.created_at),
+        }
+        for row in rows
+    ]
 
 
 async def release_version(db, *, slug, operator, expected_revision):
@@ -141,21 +220,44 @@ async def release_version(db, *, slug, operator, expected_revision):
     destination.parent.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(shutil.copytree, root, destination)
     revision = await asyncio.to_thread(directory_revision, destination)
-    db.add(SkillVersion(tenant_id=item.tenant_id, skill_id=item.id, version=version, content_hash=revision, dir_path=destination.relative_to(Path(service.sys_config.save_dir)).as_posix(), created_by=str(operator.uid)))
+    db.add(
+        SkillVersion(
+            tenant_id=item.tenant_id,
+            skill_id=item.id,
+            version=version,
+            content_hash=revision,
+            dir_path=destination.relative_to(Path(service.sys_config.save_dir)).as_posix(),
+            created_by=str(operator.uid),
+        )
+    )
     await db.commit()
     return {"version": version, "revision": revision}
 
 
 async def require_bound_agent(db, *, operator, agent_id=None, agent_slug=None, manage=False):
-    from yuxi.repositories.agent_repository import resolve_creator_department, user_can_access_agent, user_can_manage_agent
+    from yuxi.repositories.agent_repository import (
+        resolve_creator_department,
+        user_can_access_agent,
+        user_can_manage_agent,
+    )
     from yuxi.services.principal import resolve_tenant_id
 
-    query = select(Agent).where(Agent.id == agent_id) if agent_id is not None else select(Agent).where(Agent.slug == agent_slug)
+    query = (
+        select(Agent).where(Agent.id == agent_id)
+        if agent_id is not None
+        else select(Agent).where(Agent.slug == agent_slug)
+    )
     agent = (await db.execute(query.with_for_update() if manage else query)).scalar_one_or_none()
-    if agent is None or (operator.role != "superadmin" and agent.tenant_id != await resolve_tenant_id(db, str(operator.uid))):
+    if agent is None or (
+        operator.role != "superadmin" and agent.tenant_id != await resolve_tenant_id(db, str(operator.uid))
+    ):
         raise ValueError("智能体不存在或无权访问")
     department = await resolve_creator_department(db, agent.created_by) if manage else None
-    permitted = user_can_manage_agent(operator, agent, creator_department_id=department) if manage else user_can_access_agent(operator, agent)
+    permitted = (
+        user_can_manage_agent(operator, agent, creator_department_id=department)
+        if manage
+        else user_can_access_agent(operator, agent)
+    )
     if not permitted:
         raise ValueError("智能体不存在或无权访问")
     return agent
@@ -168,11 +270,43 @@ async def bound_skill(db, *, operator, agent_slug, create=False):
         slug = "self-" + uuid.uuid4().hex[:16]
         directory = service.get_skills_root_dir() / ".packages" / slug / uuid.uuid4().hex
         directory.mkdir(parents=True)
-        (directory / "SKILL.md").write_text("---\n" + yaml.safe_dump({"name": agent.name + "操作指南", "slug": slug, "description": "此智能体的专属工作指南", "tool_dependencies": [], "mcp_dependencies": [], "skill_dependencies": []}, allow_unicode=True, sort_keys=False) + "---\n\n# 操作指南\n\n在此维护可复用的工作步骤和验收要求。\n", encoding="utf-8")
-        item = Skill(tenant_id=agent.tenant_id, bound_agent_id=agent.id, slug=slug, name=agent.name + "操作指南", description="此智能体的专属工作指南", source_type="upload", dir_path=directory.relative_to(Path(service.sys_config.save_dir)).as_posix(), content_hash=await asyncio.to_thread(directory_revision, directory), tool_dependencies=[], mcp_dependencies=[], skill_dependencies=[], share_config=agent.share_config or {}, created_by=str(operator.uid), updated_by=str(operator.uid), enabled=True)
+        (directory / "SKILL.md").write_text(
+            "---\n"
+            + yaml.safe_dump(
+                {
+                    "name": agent.name + "操作指南",
+                    "slug": slug,
+                    "description": "此智能体的专属工作指南",
+                    "tool_dependencies": [],
+                    "mcp_dependencies": [],
+                    "skill_dependencies": [],
+                },
+                allow_unicode=True,
+                sort_keys=False,
+            )
+            + "---\n\n# 操作指南\n\n在此维护可复用的工作步骤和验收要求。\n",
+            encoding="utf-8",
+        )
+        item = Skill(
+            tenant_id=agent.tenant_id,
+            bound_agent_id=agent.id,
+            slug=slug,
+            name=agent.name + "操作指南",
+            description="此智能体的专属工作指南",
+            source_type="upload",
+            dir_path=directory.relative_to(Path(service.sys_config.save_dir)).as_posix(),
+            content_hash=await asyncio.to_thread(directory_revision, directory),
+            tool_dependencies=[],
+            mcp_dependencies=[],
+            skill_dependencies=[],
+            share_config=agent.share_config or {},
+            created_by=str(operator.uid),
+            updated_by=str(operator.uid),
+            enabled=True,
+        )
         db.add(item)
         await db.commit()
         await db.refresh(item)
     if item is None:
         return {"skill": None, "revision": None}
-    return {"skill": item.to_dict(), "revision": await asyncio.to_thread(directory_revision, service._resolve_skill_dir(item))}
+    return await package_state(db, slug=item.slug, operator=operator)

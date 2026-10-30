@@ -57,7 +57,20 @@ def build_mcp_base_tool(
         )
 
     async def _arun(**kwargs: Any) -> tuple[str, dict[str, Any]]:
-        result = await host.call_tool(descriptor.server_slug, config, descriptor.name, kwargs)
+        active_config = config
+        if config.get("_personal_oauth"):
+            from yuxi.agents.mcp.execution import get_mcp_execution_context
+            from yuxi.agents.mcp.service import build_runtime_config, get_enabled_mcp_server_config
+
+            binding = config["_personal_oauth"]
+            context = get_mcp_execution_context()
+            if context is None or (context.tenant_id, context.uid) != (binding["tenant_id"], binding["uid"]):
+                raise McpHostError("个人 MCP 执行身份已变更", stage="config", code="OAUTH_CONTEXT_MISMATCH")
+            fresh = await get_enabled_mcp_server_config(descriptor.server_slug)
+            if fresh is None or not fresh.get("_personal_oauth"):
+                raise McpHostError("个人 MCP 连接不可用", stage="config", code="OAUTH_UNAVAILABLE")
+            active_config = build_runtime_config(descriptor.server_slug, fresh)
+        result = await host.call_tool(descriptor.server_slug, active_config, descriptor.name, kwargs)
         profile = trusted_profile
         payload = result.to_dict()
         if profile and profile.source_class == "BIBLIOGRAPHY":

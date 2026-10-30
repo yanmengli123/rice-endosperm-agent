@@ -177,6 +177,50 @@
             </div>
           </div>
 
+          <div v-if="processingParams.ocr_engine === 'mineru_ocr'" class="setting-row">
+            <div class="col-item">
+              <div class="setting-label">MinerU 后端</div>
+              <a-select
+                v-model:value="processingParams.ocr_engine_config.backend"
+                allow-clear
+                placeholder="默认 hybrid-auto-engine"
+                :options="
+                  ['pipeline', 'vlm-auto-engine', 'hybrid-auto-engine'].map((value) => ({
+                    value,
+                    label: value
+                  }))
+                "
+              />
+            </div>
+            <div class="col-item">
+              <div class="setting-label">解析方式</div>
+              <a-select
+                v-model:value="processingParams.ocr_engine_config.parse_method"
+                allow-clear
+                placeholder="默认 auto"
+                :options="[
+                  { value: 'auto', label: '自动' },
+                  { value: 'txt', label: '文本提取' },
+                  { value: 'ocr', label: 'OCR' }
+                ]"
+              />
+            </div>
+          </div>
+          <div v-if="processingParams.ocr_engine === 'mineru_official'" class="setting-row">
+            <div class="col-item">
+              <div class="setting-label">官方解析模型</div>
+              <a-select
+                v-model:value="processingParams.ocr_engine_config.model_version"
+                allow-clear
+                placeholder="沿用服务配置"
+                :options="[
+                  { value: 'vlm', label: '视觉语言模型' },
+                  { value: 'pipeline', label: 'Pipeline' }
+                ]"
+              />
+            </div>
+          </div>
+
           <!-- 第二行：自动入库配置 (仅在开启时显示) -->
           <div class="setting-row" v-if="autoIndex && !isPdfEvidenceKb">
             <div class="col-item">

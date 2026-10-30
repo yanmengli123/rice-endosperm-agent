@@ -60,6 +60,21 @@ class FakeHit:
 
 class FakeCollection:
     def __init__(self, distance: float = 0.8):
+        from pymilvus import DataType, FunctionType
+
+        self.schema = types.SimpleNamespace(
+            fields=[
+                types.SimpleNamespace(
+                    name="content", dtype=DataType.VARCHAR, params={"enable_analyzer": True, "enable_match": True}
+                ),
+                types.SimpleNamespace(name="content_sparse", dtype=DataType.SPARSE_FLOAT_VECTOR),
+            ],
+            functions=[
+                types.SimpleNamespace(
+                    type=FunctionType.BM25, input_field_names=["content"], output_field_names=["content_sparse"]
+                )
+            ],
+        )
         self.search_calls = []
         self.hybrid_calls = []
         self.insert_calls = []
@@ -710,6 +725,28 @@ def test_query_params_config_uses_bm25_parameters():
     descriptions = {option["value"]: option["description"] for option in search_mode["options"]}
     assert "BM25" in descriptions["keyword"]
     assert "BM25" in descriptions["hybrid"]
+
+
+@pytest.mark.parametrize("mode", ["vector", "keyword"])
+async def test_text_filters_are_applied_by_milvus_with_document_scope(mode):
+    collection = FakeCollection()
+    kb = make_kb(collection)
+    await kb.aquery("Wx", "db", search_mode=mode, required_terms="grain", excluded_terms="review", file_ids=["file-1"])
+    expression = collection.search_calls[0]["expr"]
+    assert 'file_id == "file-1"' in expression
+    assert 'TEXT_MATCH(content, "grain")' in expression
+    assert 'not TEXT_MATCH(content, "review")' in expression
+
+
+async def test_collection_without_match_schema_rejects_filters_explicitly():
+    from yuxi.knowledge.text_retrieval import TextRetrievalError
+
+    collection = FakeCollection()
+    collection.schema.fields[0].params.pop("enable_match")
+    kb = make_kb(collection)
+    with pytest.raises(TextRetrievalError, match="原索引不会自动删除"):
+        await kb.aquery("Wx", "db", search_mode="vector", required_terms="grain")
+    assert not collection.search_calls
 
 
 def test_collection_supports_bm25_requires_analyzed_content_sparse_field_and_function():

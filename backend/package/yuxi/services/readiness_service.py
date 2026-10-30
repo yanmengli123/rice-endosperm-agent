@@ -20,7 +20,17 @@ async def check_readiness(*, initialized, db_context, redis):
             async with db_context() as db:
                 await db.execute(text("SELECT 1"))
                 checks["database"] = True
-                result = await db.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'skills' AND column_name = 'bound_agent_id') AND to_regclass('skill_versions') IS NOT NULL"))
+                result = await db.execute(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() AND table_name = 'skills' "
+                        "AND column_name = 'bound_agent_id') "
+                        "AND to_regclass('skill_versions') IS NOT NULL "
+                        "AND to_regclass('mcp_oauth_configs') IS NOT NULL "
+                        "AND to_regclass('mcp_oauth_connections') IS NOT NULL "
+                        "AND to_regclass('mcp_oauth_attempts') IS NOT NULL"
+                    )
+                )
                 checks["schema"] = bool(result.scalar())
     except Exception:
         pass

@@ -17,7 +17,6 @@ import aiofiles
 from docling.datamodel.base_models import InputFormat
 from docling.document_converter import DocumentConverter
 from langchain_community.document_loaders import PyPDFLoader
-from markdownify import markdownify as md_convert
 
 from yuxi.knowledge.parser.zip_utils import process_zip_file as _process_zip_file
 from yuxi.knowledge.utils.text_utils import sanitize_extracted_text, validate_markdown_quality
@@ -413,13 +412,20 @@ async def _process_file_to_markdown_core(
         elif file_ext in [".html", ".htm"]:
             async with aiofiles.open(file_path_obj, encoding="utf-8") as f:
                 content = await f.read()
-            text = await asyncio.to_thread(md_convert, content, heading_style="ATX")
+            from yuxi.knowledge.parser.office_text import html_to_markdown
+
+            text = await asyncio.to_thread(html_to_markdown, content)
             result = f"{text}"
 
         elif file_ext == ".csv":
             result = await asyncio.to_thread(_convert_csv_to_markdown, file_path_obj)
 
-        elif file_ext in [".xls", ".xlsx"]:
+        elif file_ext == ".xls":
+            from yuxi.knowledge.parser.office_text import xls_to_markdown
+
+            result = await asyncio.to_thread(xls_to_markdown, file_path_obj)
+
+        elif file_ext == ".xlsx":
             result = await asyncio.to_thread(_convert_with_docling, file_path_obj, params=params)
 
         elif file_ext == ".json":

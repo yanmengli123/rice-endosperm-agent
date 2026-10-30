@@ -121,11 +121,13 @@ class MinerUParser(BaseDocumentProcessor):
 
         # 解析参数
         params = params or {}
+        from yuxi.knowledge.parser.office_text import mineru_options
+
+        validated_options = mineru_options(params)
 
         data = {
             "lang_list": params.get("lang_list", ["ch"]),
-            "backend": params.get("backend", "hybrid-auto-engine"),
-            "parse_method": params.get("parse_method", "auto"),
+            **validated_options,
             "formula_enable": params.get("formula_enable", True),
             "table_enable": params.get("table_enable", True),
             "image_analysis": params.get("image_analysis", True),

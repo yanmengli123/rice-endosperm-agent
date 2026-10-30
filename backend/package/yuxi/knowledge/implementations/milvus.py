@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import inspect
+import json
 import os
 import re
 import time
@@ -30,6 +31,12 @@ from yuxi.knowledge.base import FileStatus, KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.dispatcher import chunk_markdown
 from yuxi.knowledge.chunking.ragflow_like.nlp import count_tokens
 from yuxi.knowledge.parser.unified import Parser
+from yuxi.knowledge.text_retrieval import (
+    TextRetrievalError,
+    literal_highlights,
+    require_phrase_version,
+    text_conditions,
+)
 from yuxi.knowledge.utils.kb_utils import resolve_processing_params
 from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
@@ -92,6 +99,28 @@ async def _run_milvus_query_io(func, /, *args, **kwargs):
 
 @dataclass(kw_only=True)
 class MilvusRetrievalConfig:
+    required_terms: str = field(
+        default="", metadata={"label": "必含词", "type": "text", "description": "空格分隔；要求集合启用文本匹配"}
+    )
+    excluded_terms: str = field(
+        default="", metadata={"label": "排除词", "type": "text", "description": "空格分隔，在服务端过滤候选"}
+    )
+    exact_phrase: str = field(
+        default="",
+        metadata={
+            "label": "完整短语",
+            "type": "text",
+            "description": "保持词序相邻；要求 Milvus 2.5.17+ 和文本匹配索引",
+        },
+    )
+    highlight_results: bool = field(
+        default=True,
+        metadata={
+            "label": "高亮命中文字",
+            "type": "boolean",
+            "description": "显示原文中的字面命中，不改变检索或证据资格",
+        },
+    )
     search_mode: str = field(
         default="hybrid",
         metadata={
@@ -397,13 +426,12 @@ class MilvusKB(KnowledgeBase):
                         f"Collection {collection_name} model mismatch: "
                         f"expected='{expected_model}', found_in_description='{description}'"
                     )
-                    utility.drop_collection(collection_name, using=self.connection_alias)
-                    return self._create_new_collection(collection_name, embedding_info, kb_id)
+                    raise RuntimeError("现有集合的嵌入模型不匹配；请在新集合重建并验证后切换，原集合已保留")
 
                 if not self._collection_supports_bm25(collection):
-                    logger.warning(f"Collection {collection_name} schema does not support BM25, recreating")
-                    utility.drop_collection(collection_name, using=self.connection_alias)
-                    return self._create_new_collection(collection_name, embedding_info, kb_id)
+                    logger.warning(
+                        f"Collection {collection_name} has no BM25 index; keeping the existing vector collection"
+                    )
 
                 logger.info(f"Retrieved existing collection: {collection_name}")
                 return collection
@@ -432,6 +460,7 @@ class MilvusKB(KnowledgeBase):
                 dtype=DataType.VARCHAR,
                 max_length=65535,
                 enable_analyzer=True,
+                enable_match=True,
                 analyzer_params=CONTENT_ANALYZER_PARAMS,
             ),
             FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=100),
@@ -1209,6 +1238,22 @@ class MilvusKB(KnowledgeBase):
             ids_expr = self._build_file_ids_expr(merged_kwargs.get("file_ids"))
             if ids_expr:
                 file_expr = f"{file_expr} and {ids_expr}" if file_expr else ids_expr
+            text_expr, highlight_terms = text_conditions(merged_kwargs)
+            if text_expr:
+                content_field = next((field for field in collection.schema.fields if field.name == "content"), None)
+                if content_field is None or not content_field.params.get("enable_match"):
+                    raise TextRetrievalError(
+                        "该集合未启用文本匹配；请在独立集合重建索引并核对后启用，原索引不会自动删除"
+                    )
+                if merged_kwargs.get("exact_phrase", "").strip():
+                    version = await _run_milvus_query_io(utility.get_server_version, using=self.connection_alias)
+                    require_phrase_version(version)
+                file_expr = f"({file_expr}) and ({text_expr})" if file_expr else text_expr
+            highlight_results = merged_kwargs.get("highlight_results", True)
+            if not isinstance(highlight_results, bool):
+                raise TextRetrievalError("highlight_results 必须是布尔值")
+            if search_mode in {"keyword", "hybrid"} and not self._collection_supports_bm25(collection):
+                raise TextRetrievalError("该集合没有 BM25 索引，请使用向量检索，或在新集合重建 BM25 索引")
             if file_expr:
                 logger.debug(f"Using filter expression: {file_expr}")
 
@@ -1343,6 +1388,25 @@ class MilvusKB(KnowledgeBase):
 
             if use_graph_retrieval:
                 graph_chunks = await self._retrieve_graph_chunks(query_text, kb_id, retrieved_chunks, merged_kwargs)
+                if graph_chunks and file_expr:
+                    chunk_ids = [
+                        str(chunk.get("metadata", {}).get("chunk_id"))
+                        for chunk in graph_chunks
+                        if chunk.get("metadata", {}).get("chunk_id")
+                    ]
+                    allowed_rows = (
+                        await _run_milvus_query_io(
+                            collection.query,
+                            expr=f"({file_expr}) and chunk_id in {json.dumps(chunk_ids)}",
+                            output_fields=["chunk_id"],
+                        )
+                        if chunk_ids
+                        else []
+                    )
+                    allowed_ids = {row["chunk_id"] for row in allowed_rows}
+                    graph_chunks = [
+                        chunk for chunk in graph_chunks if chunk.get("metadata", {}).get("chunk_id") in allowed_ids
+                    ]
                 if graph_chunks:
                     graph_weight = float(merged_kwargs.get("graph_weight", 1.0))
                     retrieved_chunks = self._fuse_chunk_rankings(retrieved_chunks, graph_chunks, graph_weight)
@@ -1354,6 +1418,10 @@ class MilvusKB(KnowledgeBase):
 
             await self._hydrate_chunk_sources(kb_id, retrieved_chunks)
             await self._hydrate_chunk_provenance(retrieved_chunks)
+            if highlight_results:
+                terms = [*highlight_terms, *query_text.split()[:32]] if search_mode != "vector" else highlight_terms
+                for chunk in retrieved_chunks:
+                    chunk["highlights"] = literal_highlights(str(chunk.get("content") or ""), terms)
 
             if not use_reranker:
                 if merged_kwargs.get("scientific_pdf_diversity"):
@@ -1397,6 +1465,8 @@ class MilvusKB(KnowledgeBase):
             # 统一返回结果
             return retrieved_chunks[:final_top_k]
 
+        except TextRetrievalError:
+            raise
         except Exception as e:
             logger.error(f"Milvus query error: {e}, {traceback.format_exc()}")
             return []

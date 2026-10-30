@@ -38,6 +38,14 @@
             <span>API Keys</span>
           </div>
           <div
+            v-if="userStore.isLoggedIn"
+            class="sider-item"
+            :class="{ activesec: activeTab === 'mcpOAuth' }"
+            @click="activeTab = 'mcpOAuth'"
+          >
+            <Key class="icon" :size="18" /><span>个人 MCP</span>
+          </div>
+          <div
             class="sider-item"
             :class="{ activesec: activeTab === 'base' }"
             @click="activeTab = 'base'"
@@ -104,6 +112,14 @@
           API Keys
         </div>
         <div
+          v-if="userStore.isLoggedIn"
+          class="nav-item"
+          :class="{ active: activeTab === 'mcpOAuth' }"
+          @click="activeTab = 'mcpOAuth'"
+        >
+          个人 MCP
+        </div>
+        <div
           class="nav-item"
           :class="{ active: activeTab === 'agentEnv' }"
           @click="activeTab = 'agentEnv'"
@@ -147,6 +163,7 @@
           <div v-if="activeTab === 'apiKeys' && userStore.isLoggedIn">
             <ApiKeyManagementComponent />
           </div>
+          <div v-if="activeTab === 'mcpOAuth' && userStore.isLoggedIn"><McpOAuthSettings /></div>
 
           <div v-if="activeTab === 'agentEnv' && userStore.isLoggedIn">
             <AgentEnvSettingsCard />
@@ -177,6 +194,7 @@ import AccountSettingsComponent from '@/components/AccountSettingsComponent.vue'
 import AgentEnvSettingsCard from '@/components/AgentEnvSettingsCard.vue'
 import BasicSettingsSection from '@/components/BasicSettingsSection.vue'
 import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
+import McpOAuthSettings from '@/components/McpOAuthSettings.vue'
 import UserManagementComponent from '@/components/UserManagementComponent.vue'
 import DepartmentManagementComponent from '@/components/DepartmentManagementComponent.vue'
 
@@ -203,7 +221,7 @@ const visible = computed({
 
 const availableTabs = computed(() => {
   const tabs = []
-  if (userStore.isLoggedIn) tabs.push('account', 'apiKeys', 'agentEnv')
+  if (userStore.isLoggedIn) tabs.push('account', 'apiKeys', 'mcpOAuth', 'agentEnv')
   if (userStore.isAdmin) tabs.push('base', 'user')
   if (userStore.isSuperAdmin) tabs.push('department')
   return tabs

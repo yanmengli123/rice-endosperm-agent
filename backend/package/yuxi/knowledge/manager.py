@@ -4,6 +4,7 @@ import os
 from yuxi.knowledge.base import KBNotFoundError, KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.presets import deep_merge
 from yuxi.knowledge.factory import KnowledgeBaseFactory
+from yuxi.knowledge.connector_secrets import public_connector_info
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_isoformat
@@ -237,7 +238,7 @@ class KnowledgeBaseManager:
             db_info["additional_params"] = kb_instance.normalize_additional_params(row.additional_params)
             db_info["created_by"] = row.created_by
             db_info["tenant_id"] = row.tenant_id
-            all_databases.append(db_info)
+            all_databases.append(public_connector_info(db_info))
         return {"databases": all_databases}
 
     @staticmethod
@@ -509,8 +510,8 @@ class KnowledgeBaseManager:
         ):
             db_info[field] = getattr(kb_row, field)
 
-        logger.info(f"Created {kb_type} database: {database_name} ({kb_id}) with {kwargs}")
-        return db_info
+        logger.info(f"Created {kb_type} database: {database_name} ({kb_id})")
+        return public_connector_info(db_info)
 
     async def delete_database(self, kb_id: str) -> dict:
         """删除数据库"""
@@ -723,7 +724,7 @@ class KnowledgeBaseManager:
         db_info["stats"] = file_stats
         db_info["row_count"] = file_stats["row_count"]
 
-        return db_info
+        return public_connector_info(db_info)
 
     async def list_document_files(
         self,

@@ -51,7 +51,8 @@
                 >
                 <span v-if="getLineRange(chunk)" class="score-item">{{ getLineRange(chunk) }}</span>
               </div>
-              <span class="chunk-preview">{{ getPreviewText(chunk.content) }}</span>
+              <KeywordHighlights v-if="chunk.highlights?.length" :fragments="chunk.highlights.slice(0, 1)" class="chunk-preview" />
+              <span v-else class="chunk-preview">{{ getPreviewText(chunk.content) }}</span>
               <Eye :size="14" class="view-icon" />
             </div>
           </div>
@@ -78,6 +79,7 @@
 </template>
 
 <script setup>
+import KeywordHighlights from './KeywordHighlights.vue'
 import { computed, ref, watch } from 'vue'
 import { FileText, ChevronRight, ChevronDown, Eye } from '@lucide/vue'
 import KbChunkDetailModal from './KbChunkDetailModal.vue'

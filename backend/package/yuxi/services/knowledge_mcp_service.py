@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import asyncio
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -57,7 +58,12 @@ async def execute_knowledge_tool(db, user, name, arguments):
     if name == "search_file":
         if not any((parameters.kb_id, parameters.kb_name, parameters.query)):
             raise ValueError("至少指定知识库或文件名关键词")
-        ids = [kb_id for kb_id, item in by_id.items() if (parameters.kb_id is None or kb_id == parameters.kb_id) and (parameters.kb_name is None or item.get("name") == parameters.kb_name)]
+        ids = [
+            kb_id
+            for kb_id, item in by_id.items()
+            if (parameters.kb_id is None or kb_id == parameters.kb_id)
+            and (parameters.kb_name is None or item.get("name") == parameters.kb_name)
+        ]
         if (parameters.kb_id or parameters.kb_name) and not ids:
             raise HTTPException(404, "知识库不存在或无权访问")
         conditions = [KnowledgeFile.kb_id.in_(ids), KnowledgeFile.is_folder.is_(False)]
@@ -66,8 +72,35 @@ async def execute_knowledge_tool(db, user, name, arguments):
 
             conditions.append(KnowledgeFile.filename.ilike("%" + escape_like(parameters.query) + "%", escape="/"))
         total = (await db.execute(select(func.count()).select_from(KnowledgeFile).where(*conditions))).scalar_one()
-        files = (await db.execute(select(KnowledgeFile).where(*conditions).order_by(KnowledgeFile.updated_at.desc(), KnowledgeFile.id).offset(parameters.offset).limit(parameters.limit))).scalars().all()
-        return {"files": [{"kb_id": item.kb_id, "file_id": item.file_id, "filename": item.filename, "file_type": item.file_type, "status": item.status} for item in files], "total": total, "offset": parameters.offset, "limit": parameters.limit, "has_more": parameters.offset + len(files) < total}
+        files = (
+            (
+                await db.execute(
+                    select(KnowledgeFile)
+                    .where(*conditions)
+                    .order_by(KnowledgeFile.updated_at.desc(), KnowledgeFile.id)
+                    .offset(parameters.offset)
+                    .limit(parameters.limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {
+            "files": [
+                {
+                    "kb_id": item.kb_id,
+                    "file_id": item.file_id,
+                    "filename": item.filename,
+                    "file_type": item.file_type,
+                    "status": item.status,
+                }
+                for item in files
+            ],
+            "total": total,
+            "offset": parameters.offset,
+            "limit": parameters.limit,
+            "has_more": parameters.offset + len(files) < total,
+        }
     if parameters.kb_id not in by_id:
         raise HTTPException(404, "知识库不存在或无权访问")
     if name == "query_kb":
@@ -75,20 +108,41 @@ async def execute_knowledge_tool(db, user, name, arguments):
         if target is None:
             raise HTTPException(404, "知识库当前不可检索")
         retriever = target["retriever"]
-        result = retriever(parameters.query_text, **({"file_name": parameters.file_name} if parameters.file_name else {}))
+        options = {"file_name": parameters.file_name} if parameters.file_name else {}
+        if inspect.iscoroutinefunction(retriever):
+            result = await retriever(parameters.query_text, **options)
+        else:
+            result = await asyncio.to_thread(retriever, parameters.query_text, **options)
         if inspect.isawaitable(result):
             result = await result
         output = await _build_query_output(parameters.kb_id, result)
         output["verification"] = "retrieval_candidates"
         return output
-    file = await KnowledgeFileRepository(db).get_by_file_id(parameters.file_id)
-    if file is None or file.kb_id != parameters.kb_id or file.is_folder:
-        raise HTTPException(404, "知识文件不存在或无权访问")
+    if by_id[parameters.kb_id].get("kb_type") != "feishu":
+        file = await KnowledgeFileRepository(db).get_by_file_id(parameters.file_id)
+        if file is None or file.kb_id != parameters.kb_id or file.is_folder:
+            raise HTTPException(404, "知识文件不存在或无权访问")
     if name == "open_kb_document":
         offset = parameters.line - 1 if parameters.line is not None else parameters.offset or 0
-        result = await knowledge_base.open_file_content(parameters.kb_id, parameters.file_id, offset=offset, limit=parameters.window_size)
+        result = await knowledge_base.open_file_content(
+            parameters.kb_id, parameters.file_id, offset=offset, limit=parameters.window_size
+        )
     else:
-        if not parameters.patterns or len(parameters.patterns) > 20 or any(len(pattern) > 512 for pattern in parameters.patterns):
+        if (
+            not parameters.patterns
+            or len(parameters.patterns) > 20
+            or any(len(pattern) > 512 for pattern in parameters.patterns)
+        ):
             raise ValueError("需提供 1–20 个不超过 512 字符的检索模式")
-        result = await knowledge_base.find_file_content(parameters.kb_id, parameters.file_id, parameters.patterns, use_regex=parameters.use_regex, case_sensitive=parameters.case_sensitive, max_windows=parameters.max_windows, window_size=parameters.window_size)
+        if parameters.use_regex:
+            raise ValueError("公开 MCP 文档查找仅支持字面关键词，请关闭 use_regex")
+        result = await knowledge_base.find_file_content(
+            parameters.kb_id,
+            parameters.file_id,
+            parameters.patterns,
+            use_regex=parameters.use_regex,
+            case_sensitive=parameters.case_sensitive,
+            max_windows=parameters.max_windows,
+            window_size=parameters.window_size,
+        )
     return {"kb_id": parameters.kb_id, "file_id": parameters.file_id, **result}
