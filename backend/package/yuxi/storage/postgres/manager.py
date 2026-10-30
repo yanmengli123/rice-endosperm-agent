@@ -1068,6 +1068,121 @@ class PostgresManager(metaclass=SingletonMeta):
 
         await conn.run_sync(lambda connection: AnswerSourceAnnotation.__table__.create(connection, checkfirst=True))
 
+    async def _migration_0129_public_session_control_plane(self, conn) -> None:
+        await conn.execute(
+            text("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS public_session BOOLEAN NOT NULL DEFAULT false")
+        )
+        from yuxi.storage.postgres.models_business import (
+            Base,
+            PublicApp,
+            PublicAppKey,
+            PublicEndUser,
+            PublicSession,
+            PublicInput,
+            PublicTurn,
+            PublicReceipt,
+            PublicSessionEvent,
+            PublicFile,
+            PublicTurnRun,
+        )
+
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS user_kind VARCHAR(24) NOT NULL DEFAULT 'human'")
+        )
+        tables = [
+            model.__table__
+            for model in (
+                PublicApp,
+                PublicAppKey,
+                PublicEndUser,
+                PublicSession,
+                PublicInput,
+                PublicTurn,
+                PublicReceipt,
+                PublicSessionEvent,
+                PublicFile,
+                PublicTurnRun,
+            )
+        ]
+        await conn.run_sync(lambda connection: Base.metadata.create_all(connection, tables=tables, checkfirst=True))
+        schema = (await conn.execute(text("SELECT current_schema()"))).scalar_one()
+        quoted = '"' + schema.replace('"', '""') + '"'
+        await conn.execute(
+            text(f"""
+            CREATE OR REPLACE FUNCTION {quoted}.yuxi_public_budget(
+                p_uid text, p_tenant bigint, p_day timestamp, p_month timestamptz
+            ) RETURNS TABLE(daily_chat bigint, daily_literature bigint, active_platform bigint, monthly_tokens bigint)
+            LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, {quoted} AS $budget$
+            DECLARE owner_id text;
+            BEGIN
+              IF NULLIF(current_setting('yuxi.uid', true), '') IS DISTINCT FROM p_uid
+                OR NULLIF(current_setting('yuxi.tenant_id', true), '') IS DISTINCT FROM p_tenant::text THEN
+                RAISE EXCEPTION 'Budget identity mismatch' USING ERRCODE = '42501';
+              END IF;
+              SELECT a.owner_uid INTO owner_id FROM public_end_users e JOIN public_apps a ON a.id=e.app_id
+                WHERE e.uid=p_uid AND e.tenant_id=p_tenant AND a.tenant_id=p_tenant;
+              owner_id := COALESCE(owner_id, p_uid);
+              IF NOT EXISTS (SELECT 1 FROM users u JOIN tenant_memberships m ON m.uid=u.uid
+                WHERE u.uid=owner_id AND u.user_kind='human' AND u.is_deleted=0 AND NOT u.is_disabled
+                AND m.tenant_id=p_tenant AND m.status='active') THEN
+                RAISE EXCEPTION 'Budget owner unavailable' USING ERRCODE = '42501';
+              END IF;
+              RETURN QUERY WITH billed AS (
+                SELECT owner_id AS uid UNION
+                SELECT e.uid FROM public_end_users e JOIN public_apps a ON a.id=e.app_id
+                  WHERE a.owner_uid=owner_id AND a.tenant_id=p_tenant AND e.tenant_id=p_tenant
+              ) SELECT
+                count(*) FILTER (WHERE r.run_type IN ('chat','source_annotation') AND r.created_at>=p_day
+                  AND r.status NOT IN ('failed','cancelled')),
+                count(*) FILTER (WHERE r.run_type='literature' AND r.created_at>=p_day
+                  AND r.status NOT IN ('failed','cancelled')),
+                count(*) FILTER (WHERE r.run_type IN ('chat','resume','literature','source_annotation')
+                  AND r.status NOT IN ('completed','failed','cancelled','interrupted')
+                  AND (r.input_payload->'runtime'->>'kind') IS DISTINCT FROM 'subagent'
+                  AND COALESCE(r.input_payload->>'user_credential', '{{}}') IN ('{{}}', 'null')),
+                (SELECT COALESCE(sum(l.total_tokens),0)::bigint FROM usage_ledger l
+                  WHERE l.uid IN (SELECT billed.uid FROM billed) AND l.tenant_id=p_tenant AND l.created_at>=p_month
+                  AND l.credential_source IN ('platform','legacy_unknown'))
+              FROM agent_runs r WHERE r.uid IN (SELECT billed.uid FROM billed) AND r.tenant_id=p_tenant;
+            END $budget$;
+        """)
+        )
+        await conn.execute(
+            text(f"REVOKE ALL ON FUNCTION {quoted}.yuxi_public_budget(text,bigint,timestamp,timestamptz) FROM PUBLIC")
+        )
+        # 0123 granted only then-existing tables; incremental features need their own grants.
+        role_exists = (await conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname='yuxi_api_runtime'"))).scalar()
+        if role_exists:
+            feature_tables = [
+                "skill_versions",
+                "mcp_oauth_configs",
+                "mcp_oauth_connections",
+                "mcp_oauth_attempts",
+                "collaboration_messages",
+                "collaboration_stops",
+                "agent_run_waitpoints",
+                "answer_source_annotations",
+                *(table.name for table in tables),
+            ]
+            for table_name in feature_tables:
+                await conn.execute(
+                    text(f'GRANT SELECT,INSERT,UPDATE,DELETE ON {quoted}."{table_name}" TO yuxi_api_runtime')
+                )
+                if "id" in Base.metadata.tables[table_name].columns:
+                    sequence = (
+                        await conn.execute(
+                            text("SELECT pg_get_serial_sequence(:table, 'id')"), {"table": f'{quoted}."{table_name}"'}
+                        )
+                    ).scalar()
+                    if sequence:
+                        await conn.execute(text(f"GRANT USAGE,SELECT ON SEQUENCE {sequence} TO yuxi_api_runtime"))
+            await conn.execute(
+                text(
+                    f"GRANT EXECUTE ON FUNCTION {quoted}.yuxi_public_budget(text,bigint,timestamp,timestamptz) "
+                    "TO yuxi_api_runtime"
+                )
+            )
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
@@ -1201,6 +1316,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0126_collaboration_messages", "_migration_0126_collaboration_messages"),
         ("0127_agent_run_waitpoints", "_migration_0127_agent_run_waitpoints"),
         ("0128_answer_source_annotations", "_migration_0128_answer_source_annotations"),
+        ("0129_public_session_control_plane", "_migration_0129_public_session_control_plane"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:

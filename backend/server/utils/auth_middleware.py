@@ -43,6 +43,7 @@ async def _verify_api_key(key: str, db: AsyncSession) -> tuple[User | None, APIK
     user = result.scalar_one_or_none()
     if (
         user
+        and (getattr(user, "user_kind", None) or "human") == "human"
         and not user.is_deleted
         and not user.is_disabled
         and user.department_id is not None
@@ -110,6 +111,8 @@ async def get_current_user(
     result = await db.execute(select(User).filter(User.id == parsed_user_id, User.is_deleted == 0))
     user = result.scalar_one_or_none()
     if user is None:
+        raise credentials_exception
+    if (getattr(user, "user_kind", None) or "human") != "human":
         raise credentials_exception
     if user.is_disabled:
         raise HTTPException(

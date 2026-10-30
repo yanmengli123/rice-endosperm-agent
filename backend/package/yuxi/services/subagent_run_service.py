@@ -374,7 +374,7 @@ class SubagentRunService:
         # 同批复制）。缺失时子轮永远回落平台凭据，既绕过 BYOK 计费豁免，也可能在
         # platform_only 策略下无凭据可用。
         if isinstance(creator_payload, dict):
-            for freeze_key in ("user_credential", "credential_source", "policy_version"):
+            for freeze_key in ("user_credential", "credential_source", "policy_version", "tool_approval_mode"):
                 if creator_payload.get(freeze_key) is not None:
                     input_payload[freeze_key] = creator_payload[freeze_key]
         subagent_input_message = input_message.with_metadata(

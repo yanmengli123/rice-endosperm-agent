@@ -53,7 +53,7 @@ from yuxi.services.channel_service import (
 )
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.agents.buildin.dsh.execution import reconcile_dsh_usage
-from yuxi.services.input_message_service import restore_chat_input_message
+from yuxi.services.input_message_service import build_chat_input_message_from_openai_content, restore_chat_input_message
 from yuxi.services.mcp_canary_service import run_mcp_live_canary
 from yuxi.services.run_queue_service import (
     append_run_stream_event,
@@ -237,10 +237,23 @@ async def _load_user(uid: str):
                 User.uid == uid,
                 User.is_deleted == 0,
                 User.is_disabled.is_(False),
-                User.department_id.is_not(None),
             )
         )
-        return result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+        if user is None:
+            return None
+        if (user.user_kind or "human") == "app_end_user":
+            from fastapi import HTTPException
+
+            from yuxi.services.principal import PrincipalResolutionError
+            from yuxi.services.public_identity_service import app_principal
+
+            try:
+                await app_principal(db, uid=uid)
+            except (HTTPException, PrincipalResolutionError):
+                return None
+            return user
+        return user if (user.user_kind or "human") == "human" and user.department_id is not None else None
 
 
 async def _is_cancel_requested(run_id: str) -> bool:
@@ -727,6 +740,7 @@ async def process_agent_run(ctx, run_id: str):
             return
 
     resume_input = None
+    ordered_human_messages = None
     if run_type == "resume":
         resume_input = input_metadata.get("resume")
         if resume_input is None:
@@ -744,6 +758,9 @@ async def process_agent_run(ctx, run_id: str):
                 image_content=image_content,
                 metadata=input_metadata,
             )
+            if payload.get("ordered_input_message_ids"):
+                async with pg_manager.get_async_session_context() as ordered_db:
+                    normalized_input_message, ordered_human_messages = await _restore_ordered_input(ordered_db, run)
         except ValueError as exc:
             await _finish_run_before_execution(
                 run,
@@ -764,6 +781,8 @@ async def process_agent_run(ctx, run_id: str):
         "model_spec": payload.get("model_spec"),
         "agent_runtime": payload.get("agent_runtime", "langgraph"),
         "agent_runtime_snapshot": payload.get("agent_runtime_snapshot"),
+        "agent_context_snapshot": payload.get("agent_context_snapshot"),
+        "tool_approval_mode": payload.get("tool_approval_mode"),
         "knowledge_scope_snapshot": payload.get("knowledge_scope_snapshot"),
         "mention_resolution": payload.get("mention_resolution"),
         "user_credential": payload.get("user_credential"),
@@ -773,6 +792,8 @@ async def process_agent_run(ctx, run_id: str):
         "run_type": run_type,
         "created_by_run_id": run.created_by_run_id,
     }
+    if ordered_human_messages is not None:
+        meta["ordered_human_messages"] = ordered_human_messages
     if isinstance(frozen_scope, dict) and frozen_scope.get("literature_binding"):
         meta["input_message_id"] = input_message.id
     if run_type == "subagent" or (run_type == "resume" and runtime.get("kind") == "subagent"):
@@ -1235,6 +1256,36 @@ async def _load_input_message(message_id: int | None) -> Message | None:
     async with pg_manager.get_async_session_context() as db:
         result = await db.execute(select(Message).where(Message.id == message_id))
         return result.scalar_one_or_none()
+
+
+async def _restore_ordered_input(db, run):
+    identifiers = run.input_payload["ordered_input_message_ids"]
+    rows = list(
+        await db.scalars(
+            select(Message).where(
+                Message.id.in_(identifiers),
+                Message.run_id == run.id,
+                Message.conversation_id == run.conversation_id,
+                Message.role == "user",
+            )
+        )
+    )
+    by_id = {row.id: row for row in rows}
+    if len(by_id) != len(identifiers) or len(set(identifiers)) != len(identifiers):
+        raise ValueError("Session 有序输入的持久消息不完整")
+    messages, parts = [], []
+    for identifier in identifiers:
+        row = by_id[identifier]
+        restored = restore_chat_input_message(
+            content=row.content, image_content=row.image_content, metadata=row.extra_metadata or {}
+        )
+        message = restored.require_langchain_message()
+        message.id = f"public-message:{identifier}"
+        messages.append(message.model_dump())
+        parts.extend(
+            [{"type": "text", "text": message.content}] if isinstance(message.content, str) else message.content
+        )
+    return build_chat_input_message_from_openai_content(parts), messages
 
 
 async def worker_heartbeat(ctx: Any = None) -> None:

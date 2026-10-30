@@ -291,6 +291,8 @@ class KnowledgeBaseManager:
         Returns:
             bool: 是否有权限
         """
+        if user.get("user_kind") == "app_end_user" or str(user.get("uid") or "").startswith("app:"):
+            return any(item.get("kb_id") == kb_id for item in (await self.get_databases_by_user(user))["databases"])
         # 超级管理员有权访问所有
         if user.get("role") == "superadmin":
             return True
@@ -365,6 +367,32 @@ class KnowledgeBaseManager:
                 "uid": user.uid,
                 "role": user.role,
                 "department_id": user.department_id,
+                "user_kind": getattr(user, "user_kind", None),
+            }
+
+        if user_info.get("user_kind") == "app_end_user" or str(user_info.get("uid") or "").startswith("app:"):
+            from yuxi.services.public_identity_service import app_principal
+            from yuxi.storage.postgres.manager import pg_manager
+
+            async with pg_manager.get_async_session_context() as session:
+                app, owner = await app_principal(session, uid=str(user_info["uid"]))
+                owner_info = {
+                    "uid": owner.uid,
+                    "role": owner.role,
+                    "department_id": owner.department_id,
+                    "tenant_id": app.tenant_id,
+                }
+                granted = set(app.kb_ids)
+                tenant_id = app.tenant_id
+            all_databases = (await self.get_databases()).get("databases", [])
+            return {
+                "databases": [
+                    item
+                    for item in all_databases
+                    if item.get("kb_id") in granted
+                    and item.get("tenant_id") == tenant_id
+                    and self._database_info_accessible(owner_info, item)
+                ]
             }
 
         if user_info.get("role") != "superadmin":

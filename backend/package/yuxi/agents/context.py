@@ -205,6 +205,10 @@ class BaseContext:
         default=None,
         metadata={"name": "请求 ID", "configurable": False, "hide": True},
     )
+    tool_approval_mode: str | None = field(
+        default=None,
+        metadata={"name": "运行时工具审批", "configurable": False, "hide": True},
+    )
 
     _effective_knowledge_scope: dict[str, Any] | None = field(
         default=None,

@@ -82,3 +82,17 @@ PostgreSQL 测试仅接受 `yuxi-v08-postgres/v08_compat`，自建随机 Schema 
 检索列表将片段展开与详情入口分开，默认六行，可展开完整正文；高亮使用文本节点。文件预览按容器宽度折叠视图/下载菜单。未新增前端依赖。
 
 本批验证：模型网关/权益/运行回归 100 passed；标注与预算分组 22 passed；标注/证据/Key/旧契约分组 51 passed。隔离 PostgreSQL 10 passed，覆盖 0128 重放与漂移、标注并发锁、幂等、无效输出重试、独立 append-only 用量、原文不变、权限撤销及文档换代过滤。前端 ESLint、Vite 构建通过。真实模型语义质量、来源阅读浏览器交互与外部网页标注未宣称通过。
+
+## Public Session 身份与事务基础（接入仍在进行）
+
+0129 新增独立 APP、密钥、终端用户、Session、Input、Turn、执行关联、幂等回执、会话事件和文件草稿表。保留原 conversations/agent_runs 和 AgentRun 1.9；公开会话通过服务端标记阻止旧运行入口绕过队列。新表时间列使用 TIMESTAMPTZ；迁移补齐 0124–0129 新表及序列的 API 受限角色授权，readiness 同步检查新结构与预算函数。
+
+APP Key 仅在新的公开认证适配层解析，不能作为产品登录凭据。APP 与外部用户 ID 决定独立无部门账号；客户端 X-App-Id 不授予权限。JWT 与个人 full/旧桌面 Key 不接受终端用户 Header，外部限权 Key 不能变成完整权限 Key。每次重新检查 APP、所有者、终端账号及租户成员资格。Agent 授权取 APP 清单与所有者当前可见范围交集，始终排除私有 Agent；知识范围取显式授权、当前所有者权限和 APP 租户交集。仅显式开启时可以委托所有者的模型凭据，不继承个人 MCP 或工作区权限。
+
+终端用户与所有者共享日/月预算和并发预留，账本仍记录实际运行 UID。PostgreSQL 预算函数使用固定 search_path、事务身份校验和 SECURITY DEFINER，仅返回计数与用量汇总；不授予终端用户读取其他会话的权限。
+
+接收与派发分开：接收保存完整有序消息、文件绑定及不可变回执；领取时在 Session 锁内一次提交 Input 消费、Turn、Run、正式消息和派发 Outbox。崩溃回滚后输入仍待领取，双 worker 只产生一次执行。模型/提示词/知识范围/审批模式在接收时冻结；执行重新验证权限。多条用户消息分别保存，worker 恢复原顺序、原 MIME 和完整图片 data URL，附件只绑定本次提交的末条消息。空闲队列支持 FIFO 和有界 steer 前缀合批；运行中 steer 接管尚未接线。
+
+人工回答/工具审批恢复在同一 Turn 创建下一 Run，等待点消费、运行、Outbox 与控制回执同事务提交。审批先检查全部 call_id，再以 LangGraph checkpoint 保存决策；拒绝或参数变更不会执行工具。保留审批时绑定的原调用详情，worker 再次发布等待点不能覆盖。真实 SQLite checkpoint 关闭/重开验证通过；隔离 PostgreSQL 验证恢复回滚、旧等待点和改变幂等意图拒绝。
+
+本批后端回归 188 passed；隔离 PostgreSQL 14 passed（包含旧功能，分组有重叠，不累计）。尚未注册公开 HTTP 路由与扫描派发，APP 管理 UI、长期 SSE/Items 投影、运行中 steer、取消清理及 CLI/浏览器完整链路仍需完成，不能据此宣称 Public API 已可对外使用。原服务未重启、未执行迁移。

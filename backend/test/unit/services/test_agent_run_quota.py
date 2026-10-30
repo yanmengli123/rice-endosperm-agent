@@ -19,6 +19,8 @@ from yuxi.storage.postgres.models_business import (
     TenantUserEntitlement,
     UsageLedger,
     User,
+    PublicApp,
+    PublicEndUser,
 )
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -245,3 +247,38 @@ async def test_literature_scope_unlimited_when_budget_unset(quota_session):
     await db.commit()
 
     await _enforce_user_quota(db=db, uid=user.uid, scope="literature")
+
+
+async def test_apps_and_owner_share_one_entitlement_and_platform_budget(quota_session):
+    db, owner, quota, _conversation = quota_session
+    app_user = User(
+        uid="app:customer", username="customer", password_hash="!external", role="user", user_kind="app_end_user"
+    )
+    db.add(app_user)
+    db.add(PublicApp(id="crm", tenant_id=1, owner_uid=owner.uid, name="CRM"))
+    await db.flush()
+    db.add(TenantMembership(uid=app_user.uid, tenant_id=1, role="member", status="active"))
+    db.add(PublicEndUser(uid=app_user.uid, app_id="crm", tenant_id=1, external_id="customer"))
+    conversation = Conversation(uid=app_user.uid, thread_id="crm-thread", tenant_id=1, agent_id="chatbot")
+    db.add(conversation)
+    quota.daily_run_limit = 1
+    quota.monthly_platform_token_limit = 100
+    await db.commit()
+    snapshot = await _enforce_user_quota(db=db, uid=app_user.uid)
+    assert snapshot["billing_uid"] == owner.uid and snapshot["credential_policy"] == quota.credential_policy
+    run = _run(user=app_user, conversation=conversation, run_type="chat", status="completed")
+    db.add(run)
+    await db.flush()
+    db.add(_usage(run=run, source="platform", total_tokens=20))
+    await db.commit()
+    for uid in (owner.uid, app_user.uid):
+        with pytest.raises(HTTPException) as daily:
+            await _enforce_user_quota(db=db, uid=uid)
+        assert daily.value.detail["code"] == "daily_run_quota_exceeded"
+    quota.daily_run_limit = None
+    quota.monthly_platform_token_limit = 10
+    await db.commit()
+    for uid in (owner.uid, app_user.uid):
+        with pytest.raises(HTTPException) as monthly:
+            await _enforce_user_quota(db=db, uid=uid)
+        assert monthly.value.detail["code"] == "platform_token_quota_exceeded"

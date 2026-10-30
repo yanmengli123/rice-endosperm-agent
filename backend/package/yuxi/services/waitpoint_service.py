@@ -10,7 +10,7 @@ from yuxi.storage.postgres.models_business import AgentRun, AgentRunWaitpoint
 from yuxi.utils.datetime_utils import utc_now
 
 
-async def persist_waitpoint(db, *, run_id, chunk):
+async def persist_waitpoint(db, *, run_id, chunk, approval_calls=None):
     questions = chunk.get("questions")
     if not isinstance(questions, list) or not questions:
         return
@@ -29,14 +29,25 @@ async def persist_waitpoint(db, *, run_id, chunk):
         "source": str(chunk.get("source") or "interrupt"),
         "status": str(chunk.get("status") or "ask_user_question_required"),
     }
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
-    if len(raw.encode("utf-8")) > 65536:
-        raise ValueError("人工等待点内容超过上限")
     run = await db.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
     if run is None:
         raise ValueError("等待点所属运行不存在")
-    revision = hashlib.sha256(raw.encode()).hexdigest()
     existing = await db.get(AgentRunWaitpoint, run_id)
+    details = (
+        approval_calls
+        if approval_calls is not None
+        else (existing.payload_json.get("approval_calls") if existing else None)
+    )
+    if details is not None:
+        if payload["source"] != "tool_approval" or {item["call_id"] for item in details} != {
+            q["question_id"] for q in questions
+        }:
+            raise ValueError("工具审批的调用与问题不匹配")
+        payload["approval_calls"] = details
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    if len(raw.encode("utf-8")) > 65536:
+        raise ValueError("人工等待点内容超过上限")
+    revision = hashlib.sha256(raw.encode()).hexdigest()
     if existing:
         if existing.revision != revision:
             raise ValueError("同一运行的人工等待点内容不能改写")

@@ -20,7 +20,7 @@
 
 ## 未发布
 
-- 0.8 能力兼容（独立分支，未部署）：接入聊天组件、Skills 整包版本与专属绑定、知识库只读 MCP、个人 MCP OAuth、飞书只读连接、文本精确过滤和解析器增量。协作增加持久消息、整组/子树停止、受限多级委派及可幂等恢复的成员人工等待点；来源阅读增加独立模型标注、独立计费、权限与文档换代过滤及可展开片段，0124–0128 迁移保留原科研租户与计费体系。旧 AgentRun 1.9 契约保留；Public Session/Input/Turn 与最终部署验收仍进行中，详见 `upstream-v08-compatibility.md`。
+- 0.8 能力兼容（独立分支，未部署）：接入聊天组件、Skills 整包版本与专属绑定、知识库只读 MCP、个人 MCP OAuth、飞书只读连接、文本精确过滤和解析器增量。协作增加持久消息、整组/子树停止、受限多级委派及可幂等恢复的成员人工等待点；来源阅读增加独立模型标注、独立计费、权限与文档换代过滤及可展开片段。0124–0129 迁移保留原科研租户与计费体系，增加 APP 终端身份、共享预算、不可变接收回执、原子 Input/Turn/Run 领取与同轮审批恢复基础；旧 AgentRun 1.9 契约保留。公开路由、会话事件恢复、控制清理与最终部署验收仍进行中，详见 `upstream-v08-compatibility.md`。
 
 - 文献工作台轻量化：下线整篇翻译（supertranslate 三容器 + 保版式 PDF 翻译链）、L1/L2/L3 编译与笔记 Wiki、概念页、综述报告、BERTopic 主题分析（topic-worker 容器 + 12 模块）、durable 工作流、批量导入流水线与 PaperAgent 历史迁移链。后端删除 52 个端点、6 个 worker 函数、7 条对账 cron、2 个智能体工具与 35 个领域模块（约 -20800 行）；前端删除 8 个组件与全部对应入口，阅读器收敛为原文/PDF/图片三标签。`register_literature_paper` 提取至 `literature/registration.py` 并补幂等/跨租户/来源切换回归测试；`attach_journal_metrics` 迁至 `metrics.py`；业务备份内联归档构建器并去除概念/报告段；0114 主题角色迁移 no-op 化。数据收尾：5 个文献笔记 Wiki 按官方 tombstone 语义下线（含来源绑定停用与 kb 投影标记），编译/变体/报告等休眠行清除；`literature_translation_jobs`/`literature_pdf_model_calls` 为触发器保护的计费审计表，按 append-only 纪律保留。保留能力：目录/清单导入/阅读渲染/人工版本/识别复核/深读会话/卡片/计量/图谱/日记/Obsidian 导出。验证：文献域与文献工具单测 391 passed，前端 6 个受影响 spec 全绿，生产构建通过。容器从 18 减至 14。
 

@@ -275,7 +275,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     user = await _find_login_user(db, login_identifier)
 
     # 如果用户不存在，执行一次真实 Argon2 校验以降低时序枚举风险。
-    if not user:
+    if not user or (getattr(user, "user_kind", None) or "human") != "human":
         AuthUtils.verify_password(DUMMY_PASSWORD_HASH, form_data.password)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -382,7 +382,9 @@ async def login_desktop_client(
 
     user = await _find_login_user(db, login_identifier)
     password_matches = AuthUtils.verify_password(
-        user.password_hash if user is not None else DUMMY_PASSWORD_HASH,
+        user.password_hash
+        if user is not None and (getattr(user, "user_kind", None) or "human") == "human"
+        else DUMMY_PASSWORD_HASH,
         password,
     )
 
@@ -392,7 +394,7 @@ async def login_desktop_client(
     ).one_or_none()
     api_key, key_owner = key_row if key_row is not None else (None, None)
 
-    if not password_matches:
+    if not password_matches or user is None or (getattr(user, "user_kind", None) or "human") != "human":
         if user is not None and not user.is_deleted and not user.is_disabled:
             user.increment_failed_login()
             await db.commit()

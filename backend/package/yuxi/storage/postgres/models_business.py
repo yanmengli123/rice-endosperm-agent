@@ -8,6 +8,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -329,6 +331,7 @@ class User(Base):
     avatar = Column(String, nullable=True)  # 头像URL
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False, default="user")  # 角色: superadmin, admin, user
+    user_kind = Column(String(24), nullable=False, default="human", server_default="human")
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)  # 部门ID
     # naive-UTC 口径：与 departments.created_at 同理，见 _UtcNowDefault
     created_at = Column(
@@ -386,6 +389,7 @@ class User(Base):
             "phone_number": self.phone_number,
             "avatar": normalize_public_minio_url(self.avatar),
             "role": self.role,
+            "user_kind": self.user_kind,
             "department_id": self.department_id,
             "created_at": format_utc_datetime(self.created_at),
             "last_login": format_utc_datetime(self.last_login),
@@ -657,6 +661,7 @@ class Conversation(Base):
     """Conversation table - 对话表"""
 
     __tablename__ = "conversations"
+    public_session = Column(Boolean, nullable=False, default=False, server_default="false")
 
     # P1 租户归属：由 PrincipalContext 注入，禁止来自请求体
     tenant_id = _tenant_column()
@@ -1435,6 +1440,175 @@ class TaskRecord(Base):
         data.pop("payload", None)
         data.pop("result", None)
         return data
+
+
+class PublicApp(Base):
+    __tablename__ = "public_apps"
+
+    id = Column(String(64), primary_key=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False)
+    owner_uid = Column(String, ForeignKey("users.uid"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    agent_slugs = Column(JSON, nullable=False, default=list)
+    kb_ids = Column(JSON, nullable=False, default=list)
+    allow_owner_model_credentials = Column(Boolean, nullable=False, default=False)
+    max_end_users = Column(Integer, nullable=False, default=1000)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class PublicAppKey(Base):
+    """These credentials authenticate only at the versioned public boundary."""
+
+    __tablename__ = "public_app_keys"
+
+    id = Column(String(32), primary_key=True)
+    app_id = Column(String(64), ForeignKey("public_apps.id"), nullable=False, index=True)
+    key_hash = Column(String(64), nullable=False, unique=True)
+    key_prefix = Column(String(16), nullable=False)
+    name = Column(String(100), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class PublicEndUser(Base):
+    __tablename__ = "public_end_users"
+    __table_args__ = (UniqueConstraint("app_id", "external_id", name="uq_public_app_external_user"),)
+
+    uid = Column(String, ForeignKey("users.uid"), primary_key=True)
+    app_id = Column(String(64), ForeignKey("public_apps.id"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False)
+    external_id = Column(String(128), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class PublicSession(Base):
+    __tablename__ = "public_sessions"
+    __table_args__ = (UniqueConstraint("uid", "creation_key", name="uq_public_session_creation"),)
+
+    id = Column(String(64), ForeignKey("conversations.thread_id"), primary_key=True)
+    uid = Column(String, ForeignKey("users.uid"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False)
+    app_id = Column(String(64), ForeignKey("public_apps.id"), nullable=True)
+    agent_slug = Column(String(80), nullable=False)
+    creation_key = Column(String(128), nullable=False)
+    creation_hash = Column(String(64), nullable=False)
+    config_snapshot = Column(JSON, nullable=False)
+    title = Column(String(255), nullable=True)
+    archived = Column(Boolean, nullable=False, default=False)
+    is_pinned = Column(Boolean, nullable=False, default=False)
+    queue_paused = Column(Boolean, nullable=False, default=False)
+    next_input_seq = Column(Integer, nullable=False, default=1)
+    next_event_seq = Column(BigInteger, nullable=False, default=1)
+    next_turn_seq = Column(Integer, nullable=False, default=1)
+    last_active_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class PublicInput(Base):
+    __tablename__ = "public_inputs"
+    __table_args__ = (
+        UniqueConstraint("session_id", "received_seq", name="uq_public_input_order"),
+        CheckConstraint("kind IN ('follow_up', 'steer')", name="ck_public_input_kind"),
+        CheckConstraint(
+            "(status = 'pending' AND run_id IS NULL AND turn_id IS NULL AND consumed_at IS NULL) "
+            "OR (status = 'consumed' AND run_id IS NOT NULL AND turn_id IS NOT NULL AND consumed_at IS NOT NULL) "
+            "OR (status = 'cancelled' AND run_id IS NULL AND turn_id IS NULL AND cancelled_at IS NOT NULL)",
+            name="ck_public_input_consumption",
+        ),
+    )
+
+    id = Column(String(64), primary_key=True)
+    session_id = Column(String(64), ForeignKey("public_sessions.id"), nullable=False, index=True)
+    received_seq = Column(Integer, nullable=False)
+    kind = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False, default="pending")
+    messages = Column(JSON, nullable=False)
+    config_snapshot = Column(JSON, nullable=False)
+    attachment_ids = Column(JSON, nullable=False, default=list)
+    turn_id = Column(String(64), ForeignKey("public_turns.id", use_alter=True), nullable=True)
+    run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True)
+    error = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class PublicTurn(Base):
+    __tablename__ = "public_turns"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_public_turn_order"),
+        Index(
+            "uq_public_turn_active_session", "session_id", unique=True,
+            postgresql_where=text("status IN ('in_progress','requires_action','cancelling')"),
+            sqlite_where=text("status IN ('in_progress','requires_action','cancelling')"),
+        ),
+    )
+
+    id = Column(String(64), primary_key=True)
+    session_id = Column(String(64), ForeignKey("public_sessions.id"), nullable=False, index=True)
+    sequence = Column(Integer, nullable=False)
+    status = Column(String(24), nullable=False, default="in_progress")
+    current_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True, index=True)
+    result_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True)
+    waitpoint_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class PublicReceipt(Base):
+    __tablename__ = "public_receipts"
+    __table_args__ = (UniqueConstraint("session_id", "idempotency_key", name="uq_public_event_receipt"),)
+
+    id = Column(String(64), primary_key=True)
+    session_id = Column(String(64), ForeignKey("public_sessions.id"), nullable=False, index=True)
+    idempotency_key = Column(String(128), nullable=False)
+    intent_hash = Column(String(64), nullable=False)
+    event_type = Column(String(64), nullable=False)
+    response_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class PublicTurnRun(Base):
+    __tablename__ = "public_turn_runs"
+
+    run_id = Column(String(64), ForeignKey("agent_runs.id"), primary_key=True)
+    session_id = Column(String(64), ForeignKey("public_sessions.id"), nullable=False, index=True)
+    turn_id = Column(String(64), ForeignKey("public_turns.id"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class PublicSessionEvent(Base):
+    __tablename__ = "public_session_events"
+
+    session_id = Column(String(64), ForeignKey("public_sessions.id"), primary_key=True)
+    sequence = Column(BigInteger, primary_key=True)
+    type = Column(String(80), nullable=False)
+    payload_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class PublicFile(Base):
+    __tablename__ = "public_files"
+
+    id = Column(String(32), primary_key=True)
+    uid = Column(String, ForeignKey("users.uid"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False)
+    app_id = Column(String(64), ForeignKey("public_apps.id"), nullable=True)
+    filename = Column(String(255), nullable=False)
+    mime_type = Column(String(100), nullable=False)
+    size_bytes = Column(BigInteger, nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    storage_key = Column(String(512), nullable=False)
+    input_id = Column(String(64), ForeignKey("public_inputs.id"), nullable=True)
+    attachment_id = Column(String(64), nullable=True)
+    status = Column(String(24), nullable=False, default="draft")
+    error = Column(String(256), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
 class APIKey(Base):

@@ -14,10 +14,13 @@ from yuxi.storage.postgres.manager import PostgresManager
 from yuxi.storage.postgres.models_business import (
     Agent,
     AgentRun,
+    AgentRunDispatchOutbox,
+    APIKey,
     AgentRunWaitpoint,
     AnswerSourceAnnotation,
     CollaborationMessage,
     CollaborationStop,
+    ConversationStats,
     Base,
     MCPServer,
     Message,
@@ -33,10 +36,21 @@ from yuxi.storage.postgres.models_business import (
     UserModelCredential,
     TenantUserEntitlement,
     UsageLedger,
+    PublicApp,
+    PublicAppKey,
+    PublicEndUser,
+    PublicSession,
+    PublicInput,
+    PublicTurn,
+    PublicTurnRun,
+    PublicReceipt,
+    PublicSessionEvent,
+    PublicFile,
 )
 from yuxi.utils.datetime_utils import utc_now
 from yuxi.utils.secret_crypto import _master_key
 from yuxi.storage.postgres.models_knowledge import KnowledgeFile, KnowledgeBase
+from yuxi.storage.postgres.models_trace import AgentRunTraceHead
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -80,12 +94,16 @@ async def postgres(monkeypatch):
         MCPServer,
         TenantMembership,
         AgentRun,
+        AgentRunDispatchOutbox,
+        AgentRunTraceHead,
+        ConversationStats,
         Message,
         UserModelPreference,
         UserModelCredential,
         TenantUserEntitlement,
         UsageLedger,
         KnowledgeFile,
+        APIKey,
     ):
         add_table(model.__table__)
     async with admin.begin() as conn:
@@ -99,12 +117,14 @@ async def postgres(monkeypatch):
         await manager._migration_0126_collaboration_messages(conn)
         await manager._migration_0127_agent_run_waitpoints(conn)
         await manager._migration_0128_answer_source_annotations(conn)
+        await manager._migration_0129_public_session_control_plane(conn)
         # Idempotent DDL also works after interrupted deployment/replay.
         await manager._migration_0124_skill_package_versions(conn)
         await manager._migration_0125_personal_mcp_oauth(conn)
         await manager._migration_0126_collaboration_messages(conn)
         await manager._migration_0127_agent_run_waitpoints(conn)
         await manager._migration_0128_answer_source_annotations(conn)
+        await manager._migration_0129_public_session_control_plane(conn)
     engine = create_async_engine(dsn, connect_args={"server_settings": {"search_path": schema}})
     monkeypatch.setenv("YUXI_SECRET_MASTER_KEY", "v08-test-master-key-over-32-characters-only")
     monkeypatch.setenv("YUXI_PUBLIC_URL", "https://yuxi.example")
@@ -130,6 +150,16 @@ async def test_migrated_columns_match_orm_and_use_timezone(postgres):
             CollaborationStop,
             AgentRunWaitpoint,
             AnswerSourceAnnotation,
+            PublicApp,
+            PublicAppKey,
+            PublicEndUser,
+            PublicSession,
+            PublicInput,
+            PublicTurn,
+            PublicTurnRun,
+            PublicReceipt,
+            PublicSessionEvent,
+            PublicFile,
         ):
             columns = await conn.run_sync(lambda conn, model=model: inspect(conn).get_columns(model.__tablename__))
             actual = {column["name"]: column for column in columns}
@@ -651,3 +681,303 @@ async def test_source_annotations_are_private_replayable_metered_and_acl_filtere
         visible.clear()
         filtered = await service.get_annotations(db, user=user, run_id="answer")
         assert filtered["annotations"]["citations"] == [] and filtered["annotations"]["hidden_count"] == 1
+
+
+async def test_public_end_user_first_use_is_serialized_across_connections(postgres):
+    from yuxi.services import public_identity_service as service
+    from server.utils.auth_middleware import _verify_api_key
+
+    sessions = await _connected(postgres)
+    async with sessions() as db:
+        owner = await db.scalar(select(User).where(User.uid == "alice"))
+        db.add(PublicApp(id="crm", tenant_id=1, owner_uid=owner.uid, name="CRM"))
+        await db.flush()
+        key, token = await service.create_app_key(db, user=owner, app_id="crm", name="CRM key")
+        await db.commit()
+        key_id = key.id
+
+    async def resolve():
+        async with sessions() as db:
+            return await service.resolve_app_actor(db, token=token, external_id="customer-42")
+
+    first, second = await asyncio.gather(resolve(), resolve())
+    assert first == second
+    async with sessions() as db:
+        users = list(await db.scalars(select(PublicEndUser)))
+        assert len(users) == 1 and users[0].uid == first.uid
+        assert await _verify_api_key(token, db) == (None, None)
+        key = await db.get(PublicAppKey, key_id)
+        assert key.last_used_at.tzinfo is not None
+
+
+async def test_public_budget_function_enforces_identity_and_aggregates_without_row_access(postgres):
+    from yuxi.services.public_identity_service import create_app_key, resolve_app_actor
+    from yuxi.services.public_budget_service import budget_totals
+    from yuxi.services.principal import resolve_tenant_id
+
+    sessions = await _connected(postgres)
+    role = "v08_budget_" + uuid4().hex
+    async with sessions() as db:
+        owner = await db.scalar(select(User).where(User.uid == "alice"))
+        db.add(PublicApp(id="crm", tenant_id=1, owner_uid="alice", name="CRM"))
+        await db.flush()
+        _, token = await create_app_key(db, user=owner, app_id="crm", name="test")
+        await db.commit()
+        customer = await resolve_app_actor(db, token=token, external_id="customer")
+        for uid, status, tokens, source in [
+            (owner.uid, "completed", 10, "platform"),
+            (customer.uid, "running", 20, "platform"),
+        ]:
+            run_id = uuid4().hex
+            db.add(
+                AgentRun(
+                    id=run_id,
+                    tenant_id=1,
+                    uid=uid,
+                    request_id=run_id,
+                    agent_slug="assistant",
+                    run_type="chat",
+                    conversation_thread_id=run_id,
+                    status=status,
+                    input_payload={},
+                )
+            )
+            db.add(UsageLedger(run_id=run_id, tenant_id=1, uid=uid, total_tokens=tokens, credential_source=source))
+        db.add(
+            UsageLedger(
+                run_id="byok-aux", tenant_id=1, uid=customer.uid, total_tokens=1000, credential_source="user_byok"
+            )
+        )
+        await db.commit()
+    async with postgres.begin() as conn:
+        schema = (await conn.execute(text("SELECT current_schema()"))).scalar_one()
+        await conn.execute(text(f'CREATE ROLE "{role}" NOLOGIN NOSUPERUSER NOBYPASSRLS'))
+        await conn.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"'))
+        await conn.execute(
+            text(
+                f'GRANT EXECUTE ON FUNCTION "{schema}".yuxi_public_budget(text,bigint,timestamp,timestamptz) '
+                f'TO "{role}"'
+            )
+        )
+    try:
+        async with sessions() as db:
+            await resolve_tenant_id(db, customer.uid)
+            await db.execute(text(f'SET LOCAL ROLE "{role}"'))
+            assert (
+                await db.execute(text("SELECT has_table_privilege(current_user, 'agent_runs', 'SELECT')"))
+            ).scalar() is False
+            totals = await budget_totals(db, uid=customer.uid, tenant_id=1, now=utc_now())
+            assert totals == {"daily_chat": 2, "daily_literature": 0, "active_platform": 1, "monthly_tokens": 30}
+            from sqlalchemy.exc import DBAPIError
+
+            with pytest.raises(DBAPIError) as forged:
+                await budget_totals(db, uid=owner.uid, tenant_id=1, now=utc_now())
+            assert getattr(forged.value.orig, "sqlstate", None) == "42501"
+            await db.rollback()
+    finally:
+        async with postgres.begin() as conn:
+            await conn.execute(text(f'DROP OWNED BY "{role}"'))
+            await conn.execute(text(f'DROP ROLE "{role}"'))
+
+
+async def test_public_dispatch_is_atomic_and_preserves_multiple_messages(postgres, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+    from yuxi.services import agent_run_service as core, public_session_service as reception
+    from yuxi.services.public_api_schemas import SessionCreate, MessageEvent, InputMessage, MessageOptions
+    from yuxi.services.public_execution_service import dispatch_next_input, refresh_turn, latest_turn, resume_turn
+    from yuxi.services.public_identity_service import PublicActor
+    from yuxi.services.run_worker import _restore_ordered_input
+    from yuxi.services.input_message_service import build_chat_input_message
+    from yuxi.services.waitpoint_service import persist_waitpoint
+    from yuxi.services.public_api_schemas import ResumeEvent
+
+    sessions = await _connected(postgres)
+    monkeypatch.setattr(reception.agent_manager, "get_agent", lambda _: SimpleNamespace())
+    monkeypatch.setattr(reception, "resolve_agent_run_model_spec", lambda value, *_, **__: value or "test:frozen")
+    monkeypatch.setattr(core, "resolve_agent_run_model_spec", lambda value, *_, **__: value or "test:frozen")
+    monkeypatch.setattr(
+        reception, "resolve_effective_knowledge_scope", AsyncMock(return_value={"effective_kb_ids": []})
+    )
+    monkeypatch.setattr(
+        core,
+        "_resolve_run_mentions",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                rejected=False,
+                audit_dict=lambda: {},
+                session_kb_ids=None,
+            )
+        ),
+    )
+    # Enqueue must never happen before Input/Turn/Run/Outbox commit together.
+    enqueue = AsyncMock(side_effect=AssertionError("premature dispatch"))
+    monkeypatch.setattr(core, "enqueue_agent_run", enqueue)
+    actor = PublicActor(uid="alice", tenant_id=1)
+    async with sessions() as db:
+        db.add(
+            Agent(
+                slug="assistant",
+                name="Assistant",
+                backend_id="ChatbotAgent",
+                tenant_id=1,
+                created_by="alice",
+                config_json={"context": {"system_prompt": "frozen prompt"}},
+            )
+        )
+        await db.commit()
+        session, receipt = await reception.create_session(
+            db,
+            actor,
+            SessionCreate.model_validate(
+                {
+                    "agent_id": "assistant",
+                    "input": [
+                        {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "second"},
+                                {"type": "input_image", "image_url": "data:image/png;base64,YQ=="},
+                            ],
+                        },
+                    ],
+                }
+            ),
+            key="initial",
+        )
+        session_id = session.id
+        agent = await db.scalar(select(Agent).where(Agent.slug == "assistant"))
+        agent.config_json = {"context": {"system_prompt": "changed after acceptance"}}
+        await db.commit()
+        run_id = await dispatch_next_input(db, actor, session_id)
+        assert run_id
+        # A crash before commit discards the whole claim, including messages/outbox.
+        await db.rollback()
+    async with sessions() as db:
+        item = await db.get(PublicInput, receipt["input_id"])
+        assert item.status == "pending" and item.run_id is None
+        assert not list(await db.scalars(select(PublicTurn)))
+        assert not list(await db.scalars(select(AgentRunDispatchOutbox)))
+
+    async def dispatch():
+        async with sessions() as db:
+            result = await dispatch_next_input(db, actor, session_id)
+            await db.commit()
+            return result
+
+    results = await asyncio.gather(dispatch(), dispatch())
+    assert len([value for value in results if value]) == 1
+    run_id = next(value for value in results if value)
+    async with sessions() as db:
+        run = await db.get(AgentRun, run_id)
+        assert run.input_payload["agent_context_snapshot"]["system_prompt"] == "frozen prompt"
+        assert run.input_payload["model_spec"] == "test:frozen"
+        item = await db.get(PublicInput, receipt["input_id"])
+        assert item.status == "consumed" and item.run_id == run.id
+        assert (await reception.receipt_for_key(db, await db.get(PublicSession, session_id), "initial")) == receipt
+        normalized, messages = await _restore_ordered_input(db, run)
+        assert normalized.content == "first\nsecond"
+        assert [m["content"] for m in messages][0] == "first"
+        assert messages[1]["content"][1]["image_url"]["url"] == "data:image/png;base64,YQ=="
+        assert len(set(m["id"] for m in messages)) == 2
+        assert len(list(await db.scalars(select(AgentRunDispatchOutbox)))) == 1
+        assert (await db.get(PublicTurnRun, run.id)).turn_id == item.turn_id
+        with pytest.raises(HTTPException) as legacy:
+            await core.create_agent_run_view(
+                input_message=build_chat_input_message("bypass"),
+                agent_slug="assistant",
+                thread_id=session_id,
+                meta={"request_id": "legacy"},
+                current_uid="alice",
+                db=db,
+            )
+        assert legacy.value.status_code == 409
+        run.status = "completed"
+        await db.commit()
+        session = await db.get(PublicSession, session_id)
+        turn = await refresh_turn(db, session, await latest_turn(db, session_id))
+        assert turn.status == "completed" and turn.result_run_id == run_id
+        event = MessageEvent(
+            input=[InputMessage(role="user", content=[{"type": "input_text", "text": "next"}])],
+            type="agent.session.input.message",
+            yuxi=MessageOptions(mode="follow_up"),
+        )
+        await reception.receive_message(db, actor, session, event, key="next")
+        await db.commit()
+        next_run = await dispatch_next_input(db, actor, session_id)
+        await db.commit()
+        assert next_run != run_id and (await latest_turn(db, session_id)).sequence == 2
+        run = await db.get(AgentRun, next_run)
+        run.status = "interrupted"
+        await persist_waitpoint(
+            db,
+            run_id=run.id,
+            chunk={"source": "tool_approval", "questions": [{"question_id": "call-1", "question": "Allow?"}]},
+            approval_calls=[{"call_id": "call-1", "name": "write_file", "arguments": {"path": "notes.txt"}}],
+        )
+        await db.commit()
+        turn = await refresh_turn(db, session, await latest_turn(db, session_id))
+        event = ResumeEvent(
+            type="yuxi.session.input.resume",
+            turn_id=turn.id,
+            waitpoint_id=turn.waitpoint_json["id"],
+            response={"type": "approval", "decisions": [{"call_id": "call-1", "decision": "reject"}]},
+        )
+        accepted = await resume_turn(db, actor, session_id, event, key="approval")
+        await db.rollback()
+        assert (await db.get(AgentRunWaitpoint, next_run)).resolved_by_run_id is None
+        accepted = await resume_turn(db, actor, session_id, event, key="approval")
+        await db.commit()
+        assert accepted["turn_id"] == event.turn_id and accepted["run_id"] != next_run
+        assert (await db.get(AgentRunWaitpoint, next_run)).resolved_by_run_id == accepted["run_id"]
+        assert (await latest_turn(db, session_id)).status == "in_progress"
+        assert await resume_turn(db, actor, session_id, event, key="approval") == accepted
+        changed = event.model_copy(deep=True)
+        changed.response.decisions[0].decision = "approve"
+        with pytest.raises(HTTPException) as conflict:
+            await resume_turn(db, actor, session_id, changed, key="approval")
+        assert conflict.value.status_code == 409
+        with pytest.raises(HTTPException) as stale:
+            await resume_turn(db, actor, session_id, event, key="another-command")
+        assert stale.value.status_code == 409
+    enqueue.assert_not_awaited()
+
+
+async def test_tool_approval_waitpoint_republication_preserves_bound_calls(postgres):
+    from yuxi.services.waitpoint_service import persist_waitpoint
+
+    sessions = await _connected(postgres)
+    questions = [{"question_id": "call-1", "question": "Allow operation?"}]
+    calls = [{"call_id": "call-1", "name": "write_file", "arguments": {"path": "notes.txt", "text": "ok"}}]
+    async with sessions() as db:
+        db.add(
+            AgentRun(
+                id="approval",
+                uid="alice",
+                tenant_id=1,
+                request_id="approval",
+                conversation_thread_id="approval-thread",
+                agent_slug="assistant",
+                input_payload={},
+            )
+        )
+        await db.flush()
+        await persist_waitpoint(
+            db, run_id="approval", chunk={"source": "tool_approval", "questions": questions}, approval_calls=calls
+        )
+        await db.commit()
+    async with sessions() as db:
+        await persist_waitpoint(db, run_id="approval", chunk={"source": "tool_approval", "questions": questions})
+        await db.commit()
+        point = await db.get(AgentRunWaitpoint, "approval")
+        assert point.payload_json["approval_calls"] == calls
+        with pytest.raises(ValueError, match="不能改写"):
+            await persist_waitpoint(
+                db,
+                run_id="approval",
+                chunk={"source": "tool_approval", "questions": questions},
+                approval_calls=[{**calls[0], "arguments": {"path": "another.txt"}}],
+            )

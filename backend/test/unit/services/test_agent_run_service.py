@@ -32,6 +32,9 @@ def stub_collaboration_resume_boundary(monkeypatch):
     """This module uses repository fakes; SQL fencing has dedicated coverage."""
     monkeypatch.setattr("yuxi.services.collaboration_service.assert_resume_allowed", AsyncMock(return_value=None))
     monkeypatch.setattr("yuxi.services.waitpoint_service.claim_waitpoint", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "yuxi.services.public_identity_service.billing_owner_uid", AsyncMock(side_effect=lambda _db, uid: uid)
+    )
 
 
 @pytest.fixture(autouse=True)

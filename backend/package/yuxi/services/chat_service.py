@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langgraph.types import Command
 from sqlalchemy import select
 from yuxi import config as conf
@@ -3120,6 +3120,7 @@ async def _resolve_agent_runtime(
     agent_kind: Literal["main", "subagent"] = "main",
     frozen_runtime: str | None = None,
     runtime_snapshot: dict | None = None,
+    context_snapshot: dict | None = None,
 ) -> tuple[Agent, Any, dict]:
     """解析智能体运行时，返回 (Agent, backend, agent_config)"""
     agent_repo = AgentRepository(db)
@@ -3158,7 +3159,7 @@ async def _resolve_agent_runtime(
         validate_snapshot(runtime_snapshot or {})
 
     agent_config = await normalize_agent_context_config(
-        (agent_item.config_json or {}).get("context", {}),
+        context_snapshot if context_snapshot is not None else (agent_item.config_json or {}).get("context", {}),
         db=db,
         user=user,
         context_schema=backend.context_schema,
@@ -3333,6 +3334,7 @@ async def stream_agent_chat(
             agent_kind="subagent" if meta.get("subagent_runtime") or meta.get("run_type") == "subagent" else "main",
             frozen_runtime=meta.get("agent_runtime"),
             runtime_snapshot=meta.get("agent_runtime_snapshot"),
+            context_snapshot=meta.get("agent_context_snapshot"),
         )
     except ValueError as e:
         # 该分支发生在主流式 try/finally 之前，必须在返回前显式清理。
@@ -3365,6 +3367,9 @@ async def stream_agent_chat(
     paper_input_message_id = meta.get("input_message_id")
 
     messages = [human_message]
+    if meta.get("ordered_human_messages"):
+        # Only the worker restores these from server-bound Message rows.
+        messages = [HumanMessage.model_validate(item) for item in meta["ordered_human_messages"]]
     input_context = await build_agent_input_context(
         agent_config,
         thread_id=thread_id,
@@ -3375,6 +3380,7 @@ async def stream_agent_chat(
     _apply_model_override(input_context, meta)
     _apply_client_capabilities(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
+    input_context["tool_approval_mode"] = meta.get("tool_approval_mode")
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     # 本机浏览器（P1）：run 冻结的开关以实际布尔写入 runtime——即使配置面持久化过
     # browser_enabled=true，run 未冻结开关时也必须以 False 覆盖，否则该智能体会
@@ -4913,6 +4919,7 @@ async def stream_agent_resume(
             agent_kind="subagent" if meta.get("subagent_runtime") else "main",
             frozen_runtime=meta.get("agent_runtime"),
             runtime_snapshot=meta.get("agent_runtime_snapshot"),
+            context_snapshot=meta.get("agent_context_snapshot"),
         )
     except ValueError as e:
         # 该分支同样尚未进入下方主 try/finally。
@@ -4947,6 +4954,7 @@ async def stream_agent_resume(
     _apply_model_override(input_context, meta)
     _apply_client_capabilities(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
+    input_context["tool_approval_mode"] = meta.get("tool_approval_mode")
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）；
     if meta.get("agent_runtime") == "dsh":

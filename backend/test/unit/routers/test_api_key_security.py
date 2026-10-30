@@ -332,6 +332,35 @@ async def test_atomic_desktop_login_rejects_key_owned_by_another_user(session):
     assert exc.value.detail == "登录信息或 API Key 错误"
 
 
+async def test_app_end_user_cannot_login_even_with_assigned_password_department_and_key(session, monkeypatch):
+    db = session["db"]
+    user = session["regular_user"]
+    user.user_kind = "app_end_user"
+    secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    db.add(
+        APIKey(
+            key_hash=key_hash,
+            key_prefix=key_prefix,
+            name="misconfigured account",
+            user_id=user.id,
+            department_id=user.department_id,
+            tenant_id=1,
+            purpose="desktop_legacy",
+            created_by="test",
+        )
+    )
+    await db.commit()
+    # Successful password verification must not bypass the account type guard.
+    monkeypatch.setattr(AuthUtils, "verify_password", lambda *_: True)
+    with pytest.raises(HTTPException) as denied:
+        await login_desktop_client(
+            DesktopLoginRequest(login_id=user.uid, password="synthetic-password", api_key=secret),
+            Request({"type": "http", "method": "POST", "path": "/api/auth/desktop/login", "headers": []}),
+            db,
+        )
+    assert denied.value.status_code == 401
+
+
 async def test_department_admin_cannot_manage_user_from_another_department(session):
     with pytest.raises(HTTPException) as exc:
         _admin_guard(session["dept_b_admin"], session["regular_user"])

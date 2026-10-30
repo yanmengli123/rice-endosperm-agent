@@ -72,6 +72,10 @@ async def _build_middlewares(context):
         CollaborationMiddleware(),
     ]
     subagent_middleware = await create_subagent_task_middleware(context)
+    if getattr(context, "tool_approval_mode", None) == "always_ask":
+        from yuxi.agents.middlewares.tool_approval import ToolApprovalMiddleware
+
+        middlewares.append(ToolApprovalMiddleware())
     if subagent_middleware:
         middlewares.append(subagent_middleware)
     middlewares.extend(

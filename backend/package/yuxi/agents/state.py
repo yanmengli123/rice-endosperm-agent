@@ -21,6 +21,7 @@ class BaseState(AgentState):
 
     artifacts: Annotated[list[str], merge_artifacts]
     collaboration_delivered_ids: list[str]
+    tool_approval_decisions: dict[str, dict]
 
 
 class AgentStatePayload(TypedDict):

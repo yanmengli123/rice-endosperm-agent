@@ -19,13 +19,15 @@ import json
 import os
 import secrets
 import uuid
+from copy import deepcopy
+from types import SimpleNamespace
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import timedelta, UTC
+from datetime import timedelta
 from typing import Any, Literal
 
 from fastapi import HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
@@ -69,7 +71,6 @@ from yuxi.storage.postgres.models_business import (
     AgentRunDispatchOutbox,
     Message,
     TenantUserEntitlement,
-    UsageLedger,
     User,
     UserModelPreference,
 )
@@ -566,21 +567,9 @@ async def _assert_monthly_platform_token_quota(
     if monthly_platform_token_limit is None:
         return
 
-    # usage_ledger.created_at 是 TIMESTAMPTZ；naive 比较值经上海时区会话解释会偏 8 小时。
-    # 调用方传入的 naive now 本就是 UTC，这里显式挂上 UTC 再开月度窗口。
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=UTC)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    used_tokens = (
-        await db.execute(
-            select(func.coalesce(func.sum(UsageLedger.total_tokens), 0)).where(
-                UsageLedger.tenant_id == tenant_id,
-                UsageLedger.uid == uid,
-                UsageLedger.created_at >= month_start,
-                UsageLedger.credential_source.in_(("platform", "legacy_unknown")),
-            )
-        )
-    ).scalar() or 0
+    from yuxi.services.public_budget_service import budget_totals
+
+    used_tokens = (await budget_totals(db, uid=uid, tenant_id=tenant_id, now=now))["monthly_tokens"]
     if int(used_tokens) >= int(monthly_platform_token_limit):
         raise _registry_error(
             "platform_token_quota_exceeded",
@@ -654,24 +643,9 @@ async def _enforce_platform_token_quota(
     # already locked by ``_enforce_user_quota``; admitting at most one
     # platform-funded top-level run closes the unbounded concurrency window.
     # A concurrent user-BYOK run does not reserve platform budget.
-    active_payloads = (
-        (
-            await db.execute(
-                select(AgentRun.input_payload).where(
-                    AgentRun.tenant_id == tenant_id,
-                    AgentRun.uid == uid,
-                    AgentRun.run_type.in_(("chat", "resume", "literature", "source_annotation")),
-                    AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    has_active_platform_run = any(
-        not isinstance(payload, dict) or not payload.get("user_credential") for payload in active_payloads
-    )
-    if has_active_platform_run:
+    from yuxi.services.public_budget_service import budget_totals
+
+    if (await budget_totals(db, uid=uid, tenant_id=tenant_id, now=now))["active_platform"]:
         raise _registry_error("platform_token_quota_reservation_busy")
 
 
@@ -681,6 +655,7 @@ async def _enforce_user_quota(
     uid: str,
     credential_source: Literal["platform", "user_byok"] | None = "platform",
     scope: Literal["chat", "literature"] = "chat",
+    check_daily: bool = True,
 ) -> dict:
     """P5 权益驱动的配额预检；返回随 run 冻结的权益快照。
 
@@ -694,16 +669,18 @@ async def _enforce_user_quota(
     if not uid:
         return {}
     from yuxi.services.principal import resolve_entitlement, resolve_tenant_id
+    from yuxi.services.public_identity_service import billing_owner_uid
 
     tenant_id = await resolve_tenant_id(db, uid)
+    billing_uid = await billing_owner_uid(db, uid)
     # 旧账号可能只有租户成员关系而缺少权益行。先按企业默认策略补齐，再加行锁，
     # 避免返回一个没有落库、后续请求又变化的伪快照。
-    await resolve_entitlement(db, uid, tenant_id)
+    await resolve_entitlement(db, billing_uid, tenant_id)
     ent_result = await db.execute(
         select(TenantUserEntitlement)
         .where(
             TenantUserEntitlement.tenant_id == tenant_id,
-            TenantUserEntitlement.uid == uid,
+            TenantUserEntitlement.uid == billing_uid,
         )
         .with_for_update()
     )
@@ -716,20 +693,11 @@ async def _enforce_user_quota(
         daily_limit = entitlement.daily_run_limit
     else:
         daily_limit = entitlement.daily_literature_task_limit
-    if daily_limit is not None:
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        used_runs = (
-            await db.execute(
-                select(func.count(AgentRun.id)).filter(
-                    AgentRun.uid == uid,
-                    AgentRun.created_at >= day_start,
-                    AgentRun.run_type.in_(("chat", "source_annotation"))
-                    if scope == "chat"
-                    else AgentRun.run_type == scope,
-                    AgentRun.status.notin_(["failed", "cancelled"]),
-                )
-            )
-        ).scalar() or 0
+    if check_daily and daily_limit is not None:
+        from yuxi.services.public_budget_service import budget_totals
+
+        totals = await budget_totals(db, uid=uid, tenant_id=tenant_id, now=now)
+        used_runs = totals["daily_chat" if scope == "chat" else "daily_literature"]
         if int(used_runs) >= int(daily_limit):
             if scope == "chat":
                 raise _registry_error(
@@ -744,6 +712,7 @@ async def _enforce_user_quota(
     quota_snapshot = {
         "tenant_id": tenant_id,
         "uid": uid,
+        "billing_uid": billing_uid,
         "credential_policy": entitlement.credential_policy,
         "policy_version": entitlement.policy_version,
         "byok_platform_token_exempt": entitlement.byok_platform_token_exempt,
@@ -826,6 +795,10 @@ async def create_agent_run_view(
     mentions: list[dict[str, Any]] | None = None,
     browser_enabled: bool = False,
     agent_kind: Literal["main", "subagent"] = "main",
+    public_session_id: str | None = None,
+    execution_snapshot: dict | None = None,
+    commit_and_dispatch: bool = True,
+    ordered_input_messages: list[AgentRunInputMessage] | None = None,
 ) -> dict:
     """创建 chat/resume run 的 HTTP 入口，输入正文由 Message 承载，run 只登记运行元数据。"""
     meta = meta or {}
@@ -840,7 +813,6 @@ async def create_agent_run_view(
         resume=resume,
         created_by_run_id=run_created_by_id,
     )
-
     scope = await prepare_agent_run_creation_scope(
         agent_slug=agent_slug,
         conversation_thread_id=thread_id,
@@ -851,6 +823,10 @@ async def create_agent_run_view(
         agent_kind=agent_kind,
         created_by_run_id=run_created_by_id,
     )
+    if getattr(scope.conversation, "public_session", False) and public_session_id != thread_id:
+        raise HTTPException(409, "此会话由 Session 输入队列管理，请通过 Session 接口继续")
+    if ordered_input_messages is not None and (public_session_id != thread_id or run_type != "chat"):
+        raise HTTPException(422, "有序消息仅用于 Session 普通输入")
     if scope.existing_run:
         return _build_run_response(scope.existing_run)
 
@@ -893,6 +869,7 @@ async def create_agent_run_view(
         db=db,
         uid=current_uid,
         credential_source=None,
+        check_daily=run_type != "resume",
     )
 
     from yuxi.services.user_credential_service import (
@@ -911,13 +888,15 @@ async def create_agent_run_view(
             if resolved_model_spec not in custom_model_specs:
                 raise _registry_error("custom_model_credential_unavailable")
     else:
+        if execution_snapshot is not None:
+            model_spec = execution_snapshot["model_spec"]
         user_model_spec = await _get_user_model_pref(db=db, uid=current_uid)
         requested_model_spec = model_spec.strip() if isinstance(model_spec, str) else ""
         if requested_model_spec.startswith(custom_prefixes) or (user_model_spec or "").startswith(custom_prefixes):
             custom_model_specs = await list_active_custom_model_specs(db, current_uid)
         resolved_model_spec = resolve_agent_run_model_spec(
             model_spec,
-            scope.agent_item,
+            SimpleNamespace(model_policy="preferred") if execution_snapshot else scope.agent_item,
             scope.agent_backend,
             user_model_spec=user_model_spec,
             allowed_custom_model_specs=custom_model_specs,
@@ -962,6 +941,8 @@ async def create_agent_run_view(
     knowledge_scope_snapshot = (
         parent_payload.get("knowledge_scope_snapshot") if isinstance(parent_payload, dict) else None
     )
+    if run_type != "resume" and execution_snapshot is not None:
+        knowledge_scope_snapshot = deepcopy(execution_snapshot["knowledge_scope_snapshot"])
     if not isinstance(knowledge_scope_snapshot, dict):
         knowledge_scope_snapshot = await resolve_effective_knowledge_scope(
             db=db,
@@ -1026,12 +1007,32 @@ async def create_agent_run_view(
         meta=meta,
     )
 
-    persisted_input_message = await create_agent_run_input_message(
-        db=db,
-        conversation_id=scope.conversation.id,
-        request_id=request_id,
-        input_message=run_input_message,
-    )
+    persisted_messages = []
+    for index, message in enumerate(ordered_input_messages or [run_input_message]):
+        message_meta = dict(meta)
+        if ordered_input_messages is not None and index != len(ordered_input_messages) - 1:
+            message_meta.pop("attachment_file_ids", None)
+        prepared = (
+            _prepare_run_input_message(
+                run_type=run_type,
+                input_message=message,
+                resume=resume,
+                request_id=request_id,
+                model_spec=resolved_model_spec,
+                meta=message_meta,
+            )
+            if ordered_input_messages is not None
+            else message
+        )
+        persisted_messages.append(
+            await create_agent_run_input_message(
+                db=db,
+                conversation_id=scope.conversation.id,
+                request_id=request_id,
+                input_message=prepared,
+            )
+        )
+    persisted_input_message = persisted_messages[-1]
     client_capabilities = (
         (parent_payload or {}).get("client_capabilities") if run_type == "resume" else meta.get("client_capabilities")
     )
@@ -1053,7 +1054,19 @@ async def create_agent_run_view(
         # This frozen choice drives worker behavior, including resume.
         "agent_runtime": _resolve_frozen_agent_runtime(scope),
     }
+    if ordered_input_messages is not None:
+        input_payload["ordered_input_message_ids"] = [item.id for item in persisted_messages]
+    if execution_snapshot is not None and run_type != "resume":
+        input_payload["agent_context_snapshot"] = deepcopy(
+            (execution_snapshot["agent_config"] or {}).get("context", {})
+        )
+        input_payload["tool_approval_mode"] = execution_snapshot["tool_approval_mode"]
+    elif run_type == "resume" and "agent_context_snapshot" in (parent_payload or {}):
+        input_payload["agent_context_snapshot"] = deepcopy(parent_payload["agent_context_snapshot"])
+        input_payload["tool_approval_mode"] = parent_payload["tool_approval_mode"]
     if input_payload["agent_runtime"] == "dsh":
+        if input_payload.get("tool_approval_mode") == "always_ask":
+            raise HTTPException(422, "当前 DSH 后端暂不支持通用工具审批，请选择 LangGraph 智能体")
         from yuxi.agents.buildin.dsh.runtime import runtime_snapshot, validate_snapshot
 
         snapshot = (parent_payload or {}).get("agent_runtime_snapshot") if run_type == "resume" else runtime_snapshot()
@@ -1092,6 +1105,10 @@ async def create_agent_run_view(
         created_by_run_id=run_created_by_id,
     )
     if created:
+        for message in persisted_messages:
+            message.run_id = run.id
+        await db.flush()
+    if created and commit_and_dispatch:
         await db.commit()
         await dispatch_created_agent_run(db=db, run_id=run.id)
 

@@ -206,9 +206,23 @@ class AgentRepository:
     def __init__(self, db_session: AsyncSession):
         self.db = db_session
 
+    async def _filter_visible(self, agents, user):
+        if (getattr(user, "user_kind", None) or "human") != "app_end_user":
+            return [agent for agent in agents if user_can_access_agent(user, agent)]
+        from yuxi.services.public_identity_service import app_principal
+
+        app, owner = await app_principal(self.db, uid=str(user.uid))
+        return [
+            agent
+            for agent in agents
+            if (agent.is_subagent or agent.slug in app.agent_slugs)
+            and (agent.share_config or DEFAULT_SHARE_CONFIG).get("access_level") != "user"
+            and user_can_access_agent(owner, agent)
+        ]
+
     async def _tenant_visible_clause(self, user: User):
         """平台内置 Agent 跨租户可见；其他 Agent 的 global 只表示租户内全局。"""
-        if user.role == "superadmin":
+        if user.role == "superadmin" and (getattr(user, "user_kind", None) or "human") == "human":
             return None
         tenant_id = await resolve_tenant_id(self.db, str(user.uid))
         return or_(
@@ -402,9 +416,7 @@ class AgentRepository:
             stmt = stmt.where(Agent.is_subagent.is_(False))
         result = await self.db.execute(stmt.order_by(Agent.is_default.desc(), Agent.id.asc()))
         agents = list(result.scalars().all())
-        if user.role == "superadmin":
-            return agents
-        return [agent for agent in agents if user_can_access_agent(user, agent)]
+        return await self._filter_visible(agents, user)
 
     async def list_visible_subagents(self, *, user: User) -> list[Agent]:
         stmt = select(Agent).where(Agent.is_subagent.is_(True))
@@ -413,9 +425,7 @@ class AgentRepository:
             stmt = stmt.where(tenant_clause)
         result = await self.db.execute(stmt.order_by(Agent.name.asc(), Agent.id.asc()))
         agents = list(result.scalars().all())
-        if user.role == "superadmin":
-            return agents
-        return [agent for agent in agents if user_can_access_agent(user, agent)]
+        return await self._filter_visible(agents, user)
 
     async def get_by_slug(self, slug: str) -> Agent | None:
         result = await self.db.execute(select(Agent).where(Agent.slug == slug))
@@ -436,7 +446,7 @@ class AgentRepository:
         agent = (await self.db.execute(stmt)).scalar_one_or_none()
         if not agent:
             return None
-        if not user_can_access_agent(user, agent):
+        if not await self._filter_visible([agent], user):
             return None
         if kind == "any":
             return agent
