@@ -215,7 +215,12 @@ async def dispatch_next_input(db, actor, session_id):
         ordered_input_messages=messages,
         agent_slug=session.agent_slug,
         thread_id=session.id,
-        meta={"request_id": first.id, "source": "public_api", "attachment_file_ids": first.attachment_ids},
+        meta={
+            "request_id": first.id,
+            "source": "public_api",
+            "attachment_file_ids": first.attachment_ids,
+            "client_capabilities": ["chat_widgets"],
+        },
         current_uid=actor.uid,
         db=db,
         public_session_id=session.id,
@@ -309,7 +314,7 @@ async def resume_turn(db, actor, session_id, event, *, key):
         input_message=None,
         agent_slug=session.agent_slug,
         thread_id=session.id,
-        meta={"request_id": intent_hash(["public-resume", session.id, key])},
+        meta={"request_id": intent_hash(["public-resume", session.id, key]), "client_capabilities": ["chat_widgets"]},
         current_uid=actor.uid,
         db=db,
         resume=answer,
@@ -478,8 +483,13 @@ async def register_public_child(db, creator, run, definition):
     actor = PublicActor(run.uid, run.tenant_id, context.get("app_id"))
     parent = await require_session(db, actor, context["session_id"])
     session = await db.get(PublicSession, run.conversation_thread_id)
-    run.input_payload = {**run.input_payload, "runtime": {
-        **run.input_payload["runtime"], "file_thread_id": parent.config_snapshot.get("project_id") or parent.id}}
+    run.input_payload = {
+        **run.input_payload,
+        "runtime": {
+            **run.input_payload["runtime"],
+            "file_thread_id": parent.config_snapshot.get("project_id") or parent.id,
+        },
+    }
     snapshot = {
         "backend_id": definition.backend_id,
         "project_id": parent.config_snapshot.get("project_id") or parent.id,
@@ -528,8 +538,13 @@ async def register_public_child(db, creator, run, definition):
         "agent_context_snapshot": snapshot["agent_config"].get("context", {}),
         "collaboration_limits": creator.input_payload["collaboration_limits"],
         "tool_approval_mode": snapshot["tool_approval_mode"],
-        "public_context": {"session_id": session.id, "app_id": session.app_id, "turn_id": turn.id, "input_ids": [],
-                           "file_thread_id": snapshot["project_id"]},
+        "public_context": {
+            "session_id": session.id,
+            "app_id": session.app_id,
+            "turn_id": turn.id,
+            "input_ids": [],
+            "file_thread_id": snapshot["project_id"],
+        },
     }
     await append_event(
         db,
