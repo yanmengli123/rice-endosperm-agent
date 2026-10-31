@@ -357,7 +357,7 @@ async def assert_spawn_allowed(db, *, uid, creator_run_id, child_thread_id=None)
 
 def is_worker_member(run):
     runtime = (run.input_payload or {}).get("runtime") or {}
-    return run.run_type == "subagent" or (run.run_type == "resume" and runtime.get("kind") == "subagent")
+    return run.run_type == "subagent" or runtime.get("kind") == "subagent"
 
 
 async def assert_resume_allowed(db, *, uid, run_id):
@@ -416,7 +416,7 @@ async def assert_resume_allowed(db, *, uid, run_id):
             raise HTTPException(409, "此会话已推进到新任务，不能重放旧等待点")
 
 
-async def stop_group(db, *, uid, run_id, whole_group=True):
+async def stop_group(db, *, uid, run_id, whole_group=True, commit=True):
     from yuxi.repositories.agent_run_repository import AgentRunRepository
     from yuxi.services.agent_run_service import publish_cancel_signal
 
@@ -453,6 +453,7 @@ async def stop_group(db, *, uid, run_id, whole_group=True):
             stopped.append(row.id)
             if updated.status == "cancel_requested":
                 requested.append(row.id)
-    await db.commit()
-    await asyncio.gather(*(publish_cancel_signal(item) for item in requested))
+    if commit:
+        await db.commit()
+        await asyncio.gather(*(publish_cancel_signal(item) for item in requested))
     return {"root_run_id": root.id, "stopped_run_ids": stopped, "cancel_requested_run_ids": requested}

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi import HTTPException
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
 
 from yuxi.agents.buildin import agent_manager
@@ -55,24 +56,44 @@ async def require_session(db, actor: PublicActor, session_id, *, lock=False):
 async def append_event(db, session, event_type, payload):
     sequence = session.next_event_seq
     session.next_event_seq += 1
-    event = PublicSessionEvent(session_id=session.id, sequence=sequence, type=event_type, payload_json=payload)
+    payload = {
+        **payload,
+        "type": event_type,
+        "session_id": session.id,
+        "event_id": payload.get("event_id") or uuid4().hex,
+    }
+    event = PublicSessionEvent(
+        session_id=session.id, sequence=sequence, type=event_type, payload_json=jsonable_encoder(payload)
+    )
     db.add(event)
     await db.flush()
     return event
 
 
-async def visible_agent(db, actor, agent_slug):
+async def visible_agent(db, actor, agent_slug, *, kind="main"):
     user = await db.scalar(select(User).where(User.uid == actor.uid))
     if not user or user.is_deleted or user.is_disabled:
         raise HTTPException(403, "当前用户已不可用")
     if actor.app_id:
         app, _owner = await app_principal(db, uid=actor.uid)
-        if app.id != actor.app_id or agent_slug not in app.agent_slugs:
+        if app.id != actor.app_id or (kind == "main" and agent_slug not in app.agent_slugs):
             raise HTTPException(404, "Agent 不可用")
-    agent = await AgentRepository(db).get_visible_by_slug(slug=agent_slug, user=user, kind="main")
+    agent = await AgentRepository(db).get_visible_by_slug(slug=agent_slug, user=user, kind=kind)
     if not agent:
         raise HTTPException(404, "Agent 不可用")
     return agent
+
+
+async def visible_session_agent(db, actor, session):
+    root, seen = session, set()
+    while root.parent_session_id:
+        if root.id in seen or len(seen) >= 32:
+            raise HTTPException(409, "协作会话层级异常")
+        seen.add(root.id)
+        root = await require_session(db, actor, root.parent_session_id)
+    if root.id != session.id:
+        await visible_agent(db, actor, root.agent_slug)
+    return await visible_agent(db, actor, session.agent_slug, kind="subagent" if session.parent_session_id else "main")
 
 
 async def resolve_public_model(db, actor, agent, requested, snapshot=None):
@@ -94,7 +115,7 @@ async def resolve_public_model(db, actor, agent, requested, snapshot=None):
     )
 
 
-async def create_session(db, actor, payload, *, key):
+async def create_session(db, actor, payload, *, key, report_created=False):
     validate_key(key)
     raw = payload.model_dump(mode="json")
     fingerprint = intent_hash(raw)
@@ -109,7 +130,8 @@ async def create_session(db, actor, payload, *, key):
         receipt = await db.scalar(
             select(PublicReceipt).where(PublicReceipt.session_id == previous.id, PublicReceipt.idempotency_key == key)
         )
-        return previous, receipt.response_json if receipt else None
+        result = (previous, receipt.response_json if receipt else None)
+        return (*result, False) if report_created else result
     agent = await visible_agent(db, actor, payload.agent_id)
     model = await resolve_public_model(db, actor, agent, payload.agent.model if payload.agent else None)
     user = await db.scalar(select(User).where(User.uid == actor.uid))
@@ -143,7 +165,7 @@ async def create_session(db, actor, payload, *, key):
     )
     db.add(session)
     await db.flush()
-    await append_event(db, session, "agent.session.created", {"session_id": session_id})
+    created_event = await append_event(db, session, "agent.session.created", {"session_id": session_id})
     receipt = None
     if payload.input is not None:
         from yuxi.services.public_api_schemas import InputMessage, MessageEvent, MessageOptions
@@ -159,8 +181,14 @@ async def create_session(db, actor, payload, *, key):
             yuxi=MessageOptions(mode="follow_up", attachment_file_ids=payload.yuxi.attachment_file_ids),
         )
         receipt = await receive_message(db, actor, session, event, key=key, fingerprint=fingerprint)
+    from yuxi.services.public_query_service import session_resource
+
+    created_event.payload_json = {
+        **created_event.payload_json,
+        "session": await session_resource(db, actor, session.id, receipt=receipt),
+    }
     await db.commit()
-    return session, receipt
+    return (session, receipt, True) if report_created else (session, receipt)
 
 
 async def receipt_for_key(db, session, key, fingerprint=None):
@@ -190,7 +218,7 @@ async def receive_message(db, actor, session, event, *, key, fingerprint=None):
         raise HTTPException(409, "当前 Turn 等待回答或审批，请先处理等待点")
     if current and current.status == "cancelling":
         raise HTTPException(409, "正在清理取消的 Turn，请稍后提交")
-    await visible_agent(db, actor, session.agent_slug)
+    await visible_session_agent(db, actor, session)
     count = await db.scalar(
         select(func.count())
         .select_from(PublicInput)
@@ -204,7 +232,7 @@ async def receive_message(db, actor, session, event, *, key, fingerprint=None):
         raise HTTPException(422, "steer 不支持覆盖模型、审批模式或携带附件")
     snapshot = deepcopy(session.config_snapshot)
     if event.yuxi.model:
-        agent = await visible_agent(db, actor, session.agent_slug)
+        agent = await visible_session_agent(db, actor, session)
         snapshot["model_spec"] = await resolve_public_model(db, actor, agent, event.yuxi.model, snapshot)
     if event.yuxi.tool_approval_mode:
         snapshot["tool_approval_mode"] = event.yuxi.tool_approval_mode
@@ -222,6 +250,9 @@ async def receive_message(db, actor, session, event, *, key, fingerprint=None):
     db.add(item)
     await db.flush()
     await bind_files(db, actor, item)
+    if session.queue_paused or session.tree_paused:
+        session.queue_paused = session.tree_paused = False
+        session.priority_input_id = item.id
     response = {
         "object": "yuxi.session.event.accepted",
         "event_id": uuid4().hex,

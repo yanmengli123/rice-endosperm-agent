@@ -72,6 +72,8 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import AgentRun, Message, User
 from yuxi.storage.redis import get_arq_redis_settings
 from yuxi.trace import TraceRecorder
+from yuxi.services.public_runtime_service import process_public_session, recover_public_sessions
+from yuxi.services.public_input_service import purge_expired_public_drafts
 from yuxi.utils.logging_config import logger
 from yuxi.utils.thread_utils import extract_thread_id
 
@@ -200,13 +202,27 @@ async def _get_run(run_id: str):
 
 
 async def append_run_event(run_id: str, event_type: str, payload: dict, *, thread_id: str | None = None):
+    from yuxi.services.public_event_service import public_run, project_run_event
+
+    public = public_run.get()
+    if public is not None and public.id == run_id:
+        await project_run_event(public, event_type, payload, thread_id=thread_id)
+        try:
+            await append_run_stream_event(run_id, event_type, payload, thread_id=thread_id)
+        except Exception as error:
+            logger.warning(f"Public run legacy stream deferred: {type(error).__name__}")
+        return
     await append_run_stream_event(run_id, event_type, payload, thread_id=thread_id)
 
 
 async def mark_run_running(run_id: str):
+    from yuxi.services.public_event_service import public_run
+
     async with pg_manager.get_async_session_context() as db:
         repo = AgentRunRepository(db)
-        await repo.mark_running(run_id)
+        if public_run.get() is not None:
+            return await repo.mark_running(run_id, pending_only=True)
+        return await repo.mark_running(run_id)
 
 
 async def mark_run_terminal(
@@ -640,8 +656,29 @@ async def _emit_browser_guard_trace(run_id: str) -> None:
 
 
 async def process_agent_run(ctx, run_id: str):
-    """执行队列中的 AgentRun，并只从 run 列和输入消息恢复运行参数。"""
+    from yuxi.services.public_event_service import public_run
+    from yuxi.storage.postgres.runtime_security import actor
+
     run = await _get_run(run_id)
+    if run is None:
+        return
+    is_public = isinstance(run.input_payload, dict) and bool(run.input_payload.get("public_context"))
+    token = public_run.set(run if is_public else None)
+    try:
+        if is_public:
+            with actor(int(run.tenant_id), str(run.uid)):
+                return await _process_agent_run(ctx, run_id, run)
+        return await _process_agent_run(ctx, run_id, run)
+    finally:
+        public_run.reset(token)
+        if is_public:
+            from yuxi.services.public_runtime_service import kick_public_session
+
+            await kick_public_session(run.input_payload["public_context"]["session_id"])
+
+
+async def _process_agent_run(ctx, run_id, run):
+    """执行队列中的 AgentRun，并只从 run 列和输入消息恢复运行参数。"""
     if not run:
         logger.warning(f"Run not found: {run_id}")
         return
@@ -783,6 +820,7 @@ async def process_agent_run(ctx, run_id: str):
         "agent_runtime_snapshot": payload.get("agent_runtime_snapshot"),
         "agent_context_snapshot": payload.get("agent_context_snapshot"),
         "tool_approval_mode": payload.get("tool_approval_mode"),
+        "public_session_id": (payload.get("public_context") or {}).get("session_id"),
         "knowledge_scope_snapshot": payload.get("knowledge_scope_snapshot"),
         "mention_resolution": payload.get("mention_resolution"),
         "user_credential": payload.get("user_credential"),
@@ -796,7 +834,7 @@ async def process_agent_run(ctx, run_id: str):
         meta["ordered_human_messages"] = ordered_human_messages
     if isinstance(frozen_scope, dict) and frozen_scope.get("literature_binding"):
         meta["input_message_id"] = input_message.id
-    if run_type == "subagent" or (run_type == "resume" and runtime.get("kind") == "subagent"):
+    if run_type == "subagent" or runtime.get("kind") == "subagent":
         # 三个线程 ID 在 subagent_run_service 创建 run 时已写入 runtime，此处不再二次兜底；
         # 缺失会在 chat_service._apply_subagent_runtime_context 处直接报错。
         meta["parent_thread_id"] = runtime.get("parent_thread_id")
@@ -808,7 +846,13 @@ async def process_agent_run(ctx, run_id: str):
     if isinstance(input_metadata.get("agent_invocation_meta"), dict):
         meta["agent_invocation_meta"] = input_metadata.get("agent_invocation_meta") or {}
 
-    await mark_run_running(run_id)
+    claimed = await mark_run_running(run_id)
+    if claimed is None and payload.get("public_context"):
+        return
+    if claimed is not None and claimed.status != "running":
+        if claimed.status == "cancel_requested":
+            await _finish_run_before_execution(run, "cancelled", error_type="cancelled", error_message="执行前已取消")
+        return
     run_ctx = RunContext(run_id=run_id)
     writer = ChunkedEventWriter(
         run_id=run_id,
@@ -984,7 +1028,7 @@ async def process_agent_run(ctx, run_id: str):
                         status_value = "cancelled" if await _is_cancel_requested(run_id) else "interrupted"
                         terminal_outcome = (
                             status_value,
-                            status_value,
+                            "public_steer" if chunk.get("source") == "public_steer" else status_value,
                             chunk.get("message"),
                             chunk,
                         )
@@ -1362,6 +1406,7 @@ class WorkerSettings:
     health_check_interval = 30
     functions = [
         process_agent_run,
+        process_public_session,
         worker_heartbeat,
         process_scientific_pdf_ingest,
         process_literature_reader_render,
@@ -1374,6 +1419,8 @@ class WorkerSettings:
     ]
     # 每 5 分钟清扫一次孤儿 run；worker 启动时也会立即执行一次。
     cron_jobs = [
+        cron(recover_public_sessions, second=set(range(0, 60, 5))),
+        cron(purge_expired_public_drafts, minute={7, 22, 37, 52}),
         # ARQ 循环心跳（compose 健康检查锚定 /tmp/yuxi_worker_heartbeat，200s 容忍）
         cron(worker_heartbeat, minute=set(range(0, 60))),
         cron(reconcile_stale_agent_runs, minute=set(range(0, 60, 5))),

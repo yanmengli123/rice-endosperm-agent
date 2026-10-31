@@ -54,7 +54,7 @@ class _SubAgentToolFilterMiddleware(AgentMiddleware[Any, Any, Any]):
         return await handler(request.override(tools=_filter_disabled_tools(request.tools or [])))
 
 
-async def _build_middlewares(context):
+async def _build_middlewares(context, cleanup_model=None):
     summary_trigger_tokens = getattr(context, "summary_threshold", DEFAULT_SUMMARY_THRESHOLD_K) * 1024
     summary_keep_messages = getattr(context, "summary_keep_messages", DEFAULT_SUMMARY_KEEP_MESSAGES)
     summary_prompt = getattr(context, "summary_prompt", None) or DEFAULT_YUXI_SUMMARY_PROMPT
@@ -64,9 +64,9 @@ async def _build_middlewares(context):
         DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT,
     )
     summary_l2_trigger_ratio = getattr(context, "summary_l2_trigger_ratio", DEFAULT_SUMMARY_L2_TRIGGER_RATIO)
-    model_spec = resolve_chat_model_spec(context.model)
+    model_spec = resolve_chat_model_spec(context.model) if cleanup_model is None else None
     summary_middleware = create_summary_middleware(
-        model=load_chat_model(fully_specified_name=model_spec),
+        model=cleanup_model or load_chat_model(fully_specified_name=model_spec),
         trigger=("tokens", summary_trigger_tokens),
         keep=("messages", summary_keep_messages),
         summary_prompt=summary_prompt,
@@ -78,7 +78,7 @@ async def _build_middlewares(context):
     middlewares = [
         create_agent_filesystem_middleware(
             getattr(context, "tool_token_limit", DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS) * 1024,
-            context=context,
+            context=context if cleanup_model is None else None,
         ),
         save_attachments_to_fs,
         TraceMiddleware(),
@@ -93,7 +93,7 @@ async def _build_middlewares(context):
         ImageInputCompatibilityMiddleware(),
         TokenUsageMiddleware(),
     ]
-    if getattr(context, "subagents", None) and getattr(context, "run_id", None):
+    if cleanup_model is None and getattr(context, "subagents", None) and getattr(context, "run_id", None):
         from yuxi.services.collaboration_service import may_delegate
         from yuxi.storage.postgres.manager import pg_manager
 
@@ -107,6 +107,10 @@ async def _build_middlewares(context):
         from yuxi.agents.middlewares.tool_approval import ToolApprovalMiddleware
 
         middlewares.append(ToolApprovalMiddleware())
+    if getattr(context, "public_session_id", None):
+        from yuxi.agents.middlewares.public_steer import PublicSteerMiddleware
+
+        middlewares.append(PublicSteerMiddleware())
     return middlewares
 
 
@@ -139,17 +143,23 @@ class SubAgentBackend(BaseAgent):
         return info
 
     async def get_graph(self, context=None, **kwargs):
-        context = await prepare_agent_runtime_context(
-            context or self.context_schema(),
-            context_schema=self.context_schema,
-        )
-        model_spec = resolve_chat_model_spec(context.model)
+        checkpoint_only = kwargs.get("checkpoint_only", False)
+        context = context or self.context_schema()
+        if not checkpoint_only:
+            context = await prepare_agent_runtime_context(
+                context or self.context_schema(),
+                context_schema=self.context_schema,
+            )
+        from yuxi.agents.checkpoint_cleanup import CheckpointCleanupModel
+
+        model_spec = resolve_chat_model_spec(context.model) if not checkpoint_only else None
+        cleanup_model = CheckpointCleanupModel() if checkpoint_only else None
 
         return create_agent(
-            model=load_chat_model(fully_specified_name=model_spec),
-            tools=_filter_disabled_tools(await resolve_configured_runtime_tools(context)),
-            system_prompt=build_prompt_with_context(context),
-            middleware=await _build_middlewares(context),
+            model=cleanup_model or load_chat_model(fully_specified_name=model_spec),
+            tools=[] if checkpoint_only else _filter_disabled_tools(await resolve_configured_runtime_tools(context)),
+            system_prompt="" if checkpoint_only else build_prompt_with_context(context),
+            middleware=await _build_middlewares(context, cleanup_model),
             state_schema=BaseState,
             checkpointer=await self._get_checkpointer(),
         )

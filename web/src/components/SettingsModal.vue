@@ -162,6 +162,7 @@
 
           <div v-if="activeTab === 'apiKeys' && userStore.isLoggedIn">
             <ApiKeyManagementComponent />
+            <PublicAppSettings />
           </div>
           <div v-if="activeTab === 'mcpOAuth' && userStore.isLoggedIn"><McpOAuthSettings /></div>
 
@@ -194,6 +195,7 @@ import AccountSettingsComponent from '@/components/AccountSettingsComponent.vue'
 import AgentEnvSettingsCard from '@/components/AgentEnvSettingsCard.vue'
 import BasicSettingsSection from '@/components/BasicSettingsSection.vue'
 import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
+import PublicAppSettings from '@/components/PublicAppSettings.vue'
 import McpOAuthSettings from '@/components/McpOAuthSettings.vue'
 import UserManagementComponent from '@/components/UserManagementComponent.vue'
 import DepartmentManagementComponent from '@/components/DepartmentManagementComponent.vue'

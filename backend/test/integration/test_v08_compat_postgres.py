@@ -120,6 +120,15 @@ async def postgres(monkeypatch):
         await manager._migration_0127_agent_run_waitpoints(conn)
         await manager._migration_0128_answer_source_annotations(conn)
         await manager._migration_0129_public_session_control_plane(conn)
+        for table, columns in {
+            "public_sessions": ["tree_paused", "priority_input_id", "parent_session_id", "read_event_seq",
+                                "recovery_checked_at"],
+            "public_turns": ["cancel_requested"],
+            "public_turn_runs": ["yielded", "last_message_id", "published_complete"],
+        }.items():
+            for column in columns:
+                await conn.execute(text(f'ALTER TABLE "{table}" DROP COLUMN "{column}" CASCADE'))
+        await manager._migration_0130_public_session_lifecycle(conn)
         # Idempotent DDL also works after interrupted deployment/replay.
         await manager._migration_0124_skill_package_versions(conn)
         await manager._migration_0125_personal_mcp_oauth(conn)
@@ -127,6 +136,7 @@ async def postgres(monkeypatch):
         await manager._migration_0127_agent_run_waitpoints(conn)
         await manager._migration_0128_answer_source_annotations(conn)
         await manager._migration_0129_public_session_control_plane(conn)
+        await manager._migration_0130_public_session_lifecycle(conn)
     engine = create_async_engine(dsn, connect_args={"server_settings": {"search_path": schema}})
     monkeypatch.setenv("YUXI_SECRET_MASTER_KEY", "v08-test-master-key-over-32-characters-only")
     monkeypatch.setenv("YUXI_PUBLIC_URL", "https://yuxi.example")

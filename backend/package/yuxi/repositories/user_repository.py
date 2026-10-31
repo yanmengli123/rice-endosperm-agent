@@ -50,7 +50,7 @@ class UserRepository:
     ) -> list[User]:
         """获取用户列表"""
         async with pg_manager.get_async_session_context() as session:
-            query = select(User).where(User.is_deleted == 0)
+            query = select(User).where(User.is_deleted == 0, User.user_kind == "human")
             if department_id is not None:
                 query = query.where(User.department_id == department_id)
             if role is not None:
@@ -69,7 +69,7 @@ class UserRepository:
             query = (
                 select(User, Department.name.label("department_name"))
                 .outerjoin(Department, User.department_id == Department.id)
-                .where(User.is_deleted == 0)
+                .where(User.is_deleted == 0, User.user_kind == "human")
             )
             if department_id is not None:
                 query = query.where(User.department_id == department_id)

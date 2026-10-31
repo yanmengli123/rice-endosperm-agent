@@ -35,7 +35,7 @@ from .state import ChatBotState
 from yuxi.agents.middlewares.collaboration import CollaborationMiddleware
 
 
-async def _build_middlewares(context):
+async def _build_middlewares(context, cleanup_model=None):
     """构建中间件列表"""
     # summary middleware
     # 主 Agent 上下文优化：默认 100k tokens 触发压缩，压缩后保留最近 10 条消息
@@ -48,9 +48,9 @@ async def _build_middlewares(context):
         DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT,
     )
     summary_l2_trigger_ratio = getattr(context, "summary_l2_trigger_ratio", DEFAULT_SUMMARY_L2_TRIGGER_RATIO)
-    model_spec = resolve_chat_model_spec(context.model)
+    model_spec = resolve_chat_model_spec(context.model) if cleanup_model is None else None
     summary_middleware = create_summary_middleware(
-        model=load_chat_model(fully_specified_name=model_spec),
+        model=cleanup_model or load_chat_model(fully_specified_name=model_spec),
         trigger=("tokens", summary_trigger_tokens),
         keep=("messages", summary_keep_messages),
         summary_prompt=summary_prompt,
@@ -62,7 +62,7 @@ async def _build_middlewares(context):
     middlewares = [
         create_agent_filesystem_middleware(
             getattr(context, "tool_token_limit", DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS) * 1024,
-            context=context,
+            context=context if cleanup_model is None else None,
         ),
         save_attachments_to_fs,
         TraceMiddleware(),
@@ -71,7 +71,11 @@ async def _build_middlewares(context):
         KnowledgeContextMiddleware(),
         CollaborationMiddleware(),
     ]
-    subagent_middleware = await create_subagent_task_middleware(context)
+    subagent_middleware = await create_subagent_task_middleware(context) if cleanup_model is None else None
+    if getattr(context, "public_session_id", None):
+        from yuxi.agents.middlewares.public_steer import PublicSteerMiddleware
+
+        middlewares.append(PublicSteerMiddleware())
     if getattr(context, "tool_approval_mode", None) == "always_ask":
         from yuxi.agents.middlewares.tool_approval import ToolApprovalMiddleware
 
@@ -103,19 +107,24 @@ class ChatbotAgent(BaseAgent):
         super().__init__(**kwargs)
 
     async def get_graph(self, context=None, **kwargs):
-
-        context = await prepare_agent_runtime_context(
-            context or self.context_schema(),
-            context_schema=self.context_schema,
-        )
+        checkpoint_only = kwargs.get("checkpoint_only", False)
+        context = context or self.context_schema()
+        if not checkpoint_only:
+            context = await prepare_agent_runtime_context(
+                context or self.context_schema(),
+                context_schema=self.context_schema,
+            )
 
         # 使用 create_agent 创建智能体
-        model_spec = resolve_chat_model_spec(context.model)
+        from yuxi.agents.checkpoint_cleanup import CheckpointCleanupModel
+
+        model_spec = resolve_chat_model_spec(context.model) if not checkpoint_only else None
+        cleanup_model = CheckpointCleanupModel() if checkpoint_only else None
         graph = create_agent(
-            model=load_chat_model(fully_specified_name=model_spec),
-            tools=await resolve_configured_runtime_tools(context),
-            system_prompt=build_prompt_with_context(context),
-            middleware=await _build_middlewares(context),
+            model=cleanup_model or load_chat_model(fully_specified_name=model_spec),
+            tools=[] if checkpoint_only else await resolve_configured_runtime_tools(context),
+            system_prompt="" if checkpoint_only else build_prompt_with_context(context),
+            middleware=await _build_middlewares(context, cleanup_model),
             state_schema=ChatBotState,
             checkpointer=await self._get_checkpointer(),
         )

@@ -21,6 +21,27 @@ upstreams:
       read: 600
 
 routes:
+  - id: yuxi-public-v08
+    name: yuxi-public-v08
+    uris:
+      - /v1/agents
+      - /v1/agents/*
+      - /api/v1/agents
+      - /api/v1/agents/*
+      - /v1/knowledge/tools/*
+      - /api/v1/knowledge/tools/*
+      - /api/user/apps
+      - /api/user/apps/*
+    methods: [GET, POST, PUT, DELETE, OPTIONS]
+    priority: 125
+    upstream_id: yuxi-backend
+    plugins:
+      proxy-rewrite:
+        headers:
+          remove: [X-Consumer-Username, X-Credential-Identifier, X-Yuxi-Key-ID, X-Yuxi-User-ID, X-Yuxi-Tenant-ID, X-User-ID, X-Authenticated-User, X-Authenticated-Tenant]
+      proxy-buffering:
+        disable_proxy_buffering: true
+
   - id: yuxi-source-annotations
     name: yuxi-source-annotations
     uri: /api/agent/runs/:run_id/source-annotations

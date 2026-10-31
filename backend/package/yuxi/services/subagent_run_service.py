@@ -200,6 +200,11 @@ class SubagentRunService:
         creator_run = await self.run_repo.get_run_for_user(created_by_run_id, uid)
         if not creator_run:
             raise ValueError("父运行任务不存在")
+        public_context = (getattr(creator_run, "input_payload", None) or {}).get("public_context")
+        if public_context:
+            from yuxi.services.public_execution_service import lock_public_parent
+
+            await lock_public_parent(self.db, creator_run)
         if getattr(creator_run, "run_type", None) == "subagent":
             from yuxi.services.collaboration_service import assert_spawn_allowed
 
@@ -256,6 +261,10 @@ class SubagentRunService:
 
         # 创建成功后入队 worker 执行；幂等命中已有 run 时不重复入队。
         if created:
+            if public_context:
+                from yuxi.services.public_execution_service import register_public_child
+
+                await register_public_child(self.db, creator_run, run, agent_item)
             await self.db.commit()
             await agent_run_service.dispatch_created_agent_run(db=self.db, run_id=run.id)
 

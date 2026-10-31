@@ -3,6 +3,7 @@
 import hashlib
 import secrets
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from datetime import UTC, timedelta
 from uuid import uuid4
 
@@ -102,7 +103,7 @@ async def resolve_app_actor(db, *, token, external_id=None):
         count = await db.scalar(select(func.count()).select_from(PublicEndUser).where(PublicEndUser.app_id == app.id))
         if count >= app.max_end_users:
             raise HTTPException(429, "应用终端用户数量已达上限")
-        uid = "app:" + uuid4().hex
+        uid = "app_" + uuid4().hex
         # No product password or department membership is inherited from the owner.
         user = User(
             uid=uid,
@@ -180,7 +181,30 @@ def billed_uids(owner_uid):
 
 
 async def model_credential_uid(db, uid):
-    if not uid.startswith("app:"):
+    if not uid.startswith(("app_", "app:")):
+        return uid
+    if not await is_app_end_user(db, uid):
         return uid
     app, owner = await app_principal(db, uid=uid)
     return owner.uid if app.allow_owner_model_credentials else uid
+
+
+async def is_app_end_user(db, uid):
+    return await db.scalar(select(User.user_kind).where(User.uid == uid)) == "app_end_user"
+
+
+@asynccontextmanager
+async def model_credential_reader(db, uid):
+    owner_uid = await model_credential_uid(db, uid)
+    if owner_uid == uid or db.get_bind().dialect.name != "postgresql":
+        yield db, owner_uid
+        return
+    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.storage.postgres.runtime_security import actor
+
+    app, _owner = await app_principal(db, uid=uid)
+    # This narrow read uses a separate transaction: the caller's APP transaction
+    # and its RLS identity remain unchanged, including while opening a frozen key.
+    with actor(app.tenant_id, owner_uid):
+        async with pg_manager.get_async_session_context() as reader:
+            yield reader, owner_uid

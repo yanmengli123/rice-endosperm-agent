@@ -1183,6 +1183,32 @@ class PostgresManager(metaclass=SingletonMeta):
                 )
             )
 
+    async def _migration_0130_public_session_lifecycle(self, conn) -> None:
+        for statement in (
+            "ALTER TABLE public_sessions ADD COLUMN IF NOT EXISTS tree_paused BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE public_sessions ADD COLUMN IF NOT EXISTS priority_input_id VARCHAR(64)",
+            "ALTER TABLE public_sessions ADD COLUMN IF NOT EXISTS parent_session_id VARCHAR(64)",
+            "ALTER TABLE public_sessions ADD COLUMN IF NOT EXISTS read_event_seq BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE public_sessions ADD COLUMN IF NOT EXISTS recovery_checked_at TIMESTAMPTZ",
+            "ALTER TABLE public_turns ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE public_turn_runs ADD COLUMN IF NOT EXISTS yielded BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE public_turn_runs ADD COLUMN IF NOT EXISTS last_message_id VARCHAR(256)",
+            "ALTER TABLE public_turn_runs ADD COLUMN IF NOT EXISTS published_complete BOOLEAN NOT NULL DEFAULT false",
+            "CREATE INDEX IF NOT EXISTS ix_public_sessions_parent_session_id ON public_sessions(parent_session_id)",
+        ):
+            await conn.execute(text(statement))
+        definition = await conn.scalar(
+            text("SELECT pg_get_functiondef('yuxi_public_budget(text,bigint,timestamp,timestamptz)'::regprocedure)")
+        )
+        if "public_continuation_of" not in definition:
+            previous = "r.run_type IN ('chat','source_annotation') AND r.created_at>=p_day"
+            if previous not in definition:
+                raise RuntimeError("Public budget function does not match migration 0129")
+            definition = definition.replace(
+                previous, previous + " AND (r.input_payload->>'public_continuation_of') IS NULL", 1
+            )
+            await conn.execute(text(definition))
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
@@ -1317,6 +1343,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0127_agent_run_waitpoints", "_migration_0127_agent_run_waitpoints"),
         ("0128_answer_source_annotations", "_migration_0128_answer_source_annotations"),
         ("0129_public_session_control_plane", "_migration_0129_public_session_control_plane"),
+        ("0130_public_session_lifecycle", "_migration_0130_public_session_lifecycle"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:

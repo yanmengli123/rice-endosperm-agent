@@ -67,13 +67,27 @@ def _load_routes() -> list[dict]:
 
 
 def _run_create_schema(routes: list[dict]) -> dict:
-    route = next(r for r in routes if r["uri"] == "/api/agent/runs")
+    route = next(r for r in routes if r.get("uri") == "/api/agent/runs")
     return route["plugins"]["request-validation"]["body_schema"]
+
+
+def test_gateway_preserves_public_protocol_headers_and_disables_sse_buffering():
+    route = next(row for row in _load_routes() if row["id"] == "yuxi-public-v08")
+    assert {"/api/v1/agents", "/api/v1/agents/*", "/v1/agents/*", "/api/user/apps/*"} <= set(route["uris"])
+    assert {"GET", "POST", "PUT", "DELETE", "OPTIONS"} <= set(route["methods"])
+    assert route["plugins"]["proxy-buffering"]["disable_proxy_buffering"] is True
+    removed = {header.lower() for header in route["plugins"]["proxy-rewrite"]["headers"]["remove"]}
+    assert {"authorization", "idempotency-key", "last-event-id", "x-end-user-id"}.isdisjoint(removed)
+    assert {"x-yuxi-user-id", "x-authenticated-user", "x-yuxi-tenant-id"} <= removed
 
 
 def test_gateway_declares_all_desktop_required_routes() -> None:
     routes = _load_routes()
-    declared = {(r["uri"], frozenset(m.upper() for m in r.get("methods", []))) for r in routes}
+    declared = {
+        (uri, frozenset(m.upper() for m in route.get("methods", [])))
+        for route in routes
+        for uri in route.get("uris", [route.get("uri")])
+    }
     for uri, methods in REQUIRED_ROUTES.items():
         matches = [m for (u, m) in declared if u == uri]
         assert matches, f"网关缺少路由 {uri}"
@@ -99,7 +113,7 @@ def test_run_create_top_level_allows_resume_fields_but_stays_closed() -> None:
 
 def test_attachment_upload_uses_long_timeout_upstream() -> None:
     routes = _load_routes()
-    upload = next(r for r in routes if r["uri"] == "/api/chat/attachments/tmp")
+    upload = next(r for r in routes if r.get("uri") == "/api/chat/attachments/tmp")
     assert upload["upstream_id"] == "yuxi-backend-attachment", "上传必须走长超时 upstream"
     # multipart 上传不得做 JSON body 校验，否则请求被 400 拒绝
     assert "request-validation" not in upload["plugins"], "multipart 上传禁止 body 校验"
@@ -108,9 +122,9 @@ def test_attachment_upload_uses_long_timeout_upstream() -> None:
 def test_gateway_has_no_catch_all_route() -> None:
     routes = _load_routes()
     for route in routes:
-        uri = route["uri"]
-        assert "*" not in uri or uri.count("*") == 1 and uri.endswith("/*"), f"可疑通配路由 {uri}"
-        assert uri != "/*", "禁止 catch-all：所有路由必须显式声明"
+        for uri in route.get("uris", [route.get("uri")]):
+            assert "*" not in uri or uri.count("*") == 1 and uri.endswith("/*"), f"可疑通配路由 {uri}"
+            assert uri != "/*", "禁止 catch-all：所有路由必须显式声明"
 
 
 def test_run_create_gateway_schema_matches_pydantic_model() -> None:

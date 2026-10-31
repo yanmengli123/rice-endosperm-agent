@@ -3,7 +3,7 @@
 from datetime import UTC
 
 from fastapi import HTTPException
-from sqlalchemy import String, cast, func, literal, select, tuple_, union_all
+from sqlalchemy import String, and_, case, cast, func, literal, or_, select, tuple_, union_all
 
 from yuxi.services.public_execution_service import latest_turn
 from yuxi.services.public_session_service import require_session
@@ -69,6 +69,9 @@ def session_projection(session, turn, queued, *, receipt=None):
             "is_pinned": session.is_pinned,
             "tool_approval_mode": session.config_snapshot["tool_approval_mode"],
             "queue_paused": session.queue_paused,
+            "tree_paused": session.tree_paused,
+            "parent_session_id": session.parent_session_id,
+            "has_unread_events": session.next_event_seq - 1 > session.read_event_seq,
             "queued_input_count": queued,
             "receipt": receipt,
             "current_turn": {
@@ -84,15 +87,21 @@ def session_projection(session, turn, queued, *, receipt=None):
     }
 
 
-async def list_sessions(db, actor, *, after=None, limit=50, order="desc"):
+async def list_sessions(
+    db, actor, *, after=None, limit=50, order="desc", archived=False, agent_id=None, is_pinned=None
+):
     if not 1 <= limit <= 100 or order not in {"asc", "desc"}:
         raise HTTPException(422, "分页参数无效")
     scoped = select(PublicSession).where(
         PublicSession.uid == actor.uid,
         PublicSession.tenant_id == actor.tenant_id,
         PublicSession.app_id == actor.app_id,
-        PublicSession.archived.is_(False),
+        PublicSession.archived.is_(archived),
     )
+    if agent_id is not None:
+        scoped = scoped.where(PublicSession.agent_slug == agent_id)
+    if is_pinned is not None:
+        scoped = scoped.where(PublicSession.is_pinned.is_(is_pinned))
     stmt = scoped
     if after:
         cursor = await db.scalar(scoped.where(PublicSession.id == after))
@@ -210,7 +219,7 @@ def message_item(message, *, turn, run, input_content=None):
         text = render_source_answer(text)
     content = [{"type": "output_text", "text": text}] if assistant else input_content
     return {
-        "id": f"msg:{message.id}",
+        "id": public_message_id(message),
         "type": "message",
         "role": message.role,
         "status": "completed" if message.delivery_status == "complete" else "incomplete",
@@ -223,6 +232,13 @@ def message_item(message, *, turn, run, input_content=None):
         else None,
         "yuxi": {"run_id": run.id, "message_id": message.id, "created_at": unix_time(message.created_at)},
     }
+
+
+def public_message_id(message):
+    raw = (message.extra_metadata or {}).get("id")
+    if message.role == "assistant" and isinstance(raw, str) and 0 < len(raw) <= 256:
+        return f"msg:{message.run_id}:{raw}"
+    return f"msg:{message.id}"
 
 
 def user_content(message):
@@ -262,7 +278,7 @@ async def turn_resource(db, actor, session_id, turn_id):
     by_id = {run.id: run for run in runs}
     result = by_id.get(turn.result_run_id)
     output = []
-    if result and result.output_message_id:
+    if result and result.status == "completed" and result.output_message_id:
         message = await db.scalar(
             select(Message).where(
                 Message.id == result.output_message_id,
@@ -297,7 +313,7 @@ async def turn_resource(db, actor, session_id, turn_id):
                 }
                 for run in runs
             ],
-            "usage": dict(zip(("input_tokens", "output_tokens", "total_tokens"), totals, strict=True)),
+            "usage": dict(zip(("input_tokens", "output_tokens", "total_tokens"), map(int, totals), strict=True)),
         }
     )
     return response
@@ -400,11 +416,27 @@ async def list_items(db, actor, session_id, *, turn_id=None, after=None, limit=2
         AgentRun, (AgentRun.id == Message.run_id) & (AgentRun.conversation_id == Message.conversation_id)
     )
     eligible = [Message.run_id.in_(scope)]
-    messages = base.add_columns(
-        literal(0).label("tool_id"), literal(0).label("kind"), (literal("msg:") + cast(Message.id, String)).label("id")
-    ).where(
+    raw_id = Message.extra_metadata["id"].as_string()
+    message_id = case(
+        (
+            and_(Message.role == "assistant", raw_id.is_not(None), func.length(raw_id) > 0, func.length(raw_id) <= 256),
+            literal("msg:") + Message.run_id + literal(":") + raw_id,
+        ),
+        else_=literal("msg:") + cast(Message.id, String),
+    )
+    messages = base.add_columns(literal(0).label("tool_id"), literal(0).label("kind"), message_id.label("id")).where(
         *eligible,
         Message.role.in_(["user", "assistant"]),
+        or_(
+            Message.role == "user",
+            and_(
+                AgentRun.status == "completed",
+                or_(
+                    func.coalesce(AgentRun.input_payload["public_guarded_output"].as_boolean(), False).is_(False),
+                    Message.id == AgentRun.output_message_id,
+                ),
+            ),
+        ),
         (Message.role == "user") | (Message.content != ""),
         func.coalesce(Message.extra_metadata["source"].as_string(), "") != "ask_user_question_resume",
     )

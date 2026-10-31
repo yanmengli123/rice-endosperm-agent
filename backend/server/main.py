@@ -23,6 +23,7 @@ from yuxi.brands.rice_endosperm import AGENT_DESCRIPTION, BRAND_NAME
 from yuxi.storage.postgres.runtime_security import RuntimeIdentityMiddleware
 
 from server.routers import router
+from server.routers.public_agent_router import public_agents
 from server.utils.lifespan import lifespan
 from server.utils.common_utils import setup_logging
 from server.utils.access_log_middleware import AccessLogMiddleware
@@ -40,7 +41,10 @@ RATE_LIMIT_ENDPOINTS = {
 }
 DEFAULT_DEVELOPMENT_CORS_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 EXPLICIT_CORS_METHODS = ("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT")
-EXPLICIT_CORS_HEADERS = ("Accept", "Authorization", "Content-Type", "Last-Event-ID", "X-Requested-With")
+EXPLICIT_CORS_HEADERS = (
+    "Accept", "Authorization", "Content-Type", "Last-Event-ID", "X-Requested-With",
+    "Idempotency-Key", "X-End-User-Id",
+)
 
 # In-memory login attempt tracker to reduce brute-force exposure per worker.
 # OrderedDict 按 LRU 记账并设容量上限，防止伪造来源 IP 无限撑大内存。
@@ -88,10 +92,16 @@ app = FastAPI(
 )
 # 所有业务接口统一挂载到 /api，具体分组在 server.routers 中集中注册。
 app.include_router(router, prefix="/api")
+app.include_router(public_agents)
+app.include_router(public_agents, prefix="/api")
 
 if os.getenv("LITE_MODE", "").lower() not in ("true", "1"):
     from starlette.routing import Route
     from server.routers.knowledge_mcp_router import knowledge_mcp
+    from server.routers.public_knowledge_router import public_knowledge
+
+    app.include_router(public_knowledge)
+    app.include_router(public_knowledge, prefix="/api")
 
     app.router.routes.append(Route("/api/mcp", endpoint=knowledge_mcp, methods=["GET", "POST", "DELETE"]))
 

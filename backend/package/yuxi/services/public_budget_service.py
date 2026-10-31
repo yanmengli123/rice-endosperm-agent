@@ -25,7 +25,7 @@ async def budget_totals(db, *, uid, tenant_id, now):
     for run in runs:
         payload = run.input_payload if isinstance(run.input_payload, dict) else {}
         if run.created_at >= day and run.status not in {"failed", "cancelled"}:
-            if run.run_type in {"chat", "source_annotation"}:
+            if run.run_type in {"chat", "source_annotation"} and not payload.get("public_continuation_of"):
                 result["daily_chat"] += 1
             elif run.run_type == "literature":
                 result["daily_literature"] += 1

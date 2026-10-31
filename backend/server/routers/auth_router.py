@@ -1059,6 +1059,8 @@ async def read_users(
 
 
 def _ensure_user_in_current_department(current_user: User, target_user: User) -> None:
+    if target_user.user_kind == "app_end_user":
+        raise HTTPException(status_code=409, detail="应用终端用户请通过应用管理维护")
     if current_user.role == "superadmin":
         return
     if target_user.department_id != current_user.department_id:

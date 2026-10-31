@@ -2903,6 +2903,7 @@ async def save_messages_from_langgraph_state(
     final_content_override: str | None = None,
     final_additional_kwargs: dict[str, Any] | None = None,
     run_metadata: dict[str, Any] | None = None,
+    checkpoint_graph=None,
 ) -> None:
     # 契约回退（ADR-0008）：生成器侧各调用点对 knowledge_contract 的传参条件
     # 不一（中断/受保护流可能不传），但编排期已把契约会挂在 context 上——
@@ -2912,7 +2913,9 @@ async def save_messages_from_langgraph_state(
         _context_contract = getattr(context, "_knowledge_contract", None)
         if isinstance(_context_contract, dict):
             knowledge_contract = _context_contract
-    messages = await _get_langgraph_messages(agent_instance, config_dict, context=context)
+    messages = ((await checkpoint_graph.aget_state(config_dict)).values.get("messages", [])
+                if checkpoint_graph is not None else
+                await _get_langgraph_messages(agent_instance, config_dict, context=context))
     if messages is None:
         return
 
@@ -3381,6 +3384,7 @@ async def stream_agent_chat(
     _apply_client_capabilities(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
     input_context["tool_approval_mode"] = meta.get("tool_approval_mode")
+    input_context["public_session_id"] = meta.get("public_session_id")
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     # 本机浏览器（P1）：run 冻结的开关以实际布尔写入 runtime——即使配置面持久化过
     # browser_enabled=true，run 未冻结开关时也必须以 False 覆盖，否则该智能体会
@@ -3465,6 +3469,10 @@ async def stream_agent_chat(
     knowledge_contract: dict[str, Any] | None = None
     citation_sensitive_output = False
     protected_output = turn_plan.buffers_output
+    if meta.get("public_session_id"):
+        public_execution = await db.get(AgentRun, meta["run_id"])
+        public_execution.input_payload = {**public_execution.input_payload, "public_guarded_output": protected_output}
+        await db.commit()
     buffered_root_message_id: str | None = None
     buffered_root_metadata: dict[str, Any] | None = None
     source_output_validation: dict[str, Any] | None = None
@@ -4213,6 +4221,39 @@ async def stream_agent_chat(
                     thread_id=chunk_thread_id,
                 )
 
+        if meta.get("public_session_id"):
+            from yuxi.services.public_execution_service import run_yielded, mark_steer_boundary
+
+            if meta.get("agent_runtime") == "dsh":
+                state = await (await agent.get_graph(context=context)).aget_state(langgraph_config)
+                if not (getattr(state, "values", {}) or {}).get("__interrupt__"):
+                    await mark_steer_boundary(db, run_id=meta["run_id"], uid=uid)
+                    await db.commit()
+
+            if await run_yielded(db, meta["run_id"]):
+                await save_messages_from_langgraph_state(
+                    agent,
+                    thread_id,
+                    conv_repo,
+                    langgraph_config,
+                    context,
+                    run_id=meta["run_id"],
+                    request_id=meta["request_id"],
+                )
+                state = await (await agent.get_graph(context=context)).aget_state(langgraph_config)
+                total = _token_usage_delta(_extract_total_tokens(state), token_usage_baseline)
+                await _persist_run_total_tokens(
+                    db,
+                    meta["run_id"],
+                    total,
+                    uid=uid,
+                    model_spec=meta.get("model_spec"),
+                    credential_ref=meta.get("user_credential"),
+                    policy_version=meta.get("policy_version"),
+                )
+                yield make_chunk(status="interrupted", source="public_steer", meta=meta)
+                return
+
         frozen_mention_resolution = _frozen_mention_resolution(meta)
         if knowledge_scope_snapshot.get("literature_binding"):
             from yuxi.literature.session import validate_frozen_paper_scope
@@ -4955,6 +4996,7 @@ async def stream_agent_resume(
     _apply_client_capabilities(input_context, meta)
     _apply_subagent_runtime_context(input_context, meta)
     input_context["tool_approval_mode"] = meta.get("tool_approval_mode")
+    input_context["public_session_id"] = meta.get("public_session_id")
     _apply_knowledge_scope_snapshot(input_context, knowledge_scope_snapshot)
     # resume 沿用父运行冻结的本机浏览器开关（run_worker 已从 input_payload 装入 meta）；
     if meta.get("agent_runtime") == "dsh":
@@ -5087,6 +5129,38 @@ async def stream_agent_resume(
                     status="loading",
                     thread_id=chunk_thread_id,
                 )
+
+        if meta.get("public_session_id"):
+            from yuxi.services.public_execution_service import run_yielded, mark_steer_boundary
+
+            if meta.get("agent_runtime") == "dsh":
+                state = await (await agent.get_graph(context=context)).aget_state(langgraph_config)
+                if not (getattr(state, "values", {}) or {}).get("__interrupt__"):
+                    await mark_steer_boundary(db, run_id=meta["run_id"], uid=uid)
+                    await db.commit()
+
+            if await run_yielded(db, meta["run_id"]):
+                await save_messages_from_langgraph_state(
+                    agent,
+                    thread_id,
+                    conv_repo,
+                    langgraph_config,
+                    context,
+                    run_id=meta["run_id"],
+                    request_id=meta["request_id"],
+                )
+                state = await (await agent.get_graph(context=context)).aget_state(langgraph_config)
+                await _persist_run_total_tokens(
+                    db,
+                    meta["run_id"],
+                    _token_usage_delta(_extract_total_tokens(state), token_usage_baseline),
+                    uid=uid,
+                    model_spec=meta.get("model_spec"),
+                    credential_ref=meta.get("user_credential"),
+                    policy_version=meta.get("policy_version"),
+                )
+                yield make_resume_chunk(status="interrupted", source="public_steer", meta=meta)
+                return
 
         full_resume_content = "".join(accumulated_content)
         if conf.enable_content_guard and full_resume_content and await content_guard.check(full_resume_content):

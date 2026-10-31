@@ -193,9 +193,11 @@ class AgentRunRepository:
         await self.db.flush()
         return run
 
-    async def mark_running(self, run_id: str) -> AgentRun | None:
+    async def mark_running(self, run_id: str, *, pending_only=False) -> AgentRun | None:
         run = await self._lock_run(run_id)
         if not run:
+            return None
+        if pending_only and run.status == "running":
             return None
         # cancel_requested 是用户的显式意图：mark_running 不得把它翻回 running，
         # 否则取消信号会被随后到达的 running 覆盖，run 变成"取消丢失"。

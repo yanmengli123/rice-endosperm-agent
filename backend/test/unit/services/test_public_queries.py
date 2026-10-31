@@ -261,3 +261,17 @@ async def test_pending_and_cancelled_inputs_never_appear_as_formal_items(history
     await db.commit()
     assert (await service.input_resource(db, actor, "alice", pending.id))["items"] == []
     assert (await service.session_resource(db, actor, "alice"))["yuxi"]["queued_input_count"] == 0
+
+
+async def test_buffered_unvalidated_assistant_text_is_never_published_by_history(history):
+    db, actor = history
+    run = await db.get(AgentRun, "chat")
+    run.input_payload = {"public_guarded_output": True}
+    await db.commit()
+    assert "progress" not in str(await service.list_items(db, actor, "alice", limit=100))
+    run.status = "interrupted"
+    run.output_message_id = 12
+    turn = await db.get(PublicTurn, "turn-2")
+    turn.result_run_id = "chat"
+    await db.commit()
+    assert (await service.turn_resource(db, actor, "alice", "turn-2"))["yuxi"]["output"] == []

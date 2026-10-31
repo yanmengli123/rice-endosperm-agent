@@ -291,7 +291,7 @@ class KnowledgeBaseManager:
         Returns:
             bool: 是否有权限
         """
-        if user.get("user_kind") == "app_end_user" or str(user.get("uid") or "").startswith("app:"):
+        if await self._is_app_user(user):
             return any(item.get("kb_id") == kb_id for item in (await self.get_databases_by_user(user))["databases"])
         # 超级管理员有权访问所有
         if user.get("role") == "superadmin":
@@ -320,6 +320,18 @@ class KnowledgeBaseManager:
                 "tenant_id": kb.tenant_id,
             },
         )
+
+    async def _is_app_user(self, user):
+        if user.get("user_kind") == "app_end_user":
+            return True
+        uid = str(user.get("uid") or "")
+        if not uid.startswith(("app_", "app:")):
+            return False
+        from yuxi.services.public_identity_service import is_app_end_user
+        from yuxi.storage.postgres.manager import pg_manager
+
+        async with pg_manager.get_async_session_context() as session:
+            return await is_app_end_user(session, uid)
 
     async def check_manageable(self, user: dict, kb_id: str) -> bool:
         """租户内管理权限：平台管理员、创建者、创建者同部门的租户管理员。"""
@@ -370,7 +382,7 @@ class KnowledgeBaseManager:
                 "user_kind": getattr(user, "user_kind", None),
             }
 
-        if user_info.get("user_kind") == "app_end_user" or str(user_info.get("uid") or "").startswith("app:"):
+        if await self._is_app_user(user_info):
             from yuxi.services.public_identity_service import app_principal
             from yuxi.storage.postgres.manager import pg_manager
 

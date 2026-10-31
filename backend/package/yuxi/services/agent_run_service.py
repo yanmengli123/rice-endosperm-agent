@@ -799,6 +799,7 @@ async def create_agent_run_view(
     execution_snapshot: dict | None = None,
     commit_and_dispatch: bool = True,
     ordered_input_messages: list[AgentRunInputMessage] | None = None,
+    public_continuation_of: str | None = None,
 ) -> dict:
     """创建 chat/resume run 的 HTTP 入口，输入正文由 Message 承载，run 只登记运行元数据。"""
     meta = meta or {}
@@ -806,7 +807,21 @@ async def create_agent_run_view(
         raise HTTPException(status_code=422, detail="input_message 或 resume 不能为空")
 
     run_type = "resume" if resume is not None else "chat"
-    run_created_by_id = created_by_run_id if run_type == "resume" else None
+    run_created_by_id = created_by_run_id if run_type == "resume" else public_continuation_of
+    if public_continuation_of and public_session_id != thread_id:
+        raise HTTPException(422, "运行接续仅用于 Session 队列")
+    if public_continuation_of:
+        from yuxi.storage.postgres.models_business import PublicTurnRun
+
+        binding = await db.get(PublicTurnRun, public_continuation_of)
+        if binding is None or binding.session_id != thread_id:
+            raise HTTPException(409, "运行接续归属不一致")
+        # Segments share the Turn's first run as their lineage anchor. Repeated
+        # steer inputs must not consume the collaboration nesting depth.
+        run_created_by_id = await db.scalar(select(AgentRun.id).join(
+            PublicTurnRun, PublicTurnRun.run_id == AgentRun.id).where(
+                PublicTurnRun.turn_id == binding.turn_id, AgentRun.uid == current_uid)
+                .order_by(AgentRun.created_at, AgentRun.id).limit(1))
     request_id = _resolve_agent_run_request_id(
         meta=meta,
         run_type=run_type,
@@ -869,7 +884,7 @@ async def create_agent_run_view(
         db=db,
         uid=current_uid,
         credential_source=None,
-        check_daily=run_type != "resume",
+        check_daily=run_type != "resume" and public_continuation_of is None,
     )
 
     from yuxi.services.user_credential_service import (
@@ -1041,6 +1056,11 @@ async def create_agent_run_view(
     collaboration_limits = (
         (parent_payload or {}).get("collaboration_limits") if run_type == "resume" else None
     ) or freeze_collaboration_limits(scope.agent_item)
+    continuation_payload = None
+    if public_continuation_of:
+        previous = await AgentRunRepository(db).get_run_for_user(public_continuation_of, current_uid)
+        continuation_payload = previous.input_payload
+        collaboration_limits = previous.input_payload["collaboration_limits"]
     input_payload = {
         "collaboration_limits": collaboration_limits,
         "client_capabilities": (
@@ -1054,6 +1074,9 @@ async def create_agent_run_view(
         # This frozen choice drives worker behavior, including resume.
         "agent_runtime": _resolve_frozen_agent_runtime(scope),
     }
+    if continuation_payload is not None:
+        input_payload["agent_runtime"] = continuation_payload["agent_runtime"]
+        input_payload["public_continuation_of"] = public_continuation_of
     if ordered_input_messages is not None:
         input_payload["ordered_input_message_ids"] = [item.id for item in persisted_messages]
     if execution_snapshot is not None and run_type != "resume":
@@ -1064,12 +1087,16 @@ async def create_agent_run_view(
     elif run_type == "resume" and "agent_context_snapshot" in (parent_payload or {}):
         input_payload["agent_context_snapshot"] = deepcopy(parent_payload["agent_context_snapshot"])
         input_payload["tool_approval_mode"] = parent_payload["tool_approval_mode"]
+        input_payload["public_guarded_output"] = bool(parent_payload.get("public_guarded_output"))
     if input_payload["agent_runtime"] == "dsh":
         if input_payload.get("tool_approval_mode") == "always_ask":
             raise HTTPException(422, "当前 DSH 后端暂不支持通用工具审批，请选择 LangGraph 智能体")
         from yuxi.agents.buildin.dsh.runtime import runtime_snapshot, validate_snapshot
 
-        snapshot = (parent_payload or {}).get("agent_runtime_snapshot") if run_type == "resume" else runtime_snapshot()
+        frozen_runtime_payload = parent_payload if run_type == "resume" else continuation_payload
+        snapshot = (
+            frozen_runtime_payload.get("agent_runtime_snapshot") if frozen_runtime_payload else runtime_snapshot()
+        )
         if not isinstance(snapshot, dict):
             raise HTTPException(status_code=409, detail="父运行缺少 DSH 运行时快照，请重新提问")
         validate_snapshot(snapshot)
@@ -1253,6 +1280,12 @@ async def persist_agent_run_record(
                 from yuxi.services.collaboration_service import assert_resume_allowed
 
                 await assert_resume_allowed(db, uid=str(current_uid), run_id=created_by_run_id)
+            elif created_by_run_id:
+                from yuxi.services.public_execution_service import assert_continuation_allowed
+
+                await assert_continuation_allowed(
+                    db, uid=str(current_uid), run_id=input_payload.get("public_continuation_of") or created_by_run_id
+                )
             run = await AgentRunRepository(db).create_run(
                 run_id=run_id,
                 conversation_thread_id=conversation_thread_id,

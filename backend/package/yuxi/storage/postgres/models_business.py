@@ -1501,6 +1501,11 @@ class PublicSession(Base):
     archived = Column(Boolean, nullable=False, default=False)
     is_pinned = Column(Boolean, nullable=False, default=False)
     queue_paused = Column(Boolean, nullable=False, default=False)
+    tree_paused = Column(Boolean, nullable=False, default=False, server_default="false")
+    priority_input_id = Column(String(64), nullable=True)
+    parent_session_id = Column(String(64), nullable=True, index=True)
+    read_event_seq = Column(BigInteger, nullable=False, default=0, server_default="0")
+    recovery_checked_at = Column(DateTime(timezone=True), nullable=True)
     next_input_seq = Column(Integer, nullable=False, default=1)
     next_event_seq = Column(BigInteger, nullable=False, default=1)
     next_turn_seq = Column(Integer, nullable=False, default=1)
@@ -1555,6 +1560,7 @@ class PublicTurn(Base):
     current_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True, index=True)
     result_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True)
     waitpoint_json = Column(JSON, nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False, server_default="false")
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     finished_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -1578,6 +1584,9 @@ class PublicTurnRun(Base):
     run_id = Column(String(64), ForeignKey("agent_runs.id"), primary_key=True)
     session_id = Column(String(64), ForeignKey("public_sessions.id"), nullable=False, index=True)
     turn_id = Column(String(64), ForeignKey("public_turns.id"), nullable=False, index=True)
+    yielded = Column(Boolean, nullable=False, default=False, server_default="false")
+    last_message_id = Column(String(256), nullable=True)
+    published_complete = Column(Boolean, nullable=False, default=False, server_default="false")
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 

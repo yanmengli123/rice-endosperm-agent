@@ -17,6 +17,79 @@ from yuxi.storage.postgres.models_business import Conversation, PublicFile, Publ
 from yuxi.utils.datetime_utils import utc_now
 
 
+def file_resource(file):
+    from yuxi.services.public_query_service import unix_time
+
+    return {
+        "id": file.id,
+        "object": "file",
+        "filename": file.filename,
+        "bytes": file.size_bytes,
+        "created_at": unix_time(file.created_at),
+        "expires_at": unix_time(file.expires_at),
+        "purpose": "assistants",
+        "status": file.status,
+    }
+
+
+async def require_file(db, actor, file_id, *, lock=False):
+    stmt = select(PublicFile).where(
+        PublicFile.id == file_id,
+        PublicFile.uid == actor.uid,
+        PublicFile.tenant_id == actor.tenant_id,
+        PublicFile.app_id == actor.app_id,
+    )
+    if lock:
+        stmt = stmt.with_for_update()
+    file = await db.scalar(stmt.execution_options(populate_existing=True))
+    if file is None:
+        raise HTTPException(404, "附件不存在")
+    if file.status == "draft":
+        expiry = file.expires_at if file.expires_at.tzinfo else file.expires_at.replace(tzinfo=UTC)
+        if expiry <= utc_now():
+            raise HTTPException(422, "附件草稿已过期")
+    return file
+
+
+async def delete_draft(db, actor, file_id):
+    file = await require_file(db, actor, file_id, lock=True)
+    if file.status != "draft" or file.input_id is not None:
+        raise HTTPException(409, "附件已提交，不能删除草稿")
+    await remove_draft_data(file)
+    await db.delete(file)
+
+
+async def remove_draft_data(file):
+    from yuxi.services.conversation_service import _require_tmp_object_section, _tmp_attachment_prefix
+    from yuxi.storage.minio import get_minio_client
+
+    stored = json.loads(file.storage_key)
+    tmp_id, _ = _require_tmp_object_section(stored["object_name"], file.uid, "original")
+    await get_minio_client().adelete_objects_by_prefix(
+        stored["bucket_name"], _tmp_attachment_prefix(file.uid, tmp_id) + "/"
+    )
+
+
+async def purge_expired_public_drafts(ctx=None):
+    del ctx
+    from yuxi.storage.postgres.manager import pg_manager
+
+    async with pg_manager.get_async_session_context() as db:
+        rows = list(
+            await db.scalars(
+                select(PublicFile)
+                .where(PublicFile.status == "draft", PublicFile.input_id.is_(None), PublicFile.expires_at <= utc_now())
+                .order_by(PublicFile.expires_at, PublicFile.id)
+                .limit(100)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        for file in rows:
+            await remove_draft_data(file)
+            await db.delete(file)
+    return len(rows)
+
+
 def normalize_messages(messages):
     result, image_bytes, text_chars = [], 0, 0
     for message in messages:

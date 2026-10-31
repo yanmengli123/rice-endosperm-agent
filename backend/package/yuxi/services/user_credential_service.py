@@ -138,17 +138,17 @@ async def delete_user_credential(db: AsyncSession, uid: str, credential_id: int)
 
 
 async def get_active_user_credential(db: AsyncSession, uid: str, provider_id: str) -> UserModelCredential | None:
-    from yuxi.services.public_identity_service import model_credential_uid
+    from yuxi.services.public_identity_service import model_credential_reader
 
-    uid = await model_credential_uid(db, uid)
-    result = await db.execute(
-        select(UserModelCredential).where(
-            UserModelCredential.uid == uid,
-            UserModelCredential.provider_id == provider_id,
-            UserModelCredential.status == UserModelCredential.CREDENTIAL_STATUS_ACTIVE,
+    async with model_credential_reader(db, uid) as (reader, uid):
+        result = await reader.execute(
+            select(UserModelCredential).where(
+                UserModelCredential.uid == uid,
+                UserModelCredential.provider_id == provider_id,
+                UserModelCredential.status == UserModelCredential.CREDENTIAL_STATUS_ACTIVE,
+            )
         )
-    )
-    return result.scalar_one_or_none()
+        return result.scalar_one_or_none()
 
 
 async def open_user_credential_key(
@@ -159,11 +159,11 @@ async def open_user_credential_key(
     expected_provider_id: str,
 ) -> str | None:
     """按冻结引用解密；同时校验所有者、状态和供应商，防止引用被挪用。"""
-    from yuxi.services.public_identity_service import model_credential_uid
+    from yuxi.services.public_identity_service import model_credential_reader
 
-    uid = await model_credential_uid(db, uid)
-    result = await db.execute(select(UserModelCredential).where(UserModelCredential.id == credential_id))
-    credential = result.scalar_one_or_none()
+    async with model_credential_reader(db, uid) as (reader, uid):
+        result = await reader.execute(select(UserModelCredential).where(UserModelCredential.id == credential_id))
+        credential = result.scalar_one_or_none()
     if (
         credential is None
         or credential.uid != uid
@@ -182,11 +182,11 @@ async def open_user_credential_runtime(
     expected_provider_id: str,
 ) -> dict[str, str | None] | None:
     """解封运行时凭据及其用户级端点；所有归属和状态检查均失败关闭。"""
-    from yuxi.services.public_identity_service import model_credential_uid
+    from yuxi.services.public_identity_service import model_credential_reader
 
-    uid = await model_credential_uid(db, uid)
-    result = await db.execute(select(UserModelCredential).where(UserModelCredential.id == credential_id))
-    credential = result.scalar_one_or_none()
+    async with model_credential_reader(db, uid) as (reader, uid):
+        result = await reader.execute(select(UserModelCredential).where(UserModelCredential.id == credential_id))
+        credential = result.scalar_one_or_none()
     if (
         credential is None
         or credential.uid != uid
@@ -213,19 +213,19 @@ def custom_model_spec(credential: UserModelCredential) -> str | None:
 
 
 async def list_active_custom_model_specs(db: AsyncSession, uid: str) -> set[str]:
-    from yuxi.services.public_identity_service import model_credential_uid
+    from yuxi.services.public_identity_service import model_credential_reader
 
-    uid = await model_credential_uid(db, uid)
-    result = await db.execute(
-        select(UserModelCredential).where(
-            UserModelCredential.uid == uid,
-            UserModelCredential.status == UserModelCredential.CREDENTIAL_STATUS_ACTIVE,
-            UserModelCredential.protocol.is_not(None),
-            UserModelCredential.base_url.is_not(None),
-            UserModelCredential.model_id.is_not(None),
+    async with model_credential_reader(db, uid) as (reader, uid):
+        result = await reader.execute(
+            select(UserModelCredential).where(
+                UserModelCredential.uid == uid,
+                UserModelCredential.status == UserModelCredential.CREDENTIAL_STATUS_ACTIVE,
+                UserModelCredential.protocol.is_not(None),
+                UserModelCredential.base_url.is_not(None),
+                UserModelCredential.model_id.is_not(None),
+            )
         )
-    )
-    return {spec for credential in result.scalars().all() if (spec := custom_model_spec(credential))}
+        return {spec for credential in result.scalars().all() if (spec := custom_model_spec(credential))}
 
 
 async def resolve_user_provider_key(db: AsyncSession, uid: str, provider_id: str) -> str | None:
