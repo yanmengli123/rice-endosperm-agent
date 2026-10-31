@@ -34,6 +34,13 @@ async def discovery():
         "version": get_version(),
         "api_prefix": "/api",
         "capabilities": {
+            "upstream_compatibility": {
+                "target": "v0.8.0.beta5",
+                "deployment_revision": os.getenv("YUXI_DEPLOYMENT_REVISION"),
+                "public_api": "/api/v1/agents",
+                "legacy_agent_run_protocol": "1.9",
+                "public_sandbox_lifetime": "run",
+            },
             "cli": {
                 "min_cli_version": "0.1.0",
                 "browser_login": True,

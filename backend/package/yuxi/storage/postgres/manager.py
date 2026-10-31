@@ -1033,6 +1033,27 @@ class PostgresManager(metaclass=SingletonMeta):
         await conn.execute(text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS provider_id VARCHAR(100)"))
         await conn.execute(text("ALTER TABLE IF EXISTS usage_ledger ADD COLUMN IF NOT EXISTS policy_version INTEGER"))
 
+    async def _migration_0131_public_projects(self, conn) -> None:
+        from yuxi.storage.postgres.models_business import PublicProject
+
+        await conn.run_sync(lambda sync_conn: PublicProject.__table__.create(sync_conn, checkfirst=True))
+        # Existing Sessions keep their physical file directory during the upgrade.
+        await conn.execute(text("""
+            INSERT INTO public_projects (id, uid, tenant_id, app_id, name, archived, created_at)
+            SELECT id, uid, tenant_id, app_id, COALESCE(title, id), false, created_at
+            FROM public_sessions WHERE config_snapshot->>'project_id' IS NULL
+            ON CONFLICT (id) DO NOTHING
+        """))
+        await conn.execute(text("""
+            UPDATE public_sessions SET config_snapshot =
+                (config_snapshot::jsonb || jsonb_build_object('project_id', id))::json
+            WHERE config_snapshot->>'project_id' IS NULL
+        """))
+        if await conn.scalar(text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='yuxi_api_runtime')")):
+            await conn.execute(text("GRANT SELECT,INSERT,UPDATE,DELETE ON public_projects TO yuxi_api_runtime"))
+            if await conn.scalar(text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='yuxi_worker_runtime')")):
+                await conn.execute(text("GRANT SELECT,INSERT,UPDATE,DELETE ON public_projects TO yuxi_worker_runtime"))
+
     async def _migration_0124_skill_package_versions(self, conn) -> None:
         from yuxi.storage.postgres.models_business import SkillVersion
 
@@ -1344,6 +1365,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0128_answer_source_annotations", "_migration_0128_answer_source_annotations"),
         ("0129_public_session_control_plane", "_migration_0129_public_session_control_plane"),
         ("0130_public_session_lifecycle", "_migration_0130_public_session_lifecycle"),
+        ("0131_public_projects", "_migration_0131_public_projects"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:

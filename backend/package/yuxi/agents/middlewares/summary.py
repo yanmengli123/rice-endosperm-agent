@@ -472,11 +472,11 @@ class YuxiSummarizationMiddleware(SummarizationMiddleware):
             return "No previous conversation history."
         prompt = self._build_summary_prompt(sanitized)
         if prompt is None:
-            return "Previous conversation was too long to summarize."
-        try:
-            return self.model.invoke(prompt, config=self._SUMMARY_INVOKE_CONFIG).text.strip()
-        except Exception as e:
-            return f"Error generating summary: {e!s}"
+            raise RuntimeError("摘要输入无法保留有效上下文")
+        summary = self.model.invoke(prompt, config=self._SUMMARY_INVOKE_CONFIG).text.strip()
+        if not summary:
+            raise RuntimeError("摘要模型返回空正文")
+        return summary
 
     async def _acreate_summary(self, messages_to_summarize: list[AnyMessage]) -> str:
         sanitized = self._sanitize_messages_for_summary(
@@ -487,12 +487,12 @@ class YuxiSummarizationMiddleware(SummarizationMiddleware):
             return "No previous conversation history."
         prompt = self._build_summary_prompt(sanitized)
         if prompt is None:
-            return "Previous conversation was too long to summarize."
-        try:
-            response = await self.model.ainvoke(prompt, config=self._SUMMARY_INVOKE_CONFIG)
-            return response.text.strip()
-        except Exception as e:
-            return f"Error generating summary: {e!s}"
+            raise RuntimeError("摘要输入无法保留有效上下文")
+        response = await self.model.ainvoke(prompt, config=self._SUMMARY_INVOKE_CONFIG)
+        summary = response.text.strip()
+        if not summary:
+            raise RuntimeError("摘要模型返回空正文")
+        return summary
 
     def _offload_to_backend(self, backend, messages: list[AnyMessage]) -> str | None:
         _emit_compression_started_once()

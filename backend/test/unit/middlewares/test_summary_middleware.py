@@ -37,6 +37,9 @@ class _RecordingModel(_DummyModel):
         self.prompts.append(prompt)
         return SimpleNamespace(text="summary")
 
+    async def ainvoke(self, prompt: str, config: dict | None = None) -> SimpleNamespace:
+        return self.invoke(prompt, config)
+
 
 class _MemoryBackend:
     def __init__(self) -> None:

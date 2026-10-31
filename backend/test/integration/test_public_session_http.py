@@ -41,6 +41,7 @@ async def public_http(postgres, monkeypatch):
     from server.routers.public_app_router import apps
     from server.utils.auth_middleware import get_db
     from yuxi.services.public_event_service import session_event_stream
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.provider.destroy_public_run", lambda **kwargs: None)
 
     sessions = await isolated._connected(postgres)
 
@@ -601,6 +602,23 @@ async def test_accepted_attachment_prepares_while_queue_paused_and_keeps_scoped_
     url = listing["attachments"][0]["download_url"]
     assert (await client.get(url)).content == b"private attachment"
     assert (await client.get(url, headers={"X-End-User-Id": "other"})).status_code == 404
+    delete_url = f"/api/v1/agents/sessions/{sid}/attachments/{file_id}"
+    assert (await client.delete(delete_url)).status_code == 409
+    from yuxi.services import public_capability_service
+    from yuxi.utils.datetime_utils import utc_now
+
+    graph = SimpleNamespace(aget_state=AsyncMock(return_value=SimpleNamespace(next=(), interrupts=(), values={})))
+    monkeypatch.setattr(public_capability_service, "public_checkpoint", AsyncMock(return_value=(graph, None)))
+    async with sessions() as db:
+        file = await db.get(PublicFile, file_id)
+        item = await db.get(PublicInput, file.input_id)
+        item.status, item.cancelled_at = "cancelled", utc_now()
+        await db.commit()
+    deleted = await client.delete(delete_url)
+    assert deleted.status_code == 200, deleted.text
+    assert (await client.get(url)).status_code == 404
+    assert (await client.get(f"/v1/agents/sessions/{sid}/attachments")).json()["attachments"] == []
+    assert (await client.delete(delete_url)).status_code == 404
 
 
 async def test_open_sse_rechecks_revocation_before_reading_more_events(public_http):

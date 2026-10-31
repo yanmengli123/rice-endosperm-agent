@@ -98,6 +98,17 @@ const router = createRouter({
       ]
     },
     {
+      path: '/sessions',
+      component: AppLayout,
+      children: [
+        {
+          path: ':session_id?',
+          component: () => import('../views/PublicSessionsView.vue'),
+          meta: { requiresAuth: true, compactShell: true }
+        }
+      ]
+    },
+    {
       path: '/dashboard',
       name: 'dashboard',
       component: AppLayout,

@@ -37,6 +37,7 @@ class AgentOverride(WireModel):
 
 class SessionCreate(WireModel):
     agent_id: str = Field(min_length=1, max_length=80)
+    project_id: str | None = Field(default=None, min_length=1, max_length=64)
     agent: AgentOverride | None = None
     input: (
         Annotated[str, Field(min_length=1, max_length=32768)]

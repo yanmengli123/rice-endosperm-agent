@@ -64,6 +64,7 @@ def session_projection(session, turn, queued, *, receipt=None):
         "last_active_at": unix_time(session.last_active_at),
         "status": public_status(turn.status) if turn else "idle",
         "yuxi": {
+            "project_id": session.config_snapshot.get("project_id") or session.id,
             "title": session.title,
             "archived": session.archived,
             "is_pinned": session.is_pinned,
@@ -72,6 +73,7 @@ def session_projection(session, turn, queued, *, receipt=None):
             "tree_paused": session.tree_paused,
             "parent_session_id": session.parent_session_id,
             "has_unread_events": session.next_event_seq - 1 > session.read_event_seq,
+            "unread": session.next_event_seq - 1 > session.read_event_seq,
             "queued_input_count": queued,
             "receipt": receipt,
             "current_turn": {
@@ -380,6 +382,9 @@ async def input_resource(db, actor, session_id, input_id):
         "run_id": item.run_id,
         "received_seq": item.received_seq,
         "messages": item.messages,
+        "content": "\n".join(
+            part["text"] for message in item.messages for part in message["content"] if part["type"] == "input_text"
+        ),
         "items": items,
         "attachment_file_ids": item.attachment_ids,
         "received_at": item.created_at,

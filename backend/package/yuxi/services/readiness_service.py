@@ -43,6 +43,7 @@ async def check_readiness(*, initialized, db_context, redis):
                         " AND to_regclass('public_receipts') IS NOT NULL"
                         " AND to_regclass('public_session_events') IS NOT NULL"
                         " AND to_regclass('public_files') IS NOT NULL"
+                        " AND to_regclass('public_projects') IS NOT NULL"
                         " AND EXISTS (SELECT 1 FROM information_schema.columns"
                         " WHERE table_schema = current_schema() AND table_name = 'public_sessions'"
                         " AND column_name = 'recovery_checked_at')"

@@ -25,6 +25,60 @@ _KB_TOOL_NAMES = {
 }
 
 
+@pytest.mark.parametrize(
+    "active,current,allowed",
+    [
+        ([], {"guarded": {"tools": ["guarded_tool"]}}, False),
+        (["guarded"], {}, False),
+        (["guarded"], {"guarded": {"tools": []}}, False),
+        (["guarded"], {"guarded": {"tools": ["guarded_tool"]}}, True),
+    ],
+)
+async def test_skill_grant_is_rechecked_before_executing_tool(monkeypatch, active, current, allowed):
+    from unittest.mock import AsyncMock
+
+    frozen = {"guarded": {"tools": ["guarded_tool"], "mcps": [], "skills": []}}
+    context = SimpleNamespace(
+        uid="alice", tools=[], mcps=[], _readable_skills=["guarded"], _runtime_skill_dependency_map=frozen
+    )
+    request = SimpleNamespace(
+        tool_call={"name": "guarded_tool", "id": "call-1", "args": {}},
+        tool=SimpleNamespace(metadata={}),
+        runtime=SimpleNamespace(context=context, state={"activated_skills": active}),
+    )
+    monkeypatch.setattr(skills_middleware, "current_skill_dependencies", AsyncMock(return_value=current))
+    handler = AsyncMock(return_value=ToolMessage(content="executed", tool_call_id="call-1"))
+    result = await SkillsMiddleware().awrap_tool_call(request, handler)
+    assert handler.await_count == int(allowed)
+    if not allowed:
+        assert result.status == "error" and result.tool_call_id == "call-1"
+
+
+async def test_revoked_child_skill_blocks_frozen_dependency_but_base_tool_stays_available(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    frozen = {
+        "parent": {"tools": ["guarded_tool"], "mcps": ["remote"], "skills": ["child"]},
+        "child": {"tools": [], "mcps": [], "skills": []},
+    }
+    context = SimpleNamespace(
+        uid="alice", tools=[], mcps=[], _readable_skills=["parent", "child"], _runtime_skill_dependency_map=frozen
+    )
+    request = SimpleNamespace(
+        tool_call={"name": "remote_query", "id": "call-1", "args": {}},
+        tool=SimpleNamespace(metadata={"server": "remote"}),
+        runtime=SimpleNamespace(context=context, state={"activated_skills": ["parent"]}),
+    )
+    current = AsyncMock(return_value={"parent": frozen["parent"]})
+    monkeypatch.setattr(skills_middleware, "current_skill_dependencies", current)
+    handler = AsyncMock(return_value=ToolMessage(content="executed", tool_call_id="call-1"))
+    assert (await SkillsMiddleware().awrap_tool_call(request, handler)).status == "error"
+    handler.assert_not_awaited()
+    context.mcps = ["remote"]
+    await SkillsMiddleware().awrap_tool_call(request, handler)
+    assert handler.await_count == 1 and current.await_count == 1
+
+
 def _system_message_text(message: SystemMessage) -> str:
     return "\n".join(block.get("text", "") for block in message.content_blocks if isinstance(block, dict))
 

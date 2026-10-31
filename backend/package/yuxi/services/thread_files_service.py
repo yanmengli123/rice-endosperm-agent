@@ -186,10 +186,12 @@ async def resolve_thread_artifact_view(
     current_uid: str,
     db,
     path: str,
+    file_thread_id: str | None = None,
 ) -> Path:
     conv_repo = ConversationRepository(db)
     conversation = await require_user_conversation(conv_repo, thread_id, str(current_uid))
     uid = str(conversation.uid)
+    thread_id = file_thread_id or thread_id
 
     ensure_thread_dirs(thread_id, uid)
 

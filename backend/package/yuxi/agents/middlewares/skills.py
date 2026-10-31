@@ -131,7 +131,12 @@ def expand_skill_closure(
 
 async def resolve_runtime_skills_for_context(context, *, db: AsyncSession | None = None, user=None) -> dict[str, Any]:
     skill_items = await _list_skills_from_db(db, user)
-    skill_items = [item for item in skill_items if getattr(item, "bound_agent_id", None) is None or getattr(getattr(item, "bound_agent", None), "slug", None) == getattr(context, "agent_slug", None)]
+    skill_items = [
+        item
+        for item in skill_items
+        if getattr(item, "bound_agent_id", None) is None
+        or getattr(getattr(item, "bound_agent", None), "slug", None) == getattr(context, "agent_slug", None)
+    ]
     capabilities = getattr(context, "client_capabilities", [])
     if not isinstance(capabilities, list) or "chat_widgets" not in capabilities:
         skill_items = [item for item in skill_items if item.slug != "chat-widgets"]
@@ -139,7 +144,11 @@ async def resolve_runtime_skills_for_context(context, *, db: AsyncSession | None
     prompt_metadata = build_prompt_metadata(skill_items)
     available = set(dependency_map)
     selected = normalize_string_list(getattr(context, "skills", None))
-    selected = list(dict.fromkeys([*selected, *[item.slug for item in skill_items if getattr(item, "bound_agent_id", None) is not None]]))
+    selected = list(
+        dict.fromkeys(
+            [*selected, *[item.slug for item in skill_items if getattr(item, "bound_agent_id", None) is not None]]
+        )
+    )
     context_skills = [slug for slug in selected if slug in available]
     prompt_skills = expand_skill_closure(context_skills, dependency_map)
     from yuxi.trace import emit_trace
@@ -206,6 +215,25 @@ def _activated_skills_reducer(left: list[str] | None, right: list[str] | None) -
     return merged
 
 
+async def current_skill_dependencies(context) -> dict[str, SkillDependencyNode]:
+    """Recheck the invoking user and current Skill grants immediately before execution."""
+    from sqlalchemy import select
+    from yuxi.storage.postgres.models_business import User
+
+    async with pg_manager.get_async_session_context() as db:
+        user = await db.scalar(select(User).where(User.uid == getattr(context, "uid", None)))
+        if user is None or user.is_deleted or user.is_disabled:
+            return {}
+        items = await list_accessible_skills(db, user)
+        items = [
+            item
+            for item in items
+            if item.bound_agent_id is None
+            or (item.bound_agent and item.bound_agent.slug == getattr(context, "agent_slug", None))
+        ]
+        return build_dependency_map(items)
+
+
 class SkillsState(AgentState):
     """Skills 状态定义"""
 
@@ -249,7 +277,11 @@ class SkillsMiddleware(AgentMiddleware):
         runtime_context = request.runtime.context
         bound_prompt = getattr(runtime_context, "_bound_skill_prompt", "")
         if bound_prompt:
-            request = request.override(system_message=append_to_system_message(getattr(request, "system_message", None), "智能体专属操作指南：\n" + bound_prompt))
+            request = request.override(
+                system_message=append_to_system_message(
+                    getattr(request, "system_message", None), "智能体专属操作指南：\n" + bound_prompt
+                )
+            )
 
         # mention.v2 服务端预激活：Run 创建时冻结的 @skill 在这里确定性生效——
         # 不依赖模型读取 SKILL.md；readable 过滤保证运行中被撤权时失败关闭。
@@ -465,6 +497,11 @@ class SkillsMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Any],
     ):
         """包装工具调用，处理 skill 动态激活"""
+        guarded = self._skill_tool_requirement(request)
+        if guarded is not None:
+            current = await current_skill_dependencies(request.runtime.context)
+            if not self._skill_tool_allowed(request, guarded, current):
+                return self._denied_skill_tool(request)
         result = await handler(request)
         return self._process_tool_call_result(result, request)
 
@@ -474,8 +511,62 @@ class SkillsMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Any],
     ):
         """同步版本的工具调用包装"""
+        # The production chain is async; a sync call cannot bypass the current-grant check.
+        if self._skill_tool_requirement(request) is not None:
+            return self._denied_skill_tool(request)
         result = handler(request)
         return self._process_tool_call_result(result, request)
+
+    def _skill_tool_requirement(self, request):
+        context = request.runtime.context
+        name = request.tool_call.get("name")
+        slug = self._extract_skill_slug_from_skill_md_path((request.tool_call.get("args") or {}).get("file_path"))
+        if name == "read_file" and slug:
+            return ("skill", slug)
+        frozen = self._get_runtime_dependency_map(context)
+        if name not in set(normalize_string_list(getattr(context, "tools", None))) and any(
+            name in node.get("tools", []) for node in frozen.values()
+        ):
+            return ("tools", name)
+        metadata = getattr(getattr(request, "tool", None), "metadata", None) or {}
+        server = metadata.get("server")
+        if (
+            server
+            and server not in (getattr(context, "mcps", None) or [])
+            and any(server in node.get("mcps", []) for node in frozen.values())
+        ):
+            return ("mcps", server)
+        return None
+
+    def _skill_tool_allowed(self, request, requirement, current):
+        kind, value = requirement
+        context = request.runtime.context
+        frozen = self._get_runtime_dependency_map(context)
+        readable = self._get_readable_skills(context)
+        if kind == "skill":
+            return value in readable and value in current
+        state = request.runtime.state if isinstance(request.runtime.state, dict) else {}
+        pinned = getattr(context, "_mention_resolution", None) or {}
+        activated = normalize_string_list([*(state.get("activated_skills") or []), *(pinned.get("skill_slugs") or [])])
+        for slug in activated:
+            if slug not in readable or slug not in current:
+                continue
+            closure = expand_skill_closure([slug], frozen)
+            if any(child not in current for child in closure):
+                continue
+            if value in frozen.get(slug, {}).get(kind, []) and value in current[slug].get(kind, []):
+                return True
+        return False
+
+    @staticmethod
+    def _denied_skill_tool(request):
+        from langchain_core.messages import ToolMessage
+
+        return ToolMessage(
+            content="Skill 未激活、已停用、依赖已改变或授权已撤销，工具未执行。",
+            tool_call_id=request.tool_call["id"],
+            status="error",
+        )
 
     def _extract_skill_slug_from_skill_md_path(self, file_path: Any) -> str | None:
         """从文件路径中提取 skill slug"""

@@ -323,6 +323,8 @@ async def _activate_user_credential(*, db, uid: str, meta: dict | None):
 def _apply_subagent_runtime_context(input_context: dict, meta: dict | None) -> None:
     """把子智能体 run 的父线程和文件线程信息注入运行 context。"""
     meta = meta or {}
+    if meta.get("public_session_id") and meta.get("public_file_thread_id"):
+        input_context["file_thread_id"] = str(meta["public_file_thread_id"])
     # 仅对子智能体类型的 run 生效
     if not meta.get("subagent_runtime") and meta.get("run_type") != "subagent":
         return

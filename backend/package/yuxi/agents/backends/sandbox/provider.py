@@ -6,10 +6,13 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from contextvars import ContextVar
 
 from yuxi.utils.logging_config import logger
 
 from .provisioner_client import ProvisionerClient, SandboxRecord
+
+public_sandbox_run: ContextVar[str | None] = ContextVar("public_sandbox_run", default=None)
 
 
 def sandbox_provisioner_token() -> str:
@@ -25,12 +28,15 @@ def sandbox_id_for_thread(thread_id: str, skills_thread_id: str | None = None, *
     uid_id = str(uid or "").strip()
     scope = file_thread_id if skills_id == file_thread_id else f"{file_thread_id}:{skills_id}"
     identity = f"{uid_id}:{scope}" if uid_id else scope
+    if public_sandbox_run.get():
+        identity += ":run:" + public_sandbox_run.get()
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return digest[:12]
 
 
 def _sandbox_key(uid: str, file_thread_id: str, skills_thread_id: str) -> str:
-    return f"{uid}::{file_thread_id}::{skills_thread_id}"
+    key = f"{uid}::{file_thread_id}::{skills_thread_id}"
+    return key + "::" + public_sandbox_run.get() if public_sandbox_run.get() else key
 
 
 def normalize_env(env: dict | None) -> dict[str, str]:
@@ -80,6 +86,7 @@ class SandboxConnection:
     uid: str
     sandbox_id: str
     sandbox_url: str
+    run_id: str | None = None
 
 
 class ProvisionerSandboxProvider:
@@ -122,6 +129,7 @@ class ProvisionerSandboxProvider:
             uid=uid,
             sandbox_id=record.sandbox_id,
             sandbox_url=record.sandbox_url,
+            run_id=public_sandbox_run.get(),
         )
         self._connections[cache_key] = connection
         self._last_touch_at[cache_key] = time.time()
@@ -240,6 +248,15 @@ class ProvisionerSandboxProvider:
                 record=record,
             )
 
+    def release_run(self, run_id: str) -> None:
+        with self._lock:
+            selected = [item for item in self._connections.values() if item.run_id == run_id]
+        for connection in selected:
+            self._client.delete(connection.sandbox_id)
+            with self._lock:
+                self._connections.pop(connection.cache_key, None)
+                self._last_touch_at.pop(connection.cache_key, None)
+
     def shutdown(self) -> None:
         with self._lock:
             connections = list(self._connections.values())
@@ -255,6 +272,26 @@ class ProvisionerSandboxProvider:
 
 _sandbox_provider: ProvisionerSandboxProvider | None = None
 _sandbox_provider_lock = threading.Lock()
+
+
+def release_public_run(run_id: str) -> None:
+    if _sandbox_provider is not None:
+        _sandbox_provider.release_run(run_id)
+
+
+def destroy_public_run(*, run_id: str, uid: str, thread_id: str, file_thread_id: str, skills_thread_id: str) -> None:
+    """Idempotent cancellation cleanup also works after the creating worker has exited."""
+    token = public_sandbox_run.set(run_id)
+    try:
+        provider = get_sandbox_provider()
+        sandbox_id = sandbox_id_for_thread(file_thread_id, skills_thread_id, uid=uid)
+        provider._client.delete(sandbox_id)
+        with provider._lock:
+            key = _sandbox_key(uid, file_thread_id, skills_thread_id)
+            provider._connections.pop(key, None)
+            provider._last_touch_at.pop(key, None)
+    finally:
+        public_sandbox_run.reset(token)
 
 
 def init_sandbox_provider() -> ProvisionerSandboxProvider:

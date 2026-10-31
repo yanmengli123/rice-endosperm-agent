@@ -821,6 +821,7 @@ async def _process_agent_run(ctx, run_id, run):
         "agent_context_snapshot": payload.get("agent_context_snapshot"),
         "tool_approval_mode": payload.get("tool_approval_mode"),
         "public_session_id": (payload.get("public_context") or {}).get("session_id"),
+        "public_file_thread_id": (payload.get("public_context") or {}).get("file_thread_id"),
         "knowledge_scope_snapshot": payload.get("knowledge_scope_snapshot"),
         "mention_resolution": payload.get("mention_resolution"),
         "user_credential": payload.get("user_credential"),
@@ -854,6 +855,9 @@ async def _process_agent_run(ctx, run_id, run):
             await _finish_run_before_execution(run, "cancelled", error_type="cancelled", error_message="执行前已取消")
         return
     run_ctx = RunContext(run_id=run_id)
+    from yuxi.agents.backends.sandbox.provider import public_sandbox_run, release_public_run
+
+    sandbox_run_token = public_sandbox_run.set(run_id if payload.get("public_context") else None)
     writer = ChunkedEventWriter(
         run_id=run_id,
         thread_id=thread_id,
@@ -1239,6 +1243,13 @@ async def _process_agent_run(ctx, run_id, run):
         return
     finally:
         # 浏览器任务会话回收：在 worker Task 边界执行（工具继承的同一实例）；
+        try:
+            if payload.get("public_context"):
+                await asyncio.to_thread(release_public_run, run_id)
+        except Exception:
+            logger.exception(f"Public sandbox cleanup deferred to provisioner expiry: {run_id}")
+        finally:
+            public_sandbox_run.reset(sandbox_run_token)
         if payload.get("agent_runtime") == "dsh":
             from yuxi.agents.buildin.dsh.execution import settle_run_usage
 

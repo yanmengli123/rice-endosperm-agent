@@ -1485,6 +1485,18 @@ class PublicEndUser(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
+class PublicProject(Base):
+    __tablename__ = "public_projects"
+
+    id = Column(String(64), primary_key=True)
+    uid = Column(String, ForeignKey("users.uid"), nullable=False, index=True)
+    tenant_id = Column(BigInteger, ForeignKey("tenants.id"), nullable=False)
+    app_id = Column(String(64), ForeignKey("public_apps.id"), nullable=True)
+    name = Column(String(255), nullable=False)
+    archived = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class PublicSession(Base):
     __tablename__ = "public_sessions"
     __table_args__ = (UniqueConstraint("uid", "creation_key", name="uq_public_session_creation"),)

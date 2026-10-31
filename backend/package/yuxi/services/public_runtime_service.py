@@ -138,6 +138,19 @@ async def cleanup_cancelled_checkpoint(db, session, turn, run):
     from yuxi.repositories.agent_repository import AgentRepository
 
     if (run.input_payload or {}).get("agent_runtime") != "dsh":
+        from yuxi.agents.backends.sandbox.provider import destroy_public_run
+
+        runtime = run.input_payload.get("runtime") or {}
+        await asyncio.to_thread(
+            destroy_public_run,
+            run_id=run.id,
+            uid=run.uid,
+            thread_id=session.id,
+            file_thread_id=(run.input_payload.get("public_context") or {}).get("file_thread_id")
+            or runtime.get("file_thread_id")
+            or session.id,
+            skills_thread_id=runtime.get("skills_thread_id") or session.id,
+        )
         definition = await AgentRepository(db).get_by_slug(run.agent_slug)
         backend = agent_manager.get_agent(
             definition.backend_id if definition else session.config_snapshot["backend_id"]

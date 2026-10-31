@@ -229,6 +229,7 @@ async def dispatch_next_input(db, actor, session_id):
         **run.input_payload,
         "public_context": {
             "session_id": session.id,
+            "file_thread_id": session.config_snapshot.get("project_id") or session.id,
             "app_id": session.app_id,
             "turn_id": turn.id,
             "input_ids": [item.id for item in selected],
@@ -322,6 +323,7 @@ async def resume_turn(db, actor, session_id, event, *, key):
         **run.input_payload,
         "public_context": {
             "session_id": session.id,
+            "file_thread_id": session.config_snapshot.get("project_id") or session.id,
             "turn_id": turn.id,
             "input_ids": [],
             "resumed_run_id": parent_id,
@@ -476,8 +478,11 @@ async def register_public_child(db, creator, run, definition):
     actor = PublicActor(run.uid, run.tenant_id, context.get("app_id"))
     parent = await require_session(db, actor, context["session_id"])
     session = await db.get(PublicSession, run.conversation_thread_id)
+    run.input_payload = {**run.input_payload, "runtime": {
+        **run.input_payload["runtime"], "file_thread_id": parent.config_snapshot.get("project_id") or parent.id}}
     snapshot = {
         "backend_id": definition.backend_id,
+        "project_id": parent.config_snapshot.get("project_id") or parent.id,
         "agent_config": deepcopy(definition.config_json or {}),
         "model_policy": definition.model_policy,
         "model_spec": run.input_payload["model_spec"],
@@ -523,7 +528,8 @@ async def register_public_child(db, creator, run, definition):
         "agent_context_snapshot": snapshot["agent_config"].get("context", {}),
         "collaboration_limits": creator.input_payload["collaboration_limits"],
         "tool_approval_mode": snapshot["tool_approval_mode"],
-        "public_context": {"session_id": session.id, "app_id": session.app_id, "turn_id": turn.id, "input_ids": []},
+        "public_context": {"session_id": session.id, "app_id": session.app_id, "turn_id": turn.id, "input_ids": [],
+                           "file_thread_id": snapshot["project_id"]},
     }
     await append_event(
         db,

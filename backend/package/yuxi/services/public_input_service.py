@@ -24,11 +24,12 @@ def file_resource(file):
         "id": file.id,
         "object": "file",
         "filename": file.filename,
+        "mime_type": file.mime_type,
         "bytes": file.size_bytes,
         "created_at": unix_time(file.created_at),
         "expires_at": unix_time(file.expires_at),
         "purpose": "assistants",
-        "status": file.status,
+        "status": "parsed" if file.status == "ready" else file.status,
     }
 
 
@@ -42,7 +43,7 @@ async def require_file(db, actor, file_id, *, lock=False):
     if lock:
         stmt = stmt.with_for_update()
     file = await db.scalar(stmt.execution_options(populate_existing=True))
-    if file is None:
+    if file is None or file.status == "deleted":
         raise HTTPException(404, "附件不存在")
     if file.status == "draft":
         expiry = file.expires_at if file.expires_at.tzinfo else file.expires_at.replace(tzinfo=UTC)
@@ -238,7 +239,7 @@ async def prepare_input_files(db, input_id):
             raise RuntimeError("附件原文件校验失败")
         materialized = await asyncio.to_thread(
             _materialize_tmp_attachment_files,
-            thread_id=session.id,
+            thread_id=session.config_snapshot.get("project_id") or session.id,
             uid=session.uid,
             file_id=file.id,
             file_name=safe_name,

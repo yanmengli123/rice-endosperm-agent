@@ -61,6 +61,31 @@ def test_create_agent_composite_backend_requires_thread_id():
         create_agent_composite_backend(_runtime(thread_id=None))
 
 
+def test_public_run_sandbox_identity_is_distinct_and_cleanup_preserves_other_runs():
+    from unittest.mock import Mock
+    from yuxi.agents.backends.sandbox.provider import ProvisionerSandboxProvider, SandboxConnection, public_sandbox_run
+
+    identities = []
+    for run_id in ("first-run", "second-run"):
+        token = public_sandbox_run.set(run_id)
+        try:
+            identities.append(sandbox_id_for_thread("project", "skills", uid="alice"))
+        finally:
+            public_sandbox_run.reset(token)
+    assert identities[0] != identities[1]
+    provider = ProvisionerSandboxProvider.__new__(ProvisionerSandboxProvider)
+    provider._lock, provider._client = threading.Lock(), SimpleNamespace(delete=Mock())
+    provider._connections = {
+        key: SandboxConnection(key, "session", "project", "skills", "alice", identity, "http://sandbox", run_id)
+        for key, identity, run_id in zip(("a", "b"), identities, ("first-run", "second-run"), strict=True)
+    }
+    provider._last_touch_at = {"a": 1, "b": 1}
+    provider.release_run("first-run")
+    provider.release_run("first-run")
+    provider._client.delete.assert_called_once_with(identities[0])
+    assert set(provider._connections) == {"b"} and set(provider._last_touch_at) == {"b"}
+
+
 def test_create_agent_composite_backend_ignores_unprepared_context_skills(monkeypatch):
     monkeypatch.setattr("yuxi.agents.backends.sandbox.backend.get_sandbox_provider", lambda: object())
 

@@ -137,6 +137,10 @@ async def create_session(db, actor, payload, *, key, report_created=False):
     user = await db.scalar(select(User).where(User.uid == actor.uid))
     knowledge_scope = await resolve_effective_knowledge_scope(db=db, user=user, agent_slug=agent.slug)
     session_id = str(uuid4())
+    from yuxi.services.public_project_service import create_project, require_project
+
+    project = (await require_project(db, actor, payload.project_id, active=True) if payload.project_id
+               else await create_project(db, actor, name=payload.title))
     conversation = await ConversationRepository(db).add_conversation(
         uid=actor.uid,
         agent_id=agent.slug,
@@ -155,6 +159,7 @@ async def create_session(db, actor, payload, *, key, report_created=False):
         creation_hash=fingerprint,
         title=payload.title,
         config_snapshot={
+            "project_id": project.id,
             "backend_id": agent.backend_id,
             "agent_config": deepcopy(agent.config_json or {}),
             "model_spec": model,

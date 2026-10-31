@@ -190,6 +190,7 @@ class BaseContext:
         metadata={"configurable": False, "hide": True},
     )
     agent_slug: str | None = field(default=None, metadata={"configurable": False, "hide": True})
+    file_thread_id: str | None = field(default=None, metadata={"configurable": False, "hide": True})
 
     uid: str = field(
         default_factory=lambda: str(uuid.uuid4()),

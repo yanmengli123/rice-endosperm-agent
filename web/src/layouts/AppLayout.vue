@@ -176,6 +176,7 @@ const mainList = computed(() => {
     icon: FolderKanban,
     activeIcon: FolderKanban
   })
+  items.push({ name: '协作会话', path: '/sessions', icon: Users, activeIcon: Users })
 
   items.push({
     name: '文献库',

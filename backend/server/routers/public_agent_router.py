@@ -3,14 +3,15 @@
 from copy import deepcopy
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from server.utils.auth_middleware import get_db
 from server.utils.public_auth import authenticate_public_request
 from yuxi.services import public_query_service as queries
 from yuxi.services.public_api_schemas import SessionCreate, SessionEventCreate, SessionUpdate
+from pydantic import BaseModel, ConfigDict, Field
 from yuxi.services.public_control_service import submit_event
 from yuxi.services.public_event_service import session_event_stream, validate_cursor
 from yuxi.services.public_runtime_service import kick_public_session
@@ -51,6 +52,139 @@ def stream_response(request, actor, session_id, sequence=0, *, status_code=200):
     )
 
 
+class ProjectCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, max_length=255)
+
+
+@public_agents.get("/projects")
+async def projects(actor=Depends(authenticate_public_request), db=Depends(get_db)):
+    from yuxi.services.public_project_service import project_resource
+    from yuxi.storage.postgres.models_business import PublicProject
+
+    rows = await db.scalars(
+        select(PublicProject)
+        .where(
+            PublicProject.uid == actor.uid,
+            PublicProject.tenant_id == actor.tenant_id,
+            PublicProject.app_id == actor.app_id,
+            PublicProject.archived.is_(False),
+        )
+        .order_by(PublicProject.created_at.desc())
+        .limit(100)
+    )
+    return {"object": "list", "data": [project_resource(row) for row in rows]}
+
+
+@public_agents.post("/projects", status_code=201)
+async def project_create(payload: ProjectCreate, actor=Depends(authenticate_public_request), db=Depends(get_db)):
+    from yuxi.services.public_project_service import create_project, project_resource
+
+    result = await create_project(db, actor, name=payload.name)
+    await db.commit()
+    return project_resource(result)
+
+
+@public_agents.post("/projects/{project_id}/archive")
+async def project_archive(project_id: str, actor=Depends(authenticate_public_request), db=Depends(get_db)):
+    from yuxi.services.public_project_service import require_project, project_resource
+
+    project = await require_project(db, actor, project_id)
+    project.archived = True
+    await db.commit()
+    return project_resource(project)
+
+
+@public_agents.get("/sessions/{session_id}/files")
+async def project_files(
+    session_id: str, path: str | None = None, actor=Depends(authenticate_public_request), db=Depends(get_db)
+):
+    from yuxi.agents.backends.sandbox import (
+        ensure_thread_dirs,
+        resolve_virtual_path,
+        sandbox_outputs_dir,
+        sandbox_uploads_dir,
+        sandbox_workspace_dir,
+        virtual_path_for_thread_file,
+    )
+    from yuxi.services.thread_files_service import _list_directory_entries
+
+    session = await require_session(db, actor, session_id)
+    file_thread = session.config_snapshot.get("project_id") or session.id
+    ensure_thread_dirs(file_thread, actor.uid)
+    roots = [
+        sandbox_outputs_dir(file_thread).resolve(),
+        sandbox_uploads_dir(file_thread).resolve(),
+        sandbox_workspace_dir(file_thread, actor.uid).resolve(),
+    ]
+    if path:
+        try:
+            target = resolve_virtual_path(file_thread, path, uid=actor.uid)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        if not any(target.is_relative_to(root) for root in roots):
+            raise HTTPException(403, "目录不可访问")
+        if not target.is_dir():
+            raise HTTPException(404, "目录不存在")
+        entries = _list_directory_entries(file_thread, actor.uid, target)
+    else:
+        entries = [
+            {"name": root.name, "path": virtual_path_for_thread_file(file_thread, root, uid=actor.uid), "is_dir": True}
+            for root in roots
+        ]
+    for entry in entries:
+        if not entry["is_dir"]:
+            entry["artifact_url"] = f"/api/v1/agents/sessions/{session_id}/artifacts/{entry['path'].lstrip('/')}"
+    return {"files": entries, "project_id": file_thread}
+
+
+@public_agents.post("/sessions/{session_id}/files", status_code=201)
+async def upload_project_file(
+    session_id: str,
+    file: UploadFile,
+    relative_path: str = Form(..., min_length=1, max_length=1024),
+    actor=Depends(authenticate_public_request),
+    db=Depends(get_db),
+):
+    from pathlib import PurePosixPath
+    from yuxi.agents.backends.sandbox import ensure_thread_dirs, resolve_virtual_path
+    from yuxi.utils.paths import VIRTUAL_PATH_UPLOADS
+    from yuxi.utils.upload_utils import read_upload_with_limit
+
+    session = await require_session(db, actor, session_id, lock=True)
+    if session.archived:
+        raise HTTPException(409, "会话已归档")
+    parts = PurePosixPath(relative_path).parts
+    if (
+        not parts
+        or relative_path.startswith("/")
+        or "\\" in relative_path
+        or any(part in {".", ".."} or ":" in part or any(ord(c) < 32 for c in part) for part in parts)
+    ):
+        raise HTTPException(422, "文件夹相对路径无效")
+    file_thread = session.config_snapshot.get("project_id") or session.id
+    ensure_thread_dirs(file_thread, actor.uid)
+    virtual = f"{VIRTUAL_PATH_UPLOADS}/project-files/{'/'.join(parts)}"
+    try:
+        target = resolve_virtual_path(file_thread, virtual, uid=actor.uid)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+    data = await read_upload_with_limit(file, max_size_bytes=5 * 1024 * 1024, too_large_message="文件超过 5 MiB")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with target.open("xb") as output:
+            output.write(data)
+    except FileExistsError:
+        raise HTTPException(409, "项目中已存在同名文件，请更名后上传") from None
+    return {
+        "name": target.name,
+        "path": virtual,
+        "is_dir": False,
+        "size": len(data),
+        "artifact_url": f"/api/v1/agents/sessions/{session_id}/artifacts/{virtual.lstrip('/')}",
+    }
+
+
 @public_agents.post("/sessions", status_code=201)
 async def create(
     payload: SessionCreate,
@@ -87,6 +221,20 @@ async def sessions(
     return await queries.list_sessions(
         db, actor, after=after, limit=limit, order=order, archived=archived, agent_id=agent_id, is_pinned=is_pinned
     )
+
+
+@public_agents.get("/sessions/search")
+async def search(
+    q: str = Query(min_length=1, max_length=200),
+    agent_id: str | None = None,
+    limit: int = Query(20, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    actor=Depends(authenticate_public_request),
+    db=Depends(get_db),
+):
+    from yuxi.services.public_capability_service import search_sessions
+
+    return await search_sessions(db, actor, q, agent_id=agent_id, limit=limit, offset=offset)
 
 
 @public_agents.get("/sessions/{session_id}")
@@ -151,7 +299,10 @@ async def queue(session_id: str, actor=Depends(authenticate_public_request), db=
         await db.scalars(
             select(PublicInput)
             .where(PublicInput.session_id == session_id, PublicInput.status == "pending")
-            .order_by(PublicInput.received_seq)
+            .order_by(
+                case((PublicInput.id == session.priority_input_id, 0), (PublicInput.kind == "steer", 1), else_=2),
+                PublicInput.received_seq,
+            )
             .limit(100)
         )
     )
@@ -160,6 +311,9 @@ async def queue(session_id: str, actor=Depends(authenticate_public_request), db=
         "thread_id": session_id,
         "queue_paused": session.queue_paused,
         "tree_paused": session.tree_paused,
+        "status": "paused"
+        if session.queue_paused or session.tree_paused
+        else ("running" if turn and turn.status in {"in_progress", "requires_action", "cancelling"} else "ready"),
         "current_turn_id": turn.id if turn else None,
         "inputs": [await queries.input_resource(db, actor, session_id, row.id) for row in rows],
     }
@@ -336,7 +490,9 @@ async def cooperation(session_id: str, actor=Depends(authenticate_public_request
 
 
 @public_agents.get("/sessions/{session_id}/state")
-async def state(session_id: str, actor=Depends(authenticate_public_request), db=Depends(get_db)):
+async def state(
+    session_id: str, include_relations: bool = True, actor=Depends(authenticate_public_request), db=Depends(get_db)
+):
     from yuxi.services.public_execution_service import latest_turn
     from yuxi.storage.postgres.models_business import AgentRun
     from yuxi.agents.buildin import agent_manager
@@ -364,7 +520,10 @@ async def state(session_id: str, actor=Depends(authenticate_public_request), db=
     value = extract_agent_state(saved.values if saved else {})
     # File contents stay behind authorized artifact reads; no raw checkpoint is returned.
     value["files"] = {path: {} for path in value["files"]}
-    return {"agent_state": value}
+    result = {"agent_state": value}
+    if include_relations:
+        result["cooperation"] = await cooperation(session_id, actor, db)
+    return result
 
 
 @public_agents.get("/sessions/{session_id}/attachments")
@@ -382,6 +541,7 @@ async def attachments(session_id: str, actor=Depends(authenticate_public_request
                 PublicFile.uid == actor.uid,
                 PublicFile.tenant_id == actor.tenant_id,
                 PublicFile.app_id == actor.app_id,
+                PublicFile.status != "deleted",
             )
             .order_by(PublicFile.created_at, PublicFile.id)
             .limit(100)
@@ -414,18 +574,87 @@ async def attachment_content(
     return await file_content(file_id, actor, db)
 
 
+@public_agents.delete("/sessions/{session_id}/attachments/{file_id}")
+async def delete_attachment(
+    session_id: str, file_id: str, actor=Depends(authenticate_public_request), db=Depends(get_db)
+):
+    from yuxi.services.public_capability_service import delete_attachment as delete
+
+    result = await delete(db, actor, session_id, file_id)
+    await db.commit()
+    return result
+
+
+class SaveArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=4096)
+    destination_path: str | None = Field(default=None, min_length=1, max_length=4096)
+
+
+@public_agents.post("/sessions/{session_id}/artifacts/save")
+async def save_artifact(
+    session_id: str, payload: SaveArtifact, actor=Depends(authenticate_public_request), db=Depends(get_db)
+):
+    from yuxi.services.public_capability_service import save_artifact as save
+
+    result = await save(db, actor, session_id, payload.path, payload.destination_path)
+    await db.commit()
+    return result
+
+
+@public_agents.get("/sessions/{session_id}/audits")
+async def audits(session_id: str, request: Request, actor=Depends(authenticate_public_request), db=Depends(get_db)):
+    from yuxi.services.public_capability_service import thread_audits
+
+    user = await db.scalar(select(User).where(User.uid == actor.uid))
+    if (
+        actor.app_id
+        or user.role != "superadmin"
+        or request.headers.get("authorization", "").removeprefix("Bearer ").startswith("yxkey_")
+    ):
+        raise HTTPException(403, "仅超级管理员登录会话可读取模型与工具审计")
+    return await thread_audits(db, actor, session_id)
+
+
+@public_agents.post("/sessions/{session_id}/compress")
+async def compress(session_id: str, actor=Depends(authenticate_public_request), db=Depends(get_db)):
+    from yuxi.services.public_compression_service import compress_session
+
+    return await compress_session(db, actor, session_id)
+
+
 @public_agents.get("/sessions/{session_id}/artifacts/{path:path}")
-async def artifact(session_id: str, path: str, actor=Depends(authenticate_public_request), db=Depends(get_db)):
+async def artifact(
+    session_id: str,
+    path: str,
+    download: bool = False,
+    preview: bool = False,
+    actor=Depends(authenticate_public_request),
+    db=Depends(get_db),
+):
+    import mimetypes
     from fastapi.responses import FileResponse
     from yuxi.services.thread_files_service import resolve_thread_artifact_view
 
-    await require_session(db, actor, session_id)
-    target = await resolve_thread_artifact_view(thread_id=session_id, current_uid=actor.uid, db=db, path=path)
+    session = await require_session(db, actor, session_id)
+    target = await resolve_thread_artifact_view(
+        thread_id=session_id,
+        current_uid=actor.uid,
+        db=db,
+        path=path,
+        file_thread_id=session.config_snapshot.get("project_id") or session.id,
+    )
+    mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    # Active documents never execute in the product origin, including SVG/HTML previews.
+    inline = preview and not download
+    if inline and mime not in {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"}:
+        mime = "text/plain"
     return FileResponse(
         target,
         filename=target.name,
-        media_type="application/octet-stream",
-        headers={"X-Content-Type-Options": "nosniff"},
+        media_type=mime,
+        content_disposition_type="inline" if inline else "attachment",
+        headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox; default-src 'none'"},
     )
 
 
