@@ -27,6 +27,10 @@ GATEWAY_URL = os.getenv("E2E_GATEWAY_URL", "http://127.0.0.1:9088").rstrip("/")
 
 # 桌面端 yuxi.rs 实际调用的、且必须经网关放行的路由（uri, methods）。
 REQUIRED_ROUTES: dict[str, set[str]] = {
+    # CLI 和运维在认证前读取服务能力与健康状态。
+    "/api/system/health": {"GET"},
+    "/api/system/discovery": {"GET"},
+    "/api/system/ready": {"GET"},
     "/api/browser/devices": {"GET"},
     "/api/browser/devices/*": {"DELETE"},
     "/api/chat/attachments/tmp": {"POST"},

@@ -95,6 +95,15 @@ routes:
     priority: 120
     upstream_id: yuxi-backend
 
+  - id: yuxi-system-discovery
+    name: yuxi-system-discovery
+    uris:
+      - /api/system/health
+      - /api/system/discovery
+    methods: [GET]
+    priority: 120
+    upstream_id: yuxi-backend
+
   - id: yuxi-personal-mcp-oauth
     name: yuxi-personal-mcp-oauth
     uri: /api/system/mcp-oauth/*
