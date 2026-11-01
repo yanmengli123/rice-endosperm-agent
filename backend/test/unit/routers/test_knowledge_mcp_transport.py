@@ -25,6 +25,10 @@ def request(headers):
     return Request({"type": "http", "headers": [(key.encode(), value.encode()) for key, value in headers.items()]})
 
 
+def rpc_payload(identifier, method, params=None):
+    return {"jsonrpc": "2.0", "id": identifier, "method": method, "params": params or {}}
+
+
 async def test_mcp_auth_requires_a_live_scoped_key_and_matching_tenant(mcp_auth):
     user, key, verify = mcp_auth
     req = request({"authorization": "Bearer yxkey_test"})
@@ -44,7 +48,8 @@ async def test_mcp_auth_requires_a_live_scoped_key_and_matching_tenant(mcp_auth)
     with pytest.raises(HTTPException):
         await transport.authenticate_knowledge_request(request({"authorization": "Bearer jwt"}), None)
     with pytest.raises(HTTPException):
-        await transport.authenticate_knowledge_request(request({"authorization": "Bearer yxkey_test", "origin": "https://example.com"}), None)
+        await transport.authenticate_knowledge_request(
+            request({"authorization": "Bearer yxkey_test", "origin": "https://example.com"}), None)
 
 
 async def test_real_streamable_http_handshake_tools_and_revocation(monkeypatch, mcp_auth):
@@ -60,15 +65,19 @@ async def test_real_streamable_http_handshake_tools_and_revocation(monkeypatch, 
     mcp = transport.KnowledgeMCP()
     headers = {"Authorization": "Bearer yxkey_test", "Accept": "application/json, text/event-stream"}
     async with mcp.manager.run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=mcp), base_url="http://localhost", headers=headers) as client:
-            initialized = await client.post("/api/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "compat-test", "version": "1"}}})
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=mcp), base_url="http://localhost",
+                                     headers=headers) as client:
+            initialize_params = {"protocolVersion": "2025-03-26", "capabilities": {},
+                                 "clientInfo": {"name": "compat-test", "version": "1"}}
+            initialized = await client.post("/api/mcp", json=rpc_payload(1, "initialize", initialize_params))
             assert initialized.status_code == 200
             assert "serverInfo" in initialized.json()["result"]
-            tools = await client.post("/api/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+            tools = await client.post("/api/mcp", json=rpc_payload(2, "tools/list"))
             assert {item["name"] for item in tools.json()["result"]["tools"]} == set(transport.TOOLS)
-            result = await client.post("/api/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "query_kb", "arguments": {"kb_id": "kb1", "query_text": "Wx"}}})
+            tool_call = {"name": "query_kb", "arguments": {"kb_id": "kb1", "query_text": "Wx"}}
+            result = await client.post("/api/mcp", json=rpc_payload(3, "tools/call", tool_call))
             assert result.json()["result"]["structuredContent"]["results"][0]["file_id"] == "f1"
             call.assert_awaited_once()
             verify.return_value = (None, None)
-            revoked = await client.post("/api/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}})
+            revoked = await client.post("/api/mcp", json=rpc_payload(4, "tools/list"))
             assert revoked.status_code == 401

@@ -33,6 +33,20 @@ def agent_resource(agent):
     return {"id": agent.slug, "object": "agent", "name": agent.name, "description": agent.description}
 
 
+@public_agents.get('/sessions/{session_id}/mention-agents')
+async def mention_agents(session_id: str, actor=Depends(authenticate_public_request), db=Depends(get_db)):
+    from yuxi.knowledge.planning.mention_protocol import _agent_allowed_slugs
+    from yuxi.repositories.agent_repository import AgentRepository
+
+    session = await require_session(db, actor, session_id)
+    agent = await visible_session_agent(db, actor, session)
+    frozen = _agent_allowed_slugs(session.config_snapshot['agent_config'], 'subagents') or set()
+    current = _agent_allowed_slugs(agent.config_json, 'subagents') or set()
+    user = await db.scalar(select(User).where(User.uid == actor.uid))
+    agents = await AgentRepository(db).list_visible_subagents(user=user)
+    return {'data': [agent_resource(candidate) for candidate in agents if candidate.slug in frozen & current]}
+
+
 @public_agents.get("")
 @public_agents.get("/", include_in_schema=False)
 async def list_agents(actor=Depends(authenticate_public_request), db=Depends(get_db)):

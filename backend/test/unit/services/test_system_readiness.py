@@ -8,7 +8,9 @@ import pytest
 from yuxi.services.readiness_service import check_readiness
 
 
-@pytest.mark.parametrize("schema,age,initialized,ready", [(True, 1, True, True), (False, 1, True, False), (True, 201, True, False), (True, 1, False, False)])
+@pytest.mark.parametrize("schema,age,initialized,ready", [
+    (True, 1, True, True), (False, 1, True, False), (True, 201, True, False), (True, 1, False, False),
+])
 async def test_readiness_requires_schema_initialization_queue_and_fresh_worker(schema, age, initialized, ready):
     db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar=lambda: schema)))
 

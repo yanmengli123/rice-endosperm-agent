@@ -1,5 +1,6 @@
 <template>
   <section class="public-app-settings">
+    <AppUsagePanel ref="usagePanel" :apps="apps" />
     <div class="app-heading">
       <h3>公开 API 应用</h3>
       <a-button @click="edit()">创建应用</a-button>
@@ -85,6 +86,8 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { publicAppApi } from '@/apis/public_app_api'
+import AppUsagePanel from '@/components/AppUsagePanel.vue'
+const usagePanel = ref(null)
 
 const apps = ref([]),
   keys = ref([]),
@@ -112,6 +115,7 @@ const action = async (fn) => {
   error.value = ''
   try {
     await fn()
+    await usagePanel.value?.refresh()
   } catch (e) {
     error.value = e.message || '应用操作失败'
   } finally {

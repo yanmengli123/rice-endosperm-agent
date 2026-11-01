@@ -3,6 +3,7 @@ import { apiGet, apiPost, apiPut } from './base'
 const path = '/api/user/apps'
 export const publicAppApi = {
   list: () => apiGet(path),
+  usage: (days = 30, options = {}) => apiGet(`${path}/usage`, { ...options, params: { days } }),
   options: () => apiGet(`${path}/grant-options`),
   create: (data) => apiPost(path, data),
   update: (id, data) => apiPut(`${path}/${encodeURIComponent(id)}`, data),

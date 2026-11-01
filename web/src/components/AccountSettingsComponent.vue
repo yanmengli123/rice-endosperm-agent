@@ -106,11 +106,13 @@
     <div class="account-card user-config-card">
       <UserConfigSettingsCard />
     </div>
+    <UserActivityHeatmap />
   </div>
 </template>
 
 <script setup>
 import UserConfigSettingsCard from '@/components/UserConfigSettingsCard.vue'
+import UserActivityHeatmap from '@/components/UserActivityHeatmap.vue'
 
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'

@@ -14,6 +14,7 @@
           :results="parsedData(resultContent).results"
         />
 
+        <div v-else-if="parsedData(resultContent).content" class="raw-content">{{ parsedData(resultContent).content }}</div>
         <div v-else-if="parsedData(resultContent).rawText" class="raw-content">
           {{ parsedData(resultContent).rawText }}
         </div>

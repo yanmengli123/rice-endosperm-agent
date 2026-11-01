@@ -5,10 +5,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_db, get_required_user
-from yuxi.agents.skills.edit import SkillEditConflict, bound_skill, list_versions, package_state, release_version, save_package
+from yuxi.agents.skills.edit import (
+    SkillEditConflict, bound_skill, list_versions, package_state, release_version, save_package,
+)
 from yuxi.storage.postgres.models_business import User
 
 router = APIRouter()
+
+REQUIRED_USER = Depends(get_required_user)
+DB_SESSION = Depends(get_db)
 
 
 class SkillRevisionRequest(BaseModel):
@@ -32,7 +37,7 @@ def raise_edit_error(error):
 
 
 @router.get("/{slug}/content")
-async def read_package(slug: str, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def read_package(slug: str, user: User = REQUIRED_USER, db: AsyncSession = DB_SESSION):
     try:
         return {"success": True, "data": await package_state(db, slug=slug, operator=user)}
     except ValueError as error:
@@ -40,16 +45,20 @@ async def read_package(slug: str, user: User = Depends(get_required_user), db: A
 
 
 @router.put("/{slug}/content")
-async def update_package(slug: str, payload: SkillPackageRequest, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def update_package(slug: str, payload: SkillPackageRequest,
+                         user: User = REQUIRED_USER, db: AsyncSession = DB_SESSION):
     try:
-        result = await save_package(db, slug=slug, operator=user, expected_revision=payload.expected_revision, files=payload.files, deletions=payload.deletions, dependencies=payload.dependencies.model_dump() if payload.dependencies is not None else None)
+        dependencies = payload.dependencies.model_dump() if payload.dependencies is not None else None
+        result = await save_package(db, slug=slug, operator=user,
+                                    expected_revision=payload.expected_revision, files=payload.files,
+                                    deletions=payload.deletions, dependencies=dependencies)
         return {"success": True, "data": result}
     except ValueError as error:
         raise_edit_error(error)
 
 
 @router.get("/{slug}/versions")
-async def read_versions(slug: str, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def read_versions(slug: str, user: User = REQUIRED_USER, db: AsyncSession = DB_SESSION):
     try:
         return {"success": True, "data": await list_versions(db, slug=slug, operator=user)}
     except ValueError as error:
@@ -57,23 +66,28 @@ async def read_versions(slug: str, user: User = Depends(get_required_user), db: 
 
 
 @router.post("/{slug}/versions")
-async def publish_version(slug: str, payload: SkillRevisionRequest, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def publish_version(slug: str, payload: SkillRevisionRequest,
+                          user: User = REQUIRED_USER, db: AsyncSession = DB_SESSION):
     try:
-        return {"success": True, "data": await release_version(db, slug=slug, operator=user, expected_revision=payload.expected_revision)}
+        data = await release_version(db, slug=slug, operator=user, expected_revision=payload.expected_revision)
+        return {"success": True, "data": data}
     except ValueError as error:
         raise_edit_error(error)
 
 
 @router.post("/{slug}/versions/{version}/restore")
-async def restore_version(slug: str, version: str, payload: SkillRevisionRequest, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def restore_version(slug: str, version: str, payload: SkillRevisionRequest,
+                          user: User = REQUIRED_USER, db: AsyncSession = DB_SESSION):
     try:
-        return {"success": True, "data": await save_package(db, slug=slug, operator=user, expected_revision=payload.expected_revision, restore_version=version)}
+        data = await save_package(db, slug=slug, operator=user, restore_version=version,
+                                  expected_revision=payload.expected_revision)
+        return {"success": True, "data": data}
     except ValueError as error:
         raise_edit_error(error)
 
 
 @router.get("/agents/{agent_slug}/bound")
-async def read_bound_skill(agent_slug: str, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def read_bound_skill(agent_slug: str, user: User = REQUIRED_USER, db: AsyncSession = DB_SESSION):
     try:
         return {"success": True, "data": await bound_skill(db, operator=user, agent_slug=agent_slug)}
     except ValueError as error:
@@ -81,7 +95,7 @@ async def read_bound_skill(agent_slug: str, user: User = Depends(get_required_us
 
 
 @router.post("/agents/{agent_slug}/bound")
-async def create_bound_skill(agent_slug: str, user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def create_bound_skill(agent_slug: str, user: User = REQUIRED_USER, db: AsyncSession = DB_SESSION):
     try:
         return {"success": True, "data": await bound_skill(db, operator=user, agent_slug=agent_slug, create=True)}
     except ValueError as error:

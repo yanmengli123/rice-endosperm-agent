@@ -98,6 +98,8 @@ const TOOL_RENDERERS = {
   subagent_status: SubagentLifecycleTool,
   task: TaskTool,
   tavily_search: WebSearchTool,
+  web_search: WebSearchTool,
+  web_fetch: WebSearchTool,
   text_to_img_qwen_image: ImageTool,
   write_file: WriteFileTool,
   write_todos: TodoListTool

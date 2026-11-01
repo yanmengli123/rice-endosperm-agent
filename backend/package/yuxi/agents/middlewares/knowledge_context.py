@@ -40,7 +40,7 @@ _KNOWLEDGE_SOURCE_TOOLS = {
     "open_kb_document",
     "find_kb_document",
 }
-_WEB_SOURCE_TOOLS = {"tavily_search", "web_search", "search_web"}
+_WEB_SOURCE_TOOLS = {"tavily_search", "web_search", "search_web", "web_fetch", "fetch_web"}
 
 
 def _mention_directive_prompt(context) -> str | None:

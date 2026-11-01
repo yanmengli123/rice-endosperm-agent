@@ -220,11 +220,11 @@ export class MessageProcessor {
 
       for (const toolCall of msg.tool_calls) {
         const toolName = (toolCall?.name || toolCall?.function?.name || '').toLowerCase()
-        if (!toolName.includes('tavily_search')) continue
+        if (!['tavily_search', 'web_search', 'web_fetch'].some((name) => toolName.includes(name))) continue
 
         const content = toolCall?.tool_call_result?.content
         const parsed = parseToolResultContent(content)
-        const results = Array.isArray(parsed?.results) ? parsed.results : []
+        const results = Array.isArray(parsed?.results) ? parsed.results : parsed?.url && parsed?.content ? [parsed] : []
         if (results.length === 0) continue
 
         for (const item of results) {
@@ -239,7 +239,7 @@ export class MessageProcessor {
             title,
             url,
             score: typeof item?.score === 'number' ? item.score : null,
-            content: typeof item?.content === 'string' ? item.content : '',
+            content: item?.relevant_content || item?.snippet || (typeof item?.content === 'string' ? item.content : ''),
             published_date: typeof item?.published_date === 'string' ? item.published_date : ''
           })
         }

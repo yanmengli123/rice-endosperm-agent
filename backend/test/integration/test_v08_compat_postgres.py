@@ -131,6 +131,7 @@ async def postgres(monkeypatch):
                 await conn.execute(text(f'ALTER TABLE "{table}" DROP COLUMN "{column}" CASCADE'))
         await manager._migration_0130_public_session_lifecycle(conn)
         await manager._migration_0131_public_projects(conn)
+        await manager._migration_0132_web_tools_and_app_usage(conn)
         # Idempotent DDL also works after interrupted deployment/replay.
         await manager._migration_0124_skill_package_versions(conn)
         await manager._migration_0125_personal_mcp_oauth(conn)
@@ -140,6 +141,7 @@ async def postgres(monkeypatch):
         await manager._migration_0129_public_session_control_plane(conn)
         await manager._migration_0130_public_session_lifecycle(conn)
         await manager._migration_0131_public_projects(conn)
+        await manager._migration_0132_web_tools_and_app_usage(conn)
     engine = create_async_engine(dsn, connect_args={"server_settings": {"search_path": schema}})
     monkeypatch.setenv("YUXI_SECRET_MASTER_KEY", "v08-test-master-key-over-32-characters-only")
     monkeypatch.setenv("YUXI_PUBLIC_URL", "https://yuxi.example")

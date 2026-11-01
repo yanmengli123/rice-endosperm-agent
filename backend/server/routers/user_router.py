@@ -48,6 +48,14 @@ MAX_ENV_VALUE_LENGTH = 32768
 MAX_USER_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
 
 
+@user_router.get('/message-activity')
+async def get_message_activity(current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+    from yuxi.repositories.user_activity_repository import message_activity
+    from yuxi.services.principal import resolve_tenant_id
+
+    return await message_activity(db, uid=current_user.uid, tenant_id=await resolve_tenant_id(db, current_user.uid))
+
+
 class APIKeyCreate(BaseModel):
     name: str
     user_id: int | None = None

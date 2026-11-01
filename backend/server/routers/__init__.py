@@ -29,6 +29,7 @@ from server.routers.tool_router import tools
 from server.routers.user_router import user_router
 from server.routers.public_app_router import apps
 from server.routers.workspace_router import workspace
+from server.routers.web_tools_router import web_tools
 
 _LITE_MODE = os.environ.get("LITE_MODE", "").lower() in ("true", "1")
 
@@ -52,6 +53,7 @@ router.include_router(tenants)  # /api/tenant/* 租户成员信息
 router.include_router(onboarding)  # 开户编排与激活兑换
 router.include_router(mcp)  # /api/system/mcp-servers/* MCP 服务管理
 router.include_router(mcp_oauth)
+router.include_router(web_tools)
 router.include_router(model_providers)  # /api/system/model-providers/* 独立模型配置
 router.include_router(skills)  # /api/system/skills/* Skills 管理
 router.include_router(user_skills)  # /api/skills/* 用户可用 Skills

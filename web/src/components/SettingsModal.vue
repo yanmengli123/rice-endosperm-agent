@@ -19,6 +19,9 @@
       <!-- 侧边栏 (Desktop) -->
       <div class="settings-sider">
         <div class="settings-sider-nav">
+          <div v-if="userStore.isSuperAdmin" class="sider-item" :class="{ activesec: activeTab === 'webSearch' }" @click="activeTab = 'webSearch'">
+            <Globe class="icon" :size="18" /><span>网络搜索</span>
+          </div>
           <div
             class="sider-item"
             :class="{ activesec: activeTab === 'account' }"
@@ -95,6 +98,7 @@
 
       <!-- 顶部导航 (Mobile) -->
       <div class="settings-mobile-nav">
+        <div v-if="userStore.isSuperAdmin" class="nav-item" :class="{ active: activeTab === 'webSearch' }" @click="activeTab = 'webSearch'">网络搜索</div>
         <div
           class="nav-item"
           :class="{ active: activeTab === 'account' }"
@@ -165,6 +169,7 @@
             <PublicAppSettings />
           </div>
           <div v-if="activeTab === 'mcpOAuth' && userStore.isLoggedIn"><McpOAuthSettings /></div>
+          <div v-if="activeTab === 'webSearch' && userStore.isSuperAdmin"><WebSearchSettings /></div>
 
           <div v-if="activeTab === 'agentEnv' && userStore.isLoggedIn">
             <AgentEnvSettingsCard />
@@ -190,13 +195,14 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useUserStore } from '@/stores/user'
-import { CircleUser, Settings, Key, SquareTerminal, User, Users, X } from '@lucide/vue'
+import { CircleUser, Settings, Key, SquareTerminal, User, Users, X, Globe } from '@lucide/vue'
 import AccountSettingsComponent from '@/components/AccountSettingsComponent.vue'
 import AgentEnvSettingsCard from '@/components/AgentEnvSettingsCard.vue'
 import BasicSettingsSection from '@/components/BasicSettingsSection.vue'
 import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
 import PublicAppSettings from '@/components/PublicAppSettings.vue'
 import McpOAuthSettings from '@/components/McpOAuthSettings.vue'
+import WebSearchSettings from '@/components/WebSearchSettings.vue'
 import UserManagementComponent from '@/components/UserManagementComponent.vue'
 import DepartmentManagementComponent from '@/components/DepartmentManagementComponent.vue'
 
@@ -225,7 +231,7 @@ const availableTabs = computed(() => {
   const tabs = []
   if (userStore.isLoggedIn) tabs.push('account', 'apiKeys', 'mcpOAuth', 'agentEnv')
   if (userStore.isAdmin) tabs.push('base', 'user')
-  if (userStore.isSuperAdmin) tabs.push('department')
+  if (userStore.isSuperAdmin) tabs.push('department', 'webSearch')
   return tabs
 })
 

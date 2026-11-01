@@ -27,7 +27,8 @@ async def authenticate_knowledge_request(request, db):
     user, key = await _verify_api_key(authorization.removeprefix("Bearer "), db)
     if user is None or key is None:
         raise HTTPException(401, "API Key 不可用")
-    if key.purpose != "external_agent" or not isinstance(key.scopes, list) or not {"knowledge:read", "knowledge", "*"}.intersection(key.scopes):
+    granted = isinstance(key.scopes, list) and bool({"knowledge:read", "knowledge", "*"}.intersection(key.scopes))
+    if key.purpose != "external_agent" or not granted:
         raise HTTPException(403, "API Key 缺少 knowledge:read 权限")
     from yuxi.services.principal import resolve_principal
 
@@ -39,12 +40,17 @@ async def authenticate_knowledge_request(request, db):
 
 class KnowledgeMCP:
     def __init__(self):
-        self.server = Server("Yuxi Knowledge", instructions="先 list_kbs，检索后用 file_id 和行号核对原文；检索候选不代表已核验科研证据。")
+        instructions = "先 list_kbs，检索后用 file_id 和行号核对原文；检索候选不代表已核验科研证据。"
+        self.server = Server("Yuxi Knowledge", instructions=instructions)
         self.server.list_tools()(self.list_tools)
         self.server.call_tool()(self.call_tool)
-        allowed_hosts = [value.strip() for value in os.getenv("YUXI_MCP_ALLOWED_HOSTS", "localhost:*,127.0.0.1:*,api:*").split(",") if value.strip()]
+        default_hosts = "localhost:*,127.0.0.1:*,api:*"
+        raw_hosts = os.getenv("YUXI_MCP_ALLOWED_HOSTS", default_hosts)
+        allowed_hosts = [value.strip() for value in raw_hosts.split(",") if value.strip()]
         allowed_hosts += [value[:-2] for value in allowed_hosts if value.endswith(":*")]
-        self.manager = StreamableHTTPSessionManager(self.server, stateless=True, json_response=True, security_settings=TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts))
+        security = TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts)
+        self.manager = StreamableHTTPSessionManager(self.server, stateless=True, json_response=True,
+                                                    security_settings=security)
 
     async def __call__(self, scope, receive, send):
         request = Request(scope, receive)
@@ -57,7 +63,11 @@ class KnowledgeMCP:
         await self.manager.handle_request(scope, receive, send)
 
     async def list_tools(self):
-        return [types.Tool(name=name, description=description, inputSchema=schema.model_json_schema(), annotations=types.ToolAnnotations(readOnlyHint=True, destructiveHint=False)) for name, (schema, description) in TOOLS.items()]
+        tools = []
+        for name, (schema, description) in TOOLS.items():
+            tools.append(types.Tool(name=name, description=description, inputSchema=schema.model_json_schema(),
+                                    annotations=types.ToolAnnotations(readOnlyHint=True, destructiveHint=False)))
+        return tools
 
     async def call_tool(self, name, arguments):
         try:
@@ -65,7 +75,8 @@ class KnowledgeMCP:
                 user = await authenticate_knowledge_request(self.server.request_context.request, db)
                 result = await execute_knowledge_tool(db, user, name, arguments)
             structured = result if isinstance(result, dict) else {"knowledge_bases": result}
-            return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))], structuredContent=structured)
+            content = types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))
+            return types.CallToolResult(content=[content], structuredContent=structured)
         except (ValueError, ValidationError) as error:
             payload = {"status": 400, "message": str(error)}
         except HTTPException as error:
@@ -73,7 +84,8 @@ class KnowledgeMCP:
         except Exception:
             logger.exception("Knowledge MCP tool failed: %s", name)
             payload = {"status": 500, "message": "知识服务暂不可用，请稍后重试"}
-        return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))], isError=True)
+        content = types.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))
+        return types.CallToolResult(content=[content], isError=True)
 
 
 knowledge_mcp = KnowledgeMCP()

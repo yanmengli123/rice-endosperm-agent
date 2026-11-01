@@ -1442,6 +1442,18 @@ class TaskRecord(Base):
         return data
 
 
+class WebToolSettings(Base):
+    """Global web providers; credential values are AES-GCM envelopes."""
+
+    __tablename__ = 'web_tool_settings'
+    id = Column(String(16), primary_key=True)
+    search_provider = Column(String(24), nullable=True)
+    fetch_provider = Column(String(24), nullable=True)
+    credentials = Column(JSONB_COMPAT, nullable=False, default=dict)
+    updated_by = Column(String(64), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class PublicApp(Base):
     __tablename__ = "public_apps"
 

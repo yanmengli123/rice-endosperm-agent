@@ -18,6 +18,7 @@ export const publicSessionApi = {
   search: (q) => request('/sessions/search?q=' + encodeURIComponent(q)),
   create: (payload, key) => request('/sessions', 'POST', payload, key),
   session: (id) => request(`/sessions/${id}`),
+  mentionAgents: (id) => request(`/sessions/${id}/mention-agents`),
   items: (id, after) =>
     request(`/sessions/${id}/items?limit=100${after ? '&after=' + encodeURIComponent(after) : ''}`),
   queue: (id) => request(`/sessions/${id}/queue`),

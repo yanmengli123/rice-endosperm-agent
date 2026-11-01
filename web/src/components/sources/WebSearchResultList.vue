@@ -13,7 +13,7 @@
             </a>
           </h5>
           <span v-if="typeof result.score === 'number'" class="result-score">
-            相关度: {{ (result.score * 100).toFixed(1) }}%
+            相关度: {{ ((result.score / (result.score_max || 1)) * 100).toFixed(1) }}%
           </span>
         </div>
 

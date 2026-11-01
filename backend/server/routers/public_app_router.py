@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from server.utils.auth_middleware import get_db, get_required_user
 from yuxi.services.principal import resolve_tenant_id
@@ -120,6 +120,26 @@ async def grant_options(user=Depends(owner), db=Depends(get_db)):
         "agents": [{"id": item.slug, "name": item.name} for item in agents],
         "knowledge_bases": [{"id": item["kb_id"], "name": item.get("name", item["kb_id"])} for item in kbs],
     }
+
+
+@apps.get('/usage')
+async def usage(days: int = Query(30, ge=1, le=365), user=Depends(owner), db=Depends(get_db)):
+    from datetime import timedelta
+    from yuxi.utils.datetime_utils import utc_now
+
+    tenant = await resolve_tenant_id(db, user.uid)
+    rows = (await db.execute(
+        text('SELECT * FROM yuxi_public_app_usage(:uid,:tenant,:since)'),
+        {'uid': user.uid, 'tenant': tenant, 'since': utc_now() - timedelta(days=days)},
+    )).mappings().all()
+    apps_by_id = {app.id: app for app in await db.scalars(select(PublicApp).where(
+        PublicApp.owner_uid == user.uid, PublicApp.tenant_id == tenant,
+    ))}
+    data = [dict(row, name=apps_by_id[row['app_id']].name) for row in rows]
+    counters = ('key_count', 'active_key_count', 'end_user_count', 'session_count',
+                'input_count', 'run_count', 'total_tokens', 'estimated_runs')
+    totals = {'app_count': len(data), **{name: sum(row[name] for row in data) for name in counters}}
+    return {'days': days, 'apps': data, 'totals': totals}
 
 
 @apps.post("", status_code=201)

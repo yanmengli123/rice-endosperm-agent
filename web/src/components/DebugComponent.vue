@@ -11,6 +11,7 @@
     <div :class="['log-viewer', { fullscreen: state.isFullscreen }]" ref="logViewer">
       <div class="control-panel">
         <div class="button-group">
+          <a-button @click="testCasesVisible = true">测试用例库</a-button>
           <a-button
             @click="fetchLogs"
             :loading="state.fetching"
@@ -137,6 +138,7 @@
       </a-modal>
     </div>
   </a-modal>
+  <DebugTestCases v-model:open="testCasesVisible" @launched="showModal = false" />
 </template>
 
 <script setup>
@@ -154,6 +156,8 @@ import {
 } from 'vue'
 
 const showModal = defineModel('show')
+const testCasesVisible = ref(false)
+import DebugTestCases from '@/components/DebugTestCases.vue'
 
 // 监听 showModal 变化，当打开时获取日志
 watch(showModal, (isOpen) => {

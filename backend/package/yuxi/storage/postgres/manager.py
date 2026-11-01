@@ -1230,6 +1230,72 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             await conn.execute(text(definition))
 
+    async def _migration_0132_web_tools_and_app_usage(self, conn) -> None:
+        from yuxi.storage.postgres.models_business import WebToolSettings
+
+        await conn.run_sync(lambda connection: WebToolSettings.__table__.create(connection, checkfirst=True))
+        await conn.execute(text(
+            "INSERT INTO web_tool_settings(id,credentials,updated_at) VALUES ('global','{}'::jsonb,now())"
+            " ON CONFLICT(id) DO NOTHING"))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_messages_conversation_created"
+            " ON messages(conversation_id, created_at)"))
+        schema = (await conn.execute(text('SELECT current_schema()'))).scalar_one()
+        quoted = '"' + schema.replace('"', '""') + '"'
+        await conn.execute(text(f"""
+            CREATE OR REPLACE FUNCTION {quoted}.yuxi_public_app_usage(
+                p_owner text, p_tenant bigint, p_since timestamptz)
+            RETURNS TABLE(app_id text, key_count bigint, active_key_count bigint, end_user_count bigint,
+                session_count bigint, input_count bigint, run_count bigint, total_tokens bigint,
+                estimated_runs bigint)
+            LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, {quoted} AS $usage$
+            BEGIN
+              IF NULLIF(current_setting('yuxi.uid', true), '') IS DISTINCT FROM p_owner
+                OR NULLIF(current_setting('yuxi.tenant_id', true), '') IS DISTINCT FROM p_tenant::text THEN
+                RAISE EXCEPTION 'App usage identity mismatch' USING ERRCODE = '42501';
+              END IF;
+              IF NOT EXISTS (SELECT 1 FROM users u JOIN tenant_memberships m ON m.uid=u.uid
+                WHERE u.uid=p_owner AND u.user_kind='human' AND u.is_deleted=0 AND NOT u.is_disabled
+                  AND m.tenant_id=p_tenant AND m.status='active') THEN
+                RAISE EXCEPTION 'App usage owner unavailable' USING ERRCODE = '42501';
+              END IF;
+              RETURN QUERY WITH owned AS (
+                SELECT a.id,a.enabled FROM public_apps a WHERE a.owner_uid=p_owner AND a.tenant_id=p_tenant
+              ), keys AS (
+                SELECT k.app_id,count(*) AS all_keys,
+                  count(*) FILTER(WHERE k.enabled AND (k.expires_at IS NULL OR k.expires_at>now())) AS valid_keys
+                FROM public_app_keys k JOIN owned a ON a.id=k.app_id GROUP BY k.app_id
+              ), end_users AS (
+                SELECT e.app_id,count(*) AS users FROM public_end_users e JOIN owned a ON a.id=e.app_id
+                WHERE e.tenant_id=p_tenant GROUP BY e.app_id
+              ), sessions AS (
+                SELECT s.app_id,count(*) AS sessions FROM public_sessions s JOIN owned a ON a.id=s.app_id
+                WHERE s.tenant_id=p_tenant GROUP BY s.app_id
+              ), inputs AS (
+                SELECT s.app_id,count(*) AS inputs FROM public_inputs i JOIN public_sessions s ON s.id=i.session_id
+                JOIN owned a ON a.id=s.app_id WHERE s.tenant_id=p_tenant GROUP BY s.app_id
+              ), runs AS (
+                SELECT s.app_id,count(r.run_id) AS runs,COALESCE(sum(l.total_tokens),0)::bigint AS tokens,
+                  count(l.id) FILTER(WHERE l.estimated) AS estimated
+                FROM public_turn_runs r JOIN public_sessions s ON s.id=r.session_id JOIN owned a ON a.id=s.app_id
+                LEFT JOIN usage_ledger l ON l.run_id=r.run_id AND l.tenant_id=p_tenant
+                WHERE s.tenant_id=p_tenant AND r.created_at>=p_since GROUP BY s.app_id
+              ) SELECT a.id::text,COALESCE(k.all_keys,0),CASE WHEN a.enabled THEN COALESCE(k.valid_keys,0) ELSE 0 END,
+                COALESCE(e.users,0),COALESCE(s.sessions,0),COALESCE(i.inputs,0),COALESCE(r.runs,0),
+                COALESCE(r.tokens,0),COALESCE(r.estimated,0)
+              FROM owned a LEFT JOIN keys k ON k.app_id=a.id LEFT JOIN end_users e ON e.app_id=a.id
+              LEFT JOIN sessions s ON s.app_id=a.id LEFT JOIN inputs i ON i.app_id=a.id
+              LEFT JOIN runs r ON r.app_id=a.id;
+            END $usage$;
+        """))
+        signature = f'{quoted}.yuxi_public_app_usage(text,bigint,timestamptz)'
+        await conn.execute(text(f'REVOKE ALL ON FUNCTION {signature} FROM PUBLIC'))
+        if (await conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname='yuxi_api_runtime'"))).scalar():
+            await conn.execute(text(f'GRANT SELECT,INSERT,UPDATE ON {quoted}.web_tool_settings TO yuxi_api_runtime'))
+            await conn.execute(text(f'GRANT EXECUTE ON FUNCTION {signature} TO yuxi_api_runtime'))
+        if (await conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname='yuxi_worker_runtime'"))).scalar():
+            await conn.execute(text(f'GRANT SELECT ON {quoted}.web_tool_settings TO yuxi_worker_runtime'))
+
     _VERSIONED_MIGRATIONS: list[tuple[str, str]] = [
         ("0001_p0_security", "_migration_0001_p0_security"),
         ("0002_tenant_foundation", "_migration_0002_tenant_foundation"),
@@ -1366,6 +1432,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ("0129_public_session_control_plane", "_migration_0129_public_session_control_plane"),
         ("0130_public_session_lifecycle", "_migration_0130_public_session_lifecycle"),
         ("0131_public_projects", "_migration_0131_public_projects"),
+        ("0132_web_tools_and_app_usage", "_migration_0132_web_tools_and_app_usage"),
     ]
 
     async def _migration_0115_literature_pdf_translation(self, conn) -> None:

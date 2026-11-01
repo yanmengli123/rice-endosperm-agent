@@ -14,5 +14,6 @@ async def system_readiness(request: Request):
         redis = await get_redis_client()
     except Exception:
         redis = None
-    result = await check_readiness(initialized=getattr(request.app.state, "initialized", False), db_context=pg_manager.get_async_session_context, redis=redis)
+    result = await check_readiness(initialized=getattr(request.app.state, "initialized", False),
+                                   db_context=pg_manager.get_async_session_context, redis=redis)
     return JSONResponse(result, status_code=200 if result["status"] == "ready" else 503)

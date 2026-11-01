@@ -1,13 +1,17 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { publicSessionApi as api } from '@/apis/public_session_api'
 import { useUserStore } from '@/stores/user'
 import ChatMessageContent from '@/components/widgets/ChatMessageContent.vue'
+import { formatMentionToken } from '@/utils/mention_utils'
 
 const route = useRoute()
 const router = useRouter()
 const user = useUserStore()
+const messagesElement = ref(null), mentionAgents = ref([])
+const sidebarPinned = ref(localStorage.getItem(`yuxi:sidebar:${user.uid}`) !== 'false'), sidebarOpen = ref(false)
+let restoringPosition = false, followBottom = true, readingTimer
 const agents = ref([]),
   projects = ref([]),
   sessions = ref([]),
@@ -43,6 +47,53 @@ const active = computed(() => ['in_progress', 'requires_action'].includes(sessio
 const draftKey = (id) => `yuxi:session-draft:${user.uid}:${id}`
 const cursorKey = (id) => draftKey(id) + ':cursor'
 const persistDraft = () => localStorage.setItem(draftKey(sid.value), draft.value)
+function pinSidebar() {
+  sidebarPinned.value = !sidebarPinned.value
+  localStorage.setItem(`yuxi:sidebar:${user.uid}`, String(sidebarPinned.value))
+  sidebarOpen.value = true
+}
+function saveReading(id = sid.value) {
+  const element = messagesElement.value
+  if (!id || !element || restoringPosition) return
+  const top = element.getBoundingClientRect().top
+  const anchor = [...element.querySelectorAll('[data-item-id]')].find(item => item.getBoundingClientRect().bottom > top)
+  localStorage.setItem(draftKey(id) + ':reading', JSON.stringify({ top: element.scrollTop, bottom: followBottom,
+    count: Math.min(items.value.length, 5000), anchor: anchor?.dataset.itemId, offset: anchor ? anchor.getBoundingClientRect().top - top : 0 }))
+}
+function onReadingScroll() {
+  const element = messagesElement.value
+  if (!element || restoringPosition) return
+  followBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 48
+  clearTimeout(readingTimer)
+  const id = sid.value
+  readingTimer = setTimeout(() => saveReading(id), 120)
+}
+async function restoreReading(id, version) {
+  const stored = localStorage.getItem(draftKey(id) + ':reading')
+  let reading
+  try { reading = stored ? JSON.parse(stored) : null } catch { localStorage.removeItem(draftKey(id) + ':reading') }
+  while (reading?.anchor && items.value.length < Math.min(Number(reading.count) || 0, 5000) && nextPage.value) {
+    const page = await api.items(id, nextPage.value)
+    if (version !== generation) return
+    const known = new Set(items.value.map(item => item.id))
+    items.value.unshift(...page.data.reverse().filter(item => !known.has(item.id)))
+    nextPage.value = page.has_more ? page.last_id : null
+  }
+  await nextTick()
+  if (version !== generation || !messagesElement.value) return
+  const element = messagesElement.value
+  followBottom = reading?.bottom ?? true
+  if (followBottom) element.scrollTop = element.scrollHeight
+  else {
+    const anchor = [...element.querySelectorAll('[data-item-id]')].find(item => item.dataset.itemId === reading?.anchor)
+    if (anchor) element.scrollTop += anchor.getBoundingClientRect().top - element.getBoundingClientRect().top - reading.offset
+    else element.scrollTop = Number(reading?.top) || 0
+  }
+}
+watch(() => [items.value.length, JSON.stringify(items.value.at(-1)?.content)], async () => {
+  await nextTick()
+  if (followBottom && !restoringPosition && messagesElement.value) messagesElement.value.scrollTop = messagesElement.value.scrollHeight
+})
 const report = (e) => {
   error.value = e.message || String(e)
 }
@@ -118,7 +169,10 @@ function scheduleRefresh(id, version) {
 }
 watch(
   sid,
-  async (id) => {
+  async (id, previous) => {
+    if (previous) saveReading(previous)
+    clearTimeout(readingTimer)
+    restoringPosition = true
     generation += 1
     const version = generation
     subscription?.abort()
@@ -130,6 +184,7 @@ watch(
     collaborators.value = []
     attachments.value = []
     files.value = []
+    mentionAgents.value = []
     uploads.value = []
     images.value = []
     answers.value = {}
@@ -138,7 +193,7 @@ watch(
     pending.value = null
     error.value = ''
     draft.value = localStorage.getItem(draftKey(id)) || ''
-    if (!id) return
+    if (!id) { restoringPosition = false; return }
     subscription = new AbortController()
     const signal = subscription.signal
     try {
@@ -146,6 +201,11 @@ watch(
       if (version !== generation) return
       items.value = history.data.reverse()
       nextPage.value = history.has_more ? history.last_id : null
+      await restoreReading(id, version)
+      if (version !== generation) return
+      restoringPosition = false
+      api.mentionAgents(id).then(result => { if (version === generation) mentionAgents.value = result.data })
+        .catch(e => { if (version === generation && e.status !== 404) report(e) })
       await api.viewed(id)
       api
         .subscribe(id, {
@@ -183,6 +243,7 @@ watch(
           }
         })
     } catch (e) {
+      restoringPosition = false
       if (version === generation) report(e)
     }
   },
@@ -357,6 +418,8 @@ async function widgetImage(path) {
 }
 onMounted(() => loadDirectory().catch(report))
 onBeforeUnmount(() => {
+  saveReading()
+  clearTimeout(readingTimer)
   generation += 1
   subscription?.abort()
   clearTimeout(refreshTimer)
@@ -364,8 +427,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="public-sessions">
-    <aside class="session-list">
+  <div class="public-sessions" :class="{ 'floating-navigation': !sidebarPinned }">
+    <button v-if="!sidebarPinned" class="navigation-trigger" aria-controls="session-navigation" :aria-expanded="sidebarOpen" @mouseenter="sidebarOpen = true" @focus="sidebarOpen = true" @click="sidebarOpen = !sidebarOpen">会话列表</button>
+    <aside id="session-navigation" v-show="sidebarPinned || sidebarOpen" class="session-list" @mouseleave="sidebarOpen = false">
+      <button @click="pinSidebar">{{ sidebarPinned ? '取消固定侧栏' : '固定侧栏' }}</button>
       <h2>协作会话</h2>
       <label
         >智能体<select v-model="selectedAgent">
@@ -437,9 +502,9 @@ onBeforeUnmount(() => {
             压缩上下文
           </button>
         </header>
-        <section class="messages" aria-live="polite">
+        <section ref="messagesElement" class="messages" aria-live="polite" @scroll.passive="onReadingScroll">
           <button v-if="nextPage" :disabled="busy" @click="older">加载更早的消息</button>
-          <article v-for="item in items" :key="item.id" :class="item.role">
+          <article v-for="item in items" :key="item.id" :class="item.role" :data-item-id="item.id">
             <template v-if="item.type === 'message'"
               ><small>{{ item.role === 'user' ? '你' : '智能体' }} · {{ item.status }}</small>
               <template v-for="(part, index) in item.content" :key="index"
@@ -498,12 +563,14 @@ onBeforeUnmount(() => {
         </section>
         <section class="composer">
           <p v-if="pending">提交结果尚未确认。点击重试会复用原提交标识，避免重复执行。</p>
-          <textarea
-            v-model="draft"
+          <a-mentions
+            v-model:value="draft"
+            :options="mentionAgents.map(agent => ({ value: formatMentionToken('subagent', agent.id).slice(1), label: agent.name }))"
+            :rows="3"
             :disabled="busy || !!pending"
             aria-label="会话输入"
             placeholder="追加任务或调整运行方向；Enter 换行"
-            @input="persistDraft"
+            @change="persistDraft"
           />
           <div>
             <select v-model="mode" :disabled="!!pending">
@@ -618,6 +685,7 @@ onBeforeUnmount(() => {
 
 <style scoped lang="less">
 .public-sessions {
+  position: relative;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr) 260px;
   height: 100%;
@@ -625,6 +693,11 @@ onBeforeUnmount(() => {
   color: var(--color-text-primary);
   background: var(--color-bg-container);
 }
+.floating-navigation { grid-template-columns: minmax(0, 1fr) 260px;
+  .session-list { position: absolute; left: 0; top: 38px; bottom: 0; width: 260px; z-index: 20; box-shadow: 0 8px 24px var(--gray-200); }
+  main { padding-top: 42px; }
+}
+.navigation-trigger { position: absolute; left: 8px; top: 4px; z-index: 21; }
 aside {
   padding: 16px;
   overflow: auto;
