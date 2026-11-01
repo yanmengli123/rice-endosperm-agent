@@ -1,6 +1,16 @@
 # 0.8 能力兼容与科研二开保留
 
-2026-11-01 发布状态：已完成授权的现网迁移和切换，应用代码 `85a076b7`、网关配置 `8064ab73`，数据库 `0131_public_projects`、Milvus 2.5.17。真实 MiniMax-M3、单 Run/单账本、幂等回执及现网网关 SSE 续读通过。以下按批次保留开发阶段的验证边界；最终状态、外部限制和回滚入口以 [发布记录](../vibe/2026-10-31-v08-full-release.md) 为准。
+2026-11-01 发布状态：已完成授权的现网迁移和切换，应用代码 `88a2bb36`、网关配置 `8064ab73`，数据库 `0132_web_tools_and_app_usage`、Milvus 2.5.17。真实 MiniMax-M3、单 Run/单账本、幂等回执及现网网关 SSE 续读通过；管理兼容续批（APP 统计、活动热力图、多供应商网络搜索、调试用例库、会话交互）已随同日发布。以下按批次保留开发阶段的验证边界；最终状态、外部限制和回滚入口以 [发布记录](../vibe/2026-10-31-v08-full-release.md) 与 [续批记录](../vibe/2026-11-01-v08-operations-compatibility.md) 为准。
+
+## 管理兼容续批（2026-11-01 已发布）
+
+- APP 使用统计：`/api/user/apps/usage` 经 `yuxi_public_app_usage` SQL 函数聚合（SECURITY DEFINER + 会话身份与在册校验），幂等重试只计一次输入，只读不改写 append-only 账本，估算口径保留 `estimated` 标记。
+- 消息活动热力图：`user_activity_repository` 按 Asia/Shanghai 日历日聚合本人活跃会话的 user/assistant/tool 消息，排除他人、已删除会话与 system 角色。
+- 多供应商网络搜索：`web_tools` 包统一 Tavily/DeepSeek/豆包搜索与正文抓取；凭据 `enc.v1` + 按供应商 AAD 加密，仅超管登录态可管理与测试，明文与密文均不回显；`web_search`/`web_fetch` 经标准工具注册表装配，按最新凭据决定可用性，未配置失败关闭，scope 关闭时随既有 web 工具过滤。
+- 调试用例库：筛选/复制/带草稿进入会话，不自动调用模型。
+- 会话交互：阅读位置与跟随底部持久化、侧栏固定/悬浮、授权智能体提及。首页草稿交接未实现（本部署首页无任务输入入口），留待后续批次。
+- 迁移 `0132_web_tools_and_app_usage`；readiness 增加 `web_tool_settings` 与用量函数存在性检查。镜像沿用 `yuxi-api:v08-compat-20261031`（无依赖变更），网关配置不变（新端点仅网页管理面使用，vite 代理直连 API）。
+- 验证：隔离真库集成测试 3 项（需 `YUXI_V08_TEST_POSTGRES_DSN`，缺省显式 skip）、网页工具运行时单测 5 项、受影响面回归 238 passed、前端构建/ESLint 通过；现网探针五项 readiness、新端点匿名 401、桌面协议 1.9 保持全部通过。
 
 ## 目标与基线
 
