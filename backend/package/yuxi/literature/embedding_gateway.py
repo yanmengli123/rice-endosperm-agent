@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import uuid
 
@@ -44,7 +45,27 @@ async def encode(policy, texts: list[str], *, query: bool = False) -> list[list[
         return vectors
 
 
+EMBEDDING_QUERY_TIMEOUT_SECONDS = 30.0
+
+
 async def encode_query(tenant_id: int, model_spec: str, query: str) -> list[list[float]]:
+    scope = current_access()
+    if scope is None or scope.tenant_id != tenant_id:
+        raise ValueError("导航查询必须绑定请求者")
+    try:
+        return await asyncio.wait_for(
+            _encode_query_governed(tenant_id, model_spec, query),
+            timeout=EMBEDDING_QUERY_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        # 无超时的外部 embedding 调用曾把检索工具整体挂死到 300s 全局看门狗；
+        # 超时抛出后由 search_navigation_vectors 的降级分支回退关键词通道。
+        raise TimeoutError(
+            f"导航 Embedding 超时（>{EMBEDDING_QUERY_TIMEOUT_SECONDS:.0f}s），本轮回退关键词通道"
+        ) from exc
+
+
+async def _encode_query_governed(tenant_id: int, model_spec: str, query: str) -> list[list[float]]:
     scope = current_access()
     if scope is None or scope.tenant_id != tenant_id:
         raise ValueError("导航查询必须绑定请求者")

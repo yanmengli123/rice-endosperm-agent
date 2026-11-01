@@ -869,3 +869,19 @@ async def test_subagent_run_service_rejects_run_from_another_parent_run(
             created_by_run_id="parent-run",
             run_id="child-run",
         )
+
+
+def test_concurrency_limit_exception_is_raisable():
+    """限流异常必须可被 raise：frozen dataclass 无法写 __traceback__，raise 必崩。
+
+    回归 2026-11-01 验收：第 4 个子智能体派发触发限流时抛出
+    "cannot assign to field '__traceback__'" 导致整个回答流崩溃。
+    """
+    from yuxi.services.subagent_run_service import SubagentRunConcurrencyLimit
+
+    exc = SubagentRunConcurrencyLimit(limit=3, active_run_ids=("run-a", "run-b", "run-c"))
+    with pytest.raises(SubagentRunConcurrencyLimit) as caught:
+        raise exc
+    assert caught.value.limit == 3
+    assert caught.value.active_run_ids == ("run-a", "run-b", "run-c")
+    assert caught.value.to_payload()["status"] == "concurrency_limit"

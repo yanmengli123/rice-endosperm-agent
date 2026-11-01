@@ -201,6 +201,40 @@ async def _get_run(run_id: str):
         return await repo.get_run(run_id)
 
 
+async def _fail_orphaned_subagent_runs(parent_run_id: str, cause: str) -> None:
+    """父运行被看门狗/外部终止时，把仍处非终态的子运行一并收敛为 failed。
+
+    孤儿 running 子运行会持续占用父级子智能体并发额度（SubagentRunConcurrencyLimit），
+    并在会话树上留下永不结束的成员；正常完成路径由各子执行器自行收敛，不经过这里。
+    """
+    from sqlalchemy import update
+
+    from yuxi.storage.postgres.models_business import AgentRun
+
+    try:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                update(AgentRun)
+                .where(
+                    AgentRun.created_by_run_id == parent_run_id,
+                    AgentRun.run_type == "subagent",
+                    AgentRun.status.in_(("pending", "running", "cancel_requested")),
+                )
+                .values(
+                    status="failed",
+                    error_type="parent_run_terminated",
+                    error_message=cause,
+                )
+            )
+            await session.commit()
+            if result.rowcount:
+                logger.warning(
+                    f"Run {parent_run_id} terminated; reconciled {result.rowcount} orphaned subagent run(s) to failed"
+                )
+    except Exception:  # noqa: BLE001 —— 子运行收敛失败不能掩盖父运行自身的终态落库
+        logger.exception(f"Failed to reconcile orphaned subagent runs for {parent_run_id}")
+
+
 async def append_run_event(run_id: str, event_type: str, payload: dict, *, thread_id: str | None = None):
     from yuxi.services.public_event_service import public_run, project_run_event
 
@@ -1105,6 +1139,7 @@ async def _process_agent_run(ctx, run_id, run):
 
     except (RunStreamIdleTimeout, RunStreamTotalTimeout) as e:
         await writer.flush()
+        await _fail_orphaned_subagent_runs(run_id, "父运行因超时被安全结束，子任务已一并收敛。")
         error_message = "服务端长时间未收到检索或模型输出，已安全结束本次任务，请重试。"
         error_type = "run_total_timeout" if isinstance(e, RunStreamTotalTimeout) else "run_idle_timeout"
         error_chunk = {
@@ -1137,6 +1172,7 @@ async def _process_agent_run(ctx, run_id, run):
         if not run_ctx.cancel_event.is_set():
             # 非用户取消的 CancelledError（ARQ job_timeout 等外部终止）：按 failed +
             # run_worker_timeout 收尾，不再误标 cancelled（用户从未请求取消）。
+            await _fail_orphaned_subagent_runs(run_id, "父运行被 worker 时限终止，子任务已一并收敛。")
             error_message = "任务执行超过 worker 时限，已被终止，请重试。"
             error_chunk = {
                 "status": "error",

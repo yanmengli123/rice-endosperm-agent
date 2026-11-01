@@ -58,9 +58,13 @@ class SubagentRunBusy(Exception):
         }
 
 
-@dataclass(frozen=True)
+@dataclass
 class SubagentRunConcurrencyLimit(Exception):
-    """父 run 同时运行的子智能体数量已达上限；语义与 busy 同类：可恢复、不算失败。"""
+    """父 run 同时运行的子智能体数量已达上限；语义与 busy 同类：可恢复、不算失败。
+
+    不可用 frozen dataclass：Python raise 需要给异常实例写 __traceback__，
+    frozen 禁止属性赋值会让限流路径必然抛出 "cannot assign to field '__traceback__'"。
+    """
 
     limit: int
     active_run_ids: tuple[str, ...]
