@@ -31,6 +31,7 @@ REQUIRED_ROUTES: dict[str, set[str]] = {
     "/api/system/health": {"GET"},
     "/api/system/discovery": {"GET"},
     "/api/system/ready": {"GET"},
+    "/api/auth/me": {"GET"},
     "/api/browser/devices": {"GET"},
     "/api/browser/devices/*": {"DELETE"},
     "/api/chat/attachments/tmp": {"POST"},

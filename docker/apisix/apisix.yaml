@@ -104,6 +104,17 @@ routes:
     priority: 120
     upstream_id: yuxi-backend
 
+  - id: yuxi-auth-me
+    name: yuxi-auth-me
+    uri: /api/auth/me
+    methods: [GET]
+    priority: 120
+    upstream_id: yuxi-backend
+    plugins:
+      proxy-rewrite:
+        headers:
+          remove: [X-Consumer-Username, X-Credential-Identifier, X-Yuxi-Key-ID, X-Yuxi-User-ID, X-Yuxi-Tenant-ID, X-User-ID, X-Authenticated-User, X-Authenticated-Tenant]
+
   - id: yuxi-personal-mcp-oauth
     name: yuxi-personal-mcp-oauth
     uri: /api/system/mcp-oauth/*
