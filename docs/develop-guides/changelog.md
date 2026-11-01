@@ -1,5 +1,7 @@
 # 版本变更记录
 
+- 对话链修复与默认模型切换（2026-11-01，`c00b56b8`）：导航 Embedding 查询新增 30s 硬超时（外部挂起曾把文献检索工具卡死到全局看门狗，超时回退关键词通道）；`SubagentRunConcurrencyLimit` 去 frozen（frozen dataclass 无法写 `__traceback__`，第 4 个子智能体派发即崩整个回答流）；看门狗/worker 时限终止父运行时级联收敛非终态子运行（`parent_run_terminated`），不再残留占用并发额度。平台默认模型经管理 API 切至 `siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash`（原 MiniMax 生成超时；DeepSeek 平台 Key 实测 401 失效待管理员更换）。普通用户 GUI 复测：知识库轮 8 工具完成并附诚实证据声明（可引用论计数 0 时降级通识回答不附页码）、基因轮诚实拒答给核验路径，证据契约与 SOURCE-ONLY 拒答均正确工作。详见 `docs/vibe/2026-11-01-chat-chain-fixes.md`。
+
 - GUI 全量验收缺陷修复（2026-11-01，`282123ee`）：①genomics MCP 生命周期误降级——无 docker 的 api 进程在启动 ensure 中把 `gene-authority` 覆写成 BUILD_REQUIRED，压掉 worker 依据宿主 OCI 镜像写入的 READY，AUTHORITATIVE 依赖失败关闭导致默认智能体全部执行失败；修复为无评估能力的进程跳过 genomics 生命周期字段同步，就绪评估只缓存 True 并对失败退避重试，镜像确实未构建的三个 OPTIONAL 运行时保持诚实门禁。②删除技能 PG 500——`Skill.bound_agent` 的 `lazy=joined` 使 SELECT 带外连接，与 `with_for_update` 冲突，改 `selectin`。③专属 Skill 创建后导航被关弹窗竞态吞掉，改为先导航后关闭。现网复测：真实模型对话恢复（含 5 次工具调用）、删除接口 200、详情导航成功；readiness 与桌面协议 1.9 保持。详见 `docs/vibe/2026-11-01-gui-acceptance-fixes.md`。
 
 - 0.8 管理兼容续批（2026-11-01）：APP 使用统计（`yuxi_public_app_usage` SQL 函数聚合，幂等只计一次、只读不改写账本）、本人近一年消息活动热力图（Asia/Shanghai 日历日，排除他人/已删除会话/system 角色）、Tavily/DeepSeek/豆包统一网络搜索与正文抓取（凭据 AES-GCM+AAD 加密、超管登录态管理、工具按凭据装配、未配置失败关闭）、调试测试用例库（筛选/复制/带草稿进入会话，不自动调用模型）与协作会话阅读位置/侧栏固定/授权智能体提及。迁移 `0132_web_tools_and_app_usage`，readiness 增加新表与用量函数检查；镜像与网关配置不变。验证：隔离真库集成 3 项、网页工具运行时单测 5 项、受影响面回归 238 passed、前端构建/ESLint 通过；现网探针 readiness 五项、新端点匿名 401、桌面协议 1.9 保持通过。首页草稿交接未实现（首页无任务输入入口）；真实搜索供应商联调未计通过。详见 `docs/vibe/2026-11-01-v08-operations-compatibility.md`。
