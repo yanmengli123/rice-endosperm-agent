@@ -600,7 +600,10 @@ class Skill(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     bound_agent_id = Column(Integer, ForeignKey("agents.id", ondelete="CASCADE"), nullable=True, unique=True)
-    bound_agent = relationship("Agent", lazy="joined")
+    # selectin 而非 joined：joined 会让每条 SELECT 带 agents 左外连接，
+    # 与 with_for_update 组合在 PostgreSQL 上报
+    # "FOR UPDATE cannot be applied to the nullable side of an outer join"。
+    bound_agent = relationship("Agent", lazy="selectin")
     slug = Column(String(128), nullable=False, unique=True, index=True, comment="技能唯一标识（目录名）")
     name = Column(String(128), nullable=False, comment="技能名称（来自 SKILL.md frontmatter.name）")
     description = Column(Text, nullable=False, comment="技能描述（来自 SKILL.md frontmatter.description）")

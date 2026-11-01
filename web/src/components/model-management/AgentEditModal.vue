@@ -31,8 +31,12 @@ const router = useRouter()
 const openBoundSkill = async () => {
   try {
     const result = await skillApi.createBoundSkill(editingAgentId.value)
+    const slug = result?.data?.skill?.slug
+    if (!slug) { message.error('专属 Skill 已创建但未返回标识，请在技能列表中打开'); return }
+    // 先导航再关弹窗：closeAgentModal 会重置编辑态并触发会话选中恢复，
+    // 与 router.push 竞态会把导航吞掉，表现为弹窗关闭后停留在当前页。
+    await router.push({ name: 'ExtensionSkillDetail', params: { slug } })
     closeAgentModal()
-    await router.push({ name: 'ExtensionSkillDetail', params: { slug: result.data.skill.slug } })
   } catch (error) { message.error(error.message || '打开专属 Skill 失败') }
 }
 

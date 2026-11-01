@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -429,8 +430,27 @@ def _bioinfomcp_runtime_ready(slug: str) -> bool:
     )
 
 
-@lru_cache(maxsize=16)
+# 只缓存通过校验的 True 结果：冷启动期 docker/探针可能瞬时失败，
+# lru_cache 会把 False 固化整个进程生命周期，而 ensure 仅在启动时运行，
+# 一次瞬时失败就会把 READY 误降级成 BUILD_REQUIRED（2026-11-01 生产事故）。
+_GENOMICS_READY_POSITIVE: dict[str, bool] = {}
+
+
 def _genomics_mcp_runtime_ready(slug: str) -> bool:
+    if _GENOMICS_READY_POSITIVE.get(slug):
+        return True
+    if _probe_genomics_runtime(slug):
+        _GENOMICS_READY_POSITIVE[slug] = True
+        return True
+    # 启动初期（容器首秒）评估可能瞬时失败：退避后重试一次再定性。
+    time.sleep(3)
+    if _probe_genomics_runtime(slug):
+        _GENOMICS_READY_POSITIVE[slug] = True
+        return True
+    return False
+
+
+def _probe_genomics_runtime(slug: str) -> bool:
     runtime = _GENOMICS_MCP_RUNTIMES.get(slug)
     if runtime is None or shutil.which("docker") is None:
         return False
@@ -806,6 +826,21 @@ async def get_mcp_dependency_mode(server_slug: str) -> str:
 # =============================================================================
 
 
+# 安全加固后的 api 容器没有 docker，无法评估 genomics 托管运行时是否就绪。
+# 有评估能力的进程（持有 docker 访问的 worker）会写入真实状态；无评估能力
+# 的进程跳过这两个字段，避免启动竞态把 READY 误降级成 BUILD_REQUIRED
+# （2026-11-01 生产事故：gene-authority 被误判导致默认智能体全部执行失败）。
+_RUNTIME_ASSESSMENT_FIELDS = frozenset({"lifecycle_status", "runtime_artifact"})
+
+
+def _sync_skips_runtime_field(slug: str, field: str) -> bool:
+    return (
+        slug in _GENOMICS_MCP_RUNTIMES
+        and field in _RUNTIME_ASSESSMENT_FIELDS
+        and shutil.which("docker") is None
+    )
+
+
 async def ensure_builtin_mcp_servers_in_db() -> None:
     """Ensure built-in MCP server definitions exist in the database."""
     from yuxi.storage.postgres.manager import pg_manager
@@ -837,6 +872,8 @@ async def ensure_builtin_mcp_servers_in_db() -> None:
                 else:
                     server_changed = False
                     for field in _SYNCED_MCP_FIELDS:
+                        if _sync_skips_runtime_field(slug, field):
+                            continue
                         next_value = builtin_values.get(field)
                         if getattr(existing, field) != next_value:
                             setattr(existing, field, next_value)

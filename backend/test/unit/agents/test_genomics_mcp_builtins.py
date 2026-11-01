@@ -63,9 +63,10 @@ def test_genomics_runtime_requires_matching_launcher_probe(monkeypatch):
         return SimpleNamespace(returncode=0, stdout=f"ready:{slug}:{revision}\n")
 
     monkeypatch.setattr(mcp_service.subprocess, "run", run)
-    mcp_service._genomics_mcp_runtime_ready.cache_clear()
+    monkeypatch.setattr(mcp_service.time, "sleep", lambda _seconds: None)
+    mcp_service._GENOMICS_READY_POSITIVE.clear()
     assert mcp_service._genomics_mcp_runtime_ready(slug) is True
-
+    # 通过校验的 True 进入正缓存后，陈旧探针不再影响本进程判定
     def stale_launcher(command, **kwargs):
         result = run(command, **kwargs)
         if command[0] != "docker":
@@ -73,7 +74,9 @@ def test_genomics_runtime_requires_matching_launcher_probe(monkeypatch):
         return result
 
     monkeypatch.setattr(mcp_service.subprocess, "run", stale_launcher)
-    mcp_service._genomics_mcp_runtime_ready.cache_clear()
+    assert mcp_service._genomics_mcp_runtime_ready(slug) is True
+    # 清空正缓存后，陈旧 revision 的探针被拒绝（含一次退避重试）
+    mcp_service._GENOMICS_READY_POSITIVE.clear()
     assert mcp_service._genomics_mcp_runtime_ready(slug) is False
 
 
@@ -201,3 +204,24 @@ def test_aggregator_generic_names_are_trusted_only_within_reviewed_server():
     assert candidate.answer_eligible is False
     assert profile_for_server_tool("another-server", "search") is None
     assert profile_for_server_tool("data-aggregator", "fetch") is None
+
+
+
+def test_dockerless_process_does_not_downgrade_genomics_runtime_state(monkeypatch):
+    """无 docker 的进程（安全加固后的 api）不应改写 genomics 运行时状态字段。
+
+    回归 2026-11-01 生产事故：api 与 worker 并发跑 ensure，api 因无 docker
+    评估为 BUILD_REQUIRED 并覆盖 worker 写入的 READY，gene-authority
+    （AUTHORITATIVE 依赖）被挡导致默认智能体全部执行失败。
+    """
+    monkeypatch.setattr(mcp_service.shutil, "which", lambda _name: None)
+    assert mcp_service._sync_skips_runtime_field("gene-authority", "lifecycle_status") is True
+    assert mcp_service._sync_skips_runtime_field("gene-authority", "runtime_artifact") is True
+    # 非运行时字段不受影响，保持正常同步
+    assert mcp_service._sync_skips_runtime_field("gene-authority", "description") is False
+    # 有 docker 的进程（worker）可评估，正常同步真实状态
+    monkeypatch.setattr(mcp_service.shutil, "which", lambda _name: "/usr/bin/docker")
+    assert mcp_service._sync_skips_runtime_field("gene-authority", "lifecycle_status") is False
+    # 非 genomics 的本地 stdio 服务器不经过托管运行时评估
+    monkeypatch.setattr(mcp_service.shutil, "which", lambda _name: None)
+    assert mcp_service._sync_skips_runtime_field("bio-mcp", "lifecycle_status") is False
