@@ -272,7 +272,7 @@ services:
       - ${YUXI_DATA_DIR:-./docker/volumes}/neo4j/data:/data
       - ${YUXI_DATA_DIR:-./docker/volumes}/neo4j/logs:/var/lib/neo4j/logs
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:7474 || exit 1"]
+      test: ["CMD-SHELL", "cypher-shell -a bolt://127.0.0.1:7687 -u \"$${NEO4J_AUTH%%/*}\" -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1' >/dev/null"]
       interval: 20s
       timeout: 10s
       retries: 5

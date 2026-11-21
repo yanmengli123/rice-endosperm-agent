@@ -2076,13 +2076,13 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE UNIQUE INDEX uq_literature_translation_jobs_key ON literature_translation_jobs "
             "(tenant_id, paper_id, variant_kind, template, source_revision_id, "
             "reading_version, generator_version, config_digest)",
-            """CREATE TABLE literature_translation_settings (
+            """CREATE TABLE IF NOT EXISTS literature_translation_settings (
                 tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
                 uid VARCHAR(64) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
                 profiles_json JSONB NOT NULL, active_profile_id VARCHAR(64), updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY (tenant_id, uid)
             )""",
-            """CREATE TABLE literature_translation_tasks (
+            """CREATE TABLE IF NOT EXISTS literature_translation_tasks (
                 id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
                 requested_by VARCHAR(64) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
                 task_kind VARCHAR(16) NOT NULL, source_kind VARCHAR(16) NOT NULL,
@@ -2093,7 +2093,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 credential_source VARCHAR(24), credential_id BIGINT, provider_id VARCHAR(100), policy_version INTEGER,
                 created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
             )""",
-            "CREATE INDEX ix_literature_translation_tasks_status ON literature_translation_tasks "
+            "CREATE INDEX IF NOT EXISTS ix_literature_translation_tasks_status ON literature_translation_tasks "
             "(status, next_retry_at)",
         ):
             await conn.execute(text(statement))
