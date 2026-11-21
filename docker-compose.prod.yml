@@ -3,6 +3,8 @@ x-api-worker-env: &api-worker-env
   LITE_MODE: ${LITE_MODE:-}
   RUNNING_IN_DOCKER: "true"
   YUXI_ENV: production
+  YUXI_DEPLOYMENT_REVISION: ${YUXI_DEPLOYMENT_REVISION:-}
+  YUXI_PUBLIC_WEB_URL: ${YUXI_PUBLIC_WEB_URL:-http://localhost}
   ALLOW_DEVELOPMENT_MCP_RUNTIME: "false"
   YUXI_MCP_ALLOW_INSECURE_HTTP: "false"
   YUXI_MCP_BUILDER_URL: ${YUXI_MCP_BUILDER_URL:-}
@@ -46,18 +48,20 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      args:
+        YUXI_DOCKERHUB_REGISTRY: ${YUXI_DOCKERHUB_REGISTRY:-docker.io}
     image: yuxi-api:${YUXI_VERSION:-0.7.1}
-    container_name: api-prod
+    container_name: ${YUXI_CONTAINER_PREFIX:-}api-prod
     working_dir: /app
     networks:
       - app-network
     volumes:
-      - ./docker/volumes/yuxi:/app/saves
-      - ./docker/volumes/models:/app/models
+      - ${YUXI_DATA_DIR:-./docker/volumes}/yuxi:/app/saves
+      - ${YUXI_DATA_DIR:-./docker/volumes}/models:/app/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.prod
+      - "${YUXI_PROD_ENV_FILE:-.env.prod}"
     # region api_envs
     environment:
       <<: *api-worker-env
@@ -85,13 +89,13 @@ services:
 
   apisix:
     image: apache/apisix:3.17.0-debian
-    container_name: yuxi-apisix
+    container_name: ${YUXI_CONTAINER_PREFIX:-}yuxi-apisix
     restart: unless-stopped
     ports:
       - "${APISIX_HTTP_BIND:-127.0.0.1}:${APISIX_HTTP_PORT:-9088}:9080"
     volumes:
-      - ./docker/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
-      - ./docker/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+      - ${YUXI_DEPLOY_CONFIG_DIR:-./docker}/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ${YUXI_DEPLOY_CONFIG_DIR:-./docker}/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
     environment:
       YUXI_PUBLIC_AGENT_SLUG: ${YUXI_PUBLIC_AGENT_SLUG:-default-chatbot}
     networks:
@@ -112,18 +116,20 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      args:
+        YUXI_DOCKERHUB_REGISTRY: ${YUXI_DOCKERHUB_REGISTRY:-docker.io}
     image: yuxi-api:${YUXI_VERSION:-0.7.1}
-    container_name: worker-prod
+    container_name: ${YUXI_CONTAINER_PREFIX:-}worker-prod
     working_dir: /app
     networks:
       - app-network
     volumes:
-      - ./docker/volumes/yuxi:/app/saves
-      - ./docker/volumes/models:/app/models
+      - ${YUXI_DATA_DIR:-./docker/volumes}/yuxi:/app/saves
+      - ${YUXI_DATA_DIR:-./docker/volumes}/models:/app/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.prod
+      - "${YUXI_PROD_ENV_FILE:-.env.prod}"
     environment:
       <<: *api-worker-env
     command: uv run --no-sync --no-dev arq server.worker_main.WorkerSettings
@@ -157,18 +163,20 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      args:
+        YUXI_DOCKERHUB_REGISTRY: ${YUXI_DOCKERHUB_REGISTRY:-docker.io}
     image: yuxi-api:${YUXI_VERSION:-0.7.1}
-    container_name: channels-prod
+    container_name: ${YUXI_CONTAINER_PREFIX:-}channels-prod
     working_dir: /app
     networks:
       - app-network
     volumes:
-      - ./docker/volumes/yuxi:/app/saves
-      - ./docker/volumes/models:/app/models
+      - ${YUXI_DATA_DIR:-./docker/volumes}/yuxi:/app/saves
+      - ${YUXI_DATA_DIR:-./docker/volumes}/models:/app/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.prod
+      - "${YUXI_PROD_ENV_FILE:-.env.prod}"
     environment:
       <<: *api-worker-env
     command: uv run --no-sync --no-dev python -m server.channels_main
@@ -191,10 +199,12 @@ services:
     build:
       context: ./docker/sandbox_provisioner
       dockerfile: Dockerfile
-    container_name: sandbox-provisioner
+      args:
+        YUXI_DOCKERHUB_REGISTRY: ${YUXI_DOCKERHUB_REGISTRY:-docker.io}
+    container_name: ${YUXI_CONTAINER_PREFIX:-}sandbox-provisioner
     volumes:
-      - ./docker/volumes/yuxi:/app/saves
-      - ./docker/sandbox_provisioner/sandbox.env:/app/sandbox.env:ro
+      - ${YUXI_DATA_DIR:-./docker/volumes}/yuxi:/app/saves
+      - ${YUXI_DEPLOY_CONFIG_DIR:-./docker}/sandbox_provisioner/sandbox.env:/app/sandbox.env:ro
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - app-network
@@ -238,11 +248,13 @@ services:
     build:
       context: .
       dockerfile: docker/web.Dockerfile
+      args:
+        YUXI_DOCKERHUB_REGISTRY: ${YUXI_DOCKERHUB_REGISTRY:-docker.io}
       target: production
     image: yuxi-web:${YUXI_VERSION:-0.7.1}
-    container_name: web-prod
+    container_name: ${YUXI_CONTAINER_PREFIX:-}web-prod
     ports:
-      - "80:80"
+      - "${YUXI_WEB_BIND:-0.0.0.0}:${YUXI_WEB_PORT:-80}:80"
     depends_on:
       - api
     networks:
@@ -255,10 +267,10 @@ services:
 
   graph:
     image: neo4j:5.26
-    container_name: graph
+    container_name: ${YUXI_CONTAINER_PREFIX:-}graph
     volumes:
-      - ./docker/volumes/neo4j/data:/data
-      - ./docker/volumes/neo4j/logs:/var/lib/neo4j/logs
+      - ${YUXI_DATA_DIR:-./docker/volumes}/neo4j/data:/data
+      - ${YUXI_DATA_DIR:-./docker/volumes}/neo4j/logs:/var/lib/neo4j/logs
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:7474 || exit 1"]
       interval: 20s
@@ -275,7 +287,7 @@ services:
     restart: unless-stopped
 
   etcd:
-    container_name: milvus-etcd
+    container_name: ${YUXI_CONTAINER_PREFIX:-}milvus-etcd
     image: quay.io/coreos/etcd:v3.5.5
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
@@ -283,7 +295,7 @@ services:
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
     volumes:
-      - ./docker/volumes/milvus/etcd:/etcd
+      - ${YUXI_DATA_DIR:-./docker/volumes}/milvus/etcd:/etcd
     command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
@@ -296,14 +308,14 @@ services:
     restart: unless-stopped
 
   minio:
-    container_name: minio
+    container_name: ${YUXI_CONTAINER_PREFIX:-}minio
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     environment:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in .env.prod}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in .env.prod}
     volumes:
-      - ./docker/volumes/milvus/minio:/minio_data
-      - ./docker/volumes/milvus/minio_config:/root/.minio
+      - ${YUXI_DATA_DIR:-./docker/volumes}/milvus/minio:/minio_data
+      - ${YUXI_DATA_DIR:-./docker/volumes}/milvus/minio_config:/root/.minio
     command: minio server /minio_data --address 0.0.0.0:9000 --console-address 0.0.0.0:9001
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -316,18 +328,20 @@ services:
     restart: unless-stopped
 
   milvus:
-    image: milvusdb/milvus:v2.5.6
-    container_name: milvus
+    image: ${YUXI_MILVUS_IMAGE:-milvusdb/milvus:v2.5.6}
+    container_name: ${YUXI_CONTAINER_PREFIX:-}milvus
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in .env.prod}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in .env.prod}
       MILVUS_LOG_LEVEL: error
     volumes:
-      - ./docker/volumes/milvus/milvus:/var/lib/milvus
-      - ./docker/volumes/milvus/logs:/var/lib/milvus/logs
+      - ${YUXI_DATA_DIR:-./docker/volumes}/milvus/milvus:/var/lib/milvus
+      - ${YUXI_DATA_DIR:-./docker/volumes}/milvus/logs:/var/lib/milvus/logs
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 60s
@@ -343,14 +357,14 @@ services:
 
   postgres:
     image: postgres:16
-    container_name: postgres
+    container_name: ${YUXI_CONTAINER_PREFIX:-}postgres
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}
       - POSTGRES_DB=${POSTGRES_DB:-yuxi}
       - TZ=${TZ:-Asia/Shanghai}
     volumes:
-      - ./docker/volumes/postgresql:/var/lib/postgresql/data
+      - ${YUXI_DATA_DIR:-./docker/volumes}/postgresql:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-yuxi} || exit 1"]
       interval: 5s
@@ -362,7 +376,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: redis
+    container_name: ${YUXI_CONTAINER_PREFIX:-}redis
     command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -370,7 +384,7 @@ services:
       timeout: 5s
       retries: 10
     volumes:
-      - ./docker/volumes/redis:/data
+      - ${YUXI_DATA_DIR:-./docker/volumes}/redis:/data
     networks:
       - app-network
     restart: unless-stopped
@@ -380,11 +394,11 @@ services:
       context: .
       dockerfile: docker/mineru.Dockerfile
     image: mineru-vllm:latest
-    container_name: mineru-api
+    container_name: ${YUXI_CONTAINER_PREFIX:-}mineru-api
     profiles:
       - all
     env_file:
-      - .env.prod
+      - "${YUXI_PROD_ENV_FILE:-.env.prod}"
     environment:
       MINERU_MODEL_SOURCE: local
     entrypoint: mineru-api
@@ -416,11 +430,11 @@ services:
       context: .
       dockerfile: docker/paddlex.Dockerfile
     image: paddlex:latest
-    container_name: paddlex-ocr
+    container_name: ${YUXI_CONTAINER_PREFIX:-}paddlex-ocr
     profiles:
       - all
     volumes:
-      - ./docker/volumes/paddlex:/paddlex
+      - ${YUXI_DATA_DIR:-./docker/volumes}/paddlex:/paddlex
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
       interval: 20s

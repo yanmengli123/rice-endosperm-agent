@@ -1,10 +1,13 @@
 # 使用轻量级Python基础镜像
-FROM python:3.13-slim
+ARG YUXI_DOCKERHUB_REGISTRY=docker.io
+FROM ${YUXI_DOCKERHUB_REGISTRY}/library/node:24-slim AS node-runtime
+FROM ${YUXI_DOCKERHUB_REGISTRY}/library/docker:27.5.1-cli AS docker-cli
+FROM ${YUXI_DOCKERHUB_REGISTRY}/library/python:3.13-slim
 COPY --from=ghcr.io/astral-sh/uv:0.11.26 /uv /uvx /bin/
-COPY --from=node:24-slim /usr/local/bin /usr/local/bin
-COPY --from=node:24-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
-COPY --from=node:24-slim /usr/local/include /usr/local/include
-COPY --from=node:24-slim /usr/local/share /usr/local/share
+COPY --from=node-runtime /usr/local/bin /usr/local/bin
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=node-runtime /usr/local/include /usr/local/include
+COPY --from=node-runtime /usr/local/share /usr/local/share
 
 # DSH is installed once at build time; npm ci verifies the committed integrity lock.
 # The Yuxi profile does not mount any optional native database/shell plugins.
@@ -90,7 +93,7 @@ COPY backend/server /app/server
 
 # docker CLI：MCP Runtime 以 docker run 方式接入隔离的生信工具镜像（共享宿主 docker.sock）。
 # 放在依赖安装之后，避免只升级 CLI 时让系统依赖和 Python 依赖缓存全部失效。
-COPY --from=docker:27.5.1-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 # 代码内置的容器化 MCP 只能通过固定 wrapper 启动。wrapper 负责租户/会话目录
 # 收口、资源限制与容器回收，数据库中的 MCP 配置不能拼接任意 docker 参数。

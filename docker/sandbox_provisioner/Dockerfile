@@ -1,4 +1,5 @@
-FROM python:3.13-slim
+ARG YUXI_DOCKERHUB_REGISTRY=docker.io
+FROM ${YUXI_DOCKERHUB_REGISTRY}/library/python:3.13-slim
 
 WORKDIR /app
 

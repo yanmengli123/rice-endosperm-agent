@@ -1,5 +1,6 @@
+ARG YUXI_DOCKERHUB_REGISTRY=docker.io
 # 开发阶段
-FROM node:24-alpine AS development
+FROM ${YUXI_DOCKERHUB_REGISTRY}/library/node:24-alpine AS development
 WORKDIR /app
 ENV TZ=Asia/Shanghai
 
@@ -23,7 +24,7 @@ EXPOSE 5173
 # 启动开发服务器的命令在 docker-compose 文件中定义
 
 # 生产阶段
-FROM node:24-alpine AS build-stage
+FROM ${YUXI_DOCKERHUB_REGISTRY}/library/node:24-alpine AS build-stage
 WORKDIR /app
 
 # 与开发镜像保持一致，避免生产构建使用不同的解析器版本
@@ -42,7 +43,7 @@ COPY ./web .
 RUN pnpm run build
 
 # 生产环境运行阶段
-FROM nginx:alpine AS production
+FROM ${YUXI_DOCKERHUB_REGISTRY}/library/nginx:alpine AS production
 COPY --from=build-stage /app/dist /usr/share/nginx/html
 COPY ./docker/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY ./docker/nginx/default.conf /etc/nginx/conf.d/default.conf

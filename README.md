@@ -1,5 +1,7 @@
 <div align="center">
 
+Windows 下载后可运行 [部署入口](QUICK-DEPLOY.md)，首次启动时自动创建独立的数据目录。
+
 # 稻芯智析 · 服务端 (Rice Endosperm Agent — Server)
 
 <p><strong>面向水稻胚乳研究的多智能体知识库平台</strong><br/>
