@@ -57,9 +57,11 @@ if (!(Test-Path -LiteralPath $envFile)) {
         SANDBOX_PROVISIONER_TOKEN = (New-RandomHex)
         YUXI_INSTANCE_ID = $Project
     }
-    $config = Get-Content -LiteralPath (Join-Path $source '.env.template') -Raw
+    $config = [IO.File]::ReadAllText((Join-Path $source '.env.template'), [Text.Encoding]::UTF8)
     foreach ($name in $secrets.Keys) {
-        $config = [regex]::Replace($config, "(?m)^${name}=[^\r\n]*", "$name=$($secrets[$name])")
+        $entry = "(?m)^${name}=[^\r\n]*"
+        if (![regex]::IsMatch($config, $entry)) { throw "Missing ${name} in .env.template." }
+        $config = [regex]::Replace($config, $entry, "$name=$($secrets[$name])")
     }
     $stream = [IO.File]::Open($envFile, [IO.FileMode]::CreateNew)
     try {
